@@ -165,15 +165,49 @@ TEST_CASE("bringing the gauge up reads its version and writes nothing",
 /* The bench measured 900-1100 ms from the second write to a chip that
  * answers real numbers. A wake that waited for that here would be a wake
  * nobody could call from an AO; this one returns and the owner asks. */
-TEST_CASE("wake is the two-step sequence and returns without polling",
+TEST_CASE("wake on a chip in shutdown is the two-step sequence and returns without polling",
+          "[kdrv_cw2217]")
+{
+    uint8_t h;
+
+    Mockkhal_i2c_Init();
+    bring_up();
+
+    expect_r8(CW_CONFIG, 0xF0U, &h);
+    expect_w8(CW_CONFIG, 0x30U);
+    expect_w8(CW_CONFIG, 0x00U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_cw2217_wake());
+
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
+/* The chip runs off the cell, so every reset of the P4 finds it active. The
+ * same two writes there are a restart: the estimate is thrown away and READY
+ * drops for about 1.5 s. */
+TEST_CASE("wake on a chip that is already active writes nothing",
+          "[kdrv_cw2217]")
+{
+    uint8_t h;
+
+    Mockkhal_i2c_Init();
+    bring_up();
+
+    expect_r8(CW_CONFIG, 0x00U, &h);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_cw2217_wake());
+
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("wake writes nothing when the config will not read",
           "[kdrv_cw2217]")
 {
     Mockkhal_i2c_Init();
     bring_up();
 
-    expect_w8(CW_CONFIG, 0x30U);
-    expect_w8(CW_CONFIG, 0x00U);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_cw2217_wake());
+    expect_r8_fail(CW_CONFIG);
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_cw2217_wake());
 
     Mockkhal_i2c_Verify();
     Mockkhal_i2c_Destroy();

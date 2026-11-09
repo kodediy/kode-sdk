@@ -1394,9 +1394,72 @@ TEST_CASE("test gauge passes when awake, identified, and agreeing with the charg
     Mockkhal_i2c_Destroy();
 }
 
+/** @brief Dispatch a gauge row the AO must hold, not answer yet. */
+static void test_req_held(void)
+{
+    PowerTestReqEvt req;
+
+    req.super = (QEvt)QEVT_INITIALIZER(POWER_TEST_REQ_SIG);
+    req.chip  = POWER_CHIP_GAUGE;
+    req.depth = POWER_DEPTH_FULL;
+    ao_spy_drain();
+    ao_spy_subscribe(TEST_RESULT_SIG);
+    QASM_DISPATCH(AO_Power, &req.super, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the row waits for the algorithm");
+}
+
+/**
+ * @brief Dispatch one poll and take the verdict it published, if any.
+ * @return The verdict, or NULL when the poll answered no row.
+ */
+static const TestResultEvt *poll_for_verdict(void)
+{
+    static const QEvt poll = QEVT_INITIALIZER(POWER_POLL_SIG);
+    const TestResultEvt *r = NULL;
+
+    ao_spy_drain();
+    QASM_DISPATCH(AO_Power, &poll, 0U);
+    while ( 0U < ao_spy_count() )
+    {
+        const QEvt * const e = ao_spy_take();
+        if ( (enum_t)TEST_RESULT_SIG == e->sig )
+        {
+            TEST_ASSERT_NULL_MESSAGE(r, "one row, one verdict");
+            r = (const TestResultEvt *)e;
+        }
+    }
+    return r;
+}
+
+/* The gauge is woken from shutdown when the cell connects and answers
+ * READY = 0 for about 1.5 s. A row asked then waits for it at each poll,
+ * and is judged once it is up. */
+TEST_CASE("a gauge row asked before the algorithm is up waits for it, then judges the chip",
+          "[power_ao]")
+{
+    power_up_once();
+    pmic_on_the_line();
+    gauge_reads(3905, 512);
+    s_regs[GAUGE][CW_IC_STATE] = 0x00U;
+    s_regs[GAUGE][0xABU]       = 0x4AU;
+
+    test_req_held();
+    TEST_ASSERT_TRUE(logged("not up yet"));
+    TEST_ASSERT_NULL_MESSAGE(poll_for_verdict(), "still coming up, inside the wait");
+
+    s_regs[GAUGE][CW_IC_STATE] = 0x0CU;
+    const TestResultEvt * const r = poll_for_verdict();
+    TEST_ASSERT_NOT_NULL_MESSAGE(r, "the poll that sees it up answers the row");
+    TEST_ASSERT_EQUAL_STRING("gauge", r->name);
+    TEST_ASSERT_TRUE(r->ok);
+    TEST_ASSERT_NULL_MESSAGE(poll_for_verdict(), "and only once");
+
+    Mockkhal_i2c_Destroy();
+}
+
 /* A gauge that has not come up answers zeros for its firmware and its cell:
- * numbers, not errors. The test must not call that a pass. */
-TEST_CASE("test gauge fails while the algorithm is not up, and when the firmware is not a CW2217's",
+ * numbers, not errors. Past the wait, the test must not call that a pass. */
+TEST_CASE("test gauge fails when the algorithm never comes up, and when the firmware is not a CW2217's",
           "[power_ao]")
 {
     power_up_once();
@@ -1404,7 +1467,10 @@ TEST_CASE("test gauge fails while the algorithm is not up, and when the firmware
     gauge_reads(3905, 512);
     s_regs[GAUGE][CW_IC_STATE] = 0x00U;
 
-    const TestResultEvt *r = test_req(POWER_CHIP_GAUGE);
+    test_req_held();
+    fake_time_advance_ms(KODE_GAUGE_READY_WAIT_MS);
+    const TestResultEvt *r = poll_for_verdict();
+    TEST_ASSERT_NOT_NULL_MESSAGE(r, "the poll past the wait answers the row");
     TEST_ASSERT_FALSE(r->ok);
     TEST_ASSERT_TRUE(logged("not ready"));
 

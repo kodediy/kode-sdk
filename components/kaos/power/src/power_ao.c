@@ -85,6 +85,9 @@ typedef struct {
     bool     pmic;         /**< The BQ25896 answered and took the policy.   */
     bool     gauge;        /**< The CW2217 answered at startup.            */
     bool     gauge_ready;  /**< Its algorithm has reported ready since.    */
+    bool     gauge_owed;   /**< A gauge row waits for the algorithm.       */
+    uint8_t  gauge_depth;  /**< That row's POWER_DEPTH_*.                  */
+    uint32_t gauge_asked_ms; /**< khal_time_ms() when that row was asked.  */
     int32_t  ocv_x16;      /**< Filtered OCV, 1/16 mV; -1 before a reading. */
     int32_t  soc_disp;     /**< The percentage last shown; -1 before one.  */
     bool     charge_wanted; /**< The last charge request said on.           */
@@ -316,6 +319,9 @@ void Power_ctor(void)
     me->pmic          = false;
     me->gauge         = false;
     me->gauge_ready   = false;
+    me->gauge_owed    = false;
+    me->gauge_depth   = POWER_DEPTH_FULL;
+    me->gauge_asked_ms = 0U;
     me->ocv_x16       = -1;
     me->soc_disp      = -1;
     me->charge_wanted = true;
@@ -1312,13 +1318,38 @@ static bool test_gauge(uint8_t ammeter)
 }
 
 /**
- * @brief Run one chip's self-test and publish the verdict.
+ * @brief Whether the gauge is there and its algorithm is not up yet.
+ *
+ * Read off the chip rather than the poll's flag, because a row can be asked
+ * before the first poll has looked. A read that fails is not "coming up":
+ * the test itself says what it is.
+ *
+ * @param me The AO.
+ * @return true while the CW2217 answers READY = 0.
+ */
+static bool gauge_coming_up(Power const * const me)
+{
+    int32_t ready = 0;
+
+    if ( !me->gauge )
+    {
+        return false;
+    }
+    if ( kdrv_cw2217_get(KDRV_CW_READY, &ready) != KODE_OK )
+    {
+        return false;
+    }
+    return 0 == ready;
+}
+
+/**
+ * @brief Judge one chip's self-test and publish the verdict.
  *
  * @param me    The AO.
  * @param chip  POWER_CHIP_PMIC or POWER_CHIP_GAUGE.
  * @param depth POWER_DEPTH_*.
  */
-static void power_test(Power * const me, uint8_t chip, uint8_t depth)
+static void power_test_answer(Power * const me, uint8_t chip, uint8_t depth)
 {
     const char *name = "pmic";
     bool ok;
@@ -1345,6 +1376,63 @@ static void power_test(Power * const me, uint8_t chip, uint8_t depth)
         ev->origin = TEST_ORIGIN_AUTOTEST;
         QACTIVE_PUBLISH(&ev->super, &me->super);
     }
+}
+
+/**
+ * @brief Run one chip's self-test, or hold a gauge row until the chip is up.
+ *
+ * A gauge woken from shutdown (the cell just connected) takes about 1.5 s to
+ * come up, and a row asked in that time would fail a chip that is fine. That
+ * row waits: each poll looks again (gauge_test_due()), up to
+ * KODE_GAUGE_READY_WAIT_MS from the ask.
+ *
+ * @param me    The AO.
+ * @param chip  POWER_CHIP_PMIC or POWER_CHIP_GAUGE.
+ * @param depth POWER_DEPTH_*.
+ */
+static void power_test(Power * const me, uint8_t chip, uint8_t depth)
+{
+    if ( POWER_CHIP_GAUGE == chip )
+    {
+        if ( me->gauge_owed )
+        {
+            /* Already waiting: the one answer that comes covers this ask. */
+            return;
+        }
+        if ( gauge_coming_up(me) )
+        {
+            me->gauge_owed     = true;
+            me->gauge_depth    = depth;
+            me->gauge_asked_ms = khal_time_ms();
+            KLOG_N(TAG, "test gauge: the algorithm is not up yet; waiting up to %u ms",
+                   (unsigned)KODE_GAUGE_READY_WAIT_MS);
+            return;
+        }
+    }
+    power_test_answer(me, chip, depth);
+}
+
+/**
+ * @brief Answer a waiting gauge row once the chip is up or the wait is over.
+ *
+ * Past the wait the row is judged as it stands, so a gauge that never comes
+ * up still fails with its own reason ("not ready").
+ *
+ * @param me The AO.
+ */
+static void gauge_test_due(Power * const me)
+{
+    if ( !me->gauge_owed )
+    {
+        return;
+    }
+    if ( gauge_coming_up(me)
+        && ((khal_time_ms() - me->gauge_asked_ms) < KODE_GAUGE_READY_WAIT_MS) )
+    {
+        return;
+    }
+    me->gauge_owed = false;
+    power_test_answer(me, POWER_CHIP_GAUGE, me->gauge_depth);
 }
 
 /* ---- The `power_plug` row ------------------------------------------------ */
@@ -2412,7 +2500,8 @@ static QState Power_initial(Power * const me, void const * const par)
     }
 
     /* The gauge is optional: it is powered from the cell, so on a board with
-     * no battery it simply is not there. Woken, not waited for. */
+     * no battery it simply is not there. Woken if it is in shutdown, left
+     * running if a reset found it so; never waited for. */
     me->gauge = (kdrv_cw2217_init() == KODE_OK);
     if ( me->gauge && (kdrv_cw2217_wake() != KODE_OK) )
     {
@@ -2518,6 +2607,7 @@ static QState Power_polling(Power * const me, QEvt const * const e)
             {
                 power_poll(me);
             }
+            gauge_test_due(me);
             status = Q_HANDLED();
             break;
         }

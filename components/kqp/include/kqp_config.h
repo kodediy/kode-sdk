@@ -1516,6 +1516,21 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 #define KODE_POWER_POLL_MS      2000U
 #define KODE_POWER_FIRST_MS     1500U
 
+/* ---- The gauge row (`test component=gauge`) ---------------------------------
+ * A CW2217 in shutdown (the cell just connected) takes about 1.5 s from
+ * AO_Power's wake to report ready (0xA7). A row asked sooner waits for it,
+ * looking at each poll, and is judged once the chip is up or once
+ * KODE_GAUGE_READY_WAIT_MS has passed since the ask, whichever comes first.
+ * The poll that sees the deadline comes up to KODE_POWER_POLL_MS after it.
+ */
+/** @brief How long the row waits for the gauge's algorithm, from the ask. */
+#define KODE_GAUGE_READY_WAIT_MS   3000U
+/** @brief What the row's budget adds to the wait and the poll: the judging and the verdict's way back. */
+#define KODE_GAUGE_TEST_MARGIN_MS  1000U
+/** @brief The row's budget: the wait, the poll that ends it, the margin. */
+#define KODE_GAUGE_TEST_BUDGET_MS  (KODE_GAUGE_READY_WAIT_MS + KODE_POWER_POLL_MS \
+                                    + KODE_GAUGE_TEST_MARGIN_MS)
+
 /**
  * @brief How long the cable stays out before AO_Power tells whoever armed it.
  *
