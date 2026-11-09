@@ -1,0 +1,30 @@
+version: "0.1.0"
+description: "Kode Dot SDK: the UI kit on LVGL 9.6: tokens, styles, fonts, components, Kody"
+url: "https://docs.kode.diy/sdk/kui"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/kui"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+## The desktop simulators build from the repository, never from the registry.
+files:
+  exclude:
+    - "sim/**"
+    - "test_dot/sim/**"
+
+## kui is optional: an app that draws names it, and a firmware that does not
+## never pulls in LVGL. kodediy/kode does not name it. The LVGL spec is the
+## one kgui names; the solver intersects the two, so they stay in step.
+## khal is for kui_mem.c, LVGL's allocator hooks on the PSRAM heap, and for
+## the inflate the Kody player starts an animation with; klog is the log the
+## player reports a refusal through. cJSON reads Kody's pack manifest and
+## checks a Lottie before it plays: kui_pack.c, and nothing else.
+dependencies:
+  idf: ">=6.1"
+  lvgl/lvgl: "9.6.0~1"
+  kodediy/kbsp: {version: "==0.1.0", override_path: "../kbsp"}
+  kodediy/khal: {version: "==0.1.0", override_path: "../khal"}
+  kodediy/klog: {version: "==0.1.0", override_path: "../klog"}
+  espressif/cjson: "^1.7.19"

@@ -1,0 +1,8 @@
+## One pin, and everything below the facade arrives at the same version
+## without being named: kode_sys, kaos, kqp, khal, kdrv, klog, kbsp, kdefs and
+## the vendored QP/C. Each component's own manifest names the ones it needs.
+dependencies:
+  kodediy/kode:
+    git: https://github.com/kodediy/kode-sdk.git
+    path: components/kode
+    version: v0.1.0

@@ -1,0 +1,77 @@
+{
+ "image": "kode-dot.png",
+ "size_px": [
+  602,
+  979
+ ],
+ "px_per_mm": 12.39,
+ "source": {
+  "step": "10213 Kode Dot Top Level Assembly 240726",
+  "script": "scripts/frente_kodeview.py",
+  "command": "Blender -b -noaudio --python scripts/frente_kodeview.py -- --out <dir> --px-mm 12.39 --calidad media",
+  "blender": "5.1.2",
+  "renders_3d_commit": "c03cfbc-dirty"
+ },
+ "frame_mm": {
+  "x_left": -24.2938,
+  "y_top": 28.3293,
+  "note": "pixel (i,j) centre -> x = x_left + (i+0.5)/px_per_mm, y = y_top - (j+0.5)/px_per_mm; bbox pairs are inclusive pixel indices; cx/cy are continuous (pixel i spans [i, i+1]): x = x_left + cx/px_per_mm, y = y_top - cy/px_per_mm; assembly frame: X right, Y up (top edge = 20-pin connector), origin = cover-glass centre"
+ },
+ "body_px": {
+  "x": [
+   12,
+   589
+  ],
+  "y": [
+   13,
+   966
+  ]
+ },
+ "screen_px": {
+  "x": 96,
+  "y": 100,
+  "w": 410,
+  "h": 502,
+  "corner_r_mm": 9.3
+ },
+ "top_px": {
+  "cx": 461.5,
+  "cy": 731.3,
+  "d": 119,
+  "render_part": "kode-dot-boton-b",
+  "colour": "#028AC2"
+ },
+ "bot_px": {
+  "cx": 403.2,
+  "cy": 871.4,
+  "d": 119,
+  "render_part": "kode-dot-boton-a",
+  "colour": "#C9303D"
+ },
+ "dpad_px": {
+  "cx": 198.8,
+  "cy": 801.4,
+  "span": 254,
+  "arm_w": 74
+ },
+ "led_guide_px": {
+  "x": [
+   505,
+   564
+  ],
+  "y": [
+   37,
+   96
+  ]
+ },
+ "lanyard_hole_px": {
+  "x": [
+   37,
+   96
+  ],
+  "y": [
+   883,
+   941
+  ]
+ }
+}

@@ -1,0 +1,10 @@
+# The minimal app (main/minimal.c) with the radio and the console compiled
+# out: an app's own defaults, the role, the channel and the scheduler back to
+# an app's, and KODEOS_RADIO=n - the configuration most examples ship, where
+# the core holds the C5 off on its reset line alone - with KODEOS_CONSOLE=n,
+# the build with no command line (AO_Autotest goes with it).
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+CONFIG_KODEOS_CHANNEL=n
+CONFIG_KODE_SCHEDULER=n
+CONFIG_KODEOS_RADIO=n
+CONFIG_KODEOS_CONSOLE=n

@@ -1,0 +1,16 @@
+:cmock:
+  :plugins:
+    - expect
+    - expect_any_args
+    - return_thru_ptr
+    - array
+    - ignore
+    - ignore_arg
+    - callback
+  # CMock does not evaluate the preprocessor, so it generates a mock for
+  # esp_ota_revoke_secure_boot_public_key() and then cannot name its argument
+  # type - that enum sits behind a secure-boot Kconfig this board does not
+  # enable. Nothing here calls it; stripping the declaration is cheaper than
+  # dragging in a configuration that only exists to make a mock parse.
+  :strippables:
+    - 'esp_err_t esp_ota_revoke_secure_boot_public_key\(.*?\);'

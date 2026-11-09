@@ -1,0 +1,72 @@
+# klog's compile-time ceiling and its starting level at run time.
+
+menu "klog"
+
+    choice KLOG_MAXIMUM_LEVEL_CHOICE
+        prompt "Most verbose klog level compiled in"
+        default KLOG_MAXIMUM_LEVEL_DEBUG
+        help
+            KLOG_x lines below this level are not compiled in: no flash, and
+            `log_level` cannot turn them back on. kodeOS keeps NOTICE or more,
+            because the factory reads the boot banner, a NOTICE line.
+
+        config KLOG_MAXIMUM_LEVEL_DEBUG
+            bool "Debug: everything"
+        config KLOG_MAXIMUM_LEVEL_INFO
+            bool "Info"
+        config KLOG_MAXIMUM_LEVEL_NOTICE
+            bool "Notice: outcomes, answers and the system's state"
+        config KLOG_MAXIMUM_LEVEL_WARN
+            bool "Warning"
+        config KLOG_MAXIMUM_LEVEL_ERROR
+            bool "Error"
+        config KLOG_MAXIMUM_LEVEL_NONE
+            bool "None: no klog line at all"
+    endchoice
+
+    # kode_log_lvl_t: DEBUG 0, INFO 1, NOTICE 2, WARN 3, ERROR 4, OFF 5.
+    config KLOG_MAXIMUM_LEVEL
+        int
+        default 0 if KLOG_MAXIMUM_LEVEL_DEBUG
+        default 1 if KLOG_MAXIMUM_LEVEL_INFO
+        default 2 if KLOG_MAXIMUM_LEVEL_NOTICE
+        default 3 if KLOG_MAXIMUM_LEVEL_WARN
+        default 4 if KLOG_MAXIMUM_LEVEL_ERROR
+        default 5 if KLOG_MAXIMUM_LEVEL_NONE
+
+    choice KLOG_DEFAULT_LEVEL_CHOICE
+        prompt "Level the console starts at"
+        default KLOG_DEFAULT_LEVEL_INFO
+        help
+            The global level until `log_level tag="*"` stores another one on
+            the board. It cannot be more verbose than the ceiling above.
+
+        config KLOG_DEFAULT_LEVEL_DEBUG
+            bool "Debug"
+            depends on KLOG_MAXIMUM_LEVEL_DEBUG
+        config KLOG_DEFAULT_LEVEL_INFO
+            bool "Info"
+            depends on KLOG_MAXIMUM_LEVEL < 2
+        config KLOG_DEFAULT_LEVEL_NOTICE
+            bool "Notice"
+            depends on KLOG_MAXIMUM_LEVEL < 3
+        config KLOG_DEFAULT_LEVEL_WARN
+            bool "Warning"
+            depends on KLOG_MAXIMUM_LEVEL < 4
+        config KLOG_DEFAULT_LEVEL_ERROR
+            bool "Error"
+            depends on KLOG_MAXIMUM_LEVEL < 5
+        config KLOG_DEFAULT_LEVEL_OFF
+            bool "Off: answers only"
+    endchoice
+
+    config KLOG_DEFAULT_LEVEL
+        int
+        default 0 if KLOG_DEFAULT_LEVEL_DEBUG
+        default 1 if KLOG_DEFAULT_LEVEL_INFO
+        default 2 if KLOG_DEFAULT_LEVEL_NOTICE
+        default 3 if KLOG_DEFAULT_LEVEL_WARN
+        default 4 if KLOG_DEFAULT_LEVEL_ERROR
+        default 5 if KLOG_DEFAULT_LEVEL_OFF
+
+endmenu

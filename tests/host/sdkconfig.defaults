@@ -1,0 +1,26 @@
+# The board's own partition table, not a made-up one.
+#
+# esp_partition builds for `linux` and emulates the flash in a file sized from
+# whatever table the project declares, so pointing this project at
+# components/kbsp/partitions.csv is what lets kdrv_apps.c do real reads,
+# erases and writes against the real geometry - the apps region at 0xC40000,
+# 0xBC0000 long, ending at 0x1800000 where the FAT begins. A table invented
+# for the tests would have made every offset in them a fiction.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../components/kbsp/partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="32MB"
+
+# The emulated flash's power-cut injector, esp_partition_fail_after(): the
+# n-th write or erase fails and every one after it, with what was written
+# before left in place. test_kdrv_apps_region.c cuts the directory commit and
+# the boot request write at every step they take.
+CONFIG_ESP_PARTITION_ENABLE_STATS=y
+
+# Two FreeRTOS thread-local pointers, as the board has: index 0 is the pthread
+# layer's, index 1 is khal_task_slot_get()/set(). The board asks for the same
+# in components/kbsp/sdkconfig.board; khal_system.h's _Static_assert fails the
+# build if the two drift.
+CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=2
+# And its deletion callbacks, which free a slot's owner when the task ends.
+CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS=y

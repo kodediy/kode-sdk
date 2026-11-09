@@ -1,0 +1,47 @@
+# network's own settings. Everything about the board - flash, PSRAM,
+# cache, the console - arrives from kbsp's sdkconfig.board, which
+# CMakeLists.txt fetches and reads first. Do not copy any of it here.
+
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="managed_components/kodediy__kbsp/partitions.csv"
+
+# The role AO_Boot plays: an app never writes otadata, which is kodeOS's alone,
+# and ESP-IDF refuses a write into the app's own image. Where a reset lands is
+# the boot request's business (README, The boot model).
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+
+# Kept, and here it is more than somewhere to watch this AO from: a board that
+# has never joined a network needs a place to type `wifi_join`, and the result
+# of every button press is a log line.
+CONFIG_KODEOS_CONSOLE=y
+
+# The radio and the network are on here, as in mqtt (ir_remote turns on the
+# radio alone), because asking AO_Net for a ping or a GET is the whole lesson.
+# NET depends on WIFI, WIFI on RADIO, and AO_Radio is what brings the C5 up and
+# joins the network.
+#
+# THIS IS NOT FREE. The network stack - lwIP, mbedTLS, the HTTP and MQTT
+# clients - costs about 395 kB of image, measured on an app that never opened
+# a socket (1 791 536 bytes with KODEOS_NET=y, 1 387 280 without), and an app
+# is a whole firmware, so it is paid once per app. This example leaves MQTT
+# out, so its own share is somewhat smaller, but the order of magnitude is the
+# same. An app that opens no socket turns all of it off, exactly as the other
+# examples in this directory do - WiFi, the network and MQTT all depend on the
+# radio and go with it:
+#
+#     CONFIG_KODEOS_RADIO=n
+#     CONFIG_ESP_HOSTED_ENABLED=n
+#
+# The second line is there because ESP_HOSTED_ENABLED is selected by
+# KODEOS_RADIO, so it is only left out of the image when it is switched off
+# by hand (see buttons_led/sdkconfig.defaults). Do NOT switch it off in an app
+# that uses the network: it is the link to the C5, and without it there is no
+# WiFi to ask about.
+CONFIG_KODEOS_RADIO=y
+CONFIG_KODEOS_WIFI=y
+CONFIG_KODEOS_NET=y
+
+# The SDK's own log lines are compiled in at every level, and most of them are
+# INFO: a shipped app that will never print them can compile them away, which
+# is well over a hundred kB of format strings. Left at everything here, because
+# an example is run on the bench first (components/klog/Kconfig says what goes).
+# CONFIG_KLOG_MAXIMUM_LEVEL_WARN=y

@@ -1,0 +1,24 @@
+version: "0.1.0"
+description: "Kode Dot SDK: the hardware services the drivers share"
+url: "https://docs.kode.diy/sdk/khal"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/khal"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+## Siblings: by path in this repo, at the same commit when fetched by git, and
+## at the same version from the registry. The version moves with every release
+## (tools/set_version.sh).
+dependencies:
+  idf: ">=6.1"
+  kodediy/kdefs: {version: "==0.1.0", override_path: "../kdefs"}
+  kodediy/klog:  {version: "==0.1.0", override_path: "../klog"}
+  kodediy/kbsp:  {version: "==0.1.0", override_path: "../kbsp"}
+
+## The dock console's TinyUSB CDC, fetched only with KHAL_CONSOLE_DOCK, pinned exactly. (esp_tinyusb)
+  espressif/esp_tinyusb:
+    version: "==2.2.0"
+    rules:
+      - if: "$CONFIG{KHAL_CONSOLE_DOCK} == True"

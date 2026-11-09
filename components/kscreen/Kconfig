@@ -1,0 +1,15 @@
+# kscreen's choices for an app that draws.
+
+menu "kscreen"
+
+    config KSCREEN_ROTATE_PAD
+        bool "The pad turns with the glass"
+        default y
+        help
+            When an app turns its glass with kscreen_set_rotation(), the four
+            pad buttons publish the direction they point on the turned glass:
+            at 270 degrees, the pad's right reads as up. TOP and BOT are side
+            buttons and never turn. Off, the app gets the buttons as wired
+            whatever the glass shows, and maps them itself.
+
+endmenu

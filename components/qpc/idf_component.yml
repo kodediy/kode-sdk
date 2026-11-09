@@ -1,0 +1,10 @@
+version: "0.1.0"
+description: "QP/C 8.1.4 of Quantum Leaps, with a FreeRTOS SMP port, for the Kode Dot SDK"
+url: "https://docs.kode.diy/sdk/kqp"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/qpc"
+license: "GPL-3.0-or-later"
+
+dependencies:
+  idf: ">=6.1"

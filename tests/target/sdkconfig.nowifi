@@ -1,0 +1,28 @@
+# The radio link without WiFi: BLE, the C5's own firmware and the services on
+# its GPIOs ride the link, and none of them needs a network stack. Kconfig has
+# offered this since KODEOS_WIFI existed, and it did not link: AO_Radio
+# called the WiFi driver and the credential store unguarded. Built in CI so
+# it cannot quietly stop linking again. NET depends on WIFI and goes with it.
+CONFIG_KODEOS_RADIO=y
+CONFIG_KODEOS_WIFI=n
+
+# In the app's role, so both roles are built with everything linked: the full
+# build is kodeOS's role.
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+# An app starts with the least, so what the app's role builds here is said.
+CONFIG_KODEOS_CONSOLE=y
+CONFIG_KODEOS_APPMGR=y
+CONFIG_KODEOS_SCREENSHOT=y
+CONFIG_KODEOS_BLE=y
+CONFIG_KODEOS_BLE_CONSOLE=y
+CONFIG_KODEOS_NFC=y
+
+# And without the mirror: AO_Display linked with the console on and no stream,
+# the shape in which display_ao.c once used the verb and row tables its
+# mirror block alone included. Nothing else here depends on the stream.
+CONFIG_KODEOS_MIRROR=n
+
+# AO_Scheduler off, as the SDK ships it: the doors that refuse
+# (scheduler_none.c) and every `#if CONFIG_KODE_SCHEDULER` around their callers
+# are compiled here and nowhere else.
+CONFIG_KODE_SCHEDULER=n

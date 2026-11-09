@@ -1,0 +1,14 @@
+## This tree's own facade, by path. The target build checks the code in the
+## checkout, never a tag, and every sibling arrives through kode's manifest
+## the same way it does in an app that pins a release. kui and kscreen are
+## named too, as in an app that draws: kode brings neither, and they bring
+## LVGL. kode_screen, the standard layer's screen, is named for the same reason.
+dependencies:
+  kodediy/kode:
+    override_path: "../../../components/kode"
+  kodediy/kode_screen:
+    override_path: "../../../components/kode_screen"
+  kodediy/kui:
+    override_path: "../../../components/kui"
+  kodediy/kscreen:
+    override_path: "../../../components/kscreen"

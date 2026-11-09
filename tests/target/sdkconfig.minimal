@@ -1,0 +1,7 @@
+# The minimal app (main/minimal.c): an app's own defaults, so the lines of
+# sdkconfig.defaults that are not an app's go back - the role, the channel and
+# the scheduler. Everything else - the console, the radio, Wi-Fi, BLE - stays
+# as an app gets it.
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+CONFIG_KODEOS_CHANNEL=n
+CONFIG_KODE_SCHEDULER=n

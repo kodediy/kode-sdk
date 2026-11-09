@@ -1,0 +1,36 @@
+name: assign
+
+# Every pull request lands on the owner's list the moment it opens, whoever
+# opened it. The issue forms name their assignee themselves; a pull request
+# template cannot, so this job does it.
+#
+# pull_request_target lends the base repository's token, the only one that
+# can write an assignee on a pull request from a fork. That is safe here
+# because nothing from the pull request is checked out or run.
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      # GitHub drops an assignee it will not accept without an error, so the
+      # answer is read back: a pull request left unassigned fails this job
+      # instead of passing it.
+      - name: Assign the owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          OWNER: jbenedictocenteno
+        run: |
+          if ! gh api --method POST "repos/$REPO/issues/$PR/assignees" \
+                 -f "assignees[]=$OWNER" --jq '.assignees[].login' \
+               | grep -qx "$OWNER"; then
+            echo "::error::GitHub did not assign $OWNER to #$PR" >&2
+            exit 1
+          fi

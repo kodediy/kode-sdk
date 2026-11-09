@@ -1,0 +1,12 @@
+version: "0.1.0"
+description: "Kode Dot SDK: the board's pins, addresses, owners and sdkconfig"
+url: "https://docs.kode.diy/sdk/kbsp"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/kbsp"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+dependencies:
+  idf: ">=6.1"

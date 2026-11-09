@@ -1,0 +1,48 @@
+# The budget of internal RAM for the minimal app (main/minimal.c), the
+# variant `minimal`, read by tools/check_ram.sh (`minimal_noradio` has its
+# own, ram_budget.minimal_noradio.txt):
+#
+#   ../../tools/check_ram.sh build/kode_target.elf ram_budget.minimal.txt
+#
+# The minimal app uses the LED and the buttons, so it links the core, AO_LedMgr
+# and what the console brings (AO_Console, AO_Autotest), and nothing else.
+# This file keeps it that way: an owner it does not use, dragged back in by a
+# reference, brings its stack - unlisted here, so the check fails - and its
+# static image, past a ceiling that leaves less room than the smallest stack.
+#
+# static_max is that ceiling: what `minimal` takes plus MINIMAL_MARGIN.
+#
+# 217644: `minimal` at 2d3683df.
+# MINIMAL_MARGIN 2048: under the smallest Active Object's stack (3072).
+static_max 219692
+
+# Every data symbol of 2048 bytes or more the minimal app has in internal RAM,
+# each at the most ram_budget.txt allows it. One more is an owner or a buffer
+# that came in: move it to PSRAM, or list it here in the same commit.
+#
+# symbol               source file          max bytes
+
+# The stacks of the Active Objects the minimal app starts.
+console_stack          console_ao.c         8192
+power_stack            power_ao.c           4096
+log_stack              log_ao.c             4096
+ioexp_stack            ioexp_ao.c           4096
+boot_stack             boot_ao.c            4096
+autotest_stack         autotest_ao.c        4096
+ledmgr_stack           led_mgr.c            3072
+buttons_stack          buttons_ao.c         3072
+
+# The AO supervisor's stack (CONFIG_KQP_AO_WATCH).
+s_watch_stack          khal_system_esp.c    3072
+
+# QP/C's three event pools.
+s_jumbo_pool           kqp.c                16560
+s_medium_pool          kqp.c                16128
+s_large_pool           kqp.c                16128
+
+# The console's Active Object.
+l_console              console_ao.c         4096
+
+# What the libraries declare.
+xIsrStack              port.c               4192
+s_retention            sleep_retention.c    2816

@@ -1,0 +1,3 @@
+## The host suite compiles kui_pack.c, which parses with cJSON.
+dependencies:
+  espressif/cjson: "^1.7.19"

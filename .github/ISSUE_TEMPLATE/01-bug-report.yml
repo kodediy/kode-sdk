@@ -1,0 +1,128 @@
+name: Bug report
+description: A driver, an Active Object, the kode facade or the runtime underneath behaves wrongly.
+type: Bug
+assignees:
+  - jbenedictocenteno
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the problem only shows through kodeOS - its launcher, its console, its updates - file it in [KodeOS](https://github.com/kodediy/KodeOS/issues/new/choose). A bug that reproduces from a plain SDK app belongs here.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before you file
+      options:
+        - label: I have searched the [open and closed issues](https://github.com/kodediy/kode-sdk/issues?q=is%3Aissue) and found nothing that covers this.
+          required: true
+        - label: I have reproduced it on the latest tag, or on `main`.
+          required: true
+        - label: It reproduces in a minimal app built from one of the projects in `examples/`.
+
+  - type: input
+    id: sdk_version
+    attributes:
+      label: SDK version
+      description: The tag or commit your project pins - the `kodediy/kode` entry of `idf_component.yml`, or `git -C sdk describe --tags --always` inside KodeOS.
+      placeholder: v0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: idf_version
+    attributes:
+      label: ESP-IDF version
+      description: The output of `idf.py --version`.
+      placeholder: ESP-IDF v6.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Where you believe the fault is. "Not sure" is a fine answer.
+      options:
+        - kode (the standard layer, kode.h)
+        - kode_sys (the extended layer, kode_sys.h, kode_cert.h)
+        - kaos (the Active Objects)
+        - kdrv (the chip drivers)
+        - khal (I2C bus, console transport, time, sync)
+        - kbsp (pins, addresses, sdkconfig.board, partitions.csv)
+        - klog (logging)
+        - kqp or qpc (signals, pools, priorities, the QP/C port)
+        - kdefs (kode_status_t)
+        - rfal (NFC)
+        - C5 firmware (c5/)
+        - Templates
+        - Host tests or tools
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: consumer
+    attributes:
+      label: Where it runs
+      options:
+        - An SDK app (from a template)
+        - kodeOS
+        - An Arduino sketch
+        - The host test build (linux target)
+    validations:
+      required: true
+
+  - type: textarea
+    id: board
+    attributes:
+      label: Board
+      description: If it runs on a Kode Dot, the `info` answer from kodeOS on the same board, or the MAC from `esptool read-mac`.
+      render: text
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: What the code did, as precisely as you can. Include return codes (`kode_status_t`) and exact messages.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What the header or the docs say should happen, with a link or a `file:line` if you have one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest `app_main()` that shows it. Strip everything the bug does not need; a repository link works too.
+      placeholder: |
+        #include "kode_sys.h"
+
+        void app_main(void)
+        {
+            kode_init();
+            /* ... */
+        }
+      render: c
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log
+      description: |
+        Serial output with the relevant tags at debug level (`esp_log_level_set()` in an app, `log_level tag="<tag>" level=d` in kodeOS). For an assertion or a panic, the full backtrace and the line naming the failed assertion.
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: What you already ruled out, whether an earlier tag worked, what you suspect.

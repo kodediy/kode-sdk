@@ -1,0 +1,14 @@
+:cmock:
+  :plugins:
+    - expect
+    - expect_any_args
+    - return_thru_ptr
+    - array
+    - ignore
+    - ignore_arg
+    - callback
+  # CMock does not expand macros, so ESP_EVENT_DECLARE_BASE() reads to it as a
+  # function prototype it cannot parse. It declares an event base symbol, not a
+  # function; nothing here posts HTTP events, so stripping the line is enough.
+  :strippables:
+    - 'ESP_EVENT_DECLARE_BASE\(.*?\)'

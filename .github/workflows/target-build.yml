@@ -1,0 +1,101 @@
+name: target-build
+
+# The SDK compiled for the chip, on the ESP-IDF kodeOS ships with. The
+# examples never build here - they pin a release, not this tree - so this is
+# where a change that stops the SDK compiling for the esp32p4 is found, rather
+# than in somebody's app.
+#
+# A file of its own rather than a job in host-tests.yml: that one is the check
+# every pull request waits seconds for, and it says so. A real esp32p4 build
+# takes minutes, and a slow check folded into a fast one makes both worse.
+# Like that one, it runs once per pull request and once per push to main, and
+# not at all for a change that compiles nothing (the same paths-ignore list).
+# workflow_dispatch is for a branch nobody has opened a pull request for.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/workflows/assign.yml'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/workflows/assign.yml'
+  workflow_dispatch:
+  # release.yml calls this as its gate, on the commit the tag names.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: target-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: esp32p4${{ matrix.variant && format(' ({0})', matrix.variant) || '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      # One variant failing says nothing about the other, and both answers
+      # are wanted from the same push.
+      fail-fast: false
+      matrix:
+        # The full build, and a variant (tests/target/sdkconfig.<name>): a
+        # configuration Kconfig offers and no product builds, checked so the
+        # #if paths it takes keep linking.
+        # The full build is in the OS role, as kodeOS is. `minimal` is the
+        # LED and the buttons on an app's own defaults (main/minimal.c): the
+        # image that proves an app links only what it uses. `minimal_noradio`
+        # is the same with KODEOS_RADIO=n and KODEOS_CONSOLE=n: the build
+        # that compiles kdrv_c5_hold.c, and the one with no command line.
+        # `nowifi` is also the build without the mirror (KODEOS_MIRROR=n),
+        # the only one with the display linked, the console on and no stream.
+        # `testdot` is the full build with AO_TestDot on: the only one that
+        # compiles the E5 final test, the OV5640 and the station's chips.
+        variant: ['', nowifi, minimal, minimal_noradio, testdot]
+    steps:
+      # Without submodules, for the reason host-tests.yml gives: the only one
+      # is the C5's firmware, a project for another chip that nothing here
+      # compiles.
+      - uses: actions/checkout@v7
+
+      - name: Build tests/target
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v6.1
+          target: esp32p4
+          path: tests/target
+          # After the build, the internal RAM check: what the image puts in
+          # the 640 KB of internal RAM at link time, against
+          # tests/target/ram_budget.txt, or ram_budget.<variant>.txt for a
+          # minimal app (testdot's file holds only what it adds, read before
+          # ram_budget.txt): a ceiling just over what it takes, so an owner it
+          # never uses cannot come back unseen. A build that takes too much
+          # still links and still passes the host suites, and fails on a
+          # board - see tools/check_ram.sh. Then the start check: each Active
+          # Object's start in the object that holds its queue, so a door
+          # never links without the start an app's kode_init() names weakly;
+          # and the image's promise - everything in the full builds, with
+          # every start named strongly in the OS role, none of the owners the
+          # minimal app never uses - see tools/check_starts.sh.
+          command: |
+            KODE_TARGET_VARIANT=${{ matrix.variant }} idf.py build || exit 1
+            absent=AO_Radio,AO_Net,AO_Display,AO_Storage,AO_AppMgr,AO_Ir,AO_Nfc,AO_Rfid,AO_Audio,AO_Imu,AO_Haptic,AO_Touch
+            if [ "${{ matrix.variant }}" = "minimal" ]; then
+              ../../tools/check_ram.sh build/kode_target.elf ram_budget.minimal.txt || exit 1
+              ../../tools/check_starts.sh build --absent "$absent" || exit 1
+            elif [ "${{ matrix.variant }}" = "minimal_noradio" ]; then
+              ../../tools/check_ram.sh build/kode_target.elf ram_budget.minimal_noradio.txt || exit 1
+              ../../tools/check_starts.sh build --absent "$absent,AO_Console,AO_Autotest" || exit 1
+            elif [ "${{ matrix.variant }}" = "testdot" ]; then
+              cat ram_budget.testdot.txt ram_budget.txt > build/ram_budget.testdot
+              ../../tools/check_ram.sh build/kode_target.elf build/ram_budget.testdot || exit 1
+              ../../tools/check_starts.sh build --all || exit 1
+            else
+              ../../tools/check_ram.sh build/kode_target.elf ram_budget.txt || exit 1
+              ../../tools/check_starts.sh build --all || exit 1
+            fi

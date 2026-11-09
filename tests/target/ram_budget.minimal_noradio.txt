@@ -1,0 +1,43 @@
+# The budget of internal RAM for the minimal app (main/minimal.c) built as the
+# variant `minimal_noradio`, with KODEOS_RADIO=n and KODEOS_CONSOLE=n, read by
+# tools/check_ram.sh:
+#
+#   ../../tools/check_ram.sh build/kode_target.elf ram_budget.minimal_noradio.txt
+#
+# With no console, the minimal app links the core and AO_LedMgr, and nothing
+# else. This file keeps it that way, by the rule of ram_budget.minimal.txt: an
+# owner it does not use, dragged back in by a reference, brings its stack -
+# unlisted here, so the check fails - and its static image, past a ceiling
+# that leaves less room than the smallest stack.
+#
+# static_max is that ceiling: what `minimal_noradio` takes plus MINIMAL_MARGIN.
+#
+# 196212: `minimal_noradio` with the console out.
+# MINIMAL_MARGIN 2048: under the smallest Active Object's stack (3072).
+static_max 198260
+
+# Every data symbol of 2048 bytes or more the app has in internal RAM, each at
+# the most ram_budget.txt allows it. One more is an owner or a buffer that
+# came in: move it to PSRAM, or list it here in the same commit.
+#
+# symbol               source file          max bytes
+
+# The stacks of the Active Objects it starts.
+power_stack            power_ao.c           4096
+log_stack              log_ao.c             4096
+ioexp_stack            ioexp_ao.c           4096
+boot_stack             boot_ao.c            4096
+ledmgr_stack           led_mgr.c            3072
+buttons_stack          buttons_ao.c         3072
+
+# The AO supervisor's stack (CONFIG_KQP_AO_WATCH).
+s_watch_stack          khal_system_esp.c    3072
+
+# QP/C's three event pools.
+s_jumbo_pool           kqp.c                16560
+s_medium_pool          kqp.c                16128
+s_large_pool           kqp.c                16128
+
+# What the libraries declare.
+xIsrStack              port.c               4192
+s_retention            sleep_retention.c    2816

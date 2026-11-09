@@ -1,0 +1,20 @@
+version: "0.1.0"
+description: "Kode Dot SDK: LVGL on the screen, driven from an app's Active Object"
+url: "https://docs.kode.diy/sdk/kscreen"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/kscreen"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+## kscreen is optional, like kui: an app that draws names it, and it brings
+## kui and LVGL with it. kodediy/kode does not name it. The siblings arrive at
+## the same release (see khal's manifest for the mechanism).
+dependencies:
+  idf: ">=6.1"
+  kodediy/kode_sys: {version: "==0.1.0", override_path: "../kode_sys"}
+  kodediy/kui:      {version: "==0.1.0", override_path: "../kui"}
+  kodediy/kdrv:     {version: "==0.1.0", override_path: "../kdrv"}
+  kodediy/khal:     {version: "==0.1.0", override_path: "../khal"}
+  kodediy/kbsp:     {version: "==0.1.0", override_path: "../kbsp"}

@@ -1,0 +1,17 @@
+# The actions the workflows use, kept current by pull request once a week.
+# The third-party one is pinned by commit, with its version beside it in a
+# comment, and Dependabot moves both together; a pin that never moves is a
+# pin to whatever was vulnerable the day it was written. The week's updates
+# travel together in one pull request: each one runs the whole pipeline, so
+# one pull request per action would pay for it once per action.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns:
+          - "*"

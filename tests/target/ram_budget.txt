@@ -1,0 +1,72 @@
+# The budget of internal RAM for this project, the full build and `nowifi`
+# (the minimal app's is ram_budget.minimal.txt), read by tools/check_ram.sh:
+#
+#   ../../tools/check_ram.sh build/kode_target.elf ram_budget.txt
+#
+# This project links every component of the SDK with every option on, so
+# what it takes of the ESP32-P4's 640 KB of internal RAM at link time is what
+# the SDK costs an app before the app adds a line of its own.
+#
+# static_max is the ceiling of that static image - code in IRAM, .data and
+# .bss. It sits a few kilobytes above what the full variant takes, on
+# purpose: a change that needs more either moves something to PSRAM or raises
+# this number in the same commit, where a reviewer sees it.
+#
+# 364000: the AO supervisor's 3 KB stack (s_watch_stack) took the full
+# variant from 359220 to 362292.
+# 368520: AO_Scheduler (its 3 KB stack, queue and state), the larger event
+# pool and the channel's held lines took the full variant from 359632 to
+# 364152; the ceiling moved by the same 4520 bytes.
+static_max 368520
+
+# Every data symbol of 2048 bytes or more in internal RAM, with the source
+# file that defines it and the most it may be. A static this size that is not
+# listed fails the check: a buffer belongs in PSRAM (khal_alloc_psram()), and
+# the ones below are here because something forces them to be internal.
+#
+# symbol               source file          max bytes
+
+# The stacks of the Active Objects (kqp_config.h's tiers), each in its own
+# AO's file. Internal because an AO may write flash, which takes PSRAM out of
+# reach while the write lasts.
+console_stack          console_ao.c         8192
+appmgr_stack           appmgr_ao.c          8192
+storage_stack          storage_ao.c         6144
+radio_stack            radio_ao.c           6144
+nfc_stack              nfc_ao.c             6144
+display_stack          display_ao.c         6144
+touch_stack            touch_ao.c           4096
+power_stack            power_ao.c           4096
+net_stack              net_ao.c             4096
+log_stack              log_ao.c             4096
+ioexp_stack            ioexp_ao.c           4096
+imu_stack              imu_ao.c             4096
+boot_stack             boot_ao.c            4096
+autotest_stack         autotest_ao.c        4096
+rfid_stack             rfid_ao.c            3072
+ledmgr_stack           led_mgr.c            3072
+ir_stack               ir_ao.c              3072
+haptic_stack           haptic_ao.c          3072
+buttons_stack          buttons_ao.c         3072
+audio_stack            audio_ao.c           3072
+scheduler_stack        scheduler_ao.c       3072
+
+# The AO supervisor's stack (CONFIG_KQP_AO_WATCH). Internal because it has to
+# run while a flash write has taken PSRAM out of reach.
+s_watch_stack          khal_system_esp.c    3072
+
+# QP/C's three event pools.
+s_jumbo_pool           kqp.c                16560
+s_medium_pool          kqp.c                16128
+s_large_pool           kqp.c                16512
+
+# The console's Active Object. It grows with the verbs, so the line leaves
+# room.
+l_console              console_ao.c         4096
+
+# What the libraries declare. Listed so that a version bump that grows one
+# of them is seen.
+lv_global              lv_init.c            17408
+xIsrStack              port.c               4192
+s_retention            sleep_retention.c    2816
+gNfcDev                rfal_nfc.c           2560

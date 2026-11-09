@@ -1,0 +1,126 @@
+name: release
+
+# A pushed v* tag gets its GitHub release and its components on the ESP-IDF
+# component registry, after the commit it names has passed both test
+# workflows again and is on main. Every app pins the SDK at this version, so
+# a tag on an untested commit, or on a side branch, would be what the next
+# app builds against.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# A second push of the same tag must not abort the first one's publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # First, and cheap: a tag that is not on main is refused before the gate
+  # spends its build on it.
+  on-main:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: The tag is on main
+        run: |
+          git fetch -q --no-tags origin main || exit 1
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main; tag only what main has been through" >&2
+            exit 1
+          fi
+
+  gate-tests:
+    needs: on-main
+    uses: ./.github/workflows/host-tests.yml
+
+  gate-build:
+    needs: on-main
+    uses: ./.github/workflows/target-build.yml
+
+  release:
+    needs: [gate-tests, gate-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # The tag's own line opens the notes, then the pull requests merged since the last release.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            echo "::notice::$TAG already has a release"
+            exit 0
+          fi
+          ref="$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')"
+          line=""
+          if [ "tag" = "${ref%% *}" ]; then
+            line="$(gh api "repos/$REPO/git/tags/${ref#* }" --jq '.message | split("\n")[0]')"
+          fi
+          line="${line#"$TAG"}"
+          line="${line#" - "}"
+          notes="$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="$TAG" --jq .body)"
+          if [ -n "$line" ]; then
+            notes="$(printf '%s\n\n%s' "$line" "$notes")"
+          fi
+          printf '%s\n' "$notes" > notes.md
+          gh release create "$TAG" --repo "$REPO" --verify-tag --title "kode-sdk $TAG" \
+            --notes-file notes.md --latest
+
+  # Every component goes to the ESP-IDF component registry as kodediy/<name>,
+  # at the version its manifest says, which must be the tag's. Lowest layer
+  # first, so each one's siblings are there when it arrives. The token is the
+  # registry's, for the kodediy namespace (secret IDF_COMPONENT_API_TOKEN).
+  # It runs once the repository variable IDF_REGISTRY is `on`, which waits for
+  # Espressif to approve the namespace; until then apps pin the SDK by git.
+  registry:
+    needs: [gate-tests, gate-build]
+    if: vars.IDF_REGISTRY == 'on'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The manifests say the tag's version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          want="${TAG#v}"
+          bad=$(grep -L "^version: \"$want\"$" components/*/idf_component.yml || true)
+          if [ -n "$bad" ]; then
+            echo "::error::not at $want (tools/set_version.sh $want): $bad" >&2
+            exit 1
+          fi
+          tools/check_example_pins.sh
+
+      - name: Upload to the component registry
+        uses: espressif/upload-components-ci-action@2ce17d73e35473317c1419dbd4f007aacb593040 # v2.2.1
+        with:
+          namespace: kodediy
+          api_token: ${{ secrets.IDF_COMPONENT_API_TOKEN }}
+          components: |
+            kdefs:components/kdefs
+            klog:components/klog
+            qpc:components/qpc
+            kbsp:components/kbsp
+            khal:components/khal
+            kqp:components/kqp
+            kdrv:components/kdrv
+            kaos:components/kaos
+            kode_sys:components/kode_sys
+            kode:components/kode
+            kui:components/kui
+            kscreen:components/kscreen
+            kode_screen:components/kode_screen

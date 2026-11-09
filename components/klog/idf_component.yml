@@ -1,0 +1,12 @@
+version: "0.1.0"
+description: "Kode Dot SDK: the log macros, levels and per-tag filter"
+url: "https://docs.kode.diy/sdk/klog"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/klog"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+dependencies:
+  idf: ">=6.1"

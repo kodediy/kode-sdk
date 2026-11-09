@@ -1,0 +1,98 @@
+name: tests
+
+# Every pull request, and every push to main. A branch is checked once,
+# through its pull request, not a second time for its own push - and not at
+# all for a change that reaches no suite: the Markdown, the issue forms
+# and the assign workflow. README.md
+# carries the SDK's pin, which check_example_pins.sh reads, but that pin
+# only moves together with the manifests, which are not ignored. workflow_dispatch
+# is for a branch nobody has opened a pull request for. These suites need no
+# board and no secrets: the five host projects build for ESP-IDF's `linux`
+# target, mock or fake everything below the seam under test, and finish in
+# seconds. The expensive things - a real esp32p4 build, anything that touches
+# hardware - are not here on purpose, because a check nobody waits for is a
+# check nobody reads.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/workflows/assign.yml'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/workflows/assign.yml'
+  workflow_dispatch:
+  # release.yml calls this as its gate, on the commit the tag names.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # Deliberately without submodules. The only one is the C5's own
+      # firmware, a project() for another chip that nothing here compiles -
+      # and fetching it would need a deploy key this job otherwise does not.
+      - uses: actions/checkout@v7
+
+      # An example builds against the SDK tag its manifest pins, not against
+      # this tree, and four releases once went out without bumping it. Seconds,
+      # no IDF, so it runs first. The checkout above fetched no tags, and this
+      # is a question about tags: the refspec is forced so a tag the checkout
+      # already holds cannot fail as a clobber.
+      # The checks that need neither ESP-IDF nor a board, first: seconds, and
+      # until now run only from KodeOS, which judged an SDK change only once
+      # kodeOS bumped to it - a broken MISRA gate was found there 14 minutes
+      # into a run. The kit's tokens against their header; the tests of the
+      # RAM, MISRA and start gates themselves, which stand in for cppcheck and
+      # the board's nm; an app's size checks (the apps region's case skips
+      # here, with no ESP-IDF); and the
+      # wire twins, which skip here (the C5 is a nested submodule this
+      # checkout does not fetch) and run in KodeOS, which fetches it.
+      - name: The kit's tokens match their header
+        run: python3 components/kui/tools/gen_tokens.py --check
+
+      - name: Run the tools' own tests
+        run: |
+          set -e
+          bash tools/test_check_ram.sh
+          bash tools/test_check_misra.sh
+          bash tools/test_check_wire_twins.sh
+          bash tools/test_check_starts.sh
+          bash tools/test_check_app_size.sh
+
+      - name: The SDK is at one version, the newest release or later
+        run: |
+          git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*' || exit 1
+          tools/check_example_pins.sh || exit 1
+
+      - name: Run the host suites
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v6.1
+          target: esp32p4
+          # Every step ends in `|| exit 1`, and that is not belt and braces.
+          # This block's status is its LAST command's, so a bare list reports
+          # the layer check and throws the suites' result away - which is
+          # exactly what the first version of this file did: the suites failed
+          # on an environment IDF_TARGET, and the run went green.
+          #
+          # `target` above is harmless because tools/host_tests.sh unsets
+          # IDF_TARGET itself - it refuses a target that contradicts the
+          # environment rather than letting the command line win. The ruby
+          # line stays because CMock is a ruby generator, and without it the
+          # mocks are simply not produced.
+          command: |
+            ruby --version || { echo "::error::CMock needs ruby; the IDF image did not provide it" >&2; exit 1; }
+            tools/host_tests.sh  || exit 1
+            tools/check_layers.sh || exit 1

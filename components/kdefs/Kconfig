@@ -1,0 +1,80 @@
+# Switches for the whole board: what the firmware is, and its power states.
+# Every layer may read them, so they live in the lowest one.
+
+menu "Kode Dot"
+
+    choice KODEOS_BOOT_ROLE
+        prompt "What this firmware is"
+        default KODEOS_BOOT_ROLE_APP
+        help
+            Decides whether AO_Boot may write otadata. The default is an app,
+            which never does, so a firmware that does not say what it is
+            cannot keep the board.
+
+        config KODEOS_BOOT_ROLE_APP
+            bool "A user app, running from the apps region"
+            help
+                AO_Boot never writes otadata. A reset returns to kodeOS, even
+                a crash on the first line, unless the app was installed
+                through the mailbox: that one starts again.
+
+        config KODEOS_BOOT_ROLE_OS
+            bool "kodeOS itself, running from factory"
+            select KODEOS_APPMGR
+            help
+                AO_Boot clears otadata at startup so the next boot is kodeOS,
+                reports why the board booted, hands the board over to the app
+                slot and runs the factory reset. Selects KODEOS_APPMGR.
+    endchoice
+
+    config KODEOS_WELCOME_APP
+        string "The app the first boot after a factory reset runs, by project name"
+        depends on KODEOS_BOOT_ROLE_OS
+        default "welcome"
+        help
+            The project name of the app the first boot after a factory reset
+            installs and runs. The factory reset keeps this app and refuses to
+            run without it. The default is a placeholder: the firmware's own
+            defaults set the real name.
+
+    config KODEOS_HOME_HOLD
+        bool "Holding BOT for 600 ms returns to kodeOS"
+        default y
+        depends on KODEOS_BOOT_ROLE_APP
+        help
+            Holding the bottom button reboots into kodeOS, even from a hung
+            app. An app that must save first calls kode_sys_home_defer() from
+            its HOME_SIG handler, then kode_sys_home_now() when it is done.
+            AO_Boot waits KODE_SYS_HOME_GRACE_MS for the deferral and
+            KODE_SYS_HOME_DEFER_MAX_MS at most, then reboots anyway.
+
+            If unsure, say Y.
+
+    config KODE_LOWPOWER
+        bool "AO_LowPower: the AWAKE, ASLEEP and OFF states"
+        default n
+        depends on KODEOS_RADIO
+        select PM_ENABLE
+        select FREERTOS_USE_TICKLESS_IDLE
+        select PM_LIGHT_SLEEP_CALLBACKS
+        help
+            Three states for the whole board. AWAKE: everything runs. ASLEEP:
+            light sleep whenever every task is idle, woken by the buttons, the
+            expander or the C5. OFF: deep sleep with the C5, the card and the
+            radios in reset, woken by the expander. A USB cable keeps the
+            board AWAKE. Off, nothing sleeps.
+
+            If unsure, say N.
+
+    config KODE_LOWPOWER_IDLE
+        bool "AO_LowPower counts the idle time (sleep_after)"
+        default y
+        depends on KODE_LOWPOWER
+        help
+            AO_LowPower goes ASLEEP after `sleep_after` with no input. Turn it
+            off when the app's interface decides when the board rests, as
+            kodeOS does; the `sleep_after` setting is then not offered.
+
+            If unsure, say Y.
+
+endmenu

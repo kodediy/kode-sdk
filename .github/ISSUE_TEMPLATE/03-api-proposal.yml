@@ -1,0 +1,85 @@
+name: API proposal
+description: A new facade call, event, driver or Active Object - or a change to an existing one.
+type: Feature
+assignees:
+  - jbenedictocenteno
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read the [design rules](https://docs.kode.diy/sdk/design-rules) first: one owning Active Object per device, apps ask the owner by event, events carry copies, public headers speak `kode_status_t`. A proposal that has to break one of them says why in **Risks**.
+
+        Not sure it is worth a proposal yet? Start a [discussion](https://github.com/kodediy/kode-sdk/discussions) instead.
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Background and motivation
+      description: The problem this solves, who hits it and how they work around it today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: api
+    attributes:
+      label: Proposed API
+      description: The declarations as they would appear in the header, each with its Doxygen `@brief`, `@param` and `@return`. For an event, the signal and the event struct.
+      placeholder: |
+        /**
+         * @brief  ...
+         * @param  ...
+         * @return KODE_OK on success, ...
+         */
+        kode_status_t kode_example(uint32_t value);
+      render: c
+    validations:
+      required: true
+
+  - type: textarea
+    id: usage
+    attributes:
+      label: Usage
+      description: How an app would call it - a few lines of real code, not pseudocode.
+      render: c
+    validations:
+      required: true
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Layer
+      description: |
+        The placement test. Knows a pin or an I2C address: kbsp. Knows a part number: kdrv. Shared by several drivers, or has a second real implementation: khal. Owns a device or decides when: kaos. Is what an app calls: kode.
+      multiple: true
+      options:
+        - kode (the standard layer, kode.h)
+        - kode_sys (the extended layer, kode_sys.h, kode_cert.h)
+        - kaos
+        - kdrv
+        - khal
+        - kbsp
+        - klog
+        - kqp
+        - kdefs
+        - C5 firmware
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative designs
+      description: Other shapes you considered - a different layer, an existing event, a Kconfig option - and why this one wins.
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks
+      description: Breaking changes for existing apps, new resource claims, internal RAM (every static lands there unless moved to PSRAM), priorities, exceptions to the layer rules.
+
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware
+      description: For a new part or a new use of one - the chip, its address or pins, the datasheet, and whether it has been tried on a board.

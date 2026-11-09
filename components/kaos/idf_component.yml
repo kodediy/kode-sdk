@@ -1,0 +1,25 @@
+version: "0.1.0"
+description: "Kode Dot SDK: the Active Objects that own the board's parts"
+url: "https://docs.kode.diy/sdk/kaos/overview"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/kaos"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+## LVGL and kui are NOT here any more: they went with AO_Gui to kgui, which
+## requires the SDK instead of being required by it. That is the measurable
+## result of the split - a headless firmware that pins kodediy/kode no longer
+## downloads a UI it will never draw.
+##
+## The first-party siblings (see khal's manifest for how they resolve).
+dependencies:
+  idf: ">=6.1"
+  kodediy/kdefs: {version: "==0.1.0", override_path: "../kdefs"}
+  kodediy/qpc:   {version: "==0.1.0", override_path: "../qpc"}
+  kodediy/kqp:   {version: "==0.1.0", override_path: "../kqp"}
+  kodediy/khal:  {version: "==0.1.0", override_path: "../khal"}
+  kodediy/kdrv:  {version: "==0.1.0", override_path: "../kdrv"}
+  kodediy/klog:  {version: "==0.1.0", override_path: "../klog"}
+  kodediy/kbsp:  {version: "==0.1.0", override_path: "../kbsp"}

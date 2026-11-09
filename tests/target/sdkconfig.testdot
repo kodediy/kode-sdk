@@ -1,0 +1,11 @@
+# AO_TestDot, the E5 final test: off by default, so no other build compiles
+# it, the OV5640 driver, the dock loop or the station's chips. Built in CI so
+# a change there cannot reach main unseen. It needs the console, AO_Radio and
+# the mirror, which the full build already has on.
+CONFIG_KODE_TEST_DOT=y
+
+# esp_cam_sensor's OV5640 in the one mode the station uses
+# (kdrv_ov5640.c refuses to build without these three lines).
+CONFIG_CAMERA_OV5640=y
+CONFIG_CAMERA_OV5640_DVP_RGB565_BE_800X600_10FPS=y
+CONFIG_CAMERA_OV5640_DVP_DEFAULT_FMT_RGB565_BE_800X600_10FPS=y

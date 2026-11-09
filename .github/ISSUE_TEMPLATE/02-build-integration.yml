@@ -1,0 +1,99 @@
+name: Build or integration problem
+description: Fetching the SDK, resolving its components, configuring or linking a project against it.
+type: Bug
+assignees:
+  - jbenedictocenteno
+body:
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before you file
+      options:
+        - label: I have searched the [open and closed issues](https://github.com/kodediy/kode-sdk/issues?q=is%3Aissue) and found nothing that covers this.
+          required: true
+        - label: My project spells out the two board facts every project in `examples/` does - `set(IDF_TARGET esp32p4)` before `project()`, and the partition table path.
+          required: true
+        - label: The problem survives deleting `build/`, `managed_components/`, `dependencies.lock` and the generated `sdkconfig`.
+          required: true
+        - label: My SSH key can read both kode-sdk and the C5 firmware nested in it (the manager fetches submodules recursively).
+          required: true
+
+  - type: textarea
+    id: manifest
+    attributes:
+      label: SDK pin
+      description: The `kodediy/kode` entry of your `idf_component.yml`.
+      placeholder: |
+        kodediy/kode:
+          git: https://github.com/kodediy/kode-sdk.git
+          path: components/kode
+          version: v0.1.0
+      render: yaml
+    validations:
+      required: true
+
+  - type: input
+    id: idf_version
+    attributes:
+      label: ESP-IDF version
+      description: The output of `idf.py --version`, from the same shell that failed.
+      placeholder: ESP-IDF v6.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host_os
+    attributes:
+      label: Host operating system
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux
+        - Windows
+    validations:
+      required: true
+
+  - type: dropdown
+    id: project
+    attributes:
+      label: Project
+      options:
+        - An SDK app (from a template)
+        - kodeOS
+        - An Arduino sketch
+        - The host tests
+        - CI
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Exactly what you ran, with every argument.
+      placeholder: idf.py build
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The full output. The first error matters more than the last line, so do not trim the top.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Whether an earlier tag worked, whether it builds inside KodeOS but not standalone, what you already tried.

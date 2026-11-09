@@ -1,0 +1,30 @@
+# The target build's own settings. kbsp's sdkconfig.board is read before this
+# file (see CMakeLists.txt); nothing here is a fact about the board.
+
+# Resolved by ESP-IDF against this project's directory.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../components/kbsp/partitions.csv"
+
+# kodeOS's role: kode_init() names every start strongly, as it does in
+# kodeOS, and tools/check_starts.sh --all proves it. The minimal variants go
+# back to the app's role, which is the one that links by use, and so does
+# nowifi, so that both roles are built with everything linked.
+CONFIG_KODEOS_BOOT_ROLE_OS=y
+
+# On in this role by default; said here, so the full build keeps compiling and
+# linking it, and the screen upload that depends on it, whatever the default.
+CONFIG_KODEOS_CHANNEL=y
+
+# AO_Scheduler, so the target build compiles it. (kaos)
+CONFIG_KODE_SCHEDULER=y
+
+# The NimBLE host, which the board file leaves off. The rest of its lines are
+# the board file's, and the controller, the VHCI transport and SM_SC_ONLY=0
+# are what a build with esp-hosted and NimBLE defaults to. (ESP-IDF)
+CONFIG_BT_ENABLED=y
+
+# HTTPS and MQTT over TLS verify against the full bundle, as kodeOS does.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# The console's `tasks` needs the scheduler to be askable.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
