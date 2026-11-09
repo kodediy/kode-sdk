@@ -1,0 +1,23 @@
+# rfid_read's own settings. Everything about the board - flash, PSRAM,
+# cache, the console - arrives from kbsp's sdkconfig.board, which
+# CMakeLists.txt fetches and reads first. Do not copy any of it here.
+
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="managed_components/kodediy__kbsp/partitions.csv"
+
+# The role AO_Boot plays: an app never writes otadata, which is kodeOS's alone,
+# and ESP-IDF refuses a write into the app's own image. Where a reset lands is
+# the boot request's business (README, The boot model).
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+
+# Kept, so there is somewhere to watch this AO from on the bench: its log lines
+# come out of the same port, and the console's `rfid` verb prints AO_Rfid's own
+# counters (tags read, windows that closed empty) to compare them against.
+# KODEOS_CONSOLE selects KODEOS_APPMGR, which compiles AO_AppMgr in; nothing
+# here calls it, so it is neither linked nor started.
+CONFIG_KODEOS_CONSOLE=y
+
+# The SDK's own log lines are compiled in at every level, and most of them are
+# INFO: a shipped app that will never print them can compile them away, which
+# is well over a hundred kB of format strings. Left at everything here, because
+# an example is run on the bench first (components/klog/Kconfig says what goes).
+# CONFIG_KLOG_MAXIMUM_LEVEL_WARN=y

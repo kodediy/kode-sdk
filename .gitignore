@@ -1,0 +1,3 @@
+# Design documents are written and kept outside the repository: they propose
+# what will be, while the code, its header comments and the README say what is.
+docs/specs/

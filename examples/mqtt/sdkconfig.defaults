@@ -1,0 +1,54 @@
+# mqtt's own settings. Everything about the board - flash, PSRAM, cache,
+# the console - arrives from kbsp's sdkconfig.board, which CMakeLists.txt
+# fetches and reads first. Do not copy any of it here.
+
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="managed_components/kodediy__kbsp/partitions.csv"
+
+# The role AO_Boot plays: an app never writes otadata, which is kodeOS's alone,
+# and ESP-IDF refuses a write into the app's own image. Where a reset lands is
+# the boot request's business (README, The boot model).
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+
+# Kept, and here it is not only somewhere to watch: a board that has never
+# joined a network needs a place to type `wifi_up` and `wifi_join`, and the
+# log lines of this AO and of AO_Net are how the session is followed.
+CONFIG_KODEOS_CONSOLE=y
+
+# ---- What this example costs -------------------------------------------------
+#
+# A broker is reached over the network, so this example has to turn the radio
+# on, and everything below is what it pays for that. Measured on an app that
+# never opened a socket, the network stack alone is about 395 kB of image. The
+# radio link costs more than flash, too: esp-hosted takes the P4's one SDMMC
+# controller with it, so the microSD moves from its plain mount to the hosted
+# path, and a board with the link up spends the radio's ~27 mA for as long as
+# it runs.
+#
+# Each option is spelled out even though all four default to y, so that the
+# cost of this example is readable from this file rather than from Kconfig:
+# NET depends on WIFI, WIFI on RADIO, and MQTT on NET.
+CONFIG_KODEOS_RADIO=y
+CONFIG_KODEOS_WIFI=y
+CONFIG_KODEOS_NET=y
+CONFIG_KODEOS_MQTT=y
+
+# The Kode channel is off in an app by default, and said here because this
+# example drives the one MQTT client itself: the channel holds that client
+# while it runs, and with it on every connect would end with err "busy".
+CONFIG_KODEOS_CHANNEL=n
+
+# What makes the second boot work by itself. `wifi_join` remembers the network
+# and switches WiFi on for good, and with this option AO_Radio joins the
+# strongest remembered network as soon as the link is up - which is the moment
+# this AO is waiting for.
+CONFIG_KODEOS_WIFI_AUTOJOIN=y
+
+# ESP_HOSTED_ENABLED is deliberately NOT set to n here. The other examples
+# switch it off to keep esp-hosted out; this one needs it, and KODEOS_RADIO
+# already selects it.
+
+# The SDK's own log lines are compiled in at every level, and most of them are
+# INFO: a shipped app that will never print them can compile them away, which
+# is well over a hundred kB of format strings. Left at everything here, because
+# an example is run on the bench first (components/klog/Kconfig says what goes).
+# CONFIG_KLOG_MAXIMUM_LEVEL_WARN=y

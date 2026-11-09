@@ -1,0 +1,316 @@
+# The Active Objects a firmware may leave out, and their options.
+
+menu "kodeOS active objects"
+
+    menu "Console and tools"
+
+        config KODEOS_CONSOLE
+            bool "AO_Console (the command line)"
+            default y if KODEOS_BOOT_ROLE_OS
+            select KODEOS_APPMGR
+            select KODEOS_AUTOTEST
+            help
+                The command line: `help`, `led`, `app`, `boot` and every other
+                verb. Off, the log still prints, but nothing reads what you
+                type.
+
+                On in kodeOS, off in an app.
+
+        config KODEOS_AUTOTEST
+            bool "AO_Autotest (the self-test sequencer)"
+            default n
+            help
+                The self-test rows and the sequencer that runs them, behind the
+                console's `test` verb. The console selects it.
+
+                If unsure, say N.
+
+        config KODEOS_APPMGR
+            bool "AO_AppMgr (write the ota_0 slot)"
+            default y if KODEOS_BOOT_ROLE_OS
+            help
+                Writes another firmware into the ota_0 slot. kodeOS needs it.
+                An app rarely does, and without it cannot overwrite the slot
+                it runs from.
+
+                On in kodeOS, off in an app.
+
+        config KODE_SCHEDULER
+            bool "AO_Scheduler: cron entries that run console lines or post events"
+            default n
+            help
+                Cron entries, to the minute on the UTC clock, that run a console
+                line or post an event to an Active Object. The built-in `mqtt`
+                entry keeps the Kode channel up. AO_Scheduler takes the priority
+                KODE_PRIO_USER_HIGH (16), which the app then cannot use.
+
+                If unsure, say N.
+
+        config KODEOS_SCREENSHOT
+            bool "Screenshots (a copy of the frame on the glass)"
+            default y if KODEOS_BOOT_ROLE_OS
+            help
+                The `screenshot` verb: a copy of the panel's framebuffer as a
+                402 KB BMP in PSRAM, held only while it is sent. It captures
+                whatever is on the glass, drawn by LVGL or by hand. Off, the
+                verb says it is unavailable.
+
+                On in kodeOS, off in an app.
+
+        config KODEOS_MIRROR
+            bool "Stream the panel"
+            depends on KODEOS_SCREENSHOT
+            default y if KODEOS_BOOT_ROLE_OS
+            help
+                Streams the panel to a host as JPEG, driven by the mirror_*
+                verbs, with its own BLE characteristic. Off saves about 530 KB
+                of PSRAM and drops the `jpeg` self-test. The touch, tap, swipe
+                and btn verbs stay either way.
+
+                On in kodeOS, off in an app.
+
+    endmenu
+
+    menu "Radio (ESP32-C5)"
+
+        config KODEOS_RADIO
+            bool "AO_Radio (the ESP32-C5 link)"
+            default y if KODEOS_BOOT_ROLE_OS
+            select ESP_HOSTED_ENABLED
+            help
+                The owner of the C5: the esp-hosted link over SDIO, WiFi and BLE
+                on it, the C5's GPIOs and its firmware. Infrared needs it, and
+                an app that uses infrared links it in. It selects esp-hosted,
+                which takes the SDMMC controller before app_main.
+
+                Off, the C5 is held in reset, unless the app plays sound (the
+                C5 enables the speaker amplifier) or sets KODEOS_C5_RUN. A
+                sound-only app resets the C5 once at boot, and a sound in the
+                first ~1.5 s is silent.
+
+                On in kodeOS, off in an app.
+
+        config KODEOS_C5_HOLD
+            bool "Hold the ESP32-C5 in reset until something needs it"
+            depends on KODEOS_RADIO
+            default n
+            help
+                AO_Radio holds the C5, and the speaker amplifier with it, in
+                reset while neither WiFi nor BLE is wanted, and lets it go when
+                the link or a sound asks. The first sound of a boot then waits
+                KODE_C5_BOOT_MS. Off, the C5 runs from power-up.
+
+                If unsure, say N.
+
+        config KODEOS_C5_RUN
+            bool "Keep the ESP32-C5 running for an app without AO_Radio"
+            default n
+            help
+                For an app that talks to the C5 its own way, over its UART say,
+                and has no AO_Radio. The core resets the C5 once at boot, leaves
+                it running and claims it: `ps` shows "running for the app". It
+                draws current until the next reset. With AO_Radio linked it does
+                nothing.
+
+                If unsure, say N.
+
+        config KODEOS_WIFI
+            bool "WiFi (scan and join, through the C5)"
+            depends on KODEOS_RADIO
+            default y if KODEOS_BOOT_ROLE_OS
+            help
+                The remote WiFi stack and the wifi_* verbs. BLE and the C5's
+                firmware update use the link without it.
+
+                On in kodeOS, off in an app.
+
+        config KODEOS_WIFI_DEFAULT_ON
+            bool "WiFi on when the store has never been written"
+            depends on KODEOS_WIFI
+            default n
+            help
+                The `wifi` flag of a board whose store has never held one, as
+                it leaves the factory. On, it boots with WiFi wanted and joins.
+                Once WiFi is switched on or off, the store decides.
+
+                If unsure, say N.
+
+        config KODEOS_WIFI_AUTOJOIN
+            bool "Join a remembered network when the link comes up (the default)"
+            depends on KODEOS_WIFI
+            default y
+            help
+                When the link comes up, AO_Radio scans and joins the strongest
+                network it remembers, as `wifi_auto` does on demand. This is the
+                default of the stored `wifi_join`; once that is set, the store
+                wins. It does not turn WiFi on.
+
+                If unsure, say Y.
+
+        config KODEOS_NET
+            bool "AO_Net (ping, HTTP(S), UDP - the host's own lwIP)"
+            depends on KODEOS_WIFI
+            default y if KODEOS_BOOT_ROLE_OS
+            help
+                Ping, HTTP(S) and UDP on the P4's own lwIP. The C5 only carries
+                frames, so none of it waits on the C5's RPC channel.
+
+                On in kodeOS, off in an app.
+
+        config KODEOS_MQTT
+            bool "MQTT client (connect, publish, subscribe)"
+            depends on KODEOS_NET
+            default y if KODEOS_BOOT_ROLE_OS
+            help
+                An MQTT client owned by AO_Net. Off, it is neither compiled nor
+                linked, though the component is still downloaded.
+
+                On in kodeOS, off in an app.
+
+        config KODEOS_CHANNEL
+            bool "Join the Kode channel whenever there is Wi-Fi"
+            depends on KODEOS_MQTT && KODEOS_CONSOLE
+            default y if KODEOS_BOOT_ROLE_OS
+            default n
+            help
+                AO_Net joins the Kode channel whenever there is WiFi, with the
+                unit's key in the C5, and posts the lines it receives to
+                AO_Console. The stored `chan` setting turns it off at run time.
+                On, AO_Net and AO_Radio are always linked. The channel holds the
+                one MQTT client, so an app that uses kode_sys_mqtt_* leaves it
+                off. On in kodeOS, off in an app.
+
+        config KODEOS_SHOT_HTTP
+            bool "Upload the screen to the Kode channel's shots link"
+            depends on KODEOS_CHANNEL && KODEOS_MIRROR
+            default y
+            help
+                On an order with an upload token, AO_Net uploads the glass as
+                one JPEG to the channel's `shots` link. A session whose answer
+                names no valid link refuses uploads.
+
+                If unsure, say Y.
+
+        config KODEOS_BLE
+            bool "BLE (NimBLE here, the controller on the C5)"
+            depends on KODEOS_RADIO && BT_NIMBLE_ENABLED
+            default y if KODEOS_BOOT_ROLE_OS
+            help
+                The NimBLE host on the P4, its HCI over the same SDIO link, so
+                BLE goes down with the link. The board file turns on
+                BT_NIMBLE_ENABLED, so BLE is on in an app unless it sets
+                CONFIG_KODEOS_BLE=n.
+
+                On in kodeOS, off in an app.
+
+        config KODEOS_BLE_DEFAULT_ON
+            bool "BLE on when the store has never been written"
+            depends on KODEOS_BLE
+            default y
+            help
+                The `ble` flag of a board whose store has never held one. On, it
+                boots advertising until the user switches BLE off, and that
+                choice is kept for every firmware. A board with no bonds is
+                visible; once bonded, only its devices see it, except for five
+                minutes after Pair new device.
+
+                If unsure, say Y.
+
+        config KODEOS_BLE_AT_BOOT
+            bool "BLE on from boot, whatever the store says"
+            depends on KODEOS_BLE
+            default n
+            help
+                BLE comes up on every boot, always visible, whatever the stored
+                flag says. The switch in Settings lasts until the next boot. For
+                a bench or lab build, not a shipped kodeOS.
+
+                If unsure, say N.
+
+        config KODEOS_BLE_CONSOLE
+            bool "Console over BLE"
+            depends on KODEOS_BLE && KODEOS_CONSOLE
+            default y if KODEOS_BOOT_ROLE_OS
+            help
+                The console as a BLE GATT service: the same verbs and grammar as
+                the USB cable.
+
+                On in kodeOS, off in an app.
+
+        config KODEOS_BLE_CONSOLE_PAIRING
+            bool "Require pairing on the BLE console"
+            depends on KODEOS_BLE_CONSOLE
+            default y
+            help
+                Only a paired, bonded central reaches the BLE console (LE Secure
+                Connections). Off, the console is open to anyone in range,
+                file_get, screenshot and install included. Needs
+                CONFIG_BT_NIMBLE_SM_SC_ONLY=0. See
+                https://docs.kode.diy/internals/ble-console.
+
+                If unsure, say Y.
+
+        config KODEOS_BLE_PAIRING_PASSKEY
+            bool "Pair with a code: shown on the glass in kodeOS, never in an app"
+            depends on KODEOS_BLE_CONSOLE_PAIRING
+            default y
+            help
+                Pairing with a six-digit code shown on the glass, so the bond is
+                authenticated. An app refuses every new pairing; a phone bonded
+                in kodeOS reconnects in the app. The code never reaches a log or
+                the console. Off, pairing is Just Works: encrypted, not
+                authenticated.
+
+                If unsure, say Y.
+
+    endmenu
+
+    config KODEOS_NFC
+        bool "AO_Nfc (the ST25R3916B reader)"
+        default y if KODEOS_BOOT_ROLE_OS
+        help
+            The owner of the ST25R3916B on SPI2: read, write and emulate through
+            kode_nfc_*(). An app that calls none leaves AO_Nfc out and the core
+            parks the chip. Off, the chip and SPI2 are the app's, and a call to
+            kode_nfc_*() fails to link.
+
+            On in kodeOS, off in an app.
+
+    menu "Factory and bench"
+
+        config KODE_TEST_DOT
+            bool "AO_TestDot: the E5 final test and its station"
+            default n
+            help
+                The factory's final test, driven by the E5 station over the
+                cable: AO_TestDot, `test component=all`, the test_dot_* verbs,
+                the J3 camera and the operator's screens. It takes the priority
+                KODE_PRIO_USER_LOW (1), and needs KODEOS_CONSOLE, KODEOS_RADIO
+                and KODEOS_MIRROR; an #error stops the build without them.
+
+                If unsure, say N.
+
+        config KODEOS_NFC_CERT
+            bool "Maximum-drive continuous carriers, NFC and RFID (FCC bench only)"
+            depends on KODEOS_NFC
+            default n
+            help
+                Holds a carrier at maximum drive until told to stop: NFC at
+                13.56 MHz (FCC 15.225) and RFID at 125 kHz (FCC 15.209). Only for
+                the certification build an accredited lab runs, never for users.
+                Off, the kode_cert_*_carrier() calls refuse.
+
+                If unsure, say N.
+
+        config KODEOS_CHANNEL_RENEW_S
+            int "Seconds between a connect and the renewal (bench only)"
+            depends on KODEOS_CHANNEL
+            default 82800
+            range 60 82800
+            help
+                The api's token lives 24 h and the channel renews 23 h after a
+                connect. Shorten it only on a bench that must see a renewal.
+
+    endmenu
+
+endmenu

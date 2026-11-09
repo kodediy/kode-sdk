@@ -1,0 +1,49 @@
+# kodeOS partition table - Kode Dot (32 MB NOR flash)
+#
+#
+#   nvs        : Storage for sketches (Arduino `Preferences`). The Arduino core
+#                erases the first NVS partition it finds whenever it is full,
+#                so nothing that must survive a sketch lives here. kodeOS moves
+#                its own settings to the C5 separately; until then they still
+#                live here.
+#   factory    : kodeOS itself. The bootloader falls back here whenever otadata
+#                is blank or invalid, which is the default state (see kboot).
+#                Rescue-only, reachable by cable only.
+#   ota_0      : ping-pong slot for kodeOS updates
+#   ota_1      : ping-pong slot for kodeOS updates
+#   coredump   : kodeOS's last panic, ELF format, read with `idf.py
+#                coredump-info`. It sits below 16 MB because the panic handler
+#                writes it with the cache off.
+#   apps       : The app region (directory + images). Format in kapps_fmt.h.
+#   storage    : The user's FAT volume, wear-levelled. kodeOS ships it with
+#                kode/ (Kody's pack) and c5_slave.bin (the release's C5
+#                image), and stores nothing else there.
+#   app_pending: Development mailbox, 6 MB at 0x1A00000, marked non-executable
+#                so the bootloader will never boot it under any circumstances.
+#                An image through it is at most 0x5FF000 (6 MB less the intent
+#                sector); an OS image is bounded first by its 4 MB slot. The
+#                Arduino core's Kode Dot entry uploads to this address
+#                (build.flash_offset) with this ceiling (upload.maximum_size).
+#   (the table itself sits at 0x8000; nvs starts at 0xB000 on purpose, so the
+#    two sectors between are free and a table change never has to move nvs)
+#
+# Executable code is not confined below the 16 MB mark: the cache maps 32-bit
+# addresses (CONFIG_BOOTLOADER_CACHE_32BIT_ADDR_QUAD_FLASH in sdkconfig.board),
+# so the apps region runs from the last OS slot all the way up to the FAT. Its
+# base stays at 0xC40000, where installed apps have their addresses; its top
+# is 0x1800000, which leaves the mailbox 6 MB. A directory entry that runs
+# past the top makes the directory unsound, and the region is formatted. The
+# storage FAT is reformatted on first boot when the partition moves; the
+# factory writes storage.bin at its offset.
+#
+# Name,        Type, SubType,  Offset,    Size,       Flags
+nvs,           data, nvs,      0xB000,    0x10000,
+otadata,       data, ota,      0x1B000,   0x2000,
+phy_init,      data, phy,      0x1D000,   0x1000,
+factory,       app,  factory,  0x20000,   0x400000,
+ota_0,         app,  ota_0,    0x420000,  0x400000,
+ota_1,         app,  ota_1,    0x820000,  0x400000,
+coredump,      data, coredump, 0xC20000,  0x20000,
+apps,          data, 0x40,     0xC40000,  0xBC0000,
+storage,       data, fat,      0x1800000, 0x200000,
+app_pending,   data, 0x41,     0x1A00000, 0x600000,

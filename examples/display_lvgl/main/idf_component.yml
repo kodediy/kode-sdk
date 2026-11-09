@@ -1,0 +1,12 @@
+## One pin, and everything below the facade arrives at the same version
+## without being named: kode_sys, kaos, kqp, khal, kdrv, klog, kbsp, kdefs and
+## the vendored QP/C. Each component's own manifest names the ones it needs.
+##
+## The second line is kscreen, at the same version: LVGL on the glass from
+## this example's own Active Object. It brings the UI kit, kui, and LVGL with
+## it - the release kodeOS's own GUI draws with and the board's
+## sdkconfig.board is written against. No SDK component drags any of them in
+## unasked.
+dependencies:
+  kodediy/kode: "==0.1.0"
+  kodediy/kscreen: "==0.1.0"

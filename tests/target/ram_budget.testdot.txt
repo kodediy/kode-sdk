@@ -1,0 +1,16 @@
+# What the `testdot` variant adds to ram_budget.txt, read before it:
+#
+#   cat ram_budget.testdot.txt ram_budget.txt > build/ram_budget.testdot
+#   ../../tools/check_ram.sh build/kode_target.elf build/ram_budget.testdot
+#
+# check_ram.sh takes the first `static_max` and the first line of a symbol,
+# so this file's win and every other line comes from ram_budget.txt.
+#
+# 374776: the full build's ceiling plus the 6256 bytes AO_TestDot adds to the
+# full variant (364424 to 370680): its stack (4096), its object (808) and
+# queue (128), and 1062 of the DVP driver's code, which ESP-IDF marks
+# IRAM_ATTR whatever CONFIG_CAM_CTLR_DVP_CAM_ISR_CACHE_SAFE says.
+static_max 374776
+
+# AO_TestDot's stack: internal because it writes the station lock to NVS.
+test_dot_stack         test_dot_ao.c        4096

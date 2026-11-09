@@ -1,0 +1,27 @@
+# The MISRA C:2012 rules this code base deviates from everywhere, each with
+# its reason. A cppcheck suppressions list, read by tools/check_misra.sh.
+#
+# A rule belongs here when the deviation is a decision about how the whole
+# SDK is written. A finding with a reason of its own is deviated on its line
+# instead, and everything else is counted by the project's baseline.
+
+# Rule 15.5 (advisory): a function should have a single point of exit.
+# A function here refuses its bad arguments first and returns, one guard a
+# line, so the body below reads without nesting. A single exit would put the
+# whole body inside the guards' else branches.
+misra-c2012-15.5
+
+# Rule 11.3 (required): no cast between pointers to different object types.
+# QP/C's own macros do it by design: Q_EVT_CAST and Q_NEW_X take the QEvt at
+# the head of an event for the event it is, and Q_TRAN and Q_SUPER do the
+# same for a state handler's `me`. An event's first member is its QEvt, which
+# is what makes the cast defined; QP/C records the same deviation in its own
+# compliance matrix.
+misra-c2012-11.3
+
+# Rule 21.6 (required): the standard library's input/output is not used.
+# Bounded formatting is snprintf() and vsnprintf(), into a buffer whose size
+# is the second argument, and files are opened through the C library because
+# that is what ESP-IDF's VFS mounts the FAT and the SD card under. Where
+# those calls may be made is the layer check's to say (tools/check_layers.sh).
+misra-c2012-21.6

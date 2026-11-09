@@ -1,0 +1,19 @@
+version: "0.1.0"
+description: "Kode Dot SDK: QP/C on the board: signals, event pools, priorities, the tick"
+url: "https://docs.kode.diy/sdk/kqp"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/kqp"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+## kqp's first-party siblings (see khal's manifest for how they
+## resolve). qpc is vendored here rather than fetched: it travels with the
+## repo, so it is a sibling like any other.
+dependencies:
+  idf: ">=6.1"
+  kodediy/kdefs: {version: "==0.1.0", override_path: "../kdefs"}
+  kodediy/qpc:   {version: "==0.1.0", override_path: "../qpc"}
+  kodediy/klog:  {version: "==0.1.0", override_path: "../klog"}
+  kodediy/khal:  {version: "==0.1.0", override_path: "../khal"}

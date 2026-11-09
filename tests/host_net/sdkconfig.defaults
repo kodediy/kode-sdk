@@ -1,0 +1,3 @@
+# Nothing board-specific: this binary owns no flash. What it does need is the
+# MQTT half compiled in, which is a Kconfig in kdrv_net's own component and
+# arrives here as a compile definition on the test component instead.

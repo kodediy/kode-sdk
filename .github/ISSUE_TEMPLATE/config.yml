@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/kodediy/kode-sdk/discussions
+    about: How do I..., is this the right layer for..., would it make sense to... Ask in Discussions; issues are for defects and agreed work.
+  - name: kodeOS bug or feature
+    url: https://github.com/kodediy/KodeOS/issues/new/choose
+    about: The launcher, the console verbs, OTA and the app manager's behaviour on the device live in KodeOS.
+  - name: Architecture and design rules
+    url: https://docs.kode.diy/sdk/design-rules
+    about: The layer cake, the placement test and the rules every component obeys.

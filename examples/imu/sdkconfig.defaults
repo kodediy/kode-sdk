@@ -1,0 +1,21 @@
+# imu's own settings. Everything about the board - flash, PSRAM, cache, the
+# console - arrives from kbsp's sdkconfig.board, which CMakeLists.txt fetches
+# and reads first. Do not copy any of it here.
+
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="managed_components/kodediy__kbsp/partitions.csv"
+
+# The role AO_Boot plays: an app never writes otadata, which is kodeOS's alone,
+# and ESP-IDF refuses a write into the app's own image. Where a reset lands is
+# the boot request's business (README, The boot model).
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+
+# Kept, and it is where this example is watched: the readings go out as log
+# lines, and the console is also how a production row (`test component=imu`)
+# is asked for while the stream runs, to see AO_Imu refuse a read.
+CONFIG_KODEOS_CONSOLE=y
+
+# The SDK's own log lines are compiled in at every level, and most of them are
+# INFO: a shipped app that will never print them can compile them away, which
+# is well over a hundred kB of format strings. Left at everything here, because
+# an example is run on the bench first (components/klog/Kconfig says what goes).
+# CONFIG_KLOG_MAXIMUM_LEVEL_WARN=y

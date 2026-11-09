@@ -1,0 +1,67 @@
+version: "0.1.0"
+description: "Kode Dot SDK: the chip drivers, with STMicroelectronics' RFAL vendored"
+url: "https://docs.kode.diy/sdk/kdrv/overview"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/kdrv"
+license: "GPL-3.0-or-later AND LicenseRef-SLA0051"
+targets:
+  - esp32p4
+
+## The panel stack. The version matches the board-validation examples
+## (Kode-Dot-Val/03-DISPLAY), which are the ones proven on this hardware.
+## The touch controller (CST820 @0x15) is kdrv_cst820, a register map over
+## khal_i2c, and needs no component.
+##
+## Every registry dependency is pinned exactly. kodeOS does not keep its
+## dependencies.lock, so a range here is resolved again on every clean build
+## of it, a release included, and would compile whatever the registry
+## published since the tests ran. A version moves when someone moves it, here,
+## and CI builds it on the way in.
+dependencies:
+  idf: ">=6.1"
+  # MIPI-DSI driver for the Chipone CO5300 AMOLED (official Espressif)
+  esp_lcd_co5300: "==2.2.0"
+
+  # The ESP32-C5 radio link (kdrv_radio). Pinned exactly: host and slave must
+  # run the same esp-hosted version, and 2.12.9 is what the slave firmware on
+  # the boards carries - the pair Kode-Dot-Val validated end to end. On the
+  # P4, esp_wifi.h *is* esp_wifi_remote (the chip has no radio of its own).
+  esp_hosted: "==2.12.9"
+  esp_wifi_remote: "==1.6.5"
+
+  # The ES8311 codec and the layer over it (kdrv_es8311). Pinned exactly,
+  # like esp-hosted and unlike mqtt: the numbers this firmware judges by are
+  # this version's behaviour rather than a stable interface - the volume law
+  # its register calculation implements, what its hw_gain arithmetic does to
+  # that law, and which register its no_dac_ref flag writes. 1.5.10 is the
+  # version Kode-Dot-Val validated on this board with a scope on the output.
+  esp_codec_dev: "==1.5.10"
+
+  # The MQTT client (kdrv_net). It is here rather than absent because esp-mqtt
+  # left the IDF tree in v6 - everything else the network services need
+  # (lwip, esp_http_client, esp-tls, mbedtls) still ships with the toolchain.
+  # Nothing on the far end has to match a version of it, unlike esp-hosted,
+  # but it is pinned exactly for the reason at the top of this file.
+  mqtt: "==1.1.0"
+
+  # The E5 station's camera (kdrv_ov5640): the OV5640's driver and the SCCB
+  # under it, fetched only with KODE_TEST_DOT and pinned exactly - the
+  # versions the station's camera code was written against. Private: nothing
+  # above kdrv sees them.
+  espressif/esp_cam_sensor:
+    version: "==2.6.0"
+    require: private
+    rules:
+      - if: "$CONFIG{KODE_TEST_DOT} == True"
+  espressif/esp_sccb_intf:
+    version: "==0.0.9"
+    require: private
+    rules:
+      - if: "$CONFIG{KODE_TEST_DOT} == True"
+
+  ## The first-party siblings (see khal's manifest for how they resolve).
+  kodediy/kdefs: {version: "==0.1.0", override_path: "../kdefs"}
+  kodediy/klog:  {version: "==0.1.0", override_path: "../klog"}
+  kodediy/khal:  {version: "==0.1.0", override_path: "../khal"}
+  kodediy/kbsp:  {version: "==0.1.0", override_path: "../kbsp"}

@@ -1,0 +1,25 @@
+menu "kqp"
+
+    config KQP_AO_WATCH
+        bool "Watch every Active Object for a stuck or starved step"
+        default y
+        help
+            Panics with a core dump naming any Active Object that stays inside
+            one event, or holds events and dispatches none, for 30 s. A step
+            longer than KQP_AO_STEP_MAX_MS is logged as a warning. Initial
+            transitions are not watched. Needs the task watchdog
+            (CONFIG_ESP_TASK_WDT_EN).
+
+            If unsure, say Y.
+
+    config KQP_AO_STEP_MAX_MS
+        int "Longest step an Active Object may take, in ms"
+        depends on KQP_AO_WATCH
+        range 100 10000
+        default 5000
+        help
+            A step longer than this is logged as a warning, with its length. The
+            time includes waiting for a core, so a low-priority Active Object
+            can pass a second while others run.
+
+endmenu

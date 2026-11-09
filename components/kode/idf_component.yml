@@ -1,0 +1,39 @@
+version: "0.1.0"
+description: "Kode Dot SDK: the standard layer, kode.h, and the one dependency an app names"
+url: "https://docs.kode.diy/sdk/kode"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/kode"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+## The SDK's examples, which the registry lists under this component.
+examples:
+  - path: ../../examples/audio
+  - path: ../../examples/ble_peripheral
+  - path: ../../examples/buttons_led
+  - path: ../../examples/console_actions
+  - path: ../../examples/display_lvgl
+  - path: ../../examples/exp_bus
+  - path: ../../examples/expansion_io
+  - path: ../../examples/haptic
+  - path: ../../examples/imu
+  - path: ../../examples/ir_remote
+  - path: ../../examples/mqtt
+  - path: ../../examples/network
+  - path: ../../examples/nfc_read
+  - path: ../../examples/power
+  - path: ../../examples/rfid_read
+  - path: ../../examples/storage
+
+## The standard layer's dependencies, and the entry point of the whole graph: an
+## app outside this repo pins kodediy/kode and nothing else, and every layer
+## below arrives at the same release through these entries (see khal's
+## manifest for the mechanism). kode_screen, kscreen and kui are not among
+## them: an app that draws names kode_screen, which brings the other two.
+dependencies:
+  idf: ">=6.1"
+  kodediy/kode_sys: {version: "==0.1.0", override_path: "../kode_sys"}
+  kodediy/kdrv:     {version: "==0.1.0", override_path: "../kdrv"}
+  kodediy/khal:     {version: "==0.1.0", override_path: "../khal"}

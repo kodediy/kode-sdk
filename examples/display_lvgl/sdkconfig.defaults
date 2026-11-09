@@ -1,0 +1,32 @@
+# display_lvgl's own settings. Everything about the board - flash, PSRAM,
+# cache, the console, and the LVGL build every project on this board shares
+# (RGB565, no lv_conf.h, the 20 ms refresh) - arrives from kbsp's
+# sdkconfig.board, which CMakeLists.txt fetches and reads first. Do not copy
+# any of it here.
+
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="managed_components/kodediy__kbsp/partitions.csv"
+
+# The role AO_Boot plays: an app never writes otadata, which is kodeOS's alone,
+# and ESP-IDF refuses a write into the app's own image. Where a reset lands is
+# the boot request's business (README, The boot model).
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+
+# Kept, and worth having for this example in particular: with the console up,
+# `screenshot` (or the mirror) shows what this AO drew, which is the only way
+# to check a picture without standing in front of the board.
+CONFIG_KODEOS_CONSOLE=y
+
+# ---- LVGL -------------------------------------------------------------------
+# LVGL's allocator is the board's: kui brings the hooks with it (kui_mem.c),
+# so the widget tree lands in PSRAM with nothing written here.
+#
+# The board compiles Montserrat 14 only, because the launcher draws in its own
+# faces. Two bigger sizes for the title and the counter; each is flash.
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+
+# The SDK's own log lines are compiled in at every level, and most of them are
+# INFO: a shipped app that will never print them can compile them away, which
+# is well over a hundred kB of format strings. Left at everything here, because
+# an example is run on the bench first (components/klog/Kconfig says what goes).
+# CONFIG_KLOG_MAXIMUM_LEVEL_WARN=y

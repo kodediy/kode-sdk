@@ -1,0 +1,24 @@
+menu "khal: console ports"
+
+    config KHAL_CONSOLE_DOCK
+        bool "Console also on the magnetic dock (USB CDC on GPIO26/27)"
+        depends on IDF_TARGET_ESP32P4
+        help
+            A second console on the magnetic pads, as USB CDC through the
+            charging base. It takes the OTG controller, which an app may want
+            for itself. kodeOS raises CONFIG_TINYUSB_CDC_RX_BUFSIZE and
+            _TX_BUFSIZE to 4096 so a whole 4 KB install window fits, which
+            costs about 7 KB of internal RAM.
+
+            If unsure, say N.
+
+    config KHAL_CONSOLE_DOCK_TX_WAIT_MS
+        int "Longest a console write waits for the dock host to drain"
+        depends on KHAL_CONSOLE_DOCK
+        range 0 200
+        default 20
+        help
+            How long a write waits for the dock's host to read before it drops
+            the rest, so a port nobody reads never slows the console.
+
+endmenu

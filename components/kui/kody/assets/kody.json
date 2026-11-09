@@ -1,0 +1,1130 @@
+{
+  "$comment": [
+    "Kody's animations, the single source: tools/kodygen.py turns each entry into kody/kody_<name>.c and",
+    "declares them all in include/kui_kody_anims.h. The Lottie files beside this one are copied unchanged",
+    "from kody-ui (AnimacionesKody/03-lottie); the poses that draw them live there.",
+    "An entry reframes its source onto a canvas of w x h: every top-level layer is scaled by 'scale' about",
+    "the origin and moved by (dx, dy), so a point (x, y) of the source lands on (scale x + dx, scale y + dy).",
+    "Canvases sit on the glass's bottom edge, all but cargando's, a 264 x 264 square centred on the glass",
+    "(the wheel's 342 px brought down to 260, 2 px clear of each side). The face's animations share one",
+    "410 x 300 canvas (screen y 202 to 502): the clock family is lifted out of its full-glass source by",
+    "202 px, and the train, rooftop, camping, small-hours and mallet families, drawn for a 410 x 288 canvas",
+    "214 px down, are let down 12 px into it.",
+    "'anchor' is the number of frames between two anchor poses, 0 for an animation that has none; it divides",
+    "the pass. The rooftop, camping, small-hours and mallet loops have none: each tells one story a pass, and no",
+    "period brings frame 0's picture back. 'recolour' replaces a colour exactly, compared at 8 bits per",
+    "channel, alpha kept: the train's wall, and the glass of the small-hours window with the disc that cuts",
+    "its moon, are drawn in the design's page colour, and the Dot's page is true black.",
+    "An entry with 'builtin' is also compiled into the firmware: the reloj scene, the floor a board falls",
+    "back on when no pack is usable. 'pack' is the official pack, in the firmware's format (kui_pack.h) but",
+    "naming entries: kodygen writes each entry as pack/<name>.json.z and this block as pack/kode.json, with",
+    "every digest, and takes each scene's anchor from its loop's entry."
+  ],
+  "animations": [
+    {
+      "name": "escena_tren",
+      "source": "kody_escena_tren.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 45,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_tren."
+    },
+    {
+      "name": "despierta_tren",
+      "source": "kody_despierta_tren.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_tren."
+    },
+    {
+      "name": "tren_te_mira",
+      "source": "kody_tren_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: tren_te_mira."
+    },
+    {
+      "name": "tren_mira_hora",
+      "source": "kody_tren_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: tren_mira_hora."
+    },
+    {
+      "name": "tren_lee_aviso",
+      "source": "kody_tren_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: tren_lee_aviso."
+    },
+    {
+      "name": "tren_enchufado",
+      "source": "kody_tren_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: tren_enchufado."
+    },
+    {
+      "name": "tren_chiste",
+      "source": "kody_tren_chiste.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: tren_chiste."
+    },
+    {
+      "name": "escena_parque",
+      "source": "kody_escena_parque.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 135,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_parque."
+    },
+    {
+      "name": "despierta_parque",
+      "source": "kody_despierta_parque.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_parque."
+    },
+    {
+      "name": "parque_te_mira",
+      "source": "kody_parque_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: parque_te_mira."
+    },
+    {
+      "name": "parque_mira_hora",
+      "source": "kody_parque_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: parque_mira_hora."
+    },
+    {
+      "name": "parque_lee_aviso",
+      "source": "kody_parque_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: parque_lee_aviso."
+    },
+    {
+      "name": "parque_enchufado",
+      "source": "kody_parque_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: parque_enchufado."
+    },
+    {
+      "name": "parque_chiste",
+      "source": "kody_parque_chiste.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: parque_chiste."
+    },
+    {
+      "name": "escena_camping",
+      "source": "kody_escena_camping.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 135,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_camping."
+    },
+    {
+      "name": "despierta_camping",
+      "source": "kody_despierta_camping.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_camping."
+    },
+    {
+      "name": "camping_te_mira",
+      "source": "kody_camping_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: camping_te_mira."
+    },
+    {
+      "name": "camping_mira_hora",
+      "source": "kody_camping_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: camping_mira_hora."
+    },
+    {
+      "name": "camping_lee_aviso",
+      "source": "kody_camping_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: camping_lee_aviso."
+    },
+    {
+      "name": "camping_enchufado",
+      "source": "kody_camping_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: camping_enchufado."
+    },
+    {
+      "name": "camping_chiste",
+      "source": "kody_camping_chiste.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: camping_chiste."
+    },
+    {
+      "name": "escena_azotea",
+      "source": "kody_escena_azotea.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 135,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_azotea."
+    },
+    {
+      "name": "despierta_azotea",
+      "source": "kody_despierta_azotea.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_azotea."
+    },
+    {
+      "name": "azotea_te_mira",
+      "source": "kody_azotea_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: azotea_te_mira."
+    },
+    {
+      "name": "azotea_mira_hora",
+      "source": "kody_azotea_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: azotea_mira_hora."
+    },
+    {
+      "name": "azotea_lee_aviso",
+      "source": "kody_azotea_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: azotea_lee_aviso."
+    },
+    {
+      "name": "azotea_enchufado",
+      "source": "kody_azotea_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: azotea_enchufado."
+    },
+    {
+      "name": "azotea_chiste",
+      "source": "kody_azotea_chiste.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: azotea_chiste."
+    },
+    {
+      "name": "escena_madrugada",
+      "source": "kody_escena_madrugada.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 135,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_madrugada."
+    },
+    {
+      "name": "despierta_madrugada",
+      "source": "kody_despierta_madrugada.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_madrugada."
+    },
+    {
+      "name": "madrugada_te_mira",
+      "source": "kody_madrugada_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: madrugada_te_mira."
+    },
+    {
+      "name": "madrugada_mira_hora",
+      "source": "kody_madrugada_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: madrugada_mira_hora."
+    },
+    {
+      "name": "madrugada_lee_aviso",
+      "source": "kody_madrugada_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: madrugada_lee_aviso."
+    },
+    {
+      "name": "madrugada_enchufado",
+      "source": "kody_madrugada_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: madrugada_enchufado."
+    },
+    {
+      "name": "madrugada_chiste",
+      "source": "kody_madrugada_chiste.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: madrugada_chiste."
+    },
+    {
+      "name": "escena_desayuno",
+      "source": "kody_escena_desayuno.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 135,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_desayuno."
+    },
+    {
+      "name": "despierta_desayuno",
+      "source": "kody_despierta_desayuno.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_desayuno."
+    },
+    {
+      "name": "desayuno_te_mira",
+      "source": "kody_desayuno_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: desayuno_te_mira."
+    },
+    {
+      "name": "desayuno_mira_hora",
+      "source": "kody_desayuno_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: desayuno_mira_hora."
+    },
+    {
+      "name": "desayuno_lee_aviso",
+      "source": "kody_desayuno_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: desayuno_lee_aviso."
+    },
+    {
+      "name": "desayuno_enchufado",
+      "source": "kody_desayuno_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: desayuno_enchufado."
+    },
+    {
+      "name": "escena_taller",
+      "source": "kody_escena_taller.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 135,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_taller."
+    },
+    {
+      "name": "despierta_taller",
+      "source": "kody_despierta_taller.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_taller."
+    },
+    {
+      "name": "taller_te_mira",
+      "source": "kody_taller_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: taller_te_mira."
+    },
+    {
+      "name": "taller_mira_hora",
+      "source": "kody_taller_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: taller_mira_hora."
+    },
+    {
+      "name": "taller_lee_aviso",
+      "source": "kody_taller_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: taller_lee_aviso."
+    },
+    {
+      "name": "taller_enchufado",
+      "source": "kody_taller_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: taller_enchufado."
+    },
+    {
+      "name": "escena_lluvia",
+      "source": "kody_escena_lluvia.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 135,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_lluvia."
+    },
+    {
+      "name": "despierta_lluvia",
+      "source": "kody_despierta_lluvia.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_lluvia."
+    },
+    {
+      "name": "lluvia_te_mira",
+      "source": "kody_lluvia_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: lluvia_te_mira."
+    },
+    {
+      "name": "lluvia_mira_hora",
+      "source": "kody_lluvia_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: lluvia_mira_hora."
+    },
+    {
+      "name": "lluvia_lee_aviso",
+      "source": "kody_lluvia_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: lluvia_lee_aviso."
+    },
+    {
+      "name": "lluvia_enchufado",
+      "source": "kody_lluvia_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {
+        "#131313": "#000000"
+      },
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: lluvia_enchufado."
+    },
+    {
+      "name": "escena_playa",
+      "source": "kody_escena_playa.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 135,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: escena_playa."
+    },
+    {
+      "name": "despierta_playa",
+      "source": "kody_despierta_playa.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: despierta_playa."
+    },
+    {
+      "name": "playa_te_mira",
+      "source": "kody_playa_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: playa_te_mira."
+    },
+    {
+      "name": "playa_mira_hora",
+      "source": "kody_playa_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: playa_mira_hora."
+    },
+    {
+      "name": "playa_lee_aviso",
+      "source": "kody_playa_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: playa_lee_aviso."
+    },
+    {
+      "name": "playa_enchufado",
+      "source": "kody_playa_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1.16,
+      "dx": -65.6,
+      "dy": 0,
+      "help": "From the apocrifa's kody_anims: playa_enchufado."
+    },
+    {
+      "name": "reloj",
+      "source": "kody_reloj.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 45,
+      "recolour": {},
+      "scale": 1,
+      "dx": 0,
+      "dy": -168,
+      "builtin": true,
+      "help": "From the apocrifa's kody_anims: reloj."
+    },
+    {
+      "name": "despierta_reloj",
+      "source": "kody_despierta_reloj.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1,
+      "dx": 0,
+      "dy": -168,
+      "builtin": true,
+      "help": "From the apocrifa's kody_anims: despierta_reloj."
+    },
+    {
+      "name": "reloj_te_mira",
+      "source": "kody_reloj_te_mira.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1,
+      "dx": 0,
+      "dy": -168,
+      "builtin": true,
+      "help": "From the apocrifa's kody_anims: reloj_te_mira."
+    },
+    {
+      "name": "reloj_mira_hora",
+      "source": "kody_reloj_mira_hora.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1,
+      "dx": 0,
+      "dy": -168,
+      "builtin": true,
+      "help": "From the apocrifa's kody_anims: reloj_mira_hora."
+    },
+    {
+      "name": "reloj_lee_aviso",
+      "source": "kody_reloj_lee_aviso.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1,
+      "dx": 0,
+      "dy": -168,
+      "builtin": true,
+      "help": "From the apocrifa's kody_anims: reloj_lee_aviso."
+    },
+    {
+      "name": "reloj_enchufado",
+      "source": "kody_reloj_enchufado.json",
+      "w": 410,
+      "h": 334,
+      "anchor": 0,
+      "recolour": {},
+      "scale": 1,
+      "dx": 0,
+      "dy": -168,
+      "builtin": true,
+      "help": "From the apocrifa's kody_anims: reloj_enchufado."
+    },
+    {
+      "name": "duda",
+      "source": "kody_duda.json",
+      "w": 410,
+      "h": 369,
+      "scale": 1,
+      "dx": 0,
+      "dy": -133,
+      "anchor": 0,
+      "recolour": {},
+      "help": "Kody wonders under a question mark: the launcher with no apps. Loops"
+    },
+    {
+      "name": "portatil",
+      "source": "kody_portatil.json",
+      "w": 410,
+      "h": 160,
+      "scale": 0.72,
+      "dx": 57.4,
+      "dy": -88,
+      "anchor": 0,
+      "recolour": {},
+      "help": "Kody types on a laptop: the band under a write. Loops"
+    },
+    {
+      "name": "despide",
+      "source": "kody_despide.json",
+      "w": 410,
+      "h": 160,
+      "scale": 0.7,
+      "dx": 61.5,
+      "dy": -98.7,
+      "anchor": 0,
+      "recolour": {},
+      "help": "Kody waves goodbye and leaves the band; its last frame is empty"
+    },
+    {
+      "name": "cargando",
+      "source": "kody_cargando.json",
+      "w": 264,
+      "h": 264,
+      "scale": 0.76,
+      "dx": -23.84,
+      "dy": -73.24,
+      "anchor": 0,
+      "recolour": {},
+      "help": "Kody runs in a hamster wheel: the loading screen. Loops"
+    }
+  ],
+  "pack": {
+    "name": "Kody",
+    "version": "2026.11.05.2",
+    "scenes": [
+      {
+        "name": "tren",
+        "wake": "despierta_tren",
+        "loop": "escena_tren",
+        "on": {
+          "look": [
+            "tren_te_mira"
+          ],
+          "hour": [
+            "tren_mira_hora"
+          ],
+          "notice": [
+            "tren_lee_aviso"
+          ],
+          "plug": [
+            "tren_enchufado"
+          ],
+          "joke": [
+            "tren_chiste"
+          ]
+        }
+      },
+      {
+        "name": "parque",
+        "wake": "despierta_parque",
+        "loop": "escena_parque",
+        "on": {
+          "look": [
+            "parque_te_mira"
+          ],
+          "hour": [
+            "parque_mira_hora"
+          ],
+          "notice": [
+            "parque_lee_aviso"
+          ],
+          "plug": [
+            "parque_enchufado"
+          ],
+          "joke": [
+            "parque_chiste"
+          ]
+        }
+      },
+      {
+        "name": "camping",
+        "wake": "despierta_camping",
+        "loop": "escena_camping",
+        "on": {
+          "look": [
+            "camping_te_mira"
+          ],
+          "hour": [
+            "camping_mira_hora"
+          ],
+          "notice": [
+            "camping_lee_aviso"
+          ],
+          "plug": [
+            "camping_enchufado"
+          ],
+          "joke": [
+            "camping_chiste"
+          ]
+        }
+      },
+      {
+        "name": "azotea",
+        "wake": "despierta_azotea",
+        "loop": "escena_azotea",
+        "on": {
+          "look": [
+            "azotea_te_mira"
+          ],
+          "hour": [
+            "azotea_mira_hora"
+          ],
+          "notice": [
+            "azotea_lee_aviso"
+          ],
+          "plug": [
+            "azotea_enchufado"
+          ],
+          "joke": [
+            "azotea_chiste"
+          ]
+        }
+      },
+      {
+        "name": "madrugada",
+        "wake": "despierta_madrugada",
+        "loop": "escena_madrugada",
+        "on": {
+          "look": [
+            "madrugada_te_mira"
+          ],
+          "hour": [
+            "madrugada_mira_hora"
+          ],
+          "notice": [
+            "madrugada_lee_aviso"
+          ],
+          "plug": [
+            "madrugada_enchufado"
+          ],
+          "joke": [
+            "madrugada_chiste"
+          ]
+        }
+      },
+      {
+        "name": "desayuno",
+        "wake": "despierta_desayuno",
+        "loop": "escena_desayuno",
+        "on": {
+          "look": [
+            "desayuno_te_mira"
+          ],
+          "hour": [
+            "desayuno_mira_hora"
+          ],
+          "notice": [
+            "desayuno_lee_aviso"
+          ],
+          "plug": [
+            "desayuno_enchufado"
+          ]
+        }
+      },
+      {
+        "name": "taller",
+        "wake": "despierta_taller",
+        "loop": "escena_taller",
+        "on": {
+          "look": [
+            "taller_te_mira"
+          ],
+          "hour": [
+            "taller_mira_hora"
+          ],
+          "notice": [
+            "taller_lee_aviso"
+          ],
+          "plug": [
+            "taller_enchufado"
+          ]
+        }
+      },
+      {
+        "name": "lluvia",
+        "wake": "despierta_lluvia",
+        "loop": "escena_lluvia",
+        "on": {
+          "look": [
+            "lluvia_te_mira"
+          ],
+          "hour": [
+            "lluvia_mira_hora"
+          ],
+          "notice": [
+            "lluvia_lee_aviso"
+          ],
+          "plug": [
+            "lluvia_enchufado"
+          ]
+        }
+      },
+      {
+        "name": "playa",
+        "wake": "despierta_playa",
+        "loop": "escena_playa",
+        "on": {
+          "look": [
+            "playa_te_mira"
+          ],
+          "hour": [
+            "playa_mira_hora"
+          ],
+          "notice": [
+            "playa_lee_aviso"
+          ],
+          "plug": [
+            "playa_enchufado"
+          ]
+        }
+      },
+      {
+        "name": "reloj",
+        "wake": "despierta_reloj",
+        "loop": "reloj",
+        "on": {
+          "look": [
+            "reloj_te_mira"
+          ],
+          "hour": [
+            "reloj_mira_hora"
+          ],
+          "notice": [
+            "reloj_lee_aviso"
+          ],
+          "plug": [
+            "reloj_enchufado"
+          ]
+        }
+      }
+    ],
+    "face": {
+      "default": "tren",
+      "hours": []
+    },
+    "empty": "duda",
+    "writing": "portatil",
+    "goodbye": "despide",
+    "loading": "cargando"
+  }
+}

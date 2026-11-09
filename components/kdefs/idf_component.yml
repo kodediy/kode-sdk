@@ -1,0 +1,12 @@
+version: "0.1.0"
+description: "Kode Dot SDK: kode_status_t and the board-wide options"
+url: "https://docs.kode.diy/sdk/kdefs"
+repository: "https://github.com/kodediy/kode-sdk.git"
+repository_info:
+  path: "components/kdefs"
+license: "GPL-3.0-or-later"
+targets:
+  - esp32p4
+
+dependencies:
+  idf: ">=6.1"

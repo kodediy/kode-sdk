@@ -1,0 +1,47 @@
+name: Documentation
+description: A header comment, the README, a template or a page about the SDK is wrong, missing or unclear.
+type: Task
+labels:
+  - documentation
+assignees:
+  - jbenedictocenteno
+body:
+  - type: markdown
+    attributes:
+      value: |
+        When a header and the code disagree, the code is the truth and the header is the bug. Say what the documentation claims, what is actually true, and how you know.
+
+  - type: input
+    id: location
+    attributes:
+      label: Where
+      description: The file and symbol, or the URL. For something missing, where you looked for it.
+      placeholder: components/kode_sys/include/kode_sys.h, kode_sys_nvs_get()
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is wrong
+      options:
+        - Wrong - it does not match the code or the board
+        - Missing - nothing covers it
+        - Unclear - it is there but hard to follow
+        - Broken link or formatting
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What it says, what is true, and the evidence - a `file:line`, a return code, a log line.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording
+      description: Optional. If you know what it should say, write it here.

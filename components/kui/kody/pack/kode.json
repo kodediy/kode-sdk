@@ -1,0 +1,301 @@
+{
+  "format": 1,
+  "name": "Kody",
+  "version": "2026.11.05.2",
+  "scenes": [
+    {
+      "name": "tren",
+      "wake": "despierta_tren.json.z",
+      "loop": "escena_tren.json.z",
+      "anchor": 45,
+      "on": {
+        "look": [
+          "tren_te_mira.json.z"
+        ],
+        "hour": [
+          "tren_mira_hora.json.z"
+        ],
+        "notice": [
+          "tren_lee_aviso.json.z"
+        ],
+        "plug": [
+          "tren_enchufado.json.z"
+        ],
+        "joke": [
+          "tren_chiste.json.z"
+        ]
+      }
+    },
+    {
+      "name": "parque",
+      "wake": "despierta_parque.json.z",
+      "loop": "escena_parque.json.z",
+      "anchor": 135,
+      "on": {
+        "look": [
+          "parque_te_mira.json.z"
+        ],
+        "hour": [
+          "parque_mira_hora.json.z"
+        ],
+        "notice": [
+          "parque_lee_aviso.json.z"
+        ],
+        "plug": [
+          "parque_enchufado.json.z"
+        ],
+        "joke": [
+          "parque_chiste.json.z"
+        ]
+      }
+    },
+    {
+      "name": "camping",
+      "wake": "despierta_camping.json.z",
+      "loop": "escena_camping.json.z",
+      "anchor": 135,
+      "on": {
+        "look": [
+          "camping_te_mira.json.z"
+        ],
+        "hour": [
+          "camping_mira_hora.json.z"
+        ],
+        "notice": [
+          "camping_lee_aviso.json.z"
+        ],
+        "plug": [
+          "camping_enchufado.json.z"
+        ],
+        "joke": [
+          "camping_chiste.json.z"
+        ]
+      }
+    },
+    {
+      "name": "azotea",
+      "wake": "despierta_azotea.json.z",
+      "loop": "escena_azotea.json.z",
+      "anchor": 135,
+      "on": {
+        "look": [
+          "azotea_te_mira.json.z"
+        ],
+        "hour": [
+          "azotea_mira_hora.json.z"
+        ],
+        "notice": [
+          "azotea_lee_aviso.json.z"
+        ],
+        "plug": [
+          "azotea_enchufado.json.z"
+        ],
+        "joke": [
+          "azotea_chiste.json.z"
+        ]
+      }
+    },
+    {
+      "name": "madrugada",
+      "wake": "despierta_madrugada.json.z",
+      "loop": "escena_madrugada.json.z",
+      "anchor": 135,
+      "on": {
+        "look": [
+          "madrugada_te_mira.json.z"
+        ],
+        "hour": [
+          "madrugada_mira_hora.json.z"
+        ],
+        "notice": [
+          "madrugada_lee_aviso.json.z"
+        ],
+        "plug": [
+          "madrugada_enchufado.json.z"
+        ],
+        "joke": [
+          "madrugada_chiste.json.z"
+        ]
+      }
+    },
+    {
+      "name": "desayuno",
+      "wake": "despierta_desayuno.json.z",
+      "loop": "escena_desayuno.json.z",
+      "anchor": 135,
+      "on": {
+        "look": [
+          "desayuno_te_mira.json.z"
+        ],
+        "hour": [
+          "desayuno_mira_hora.json.z"
+        ],
+        "notice": [
+          "desayuno_lee_aviso.json.z"
+        ],
+        "plug": [
+          "desayuno_enchufado.json.z"
+        ]
+      }
+    },
+    {
+      "name": "taller",
+      "wake": "despierta_taller.json.z",
+      "loop": "escena_taller.json.z",
+      "anchor": 135,
+      "on": {
+        "look": [
+          "taller_te_mira.json.z"
+        ],
+        "hour": [
+          "taller_mira_hora.json.z"
+        ],
+        "notice": [
+          "taller_lee_aviso.json.z"
+        ],
+        "plug": [
+          "taller_enchufado.json.z"
+        ]
+      }
+    },
+    {
+      "name": "lluvia",
+      "wake": "despierta_lluvia.json.z",
+      "loop": "escena_lluvia.json.z",
+      "anchor": 135,
+      "on": {
+        "look": [
+          "lluvia_te_mira.json.z"
+        ],
+        "hour": [
+          "lluvia_mira_hora.json.z"
+        ],
+        "notice": [
+          "lluvia_lee_aviso.json.z"
+        ],
+        "plug": [
+          "lluvia_enchufado.json.z"
+        ]
+      }
+    },
+    {
+      "name": "playa",
+      "wake": "despierta_playa.json.z",
+      "loop": "escena_playa.json.z",
+      "anchor": 135,
+      "on": {
+        "look": [
+          "playa_te_mira.json.z"
+        ],
+        "hour": [
+          "playa_mira_hora.json.z"
+        ],
+        "notice": [
+          "playa_lee_aviso.json.z"
+        ],
+        "plug": [
+          "playa_enchufado.json.z"
+        ]
+      }
+    },
+    {
+      "name": "reloj",
+      "wake": "despierta_reloj.json.z",
+      "loop": "reloj.json.z",
+      "anchor": 45,
+      "on": {
+        "look": [
+          "reloj_te_mira.json.z"
+        ],
+        "hour": [
+          "reloj_mira_hora.json.z"
+        ],
+        "notice": [
+          "reloj_lee_aviso.json.z"
+        ],
+        "plug": [
+          "reloj_enchufado.json.z"
+        ]
+      }
+    }
+  ],
+  "face": {
+    "default": "tren",
+    "hours": []
+  },
+  "empty": "duda.json.z",
+  "writing": "portatil.json.z",
+  "goodbye": "despide.json.z",
+  "loading": "cargando.json.z",
+  "sha256": {
+    "despierta_tren.json.z": "34897f8a821ecf0e154598387896062fd9e314284a97aac343cd4442f8957d42",
+    "escena_tren.json.z": "595ef99999ddbacd27d46aeec31a956e42028b45abefd31d099074719bc6c40e",
+    "tren_te_mira.json.z": "7a1c8ebcf1f7571be5b83ac39d24857540b77c49dcd8028f9a824ef99ced9352",
+    "tren_mira_hora.json.z": "edf0b4e6da0cc6d265351b3294c9d4b265245b80e4da8f6ba8112197e5bc4a30",
+    "tren_lee_aviso.json.z": "2a0ee3a4174164d25405fbac38485c22f3e0641dfad40ba701cf03cc37172e29",
+    "tren_enchufado.json.z": "63cd12a2dad246610586bf58fce8be52ed7d4246f04dd43391197a98d5c80d1c",
+    "tren_chiste.json.z": "046fe8582938961619e049b9aae1d2756d9d1f3bf12ed66c203ae1be698c38ef",
+    "despierta_parque.json.z": "b31d7d3cf6ad0bbc7a9f7dc602ad4fe7d1fbf18ae796be864c2d57d9103b2c9b",
+    "escena_parque.json.z": "8b8fd82ce41903b328750b1c20fb88a3b5be1ea92ca95cbd852f256dd184b294",
+    "parque_te_mira.json.z": "c069d972c91d993d1c36e2b42ab972f850320a9482980173826260a1327ca130",
+    "parque_mira_hora.json.z": "6d3ff070178296051c506259d040b1f2aa27f849f843eec168b0547a1c53ecf9",
+    "parque_lee_aviso.json.z": "46f17b68e9298348aa4dc019b1c74ac5f475d77f171b8a5b142eca8dcd4676f8",
+    "parque_enchufado.json.z": "6cb30fa254d405f34718ac3396996cea4b91fa6031f70bacce0e4f8f30f304f2",
+    "parque_chiste.json.z": "803deb6b993ddbc35d712c847c44a7e2945603665832314b95abb11dfb0cc743",
+    "despierta_camping.json.z": "28d9215e17ca0e068586ca8b38cf5af67ad8af4e8d60cfce5affeda5d557f7f2",
+    "escena_camping.json.z": "b87c77bf983b1623d932e458052f0e068938299b579b78f0c829c033f6b8770f",
+    "camping_te_mira.json.z": "a4b66dd8bf7a97c64b6d4c876017e8a64f5acc702007b82b84fe7913f9d15216",
+    "camping_mira_hora.json.z": "c804fb4e56de23e382601ef7be9e1cedda13fa87b34d035bb09c8d64fbf16323",
+    "camping_lee_aviso.json.z": "2d1c89161c70bad237c39f1fda65b3039886622f45aeb74218eeb59cb50933bf",
+    "camping_enchufado.json.z": "66fce97e1fd636ba244d172c1bc2e84080c47e9076255ec1708da38d718cdf10",
+    "camping_chiste.json.z": "e33c2eb3b7e6033af35b7ca2c86e709b275958ef5bbe1ef5a462b7506227e7c6",
+    "despierta_azotea.json.z": "70aec15ecc7ba023f5326eb0fbe193ea4328505d1d1fc5dfb7525b960f33174f",
+    "escena_azotea.json.z": "196844ebde7bda99103b08081b9f432e1ac369cf38e4f16c8bb06671744100e4",
+    "azotea_te_mira.json.z": "84607451f50682814fbafdba91d927477ab7dd12932ef9ef4baef6cea0630760",
+    "azotea_mira_hora.json.z": "4c91f5bb67875b3decef790fe199c5fbe43849907adef31ab57aee0513aaf89b",
+    "azotea_lee_aviso.json.z": "d9a49cd5989d605744910b2253a538979ed927326dc4860d8348c5d8d4c048eb",
+    "azotea_enchufado.json.z": "c054e360b9cd813fa66fa1c4d11f563c99f89e829a2f14fab99542676d9708f1",
+    "azotea_chiste.json.z": "5f028d88fa37a54a5ddf43dc0c82422a6b944bba1701d4b92c084faa1765349f",
+    "despierta_madrugada.json.z": "421e852c67de45297717f031380c19326c3278e94e3d2ff956b5ae5e5be309cc",
+    "escena_madrugada.json.z": "3c373939bf0d2bbcbbfd0ac6c63757f6de4a0de7f805af38007f616b1301dff8",
+    "madrugada_te_mira.json.z": "e226a16a60470d8fd15ac461cef4eb0ed43eb71701c652747a2c9ea1cafb37de",
+    "madrugada_mira_hora.json.z": "52936d7e64fce40f2258e8505b95e50babd08d55ead8edee99ec7394f0b2afca",
+    "madrugada_lee_aviso.json.z": "31ea43a0107df6c806ff46c97c0d21efc4f7571db50e18ac1120f65629e25076",
+    "madrugada_enchufado.json.z": "d4abbd77aa5fdebf53da8caf634273d2f62a99a02b0bc37bcdd8f887a459c1e6",
+    "madrugada_chiste.json.z": "afd27185d22cb0c25c70cab6395fc62fd8b9dc21ff1c83c5ea4fe027f8e55655",
+    "despierta_desayuno.json.z": "28ed4940e98ea7da4f8fd5e966069a52a1418df6964f815940c956691bbbc97d",
+    "escena_desayuno.json.z": "e8e06839f44802656015f4d0b6d9bece8aa2559d399c8cad966fc63dbbe6b4a1",
+    "desayuno_te_mira.json.z": "7539ce927f2e4b3924b927adf1c5d8bb9c76d07a3510909fe11de2e7fa65453f",
+    "desayuno_mira_hora.json.z": "38dd56f2577ab1e82f54a2dd4b44b267f7f3c51f52de05730b1a6228316ddef0",
+    "desayuno_lee_aviso.json.z": "92d4125ba3ba32cae95d1366159770ed55af5084c3ce3c78241945c3476ef58f",
+    "desayuno_enchufado.json.z": "8664f85fbfcfb26140f5f95e9308edb32e454e0e84de3b2668a7486895bbaf25",
+    "despierta_taller.json.z": "5745604adf92be068ee4b8001b7841e980ca3ff63c51d3e9d11b6b5dbb858d03",
+    "escena_taller.json.z": "ff8c6e2f62567da2b346d1de6cd8e64bc05df01c1d0a18ff41d90b3598b3531c",
+    "taller_te_mira.json.z": "d10e0bef5e34e5fdcb55a1d2296d4bdbdb056cb3ee37bb7e7711cdd62f13a052",
+    "taller_mira_hora.json.z": "1c0c69acdd600833f3f86a349b1634e5aed04e335aec22aacd578a503257c950",
+    "taller_lee_aviso.json.z": "31bab6508780c68e6c6b9aad0222edb3bf43a1d9b39402e64af8e259f356040f",
+    "taller_enchufado.json.z": "4a691d3e30198598b41b7de2af8938cd19b28c9da8d03ae3e1118bf8bedfc8fa",
+    "despierta_lluvia.json.z": "3db97e2fa1a556c9fa54837837306b386ce3b12d56e36afdf8b18f0f41319e00",
+    "escena_lluvia.json.z": "436c03ccac638f7c8930b3e3897629922b6efaf492772dc21c40ad55c7912856",
+    "lluvia_te_mira.json.z": "d5873fb267e97e92e4ba8f47770081202b2794c2d0a75b513f25941ac17112d1",
+    "lluvia_mira_hora.json.z": "d6d67e9038f0d9aaba1bdf5147185daeccdd8b47931b2fe78771e21131820776",
+    "lluvia_lee_aviso.json.z": "1904ff897bc53a8a5fab366772216f382143d0f352ebdf7db5bc79250a0d2ea8",
+    "lluvia_enchufado.json.z": "86305771a44537f358059beffbce407d31a759d3f1f1f5017c6b3188a8f9884c",
+    "despierta_playa.json.z": "8eaa63124a04a1ac03d65f4d2f4e53289b0e137ba1dade8b270a6c22df54900e",
+    "escena_playa.json.z": "7ca07a058496be3f1c9d75a12fd99aed63f1d527f15ee290182c42da70f78ed3",
+    "playa_te_mira.json.z": "877592c6ad66b732bdd622b9ccaa6e28d4a62f43fc0fe71018dd55d3125e681e",
+    "playa_mira_hora.json.z": "532f558bd3c18cf75bd592e8cd174bd804629a9358e51263e0d7b0df0d46ae9f",
+    "playa_lee_aviso.json.z": "37842d11fe73f2074df0bd64cfa66795a17a43ff038aa78c07f327d42253bdeb",
+    "playa_enchufado.json.z": "c9bf8a47a38d9d0d3b16c3d321d8e5d263e115e6f0099f7af4fb3d2de30c56dc",
+    "despierta_reloj.json.z": "d6cca462ebabae077fac531f8f7050a07f948f4fddf32885c01f285f59a7ca03",
+    "reloj.json.z": "df7902c1f674797dbac051577ce8b2ada62c32b364d02a72027dfb891c039c1e",
+    "reloj_te_mira.json.z": "457c861ee63255e6ef083034bac6057a296cfaa1a996daf12ba74f8631ffda10",
+    "reloj_mira_hora.json.z": "b108b5541acd7eb2cb6fb1137b4c75649fcd2975ed7c7e00a1f888d3b3702c7b",
+    "reloj_lee_aviso.json.z": "257b6b8447d6b3755edd38909fdde0ff83dc9eed6d0611125b2d82da6d00a376",
+    "reloj_enchufado.json.z": "509b22640305d0c63d60f98550aeb35fcb4b284e5da60b4bc6ac1ac782d14d4e",
+    "duda.json.z": "9084f7241802557b770f92b550ab6780ba1191c6b7340818ce7c8ef9167de953",
+    "portatil.json.z": "9359bfee033029fb0437186a2c69efc292b1f9c8ea2df5dd7341efac6634d3f1",
+    "despide.json.z": "7f5b11d1a0058d7eeaf7b090faa28829d8d5638946861882e922bdbac7f64fc8",
+    "cargando.json.z": "3919d406dec022ce4fb51e685dfa2b3d312fd77b66b1a0ffbc73a77b94441760"
+  }
+}
