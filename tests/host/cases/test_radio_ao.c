@@ -9280,6 +9280,119 @@ TEST_CASE("Pair new device with Bluetooth off puts nothing on the air", "[radio_
     ble_adv_case_end();
 }
 
+/** @brief The next BLE state in the spy, copied; fails the case if none. */
+static BleStateEvt take_ble_state(void)
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "no BLE state was published");
+        if ( (QSignal)BLE_STATE_SIG == e->sig )
+        {
+            return *(const BleStateEvt *)e;
+        }
+    }
+}
+
+/* The board has one link. With a device on it nothing is on the air, so a
+ * time to pair that began then would run out unseen: it waits for the link,
+ * and nothing says "visible" before the advert is there. */
+TEST_CASE("Pair new device asked with a device connected waits for it to leave, "
+          "and its time starts then", "[radio_ao]")
+{
+    BleStateEvt s;
+
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_set_bonds(1U);
+    go_up();
+    ao_spy_subscribe(BLE_STATE_SIG);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, true);
+
+    /* The bonded phone connects, and somebody asks to pair another. */
+    fake_ble_secure(true);
+    fake_ble_central(true);
+    pump();
+    ao_spy_drain();
+    fake_klog_reset();
+    dispatch(BLE_PAIR_OPEN_REQ_SIG);
+    pump();
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "an advert was asked for under a link");
+    s = take_ble_state();
+    TEST_ASSERT_FALSE_MESSAGE(s.pair_open, "said visible with nothing on the air");
+    TEST_ASSERT_TRUE_MESSAGE(s.pair_wait, "the request was dropped without a word");
+    TEST_ASSERT_TRUE(logged("when it leaves"));
+    TEST_ASSERT_FALSE_MESSAGE(logged("visible for"), "the log said visible");
+    ao_spy_drain();
+
+    /* Six minutes on the phone leaves: the whole time to pair starts now. */
+    fake_time_advance_ms(360000U);
+    fake_klog_reset();
+    fake_ble_central(false);
+    pump();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+    TEST_ASSERT_TRUE(logged("visible for 300 s"));
+    dispatch(BLE_STATE_REQ_SIG);
+    s = take_ble_state();
+    TEST_ASSERT_TRUE(s.pair_open);
+    TEST_ASSERT_FALSE(s.pair_wait);
+    ao_spy_drain();
+
+    /* The fast leg ends with 270 s of the time left; when those are gone the
+     * board hides again. */
+    fake_time_advance_ms(30000U);
+    fake_ble_adv_end();
+    pump();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 270000U, false);
+    fake_time_advance_ms(270000U);
+    fake_ble_adv_end();
+    pump();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, true);
+    ble_adv_case_end();
+}
+
+TEST_CASE("Pair new device that waits for the link is dropped when Bluetooth is switched off",
+          "[radio_ao]")
+{
+    BleStateEvt s;
+
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_set_bonds(1U);
+    go_up();
+    ao_spy_subscribe(BLE_STATE_SIG);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, true);
+    fake_ble_central(true);
+    pump();
+    dispatch(BLE_PAIR_OPEN_REQ_SIG);
+    pump();
+    ao_spy_drain();
+
+    dispatch(BLE_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    fake_ble_central(false);
+    pump();
+    ao_spy_drain();
+    dispatch(BLE_STATE_REQ_SIG);
+    s = take_ble_state();
+    TEST_ASSERT_FALSE_MESSAGE(s.pair_wait, "a board switched off still waits to show itself");
+    TEST_ASSERT_FALSE(s.pair_open);
+    ao_spy_drain();
+    ble_adv_case_end();
+}
+
 /* ---- The bond count and the store a teardown frees ---------------------------------- */
 
 /** @brief The bond count of the next BLE state in the spy; fails the case if none. */

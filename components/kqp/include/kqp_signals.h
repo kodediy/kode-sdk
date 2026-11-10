@@ -4552,6 +4552,9 @@ typedef struct {
     bool     hidden;     /**< The advert hides the board from all but its
                           *   bonded devices.                               */
     bool     pair_open;  /**< Pair new device's time is running.            */
+    bool     pair_wait;  /**< Pair new device was asked with a device
+                          *   connected: its time starts when that one
+                          *   leaves.                                       */
     uint16_t backlog;    /**< Bytes still queued for the central.           */
     uint16_t retry;      /**< Times the drain waited on NimBLE's buffers.   */
     char     name[KQP_BLE_NAME_MAX]; /**< The name the board goes by: the

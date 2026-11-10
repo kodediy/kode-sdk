@@ -335,6 +335,9 @@ typedef struct {
     bool     ble_fast_owed;   /**< The next advert starts fast.                 */
     bool     ble_asked;       /**< Somebody switched it on: fast even with no bond. */
     uint32_t ble_fast_until;  /**< The fast advert ends here.                   */
+    bool     ble_pair_wait;   /**< Pair new device was asked with a device
+                               *   connected: its time starts when the link
+                               *   is free.                                     */
     bool     ble_pair_open;   /**< Pair new device was asked: visible until
                                *   ble_pair_until, or until a device pairs.     */
     uint32_t ble_pair_until;  /**< The time to pair ends here.                  */
@@ -3842,6 +3845,7 @@ static void ble_publish_state(Radio * const me)
             (void)memset(e->addr, 0, sizeof(e->addr));
         }
         e->console = kdrv_ble_console_attached();
+        e->pair_wait = me->ble_pair_wait;
         e->tx_drop = kdrv_ble_console_tx_drop();
         e->backlog = kdrv_ble_console_backlog();
         e->retry   = kdrv_ble_console_retry();
@@ -6928,6 +6932,23 @@ static bool radio_ble_resting(Radio const * const me)
 }
 
 /**
+ * @brief Start the time to pair: the board shows itself from now, and fast,
+ *        because whoever asked is about to look.
+ *
+ * @param me The AO.
+ */
+static void radio_ble_pair_start(Radio * const me)
+{
+    me->ble_pair_wait  = false;
+    me->ble_pair_open  = true;
+    me->ble_pair_until = khal_time_ms() + RADIO_BLE_PAIR_MS;
+    me->ble_fast_owed  = true;
+    me->ble_asked      = true;
+    KLOG_N(TAG, "visible for %u s: a new device may pair",
+           (unsigned)RADIO_BLE_PAIR_MS / RADIO_MS_PER_S);
+}
+
+/**
  * @brief A phone that proved who it is and left is the one coming back: its
  *        next advert starts fast. A stranger that connected and left gets
  *        the advert as it was, so that nobody speeds it up by knocking.
@@ -6947,6 +6968,16 @@ static void radio_ble_link_note(Radio * const me)
         {
             me->ble_fast_owed = true;
             me->ble_asked     = true;
+        }
+        if ( me->ble_pair_wait )
+        {
+            /* The link is free: the time to pair that waited for it starts
+             * now, unless Bluetooth was switched off meanwhile. */
+            me->ble_pair_wait = false;
+            if ( me->ble_want )
+            {
+                radio_ble_pair_start(me);
+            }
         }
     }
     else
@@ -11630,17 +11661,21 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             {
                 KLOG_W(TAG, "Bluetooth is off; `ble_up` first");
             }
+            else if ( kdrv_ble_state() == KDRV_BLE_CONNECTED )
+            {
+                /* The one link is taken and nothing can go on the air: a
+                 * time to pair that began now would run out unseen. It
+                 * starts when that device leaves (radio_ble_link_note()). */
+                me->ble_pair_wait = true;
+                KLOG_N(TAG, "a device is connected: the board shows itself "
+                            "for %u s when it leaves",
+                       (unsigned)RADIO_BLE_PAIR_MS / RADIO_MS_PER_S);
+            }
             else
             {
-                /* Visible now, and fast: whoever asked is about to look.
-                 * An advert that hides the board comes off and the visible
-                 * one follows (radio_ble_adv_reconcile()). */
-                me->ble_pair_open  = true;
-                me->ble_pair_until = khal_time_ms() + RADIO_BLE_PAIR_MS;
-                me->ble_fast_owed  = true;
-                me->ble_asked      = true;
-                KLOG_N(TAG, "visible for %u s: a new device may pair",
-                       (unsigned)RADIO_BLE_PAIR_MS / RADIO_MS_PER_S);
+                /* Visible now. An advert that hides the board comes off and
+                 * the visible one follows (radio_ble_adv_reconcile()). */
+                radio_ble_pair_start(me);
                 (void)radio_ble_adv_reconcile(me);
             }
             ble_publish_state(me);

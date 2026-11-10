@@ -243,6 +243,46 @@ TEST_CASE("ble_info says the name the board goes by, quoted as every text is",
     (void)posted(BLE_STATE_REQ_SIG);
 }
 
+/* `pair=` has three words: a time to pair that waits for the connected device
+ * to leave is neither on nor off. */
+TEST_CASE("ble_info says pair=wait while Pair new device waits for the link",
+          "[console_scan]")
+{
+    BleStateEvt s;
+
+    console_up();
+    type_line("ble_info");
+    (void)memset(&s, 0, sizeof(s));
+    s.super     = (QEvt)QEVT_INITIALIZER(BLE_STATE_SIG);
+    s.state     = (uint8_t)KDRV_BLE_CONNECTED;
+    s.pair_wait = true;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+    TEST_ASSERT_NOT_NULL(line_with(" pair=wait"));
+
+    /* A time that runs with a device on the link shows the board no more
+     * than one that has not started. */
+    fake_klog_reset();
+    type_line("ble_info");
+    s.pair_wait = false;
+    s.pair_open = true;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(" pair=wait"), "said on with nothing on the air");
+
+    fake_klog_reset();
+    type_line("ble_info");
+    s.state = (uint8_t)KDRV_BLE_ADVERTISING;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+    TEST_ASSERT_NOT_NULL(line_with(" pair=on"));
+
+    /* And a board switched off shows itself to nobody. */
+    fake_klog_reset();
+    type_line("ble_info");
+    s.state = (uint8_t)KDRV_BLE_OFF;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(" pair=off"), "said on with Bluetooth off");
+    (void)posted(BLE_STATE_REQ_SIG);
+}
+
 TEST_CASE("wifi_scan prints the BSSID", "[console_scan]")
 {
     static const uint8_t BSSID[6] = { 0x3CU, 0x84U, 0x6AU, 0x0AU, 0x0BU, 0x0CU };
