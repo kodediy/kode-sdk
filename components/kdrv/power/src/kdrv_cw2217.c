@@ -250,7 +250,7 @@ kode_status_t kdrv_cw2217_init(void)
         release();
         return KODE_ERROR;
     }
-    KLOG_D(TAG, "CW2217 at 0x%02X, version 0x%02X; asleep until woken",
+    KLOG_D(TAG, "CW2217 at 0x%02X, version 0x%02X",
            (unsigned)KBSP_I2C_ADDR_GAUGE, (unsigned)ver);
     return KODE_OK;
 }
@@ -260,12 +260,17 @@ bool kdrv_cw2217_present(void)
     return NULL != s_dev;
 }
 
-kode_status_t kdrv_cw2217_wake(void)
+/**
+ * @brief Leave shutdown: CONFIG <- 0x30, 20 ms, CONFIG <- 0x00.
+ *
+ * On a chip that is already active the same two writes are a restart, so
+ * only a caller that knows the chip is asleep, or wants the restart, calls
+ * this.
+ *
+ * @return KODE_OK, or KODE_ERROR on a bus failure.
+ */
+static kode_status_t start_ic(void)
 {
-    if ( NULL == s_dev )
-    {
-        return KODE_DENIED;
-    }
     if ( !reg_write(CW_REG_CONFIG, CW_CONFIG_SLEEP_CLR) )
     {
         return KODE_ERROR;
@@ -276,6 +281,29 @@ kode_status_t kdrv_cw2217_wake(void)
         return KODE_ERROR;
     }
     return KODE_OK;
+}
+
+kode_status_t kdrv_cw2217_wake(void)
+{
+    uint8_t cfg = 0U;
+
+    if ( NULL == s_dev )
+    {
+        return KODE_DENIED;
+    }
+    if ( !reg_read(CW_REG_CONFIG, &cfg, 1U) )
+    {
+        return KODE_ERROR;
+    }
+    /* The chip runs off the cell, so a reset of the P4 finds it running.
+     * The vendor driver leaves it alone too. */
+    if ( CW_CONFIG_ACTIVE == cfg )
+    {
+        KLOG_D(TAG, "already running; left as it is");
+        return KODE_OK;
+    }
+    KLOG_D(TAG, "CONFIG=0x%02X; woken", (unsigned)cfg);
+    return start_ic();
 }
 
 kode_status_t kdrv_cw2217_sleep(void)
@@ -575,7 +603,7 @@ kode_status_t kdrv_cw2217_profile_load(const uint8_t profile[KDRV_CW2217_PROFILE
     {
         return KODE_ERROR;
     }
-    if ( kdrv_cw2217_wake() != KODE_OK )
+    if ( start_ic() != KODE_OK )
     {
         return KODE_ERROR;
     }
