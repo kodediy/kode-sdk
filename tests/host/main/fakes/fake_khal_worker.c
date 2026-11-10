@@ -9,8 +9,10 @@
 #include "fake_khal_worker.h"
 #include "khal_worker.h"
 
-/** @brief Most jobs the fake's queue can be created to hold. */
-#define FAKE_WORKER_DEPTH_MAX 8U
+/** @brief Most jobs the fake's queue can be created to hold: the radio's
+ *         service worker asks for two slots per KODE service, so 16 holds
+ *         eight services. */
+#define FAKE_WORKER_DEPTH_MAX 16U
 
 /** @brief Largest job the fake can copy. */
 #define FAKE_WORKER_JOB_MAX 64U
