@@ -504,13 +504,13 @@ kode_status_t kode_file_window(const char *vol, uint32_t size, uint32_t offset, 
 }
 
 /**
- * @brief Ask what a path is and check it is a file a read can take.
+ * @brief Ask what a path is and check it is a file.
  * @param user The path as typed, for the error text.
  * @param vol  The volume path.
  * @param size Out: the file's size.
- * @return true for a file within KODE_FILE_READ_MAX; false with the error set.
+ * @return true for a file; false with the error set.
  */
-static bool load_status(const char *user, const char *vol, uint32_t *size)
+static bool file_status_of(const char *user, const char *vol, uint32_t *size)
 {
     kode_sys_file_status_t st = { false, false, 0U };
     const kode_status_t    rc = stat_run(vol, &st);
@@ -528,15 +528,35 @@ static bool load_status(const char *user, const char *vol, uint32_t *size)
     {
         kode_err_set("%s: it is a folder", user);
     }
-    else if ( KODE_FILE_READ_MAX < st.size )
-    {
-        /* The text says 4 MiB for KODE_FILE_READ_MAX. */
-        kode_err_set("%s: too big (over 4 MiB)", user);
-    }
     else
     {
         *size = st.size;
         ok    = true;
+    }
+    return ok;
+}
+
+/**
+ * @brief Ask what a path is and check it is a file a whole read can take.
+ * @param user The path as typed, for the error text.
+ * @param vol  The volume path.
+ * @param size Out: the file's size.
+ * @return true for a file within KODE_FILE_READ_MAX; false with the error set.
+ */
+static bool load_status(const char *user, const char *vol, uint32_t *size)
+{
+    uint32_t n  = 0U;
+    bool     ok = file_status_of(user, vol, &n);
+
+    if ( ok && (KODE_FILE_READ_MAX < n) )
+    {
+        /* The text says 4 MiB for KODE_FILE_READ_MAX. */
+        kode_err_set("%s: too big (over 4 MiB)", user);
+        ok = false;
+    }
+    if ( ok )
+    {
+        *size = n;
     }
     return ok;
 }
@@ -743,6 +763,126 @@ const uint8_t *kode_file_read_bytes(const char *path, uint32_t *len)
         files_leave();
     }
     return bytes;
+}
+
+/**
+ * @brief Read @p want bytes of a file from @p offset, in windows. The caller holds the files lock.
+ * @param user   The path as typed, for the error text.
+ * @param vol    The volume path.
+ * @param size   What the file held when it was asked about.
+ * @param offset Where the first window starts; before the end of the file.
+ * @param out    Where the bytes go.
+ * @param want   How many; no more than the file holds from @p offset.
+ * @return true when exactly @p want bytes arrived; false with the error set.
+ */
+static bool read_windows(const char *user, const char *vol, uint32_t size, uint32_t offset,
+                         uint8_t *out, uint32_t want)
+{
+    uint32_t done  = 0U;
+    bool     ok    = true;
+    bool     ended = false;
+
+    while ( ok && !ended && (done < want) )
+    {
+        uint32_t cap = want - done;
+
+        if ( KODE_SYS_FILE_READ_MAX < cap )
+        {
+            cap = KODE_SYS_FILE_READ_MAX;
+        }
+
+        read_try_t          t  = { vol, offset + done, &out[done], cap, 0U, size };
+        const kode_status_t rc = kode_file_sys(&read_op, &t);
+
+        if ( KODE_OK != rc )
+        {
+            if ( 0U < done )
+            {
+                kode_err_set("%s: read %lu of %lu bytes: %s", user, (unsigned long)done,
+                             (unsigned long)want, kode_file_why(rc));
+            }
+            else
+            {
+                kode_err_set("%s: %s", user, kode_file_why(rc));
+            }
+            ok = false;
+        }
+        else
+        {
+            done += t.got;
+            /* Short: the file ended before the size it was asked about. */
+            ended = (t.got < cap);
+        }
+    }
+    if ( ok && (done != want) )
+    {
+        kode_err_set("%s: changed while it was read", user);
+        ok = false;
+    }
+    return ok;
+}
+
+/**
+ * @brief Read from a typed path into the caller's buffer. The caller holds the files lock.
+ * @param user   The path as typed.
+ * @param offset The first byte.
+ * @param buf    Where the bytes go; NULL is refused.
+ * @param cap    The most bytes.
+ * @param got    Out: the bytes read; set to 0 first.
+ * @return true when the read was done; false with the error set.
+ */
+static bool read_at_run(const char *user, uint32_t offset, void *buf, uint32_t cap, uint32_t *got)
+{
+    char     vol[KODE_PATH_MAX];
+    uint32_t size = 0U;
+    bool     ok   = kode_file_path(user, vol, sizeof(vol));
+
+    if ( ok && (NULL == buf) )
+    {
+        kode_err_set("%s: no buffer to read into", user);
+        ok = false;
+    }
+    if ( ok && (NULL == got) )
+    {
+        kode_err_set("%s: no place for the count of bytes read", user);
+        ok = false;
+    }
+    if ( ok )
+    {
+        ok = file_status_of(user, vol, &size);
+    }
+    if ( ok && (offset < size) && (0U < cap) )
+    {
+        uint32_t want = size - offset;
+
+        if ( cap < want )
+        {
+            want = cap;
+        }
+        /* cppcheck-suppress misra-c2012-11.5 ; the caller's buffer holds bytes */
+        ok = read_windows(user, vol, size, offset, (uint8_t *)buf, want);
+        if ( ok )
+        {
+            *got = want;
+        }
+    }
+    return ok;
+}
+
+bool kode_file_read_at(const char *path, uint32_t offset, void *buf, uint32_t cap, uint32_t *got)
+{
+    bool ok = false;
+
+    if ( NULL != got )
+    {
+        *got = 0U;
+    }
+    if ( files_enter("kode_file_read_at") )
+    {
+        ok = read_at_run(path, offset, buf, cap, got);
+        files_leave();
+    }
+    return ok;
 }
 
 bool kode_file_read_owned(const char *name, const char *path, uint8_t **block, uint32_t *len)
@@ -984,6 +1124,37 @@ bool kode_file_write(const char *path, const char *text)
 bool kode_file_append(const char *path, const char *text)
 {
     return text_put("kode_file_append", path, text, true);
+}
+
+/**
+ * @brief Write or append @p len bytes, for the two public calls.
+ * @param name   The public name of the call.
+ * @param path   The path as typed.
+ * @param data   The bytes; NULL is refused.
+ * @param len    How many.
+ * @param append Add at the end rather than replace.
+ * @return true when all of it is written; false with the error set.
+ */
+static bool bytes_put(const char *name, const char *path, const void *data, uint32_t len, bool append)
+{
+    bool ok = false;
+
+    if ( kode_enter(name) )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; the caller's data is its own bytes */
+        ok = kode_file_put_bytes(path, (const uint8_t *)data, len, append);
+    }
+    return ok;
+}
+
+bool kode_file_write_bytes(const char *path, const void *data, uint32_t len)
+{
+    return bytes_put("kode_file_write_bytes", path, data, len, false);
+}
+
+bool kode_file_append_bytes(const char *path, const void *data, uint32_t len)
+{
+    return bytes_put("kode_file_append_bytes", path, data, len, true);
 }
 
 /** @brief What one list try carries. */

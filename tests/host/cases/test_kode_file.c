@@ -960,6 +960,357 @@ TEST_CASE("a folder is not read", "[kode_file]")
     file_no_settle();
 }
 
+/* ---- A read at an offset, and bytes written ---- */
+
+/** @brief Bytes the offset read cases ask for. */
+#define TEST_AT_CAP 50000U
+
+/** @brief Where the offset read cases start: inside the first window and across the next. */
+#define TEST_AT_OFFSET 40000U
+
+/** @brief Bytes of guard after a read buffer, which a read leaves as they were. */
+#define TEST_GUARD_BYTES 8U
+
+/** @brief The value of a guard byte. */
+#define TEST_GUARD_FILL 0xA5U
+
+/** @brief Zero bytes ahead of the tail of the file that is longer than a whole read. */
+#define TEST_PAST_ZEROS 1000U
+
+/** @brief Bytes of that tail. */
+#define TEST_PAST_TAIL 100U
+
+/** @brief Bytes the read at the end of a file asks for beyond it. */
+#define TEST_PAST_ASK 100U
+
+/** @brief The size of the file the read ends past. */
+#define TEST_END_FILE 100000U
+
+/** @brief Bytes of that file the read that ends past it starts before the end of. */
+#define TEST_END_LEFT 10U
+
+/** @brief A buffer of @p cap bytes and a guard after them, all filled with the guard value. */
+static uint8_t *at_buf_make(uint32_t cap)
+{
+    uint8_t *const buf = (uint8_t *)malloc(cap + TEST_GUARD_BYTES);
+
+    if ( NULL != buf )
+    {
+        (void)memset(buf, (int)TEST_GUARD_FILL, cap + TEST_GUARD_BYTES);
+    }
+    return buf;
+}
+
+/** @brief Whether @p n bytes at @p buf all hold the guard value. */
+static bool guard_intact(const uint8_t *buf, uint32_t n)
+{
+    bool ok = true;
+
+    for ( uint32_t i = 0U; ok && (i < n); i++ )
+    {
+        ok = (TEST_GUARD_FILL == buf[i]);
+    }
+    return ok;
+}
+
+TEST_CASE("a read at an offset of a large file is byte-exact across windows", "[kode_file]")
+{
+    uint8_t *const buf = at_buf_make(TEST_AT_CAP);
+    uint32_t       got = UINT32_MAX;
+    uint32_t       live;
+
+    file_fresh();
+    TEST_ASSERT_NOT_NULL(buf);
+    TEST_ASSERT_TRUE(sys_put_pattern("/storage/big.bin", TEST_BIG_BYTES));
+
+    /* A failed read first, so the task's own blocks are made before the count. */
+    TEST_ASSERT_FALSE(kode_file_read_at("flash/nope.bin", 0U, buf, TEST_AT_CAP, &got));
+    live = psram_live();
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_read_at("flash/big.bin", TEST_AT_OFFSET, buf, TEST_AT_CAP, &got),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_AT_CAP, got);
+    TEST_ASSERT_TRUE(pattern_is(buf, TEST_AT_OFFSET, TEST_AT_CAP));
+    TEST_ASSERT_TRUE(guard_intact(&buf[TEST_AT_CAP], TEST_GUARD_BYTES));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(live, psram_live(), "the read took a block of its own");
+
+    /* A small read from the middle of a window. */
+    (void)memset(buf, (int)TEST_GUARD_FILL, TEST_AT_CAP + TEST_GUARD_BYTES);
+    TEST_ASSERT_TRUE(kode_file_read_at("flash/big.bin", 5U, buf, 10U, &got));
+    TEST_ASSERT_EQUAL_UINT32(10U, got);
+    TEST_ASSERT_TRUE(pattern_is(buf, 5U, 10U));
+    TEST_ASSERT_TRUE(guard_intact(&buf[10], TEST_AT_CAP - 10U));
+
+    /* The whole file in one read. */
+    TEST_ASSERT_TRUE(kode_file_read_at("flash/big.bin", 0U, buf, TEST_AT_CAP, &got));
+    TEST_ASSERT_EQUAL_UINT32(TEST_AT_CAP, got);
+    TEST_ASSERT_TRUE(pattern_is(buf, 0U, TEST_AT_CAP));
+    free(buf);
+    file_no_settle();
+}
+
+TEST_CASE("a read at an offset reaches past the whole-file ceiling", "[kode_file]")
+{
+    uint8_t *const buf = at_buf_make(TEST_PAST_TAIL * 2U);
+    uint32_t       got = UINT32_MAX;
+
+    file_fresh();
+    TEST_ASSERT_NOT_NULL(buf);
+    TEST_ASSERT_TRUE(host_sparse("huge.bin", KODE_FILE_READ_MAX + TEST_PAST_ZEROS));
+    TEST_ASSERT_TRUE(host_pattern("huge.bin", 0U, TEST_PAST_TAIL, "ab"));
+    TEST_ASSERT_EQUAL_STRING("", kode_file_read("flash/huge.bin"));
+    TEST_ASSERT_EQUAL_STRING(TEST_TOO_BIG, kode_error());
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_read_at("flash/huge.bin", KODE_FILE_READ_MAX + TEST_PAST_ZEROS, buf,
+                                               TEST_PAST_TAIL * 2U, &got),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_PAST_TAIL, got);
+    TEST_ASSERT_TRUE(pattern_is(buf, 0U, TEST_PAST_TAIL));
+    TEST_ASSERT_TRUE(guard_intact(&buf[TEST_PAST_TAIL], TEST_PAST_TAIL + TEST_GUARD_BYTES));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    free(buf);
+    file_no_settle();
+}
+
+TEST_CASE("a read that ends past the end of the file returns what there is", "[kode_file]")
+{
+    uint8_t *const buf = at_buf_make(TEST_PAST_ASK);
+    uint32_t       got = UINT32_MAX;
+
+    file_fresh();
+    TEST_ASSERT_NOT_NULL(buf);
+    TEST_ASSERT_TRUE(host_pattern("end.bin", 0U, TEST_END_FILE, "wb"));
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_read_at("flash/end.bin", TEST_END_FILE - TEST_END_LEFT, buf,
+                                               TEST_PAST_ASK, &got),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_END_LEFT, got);
+    TEST_ASSERT_TRUE(pattern_is(buf, TEST_END_FILE - TEST_END_LEFT, got));
+    TEST_ASSERT_TRUE(guard_intact(&buf[got], TEST_PAST_ASK + TEST_GUARD_BYTES - got));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    free(buf);
+    file_no_settle();
+}
+
+TEST_CASE("a read at or past the end reads nothing and is not an error", "[kode_file]")
+{
+    uint8_t *const buf = at_buf_make(TEST_PAST_ASK);
+    uint32_t       got = UINT32_MAX;
+
+    file_fresh();
+    TEST_ASSERT_NOT_NULL(buf);
+    TEST_ASSERT_TRUE(host_pattern("end.bin", 0U, TEST_END_FILE, "wb"));
+    TEST_ASSERT_TRUE(host_pattern("none.bin", 0U, 0U, "wb"));
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_read_at("flash/end.bin", TEST_END_FILE, buf, TEST_PAST_ASK, &got),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+
+    got = UINT32_MAX;
+    TEST_ASSERT_TRUE(kode_file_read_at("flash/end.bin", TEST_END_FILE + 1U, buf, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+
+    got = UINT32_MAX;
+    TEST_ASSERT_TRUE(kode_file_read_at("flash/end.bin", UINT32_MAX, buf, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+
+    got = UINT32_MAX;
+    TEST_ASSERT_TRUE(kode_file_read_at("flash/none.bin", 0U, buf, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+
+    /* Asking for no bytes of a file that is there reads none. */
+    got = UINT32_MAX;
+    TEST_ASSERT_TRUE(kode_file_read_at("flash/end.bin", 0U, buf, 0U, &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    TEST_ASSERT_TRUE(guard_intact(buf, TEST_PAST_ASK + TEST_GUARD_BYTES));
+    free(buf);
+    file_no_settle();
+}
+
+TEST_CASE("a read at an offset of nothing, of a folder or by a bad path is refused", "[kode_file]")
+{
+    uint8_t *const buf = at_buf_make(TEST_PAST_ASK);
+    uint32_t       got = UINT32_MAX;
+
+    file_fresh();
+    TEST_ASSERT_NOT_NULL(buf);
+    fake_media_put_fs_dir("dir");
+
+    TEST_ASSERT_FALSE(kode_file_read_at("flash/nope.bin", 0U, buf, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    TEST_ASSERT_EQUAL_STRING("flash/nope.bin: no such file", kode_error());
+
+    got = UINT32_MAX;
+    TEST_ASSERT_FALSE(kode_file_read_at("flash/dir", 0U, buf, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    TEST_ASSERT_EQUAL_STRING("flash/dir: it is a folder", kode_error());
+
+    got = UINT32_MAX;
+    TEST_ASSERT_FALSE(kode_file_read_at("usb/a", 0U, buf, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    TEST_ASSERT_EQUAL_STRING("bad path 'usb/a': start with sd/ or flash/", kode_error());
+
+    TEST_ASSERT_FALSE(kode_file_read_at(NULL, 0U, buf, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_STRING("bad path '(null)': start with sd/ or flash/", kode_error());
+
+    TEST_ASSERT_FALSE(kode_file_read_at("sd/../a", 0U, buf, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_STRING("bad path 'sd/../a': no empty, '.' or '..' part", kode_error());
+    TEST_ASSERT_TRUE(guard_intact(buf, TEST_PAST_ASK + TEST_GUARD_BYTES));
+    free(buf);
+    file_no_settle();
+}
+
+TEST_CASE("a read at an offset with no buffer or no count is refused", "[kode_file]")
+{
+    uint8_t *const buf = at_buf_make(TEST_PAST_ASK);
+    uint32_t       got = UINT32_MAX;
+
+    file_fresh();
+    TEST_ASSERT_NOT_NULL(buf);
+    TEST_ASSERT_TRUE(host_pattern("a.bin", 0U, TEST_PAST_ASK, "wb"));
+
+    TEST_ASSERT_FALSE(kode_file_read_at("flash/a.bin", 0U, NULL, TEST_PAST_ASK, &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    TEST_ASSERT_EQUAL_STRING("flash/a.bin: no buffer to read into", kode_error());
+
+    TEST_ASSERT_FALSE(kode_file_read_at("flash/a.bin", 0U, buf, TEST_PAST_ASK, NULL));
+    TEST_ASSERT_EQUAL_STRING("flash/a.bin: no place for the count of bytes read", kode_error());
+    TEST_ASSERT_TRUE(guard_intact(buf, TEST_PAST_ASK + TEST_GUARD_BYTES));
+
+    /* A bad path is the error that wins over a missing buffer or count. */
+    TEST_ASSERT_FALSE(kode_file_read_at("usb/a", 0U, NULL, TEST_PAST_ASK, NULL));
+    TEST_ASSERT_EQUAL_STRING("bad path 'usb/a': start with sd/ or flash/", kode_error());
+    free(buf);
+    file_no_settle();
+}
+
+/** @brief Bytes of a flash file the write cases hold: two parts and a bit, with NULs in them. */
+#define TEST_WB_BYTES TEST_TEXT_BYTES
+
+/** @brief Fill @p data with the NUL-bearing pattern of the write cases. */
+static void wb_fill(uint8_t *data, uint32_t n)
+{
+    for ( uint32_t i = 0U; i < n; i++ )
+    {
+        data[i] = (uint8_t)(i % TEST_BYTE_PERIOD);
+    }
+}
+
+TEST_CASE("bytes with NULs are written, appended to and read back exactly", "[kode_file]")
+{
+    uint8_t *const data = (uint8_t *)malloc(TEST_WB_BYTES);
+    uint8_t *const back = at_buf_make(TEST_WB_BYTES + TEST_APPEND_BYTES);
+    uint32_t       got  = UINT32_MAX;
+
+    TEST_ASSERT_NOT_NULL(data);
+    TEST_ASSERT_NOT_NULL(back);
+    wb_fill(data, TEST_WB_BYTES);
+
+    file_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_write_bytes("flash/w.bin", data, TEST_WB_BYTES), kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_WB_BYTES, host_size(fake_media_fs_dir(), "w.bin"));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_append_bytes("flash/w.bin", data, TEST_APPEND_BYTES), kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_WB_BYTES + TEST_APPEND_BYTES, host_size(fake_media_fs_dir(), "w.bin"));
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_read_at("flash/w.bin", 0U, back, TEST_WB_BYTES + TEST_APPEND_BYTES, &got),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_WB_BYTES + TEST_APPEND_BYTES, got);
+    TEST_ASSERT_EQUAL_MEMORY(data, back, TEST_WB_BYTES);
+    TEST_ASSERT_EQUAL_MEMORY(data, &back[TEST_WB_BYTES], TEST_APPEND_BYTES);
+    TEST_ASSERT_EQUAL_UINT8(0U, back[0]);
+
+    /* A write replaces what the file held. */
+    TEST_ASSERT_TRUE(kode_file_write_bytes("flash/w.bin", data, TEST_REPLACE_BYTES));
+    TEST_ASSERT_EQUAL_UINT32(TEST_REPLACE_BYTES, host_size(fake_media_fs_dir(), "w.bin"));
+    free(data);
+    free(back);
+    file_no_settle();
+}
+
+TEST_CASE("an append of bytes creates a file that is not there", "[kode_file]")
+{
+    static const uint8_t data[] = { 0U, 1U, 0U, 2U };
+    uint8_t              back[sizeof(data)];
+    uint32_t             got = UINT32_MAX;
+
+    file_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_append_bytes("flash/n.bin", data, sizeof(data)), kode_error());
+    TEST_ASSERT_TRUE(kode_file_read_at("flash/n.bin", 0U, back, sizeof(back), &got));
+    TEST_ASSERT_EQUAL_UINT32(sizeof(data), got);
+    TEST_ASSERT_EQUAL_MEMORY(data, back, sizeof(data));
+    file_no_settle();
+}
+
+TEST_CASE("a write of bytes with a length of 0 leaves a file of no bytes", "[kode_file]")
+{
+    static const uint8_t data[] = { 7U };
+
+    file_fresh();
+    TEST_ASSERT_TRUE(kode_file_write_bytes("flash/e.bin", data, sizeof(data)));
+    TEST_ASSERT_EQUAL_UINT32(sizeof(data), host_size(fake_media_fs_dir(), "e.bin"));
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_write_bytes("flash/e.bin", data, 0U), kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, host_size(fake_media_fs_dir(), "e.bin"));
+
+    /* An append of no bytes keeps the file and makes it when it is not there. */
+    TEST_ASSERT_TRUE(kode_file_append_bytes("flash/e.bin", data, 0U));
+    TEST_ASSERT_EQUAL_UINT32(0U, host_size(fake_media_fs_dir(), "e.bin"));
+    TEST_ASSERT_TRUE(kode_file_append_bytes("flash/f.bin", data, 0U));
+    TEST_ASSERT_EQUAL_UINT32(0U, host_size(fake_media_fs_dir(), "f.bin"));
+    file_no_settle();
+}
+
+TEST_CASE("a write of bytes with no data is refused, whatever the length", "[kode_file]")
+{
+    static const uint8_t data[] = { 1U };
+
+    file_fresh();
+    TEST_ASSERT_TRUE(kode_file_write_bytes("flash/k.bin", data, sizeof(data)));
+
+    TEST_ASSERT_FALSE(kode_file_write_bytes("flash/k.bin", NULL, 1U));
+    TEST_ASSERT_EQUAL_STRING("flash/k.bin: no data to write", kode_error());
+    TEST_ASSERT_FALSE(kode_file_write_bytes("flash/k.bin", NULL, 0U));
+    TEST_ASSERT_EQUAL_STRING("flash/k.bin: no data to write", kode_error());
+    TEST_ASSERT_FALSE(kode_file_append_bytes("flash/k.bin", NULL, 1U));
+    TEST_ASSERT_EQUAL_STRING("flash/k.bin: no data to write", kode_error());
+    TEST_ASSERT_FALSE(kode_file_append_bytes("flash/k.bin", NULL, 0U));
+    TEST_ASSERT_EQUAL_STRING("flash/k.bin: no data to write", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(sizeof(data), host_size(fake_media_fs_dir(), "k.bin"));
+
+    /* A bad path is the error that wins; nothing is made. */
+    TEST_ASSERT_FALSE(kode_file_write_bytes("sd/../k.bin", NULL, 0U));
+    TEST_ASSERT_EQUAL_STRING("bad path 'sd/../k.bin': no empty, '.' or '..' part", kode_error());
+    TEST_ASSERT_FALSE(kode_file_append_bytes(NULL, data, sizeof(data)));
+    TEST_ASSERT_EQUAL_STRING("bad path '(null)': start with sd/ or flash/", kode_error());
+    file_no_settle();
+}
+
+TEST_CASE("a write of bytes says why when the folder is missing, a file is in the way or it is a folder",
+          "[kode_file]")
+{
+    static const uint8_t data[] = { 1U, 2U };
+
+    file_fresh();
+    TEST_ASSERT_FALSE(kode_file_write_bytes("flash/nodir/x.bin", data, sizeof(data)));
+    TEST_ASSERT_EQUAL_STRING("flash/nodir/x.bin: the folder above does not exist", kode_error());
+    TEST_ASSERT_FALSE(kode_file_append_bytes("flash/nodir/x.bin", data, sizeof(data)));
+    TEST_ASSERT_EQUAL_STRING("flash/nodir/x.bin: the folder above does not exist", kode_error());
+
+    TEST_ASSERT_TRUE(kode_file_write_bytes("flash/f", data, sizeof(data)));
+    TEST_ASSERT_FALSE(kode_file_write_bytes("flash/f/x.bin", data, sizeof(data)));
+    TEST_ASSERT_EQUAL_STRING("flash/f/x.bin: a folder in the path is a file", kode_error());
+
+    fake_media_put_fs_dir("dir");
+    TEST_ASSERT_FALSE(kode_file_write_bytes("flash/dir", data, sizeof(data)));
+    TEST_ASSERT_EQUAL_STRING("flash/dir: it is a folder", kode_error());
+    TEST_ASSERT_FALSE(kode_file_append_bytes("flash/dir", data, sizeof(data)));
+    TEST_ASSERT_EQUAL_STRING("flash/dir: it is a folder", kode_error());
+    file_no_settle();
+}
+
 TEST_CASE("a new read replaces the last text and leaks nothing", "[kode_file]")
 {
     uint32_t live;
@@ -1200,6 +1551,26 @@ TEST_CASE("a file that grows after its status is reported changed", "[kode_file]
     TEST_ASSERT_EQUAL_STRING("", kode_file_read("flash/g.bin"));
     TEST_ASSERT_TRUE(s_change_ok);
     TEST_ASSERT_EQUAL_STRING("flash/g.bin: changed while it was read", kode_error());
+    file_no_settle();
+}
+
+TEST_CASE("a read at an offset of a file that shrinks between two windows is reported changed",
+          "[kode_file]")
+{
+    uint8_t *const buf = at_buf_make(TEST_GROW_BYTES);
+    uint32_t       got = UINT32_MAX;
+
+    file_fresh();
+    TEST_ASSERT_NOT_NULL(buf);
+    TEST_ASSERT_TRUE(host_pattern("g.bin", 0U, TEST_GROW_BYTES, "wb"));
+
+    /* Round trips: the status, the first window; the change lands after the first window. */
+    read_with_change(&change_shrink, 2U);
+    TEST_ASSERT_FALSE(kode_file_read_at("flash/g.bin", 0U, buf, TEST_GROW_BYTES, &got));
+    TEST_ASSERT_TRUE(s_change_ok);
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    TEST_ASSERT_EQUAL_STRING("flash/g.bin: changed while it was read", kode_error());
+    free(buf);
     file_no_settle();
 }
 
