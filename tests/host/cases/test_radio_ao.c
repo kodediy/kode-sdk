@@ -4498,8 +4498,8 @@ TEST_CASE("the old Wi-Fi store on the P4 is erased at boot, once and only if the
 /* ---- The expansion header's supply -------------------------------------------
  *
  * J3's +3.3V_EXT is switched by the C5's IO5, pulled up on the board. The
- * wish starts off; a link-up leaves the pin as the wish was when the connect
- * went out; with the link up a wish is a job of its own; with no link "on"
+ * wish starts off; a link-up drives the pin as the wish is when the connect
+ * reaches it; with the link up a wish is a job of its own; with no link "on"
  * is a reset of the C5 and "off" waits for the next link-up.
  */
 
@@ -4539,12 +4539,121 @@ TEST_CASE("a link-up switches J3's supply off when nobody asked for it",
 
     dispatch(RADIO_UP_REQ_SIG);
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
-    TEST_ASSERT_FALSE_MESSAGE(held_req()->on,
-                              "the connect would leave the supply on");
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
     TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(),
+                              "the connect left the supply on");
+    TEST_ASSERT_EQUAL_UINT(1U, fake_radio_exp_off_drives());
     TEST_ASSERT_NOT_EQUAL_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
                                   "the link-up needed a job of its own");
+    exp_case_end();
+}
+
+TEST_CASE("an on asked while the boot connect is in flight is never followed by a drive to off",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    exp_ask(true);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the on needed a job of its own");
+    TEST_ASSERT_TRUE_MESSAGE(fake_radio_exp_pin(), "the rail did not end on");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_radio_exp_off_drives(),
+                                   "the pin was driven off while an on was asked");
+    exp_case_end();
+}
+
+TEST_CASE("an on asked after the connect has read the wish is carried out by the job that follows",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    fake_radio_connect_read();
+    exp_ask(true);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
+                                  "the wish that came after the read was not carried out");
+    TEST_ASSERT_TRUE(held_req()->on);
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+    TEST_ASSERT_FALSE(job_held());
+    exp_case_end();
+}
+
+/** @brief End the job the worker holds, which must be @p job. */
+static void boot_step(kdrv_radio_job_t job, kode_status_t rc, const char *what)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)job, running_job(), what);
+    finish(job, rc);
+}
+
+/** @brief The boot's own jobs, in order, with nothing else between them. */
+static void boot_jobs_in_order(void)
+{
+    boot_step(KDRV_RADIO_JOB_BLE_START, KODE_OK, "Bluetooth does not start right after the connect");
+    boot_step(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR, "the autojoin does not follow Bluetooth");
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a job the boot does not own followed the autojoin");
+    TEST_ASSERT_FALSE_MESSAGE(logged("the C5 is busy"), "a request met the busy channel");
+}
+
+TEST_CASE("the boot's jobs go connect, Bluetooth start, autojoin, with the wish off",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+
+    dispatch(BLE_START_REQ_SIG);
+    dispatch(WIFI_START_REQ_SIG);
+    boot_step(KDRV_RADIO_JOB_CONNECT, KODE_OK, "the first job is not the connect");
+    boot_jobs_in_order();
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(), "the supply did not end off");
+    TEST_ASSERT_EQUAL_UINT(1U, fake_radio_exp_off_drives());
+    dispatch(BLE_STOP_REQ_SIG);
+    dispatch(WIFI_STOP_REQ_SIG);
+    exp_case_end();
+}
+
+TEST_CASE("the boot's jobs go connect, Bluetooth start, autojoin, with an on asked during the connect",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+
+    dispatch(BLE_START_REQ_SIG);
+    dispatch(WIFI_START_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
+                                  "the first job is not the connect");
+    exp_ask(true);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    boot_jobs_in_order();
+    TEST_ASSERT_TRUE_MESSAGE(fake_radio_exp_pin(), "the supply did not end on");
+    TEST_ASSERT_EQUAL_UINT(0U, fake_radio_exp_off_drives());
+    dispatch(BLE_STOP_REQ_SIG);
+    dispatch(WIFI_STOP_REQ_SIG);
+    exp_case_end();
+}
+
+TEST_CASE("the boot's jobs go connect, Bluetooth start, autojoin, with an on asked before the connect",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(true);
+    tick(QF_SUPPORT_STEPS(EXP_PULSE_MS) + 1U);
+
+    dispatch(BLE_START_REQ_SIG);
+    dispatch(WIFI_START_REQ_SIG);
+    boot_step(KDRV_RADIO_JOB_CONNECT, KODE_OK, "the first job is not the connect");
+    boot_jobs_in_order();
+    TEST_ASSERT_TRUE_MESSAGE(fake_radio_exp_pin(), "the supply did not end on");
+    TEST_ASSERT_EQUAL_UINT(0U, fake_radio_exp_off_drives());
+    dispatch(BLE_STOP_REQ_SIG);
+    dispatch(WIFI_STOP_REQ_SIG);
     exp_case_end();
 }
 
@@ -4641,27 +4750,28 @@ TEST_CASE("an off with no link brings the link up, and the link-up carries it",
     pump();
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
                                   "the off did not bring the link up");
-    TEST_ASSERT_FALSE(held_req()->on);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(), "the connect would leave the supply on");
     exp_case_end();
 }
 
-TEST_CASE("a wish changed while the link comes up is applied once it is up",
+TEST_CASE("an off asked while the link comes up is the one the connect drives",
           "[radio_ao]")
 {
     radio_fresh();
-    exp_ask(false);
+    exp_ask(true);
+    tick(QF_SUPPORT_STEPS(EXP_PULSE_MS) + 1U);
 
     dispatch(RADIO_UP_REQ_SIG);
-    TEST_ASSERT_FALSE(held_req()->on);
-    exp_ask(true);
+    exp_ask(false);
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
                                   "the wish did not wait for the connect");
 
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
     TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
-    TEST_ASSERT_TRUE(held_req()->on);
-    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the link-up needed a job of its own");
+    TEST_ASSERT_FALSE(fake_radio_exp_pin());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_radio_exp_off_drives());
     exp_case_end();
 }
 
@@ -4878,8 +4988,8 @@ TEST_CASE("an off with no link, Wi-Fi and Bluetooth off, brings the link up and 
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, exp_heard().n, "said before the link could carry it");
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
-    TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the connect would leave the supply on");
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(), "the connect would leave the supply on");
     exp_heard_one(false, KODE_OK);
 
     pump();
@@ -4966,7 +5076,7 @@ TEST_CASE("a switch of J3's supply asked during a sweep goes before the autojoin
     exp_case_end();
 }
 
-TEST_CASE("an on asked while the link comes up is said once the link-up's job has switched it",
+TEST_CASE("an on asked while the link comes up is said once the connect has driven it",
           "[radio_ao][exp_power]")
 {
     radio_fresh();
@@ -4979,11 +5089,72 @@ TEST_CASE("an on asked while the link comes up is said once the link-up's job ha
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, exp_heard().n, "said before the link could carry it");
 
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
-    TEST_ASSERT_EQUAL_UINT(0U, exp_heard().n);
-    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the link-up needed a job of its own");
     exp_heard_one(true, KODE_OK);
     exp_listen_end();
+}
+
+TEST_CASE("an on asked during the card's remount waits for it, then one job drives it and says it",
+          "[radio_ao][exp_power]")
+{
+    unsigned submits;
+
+    radio_fresh();
+    exp_ask(false);
+    exp_listen();
+
+    dispatch(RADIO_UP_REQ_SIG);
+    (void)exp_heard();
+    finish_only(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_STARTING, link_now());
+    TEST_ASSERT_FALSE(fake_radio_exp_pin());
+    submits = job_submits();
+
+    /* The connect has read the wish and driven the pin off; the answer of
+     * the card's remount has not come. */
+    exp_ask(true);
+    pump();
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a job ran during the card's remount");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, exp_heard().n, "said before the pin was driven");
+    TEST_ASSERT_FALSE(fake_radio_exp_pin());
+
+    dispatch(STORAGE_CMD_RSP_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
+                                  "no job drove the wish asked during the remount");
+    TEST_ASSERT_TRUE(held_req()->on);
+    TEST_ASSERT_EQUAL_UINT(0U, exp_heard().n);
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(submits + 1U, job_submits(), "more than one job drove the wish");
+    exp_heard_one(true, KODE_OK);
+    exp_listen_end();
+}
+
+TEST_CASE("a switch the C5 refused leaves the wish at the rail, and the next connect drives that",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+    go_up();
+
+    exp_ask(true);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_ERROR);
+    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_FALSE(fake_radio_exp_pin());
+
+    settle_to_off();
+    storage_drain();
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(),
+                              "the connect drove a wish that was dropped");
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the link-up needed a job of its own");
+    exp_case_end();
 }
 
 TEST_CASE("a switch of J3's supply inside the worker when the link goes is said owed to the next link, once",
