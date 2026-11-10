@@ -12474,10 +12474,30 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
     QState status;
     switch ( e->sig )
     {
-        /* No entry action: whoever transitions here has set the phase and
-         * the counters - Radio_up's FLASH_REQ_SIG arm at OPENING with the
-         * buffer released, RADIO_INSTALL_GO_SIG at BEGIN with the image
-         * already staged in it. */
+        /* Whoever transitions here has set the phase and the counters -
+         * Radio_up's FLASH_REQ_SIG arm at OPENING with the buffer released,
+         * RADIO_INSTALL_GO_SIG at BEGIN with the image already staged in it.
+         * The entry only ends a Wi-Fi frames stream: the update owns the
+         * C5 and reboots it. */
+        case Q_ENTRY_SIG: {
+            (void)radio_frames_end(&me->frames, KWIFI_FRAMES_BUSY);
+            status = Q_HANDLED();
+            break;
+        }
+        case WIFI_FRAMES_REQ_SIG: {
+            WifiFramesReqEvt const * const r = Q_EVT_CAST(WifiFramesReqEvt);
+
+            if ( r->on )
+            {
+                radio_frames_refuse(r, KWIFI_FRAMES_BUSY);
+                status = Q_HANDLED();
+            }
+            else
+            {
+                status = Q_SUPER(&Radio_up);   /* a stop is the door's to answer */
+            }
+            break;
+        }
         case STORAGE_CMD_RSP_SIG: {
             switch ( radio_asked(me) )
             {

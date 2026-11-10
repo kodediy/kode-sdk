@@ -708,3 +708,55 @@ TEST_CASE("a join, which may restart the station, ends a stream before it goes t
     }
     frames_end();
 }
+
+/** @brief Ask for a C5 update from the card: Radio_updating, waiting for the file. */
+static void c5_update_begins(void)
+{
+    FlashReqEvt f;
+
+    (void)memset(&f, 0, sizeof(f));
+    f.super    = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    f.src_kind = (uint8_t)KFW_SRC_FS;
+    f.dst_kind = (uint8_t)KFW_TARGET_C5;
+    (void)snprintf(f.src, sizeof(f.src), "%s", "c5_slave.bin");
+    dispatch_evt(&f.super);
+    TEST_ASSERT_EQUAL_INT(-2, next_storage_op());   /* the open: the update has begun */
+}
+
+/** @brief The update's file was not there: back to Radio_up. */
+static void c5_update_ends(void)
+{
+    StorageOpenRspEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.super  = (QEvt)QEVT_INITIALIZER(STORAGE_OPEN_RSP_SIG);
+    r.status = (uint8_t)KODE_ERROR;
+    dispatch_evt(&r.super);
+    pump();
+}
+
+TEST_CASE("a C5 update ends a stream first, and a start during it is busy",
+          "[radio_frames]")
+{
+    frames_up();
+    start_listening(ao_spy_other(), FR_CH);
+    fake_peer_reset();
+
+    c5_update_begins();
+    pump();
+    expect_state(ao_spy_other(), false, 0U, false, KWIFI_FRAMES_BUSY);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_STOP, sent_sniff()->op);
+    c5_answers(KODE_ST_OK, 0U, FR_CH, 0U, KODE_SNIFF_WHY_NONE);
+    pump();
+    fake_peer_reset();
+
+    ask(ao_spy_other(), true, FR_CH);
+    expect_state(ao_spy_other(), false, 0U, false, KWIFI_FRAMES_BUSY);
+    TEST_ASSERT_FALSE(anything_sent());
+
+    c5_update_ends();
+    fake_peer_reset();
+    ask(ao_spy_other(), true, FR_CH);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, sent_sniff()->op);
+    frames_end();
+}
