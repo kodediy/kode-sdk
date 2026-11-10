@@ -42,6 +42,7 @@
 #define REG_DIS_SLEEP    0xFEU
 
 #define PROBE_MS         50U
+#define LOOK_MS   20U   /**< One look's probe (kdrv_cst820_answers()). */
 #define FRAME_LEN        6U      /* REG_GESTURE..REG_YL, one burst */
 #define IDENTITY_LEN     3U      /* REG_CHIP_ID..REG_FW_VER, one burst */
 
@@ -131,6 +132,23 @@ TEST_CASE("a bus with nothing at 0x15 is no touch controller", "[kdrv_cst820]")
     TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_cst820_init());
     TEST_ASSERT_FALSE(kdrv_cst820_present());
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_cst820_identity(&chip, &proj, &fw));
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
+/* What the owner asks when it looks again for a controller that was silent at
+ * the bring-up: one short probe, and nothing brought up by it. */
+TEST_CASE("a look is one short probe and brings nothing up", "[kdrv_cst820]")
+{
+    Mockkhal_i2c_Init();
+    khal_i2c_init_ExpectAndReturn(KODE_OK);
+    khal_i2c_probe_ExpectAndReturn(KBSP_I2C_ADDR_TOUCH, LOOK_MS, false);
+    TEST_ASSERT_FALSE(kdrv_cst820_answers());
+
+    khal_i2c_init_ExpectAndReturn(KODE_OK);
+    khal_i2c_probe_ExpectAndReturn(KBSP_I2C_ADDR_TOUCH, LOOK_MS, true);
+    TEST_ASSERT_TRUE(kdrv_cst820_answers());
+    TEST_ASSERT_FALSE(kdrv_cst820_present());
     Mockkhal_i2c_Verify();
     Mockkhal_i2c_Destroy();
 }

@@ -825,6 +825,9 @@ enum KodeSignals {
                                  *   SIG with the mirror's current state -
                                  *   the DISPLAY_STATE_REQ_SIG pattern.       */
     TOUCH_POLL_SIG,             /**< AO_Touch private polling QTimeEvt.       */
+    TOUCH_LOOK_SIG,             /**< AO_Touch private QTimeEvt, one-shot:
+                                 *   look again for a controller that did
+                                 *   not answer the bring-up.               */
     TOUCH_FIELD_REQ_SIG,        /**< AO_Touch: read, write or dump one field
                                  *   of the CST820 (TouchFieldReqEvt).
                                  *   Answered to TouchFieldReqEvt.who with
