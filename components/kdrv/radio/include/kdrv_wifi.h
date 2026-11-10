@@ -199,10 +199,11 @@ kode_status_t kdrv_wifi_scan(void);
  * @brief Ask the sweep that is running (if any) to end before its next step,
  *        or take the request back.
  *
- * For the radio check, which cannot wait the ~36 s of a sweep for the C5's
- * channel. It only sets a flag: the sweep reads it between its steps, so the
- * step on the air finishes first, and the sweep then returns KODE_DENIED
- * (cut) with what it had found. While the flag is set every sweep that
+ * For whoever cannot wait a sweep out: the radio check, which needs the C5's
+ * channel, a join somebody is watching, and `wifi_scan_stop`. It only sets a
+ * flag: the sweep reads it between its steps, so the step on the air finishes
+ * first, and the sweep then returns KODE_DENIED (cut) with what it had found.
+ * While the flag is set every sweep that
  * starts ends before its first step, so whoever set it clears it (@p on
  * false) once the sweep it was for has ended. AO_Radio only.
  *

@@ -1435,6 +1435,11 @@ enum KodeSignals {
     WIFI_SCAN_REQ_SIG,          /**< AO_Radio: scan. Entries follow on the
                                  *   bus as the sweep finds them, channel by
                                  *   channel, then WIFI_SCAN_END_SIG.        */
+    WIFI_SCAN_STOP_REQ_SIG,     /**< AO_Radio: end the listing in flight
+                                 *   after its step on the air
+                                 *   (wifi_scan_stop_request()). No payload
+                                 *   and no answer of its own: the listing's
+                                 *   WIFI_SCAN_END_SIG says it was cut.      */
     RADIO_SCAN_ASK_SIG,         /**< AO_Radio: a scan asked by an AO or a
                                  *   blocked task (ScanAskEvt), the sweep
                                  *   WIFI_SCAN_REQ_SIG runs or the listen
@@ -4321,6 +4326,9 @@ typedef struct {
     bool    ok;         /**< false: the scan itself failed; count is 0.     */
     bool    busy;       /**< true: not started, the C5 was busy with another
                          *   job (ok is false, count 0); ask again.          */
+    bool    cut;        /**< true: a Wi-Fi sweep ended before its last step,
+                         *   for a stop or for a job that needed the radio
+                         *   (ok is false); count is what it had heard.      */
 } WifiScanEndEvt;
 
 /** @brief ScanAskEvt.kind: the Wi-Fi sweep; the rows are kdrv_wifi_ap_t. */

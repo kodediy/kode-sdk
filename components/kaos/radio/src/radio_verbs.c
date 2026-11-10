@@ -354,6 +354,27 @@ static void h_wifi_scan(const kverb_t *c, const karg_val_t *v)
     wifi_scan_request();
 }
 
+/**
+ * @brief wifi_scan_stop: ask AO_Radio to end the listing in flight.
+ *
+ * The table's verb that does not wait (kverbs_t.nowait): it runs while
+ * `wifi_scan` holds the console, so it begins no command and leaves
+ * @c s_radio_kind alone. `>ok` is an accept, with a listing in flight or
+ * without one; the cut `wifi_scan` closes itself, `>err code=5 msg=stopped`.
+ */
+static void h_wifi_scan_stop(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c; (void)v;
+    if ( wifi_scan_stop_request() )
+    {
+        console_reply(">ok");
+    }
+    else
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
+}
+
 /** @brief wifi_join ssid="<s>" [pass="<p>"] [remember=on|off]: closed by
  *         WIFI_STATE_SIG. remember=off is the factory's own network, which
  *         must not travel to the customer in the vault. */
@@ -882,6 +903,12 @@ static bool radio_answer(QEvt const *e)
                 {
                     console_reply_err(KCLI_ERR_BUSY, "busy");
                 }
+                else if ( end->cut )
+                {
+                    /* The networks above were heard; the rest of the air
+                     * was never swept. */
+                    console_reply_err(KCLI_ERR_REJECT, "stopped");
+                }
                 else
                 {
                     console_reply_err(KCLI_ERR_REJECT, console_verb());
@@ -1109,6 +1136,7 @@ static const kverb_t RADIO_VERBS[] = {
     { "wifi_up",     NULL,                 0U,                       h_wifi_up     },
     { "wifi_down",   NULL,                 0U,                       h_wifi_down   },
     { "wifi_scan",   NULL,                 0U,                       h_wifi_scan   },
+    { "wifi_scan_stop", NULL,              0U,                       h_wifi_scan_stop },
     { "wifi_join",   A_WIFI_JOIN,          KVERB_KEYS(A_WIFI_JOIN),  h_wifi_join   },
     { "wifi_auto",   NULL,                 0U,                       h_wifi_auto   },
     { "wifi_list",   NULL,                 0U,                       h_wifi_list   },
@@ -1130,4 +1158,7 @@ const kverbs_t radio_verbs = {
     .verbs  = RADIO_VERBS, .n = sizeof(RADIO_VERBS) / sizeof(RADIO_VERBS[0]),
     .answer = radio_answer,
     .info   = radio_info,
+#if CONFIG_KODEOS_WIFI
+    .nowait = "wifi_scan_stop",
+#endif
 };

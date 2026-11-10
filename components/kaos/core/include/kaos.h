@@ -2043,6 +2043,20 @@ void radio_boot_release(void);
 void wifi_scan_request(void);
 
 /**
+ * @brief Ask AO_Radio to end the listing in flight before its last channel.
+ *
+ * The sweep wifi_scan_request() started ends after its step on the air, a few
+ * seconds at most, and its WIFI_SCAN_END_SIG says @c cut, with the networks
+ * heard so far before it. No other sweep is touched: not an asked scan, the
+ * automatic join's round or a self-test row. With no listing in flight
+ * nothing happens. No answer of its own.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
+ */
+bool wifi_scan_stop_request(void);
+
+/**
  * @brief Scan for the AO @p who; kode_sys_wifi_scan()'s door.
  *
  * Brings the link up if needed. Entries are POSTED to @p who as WIFI_SCAN_ENTRY_SIG

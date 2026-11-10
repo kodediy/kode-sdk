@@ -435,3 +435,187 @@ TEST_CASE("wifi_leave and wifi_auto with room post their request without an erro
         QASM_DISPATCH(AO_Console, &state.super, 0U);   /* AO_Radio's answer */
     }
 }
+
+/* ---- wifi_scan_stop ----------------------------------------------------------------
+ * The one verb the console takes while another command is in flight: a scan
+ * holds the console until its last channel, and the line that ends it early
+ * cannot wait for that.
+ */
+
+/** @brief One network of a listing, the way AO_Radio publishes it. */
+static void list_network(const char *ssid)
+{
+    WifiScanEntryEvt n;
+
+    (void)memset(&n, 0, sizeof(n));
+    n.super = (QEvt)QEVT_INITIALIZER(WIFI_SCAN_ENTRY_SIG);
+    (void)snprintf(n.ssid, sizeof(n.ssid), "%s", ssid);
+    n.rssi     = -40;
+    n.channel  = 6U;
+    n.authmode = 3U;
+    QASM_DISPATCH(AO_Console, &n.super, 0U);
+}
+
+/** @brief Close a listing whose sweep was cut, the way AO_Radio does. */
+static void end_cut(void)
+{
+    WifiScanEndEvt end;
+
+    (void)memset(&end, 0, sizeof(end));
+    end.super = (QEvt)QEVT_INITIALIZER(WIFI_SCAN_END_SIG);
+    end.cut   = true;
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+}
+
+TEST_CASE("wifi_scan_stop posts its request and answers ok", "[console_scan]")
+{
+    console_up();
+    type_line("wifi_scan_stop");
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    TEST_ASSERT_NULL(line_with(">err"));
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_STOP_REQ_SIG));
+
+    /* An accept, not a command that waits: the console is free at once. */
+    fake_klog_reset();
+    type_line("ble_scan ms=1500");
+    TEST_ASSERT_EQUAL_UINT32(1500U, posted_ble_ms());
+    end_listing(BLE_SCAN_END_SIG);
+}
+
+TEST_CASE("wifi_scan_stop on a full radio queue is refused busy and leaves the console free",
+          "[console_scan]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+
+    console_up();
+    for ( uint32_t guard = 0U;
+         (64U > guard)
+         && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_POST_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    fake_klog_reset();
+    type_line("wifi_scan_stop");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+    TEST_ASSERT_EQUAL_UINT(KQP_RADIO_POST_MARGIN, uxQueueSpacesAvailable(AO_Radio->eQueue));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));   /* also empties the queue */
+
+    fake_klog_reset();
+    type_line("ble_scan ms=1500");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1500U, posted_ble_ms(),
+                                     "the console is free for the next command");
+    end_listing(BLE_SCAN_END_SIG);
+}
+
+TEST_CASE("wifi_scan_stop is taken while wifi_scan holds the console, which keeps its command",
+          "[console_scan]")
+{
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    list_network("one");
+    fake_klog_reset();
+
+    type_line("wifi_scan_stop");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "the stop was refused behind the scan");
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_STOP_REQ_SIG));
+
+    /* The scan is still the command in flight: its step on the air is listed,
+     * its end closes it, and a line typed meanwhile is still turned away. */
+    fake_klog_reset();
+    list_network("two");
+    TEST_ASSERT_NOT_NULL(line_with(">|ssid=\"two\""));
+    type_line("wifi_leave");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(posted(WIFI_LEAVE_REQ_SIG));
+
+    fake_klog_reset();
+    end_cut();
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
+
+    fake_klog_reset();
+    type_line("ble_scan ms=1500");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1500U, posted_ble_ms(),
+                                     "the scan's end did not free the console");
+    end_listing(BLE_SCAN_END_SIG);
+}
+
+TEST_CASE("a stopped wifi_scan prints its networks and ends stopped, code 5",
+          "[console_scan]")
+{
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    list_network("one");
+    end_cut();
+
+    TEST_ASSERT_NOT_NULL(line_with(">|ssid=\"one\""));
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "a cut list was closed as a whole one");
+    TEST_ASSERT_NULL(line_with("msg=wifi_scan"));
+}
+
+TEST_CASE("any other line while wifi_scan holds the console is still answered busy",
+          "[console_scan]")
+{
+    static const char *const lines[] = {
+        "wifi_leave", "wifi_scan", "ping", "wifi_scan_stopp"
+    };
+
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    for ( uint32_t i = 0U; (uint32_t)(sizeof(lines) / sizeof(lines[0])) > i; ++i )
+    {
+        fake_klog_reset();
+        type_line(lines[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(line_with(">err code=4 msg=busy"), lines[i]);
+        TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), lines[i]);
+    }
+    TEST_ASSERT_FALSE(posted(WIFI_LEAVE_REQ_SIG));
+    end_listing(WIFI_SCAN_END_SIG);
+}
+
+TEST_CASE("wifi_scan_stop with a key is refused", "[console_scan]")
+{
+    console_up();
+    type_line("wifi_scan_stop now=on");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=3 msg=now"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));
+
+    /* Behind a command in flight the line is not looked at any further:
+     * busy, as every line but the bare verb is. */
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    fake_klog_reset();
+    type_line("wifi_scan_stop now=on");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));
+    end_listing(WIFI_SCAN_END_SIG);
+}
+
+/* The Kode channel's lines run in order: its sender holds a line the console
+ * is busy for and offers it again, the stop included. */
+TEST_CASE("wifi_scan_stop off the Kode channel waits its turn behind a command in flight",
+          "[console_scan]")
+{
+    ConsoleLineEvt e;
+
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    fake_klog_reset();
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CONSOLE_LINE_SIG);
+    e.src   = (uint8_t)KODE_CONSOLE_SRC_NET;
+    (void)snprintf(e.line, sizeof(e.line), "wifi_scan_stop");
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+
+    TEST_ASSERT_NULL(line_with(">ok"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));
+    end_listing(WIFI_SCAN_END_SIG);
+}
