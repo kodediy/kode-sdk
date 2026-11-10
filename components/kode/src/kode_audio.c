@@ -1230,6 +1230,78 @@ bool kode_audio_record_file(const char *path, uint32_t ms)
     return saved;
 }
 
+/** @brief What a record call with no buffer or no room fails with. */
+#define AUDIO_NO_ROOM_TEXT "no room to record into"
+
+/** @brief What one try of recording into the caller's buffer carries. */
+typedef struct {
+    int16_t      *buf;  /**< Where the frames go.        */
+    uint32_t      cap;  /**< Its room, in frames.        */
+    uint32_t      ms;   /**< The length asked for.       */
+    size_t        got;  /**< Frames the try brought.     */
+    kode_status_t rc;   /**< The last answer.            */
+} rec_samples_try_t;
+
+/** @brief One try of recording into the caller's buffer: true unless another task holds the codec. */
+static bool rec_samples_attempt(void *ctx)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; the context is the rec_samples_try_t kode_audio_record_samples() passed */
+    rec_samples_try_t *const t = (rec_samples_try_t *)ctx;
+
+    t->got = 0U;
+    t->rc  = kode_block_audio_record_samples(t->buf, (size_t)t->cap, &t->got, t->ms);
+    return KODE_DENIED != t->rc;
+}
+
+bool kode_audio_record_samples(int16_t *buf, uint32_t cap, uint32_t ms, uint32_t *frames)
+{
+    bool recorded = false;
+
+    if ( NULL != frames )
+    {
+        *frames = 0U;
+    }
+    if ( audio_enter("kode_audio_record_samples") )
+    {
+        if ( (NULL == buf) || (0U == cap) )
+        {
+            kode_err_set("%s", AUDIO_NO_ROOM_TEXT);
+        }
+        else if ( !rec_length_ok(ms) )
+        {
+            /* The error is set. */
+        }
+        else if ( atomic_load(&s_rec_running) )
+        {
+            kode_err_set("%s", AUDIO_RECORDING_TEXT);
+        }
+        else if ( atomic_load(&s_bg_running) )
+        {
+            kode_err_set("%s", AUDIO_PLAYING_TEXT);
+        }
+        else
+        {
+            rec_samples_try_t t = { buf, cap, ms, 0U, KODE_ERROR };
+
+            (void)kode_retry(&rec_samples_attempt, &t, KODE_AUDIO_BUSY_MS);
+            if ( KODE_OK == t.rc )
+            {
+                recorded = true;
+                if ( NULL != frames )
+                {
+                    *frames = (uint32_t)t.got;
+                }
+            }
+            else
+            {
+                kode_err_set("%s", mic_why(t.rc));
+            }
+        }
+        audio_leave();
+    }
+    return recorded;
+}
+
 /**
  * @brief Turn the frames in the image into little-endian bytes, in place.
  * @param image The recording's image.

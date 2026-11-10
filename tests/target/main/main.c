@@ -75,6 +75,7 @@ static void link_standard_layer(void)
     (void)kode_audio_set("volume", 0U);
     (void)kode_audio_get("volume");
     (void)kode_audio_record_file("flash/x.wav", 1U);
+    (void)kode_audio_record_samples(NULL, 0U, 1U, NULL);
     (void)kode_audio_record_start(1U);
     (void)kode_audio_record_status();
     (void)kode_audio_record_stop();
