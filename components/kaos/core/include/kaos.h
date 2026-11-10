@@ -2073,6 +2073,29 @@ kode_status_t wifi_scan_ask(QActive *who);
 void wifi_scan_request_wait(ScanWaiter *wait, uint32_t gen);
 
 /**
+ * @brief Ask AO_Radio to start or stop telling @p who about Wi-Fi frames.
+ *
+ * Posts and returns. Always answered to @p who with WIFI_FRAMES_STATE_SIG, in
+ * every state of the link: with it down the answer is KWIFI_FRAMES_NO_LINK.
+ * While on, @p who gets one WIFI_FRAMES_TICK_SIG per period in which the C5
+ * heard a frame, and after it one WIFI_FRAME_SIG per frame handed over; all of
+ * them are posted to @p who with a margin, never published, and what its queue
+ * has no room for is counted in the next tick's @c dropped. Receive only.
+ * Starts nothing that was off and never leaves a network: joined, only channel
+ * 0 or the network's. One asker listens at a time: another is answered
+ * KWIFI_FRAMES_BUSY, and its stop changes nothing.
+ *
+ * @param who     Where the answers go. Never NULL.
+ * @param on      true to listen, false to stop.
+ * @param channel 1..KWIFI_FRAMES_CHANNEL_MAX, or 0 to stay where the radio is.
+ *                Ignored for a stop.
+ * @return true when the request was posted; false when the event pool was dry
+ *         or AO_Radio's queue is within KQP_RADIO_CMD_MARGIN of full, and then
+ *         nothing answers.
+ */
+bool wifi_frames_request(QActive *who, bool on, uint8_t channel);
+
+/**
  * @brief Ask AO_Radio to join @p ssid.
  *
  * Answered with WIFI_STATE_SIG: got-ip, or the refusal. Passwords live in the C5's

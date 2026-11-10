@@ -37,6 +37,8 @@
 #include "kverbs.h"
 #include "krows.h"
 
+#include "radio_frames.h"
+
 #define TAG "kaos.radio"
 
 #define RADIO_OLD_WIFI_NS  "kwifi" /**< NVS namespace of the store before the vault. */
@@ -579,6 +581,7 @@ typedef struct {
     QTimeEvt svc_tmo[KODE_SVC_COUNT];  /**< KODE_SVC_TMO_SIG per service.  */
     uint8_t *svc_buf[KODE_SVC_COUNT];  /**< The answer's payload.          */
     bool     info_asked;               /**< INFO went out on this link.    */
+    RadioFrames frames;                /**< The Wi-Fi frames door: its asker and its request. */
 
     /* Across a jump. A park is asked by AO_Boot before it restarts the
      * board; an adoption is what the next firmware does with a C5 the last
@@ -1019,6 +1022,24 @@ bool id_sign_request(QActive *who, const char *nonce)
     }
     QACTIVE_POST(AO_Radio, &e->super, NULL);
     return true;
+}
+
+bool wifi_frames_request(QActive *who, bool on, uint8_t channel)
+{
+    if ( NULL == who )
+    {
+        return false;
+    }
+    WifiFramesReqEvt *const e = Q_NEW_X(WifiFramesReqEvt, 0U, WIFI_FRAMES_REQ_SIG);
+    if ( NULL == e )
+    {
+        return false;
+    }
+    e->who     = who;
+    e->on      = on;
+    e->channel = channel;
+    /* A refused post gives the event back to the pool: nothing answers then. */
+    return QACTIVE_POST_X(AO_Radio, &e->super, KQP_RADIO_CMD_MARGIN, who);
 }
 
 bool c5_wipe_request(QActive *who)
@@ -1637,6 +1658,17 @@ static void radio_on_svc(uint8_t service, uint8_t op, uint8_t status,
     Radio *const me = (Radio *)ctx;
     size_t n = len;
 
+    if ( 0U != ((unsigned)op & (unsigned)KODE_OP_EVENT) )
+    {
+        /* Unasked: never an answer, so it must not touch the service's
+         * buffer, which an answer in flight is waiting to be read from, nor
+         * cancel the request's deadline. */
+        if ( KODE_SVC_SNIFF == service )
+        {
+            radio_frames_heard(op, data, len);
+        }
+        return;
+    }
     if ( (NULL == me) || (KODE_SVC_COUNT <= service)
         || (NULL == me->svc_buf[service]) )
     {
@@ -1768,6 +1800,23 @@ static kode_status_t radio_svc_send(Radio * const me, uint8_t service,
     QTimeEvt_armX(&me->svc_tmo[service],
                   KQP_TICKS_PER_MS(KODE_RADIO_SVC_SEND_GUARD_MS), 0U);
     return KODE_OK;
+}
+
+/**
+ * @brief How the frames module sends: a request of the frames service
+ *        through radio_svc_send().
+ * @param ctx     The AO.
+ * @param op      KODE_SNIFF_START or KODE_SNIFF_STOP.
+ * @param payload The request's payload; NULL when @p len is 0.
+ * @param len     Its bytes.
+ * @return As radio_svc_send().
+ */
+static kode_status_t radio_frames_send(void *ctx, uint8_t op, const void *payload, size_t len)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; radio_frames_init() was given this AO as the context */
+    Radio *const me = (Radio *)ctx;
+
+    return radio_svc_send(me, KODE_SVC_SNIFF, op, payload, len);
 }
 
 /**
@@ -1951,6 +2000,7 @@ static void radio_svc_link(Radio * const me)
         (void)kdrv_c5svc_listen(svc, &radio_on_svc, me);
     }
     me->info_asked = true;
+    radio_frames_link(&me->frames);
     if ( radio_svc_send(me, KODE_SVC_SELF, KODE_SELF_INFO, NULL, 0U) != KODE_OK )
     {
         KLOG_W(TAG, "KODE INFO could not be sent to the C5");
@@ -2572,6 +2622,10 @@ static void radio_svc_answer(Radio * const me, KodeSvcEvt const * const e)
         radio_vault_answer(me, e);
     }
 #endif
+    else if ( KODE_SVC_SNIFF == e->service )
+    {
+        radio_frames_answer(&me->frames, e->status, me->svc_buf[e->service], e->len);
+    }
     else
     {
         /* a service whose answers nobody here asks for yet */
@@ -2611,6 +2665,10 @@ static void radio_svc_lost(Radio * const me, uint8_t svc)
         radio_vault_lost(me);
     }
 #endif
+    if ( KODE_SVC_SNIFF == svc )
+    {
+        radio_frames_lost(&me->frames);
+    }
 }
 
 /** @brief A KODE request went unanswered (KODE_SVC_TMO_SIG). */
@@ -8017,6 +8075,7 @@ void Radio_ctor(void)
         me->svc_wait[svc] = false;
     }
     me->info_asked = false;
+    radio_frames_init(&me->frames, &radio_frames_send, me);
     me->park_phase  = (uint8_t)PARK_IDLE;
     me->park_target = 0U;
     me->adopt        = false;
@@ -9387,6 +9446,18 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             /* So do the vault and the BLE keys. */
             wipe_reply(Q_EVT_CAST(C5WipeReqEvt)->who, (uint8_t)C5_WIPE_VAULT,
                        KODE_ST_REFUSED);
+            status = Q_HANDLED();
+            break;
+        }
+        case WIFI_FRAMES_REQ_SIG: {
+            /* The frames come from the C5, and the link is down. */
+            radio_frames_refuse(Q_EVT_CAST(WifiFramesReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case RADIO_FRAMES_KNOCK_SIG: {
+            /* A batch from a link that is gone: nobody is left to hand it to. */
+            radio_frames_drop();
             status = Q_HANDLED();
             break;
         }
@@ -10892,6 +10963,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             radio_svc_cancel(me, KODE_SVC_COUNT);
             radio_id_lost(me);
             radio_wipe_lost(me, KODE_SVC_COUNT);
+            radio_frames_gone(&me->frames);
 #if CONFIG_KODEOS_WIFI
             /* The C5 boots on the default power save; nothing it held
              * survives the link. */
@@ -10915,6 +10987,16 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         }
         case C5_WIPE_REQ_SIG: {
             radio_wipe_start(me, Q_EVT_CAST(C5WipeReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case WIFI_FRAMES_REQ_SIG: {
+            radio_frames_request(&me->frames, Q_EVT_CAST(WifiFramesReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case RADIO_FRAMES_KNOCK_SIG: {
+            radio_frames_knock(&me->frames);
             status = Q_HANDLED();
             break;
         }

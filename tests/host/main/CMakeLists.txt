@@ -129,6 +129,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kaos/storage/src/storage_ao.c"
     "${SDK_DIR}/components/kaos/net/src/net_ao.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_ao.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_frames.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5svc.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_frames.c"
