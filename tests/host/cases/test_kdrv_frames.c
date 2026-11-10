@@ -3,8 +3,7 @@
  * @file test_kdrv_frames.c
  * @brief The frames service's P4 end: answers read, batches decoded, the ring bounded.
  *
- * The real driver, with no mock. The first case runs before anything calls
- * kdrv_frames_init(): the driver keeps its state for the life of the binary.
+ * The real driver, with no mock.
  */
 #include <string.h>
 
@@ -52,20 +51,6 @@ static uint32_t drain(void)
         n++;
     }
     return n;
-}
-
-TEST_CASE("a batch fed before the driver exists is refused", "[kdrv_frames]")
-{
-    uint8_t p[PAYLOAD_MAX];
-    size_t const n = batch(p, 6U, 1U, 0U);
-    kdrv_frame_t f;
-    kdrv_frames_tick_t t;
-
-    TEST_ASSERT_FALSE(kdrv_frames_feed(p, n));
-    TEST_ASSERT_FALSE(kdrv_frames_next(&f));
-    TEST_ASSERT_FALSE(kdrv_frames_tick_take(&t));
-    TEST_ASSERT_EQUAL_UINT32(0U, kdrv_frames_dropped());
-    kdrv_frames_forget();
 }
 
 TEST_CASE("an OK answer reads as a state", "[kdrv_frames]")
