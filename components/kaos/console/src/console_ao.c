@@ -6627,6 +6627,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, RECV_FAIL_SIG);
     QActive_subscribe(&me->super, RECV_STALL_SIG);
     QActive_subscribe(&me->super, APP_CAT_RSP_SIG);
+    QActive_subscribe(&me->super, APP_ERASE_DONE_SIG);
     QActive_subscribe(&me->super, TEST_RESULT_SIG);
     QActive_subscribe(&me->super, AUTOTEST_BEGIN_SIG);
     QActive_subscribe(&me->super, AUTOTEST_ROW_SIG);

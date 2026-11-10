@@ -48,6 +48,18 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 #define APPDATA_TOP_DIR     "/storage/.kode"  /**< The tree's first level, internal. */
 #define APPDATA_TREE_DIR    APPDATA_TOP_DIR "/appsdata" /**< Holds one folder per app. */
 
+#define WIPE_FILES_MAX      KODE_APP_LIST_MAX /**< Images the wipe keeps from one medium's root: as many as the launcher lists. */
+#define WIPE_OS_IMAGE       "kodeos.bin"      /**< kodeOS's own image: never an app's file. */
+#define WIPE_C5_IMAGE       "c5_slave.bin"    /**< The coprocessor's image: never an app's file. */
+#define WIPE_FS_ROOT        "/storage/"       /**< Where the internal partition's images lie. */
+#define WIPE_PATH_MAX       (sizeof(WIPE_FS_ROOT) + KODE_APP_FILE_MAX) /**< A root, a file name and the terminator. */
+
+/** @brief What a wipe of one app's files holds in PSRAM while it runs. */
+typedef struct {
+    char    names[2U * WIPE_FILES_MAX][KODE_APP_FILE_MAX]; /**< The images to look at: the internal partition's, then the card's. */
+    uint8_t prefix[KAPP_PREFIX_LEN];                       /**< The front of the image being looked at. */
+} WipeScratch;
+
 /* kqp.c cannot see these two (they live in kaos.h, beside the request that
  * carries them), so their fit in the medium pool, which is as wide as a
  * ConsoleLineEvt, is asserted here. */
@@ -250,6 +262,21 @@ typedef struct {
     uint8_t       *g_buf;          /**< app.json then icon.k64; this AO's.    */
     uint16_t       g_json_len;     /**< Bytes of app.json at the head of g_buf. */
     uint16_t       g_icon_len;     /**< 0 when there is no icon step.         */
+
+    /* The wipe of one app's files in progress: the images kept by the walk of
+     * each root, read and deleted one a step, then the folders. x_who is the
+     * tell: NULL means no wipe is under way, and busy() reads it. */
+    QTimeEvt       x_pacer;        /**< 10 ms between files.                  */
+    QActive       *x_who;          /**< Where the one answer goes.            */
+    char           x_project[KODE_APP_PROJECT_MAX]; /**< Whose files.         */
+    WipeScratch   *x;              /**< PSRAM, held for the wipe: the names
+                                    *   and the descriptor being read.        */
+    uint16_t       x_fs_count;     /**< Names from the internal partition: the
+                                    *   first of x->names.                    */
+    uint16_t       x_count;        /**< Names in all; the card's follow.      */
+    uint16_t       x_next;         /**< The next name to look at.             */
+    AppWipeMedium  x_fs;           /**< What went on the internal partition.  */
+    AppWipeMedium  x_sd;           /**< What went on the card.                */
 } Storage;
 
 /* A timer, not a self-post, between chunks: this AO is priority 5 and AO_Gui,
@@ -1033,6 +1060,24 @@ kode_status_t appdata_rm_request(const char *project, QActive *who)
     return KODE_OK;
 }
 
+kode_status_t storage_app_wipe_request(const char *project, QActive *who)
+{
+    AppDataReqEvt *e = Q_NEW_X(AppDataReqEvt, 0U, STORAGE_APP_WIPE_REQ_SIG);
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "out of events; the files of '%s' are not looked at",
+               project);
+        return KODE_NO_RESOURCES;
+    }
+    (void)snprintf(e->project, sizeof(e->project), "%s", project);
+    e->who = who;
+    /* A card put in since the last listing is mounted before it is looked
+     * at: posted first, so the wipe waits behind the call to the card. */
+    storage_request(KDRV_MEDIUM_SD, STORAGE_OP_MOUNT);
+    QACTIVE_POST(AO_Storage, &e->super, (void *)0);
+    return KODE_OK;
+}
+
 kode_status_t appdata_put_request(const char *project, uint8_t *buf,
                                   uint16_t json_len, uint16_t icon_len,
                                   QActive *who)
@@ -1178,11 +1223,22 @@ typedef struct {
     bool          capped;      /**< Hit KODE_STORAGE_LIST_MAX.           */
 } ListCtx;
 
+/**
+ * @brief Whether two names are the same to FAT, which keeps no case.
+ * @param a One name.
+ * @param b The other.
+ * @return true when they differ in case at most.
+ */
+static bool name_is(const char *a, const char *b)
+{
+    return strcasecmp(a, b) == 0;
+}
+
 /** Anything not ending in .bin cannot possibly be booted. */
 static bool is_app_image(const char *name)
 {
     const char *dot = strrchr(name, '.');
-    return (NULL != dot) && (strcasecmp(dot, ".bin") == 0);
+    return (NULL != dot) && name_is(dot, ".bin");
 }
 
 /** Publish one entry. Runs inside kdrv_storage_list, on this AO's thread. */
@@ -1605,14 +1661,15 @@ static void close_file(Storage * const me)
  *
  * kdrv_storage has one reader and one writer for the whole system, and every
  * path that opens anything, or uses buf[0]/buf[1], asks this first. The card
- * test, a mid-walk `cat`, a `cp`, a `file_put`, an `appdata_put` and a card
- * call past its deadline (sdj.expired) all hold a handle, a buffer or the volume.
+ * test, a mid-walk `cat`, a `cp`, a `file_put`, an `appdata_put`, the wipe of
+ * an app's files and a card call past its deadline (sdj.expired) all hold a
+ * handle, a buffer or the volume.
  */
 static bool busy(const Storage * const me)
 {
     return (NULL != me->reader) || (NULL != me->writer) || (0U != me->t_phase)
         || (NULL != me->c_who) || (NULL != me->p_who) || (NULL != me->r_who)
-        || (NULL != me->g_who) || me->sdj.expired;
+        || (NULL != me->g_who) || (NULL != me->x_who) || me->sdj.expired;
 }
 
 /**
@@ -1733,6 +1790,47 @@ static bool appdata_rm_files(const char *dir, AppDataRmList *l, char *sub,
 }
 
 /**
+ * @brief Delete one data folder, whatever medium it is on.
+ *
+ * @param folder Absolute path of the folder: what appdata_folder_path() wrote.
+ * @return KODE_OK the folder is gone, KODE_ERROR there was none,
+ *         KODE_IO_ERROR it is there and something in it would not go.
+ */
+static kode_status_t appdata_rm_tree(const char *folder)
+{
+    static AppDataRmList list;   /* one delete at a time, by design */
+    char        sub[KAPP_DATA_ICON_MAX];
+    char        path[APPDATA_PATH_MAX];
+    kdrv_stat_t st;
+
+    if ( (kdrv_storage_stat(folder, &st) != KODE_OK) || !st.exists || !st.is_dir )
+    {
+        return KODE_ERROR;
+    }
+
+    bool all = appdata_rm_files(folder, &list, sub, sizeof(sub));
+    if ( '\0' != sub[0] )
+    {
+        if ( snprintf(path, sizeof(path), "%s/%s", folder, sub)
+            < (int)sizeof(path) )
+        {
+            all = appdata_rm_files(path, &list, NULL, 0U) && all;
+            all = (kdrv_storage_rmdir(path) == KODE_OK) && all;
+        }
+        else
+        {
+            all = false;
+        }
+    }
+    if ( !all || (kdrv_storage_rmdir(folder) != KODE_OK) )
+    {
+        KLOG_W(TAG, "'%s' did not empty", folder);
+        return KODE_IO_ERROR;
+    }
+    return KODE_OK;
+}
+
+/**
  * @brief Delete @p project's folder on the internal partition, and say so.
  *
  * @param me      The AO, for busy().
@@ -1741,11 +1839,8 @@ static bool appdata_rm_files(const char *dir, AppDataRmList *l, char *sub,
  */
 static kode_status_t appdata_rm(const Storage * const me, const char *project)
 {
-    static AppDataRmList list;   /* one delete at a time, by design */
     char        folder[APPDATA_FOLDER_MAX];
     char        card[APPDATA_FOLDER_MAX];
-    char        sub[KAPP_DATA_ICON_MAX];
-    char        path[APPDATA_PATH_MAX];
     kdrv_stat_t st;
 
     /* Said before anything is removed and whatever the outcome: an operator
@@ -1774,34 +1869,314 @@ static kode_status_t appdata_rm(const Storage * const me, const char *project)
     /* Nothing may have mounted the internal FAT yet (no launcher scan has
      * run): mount it here; a volume that will not mount is formatted first,
      * as the boot scan does, and refused only when that fails too. */
-    if ( (kdrv_storage_mount(KDRV_MEDIUM_FS) == NULL)
-        || (kdrv_storage_stat(folder, &st) != KODE_OK) || !st.exists
-        || !st.is_dir )
+    if ( kdrv_storage_mount(KDRV_MEDIUM_FS) == NULL )
     {
         return KODE_ERROR;
     }
 
-    bool all = appdata_rm_files(folder, &list, sub, sizeof(sub));
-    if ( '\0' != sub[0] )
+    kode_status_t const rc = appdata_rm_tree(folder);
+    if ( KODE_OK == rc )
     {
-        if ( snprintf(path, sizeof(path), "%s/%s", folder, sub)
-            < (int)sizeof(path) )
+        KLOG_N(TAG, "the data folder of '%s' is gone", project);
+    }
+    return rc;
+}
+
+/* ---- Taking every file of one app ------------------------------------------
+ * An erase's share of this AO: the images at a medium's root whose descriptor
+ * names the project, whatever the files are called, and the app's data folder,
+ * on the internal partition and on the card. The request's step walks each
+ * root once and keeps the names, since FAT makes no promise about readdir()
+ * across an unlink; each file then has a step of its own, paced as a copy's
+ * chunks are; the last step takes the folders and answers.
+ */
+
+/** @brief One root's walk: where the names go and how many it has kept. */
+typedef struct {
+    Storage *me;     /**< The AO: its scratch takes the names.               */
+    uint16_t kept;   /**< Names kept from this medium.                       */
+    bool     cut;    /**< The medium holds more images than a walk keeps.    */
+} WipeWalk;
+
+/** @brief kdrv_storage_entry_cb: keep the name of an image an app may own. */
+static bool wipe_collect(const char *name, uint32_t size, void *ctx)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; the context is the walk wipe_walk() handed the listing */
+    WipeWalk * const w  = (WipeWalk *)ctx;
+    Storage * const  me = w->me;
+    (void)size;
+
+    /* The OS image and the coprocessor's are left out by name, before any
+     * descriptor is read: what they say they are never puts them in reach. */
+    if ( !is_app_image(name) || name_is(name, WIPE_OS_IMAGE)
+        || name_is(name, WIPE_C5_IMAGE)
+        || (strlen(name) >= (size_t)KODE_APP_FILE_MAX) )
+    {
+        return true;
+    }
+    if ( WIPE_FILES_MAX <= w->kept )
+    {
+        w->cut = true;
+        return false;
+    }
+    (void)snprintf(me->x->names[me->x_count], sizeof(me->x->names[0]), "%s",
+                   name);
+    ++me->x_count;
+    ++w->kept;
+    return true;
+}
+
+/**
+ * @brief Keep the names of the images at one medium's root.
+ *
+ * @param me     The AO, with its scratch taken.
+ * @param medium Which medium.
+ * @return true when the medium was there and its root was read.
+ */
+static bool wipe_walk(Storage * const me, kdrv_medium_t medium)
+{
+    WipeWalk            walk = { .me = me, .kept = 0U, .cut = false };
+    kode_status_t const rc   = kdrv_storage_list(medium, &wipe_collect, &walk);
+
+    if ( walk.cut )
+    {
+        KLOG_W(TAG, "more than %u images at one root; the rest are not "
+                    "looked at for '%s'", (unsigned)WIPE_FILES_MAX,
+               me->x_project);
+    }
+    return KODE_OK == rc;
+}
+
+/**
+ * @brief Answer a wipe that did not run. Bounded, never asserts.
+ * @param who     The asker.
+ * @param project The project the wipe was for.
+ * @param rc      Why it did not run.
+ */
+static void wipe_refuse(QActive *who, const char *project, kode_status_t rc)
+{
+    StorageAppWipeRspEvt *rsp = Q_NEW_X(StorageAppWipeRspEvt, 0U,
+                                        STORAGE_APP_WIPE_RSP_SIG);
+
+    if ( NULL == rsp )
+    {
+        KLOG_E(TAG, "out of events; the wipe of '%s' goes unanswered", project);
+        return;
+    }
+    (void)memset(&rsp->fs, 0, sizeof(rsp->fs));
+    (void)memset(&rsp->sd, 0, sizeof(rsp->sd));
+    (void)snprintf(rsp->project, sizeof(rsp->project), "%s", project);
+    rsp->status = (uint8_t)rc;
+    QACTIVE_POST(who, &rsp->super, AO_Storage);
+}
+
+/**
+ * @brief Start the wipe of one app's files: keep the names, arm the first step.
+ *
+ * @param me  The AO.
+ * @param req The request: the project and the asker.
+ */
+static void wipe_begin(Storage * const me, AppDataReqEvt const * const req)
+{
+    if ( NULL == req->who )
+    {
+        KLOG_W(TAG, "the wipe of '%s' names nobody to answer; refused",
+               req->project);
+        return;
+    }
+    if ( busy(me) )
+    {
+        KLOG_W(TAG, "a transfer is already in flight; the files of '%s' stay",
+               req->project);
+        wipe_refuse(req->who, req->project, KODE_DENIED);
+        return;
+    }
+    /* cppcheck-suppress misra-c2012-11.5 ; a struct from a void * allocator */
+    me->x = (WipeScratch *)khal_alloc_psram(64U, sizeof(WipeScratch));
+    if ( NULL == me->x )
+    {
+        KLOG_W(TAG, "no memory for the list of images; the files of '%s' stay",
+               req->project);
+        wipe_refuse(req->who, req->project, KODE_NO_RESOURCES);
+        return;
+    }
+    (void)memset(&me->x_fs, 0, sizeof(me->x_fs));
+    (void)memset(&me->x_sd, 0, sizeof(me->x_sd));
+    (void)snprintf(me->x_project, sizeof(me->x_project), "%s", req->project);
+    me->x_who   = req->who;
+    me->x_count = 0U;
+    me->x_next  = 0U;
+
+    /* Nothing may have mounted the internal FAT yet: mount it here, as
+     * appdata_rm() does. */
+    if ( kdrv_storage_mount(KDRV_MEDIUM_FS) != NULL )
+    {
+        me->x_fs.present = wipe_walk(me, KDRV_MEDIUM_FS);
+    }
+    me->x_fs_count   = me->x_count;
+    me->x_sd.present = wipe_walk(me, KDRV_MEDIUM_SD);
+
+    QTimeEvt_armX(&me->x_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+}
+
+/**
+ * @brief Whether the image at @p path says it is the project being wiped.
+ *
+ * Open, read the front and close within this step: the one reader is the
+ * wipe's while it runs, and is never left held.
+ *
+ * @param me   The AO, with a wipe under way.
+ * @param path Absolute, virtual: "/storage/..." or "/sdcard/...".
+ * @return true when its descriptor names the project.
+ */
+static bool wipe_is_of(Storage * const me, const char *path)
+{
+    char          project[KODE_APP_PROJECT_MAX];
+    uint32_t      size = 0U;
+    size_t        got  = 0U;
+    kode_status_t st;
+
+    if ( kdrv_storage_open_path(path, &size) != KODE_OK )
+    {
+        return false;
+    }
+    st = kdrv_storage_read(me->x->prefix, sizeof(me->x->prefix), &got);
+    (void)kdrv_storage_close();
+    if ( (KODE_OK != st) || (sizeof(me->x->prefix) > got) )
+    {
+        return false;
+    }
+    if ( kapp_project_name(me->x->prefix, got, project, sizeof(project))
+        != KODE_OK )
+    {
+        return false;
+    }
+    /* An image that names no project is nobody's, whatever was asked. */
+    return ('\0' != project[0]) && (strcmp(project, me->x_project) == 0);
+}
+
+/**
+ * @brief Take @p project's data folder off one medium.
+ *
+ * @param m       Which medium's tree.
+ * @param project The app's project name.
+ * @return What became of it.
+ */
+static AppWipeFolder wipe_folder(AppDataMedium m, const char *project)
+{
+    char          folder[APPDATA_FOLDER_MAX];
+    AppWipeFolder end = APP_WIPE_FOLDER_NONE;
+
+    /* A name FAT cannot hold has no folder to take. */
+    if ( appdata_folder_path(folder, sizeof(folder), m, project) )
+    {
+        kode_status_t const rc = appdata_rm_tree(folder);
+
+        if ( KODE_OK == rc )
         {
-            all = appdata_rm_files(path, &list, NULL, 0U) && all;
-            all = (kdrv_storage_rmdir(path) == KODE_OK) && all;
+            end = APP_WIPE_FOLDER_REMOVED;
+        }
+        else if ( KODE_ERROR != rc )
+        {
+            end = APP_WIPE_FOLDER_LEFT;
         }
         else
         {
-            all = false;
+            /* There was none. */
         }
     }
-    if ( !all || (kdrv_storage_rmdir(folder) != KODE_OK) )
+    return end;
+}
+
+/**
+ * @brief End the wipe: the folders, the answer, and the scratch given back.
+ * @param me The AO, with every kept name looked at.
+ */
+static void wipe_finish(Storage * const me)
+{
+    StorageAppWipeRspEvt *rsp = Q_NEW_X(StorageAppWipeRspEvt, 0U,
+                                        STORAGE_APP_WIPE_RSP_SIG);
+
+    if ( me->x_fs.present )
     {
-        KLOG_W(TAG, "'%s' did not empty", folder);
-        return KODE_IO_ERROR;
+        me->x_fs.folder = (uint8_t)wipe_folder(APPDATA_MEDIUM_FS, me->x_project);
     }
-    KLOG_N(TAG, "the data folder of '%s' is gone", project);
-    return KODE_OK;
+    if ( me->x_sd.present )
+    {
+        me->x_sd.folder = (uint8_t)wipe_folder(APPDATA_MEDIUM_SD, me->x_project);
+    }
+    KLOG_N(TAG, "the files of '%s': %u gone and %u left on the partition, "
+                "%u gone and %u left on the card", me->x_project,
+           (unsigned)me->x_fs.files, (unsigned)me->x_fs.left,
+           (unsigned)me->x_sd.files, (unsigned)me->x_sd.left);
+
+    if ( NULL == rsp )
+    {
+        KLOG_E(TAG, "out of events; the wipe of '%s' goes unanswered",
+               me->x_project);
+    }
+    else
+    {
+        (void)snprintf(rsp->project, sizeof(rsp->project), "%s", me->x_project);
+        rsp->status = (uint8_t)KODE_OK;
+        rsp->fs     = me->x_fs;
+        rsp->sd     = me->x_sd;
+        QACTIVE_POST(me->x_who, &rsp->super, &me->super);
+    }
+    khal_free(me->x);
+    me->x     = NULL;
+    me->x_who = NULL;
+}
+
+/**
+ * @brief Look at one kept image and delete it when it is the project's, then
+ *        arm the next step or finish.
+ * @param me The AO.
+ */
+static void wipe_step(Storage * const me)
+{
+    char           path[WIPE_PATH_MAX];
+    const char    *root = KODE_CARD_APP_PREFIX;
+    AppWipeMedium *m    = &me->x_sd;
+
+    if ( NULL == me->x_who )
+    {
+        return;                       /* nothing being wiped; a stale tick */
+    }
+    if ( me->sdj.busy )
+    {
+        /* A call to the card is out on the worker: the volume is its own
+         * until it returns. */
+        QTimeEvt_armX(&me->x_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+        return;
+    }
+    if ( me->x_next >= me->x_count )
+    {
+        wipe_finish(me);
+        return;
+    }
+    if ( me->x_next < me->x_fs_count )
+    {
+        root = WIPE_FS_ROOT;
+        m    = &me->x_fs;
+    }
+    (void)snprintf(path, sizeof(path), "%s%s", root, me->x->names[me->x_next]);
+    ++me->x_next;
+
+    if ( wipe_is_of(me, path) )
+    {
+        if ( kdrv_storage_unlink(path) == KODE_OK )
+        {
+            KLOG_N(TAG, "'%s' removed: an image of '%s'", path, me->x_project);
+            ++m->files;
+        }
+        else
+        {
+            KLOG_W(TAG, "'%s' would not go", path);
+            ++m->left;
+        }
+    }
+    QTimeEvt_armX(&me->x_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
 }
 
 /* ---- Writing one app's data folder -----------------------------------------
@@ -5026,6 +5401,8 @@ void Storage_ctor(void)
     me->g_buf      = NULL;     /* a constructor over a used AO: the heap's now */
     me->g_json_len = 0U;
     me->g_icon_len = 0U;
+    me->x_who      = NULL;
+    me->x          = NULL;     /* as g_buf: the heap's now */
     me->worker_up  = false;
     me->width_owed = false;
     me->sdj_stale  = 0U;
@@ -5038,6 +5415,7 @@ void Storage_ctor(void)
     QTimeEvt_ctorX(&me->c_pacer, &me->super, STORAGE_CAT_NEXT_SIG, 0U);
     QTimeEvt_ctorX(&me->p_pacer, &me->super, STORAGE_COPY_NEXT_SIG, 0U);
     QTimeEvt_ctorX(&me->r_idle,  &me->super, STORAGE_RECV_IDLE_SIG, 0U);
+    QTimeEvt_ctorX(&me->x_pacer, &me->super, STORAGE_APP_WIPE_NEXT_SIG, 0U);
 #if CONFIG_KODE_LOWPOWER
     me->lp_who = KODE_LOWPOWER_WHO_NONE;
 #endif
@@ -5698,6 +6076,16 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case STORAGE_APP_WIPE_REQ_SIG: {
+            wipe_begin(me, Q_EVT_CAST(AppDataReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case STORAGE_APP_WIPE_NEXT_SIG: {
+            wipe_step(me);
+            status = Q_HANDLED();
+            break;
+        }
         case APPDATA_PUT_REQ_SIG: {
             appdata_put_begin(me, Q_EVT_CAST(AppDataPutEvt));
             status = Q_HANDLED();
@@ -5900,6 +6288,7 @@ static bool needs_card(const Storage * const me, QEvt const * const e)
         case STORAGE_DESC_REQ_SIG:
         case APPDATA_REQ_SIG:
         case APPDATA_RM_REQ_SIG:
+        case STORAGE_APP_WIPE_REQ_SIG:
         case STORAGE_FIELD_REQ_SIG:
         case STORAGE_LIST_PAGE_SIG: {
             /* A page walks the card first, and the first one comes right
@@ -6079,6 +6468,17 @@ static bool card_refuse(Storage * const me, QEvt const * const e)
             {
                 rsp->status = (uint8_t)KODE_DENIED;
                 QACTIVE_POST(req->who, &rsp->super, &me->super);
+            }
+            break;
+        }
+        case STORAGE_APP_WIPE_REQ_SIG: {
+            AppDataReqEvt const * const req = Q_EVT_CAST(AppDataReqEvt);
+
+            KLOG_W(TAG, "the card is busy; the files of '%s' stay",
+                   req->project);
+            if ( NULL != req->who )
+            {
+                wipe_refuse(req->who, req->project, KODE_DENIED);
             }
             break;
         }
