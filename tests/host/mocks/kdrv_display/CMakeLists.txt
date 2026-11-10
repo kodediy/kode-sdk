@@ -17,6 +17,7 @@ idf_component_mock(
                  "${SDK_DIR}/components/kdrv/display/include"
                  "${SDK_DIR}/components/kdrv/led/include"
                  "${SDK_DIR}/components/kdrv/tca6408a/include"
+                 "${SDK_DIR}/components/kbsp/board/include"
                  ${khal_includes}
                  "${SDK_DIR}/components/kdefs/include"
     MOCK_HEADER_FILES "${SDK_DIR}/components/kdrv/display/include/kdrv_display.h")
