@@ -1452,6 +1452,23 @@ enum KodeSignals {
                                  *   asking AO (RadioProbeEvt).               */
     WIFI_SCAN_RSP_SIG,          /**< Answers kode_sys_wifi_scan(), to the
                                  *   asking AO (ScanRspEvt).                 */
+    WIFI_FRAMES_REQ_SIG,        /**< AO_Radio: start or stop telling an AO about
+                                 *   the Wi-Fi frames the C5 hears
+                                 *   (WifiFramesReqEvt), wifi_frames_request().
+                                 *   Answered to the asker in every state,
+                                 *   always, with WIFI_FRAMES_STATE_SIG.      */
+    WIFI_FRAMES_STATE_SIG,      /**< To the asker: listening or not, and why
+                                 *   (WifiFramesStateEvt). Posted, never
+                                 *   published.                              */
+    WIFI_FRAMES_TICK_SIG,       /**< To the asker: one period's counts
+                                 *   (WifiFramesTickEvt), before the frames of
+                                 *   its batch. Posted, never published.      */
+    WIFI_FRAME_SIG,             /**< To the asker: one frame heard
+                                 *   (WifiFrameEvt). Posted, never published. */
+    RADIO_FRAMES_KNOCK_SIG,     /**< AO_Radio private (a static event, posted
+                                 *   with a margin from esp-hosted's thread):
+                                 *   a batch of frames waits in kdrv_frames'
+                                 *   ring.                                    */
     WIFI_JOIN_REQ_SIG,          /**< AO_Radio: join WifiJoinEvt's network
                                  *   and remember it if it works.            */
     WIFI_LEAVE_REQ_SIG,         /**< AO_Radio: leave, and forget the stored
@@ -4385,6 +4402,67 @@ typedef struct {
                          *   KQP_SCAN_WIFI.                             */
     uint8_t     kind;   /**< KQP_SCAN_WIFI or KQP_SCAN_BLE.             */
 } ScanAskEvt;
+
+/** @brief The highest channel a frames request names (5 GHz channel 177). */
+#define KWIFI_FRAMES_CHANNEL_MAX  177U
+
+/** @brief Why a frames request is, or is not, listening (WifiFramesStateEvt.why). */
+typedef enum {
+    KWIFI_FRAMES_OK = 0,      /**< Listening, or stopped as asked.            */
+    KWIFI_FRAMES_NO_LINK,     /**< The C5 link is down.                       */
+    KWIFI_FRAMES_NO_SERVICE,  /**< This C5 does not carry the service.        */
+    KWIFI_FRAMES_WIFI_OFF,    /**< Wi-Fi is not started.                      */
+    KWIFI_FRAMES_JOINED,      /**< Joined: only the network's channel.        */
+    KWIFI_FRAMES_CHANNEL,     /**< The radio refused the channel.             */
+    KWIFI_FRAMES_BUSY,        /**< Somebody else is listening.                */
+    KWIFI_FRAMES_MEMORY       /**< The C5 had no room.                        */
+} kwifi_frames_why_t;
+
+/** @brief WIFI_FRAMES_REQ_SIG: start or stop, and who to tell. */
+typedef struct {
+    QEvt     super;
+    QActive *who;       /**< Where every answer goes.                       */
+    bool     on;        /**< true to listen, false to stop.                 */
+    uint8_t  channel;   /**< 1..KWIFI_FRAMES_CHANNEL_MAX, or 0 to stay where
+                         *   the radio is; ignored for a stop.              */
+} WifiFramesReqEvt;
+
+/** @brief WIFI_FRAMES_STATE_SIG: the answer to every request. */
+typedef struct {
+    QEvt    super;
+    bool    on;         /**< Listening now.                                 */
+    uint8_t channel;    /**< The radio's primary channel, when the C5 said. */
+    bool    joined;     /**< The station holds an association.              */
+    uint8_t why;        /**< kwifi_frames_why_t.                            */
+} WifiFramesStateEvt;
+
+/** @brief WIFI_FRAMES_TICK_SIG: what one period of listening heard. */
+typedef struct {
+    QEvt     super;
+    uint8_t  channel;   /**< The radio's primary channel in the period.     */
+    bool     joined;    /**< The station holds an association.              */
+    int8_t   rssi_max;  /**< The strongest frame, dBm; -128 when none.      */
+    uint32_t heard;     /**< Frames heard since the start.                  */
+    uint16_t mgmt;      /**< Management frames in the period.               */
+    uint16_t data;      /**< Data frames in the period.                     */
+    uint32_t dropped;   /**< Frames lost since the start: the ring's, and
+                         *   those the asker's queue had no room for.       */
+} WifiFramesTickEvt;
+
+/** @brief Bytes of a frame's header kept after the MAC header (kode_wire.h's KODE_SNIFF_HEAD_LEN). */
+#define KWIFI_FRAME_HEAD_LEN  8U
+
+/** @brief WIFI_FRAME_SIG: one frame, as the C5 summarised it. */
+typedef struct {
+    QEvt     super;
+    uint8_t  channel;                      /**< The radio's primary channel then. */
+    int8_t   rssi;                         /**< dBm.                              */
+    uint8_t  fc[2];                        /**< Frame control, as on the air.     */
+    uint8_t  addr1[6];                     /**< Address 1, as on the air.         */
+    uint8_t  addr2[6];                     /**< Address 2; zeros when it has none. */
+    uint16_t len;                          /**< The frame's length on the air.    */
+    uint8_t  head[KWIFI_FRAME_HEAD_LEN];   /**< After the MAC header; zeros past its end. */
+} WifiFrameEvt;
 
 /** @brief Bytes of a network name in the radio check: 32 characters and the terminator. */
 #define RADIO_PROBE_SSID_BYTES  33U
