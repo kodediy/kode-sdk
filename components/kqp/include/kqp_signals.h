@@ -986,9 +986,10 @@ enum KodeSignals {
                                  *   waits for it is told it failed. The
                                  *   guard stays up until the call does
                                  *   return.                                 */
-    IR_LINK_TO_SIG,             /**< AO_Ir private periodic QTimeEvt, while
-                                 *   requests wait for the C5 link: each one
-                                 *   past its own budget is answered
+    IR_LINK_TO_SIG,             /**< AO_Ir private one-shot QTimeEvt, armed
+                                 *   again by each one taken while requests
+                                 *   wait for the C5 link: each request past
+                                 *   its own budget is answered
                                  *   KODE_TIMEOUT.                           */
     NFC_READ_REQ_SIG,           /**< AO_Nfc: energise, and answer with the
                                  *   first tag activated inside the window
@@ -1279,10 +1280,12 @@ enum KodeSignals {
     HAPTIC_WAIT_SIG,            /**< AO_Haptic private one-shot QTimeEvt: the
                                  *   row's stillness window, or the deadline
                                  *   on a reply from AO_Imu.                */
-    POWER_POLL_SIG,             /**< AO_Power private polling QTimeEvt.       */
-    POWER_PULSE_SIG,            /**< AO_Power private periodic QTimeEvt: the
-                                 *   next half of the write pulse. Armed
-                                 *   only while a flash write is reporting
+    POWER_POLL_SIG,             /**< AO_Power private one-shot QTimeEvt, armed
+                                 *   again by each poll taken.               */
+    POWER_PULSE_SIG,            /**< AO_Power private one-shot QTimeEvt: the
+                                 *   next half of the write pulse, armed
+                                 *   again by each half taken. Armed only
+                                 *   while a flash write is reporting
                                  *   progress.                              */
     POWER_DUMP_REQ_SIG,         /**< AO_Power: log everything both chips say. */
     POWER_PEEK_REQ_SIG,         /**< AO_Power: take one reading, publish it and keep
@@ -1683,7 +1686,8 @@ enum KodeSignals {
                                  *   (AutotestClientEvt).                     */
     AUTOTEST_REPORT_REQ_SIG,    /**< AO_Autotest: publish the kept report
                                  *   (AutotestClientEvt).                     */
-    POWER_TEST_STEP_SIG,        /**< AO_Power private one-shot QTimeEvt: the
+    POWER_TEST_STEP_SIG,        /**< AO_Power private one-shot QTimeEvt, armed
+                                 *   again by each look taken: the
                                  *   `power_plug` row looks at the cable
                                  *   again.                                   */
 

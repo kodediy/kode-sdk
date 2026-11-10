@@ -2823,3 +2823,83 @@ TEST_CASE("test_boost_test_on_a_cable_is_refused_at_once_and_writes_nothing",
     ship_done();
     Mockkhal_i2c_Destroy();
 }
+
+/* ---- One time event waits at a time ---------------------------------------- */
+
+/* QP posts a time event with no margin, and a queue that is full is an
+ * assertion and a reset. A poll that is periodic goes on posting whether or
+ * not the AO took the last one, so one that did not run for a few periods
+ * finds that many waiting. One poll waits at most, and the one that is taken
+ * arms the next. */
+TEST_CASE("a poll nobody took is not followed by another; the one taken arms the next",
+          "[power_ao]")
+{
+    power_up_once();
+    (void)qf_support_waiting_of(AO_Power, POWER_POLL_SIG);
+    (void)poll_once();
+
+    /* Two periods go by and AO_Power never runs. */
+    qf_support_time_passes(2U * KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_waiting_of(AO_Power, POWER_POLL_SIG),
+                                   "every period queued a poll the AO had not taken");
+
+    (void)poll_once();
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_waiting_of(AO_Power, POWER_POLL_SIG),
+                                   "one period after the poll that was taken, the next");
+
+    Mockkhal_i2c_Destroy();
+}
+
+/* The same for the row that watches the cable: one look waits at most. */
+TEST_CASE("a look at the cable nobody took is not followed by another",
+          "[power_ao]")
+{
+    power_up_once();
+    pmic_on_the_line();
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x12U;     /* nothing on VBUS */
+    s_regs[PMIC][0x11U]           = 0x00U;     /* VBUS_GD 0       */
+    (void)qf_support_waiting_of(AO_Power, POWER_TEST_STEP_SIG);
+
+    plug_req();
+    plug_expect_step(1U, POWER_TEST_ASK_PLUG);
+
+    /* Three periods go by and AO_Power never runs. */
+    qf_support_time_passes(3U * KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_waiting_of(AO_Power, POWER_TEST_STEP_SIG),
+                                   "every period queued a look the AO had not taken");
+
+    plug_looks(1U);
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_waiting_of(AO_Power, POWER_TEST_STEP_SIG),
+                                   "one period after the look that was taken, the next");
+
+    /* The row ends on its last look, and no timer is left behind. */
+    plug_looks(LOOKS_STEP);
+    TEST_ASSERT_NOT_NULL(plug_next());
+    qf_support_time_passes(2U * KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_waiting_of(AO_Power, POWER_TEST_STEP_SIG),
+                                   "a look was queued after the row had ended");
+
+    plug_done();
+    Mockkhal_i2c_Destroy();
+}
+
+/* A poll taken while AO_Power waits for a boost or a reset arms the next one:
+ * the entry of Power_polling never runs again then. The count of what waits
+ * fails on the periodic timer; the reset's answer is a guard. */
+TEST_CASE("a poll taken while a reset settles arms the next poll", "[power_ao]")
+{
+    power_up_once();
+    (void)qf_support_waiting_of(AO_Power, POWER_POLL_SIG);
+    ctrl_req_pending(POWER_CTRL_RESET, 0);
+    (void)poll_once();
+
+    /* Two periods go by and AO_Power never runs. */
+    qf_support_time_passes(2U * KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_waiting_of(AO_Power, POWER_POLL_SIG),
+                                   "the poll taken in the wait armed no next one, or the timer is periodic");
+
+    (void)tick();
+    Mockkhal_i2c_Destroy();
+}

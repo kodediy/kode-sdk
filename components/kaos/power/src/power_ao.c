@@ -98,7 +98,7 @@ typedef struct {
     uint8_t  ctrl_tries;   /**< Reset polls so far.                        */
     bool     boost_wanted; /**< A boost was asked for and not yet stopped. */
     uint16_t vbat_mv;      /**< The last reading's cell; 0 before one.     */
-    QTimeEvt pulse;        /**< The write pulse's own periodic timer.      */
+    QTimeEvt pulse;        /**< The write pulse: one half at a time.       */
     bool     writing;      /**< A flash write is reporting progress.       */
     uint32_t write_ms;     /**< khal_time_ms() at the last report.         */
     bool     led_done;     /**< The green is on, and the pulse's timer ends it. */
@@ -802,8 +802,8 @@ static void led_write_step(Power * const me, bool writing)
         (void)QTimeEvt_disarm(&me->pulse);
         if ( writing )
         {
-            QTimeEvt_armX(&me->pulse, KQP_TICKS_PER_MS(KODE_LED_PULSE_MS),
-                          KQP_TICKS_PER_MS(KODE_LED_PULSE_MS));
+            /* A one-shot: each half taken arms the next (POWER_PULSE_SIG). */
+            QTimeEvt_armX(&me->pulse, KQP_TICKS_PER_MS(KODE_LED_PULSE_MS), 0U);
         }
         led_publish(me, writing);  /* the first half lit, or dark at the end */
     }
@@ -1519,12 +1519,16 @@ static void plug_start(Power * const me)
     plug_publish(1U, POWER_TEST_ASK_PLUG);
     me->plug_phase = PLUG_WAIT_IN;
     me->plug_looks = PLUG_LOOKS_STEP;
-    QTimeEvt_armX(&me->plug, KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS),
-                  KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS));
+    QTimeEvt_armX(&me->plug, KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS), 0U);
 }
 
 /**
  * @brief One look at the cable, and whatever it moves the row to.
+ *
+ * The look is a one-shot that each look taken arms again, NOT a periodic
+ * timer: QP posts a time event with no margin, and a periodic one goes on
+ * posting whether or not this AO has run. Armed again by the look itself, one
+ * waits at most; the end of the row takes it back (plug_end()).
  *
  * @param me The AO.
  */
@@ -1536,6 +1540,8 @@ static void plug_look(Power * const me)
     {
         return;
     }
+    (void)QTimeEvt_rearm(&me->plug,
+                         KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS));
     if ( !plug_vbus(&vbus) )
     {
         KLOG_E(TAG, "test power_plug: FAIL - the charger chip does not answer");
@@ -2585,10 +2591,12 @@ static QState Power_polling(Power * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             /* First shot after the ADC has had time to convert; every one
-             * after that on the ordinary period. */
-            QTimeEvt_armX(&me->poll,
-                          KQP_TICKS_PER_MS(KODE_POWER_FIRST_MS),
-                          KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
+             * after that on the ordinary period, armed by the poll taken.
+             * A one-shot, NOT a periodic timer: QP posts a time event with no
+             * margin, and a periodic one goes on posting whether or not this
+             * AO has run, so a stall of a few periods fills the queue and
+             * resets the board. One waits at most. */
+            QTimeEvt_armX(&me->poll, KQP_TICKS_PER_MS(KODE_POWER_FIRST_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -2600,6 +2608,8 @@ static QState Power_polling(Power * const me, QEvt const * const e)
             break;
         }
         case POWER_POLL_SIG: {
+            (void)QTimeEvt_rearm(&me->poll,
+                                 KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
             /* A radio wake runs the tick while the ADC is rested: its
              * registers are stale and the minute's peek keeps the clock, so
              * there is nothing to read. */
@@ -2614,13 +2624,30 @@ static QState Power_polling(Power * const me, QEvt const * const e)
         case POWER_PULSE_SIG: {
             if ( me->led_done )
             {
-                me->led_done = false;
-                led_publish(me, false);
+                if ( 0U == QTimeEvt_getCtr(&me->pulse) )
+                {
+                    me->led_done = false;
+                    led_publish(me, false);
+                }
+                else
+                {
+                    /* The green's own timer is still counting: this is a
+                     * half queued before the write ended, and the green
+                     * keeps its second. */
+                }
+            }
+            else if ( me->writing )
+            {
+                /* The next half, a period from this one. */
+                (void)QTimeEvt_rearm(&me->pulse,
+                                     KQP_TICKS_PER_MS(KODE_LED_PULSE_MS));
+                me->pulse_lit = !me->pulse_lit;
+                led_publish(me, me->pulse_lit);
             }
             else
             {
-                me->pulse_lit = !me->pulse_lit;
-                led_publish(me, me->pulse_lit);
+                /* A half queued before the write ended is dropped: it
+                 * lights nothing and arms nothing. */
             }
             status = Q_HANDLED();
             break;
@@ -2806,8 +2833,9 @@ static QState Power_polling(Power * const me, QEvt const * const e)
  *
  * A substate of Power_polling: the poll and everything else keep running,
  * only a second control request is turned away. The transition back is to
- * the superstate, which QP performs as an exit of this state alone, so the
- * poll timer armed on Power_polling's entry is never re-armed.
+ * the superstate, which QP performs as an exit of this state alone, so
+ * Power_polling's entry never runs again: the poll handler arms each next
+ * poll.
  */
 static QState Power_waiting(Power * const me, QEvt const * const e)
 {
