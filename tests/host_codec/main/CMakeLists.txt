@@ -27,3 +27,7 @@ idf_component_register(
                  "${SDK_DIR}/components/kbsp/board/include"
     REQUIRES unity log freertos
     WHOLE_ARCHIVE)
+
+# The tone and its detector use libm. macOS folds libm into libSystem; on Linux
+# it has to be named, or the suite compiles and then fails to link.
+target_link_libraries(${COMPONENT_LIB} PRIVATE m)
