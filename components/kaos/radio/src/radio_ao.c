@@ -11435,6 +11435,10 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 }
                 wifi_retry_stop(me);
                 wifi_publish_state(me);
+                /* This request may be a debt radio_settle() paid by posting
+                 * it, and it ends here with no job: nothing would come back
+                 * for what waits behind it. */
+                radio_settle(me);
             }
             else
             {
