@@ -683,10 +683,10 @@ static void frames_tick(WifiFramesTickEvt const * const t)
  *
  * At its end the stop is asked for. With no room in AO_Radio's queue it is
  * asked again every slice for RADIO_V_FRAMES_STOP_MS; then the command ends
- * with its record and `>err code=5 msg=stop`: the C5 may still be listening,
- * AO_Radio still counts the console as the asker, and the next `wifi_frames`
- * (the same asker) restarts and stops it; a batch heard with nobody asking
- * would quiet it too.
+ * with its record and `>err code=5 msg=stop`: the C5 may still be listening
+ * and AO_Radio still counts the console as the asker, so its next tick
+ * reaches the console with no run to read it, and console_own() asks for the
+ * stop then.
  */
 static void frames_slice(void)
 {
@@ -1171,9 +1171,15 @@ static bool radio_answer(QEvt const *e)
             break;
         }
         case WIFI_FRAMES_TICK_SIG: {
-            if ( (RADIO_V_FRAMES == s_radio_kind) && frames_hearing() )
+            /* A run's own, whatever its phase: one still starting keeps it
+             * from the console, which would stop a stream that has an asker
+             * (see console_own()). Counted only while the C5 listens. */
+            if ( (RADIO_V_FRAMES == s_radio_kind) && ((uint8_t)FRAMES_IDLE != s_frames_run.phase) )
             {
-                frames_tick(Q_EVT_CAST(WifiFramesTickEvt));
+                if ( frames_hearing() )
+                {
+                    frames_tick(Q_EVT_CAST(WifiFramesTickEvt));
+                }
             }
             else
             {
@@ -1182,9 +1188,12 @@ static bool radio_answer(QEvt const *e)
             break;
         }
         case WIFI_FRAME_SIG: {
-            if ( (RADIO_V_FRAMES == s_radio_kind) && frames_hearing() )
+            if ( (RADIO_V_FRAMES == s_radio_kind) && ((uint8_t)FRAMES_IDLE != s_frames_run.phase) )
             {
-                s_frames_run.handed += 1U;
+                if ( frames_hearing() )
+                {
+                    s_frames_run.handed += 1U;
+                }
             }
             else
             {
@@ -1372,10 +1381,11 @@ static bool radio_answer(QEvt const *e)
  * For `wifi_frames` it is the net under an answer of AO_Radio that never
  * came, or a pacer that stopped. The stop is asked for unless one is out
  * already (behind a start still waiting, AO_Radio holds it until the start
- * is answered), the record is printed when there is one, and the console's
- * own timeout error is the one terminal line. The answers of the requests
- * left out are not told from the next run's, so h_wifi_frames() refuses the
- * next run until they can no longer come.
+ * is answered); a stop AO_Radio's queue had no room for is asked again by
+ * console_own() at the stream's next tick. The record is printed when there
+ * is one, and the console's own timeout error is the one terminal line. The
+ * answers of the requests left out are not told from the next run's, so
+ * h_wifi_frames() refuses the next run until they can no longer come.
  *
  * @return false: the console says the command timed out.
  */

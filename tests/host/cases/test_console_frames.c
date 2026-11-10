@@ -601,3 +601,52 @@ TEST_CASE("a stop's answer after the watchdog is never taken by the next run",
     TEST_ASSERT_EQUAL_UINT(2U, starts);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(starts, stops, "a start was left without its stop");
 }
+
+TEST_CASE("a tick that reaches the console after a run whose stop never reached AO_Radio asks for the stop",
+          "[console_frames]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+    posted_t p;
+
+    console_up();
+    type_line("wifi_frames ch=6 ms=200");
+    (void)posted_requests();
+    radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
+    for ( unsigned guard = 0U;
+         (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_CMD_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    window_passes(FRAMES_MS + (2U * RADIO_FRAMES_STOP_TRIES_MS));
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stop"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, posted_requests().count, "the stop reached AO_Radio");
+
+    /* AO_Radio still counts the console as the asker: its next batch comes
+     * here, to a console with no run, which asks for the stop again. */
+    fake_klog_reset();
+    radio_ticks(FRAMES_CH, false, -40, 12U, 1U, 0U, 0U);
+    radio_frame();
+    p = posted_requests();
+    TEST_ASSERT_EQUAL_UINT(1U, p.count);
+    TEST_ASSERT_EQUAL_UINT(1U, p.stops);
+    TEST_ASSERT_TRUE(AO_Console == p.who);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">"), "the console answered a run that is over");
+}
+
+TEST_CASE("a tick that reaches a run still waiting for its start asks for no stop", "[console_frames]")
+{
+    console_up();
+    type_line("wifi_frames ch=6 ms=200");
+    TEST_ASSERT_EQUAL_UINT(1U, posted_requests().starts);
+
+    /* A batch of the console's earlier stream, ahead of the new start's answer. */
+    radio_ticks(FRAMES_CH, false, -40, 3U, 1U, 0U, 0U);
+    TEST_ASSERT_EQUAL_UINT(0U, posted_requests().count);
+
+    radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
+    window_passes(FRAMES_MS);
+    TEST_ASSERT_EQUAL_UINT(1U, posted_requests().stops);
+    radio_stops();
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
