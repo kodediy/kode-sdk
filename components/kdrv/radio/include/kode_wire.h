@@ -4,11 +4,14 @@
  * @brief The KODE services between the P4 and the ESP32-C5: the wire.
  *
  * One message id each way over esp-hosted's peer data, with the service and
- * the operation in a header, because the C5's handler table is three entries
- * long and the infrared service already holds one of them. Three services
- * ride it: the Wi-Fi vault, the unit's identity and the BLE bond keys. Each
- * holds a secret on the C5 and performs the one operation that needs it; no
- * operation hands a secret back.
+ * the operation in a header, because esp-hosted's table of peer-data handlers
+ * is three entries long and the infrared service already holds one of them:
+ * the services share the other entry, and a new service takes none. Four
+ * services ride it: the Wi-Fi vault, the unit's identity, the BLE bond keys
+ * and the Wi-Fi frames. The first three each hold a secret on the C5 and
+ * perform the one operation that needs it; no operation hands a secret back.
+ * The fourth holds no secret: it listens on one channel when asked and sends
+ * what it hears as events, unasked, in batches.
  *
  * Every multi-byte field is little-endian, which is what both chips are; the
  * structs are packed and their sizes asserted. THE SAME FILE LIVES IN TWO
@@ -254,5 +257,9 @@ typedef struct __attribute__((packed)) {
     uint16_t data;      /**< Data frames heard in this period.                 */
 } kode_sniff_batch_t;
 _Static_assert(sizeof(kode_sniff_batch_t) == 12U, "kode_sniff_batch_t layout");
+/* A full batch is one message, and a message holds KODE_MAX_PAYLOAD. */
+_Static_assert((sizeof(kode_sniff_batch_t)
+                + (KODE_SNIFF_BATCH_MAX * sizeof(kode_sniff_rec_t))) <= KODE_MAX_PAYLOAD,
+               "a full kode_sniff_batch_t fits KODE_MAX_PAYLOAD");
 
 #endif /* KODE_WIRE_H_ */
