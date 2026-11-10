@@ -4550,6 +4550,23 @@ static radio_out_t radio_out_of(kdrv_radio_job_t type)
 }
 
 /**
+ * @brief Whether a job stops the C5's station or may restart it.
+ *
+ * The stop itself, and the three that reach wifi_ensure_netif() in kdrv_wifi,
+ * which stops and starts the station on the first join after a start that
+ * made no network interface. kdrv_wifi does not say beforehand whether it
+ * will, so every one of them counts.
+ *
+ * @param type The job.
+ * @return true when a Wi-Fi frames stream would not survive it.
+ */
+static bool radio_job_ends_frames(kdrv_radio_job_t type)
+{
+    return (KDRV_RADIO_JOB_WIFI_STOP == type) || (KDRV_RADIO_JOB_WIFI_PREPARE == type)
+           || (KDRV_RADIO_JOB_WIFI_JOIN == type) || (KDRV_RADIO_JOB_WIFI_ADOPT == type);
+}
+
+/**
  * @brief Submit a job that needs arguments, marking the AO busy.
  *
  * One job at a time: while one is with the worker - one whose guard fired or
@@ -4596,6 +4613,12 @@ static bool radio_submit_req(Radio * const me, const kdrv_radio_req_t *req)
         me->disc_owed = true;
         me->busy      = true;
         return true;
+    }
+    if ( radio_job_ends_frames(req->type) )
+    {
+        /* The station stops, or may stop and start again: promiscuous mode
+         * goes with it, so a stream ends here, told before the job runs. */
+        (void)radio_frames_end(&me->frames, KWIFI_FRAMES_WIFI_OFF);
     }
     me->jobs->wreq = *req;
     if ( kqp_worker_submit(&me->worker, &radio_job_run, &me->jobs->wreq,

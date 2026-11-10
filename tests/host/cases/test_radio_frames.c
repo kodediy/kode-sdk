@@ -661,3 +661,50 @@ TEST_CASE("a start asked while the board rests is refused resting and sends noth
     TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, sent_sniff()->op);
     frames_end();
 }
+
+TEST_CASE("Wi-Fi stopped under a listener ends its stream first and frees the door",
+          "[radio_frames]")
+{
+    frames_up();
+    start_listening(ao_spy_other(), FR_CH);
+    fake_peer_reset();
+
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_STOP, running_job());
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_STOP, sent_sniff()->op);
+    expect_state(ao_spy_other(), false, 0U, false, KWIFI_FRAMES_WIFI_OFF);
+    finish(KDRV_RADIO_JOB_WIFI_STOP, KODE_OK);
+
+    /* Free: another asker is taken. */
+    c5_answers(KODE_ST_OK, 0U, FR_CH, 0U, KODE_SNIFF_WHY_NONE);
+    pump();
+    fake_peer_reset();
+    ask(ao_spy(), true, FR_CH);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, sent_sniff()->op);
+    frames_end();
+}
+
+TEST_CASE("a join, which may restart the station, ends a stream before it goes to the worker",
+          "[radio_frames]")
+{
+    frames_up();
+    start_listening(ao_spy_other(), FR_CH);
+    fake_peer_reset();
+
+    TEST_ASSERT_TRUE(wifi_join_request("net", "pw12345678", false));
+    pump();
+
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_JOIN, running_job());
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_STOP, sent_sniff()->op);
+    expect_state(ao_spy_other(), false, 0U, false, KWIFI_FRAMES_WIFI_OFF);
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_ERROR);
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    frames_end();
+}
