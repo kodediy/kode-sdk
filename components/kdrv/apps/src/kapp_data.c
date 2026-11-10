@@ -245,3 +245,32 @@ const char *kapp_json_status_name(kapp_json_status_t st)
     static const char *const NAME[] = { "ok", "none", "size", "syntax", "revision" };
     return ((unsigned)st < (sizeof(NAME) / sizeof(NAME[0]))) ? NAME[st] : "?";
 }
+
+kapp_fetch_t kapp_data_fetched(const char *text, size_t len, kapp_json_status_t *why)
+{
+    kapp_data_t              d;
+    kapp_json_status_t const js  = kapp_data_parse(text, len, &d);
+    kapp_fetch_t             ask = KAPP_FETCH_REFUSED;
+
+    if ( NULL != why )
+    {
+        *why = js;
+    }
+    if ( KAPP_JSON_OK != js )
+    {
+        /* Refused as the folder's reader would refuse it. */
+    }
+    else if ( '\0' == d.icon[0] )
+    {
+        ask = KAPP_FETCH_NO_ICON;
+    }
+    else if ( strcmp(d.icon, KAPP_DATA_ICON_NAME) == 0 )
+    {
+        ask = KAPP_FETCH_ICON;
+    }
+    else
+    {
+        /* An icon by a name nobody stores it under. */
+    }
+    return ask;
+}

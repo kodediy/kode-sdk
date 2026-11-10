@@ -3334,7 +3334,8 @@ typedef struct {
 typedef struct {
     QEvt          super;
     char          project[KDRV_SLOT_PROJECT_MAX]; /**< Echoed: answers can cross. */
-    kode_status_t rc;      /**< KODE_OK, KODE_DENIED, KODE_ERROR or KODE_IO_ERROR. */
+    kode_status_t rc;      /**< KODE_OK, KODE_DENIED, KODE_ERROR, KODE_IO_ERROR,
+                            *   or KODE_NO_RESOURCES: no room for a new folder. */
 } AppDataPutRspEvt;
 
 /**
@@ -3345,7 +3346,9 @@ typedef struct {
  * `app.json` and, if @p icon_len, `icon.k64` in two steps. Never the card. Once
  * posted, AO_Storage owns @p buf and frees it on every path. Always answered with an
  * AppDataPutRspEvt: KODE_OK; KODE_DENIED bad name, length, NULL buffer or busy;
- * KODE_ERROR not mounted; KODE_IO_ERROR. A failed put leaves no folder.
+ * KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when a new folder
+ * would leave the partition under KODE_APPDATA_FREE_MIN_BYTES (a folder that is
+ * there is always replaced). A failed put leaves no folder.
  *
  * @param project  The app's project name, as the binary declares it.
  * @param buf      app.json then icon.k64, one allocation from khal_alloc_psram()
@@ -3604,6 +3607,62 @@ bool appmgr_find_request(const char *project, QActive *who);
  *         coming.
  */
 bool appmgr_keep_only_request(const char *project, QActive *who);
+
+/** @brief How a fetch of an app's data folder ended (AppDataGetRspEvt.why). */
+typedef enum {
+    APPDATA_GET_OK = 0,   /**< The folder is written.                           */
+    APPDATA_GET_BUSY,     /**< AO_AppMgr or AO_Storage was busy with a write.   */
+    APPDATA_GET_NAME,     /**< The project cannot name a folder.                */
+    APPDATA_GET_FETCH,    /**< A file did not come: no network, no 200, no
+                           *   Content-Length, fewer bytes than it said, or
+                           *   silence.                                         */
+    APPDATA_GET_JSON,     /**< app.json is longer than KAPP_DATA_JSON_MAX, is
+                           *   not what the board reads, or names an icon
+                           *   other than icon.k64.                             */
+    APPDATA_GET_ICON,     /**< icon.k64 is not KAPP_ICON_BYTES long.            */
+    APPDATA_GET_FULL,     /**< The internal partition has no room for it.       */
+    APPDATA_GET_STORE     /**< The folder could not be written.                 */
+} appdata_get_why_t;
+
+/** @brief Fetch one app's data folder from a URL (APPDATA_GET_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    char     project[KDRV_SLOT_PROJECT_MAX]; /**< The app's project name.       */
+    char     url[KODE_APPDATA_URL_MAX];      /**< The base URL; the two file
+                                              *   names are added to it.        */
+    QActive *who;                            /**< Where APPDATA_GET_RSP_SIG is
+                                              *   posted.                       */
+} AppDataGetReqEvt;
+
+/** @brief How a fetch of one app's data folder ended (APPDATA_GET_RSP_SIG). */
+typedef struct {
+    QEvt    super;
+    char    project[KDRV_SLOT_PROJECT_MAX]; /**< Echoed.                        */
+    uint8_t why;                            /**< appdata_get_why_t.             */
+    bool    icon;                           /**< The folder holds an icon.      */
+} AppDataGetRspEvt;
+
+/**
+ * @brief Ask AO_AppMgr to fetch @p project's data folder from @p url and write it.
+ *
+ * An app's data travels apart from its image and may be on the board before the
+ * app is. Two files are read, `<url>app.json` and, when that names an icon,
+ * `<url>icon.k64`; both must come with a Content-Length, and they are checked
+ * as the folder's own reader checks them before AO_Storage writes the folder
+ * (appdata_put_request()), replacing one that was there. One APPDATA_GET_RSP_SIG
+ * to @p who, refusals included: AO_AppMgr does one thing at a time and answers
+ * APPDATA_GET_BUSY while it writes an image. Any task or AO.
+ *
+ * @param project The app's project name, as its image declares it.
+ * @param url     The base URL, ending where the file names begin; shorter than
+ *                KODE_APPDATA_URL_MAX.
+ * @param who     The Active Object the answer is posted to. Not NULL.
+ * @return KODE_OK when the request is posted and an answer is owed; KODE_ERROR
+ *         for a NULL argument or a URL that does not fit; KODE_NO_RESOURCES when
+ *         the pool is dry or the queue full. Nothing was posted for the last two.
+ */
+kode_status_t appmgr_appdata_get_request(const char *project, const char *url,
+                                         QActive *who);
 
 /* ---- AO_Boot: owner of otadata AND the apps boot request ----------------
  * kodeOS lives in `factory` or its OTA slot; apps live in the `apps` region.

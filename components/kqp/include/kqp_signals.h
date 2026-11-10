@@ -592,6 +592,11 @@ enum KodeSignals {
                                  *   step of a put in progress.               */
     APPDATA_PUT_RSP_SIG,        /**< To the asker: how that put ended
                                  *   (AppDataPutRspEvt).                      */
+    APPDATA_GET_REQ_SIG,        /**< AO_AppMgr: fetch one app's data folder
+                                 *   from a URL and have AO_Storage write it
+                                 *   (AppDataGetReqEvt). Posted directly.     */
+    APPDATA_GET_RSP_SIG,        /**< To the asker: how that fetch ended
+                                 *   (AppDataGetRspEvt).                      */
     STORAGE_FIELD_REQ_SIG,      /**< AO_Storage: read, write or dump one field
                                  *   of the card (StorageFieldReqEvt).
                                  *   Answered to StorageFieldReqEvt.who with
@@ -2040,6 +2045,12 @@ typedef enum {
  * lands here too - so every report says what it is and names the
  * file when there is one. A copy, as always, never a pointer into the
  * writer's own tables.
+ *
+ * An app's report also names its project once the writer knows it: the name
+ * the host gave with a stream, then the one the image's first chunk carries.
+ * The app's data folder is named for it and may be on the board before the
+ * app is, so the sheet can show the app's own name, icon and colour while it
+ * is written (appdata_request()).
  */
 typedef struct {
     QEvt    super;
@@ -2047,6 +2058,9 @@ typedef struct {
     uint8_t what;                     /**< kwrite_t                           */
     char    file[KODE_APP_FILE_MAX];  /**< What is being written; "" for a
                                        *   stream, which has no file name.    */
+    char    project[KODE_APP_PROJECT_MAX]; /**< The app's project name; ""
+                                       *   until it is known, and for kodeOS
+                                       *   and the radio, which are no app.   */
 } AppProgressEvt;
 
 /**

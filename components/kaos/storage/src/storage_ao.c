@@ -43,8 +43,9 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 #define APPDATA_FOLDER_MAX  56U
 #define APPDATA_PATH_MAX    (APPDATA_FOLDER_MAX + KAPP_DATA_ICON_MAX)
 
-#define APPDATA_JSON_NAME   "app.json"        /**< The folder's one required file. */
-#define APPDATA_ICON_NAME   "icon.k64"        /**< The icon's default file name.   */
+#define APPDATA_KB          1024U   /**< Bytes in the kilobyte a log line counts in. */
+#define APPDATA_JSON_NAME   KAPP_DATA_JSON_NAME   /**< The folder's app.json. */
+#define APPDATA_ICON_NAME   KAPP_DATA_ICON_NAME   /**< The icon's default file name. */
 #define APPDATA_TOP_DIR     "/storage/.kode"  /**< The tree's first level, internal. */
 #define APPDATA_TREE_DIR    APPDATA_TOP_DIR "/appsdata" /**< Holds one folder per app. */
 
@@ -1916,6 +1917,40 @@ static void appdata_put_finish(Storage * const me, kode_status_t rc)
 }
 
 /**
+ * @brief Whether the internal partition has room for the folder at @p folder.
+ *
+ * A folder that is there already is replaced and takes the room it gives
+ * back. A new one must leave KODE_APPDATA_FREE_MIN_BYTES free: a data folder
+ * may arrive before its app, and nothing else bounds how many do.
+ *
+ * @param folder The folder's path on the internal partition, mounted.
+ * @return false when a new folder would leave the partition under its floor.
+ */
+static bool appdata_room(const char *folder)
+{
+    kdrv_stat_t    st;
+    uint64_t       total = 0U;
+    uint64_t       freeb = 0U;
+    uint32_t const least = KODE_APPDATA_FREE_MIN_BYTES + KODE_APPDATA_FOLDER_BYTES;
+    bool           room  = true;
+
+    if ( (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists )
+    {
+        /* A replacement. */
+    }
+    else if ( (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK)
+             && (freeb < (uint64_t)least) )
+    {
+        room = false;
+    }
+    else
+    {
+        /* Room enough, or a partition that cannot say: the write decides. */
+    }
+    return room;
+}
+
+/**
  * @brief Step one of a put: refuse, clear, make the path, write app.json.
  *
  * The request's buffer is this AO's from the post: a refusal frees it here,
@@ -1945,6 +1980,14 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     else if ( kdrv_storage_mount(KDRV_MEDIUM_FS) == NULL )
     {
         rc = KODE_ERROR;
+    }
+    else if ( !appdata_room(folder) )
+    {
+        uint32_t const floor_kb = KODE_APPDATA_FREE_MIN_BYTES / APPDATA_KB;
+
+        KLOG_W(TAG, "no room for the data folder of '%s': a new one must "
+                    "leave %lu KB free", req->project, (unsigned long)floor_kb);
+        rc = KODE_NO_RESOURCES;
     }
     else
     {

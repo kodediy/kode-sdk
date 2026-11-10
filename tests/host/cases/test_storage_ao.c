@@ -1546,6 +1546,59 @@ TEST_CASE("put writes app.json and icon.k64 into the internal folder",
                                              ".kode/appsdata/demo/icon.k64"));
 }
 
+/* A data folder may arrive before its app, and nothing bounds how many do but
+ * the partition: a new folder is refused when it would leave the partition
+ * under its floor, where Kody's pack is staged beside the one in use. */
+TEST_CASE("put refuses a new folder that would leave the partition under its floor",
+          "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FREE_MIN_BYTES
+                           + (uint64_t)KODE_APPDATA_FOLDER_BYTES - 1U);
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size(".kode/appsdata/demo/app.json"),
+        "a refused folder was written all the same");
+}
+
+TEST_CASE("put takes a new folder that leaves the partition at its floor",
+          "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FREE_MIN_BYTES
+                           + (uint64_t)KODE_APPDATA_FOLDER_BYTES);
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("put replaces a folder that is there however full the partition is",
+          "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
+    fake_media_set_fs_free(0U);
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "a replacement takes the room it gives back");
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+                          (int)fs_size(".kode/appsdata/demo/app.json"));
+}
+
 TEST_CASE("put without an icon writes app.json only and removes an old icon",
           "[storage_ao][appdata]")
 {

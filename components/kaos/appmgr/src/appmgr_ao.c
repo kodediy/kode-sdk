@@ -15,6 +15,7 @@
 #include "kapp_cat.h"
 #include "kdrv_apps.h"
 #include "kdrv_kfw.h"
+#include "kapp_data.h"
 #include "sdkconfig.h"
 #include "kode_log.h"
 #include "khal_crc32.h"
@@ -89,6 +90,12 @@ _Static_assert(KODE_APP_DATE_MAX == sizeof(((kdrv_slot_desc_t *)NULL)->date),
                "AppEntryEvt.build_date is the size of kdrv_slot_desc_t.date");
 _Static_assert(KODE_APP_TIME_MAX == sizeof(((kdrv_slot_desc_t *)NULL)->time),
                "AppEntryEvt.build_time is the size of kdrv_slot_desc_t.time");
+/* A fetch request carries a base URL: it has to stay out of the jumbo pool,
+ * which a FlashReqEvt, the widest request of this AO, is asserted to (kqp.c). */
+_Static_assert(sizeof(AppDataGetReqEvt) <= sizeof(FlashReqEvt),
+               "AppDataGetReqEvt must not reach the jumbo pool");
+_Static_assert(sizeof(AppDataGetRspEvt) <= sizeof(AppFindRspEvt),
+               "AppDataGetRspEvt must fit the pool an AppFindRspEvt fits");
 /* What a listing and an eviction answer hold at once, in medium-tier events:
  * AO_Gui can hold a page of apps and a page of files (KODE_STORAGE_LIST_MAX
  * entries and an end each) while an eviction answer (KODE_APP_EVICT_MAX and an
@@ -107,6 +114,18 @@ _Static_assert((KAPPS_MAX_ENTRIES + 1U) <= UINT8_MAX,
  * bounds how long a silent AO_Storage can hold the apps region's owner and
  * the install's end. */
 #define APPMGR_TIDY_TICKS   KQP_TICKS_PER_MS(APPMGR_TIDY_MS)   /**< APPMGR_TIDY_MS (kaos.h) in ticks. */
+
+/* An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG): its two
+ * files, by the names the folder gives them. */
+#define GET_JSON_NAME   KAPP_DATA_JSON_NAME   /**< The folder's first file.               */
+#define GET_ICON_NAME   KAPP_DATA_ICON_NAME   /**< Its second, and what app.json calls it. */
+
+/* Which part of a fetch is out. */
+enum {
+    GET_STEP_JSON = 0,   /**< app.json is being read from the URL.   */
+    GET_STEP_ICON,       /**< icon.k64 is.                           */
+    GET_STEP_PUT         /**< AO_Storage is writing the folder.      */
+};
 
 /* Immutable (statically allocated) outcome events, published on the QF bus.
  * Static events are never garbage-collected, so publishing them repeatedly is
@@ -236,6 +255,9 @@ typedef struct {
     uint32_t recv_crc;       /**< Running CRC over what has arrived.         */
     char     recv_name[KODE_APP_PROJECT_MAX]; /**< The project the host says
                               *   the image is, or "": the app it replaces. */
+    char     project[KODE_APP_PROJECT_MAX];   /**< The app being written, by
+                              *   its project name, for the reports; ""
+                              *   until it is known (project_note()).       */
     uint32_t recv_want;      /**< What that CRC must equal at the end.       */
     /* The chunk buffer of the two transfers that bring their own bytes,
      * adoption and a console stream. A stream fills a whole KODE_RECV_CHUNK
@@ -374,6 +396,23 @@ typedef struct {
     char        (*victims)[KDRV_SLOT_PROJECT_MAX];
     uint32_t      victim_count;    /**< Names recorded in victims[].            */
     uint32_t      victim_next;     /**< The next one to ask AO_Storage about.   */
+
+    /* ---- An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG) ---
+     * One buffer for both files, app.json then icon.k64, which is what
+     * appdata_put_request() takes: PSRAM, this AO's until AO_Storage has it.
+     * The base URL is kept in PSRAM too, for the icon's open (rule 8: 200
+     * bytes of internal RAM held for a fetch that rarely happens). */
+    QActive      *get_who;         /**< Who asked.                              */
+    char          get_project[KODE_APP_PROJECT_MAX]; /**< Whose folder.         */
+    char         *get_url;         /**< The base URL, KODE_APPDATA_URL_MAX of
+                                    *   PSRAM; NULL outside a fetch.            */
+    uint8_t      *get_buf;         /**< The two files; NULL when not this AO's. */
+    uint16_t      get_json_len;    /**< Bytes of app.json in it.                */
+    uint16_t      get_icon_len;    /**< Bytes of icon.k64 after them.           */
+    uint32_t      get_want;        /**< What the file in hand said it brings.   */
+    uint32_t      get_fill;        /**< How much of it has arrived.             */
+    uint8_t       get_step;        /**< GET_STEP_*: which part is out.          */
+    bool          get_open;        /**< A transfer is open with AO_Net.         */
 } AppMgr;
 
 static AppMgr l_appMgr;
@@ -390,11 +429,14 @@ static QState AppMgr_asking(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_finding(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_scrubbing(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e);
+static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e);
 
 /* The four transfer wrappers are used by flash_cleanup(), which is declared
  * ahead of them because it is what every failure path calls. */
 static void          medium_read(AppMgr * const me);
 static void          medium_close(AppMgr * const me);
+static void          project_note(AppMgr * const me, const char *name);
+static QState        get_begin(AppMgr * const me, AppDataGetReqEvt const * const req);
 static const uint8_t *medium_buf(AppMgr * const me, uint8_t idx);
 static void          medium_return(AppMgr * const me, uint8_t idx);
 static kode_status_t xfer_begin(AppMgr * const me, uint8_t want, uint32_t src_len);
@@ -513,6 +555,32 @@ bool appmgr_keep_only_request(const char *project, QActive *who)
         return false;
     }
     return true;
+}
+
+kode_status_t appmgr_appdata_get_request(const char *project, const char *url,
+                                         QActive *who)
+{
+    if ( (NULL == project) || (NULL == url) || (NULL == who)
+        || (strlen(url) >= (size_t)KODE_APPDATA_URL_MAX) )
+    {
+        return KODE_ERROR;
+    }
+    AppDataGetReqEvt *e = Q_NEW_X(AppDataGetReqEvt, 0U, APPDATA_GET_REQ_SIG);
+    if ( NULL == e )
+    {
+        KLOG_W(TAG, "out of events; the fetch of a data folder is dropped");
+        return KODE_NO_RESOURCES;
+    }
+    (void)snprintf(e->project, sizeof(e->project), "%s", project);
+    (void)snprintf(e->url, sizeof(e->url), "%s", url);
+    e->who = who;
+    if ( !QACTIVE_POST_X(AO_AppMgr, &e->super, 0U, NULL) )
+    {
+        KLOG_W(TAG, "AO_AppMgr's queue is full; the fetch of a data folder "
+                    "is dropped");
+        return KODE_NO_RESOURCES;
+    }
+    return KODE_OK;
 }
 
 void appmgr_cat_request(const char *project, const char *cats, bool clear)
@@ -1723,6 +1791,7 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
                (unsigned long)img_len, (unsigned long)me->dst_offset);
         return KODE_OK;   /* one image, one slot: nothing to place */
     }
+    project_note(me, name);   /* the image's own word for what it is */
 
     kapps_plan_t plan;
     kapps_dir_t  dir = *kdrv_apps_dir();          /* work on a copy */
@@ -2005,9 +2074,38 @@ static void progress_publish(AppMgr * const me, unsigned pct)
         }
         ev->percent = (uint8_t)pct;
         (void)snprintf(ev->file, sizeof(ev->file), "%s", me->file);
+        ev->project[0] = '\0';
+        if ( !me->os_target )
+        {
+            (void)snprintf(ev->project, sizeof(ev->project), "%s", me->project);
+        }
         QACTIVE_PUBLISH(&ev->super, &me->super);
     }
     me->reported = pct;
+}
+
+/**
+ * @brief Note which project is being written and, when that is news, say it.
+ *
+ * The reports name the project so the Opening sheet can show the app's own
+ * data folder. A write already announced learns the name later than its 0 %
+ * (a file's or a URL's first chunk carries it), and the same percent is then
+ * reported again at once: a big image would otherwise keep the sheet
+ * nameless for a whole percent of its bytes.
+ *
+ * @param me   The AO.
+ * @param name The project name; NULL or the one already noted changes nothing.
+ */
+static void project_note(AppMgr * const me, const char *name)
+{
+    if ( (NULL != name) && (strcmp(me->project, name) != 0) )
+    {
+        (void)snprintf(me->project, sizeof(me->project), "%s", name);
+        if ( me->writing && !me->os_target )
+        {
+            progress_publish(me, me->reported);
+        }
+    }
 }
 
 /** @brief Percent of the whole install: the copies, then the image. */
@@ -2461,6 +2559,8 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             me->written    = 0U;
             (void)snprintf(me->recv_name, sizeof(me->recv_name), "%s",
                            req->name);
+            /* What the reports call it until the image says so itself. */
+            (void)snprintf(me->project, sizeof(me->project), "%s", req->name);
             /* The ready publishes 0 % and the reports count on from there.
              * A stream has no file name, and one left over from the last
              * write would name a stranger on the card. */
@@ -2606,6 +2706,9 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 status = Q_HANDLED();
                 break;
             }
+            /* A file's name is not its project's, nor is a URL's: the
+             * reports name none until the first chunk is read. */
+            me->project[0] = '\0';
             /* A URL fits KODE_FLASH_SRC_MAX and travels whole; me->file
              * only names it. A file name has to fit me->file, which is the
              * shorter of the two. Refuse rather than truncate: a silently
@@ -2699,6 +2802,10 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             victims_clear(me);
             tidy_begin(me, req->file, (uint8_t)TIDY_AFTER_ERASE);
             status = tidy_state(me);
+            break;
+        }
+        case APPDATA_GET_REQ_SIG: {
+            status = get_begin(me, Q_EVT_CAST(AppDataGetReqEvt));
             break;
         }
         case APP_FIND_REQ_SIG: {
@@ -3928,6 +4035,421 @@ static QState keep_only_ask(AppMgr * const me, QEvt const * const e)
     return Q_TRAN(&AppMgr_scrubbing);
 }
 
+/* ---- An app's data folder fetched from a URL -------------------------------
+ * An app's data travels apart from its image and may come first. This AO reads
+ * the folder's two files from a base URL into one buffer and hands it to
+ * AO_Storage, which is the folder's only writer. One fetch at a time, and none
+ * while an image is written: the transfer is AO_Net's one.
+ */
+
+/**
+ * @brief Answer a fetch.
+ *
+ * @param who     The asker.
+ * @param project Whose folder.
+ * @param why     How it ended.
+ * @param icon    Whether the folder written holds an icon.
+ */
+static void get_reply(QActive * const who, const char *project,
+                      appdata_get_why_t why, bool icon)
+{
+    AppDataGetRspEvt * const ev = Q_NEW_X(AppDataGetRspEvt, 0U,
+                                          APPDATA_GET_RSP_SIG);
+
+    if ( NULL == ev )
+    {
+        KLOG_W(TAG, "out of events; the answer to a data folder's fetch is lost");
+        return;
+    }
+    (void)snprintf(ev->project, sizeof(ev->project), "%s", project);
+    ev->why  = (uint8_t)why;
+    ev->icon = icon;
+    if ( !QACTIVE_POST_X(who, &ev->super, 0U, AO_AppMgr) )
+    {
+        KLOG_W(TAG, "the asker's queue is full; the answer to a data folder's "
+                    "fetch is lost");
+    }
+}
+
+#if CONFIG_KODEOS_NET
+/**
+ * @brief Give back what a fetch still holds: the files' buffer, unless
+ *        AO_Storage has it, and the base URL.
+ *
+ * @param me The AO.
+ */
+static void get_release(AppMgr * const me)
+{
+    if ( NULL != me->get_buf )
+    {
+        khal_free(me->get_buf);
+        me->get_buf = NULL;
+    }
+    if ( NULL != me->get_url )
+    {
+        khal_free(me->get_url);
+        me->get_url = NULL;
+    }
+}
+
+/* A base URL with either file name after it is a URL a transfer takes whole. */
+_Static_assert((KODE_APPDATA_URL_MAX + sizeof(GET_JSON_NAME)) <= KODE_FLASH_SRC_MAX,
+               "a data folder's base URL and a file name fit a transfer's URL");
+_Static_assert(sizeof(GET_ICON_NAME) == sizeof(GET_JSON_NAME),
+               "the folder's two file names are the same length");
+
+/**
+ * @brief Open one of the folder's two files at the base URL.
+ *
+ * The answer's deadline is the caller's to arm: the first file is opened on
+ * the way into the state, whose entry arms it.
+ *
+ * @param me   The AO.
+ * @param file The file's name.
+ */
+static void get_open_file(AppMgr * const me, const char *file)
+{
+    char url[KODE_FLASH_SRC_MAX];
+
+    (void)snprintf(url, sizeof(url), "%s%s", me->get_url, file);
+    me->get_want = 0U;
+    me->get_fill = 0U;
+    me->get_open = true;
+    net_stream_open_request(url, &me->super);
+}
+
+/**
+ * @brief End a fetch that did not make a folder.
+ *
+ * @param me  The AO.
+ * @param why What went wrong.
+ * @return The transition to idle.
+ */
+static QState get_fail(AppMgr * const me, appdata_get_why_t why)
+{
+    if ( me->get_open )
+    {
+        net_stream_close_request();
+        me->get_open = false;
+    }
+    get_reply(me->get_who, me->get_project, why, false);
+    return Q_TRAN(&AppMgr_idle);
+}
+
+/**
+ * @brief Hand the fetched folder to AO_Storage.
+ *
+ * @param me The AO.
+ * @return The state's answer: it stays for AO_Storage's, or ends busy.
+ */
+static QState get_put(AppMgr * const me)
+{
+    if ( appdata_put_request(me->get_project, me->get_buf, me->get_json_len,
+                             me->get_icon_len, &me->super) != KODE_OK )
+    {
+        return get_fail(me, APPDATA_GET_BUSY);   /* the buffer is still ours */
+    }
+    me->get_buf  = NULL;                         /* AO_Storage's from here */
+    me->get_step = (uint8_t)GET_STEP_PUT;
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_TIDY_TICKS);
+    return Q_HANDLED();
+}
+
+/**
+ * @brief The file in hand has arrived whole: check it and go on.
+ *
+ * app.json is read with the folder's own parser, so a file AO_Storage would
+ * refuse to show is never written. It says whether there is an icon: one it
+ * names must be icon.k64, the name the folder gives it, and is fetched next.
+ *
+ * @param me The AO.
+ * @return The state's answer.
+ */
+static QState get_file_done(AppMgr * const me)
+{
+    net_stream_close_request();
+    me->get_open = false;
+
+    if ( (uint8_t)GET_STEP_ICON == me->get_step )
+    {
+        me->get_icon_len = (uint16_t)me->get_fill;
+        return get_put(me);
+    }
+
+    kapp_json_status_t why = KAPP_JSON_NONE;
+    kapp_fetch_t const ask = kapp_data_fetched((const char *)me->get_buf,
+                                               me->get_fill, &why);
+    if ( KAPP_FETCH_REFUSED == ask )
+    {
+        KLOG_W(TAG, "the app.json fetched for '%s' is refused (%s); it must be "
+                    "one the board reads, and name no icon but "
+                    GET_ICON_NAME, me->get_project, kapp_json_status_name(why));
+        return get_fail(me, APPDATA_GET_JSON);
+    }
+    me->get_json_len = (uint16_t)me->get_fill;
+    if ( KAPP_FETCH_NO_ICON == ask )
+    {
+        return get_put(me);                      /* an app with no icon */
+    }
+    me->get_step = (uint8_t)GET_STEP_ICON;
+    get_open_file(me, GET_ICON_NAME);
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
+    return Q_HANDLED();
+}
+
+/**
+ * @brief The open of the file in hand was answered.
+ *
+ * The length is judged before a byte is read: app.json may be anything up to
+ * the reader's limit, an icon is one size.
+ *
+ * @param me  The AO.
+ * @param rsp The answer.
+ * @return The state's answer.
+ */
+static QState get_opened(AppMgr * const me, StorageOpenRspEvt const * const rsp)
+{
+    if ( (uint8_t)KODE_OK != rsp->status )
+    {
+        me->get_open = false;                    /* nothing was opened */
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    if ( 0U == rsp->size )
+    {
+        KLOG_W(TAG, "the server gave no length for a file of '%s'",
+               me->get_project);
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    if ( (uint8_t)GET_STEP_JSON == me->get_step )
+    {
+        if ( KAPP_DATA_JSON_MAX < rsp->size )
+        {
+            return get_fail(me, APPDATA_GET_JSON);
+        }
+    }
+    else if ( KAPP_ICON_BYTES != rsp->size )
+    {
+        KLOG_W(TAG, "the icon fetched for '%s' is %lu bytes, not %lu",
+               me->get_project, (unsigned long)rsp->size,
+               (unsigned long)KAPP_ICON_BYTES);
+        return get_fail(me, APPDATA_GET_ICON);
+    }
+    else
+    {
+        /* An icon of the one size there is. */
+    }
+    me->get_want = rsp->size;
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
+    net_stream_read_request();
+    return Q_HANDLED();
+}
+
+/**
+ * @brief A chunk of the file in hand arrived.
+ *
+ * get_want is the file's length from its open's answer, and 0 between a
+ * file's end and the next one's open.
+ *
+ * @param me The AO.
+ * @param d  The chunk.
+ * @return The state's answer.
+ */
+static QState get_chunk(AppMgr * const me, StorageDataEvt const * const d)
+{
+    if ( 0U == me->get_want )
+    {
+        /* No file is open: the open in flight has not been answered. This is
+         * a chunk of the file before it, sent before its close was read, and
+         * taking it for the new file's would end that file empty. */
+        return Q_HANDLED();
+    }
+    if ( (uint8_t)KODE_OK != d->status )
+    {
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    if ( (uint32_t)d->len > (me->get_want - me->get_fill) )
+    {
+        KLOG_W(TAG, "a file of '%s' brought more than it said", me->get_project);
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    /* app.json fills the buffer's start; the icon goes right after it. */
+    size_t at = (size_t)me->get_fill;
+    if ( (uint8_t)GET_STEP_ICON == me->get_step )
+    {
+        at += (size_t)me->get_json_len;
+    }
+    const uint8_t * const src = net_stream_buf(d->idx);
+    if ( NULL == src )
+    {
+        return get_fail(me, APPDATA_GET_FETCH);  /* a buffer AO_Net has not got */
+    }
+    (void)memcpy(&me->get_buf[at], src, d->len);
+    me->get_fill += (uint32_t)d->len;
+
+    if ( me->get_fill == me->get_want )
+    {
+        return get_file_done(me);
+    }
+    if ( d->eof )
+    {
+        KLOG_W(TAG, "a file of '%s' ended %lu bytes short", me->get_project,
+               (unsigned long)(me->get_want - me->get_fill));
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
+    net_stream_return(d->idx);                   /* and asks for the next */
+    return Q_HANDLED();
+}
+#endif /* CONFIG_KODEOS_NET */
+
+/**
+ * @brief Begin a fetch: refuse what cannot be one, take the buffer, open app.json.
+ *
+ * @param me  The AO, idle.
+ * @param req The request.
+ * @return The transition to AppMgr_fetching, or handled when it was refused.
+ */
+static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
+{
+    char folder[KODE_PATH_MAX];
+
+    if ( NULL == req->who )
+    {
+        return Q_HANDLED();
+    }
+    if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
+                              req->project) )
+    {
+        KLOG_W(TAG, "'%s' cannot name a data folder", req->project);
+        get_reply(req->who, req->project, APPDATA_GET_NAME, false);
+        return Q_HANDLED();
+    }
+#if CONFIG_KODEOS_NET
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+    me->get_buf = (uint8_t *)khal_alloc_psram(1U, (size_t)KAPP_DATA_JSON_MAX
+                                                  + (size_t)KAPP_ICON_BYTES);
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+    me->get_url = (char *)khal_alloc_psram(1U, (size_t)KODE_APPDATA_URL_MAX);
+    if ( (NULL == me->get_buf) || (NULL == me->get_url) )
+    {
+        KLOG_W(TAG, "no PSRAM to fetch the data folder of '%s'", req->project);
+        get_release(me);
+        get_reply(req->who, req->project, APPDATA_GET_BUSY, false);
+        return Q_HANDLED();
+    }
+    me->get_who      = req->who;
+    me->get_step     = (uint8_t)GET_STEP_JSON;
+    me->get_json_len = 0U;
+    me->get_icon_len = 0U;
+    me->get_open     = false;
+    (void)snprintf(me->get_project, sizeof(me->get_project), "%s", req->project);
+    (void)snprintf(me->get_url, (size_t)KODE_APPDATA_URL_MAX, "%s", req->url);
+    KLOG_N(TAG, "fetching the data folder of '%s'", me->get_project);
+    get_open_file(me, GET_JSON_NAME);
+    return Q_TRAN(&AppMgr_fetching);
+#else
+    KLOG_E(TAG, "this firmware has no network services");
+    get_reply(req->who, req->project, APPDATA_GET_FETCH, false);
+    return Q_HANDLED();
+#endif
+}
+
+/**
+ * @brief Reading an app's data folder from a URL, then waiting for AO_Storage
+ *        to write it.
+ *
+ * Every wait has the deadline timer the other transfers use; the states are
+ * mutually exclusive and each disarms it on the way out. The buffer is this
+ * AO's until AO_Storage takes it, and whatever is still held is freed on the
+ * way out.
+ */
+static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
+{
+    QState status;
+    switch ( e->sig )
+    {
+#if CONFIG_KODEOS_NET
+        case Q_ENTRY_SIG: {
+            QTimeEvt_armX(&me->idle, APPMGR_OPEN_TICKS, 0U);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_STREAM_OPEN_RSP_SIG: {
+            status = get_opened(me, Q_EVT_CAST(StorageOpenRspEvt));
+            break;
+        }
+        case NET_STREAM_DATA_SIG: {
+            status = get_chunk(me, Q_EVT_CAST(StorageDataEvt));
+            break;
+        }
+        case APPDATA_PUT_RSP_SIG: {
+            AppDataPutRspEvt const * const rsp = Q_EVT_CAST(AppDataPutRspEvt);
+
+            status = Q_HANDLED();
+            if ( ((uint8_t)GET_STEP_PUT == me->get_step)
+                && (strcmp(rsp->project, me->get_project) == 0) )
+            {
+                appdata_get_why_t why = APPDATA_GET_STORE;
+
+                if ( KODE_OK == rsp->rc )
+                {
+                    why = APPDATA_GET_OK;
+                }
+                else if ( KODE_NO_RESOURCES == rsp->rc )
+                {
+                    why = APPDATA_GET_FULL;
+                }
+                else if ( KODE_DENIED == rsp->rc )
+                {
+                    why = APPDATA_GET_BUSY;
+                }
+                else
+                {
+                    /* The folder could not be written. */
+                }
+                get_reply(me->get_who, me->get_project, why,
+                          (APPDATA_GET_OK == why) && (0U != me->get_icon_len));
+                status = Q_TRAN(&AppMgr_idle);
+            }
+            break;
+        }
+        case APP_RECV_IDLE_SIG: {
+            if ( (uint8_t)GET_STEP_PUT == me->get_step )
+            {
+                KLOG_W(TAG, "AO_Storage never said how the data folder of '%s' "
+                            "went", me->get_project);
+                status = get_fail(me, APPDATA_GET_STORE);
+            }
+            else
+            {
+                KLOG_W(TAG, "the data folder of '%s' was never answered",
+                       me->get_project);
+                status = get_fail(me, APPDATA_GET_FETCH);
+            }
+            break;
+        }
+        case Q_EXIT_SIG: {
+            (void)QTimeEvt_disarm(&me->idle);
+            get_release(me);
+            status = Q_HANDLED();
+            break;
+        }
+#endif /* CONFIG_KODEOS_NET */
+        default: {
+            if ( busy_refused(me, e, "fetching an app's data folder") )
+            {
+                status = Q_HANDLED();
+            }
+            else
+            {
+                status = Q_SUPER(&AppMgr_busy);
+            }
+            break;
+        }
+    }
+    return status;
+}
+
 /**
  * @brief The parent of every state with work in hand.
  *
@@ -3983,6 +4505,18 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
                 KLOG_W(TAG, "busy; keep-only request for '%s' denied",
                        req->project);
                 keep_only_reply(req->who, KODE_DENIED, 0U);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APPDATA_GET_REQ_SIG: {
+            AppDataGetReqEvt const * const req = Q_EVT_CAST(AppDataGetReqEvt);
+
+            if ( NULL != req->who )
+            {
+                KLOG_W(TAG, "busy; the fetch of the data folder of '%s' is "
+                            "refused", req->project);
+                get_reply(req->who, req->project, APPDATA_GET_BUSY, false);
             }
             status = Q_HANDLED();
             break;

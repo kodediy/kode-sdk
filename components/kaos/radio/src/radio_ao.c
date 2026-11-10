@@ -7515,6 +7515,7 @@ static void c5_report(Radio * const me, uint8_t pct)
     {
         ev->percent = pct;
         ev->what    = (uint8_t)KWRITE_C5;
+        ev->project[0] = '\0';   /* the radio's image is no app */
         (void)snprintf(ev->file, sizeof(ev->file), "%s", me->file);
         QACTIVE_PUBLISH(&ev->super, &me->super);
     }
