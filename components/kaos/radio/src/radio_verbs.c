@@ -552,9 +552,9 @@ static void h_wifi_frames(const kverb_t *c, const karg_val_t *v)
 static void frames_fail(uint8_t why)
 {
     static const char *const WORDS[] = {
-        "ok", "no_link", "no_service", "wifi_off", "joined", "channel", "busy", "memory",
+        "ok", "no_link", "no_service", "wifi_off", "joined", "channel", "busy", "memory", "resting",
     };                                           /* kwifi_frames_why_t order */
-    _Static_assert((sizeof(WORDS) / sizeof(WORDS[0])) == ((size_t)KWIFI_FRAMES_MEMORY + 1U),
+    _Static_assert((sizeof(WORDS) / sizeof(WORDS[0])) == ((size_t)KWIFI_FRAMES_RESTING + 1U),
                    "one word per reason");
 
     s_frames_run.phase = (uint8_t)FRAMES_IDLE;
@@ -562,7 +562,7 @@ static void frames_fail(uint8_t why)
     {
         console_reply_err(KCLI_ERR_BUSY, WORDS[why]);
     }
-    else if ( ((uint8_t)KWIFI_FRAMES_OK < why) && ((uint8_t)KWIFI_FRAMES_MEMORY >= why) )
+    else if ( ((uint8_t)KWIFI_FRAMES_OK < why) && ((uint8_t)KWIFI_FRAMES_RESTING >= why) )
     {
         console_reply_err(KCLI_ERR_REJECT, WORDS[why]);
     }

@@ -4416,7 +4416,8 @@ typedef enum {
     KWIFI_FRAMES_JOINED,      /**< Joined: only the network's channel.        */
     KWIFI_FRAMES_CHANNEL,     /**< The radio refused the channel.             */
     KWIFI_FRAMES_BUSY,        /**< Somebody else is listening.                */
-    KWIFI_FRAMES_MEMORY       /**< The C5 had no room.                        */
+    KWIFI_FRAMES_MEMORY,      /**< The C5 had no room.                        */
+    KWIFI_FRAMES_RESTING      /**< The board is going to rest.                */
 } kwifi_frames_why_t;
 
 /** @brief WIFI_FRAMES_REQ_SIG: start or stop, and who to tell. */

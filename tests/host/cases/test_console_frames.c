@@ -300,6 +300,7 @@ TEST_CASE("wifi_frames names each reason AO_Radio refuses with", "[console_frame
         { KWIFI_FRAMES_JOINED,     ">err code=5 msg=joined"     },
         { KWIFI_FRAMES_CHANNEL,    ">err code=5 msg=channel"    },
         { KWIFI_FRAMES_MEMORY,     ">err code=5 msg=memory"     },
+        { KWIFI_FRAMES_RESTING,    ">err code=5 msg=resting"    },
         { KWIFI_FRAMES_BUSY,       ">err code=4 msg=busy"       },
     };
 

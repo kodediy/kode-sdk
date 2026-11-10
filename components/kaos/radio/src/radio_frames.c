@@ -222,9 +222,47 @@ void radio_frames_request(RadioFrames *f, WifiFramesReqEvt const *e)
     }
 }
 
-void radio_frames_refuse(WifiFramesReqEvt const *e)
+void radio_frames_refuse(WifiFramesReqEvt const *e, kwifi_frames_why_t why)
 {
-    frames_tell(e->who, false, 0U, false, KWIFI_FRAMES_NO_LINK);
+    frames_tell(e->who, false, 0U, false, why);
+}
+
+bool radio_frames_end(RadioFrames *f, kwifi_frames_why_t why)
+{
+    QActive *const who = f->who;
+
+    if ( NULL == who )
+    {
+        return frames_waiting(f);   /* a quiet STOP, or an orphaned START */
+    }
+    if ( (uint8_t)RADIO_FRAMES_WAIT_NONE == f->wait )
+    {
+        /* Best effort: with no link the C5 is not listening either, and a
+         * batch that still comes finds nobody and quiets it. */
+        if ( KODE_OK == f->send(f->ctx, KODE_SNIFF_STOP, NULL, 0U) )
+        {
+            f->wait = (uint8_t)RADIO_FRAMES_WAIT_QUIET;
+        }
+    }
+    else if ( (uint8_t)RADIO_FRAMES_WAIT_START == f->wait )
+    {
+        f->wait = (uint8_t)RADIO_FRAMES_WAIT_ORPHAN;
+    }
+    else if ( (uint8_t)RADIO_FRAMES_WAIT_STOP == f->wait )
+    {
+        f->wait = (uint8_t)RADIO_FRAMES_WAIT_QUIET;
+    }
+    else
+    {
+        /* Nothing of the asker's waits. */
+    }
+    f->who       = NULL;
+    f->stop_owed = false;
+    f->lost      = 0U;
+    kdrv_frames_forget();
+    KLOG_I(TAG, "the Wi-Fi frames stream is ended by the radio (why %u)", (unsigned)why);
+    frames_tell(who, false, 0U, false, why);
+    return true;
 }
 
 /**
@@ -295,6 +333,14 @@ void radio_frames_answer(RadioFrames *f, uint8_t status, const uint8_t *payload,
     else if ( (uint8_t)RADIO_FRAMES_WAIT_STOP == wait )
     {
         frames_stop_answered(f, &st);
+    }
+    else if ( ((uint8_t)RADIO_FRAMES_WAIT_ORPHAN == wait) && st.present && st.on )
+    {
+        /* Its asker was ended while it waited: the C5 listens for nobody. */
+        if ( KODE_OK == f->send(f->ctx, KODE_SNIFF_STOP, NULL, 0U) )
+        {
+            f->wait = (uint8_t)RADIO_FRAMES_WAIT_QUIET;
+        }
     }
     else
     {

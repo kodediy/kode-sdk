@@ -41,7 +41,10 @@ typedef enum {
     RADIO_FRAMES_WAIT_NONE = 0,  /**< None.                                         */
     RADIO_FRAMES_WAIT_START,     /**< The asker's START.                            */
     RADIO_FRAMES_WAIT_STOP,      /**< The asker's STOP.                             */
-    RADIO_FRAMES_WAIT_QUIET      /**< A STOP nobody asked for: a batch came with no asker. */
+    RADIO_FRAMES_WAIT_QUIET,     /**< A STOP whose answer nobody waits for: a batch came with no
+                                  *   asker, or the asker's stream was ended by AO_Radio. */
+    RADIO_FRAMES_WAIT_ORPHAN     /**< A START whose asker's stream AO_Radio ended while it waited:
+                                  *   if the C5 says it listens, a quiet STOP follows. */
 /* cppcheck-suppress misra-c2012-2.3 ; the type names the values of a uint8_t field, which keeps the door its size */
 } radio_frames_wait_t;
 
@@ -78,10 +81,36 @@ void radio_frames_link(RadioFrames *f);
 void radio_frames_request(RadioFrames *f, WifiFramesReqEvt const *e);
 
 /**
- * @brief Answer a request in a state with no link: KWIFI_FRAMES_NO_LINK.
- * @param e The request.
+ * @brief Answer a request without taking it: not listening, and why.
+ *
+ * For a state with no link (KWIFI_FRAMES_NO_LINK), a board at rest
+ * (KWIFI_FRAMES_RESTING) and a radio busy with work a stream would disturb
+ * (KWIFI_FRAMES_BUSY). The door is not touched.
+ *
+ * @param e   The request.
+ * @param why The reason.
  */
-void radio_frames_refuse(WifiFramesReqEvt const *e);
+void radio_frames_refuse(WifiFramesReqEvt const *e, kwifi_frames_why_t why);
+
+/**
+ * @brief AO_Radio ends the asker's stream itself, before work that would
+ *        leave it on with nothing listening: the board's rest, Wi-Fi stopped
+ *        or restarted, a C5 update.
+ *
+ * The STOP goes out when the service has no request waiting (best effort: a
+ * batch that still comes with nobody asking quiets the C5); a START or a STOP
+ * that waits has its answer made nobody's. The door is freed, the ring
+ * forgotten and the asker told `{on false, why}` at once. Runs in AO_Radio,
+ * before the work is handed to a worker. With nobody asking it changes
+ * nothing.
+ *
+ * @param f   The door.
+ * @param why What the asker is told.
+ * @return true while the C5 may still be listening for this chip: there was
+ *         a stream or a start to end, or a request of the service (a quiet
+ *         STOP included) still waits for its answer.
+ */
+bool radio_frames_end(RadioFrames *f, kwifi_frames_why_t why);
 
 /**
  * @brief The frames service answered the request in flight.

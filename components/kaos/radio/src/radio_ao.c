@@ -147,6 +147,7 @@ enum {
 #define RADIO_LP_WHY_WAKE      "wake line"           /**< The C5's wake line would not arm.      */
 #define RADIO_LP_WHY_FAILED    "radio sleep failed"  /**< The sentinel could not be made.        */
 #define RADIO_LP_WHY_DEAF      "c5 would not wake"   /**< The C5 did not answer the stop.        */
+#define RADIO_LP_WHY_FRAMES    "frames"              /**< A Wi-Fi frames stream was on, or ends. */
 
 /** @brief Free places AO_Radio's queue keeps for work that matters more than
  *         a wake note (see radio_sleep_note()). */
@@ -8821,7 +8822,14 @@ static void radio_lp_decide(Radio * const me, uint32_t round, bool off)
     {
         const char * const why = radio_lp_busy_why(me);
 
-        if ( NULL != why )
+        /* A stream keeps the C5 listening and wakes this chip at every
+         * batch: an ASLEEP round ends it, and is busy until its STOP is
+         * answered. OFF holds the C5 in reset, which ends it anyway. */
+        if ( (!off) && radio_frames_end(&me->frames, KWIFI_FRAMES_RESTING) )
+        {
+            radio_lp_answer(me, true, RADIO_LP_WHY_FRAMES);
+        }
+        else if ( NULL != why )
         {
             radio_lp_answer(me, true, why);
         }
@@ -9451,7 +9459,7 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
         }
         case WIFI_FRAMES_REQ_SIG: {
             /* The frames come from the C5, and the link is down. */
-            radio_frames_refuse(Q_EVT_CAST(WifiFramesReqEvt));
+            radio_frames_refuse(Q_EVT_CAST(WifiFramesReqEvt), KWIFI_FRAMES_NO_LINK);
             status = Q_HANDLED();
             break;
         }
@@ -10991,7 +10999,18 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             break;
         }
         case WIFI_FRAMES_REQ_SIG: {
-            radio_frames_request(&me->frames, Q_EVT_CAST(WifiFramesReqEvt));
+            WifiFramesReqEvt const * const r = Q_EVT_CAST(WifiFramesReqEvt);
+
+            if ( r->on && me->lp_rest )
+            {
+                /* The board is on its way to rest, or there: a stream would
+                 * wake it at every batch. A stop still goes through. */
+                radio_frames_refuse(r, KWIFI_FRAMES_RESTING);
+            }
+            else
+            {
+                radio_frames_request(&me->frames, r);
+            }
             status = Q_HANDLED();
             break;
         }

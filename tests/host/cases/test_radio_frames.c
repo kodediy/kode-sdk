@@ -593,3 +593,71 @@ TEST_CASE("a lost link tells the asker, empties the ring and frees the door", "[
     TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, sent_sniff()->op);
     frames_end();
 }
+
+/* ---- The board's rest, Wi-Fi and the radio's other work ---------------------- */
+
+/** @brief The board is awake again, and the sentinel a round started is stopped. */
+static void frames_awake(void)
+{
+    lp_awake(AO_Radio);
+    drain();
+    while ( job_held() && (KDRV_RADIO_JOB_SLEEP == held_req()->type) )
+    {
+        finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
+    }
+}
+
+TEST_CASE("a rest round with a listener is busy, stops the stream and tells the asker; the next is ready",
+          "[radio_frames]")
+{
+    frames_up();
+    start_listening(ao_spy_other(), FR_CH);
+    fake_peer_reset();
+
+    lp_round(AO_Radio, KODE_LP_ASLEEP);
+    drain();
+
+    lp_expect_answer(true, "frames");
+    lp_expect_no_more();
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_STOP, sent_sniff()->op);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the sentinel started under a listener");
+    expect_state(ao_spy_other(), false, 0U, false, KWIFI_FRAMES_RESTING);
+
+    /* The STOP's answer is nobody's: the asker was told already. */
+    c5_answers(KODE_ST_OK, 0U, FR_CH, 0U, KODE_SNIFF_WHY_NONE);
+    pump();
+    expect_nothing(ao_spy_other());
+
+    /* The round's retry finds the door free. */
+    lp_round(AO_Radio, KODE_LP_ASLEEP);
+    drain();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_SLEEP, running_job());
+    finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
+    lp_expect_answer(false, NULL);
+    lp_expect_no_more();
+
+    frames_awake();
+    frames_end();
+}
+
+TEST_CASE("a start asked while the board rests is refused resting and sends nothing",
+          "[radio_frames]")
+{
+    frames_up();
+    lp_round(AO_Radio, KODE_LP_ASLEEP);
+    drain();
+    finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
+    lp_expect_answer(false, NULL);
+    fake_peer_reset();
+
+    ask(ao_spy_other(), true, FR_CH);
+    expect_state(ao_spy_other(), false, 0U, false, KWIFI_FRAMES_RESTING);
+    TEST_ASSERT_FALSE(anything_sent());
+
+    /* Awake again: the door takes a start. */
+    frames_awake();
+    fake_peer_reset();
+    ask(ao_spy_other(), true, FR_CH);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, sent_sniff()->op);
+    frames_end();
+}
