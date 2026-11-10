@@ -288,7 +288,13 @@ static void frames_start_answered(RadioFrames *f, const kdrv_frames_state_t *st)
 
     if ( st->present && st->on )
     {
-        frames_tell(who, true, st->channel, st->joined, KWIFI_FRAMES_OK);
+        kwifi_frames_why_t why = KWIFI_FRAMES_OK;
+
+        if ( KODE_SNIFF_WHY_NONE != st->why )
+        {
+            why = frames_why_of(st->why);   /* a re-tune refused: on, where it was */
+        }
+        frames_tell(who, true, st->channel, st->joined, why);
         if ( f->stop_owed )
         {
             f->stop_owed = false;

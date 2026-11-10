@@ -806,6 +806,29 @@ TEST_CASE("a knock AO_Radio has no room for is not left pending: the next batch 
     frames_end();
 }
 
+TEST_CASE("a re-tune the C5 refuses while listening is told as joined, on the channel it stays on",
+          "[radio_frames]")
+{
+    frames_up();
+    ask(ao_spy_other(), true, 0U);
+    c5_answers(KODE_ST_OK, 1U, FR_JOINED_CH, 1U, KODE_SNIFF_WHY_NONE);
+    pump();
+    expect_state(ao_spy_other(), true, FR_JOINED_CH, true, KWIFI_FRAMES_OK);
+
+    ask(ao_spy_other(), true, FR_CH);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, sent_sniff()->op);
+    c5_answers(KODE_ST_REFUSED, 1U, FR_JOINED_CH, 1U, KODE_SNIFF_WHY_JOINED);
+    pump();
+    expect_state(ao_spy_other(), true, FR_JOINED_CH, true, KWIFI_FRAMES_JOINED);
+
+    /* Still the asker's stream. */
+    c5_batch(1U);
+    pump();
+    (void)take_tick(ao_spy_other());
+    (void)take_frame(ao_spy_other());
+    frames_end();
+}
+
 /** @brief Ask for a C5 update from the card: Radio_updating, waiting for the file. */
 static void c5_update_begins(void)
 {
