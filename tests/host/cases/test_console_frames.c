@@ -27,11 +27,17 @@
 #define CMD_TIMEOUT_TICKS  ((5000U * 100U) / 1000U)
 
 /** @brief QP ticks in @p ms milliseconds, plus the one that lets the timer fire. */
-#define WINDOW_TICKS(ms_)  ((((ms_) * 100U) / 1000U) + 1U)
+#define WINDOW_TICKS(ms_)  (((ms_) / SLICE_MS) + 1U)
+
+/** @brief The console pacer's slice, ms (one QP tick at 100 Hz). */
+#define SLICE_MS  10U
 
 /** @brief The window and channel the cases ask for. */
 #define FRAMES_MS   200U
 #define FRAMES_CH   6U
+
+/** @brief How long the verb asks for a stop AO_Radio has no room for, ms: one second. */
+#define RADIO_FRAMES_STOP_TRIES_MS  1000U
 
 /** @brief Bring the console up with a clean log and AO_Radio's queue empty. */
 static void console_up(void)
@@ -52,8 +58,18 @@ static void console_up(void)
         QASM_INIT(AO_Console, (void *)0, 0U);
         qf_support_background(AO_Console);
     }
-    /* A command a case left open is closed by the watchdog. */
+    /* A command a case left open is closed by the watchdog; a `wifi_frames`
+     * has none, and AO_Radio's answer closes it. */
     (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
+    {
+        WifiFramesStateEvt gone;
+
+        (void)memset(&gone, 0, sizeof(gone));
+        gone.super = (QEvt)QEVT_INITIALIZER(WIFI_FRAMES_STATE_SIG);
+        gone.why   = (uint8_t)KWIFI_FRAMES_NO_LINK;
+        QASM_DISPATCH(AO_Console, &gone.super, 0U);
+        QASM_DISPATCH(AO_Console, &gone.super, 0U);
+    }
 
     qf_support_give_queue(AO_Radio);
     while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
@@ -90,6 +106,8 @@ static const char *line_with(const char *needle)
 
 /** @brief What the console posted to AO_Radio: the last frames request, and how many. */
 typedef struct {
+    unsigned  starts;   /**< Starts seen.                            */
+    unsigned  stops;    /**< Stops seen.                             */
     unsigned  count;    /**< Requests of WIFI_FRAMES_REQ_SIG seen.   */
     bool      on;       /**< The last one's wish.                    */
     uint8_t   channel;  /**< Its channel.                            */
@@ -110,6 +128,14 @@ static posted_t posted_requests(void)
             const WifiFramesReqEvt *const r = (const WifiFramesReqEvt *)(const void *)e;
 
             p.count   += 1U;
+            if ( r->on )
+            {
+                p.starts += 1U;
+            }
+            else
+            {
+                p.stops += 1U;
+            }
             p.on       = r->on;
             p.channel  = r->channel;
             p.who      = r->who;
@@ -165,10 +191,20 @@ static void radio_frame(void)
     QASM_DISPATCH(AO_Console, &f.super, 0U);
 }
 
-/** @brief Let the window run out. */
+/** @brief Let the window run out, one slice of the console's pacer at a time. */
 static void window_passes(uint32_t ms)
 {
-    (void)qf_support_tick(AO_Console, WINDOW_TICKS(ms));
+    for ( uint32_t t = 0U; WINDOW_TICKS(ms) > t; ++t )
+    {
+        fake_time_advance_ms(SLICE_MS);
+        (void)qf_support_tick(AO_Console, 1U);
+    }
+}
+
+/** @brief AO_Radio answers the stop: the C5 has stopped. */
+static void radio_stops(void)
+{
+    radio_says(false, FRAMES_CH, false, KWIFI_FRAMES_OK);
 }
 
 TEST_CASE("wifi_frames listens, stops when the window ends and answers one record",
@@ -196,6 +232,10 @@ TEST_CASE("wifi_frames listens, stops when the window ends and answers one recor
     p = posted_requests();
     TEST_ASSERT_EQUAL_UINT(1U, p.count);
     TEST_ASSERT_FALSE_MESSAGE(p.on, "the window's end did not ask to stop");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "the verb answered before the stop was");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">|frames"), "the verb answered before the stop was");
+
+    radio_stops();
     TEST_ASSERT_NOT_NULL(line_with(">|frames ch=6 joined=0 heard=9 handed=2 dropped=1 "
                                    "mgmt=5 data=5 rssi_max=-35"));
     TEST_ASSERT_NOT_NULL(line_with(">ok"));
@@ -208,6 +248,7 @@ TEST_CASE("wifi_frames prints - for the level of a window that heard nothing", "
     (void)posted_requests();
     radio_says(true, FRAMES_CH, true, KWIFI_FRAMES_OK);
     window_passes(FRAMES_MS);
+    radio_stops();
 
     TEST_ASSERT_NOT_NULL(line_with(">|frames ch=6 joined=1 heard=0 handed=0 dropped=0 "
                                    "mgmt=0 data=0 rssi_max=-"));
@@ -225,6 +266,7 @@ TEST_CASE("wifi_frames prints nothing but counts and levels", "[console_frames]"
     radio_ticks(FRAMES_CH, false, -40, 1U, 1U, 0U, 0U);
     radio_frame();
     window_passes(FRAMES_MS);
+    radio_stops();
 
     rec = line_with(">|frames");
     TEST_ASSERT_NOT_NULL(rec);
@@ -297,4 +339,139 @@ TEST_CASE("wifi_frames ends with the reason when the link goes in the middle of 
     TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=no_link"));
     TEST_ASSERT_NULL(line_with(">ok"));
     TEST_ASSERT_EQUAL_UINT(0U, posted_requests().count);
+}
+
+/** @brief Start a run, let it listen and let its window run out; the stop is not answered yet. */
+static void run_to_the_stop(void)
+{
+    type_line("wifi_frames ch=6 ms=200");
+    radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
+    window_passes(FRAMES_MS);
+}
+
+TEST_CASE("a wifi_frames typed before the last one's stop is answered is refused busy, and none is lost",
+          "[console_frames]")
+{
+    posted_t first;
+    posted_t second;
+
+    console_up();
+    run_to_the_stop();
+    first = posted_requests();
+    TEST_ASSERT_EQUAL_UINT(1U, first.starts);
+    TEST_ASSERT_EQUAL_UINT(1U, first.stops);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "the first run closed before its stop was answered");
+
+    /* The new line comes while the stop is out: the console is still the first run's. */
+    type_line("wifi_frames ch=6 ms=200");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_EQUAL_UINT(0U, posted_requests().count);
+
+    radio_stops();
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+
+    /* The second run is whole: its own answer, its own window, its own stop. */
+    fake_klog_reset();
+    run_to_the_stop();
+    second = posted_requests();
+    TEST_ASSERT_EQUAL_UINT(1U, second.starts);
+    TEST_ASSERT_EQUAL_UINT(1U, second.stops);
+    radio_stops();
+    TEST_ASSERT_NOT_NULL(line_with(">|frames ch=6"));
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    TEST_ASSERT_NULL(line_with(">err"));
+}
+
+TEST_CASE("a stop's answer that comes late is not read as the next run's refusal", "[console_frames]")
+{
+    console_up();
+    run_to_the_stop();
+    (void)posted_requests();
+    radio_stops();
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+
+    /* The next run starts, and an answer of the stop before it - the same
+     * kind of event, delivered late - reaches it. A refusal is never OK. */
+    fake_klog_reset();
+    type_line("wifi_frames ch=6 ms=200");
+    TEST_ASSERT_EQUAL_UINT(1U, posted_requests().starts);
+    radio_stops();
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "a stop's answer ended the next run");
+
+    radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
+    window_passes(FRAMES_MS);
+    TEST_ASSERT_EQUAL_UINT(1U, posted_requests().stops);
+    radio_stops();
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    TEST_ASSERT_NULL(line_with(">err"));
+}
+
+TEST_CASE("a stop AO_Radio has no room for is asked again, and the run ends with its record",
+          "[console_frames]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+
+    console_up();
+    type_line("wifi_frames ch=6 ms=200");
+    (void)posted_requests();
+    radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
+    for ( unsigned guard = 0U;
+         (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_CMD_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    window_passes(FRAMES_MS);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "the run closed with the stop not asked");
+
+    /* Room again: the next slice asks, and the answer closes the run. */
+    {
+        const QEvt *e = NULL;
+
+        while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+        {
+            QF_gc(e);
+        }
+    }
+    window_passes(FRAMES_MS);
+    posted_t p = posted_requests();
+    TEST_ASSERT_EQUAL_UINT(1U, p.stops);
+    radio_stops();
+    TEST_ASSERT_NOT_NULL(line_with(">|frames ch=6"));
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+TEST_CASE("a stop AO_Radio never has room for ends the run saying so", "[console_frames]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+
+    console_up();
+    type_line("wifi_frames ch=6 ms=200");
+    (void)posted_requests();
+    radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
+    for ( unsigned guard = 0U;
+         (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_CMD_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    window_passes(FRAMES_MS + (2U * RADIO_FRAMES_STOP_TRIES_MS));
+
+    TEST_ASSERT_NOT_NULL(line_with(">|frames ch=6"));
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(">err code=5 msg=stop"),
+                                 "the run ended without saying the C5 may still listen");
+    TEST_ASSERT_NULL(line_with(">ok"));
+    {
+        const QEvt *e = NULL;
+
+        while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+        {
+            QF_gc(e);
+        }
+    }
+    /* The console is free, and the same asker may start again. */
+    fake_klog_reset();
+    type_line("wifi_frames ch=6 ms=200");
+    TEST_ASSERT_EQUAL_UINT(1U, posted_requests().starts);
+    radio_says(false, 0U, false, KWIFI_FRAMES_NO_LINK);   /* leave the console free for the next file */
 }

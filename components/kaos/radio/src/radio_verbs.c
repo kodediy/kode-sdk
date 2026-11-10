@@ -15,6 +15,7 @@
 #include "kdrv_c5svc.h"
 #include "kdrv_radio.h"
 #include "khal_identity.h"
+#include "khal_time.h"
 #include "kode_wire.h"
 #if CONFIG_KODEOS_BLE
 #include "kdrv_ble.h"
@@ -55,6 +56,8 @@ static radio_verb_kind_t s_radio_kind;
 #define RADIO_V_WIPE_MS     12000U /**< c5_wipe: three steps, each with AO_Radio's own 3 s, and margin. */
 #define RADIO_V_FRAMES_MS_MIN   100U    /**< wifi_frames: the shortest window, one period of the C5's batches. */
 #define RADIO_V_FRAMES_MS_MAX   10000U  /**< wifi_frames: the longest window.                                 */
+#define RADIO_V_FRAMES_SLICE_MS 10U     /**< wifi_frames: the console pacer's slice, which the stop's retries count. */
+#define RADIO_V_FRAMES_STOP_MS  1000U   /**< wifi_frames: how long a stop with no room in AO_Radio's queue is asked again. */
 
 /** @brief RADIO_V_ID: the records' word, `id` or `csr`. */
 static const char *s_radio_id_rec;
@@ -466,12 +469,25 @@ static void h_wifi_info(const kverb_t *c, const karg_val_t *v)
     wifi_state_request();
 }
 
+/** @brief Where a `wifi_frames` run stands. */
+/* cppcheck-suppress misra-c2012-2.4 ; the type names the values of a uint8_t field, which keeps the run small */
+typedef enum {
+    FRAMES_IDLE = 0,   /**< No run.                                         */
+    FRAMES_STARTING,   /**< The start is out; AO_Radio's answer is awaited. */
+    FRAMES_LISTENING,  /**< The C5 listens; the window runs.                */
+    FRAMES_STOPPING    /**< The stop is wanted or out; its answer is awaited. */
+/* cppcheck-suppress misra-c2012-2.3 ; the type names the values of a uint8_t field, which keeps the run small */
+} frames_phase_t;
+
 /** @brief What `wifi_frames` has counted in its window. */
 static struct {
+    uint8_t  phase;      /**< frames_phase_t.                               */
     uint32_t ms;         /**< The window.                                   */
+    uint32_t start_ms;   /**< When it began, on khal_time_ms()'s clock.     */
+    uint32_t tries;      /**< Slices spent asking for a stop that had no room. */
     uint8_t  channel;    /**< The radio's channel, as the last answer said. */
     bool     joined;     /**< The station holds an association.             */
-    bool     listening;  /**< AO_Radio said the C5 listens.                 */
+    bool     stop_out;   /**< The stop was posted.                          */
     uint32_t heard;      /**< Frames heard since the start: the last tick's. */
     uint32_t handed;     /**< Frames AO_Radio handed over.                  */
     uint32_t dropped;    /**< Frames lost: the last tick's.                 */
@@ -487,18 +503,27 @@ static struct {
  *
  * Starts listening on @p ch (0 stays where the radio is), lets the window
  * pass, stops, and prints one record of counts and levels, then `>ok`. An
- * address or a payload is never printed. The window is the command's
- * watchdog: AO_Radio's answer to the start arms it, radio_timeout() ends it.
+ * address or a payload is never printed.
+ *
+ * The command holds the console until AO_Radio has answered the stop, so no
+ * answer of one run can reach the next one, and the C5 is never left
+ * listening for a console that has gone: AO_Radio always answers a start and
+ * a stop (its own deadline stands behind each), so the watchdog is off for
+ * those, and the window is counted in the console's pacer slices
+ * (console_pace()).
  */
 static void h_wifi_frames(const kverb_t *c, const karg_val_t *v)
 {
     console_begin(c->verb);
     s_radio_kind = RADIO_V_FRAMES;
     (void)memset(&s_frames_run, 0, sizeof(s_frames_run));
-    s_frames_run.ms = v[1].u;
-    /* The default watchdog stands until AO_Radio answers, which it always does. */
+    s_frames_run.ms    = v[1].u;
+    s_frames_run.phase = (uint8_t)FRAMES_STARTING;
+    console_unwatched();
     if ( !wifi_frames_request(AO_Console, true, (uint8_t)v[0].u) )
     {
+        /* Nothing started, so nothing is left to stop. */
+        s_frames_run.phase = (uint8_t)FRAMES_IDLE;
         console_reply_err(KCLI_ERR_REJECT, c->verb);
         console_end();
     }
@@ -516,6 +541,7 @@ static void frames_fail(uint8_t why)
     _Static_assert((sizeof(WORDS) / sizeof(WORDS[0])) == ((size_t)KWIFI_FRAMES_MEMORY + 1U),
                    "one word per reason");
 
+    s_frames_run.phase = (uint8_t)FRAMES_IDLE;
     if ( (uint8_t)KWIFI_FRAMES_BUSY == why )
     {
         console_reply_err(KCLI_ERR_BUSY, WORDS[why]);
@@ -551,24 +577,68 @@ static void frames_record(void)
     }
 }
 
+/** @brief Whether a run has the C5 listening, or a stop on its way: ticks and frames count, slices run. */
+static bool frames_hearing(void)
+{
+    return ((uint8_t)FRAMES_LISTENING == s_frames_run.phase)
+        || ((uint8_t)FRAMES_STOPPING == s_frames_run.phase);
+}
+
 /**
  * @brief AO_Radio's answer to the start or the stop of `wifi_frames`.
  * @param a The answer.
  */
 static void frames_state(WifiFramesStateEvt const * const a)
 {
-    if ( a->on )
+    if ( (uint8_t)FRAMES_STARTING == s_frames_run.phase )
     {
-        s_frames_run.listening = true;
-        s_frames_run.channel   = a->channel;
-        s_frames_run.joined    = a->joined;
-        console_extend(s_frames_run.ms);   /* the window runs from here */
+        if ( a->on )
+        {
+            s_frames_run.phase   = (uint8_t)FRAMES_LISTENING;
+            s_frames_run.channel = a->channel;
+            s_frames_run.joined  = a->joined;
+            s_frames_run.start_ms = khal_time_ms();   /* the window runs from here */
+            console_pace();
+        }
+        else if ( (uint8_t)KWIFI_FRAMES_OK != a->why )
+        {
+            frames_fail(a->why);
+        }
+        else
+        {
+            /* A refusal is never OK: this is the answer of an earlier run's
+             * stop, which came late. The start's own answer is still to come. */
+        }
+    }
+    else if ( (uint8_t)FRAMES_LISTENING == s_frames_run.phase )
+    {
+        /* The link went in the middle of the window, or the radio left
+         * the stream: AO_Radio has freed its door, nothing is left on. */
+        if ( !a->on )
+        {
+            frames_fail(a->why);
+        }
+    }
+    else if ( ((uint8_t)FRAMES_STOPPING == s_frames_run.phase) && s_frames_run.stop_out && !a->on )
+    {
+        /* The stop's answer, or its expiry. */
+        s_frames_run.phase = (uint8_t)FRAMES_IDLE;
+        frames_record();
+        if ( (uint8_t)KWIFI_FRAMES_OK == a->why )
+        {
+            console_reply(">ok");
+            console_end();
+        }
+        else
+        {
+            /* The stop expired: the C5 did not confirm, and a batch it
+             * still sends with nobody asking will quiet it. */
+            frames_fail(a->why);
+        }
     }
     else
     {
-        /* A refusal, or the link going in the middle of the window. */
-        s_frames_run.listening = false;
-        frames_fail(a->why);
+        /* Nothing waits for it. */
     }
 }
 
@@ -593,30 +663,51 @@ static void frames_tick(WifiFramesTickEvt const * const t)
 }
 
 /**
- * @brief The window of `wifi_frames` is over: stop, and say what was heard.
- * @return true when the command is closed here.
+ * @brief A slice of the console's pacer: the window may have run out.
+ *
+ * At its end the stop is asked for. With no room in AO_Radio's queue it is
+ * asked again every slice for RADIO_V_FRAMES_STOP_MS; then the command ends
+ * with its record and `>err code=5 msg=stop`: the C5 may still be listening,
+ * AO_Radio still counts the console as the asker, and the next `wifi_frames`
+ * (the same asker) restarts and stops it; a batch heard with nobody asking
+ * would quiet it too.
  */
-static bool frames_window_end(void)
+static void frames_slice(void)
 {
-    if ( !s_frames_run.listening )
+    bool const over = s_frames_run.ms <= (khal_time_ms() - s_frames_run.start_ms);
+
+    if ( !over && ((uint8_t)FRAMES_LISTENING == s_frames_run.phase) )
     {
-        return false;   /* no answer to the start: the ordinary timeout */
+        console_pace();
     }
-    s_frames_run.listening = false;
-    s_radio_kind       = RADIO_V_NONE;
-    /* The stop is answered to nobody who waits: AO_Radio's answer comes to
-     * an idle console and is dropped. */
-    if ( wifi_frames_request(AO_Console, false, 0U) )
+    else if ( (uint8_t)FRAMES_LISTENING == s_frames_run.phase )
     {
-        frames_record();
-        console_reply(">ok");
+        s_frames_run.phase = (uint8_t)FRAMES_STOPPING;
     }
     else
     {
-        /* Still listening: the next `wifi_frames` stops it at its own end. */
-        console_reply_err(KCLI_ERR_REJECT, console_verb());
+        /* Already stopping: only a stop that had no room comes back here. */
     }
-    return true;
+    if ( ((uint8_t)FRAMES_STOPPING == s_frames_run.phase) && !s_frames_run.stop_out )
+    {
+        if ( wifi_frames_request(AO_Console, false, 0U) )
+        {
+            s_frames_run.stop_out = true;
+            console_unwatched();   /* AO_Radio's answer, which always comes, ends it */
+        }
+        else if ( (s_frames_run.tries * RADIO_V_FRAMES_SLICE_MS) < RADIO_V_FRAMES_STOP_MS )
+        {
+            s_frames_run.tries += 1U;
+            console_pace();
+        }
+        else
+        {
+            s_frames_run.phase = (uint8_t)FRAMES_IDLE;
+            frames_record();
+            console_reply_err(KCLI_ERR_REJECT, "stop");
+            console_end();
+        }
+    }
 }
 #endif /* CONFIG_KODEOS_WIFI */
 
@@ -1064,7 +1155,7 @@ static bool radio_answer(QEvt const *e)
             break;
         }
         case WIFI_FRAMES_TICK_SIG: {
-            if ( (RADIO_V_FRAMES == s_radio_kind) && s_frames_run.listening )
+            if ( (RADIO_V_FRAMES == s_radio_kind) && frames_hearing() )
             {
                 frames_tick(Q_EVT_CAST(WifiFramesTickEvt));
             }
@@ -1075,9 +1166,20 @@ static bool radio_answer(QEvt const *e)
             break;
         }
         case WIFI_FRAME_SIG: {
-            if ( (RADIO_V_FRAMES == s_radio_kind) && s_frames_run.listening )
+            if ( (RADIO_V_FRAMES == s_radio_kind) && frames_hearing() )
             {
                 s_frames_run.handed += 1U;
+            }
+            else
+            {
+                handled = false;
+            }
+            break;
+        }
+        case CONSOLE_SLICE_SIG: {
+            if ( (RADIO_V_FRAMES == s_radio_kind) && frames_hearing() )
+            {
+                frames_slice();
             }
             else
             {
@@ -1248,18 +1350,22 @@ static bool radio_answer(QEvt const *e)
     return handled;
 }
 
-/** @brief The watchdog ran out: for `wifi_frames`, its window's ordinary end. */
+/**
+ * @brief The watchdog ran out. `wifi_frames` arms it only between two slices,
+ *        so it runs out only if the pacer stopped: the stop is asked for, as
+ *        well as it can be, before the console's own timeout error.
+ * @return false: the console says the command timed out.
+ */
 static bool radio_timeout(void)
 {
-    bool closed = false;
-
 #if CONFIG_KODEOS_WIFI
-    if ( RADIO_V_FRAMES == s_radio_kind )
+    if ( (RADIO_V_FRAMES == s_radio_kind) && frames_hearing() )
     {
-        closed = frames_window_end();
+        (void)wifi_frames_request(AO_Console, false, 0U);
+        s_frames_run.phase = (uint8_t)FRAMES_IDLE;
     }
 #endif
-    return closed;
+    return false;
 }
 
 #if CONFIG_KODEOS_BLE
