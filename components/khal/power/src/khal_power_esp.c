@@ -89,7 +89,7 @@ static const held_pin_t s_held[] = {
     { KBSP_PIN_SD_PWR,     true  },   /* the card's supply off              */
     { KBSP_PIN_NFC_CS,     true  },   /* the ST25R deselected               */
     { KBSP_PIN_RFID_PULL,  true  },   /* the LF front end at rest           */
-    { KBSP_PIN_DSP_TP_RST, true  },   /* the panel and touch out of reset   */
+    { KBSP_PIN_DSP_TP_RST, false },   /* the panel and touch held in reset  */
 };
 
 /* cppcheck-suppress misra-c2012-2.5 ; used below, in a region cppcheck reads under CONFIG_KODE_LOWPOWER, whose macro uses it does not record */

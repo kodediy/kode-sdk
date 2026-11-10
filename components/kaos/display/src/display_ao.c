@@ -1070,9 +1070,14 @@ static void rest_restore_retry(Display * const me)
  * STATE(OFF) is the point of no return: deep sleep follows. Only there is
  * VCI_EN (P7) let go, and only with the panel in sleep-in and the link down;
  * a panel that refused sleep-in keeps its supply rather than lose it lit. The
- * expander holds P7 low through deep sleep, so the next boot powers the panel
- * up cold. No answer is asked: if the request misses the grace, the panel
- * stays powered and asleep.
+ * panel's power-off order has the reset line low, for at least 1 ms, before
+ * the supply: the driver drives the line low and waits that time before this
+ * asks the expander's owner for P7. A panel that did not sleep gets neither
+ * the line nor the supply from this AO; there the hold alone drives the line
+ * low, at the deep sleep (khal_power_off_enter()), and it stays low through
+ * it. The expander holds P7 low through deep sleep, so the next boot powers
+ * the panel up cold. No answer is asked: if the request misses the grace, the
+ * panel stays powered and asleep.
  *
  * @param me The AO.
  * @param s  The change.
@@ -1086,6 +1091,13 @@ static void rest_state(Display * const me, const LowPowerStateEvt * const s)
     else if ( ((uint8_t)KODE_LP_OFF == s->state) && (REST_OFF == me->rest)
              && me->panel_asleep )
     {
+        kode_status_t const st = kdrv_display_reset_low();
+
+        if ( KODE_OK != st )
+        {
+            KLOG_W(TAG, "OFF: the reset line would not go low (rc %d); the supply goes all the same",
+                   (int)st);
+        }
         ioexp_field_request(NULL, FIELD_OP_SET, (uint16_t)KDRV_TCA_O7, 0);
         KLOG_N(TAG, "OFF: the panel's supply goes (P7 low)");
     }
