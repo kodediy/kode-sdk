@@ -1711,9 +1711,11 @@ _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
 #define KQP_ID_ANSWER_MARGIN    0U    /**< Slots an identity, signature or wipe answer leaves free: 0 only asks that there be one. */
 #define KQP_FRAMES_MARGIN       4U    /**< Slots a Wi-Fi frames tick or frame leaves free in its asker's queue: room for its own traffic and the answer to a stop. */
 #define KQP_FRAMES_ANSWER_MARGIN 0U   /**< Slots a Wi-Fi frames answer leaves free: 0 only asks that there be one. */
-#define KQP_FRAMES_POOL_MARGIN  16U   /**< Blocks a Wi-Fi frames tick or frame leaves free in its pool tier, for every other AO's events. */
+#define KQP_FRAMES_POOL_MARGIN  16U   /**< Blocks a Wi-Fi frames tick (the small tier) or frame (the medium tier) leaves free in its tier, for every other AO's events; kqp.c pins each event to its tier. */
 _Static_assert((KQP_FRAMES_POOL_MARGIN > 0U) && (KQP_FRAMES_POOL_MARGIN < KQP_SMALL_POOL_COUNT),
-               "a frames event leaves some of its tier free, and the smallest tier has more than that");
+               "a tick leaves some of the small tier free, and the tier has more than that");
+_Static_assert(KQP_FRAMES_POOL_MARGIN < KQP_MEDIUM_POOL_COUNT,
+               "a frame leaves some of the medium tier free, and the tier has more than that");
 #define KQP_NET_MQTT_MARGIN     12U   /**< Slots inbound MQTT leaves free in AO_Net's queue: an identity answer's room, KODE_ID_PARTS_MAX parts and the end. */
 #define KQP_NET_LINK_MARGIN     0U    /**< Slots an MQTT link event leaves free in AO_Net's queue: it yields last of all. */
 #define KQP_NET_WAKE_MARGIN     1U    /**< Slots the channel's ring wake leaves free in AO_Net's queue. */

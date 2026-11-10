@@ -258,6 +258,16 @@ _Static_assert(sizeof(AppDataRmRspEvt) <= KQP_BLOCK_MEDIUM,
                "AppDataRmRspEvt must fit the medium pool");
 _Static_assert(sizeof(RecvDataEvt) <= KQP_BLOCK_JUMBO,
                "RecvDataEvt must fit the jumbo pool");
+/* The Wi-Fi frames events are taken with KQP_FRAMES_POOL_MARGIN (a tick and
+ * a frame) or none (an answer): each is pinned to the tier that margin is
+ * measured against, so a layout change that moves one is a build error, not a
+ * margin that guards the wrong pool. */
+_Static_assert(sizeof(WifiFramesStateEvt) <= KQP_BLOCK_SMALL,
+               "WifiFramesStateEvt must fit the small pool");
+_Static_assert(sizeof(WifiFramesTickEvt) <= KQP_BLOCK_SMALL,
+               "WifiFramesTickEvt must fit the small pool");
+_Static_assert((sizeof(WifiFrameEvt) > KQP_BLOCK_SMALL) && (sizeof(WifiFrameEvt) <= KQP_BLOCK_MEDIUM),
+               "WifiFrameEvt must land in the medium pool");
 _Static_assert(sizeof(StoragePathEvt) <= KQP_BLOCK_MEDIUM,
                "StoragePathEvt must fit the medium pool");
 _Static_assert(sizeof(StoragePathRspEvt) <= KQP_BLOCK_SMALL,
