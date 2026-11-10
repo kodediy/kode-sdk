@@ -1391,7 +1391,6 @@ static void region_launch(const char *name)
 /**
  * @brief Publish the end of an erase.
  *
- * @param me     The AO.
  * @param name   The project the erase was about.
  * @param st     How it ended; see AppEraseDoneEvt.
  * @param image  An installed image was removed.
@@ -1399,11 +1398,13 @@ static void region_launch(const char *name)
  *               looked at.
  * @param sd     What went on the card; NULL when it was not looked at.
  */
-static void erase_publish(AppMgr * const me, const char *name, kode_status_t st,
-                          bool image, const AppWipeMedium *fs,
-                          const AppWipeMedium *sd)
+static void erase_publish(const char *name, kode_status_t st, bool image,
+                          const AppWipeMedium *fs, const AppWipeMedium *sd)
 {
     AppEraseDoneEvt *e = Q_NEW_X(AppEraseDoneEvt, 0U, APP_ERASE_DONE_SIG);
+    /* A request carries a file's name, longer than a project's: what does
+     * not fit is cut, and said to the format so the compiler knows. */
+    size_t const room = sizeof(e->name) - 1U;
 
     if ( NULL == e )
     {
@@ -1411,8 +1412,7 @@ static void erase_publish(AppMgr * const me, const char *name, kode_status_t st,
                name);
         return;
     }
-    (void)snprintf(e->name, sizeof(e->name), "%.*s",
-                   (int)(sizeof(e->name) - 1U), name);
+    (void)snprintf(e->name, sizeof(e->name), "%.*s", (int)room, name);
     e->status = (uint8_t)st;
     e->image  = image;
     (void)memset(&e->fs, 0, sizeof(e->fs));
@@ -1425,21 +1425,20 @@ static void erase_publish(AppMgr * const me, const char *name, kode_status_t st,
     {
         e->sd = *sd;
     }
-    QACTIVE_PUBLISH(&e->super, &me->super);
+    QACTIVE_PUBLISH(&e->super, AO_AppMgr);
 }
 
 /**
  * @brief Answer an erase that arrives while the AO is busy: KODE_DENIED,
  *        published, so nobody waits on an erase that will not run.
  *
- * @param me The AO.
  * @param e  The request refused; any other signal is left alone.
  */
-static void erase_deny(AppMgr * const me, QEvt const * const e)
+static void erase_deny(QEvt const * const e)
 {
     if ( (QSignal)APP_ERASE_REQ_SIG == e->sig )
     {
-        erase_publish(me, Q_EVT_CAST(AppFlashEvt)->file, KODE_DENIED, false,
+        erase_publish(Q_EVT_CAST(AppFlashEvt)->file, KODE_DENIED, false,
                       NULL, NULL);
     }
 }
@@ -1708,7 +1707,7 @@ static void tidy_finish(AppMgr * const me)
                 KLOG_W(TAG, "the erase of '%s' ended with code %u", me->tidy_name,
                        (unsigned)me->erase_status);
             }
-            erase_publish(me, me->tidy_name, (kode_status_t)me->erase_status,
+            erase_publish(me->tidy_name, (kode_status_t)me->erase_status,
                           me->erase_image, &me->erase_fs, &me->erase_sd);
             break;
         }
@@ -2549,7 +2548,6 @@ static QState erase_begin(AppMgr * const me, AppFlashEvt const * const req)
 {
     kapps_dir_t dir = *kdrv_apps_dir();
     int const   idx = appmgr_find_idx(&dir, req->file);  /* -1 if absent */
-    char        held[KDRV_SLOT_PROJECT_MAX];
     char        cats[KODE_APP_CATEGORY_MAX];
     uint32_t    img_len     = 0U;
     uint32_t    decoded_len = 0U;
@@ -2563,7 +2561,7 @@ static QState erase_begin(AppMgr * const me, AppFlashEvt const * const req)
     if ( '\0' == req->file[0] )
     {
         /* No name is no app: nothing is looked for. */
-        erase_publish(me, req->file, KODE_ERROR, false, NULL, NULL);
+        erase_publish(req->file, KODE_ERROR, false, NULL, NULL);
         return Q_HANDLED();
     }
 
@@ -2576,7 +2574,7 @@ static QState erase_begin(AppMgr * const me, AppFlashEvt const * const req)
         if ( kdrv_apps_dir_commit(&dir) != KODE_OK )
         {
             KLOG_E(TAG, "cannot update the directory; nothing erased");
-            erase_publish(me, req->file, KODE_IO_ERROR, false, NULL, NULL);
+            erase_publish(req->file, KODE_IO_ERROR, false, NULL, NULL);
             return Q_HANDLED();
         }
         /* Erase the image header too, so no stale 0xE9 is left at a
@@ -2601,6 +2599,8 @@ static QState erase_begin(AppMgr * const me, AppFlashEvt const * const req)
      * boot. */
     if ( (NULL != me->chunk) && kdrv_apps_pending_present(&img_len, &decoded_len) )
     {
+        char held[KDRV_SLOT_PROJECT_MAX];
+
         pending_project(me, held, sizeof(held));
         if ( strcmp(held, req->file) == 0 )
         {
@@ -3263,7 +3263,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
         case APP_ERASE_REQ_SIG:
         case APP_LIST_REQ_SIG: {
             KLOG_W(TAG, "busy opening '%s'; request ignored", me->file);
-            erase_deny(me, e);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -3746,7 +3746,7 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy keeping apps on the card; request ignored");
-            erase_deny(me, e);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -3969,7 +3969,7 @@ static bool busy_refused(AppMgr * const me, QEvt const * const e,
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy %s; request ignored", doing);
-            erase_deny(me, e);
+            erase_deny(e);
             break;
         }
         case APP_CAT_REQ_SIG: {
@@ -4175,7 +4175,7 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
             /* A state under this one that names no refusal of its own. */
             KLOG_W(TAG, "busy; the erase of '%s' is refused",
                    Q_EVT_CAST(AppFlashEvt)->file);
-            erase_deny(me, e);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4489,7 +4489,7 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy tidying the data folder of '%s'; request ignored",
                    me->tidy_name);
-            erase_deny(me, e);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4600,7 +4600,7 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             KLOG_W(TAG, "busy writing %s (%u%%); request ignored",
                    me->os_target ? "the kodeOS slot" : "the region",
                    (unsigned)((me->written * 100U) / me->total));
-            erase_deny(me, e);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4692,7 +4692,7 @@ static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e)
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "adopting the mailbox app; request ignored");
-            erase_deny(me, e);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }

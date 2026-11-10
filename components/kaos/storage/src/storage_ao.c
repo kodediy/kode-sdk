@@ -1223,11 +1223,22 @@ typedef struct {
     bool          capped;      /**< Hit KODE_STORAGE_LIST_MAX.           */
 } ListCtx;
 
+/**
+ * @brief Whether two names are the same to FAT, which keeps no case.
+ * @param a One name.
+ * @param b The other.
+ * @return true when they differ in case at most.
+ */
+static bool name_is(const char *a, const char *b)
+{
+    return strcasecmp(a, b) == 0;
+}
+
 /** Anything not ending in .bin cannot possibly be booted. */
 static bool is_app_image(const char *name)
 {
     const char *dot = strrchr(name, '.');
-    return (NULL != dot) && (strcasecmp(dot, ".bin") == 0);
+    return (NULL != dot) && name_is(dot, ".bin");
 }
 
 /** Publish one entry. Runs inside kdrv_storage_list, on this AO's thread. */
@@ -1890,14 +1901,15 @@ typedef struct {
 /** @brief kdrv_storage_entry_cb: keep the name of an image an app may own. */
 static bool wipe_collect(const char *name, uint32_t size, void *ctx)
 {
+    /* cppcheck-suppress misra-c2012-11.5 ; the context is the walk wipe_walk() handed the listing */
     WipeWalk * const w  = (WipeWalk *)ctx;
     Storage * const  me = w->me;
     (void)size;
 
     /* The OS image and the coprocessor's are left out by name, before any
      * descriptor is read: what they say they are never puts them in reach. */
-    if ( !is_app_image(name) || (strcasecmp(name, WIPE_OS_IMAGE) == 0)
-        || (strcasecmp(name, WIPE_C5_IMAGE) == 0)
+    if ( !is_app_image(name) || name_is(name, WIPE_OS_IMAGE)
+        || name_is(name, WIPE_C5_IMAGE)
         || (strlen(name) >= (size_t)KODE_APP_FILE_MAX) )
     {
         return true;
