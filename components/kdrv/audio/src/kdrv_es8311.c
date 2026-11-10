@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 
 #include "kbsp.h"
+#include "khal_gpio.h"
 #include "khal_i2c.h"
 #include "khal_sync.h"
 #include "khal_system.h"
@@ -236,6 +237,61 @@ kode_status_t kdrv_es8311_reg_write(uint8_t reg, uint8_t val)
 
 /* ---- Bring-up ------------------------------------------------------------ */
 
+/** @brief The pins both channels are routed to, all from kbsp. */
+static const i2s_std_gpio_config_t ES_PINS = {
+    .mclk = (gpio_num_t)KBSP_PIN_I2S_MCLK,
+    .bclk = (gpio_num_t)KBSP_PIN_I2S_SCLK,
+    .ws   = (gpio_num_t)KBSP_PIN_I2S_LRCK,
+    .dout = (gpio_num_t)KBSP_PIN_I2S_DSDIN,
+    .din  = (gpio_num_t)KBSP_PIN_I2S_ASDOUT,
+    .invert_flags = {
+        .mclk_inv = false,
+        .bclk_inv = false,
+        .ws_inv   = false,
+    },
+};
+
+/**
+ * @brief Let the master clock's pad go quiet.
+ *
+ * On the P4 the master clock follows the controller's clock enable, which
+ * i2s_channel_init_std_mode() sets and only deleting the channel clears:
+ * i2s_channel_disable() leaves it running. The pad would toggle at 48 kHz
+ * times KDRV_ES8311_MCLK_MULT from the first channel's init, sound or no
+ * sound, into the board's 10 kOhm pull-up and the codec's input. So the pad
+ * is taken back from the controller (its output is switched off) and left an
+ * input with the pull-up on, the level the boot strap on it wants. The bit
+ * clock, the word select and the data pin move only while a channel is
+ * enabled and stay as they are.
+ */
+static void mclk_idle(void)
+{
+    /* The release also clears the I2S driver's claim on the pad (IDF's
+     * gpio_reset_pin() revokes it), which gpio_config() would otherwise
+     * report as a conflict on the input that follows. */
+    khal_gpio_release((uint8_t)KBSP_PIN_I2S_MCLK);
+    (void)khal_gpio_input((uint8_t)KBSP_PIN_I2S_MCLK, KHAL_GPIO_PULL_UP);
+}
+
+/**
+ * @brief Connect the pins to both channels again, so the clock reaches the pad.
+ *
+ * i2s_channel_reconfig_std_gpio() takes a channel that is not enabled: it is
+ * called before the codec layer's open() enables them, and after a close
+ * disabled them.
+ *
+ * @return KODE_OK, or KODE_ERROR when a channel refused the pins.
+ */
+static kode_status_t mclk_route(void)
+{
+    if ( (i2s_channel_reconfig_std_gpio(s_tx, &ES_PINS) != ESP_OK)
+        || (i2s_channel_reconfig_std_gpio(s_rx, &ES_PINS) != ESP_OK) )
+    {
+        return KODE_ERROR;
+    }
+    return KODE_OK;
+}
+
 /**
  * @brief Build the I2S channel pair: one controller, both directions.
  *
@@ -273,18 +329,7 @@ static kode_status_t i2s_up(void)
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(KDRV_ES8311_RATE_HZ),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                                         I2S_SLOT_MODE_STEREO),
-        .gpio_cfg = {
-            .mclk = (gpio_num_t)KBSP_PIN_I2S_MCLK,
-            .bclk = (gpio_num_t)KBSP_PIN_I2S_SCLK,
-            .ws   = (gpio_num_t)KBSP_PIN_I2S_LRCK,
-            .dout = (gpio_num_t)KBSP_PIN_I2S_DSDIN,
-            .din  = (gpio_num_t)KBSP_PIN_I2S_ASDOUT,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv   = false,
-            },
-        },
+        .gpio_cfg = ES_PINS,
     };
     std.clk_cfg.mclk_multiple = (i2s_mclk_multiple_t)KDRV_ES8311_MCLK_MULT;
 
@@ -292,6 +337,7 @@ static kode_status_t i2s_up(void)
         || (i2s_channel_init_std_mode(s_rx, &std) != ESP_OK) )
     {
         KLOG_E(TAG, "the I2S channels would not take the board's format");
+        mclk_idle();
         return KODE_ERROR;
     }
     return KODE_OK;
@@ -477,6 +523,7 @@ kode_status_t kdrv_es8311_init(void)
     if ( (NULL == s_data) || (NULL == s_gpio) )
     {
         KLOG_E(TAG, "no data interface for the codec");
+        mclk_idle();
         return KODE_ERROR;
     }
 
@@ -512,6 +559,7 @@ kode_status_t kdrv_es8311_init(void)
     if ( NULL == s_codec )
     {
         KLOG_E(TAG, "the codec would not initialise");
+        mclk_idle();
         return KODE_ERROR;
     }
 
@@ -524,6 +572,7 @@ kode_status_t kdrv_es8311_init(void)
     if ( NULL == s_dev )
     {
         KLOG_E(TAG, "no codec device");
+        mclk_idle();
         return KODE_ERROR;
     }
     /* The analog blocks go down on close. Without this the amplifier - which
@@ -536,6 +585,7 @@ kode_status_t kdrv_es8311_init(void)
     if ( install_cap() != KODE_OK )
     {
         KLOG_E(TAG, "the speaker's cap would not install; the codec stays down");
+        mclk_idle();
         return KODE_ERROR;
     }
     s_present = true;
@@ -548,6 +598,9 @@ kode_status_t kdrv_es8311_init(void)
         KLOG_W(TAG, "the codec would not rest at bring-up; it idles configured "
                     "until its first sound");
     }
+    /* After the bring-up: the codec has seen its clock through every step it
+     * took, and needs none while it rests. The next open routes it again. */
+    mclk_idle();
     KLOG_D(TAG, "ES8311 up, identity 0x%02X%02X, resting until somebody asks",
            (unsigned)s_id1, (unsigned)s_id2);
     return KODE_OK;
@@ -876,6 +929,13 @@ static kode_status_t do_open(void)
     {
         return KODE_OK;
     }
+    /* The clock reaches the pad before the codec layer starts the chip. */
+    if ( mclk_route() != KODE_OK )
+    {
+        KLOG_E(TAG, "the I2S channels would not take the board's pins");
+        mclk_idle();
+        return KODE_ERROR;
+    }
     /* TWO FALSE ERRORS PER OPEN, and they are ESP-IDF's, not this driver's.
      * The codec component's I2S data interface disables both channels before
      * it configures them, and i2s_channel_disable() logs "the channel has
@@ -897,6 +957,11 @@ static kode_status_t do_open(void)
     {
         KLOG_E(TAG, "the codec would not open at %u Hz",
                (unsigned)KDRV_ES8311_RATE_HZ);
+        /* A refused open leaves the channels enabled and the layer believing
+         * it is open. Closed here, so the next open starts from channels that
+         * can take the pins again. */
+        (void)esp_codec_dev_close(s_dev);
+        mclk_idle();
         return KODE_ERROR;
     }
     s_open = true;
@@ -937,6 +1002,9 @@ static kode_status_t do_open(void)
  * The hold is left ON, which is what the next open wants: it comes up muted
  * and the settle blocks are what let it speak.
  *
+ * The master clock's pad goes quiet once the channels are disabled; the next
+ * open routes it again.
+ *
  * @return KODE_OK.
  */
 static kode_status_t do_close(void)
@@ -949,6 +1017,7 @@ static kode_status_t do_close(void)
          * drove the converter at all. */
         mute_and_settle();
         (void)esp_codec_dev_close(s_dev);
+        mclk_idle();
         s_open = false;
         s_fresh = false;
     }
