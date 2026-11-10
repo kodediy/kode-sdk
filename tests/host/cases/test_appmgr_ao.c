@@ -21,6 +21,7 @@
 #include "esp_partition.h"
 
 #include "kaos.h"
+#include "kapp_cat.h"
 #include "kapp_desc.h"
 #include "kapps_fmt.h"
 #include "kdrv_apps.h"
@@ -1044,6 +1045,8 @@ TEST_CASE("an adopted app's listed offset is the one its launch asked for",
 static const QEvt *storage_take(enum_t sig);
 static bool storage_has_for(enum_t sig, const char *project);
 static void rm_rsp(const char *project, kode_status_t st);
+static void wipe_rsp(const char *project, kode_status_t st, uint8_t fs_files,
+                     uint8_t sd_files, uint8_t left);
 static void        answer_stat(bool exists, uint8_t rc);
 
 /* Fix 2: adoption plans and evicts BEFORE the copy, and the copy is what the
@@ -3190,9 +3193,9 @@ TEST_CASE("erasing an installed app removes its entry and its header",
     named.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_REQ_SIG);
     (void)snprintf(named.file, sizeof(named.file), "%s", "old");
     QASM_DISPATCH(AO_AppMgr, &named.super, 0U);
-    /* The erase is done once the app's data folder has gone with it. */
-    TEST_ASSERT_TRUE(storage_has_for(APPDATA_RM_REQ_SIG, "old"));
-    rm_rsp("old", KODE_OK);
+    /* The erase is done once the app's files have gone with it. */
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "old"));
+    wipe_rsp("old", KODE_OK, 0U, 0U, 0U);
 
     TEST_ASSERT_FALSE_MESSAGE(old_installed(), "the entry is still listed");
     TEST_ASSERT_TRUE(klog_has("'old' removed"));
@@ -3203,7 +3206,9 @@ TEST_CASE("erasing an installed app removes its entry and its header",
     keep_end();
 }
 
-TEST_CASE("erasing a name nobody installed changes nothing", "[appmgr_ao]")
+/* A name that is not installed may still have files: AO_Storage is asked, and
+ * the apps that are installed are left as they were. */
+TEST_CASE("erasing a name nobody installed touches no installed app", "[appmgr_ao]")
 {
     AppFlashEvt named;
 
@@ -3217,7 +3222,10 @@ TEST_CASE("erasing a name nobody installed changes nothing", "[appmgr_ao]")
     QASM_DISPATCH(AO_AppMgr, &named.super, 0U);
 
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app nobody named was erased");
-    TEST_ASSERT_TRUE(klog_has("'nobody' is not installed"));
+    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "nobody"),
+        "the files of a name that is not installed were not asked about");
+    wipe_rsp("nobody", KODE_OK, 0U, 0U, 0U);
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app nobody named was erased");
     keep_end();
 }
 
@@ -5548,6 +5556,77 @@ static void rm_rsp(const char *project, kode_status_t st)
 }
 
 /**
+ * @brief Answer AppMgr's wipe of @p project's files, with both media there.
+ * @param project  The project the wipe was for.
+ * @param st       How the wipe ended.
+ * @param fs_files Images removed from the internal partition.
+ * @param sd_files Images removed from the card.
+ * @param left     Images that would not go from the card.
+ */
+static void wipe_rsp(const char *project, kode_status_t st, uint8_t fs_files,
+                     uint8_t sd_files, uint8_t left)
+{
+    StorageAppWipeRspEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.super = (QEvt)QEVT_INITIALIZER(STORAGE_APP_WIPE_RSP_SIG);
+    (void)snprintf(r.project, sizeof(r.project), "%s", project);
+    r.status     = (uint8_t)st;
+    r.fs.present = true;
+    r.fs.files   = fs_files;
+    r.sd.present = true;
+    r.sd.files   = sd_files;
+    r.sd.left    = left;
+    QASM_DISPATCH(AO_AppMgr, &r.super, 0U);
+}
+
+/**
+ * @brief The one APP_ERASE_DONE_SIG the spy heard, or none yet.
+ * @param out Receives it.
+ * @return true when exactly one was heard.
+ */
+static bool erase_done(AppEraseDoneEvt *out)
+{
+    unsigned n = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)e->sig == APP_ERASE_DONE_SIG )
+        {
+            *out = *(AppEraseDoneEvt const *)e;
+            ++n;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(1U >= n, "an erase ended more than once");
+    return 1U == n;
+}
+
+/** @brief Ask AO_AppMgr to erase @p name. */
+static void ask_erase(const char *name)
+{
+    AppFlashEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_REQ_SIG);
+    (void)snprintf(e.file, sizeof(e.file), "%s", name);
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/** @brief Install one app named "demo" at the region's first extent. */
+static void one_demo_installed(void)
+{
+    kapps_dir_t dir = s_keep_dir;
+
+    dir.count       = 1U;
+    dir.e[0].offset = KAPPS_DATA_OFF;
+    dir.e[0].size   = 0x1000U;
+    dir.e[0].seq    = 1U;
+    dir.e[0].flags  = KAPPS_ENTRY_VALID;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&dir));
+    plant_app(KAPPS_DATA_OFF, "demo");
+}
+
+/**
  * @brief Answer every folder request AO_Storage's queue holds, and the ones
  *        those answers bring, as success.
  *
@@ -5571,7 +5650,7 @@ static void tidy_settle(void)
                 (void)snprintf(project, sizeof(project), "%s",
                                ((AppDataPutEvt const *)e)->project);
             }
-            if ( APPDATA_RM_REQ_SIG == sig )
+            if ( (APPDATA_RM_REQ_SIG == sig) || (STORAGE_APP_WIPE_REQ_SIG == sig) )
             {
                 (void)snprintf(project, sizeof(project), "%s",
                                ((AppDataReqEvt const *)e)->project);
@@ -5585,6 +5664,11 @@ static void tidy_settle(void)
             else if ( APPDATA_RM_REQ_SIG == sig )
             {
                 rm_rsp(project, KODE_OK);
+                answered = true;
+            }
+            else if ( STORAGE_APP_WIPE_REQ_SIG == sig )
+            {
+                wipe_rsp(project, KODE_OK, 0U, 0U, 0U);
                 answered = true;
             }
             else
@@ -5656,6 +5740,7 @@ static void tidy_begin_case(void)
     fake_psram_reset();
     ao_spy_subscribe(APP_FLASH_DONE_SIG);
     ao_spy_subscribe(RECV_DONE_SIG);
+    ao_spy_subscribe(APP_ERASE_DONE_SIG);
 }
 
 /** @brief The end of every tidy case. */
@@ -5663,6 +5748,7 @@ static void tidy_end_case(void)
 {
     QActive_unsubscribe(ao_spy(), APP_FLASH_DONE_SIG);
     QActive_unsubscribe(ao_spy(), RECV_DONE_SIG);
+    QActive_unsubscribe(ao_spy(), APP_ERASE_DONE_SIG);
     ao_spy_drain();
     keep_end();
 }
@@ -6154,39 +6240,331 @@ TEST_CASE("an evicted app with the installed app's name keeps the new folder",
     tidy_end_case();
 }
 
-TEST_CASE("app_erase removes the folder", "[appmgr_ao][tidy]")
+/* ---- The erase: everything of the app, and an end that says so --------------- */
+
+TEST_CASE("app_erase takes the image, then every file of the app, then says so",
+          "[appmgr_ao][tidy][erase]")
 {
-    AppFlashEvt e;
+    AppEraseDoneEvt done;
 
     tidy_begin_case();
-    kapps_dir_t dir = s_keep_dir;
-    dir.count       = 1U;
-    dir.e[0].offset = KAPPS_DATA_OFF;
-    dir.e[0].size   = 0x1000U;
-    dir.e[0].seq    = 1U;
-    dir.e[0].flags  = KAPPS_ENTRY_VALID;
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&dir));
-    plant_app(KAPPS_DATA_OFF, "demo");
+    one_demo_installed();
 
-    (void)memset(&e, 0, sizeof(e));
-    e.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_REQ_SIG);
-    (void)snprintf(e.file, sizeof(e.file), "%s", "demo");
-    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+    ask_erase("demo");
 
-    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(APPDATA_RM_REQ_SIG, "demo"),
-        "the folder went with nothing asked of AO_Storage");
-    TEST_ASSERT_FALSE_MESSAGE(klog_has("'demo' removed"),
-        "the erase was reported before its folder was deleted");
-
-    rm_rsp("demo", KODE_OK);
-    TEST_ASSERT_TRUE(klog_has("'demo' removed"));
     TEST_ASSERT_EQUAL_UINT32(0U, kdrv_apps_dir()->count);
+    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"),
+        "the app's files went with nothing asked of AO_Storage");
+    TEST_ASSERT_FALSE_MESSAGE(erase_done(&done),
+        "the erase ended before its files were dealt with");
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("'demo' removed"),
+        "the erase was reported before its files were deleted");
+
+    wipe_rsp("demo", KODE_OK, 1U, 2U, 0U);
+
+    TEST_ASSERT_TRUE_MESSAGE(erase_done(&done), "the erase never said it ended");
+    TEST_ASSERT_EQUAL_STRING("demo", done.name);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, done.status);
+    TEST_ASSERT_TRUE(done.image);
+    TEST_ASSERT_EQUAL_UINT8(1U, done.fs.files);
+    TEST_ASSERT_EQUAL_UINT8(2U, done.sd.files);
+    TEST_ASSERT_TRUE(klog_has("'demo' removed"));
+    tidy_end_case();
+}
+
+/* A file of an app that was never installed, or was evicted, is the same row
+ * in the launcher: the erase reaches it by the same door. */
+TEST_CASE("app_erase of an app that is not installed still takes its files",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("ghost");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "ghost"));
+    wipe_rsp("ghost", KODE_OK, 0U, 1U, 0U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_STRING("ghost", done.name);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, done.status);
+    TEST_ASSERT_FALSE(done.image);
+    TEST_ASSERT_EQUAL_UINT8(1U, done.sd.files);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, kdrv_apps_dir()->count,
+        "an installed app went with a name that is not its own");
+    tidy_end_case();
+}
+
+TEST_CASE("app_erase of a name with nothing anywhere ends as an error",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+
+    ask_erase("nobody");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "nobody"));
+    wipe_rsp("nobody", KODE_OK, 0U, 0U, 0U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_ERROR, done.status);
+    TEST_ASSERT_FALSE(done.image);
+    TEST_ASSERT_FALSE(klog_has("'nobody' removed"));
+    tidy_end_case();
+}
+
+/* No name is no app: nothing is asked of AO_Storage, which would otherwise be
+ * asked for the files of every image that names no project. */
+TEST_CASE("app_erase with no name ends as an error and asks nobody",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("");
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_ERROR, done.status);
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, ""),
+        "AO_Storage was asked for the files of no app");
+    TEST_ASSERT_EQUAL_UINT32(1U, kdrv_apps_dir()->count);
+    tidy_end_case();
+}
+
+/* A card that fails its deletes leaves the file where it was: the end says
+ * so, and carries what did go. */
+TEST_CASE("app_erase says what would not go", "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    wipe_rsp("demo", KODE_OK, 1U, 0U, 1U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_IO_ERROR, done.status);
+    TEST_ASSERT_TRUE(done.image);
+    TEST_ASSERT_EQUAL_UINT8(1U, done.fs.files);
+    TEST_ASSERT_EQUAL_UINT8(1U, done.sd.left);
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("'demo' removed"),
+        "an app with a file left behind was called removed");
+    tidy_end_case();
+}
+
+TEST_CASE("app_erase says a data folder that would not empty was left",
+          "[appmgr_ao][tidy][erase]")
+{
+    StorageAppWipeRspEvt r;
+    AppEraseDoneEvt      done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    (void)memset(&r, 0, sizeof(r));
+    r.super = (QEvt)QEVT_INITIALIZER(STORAGE_APP_WIPE_RSP_SIG);
+    (void)snprintf(r.project, sizeof(r.project), "%s", "demo");
+    r.status     = (uint8_t)KODE_OK;
+    r.fs.present = true;
+    r.fs.folder  = (uint8_t)APP_WIPE_FOLDER_LEFT;
+    QASM_DISPATCH(AO_AppMgr, &r.super, 0U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_IO_ERROR, done.status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, done.fs.folder);
+    TEST_ASSERT_FALSE(done.sd.present);
+    tidy_end_case();
+}
+
+/* AO_Storage in the middle of a transfer refuses the wipe: the image is gone,
+ * and the end says the files were not looked at rather than calling them gone. */
+TEST_CASE("app_erase with AO_Storage busy says the files were not looked at",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    wipe_rsp("demo", KODE_DENIED, 0U, 0U, 0U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, done.status);
+    TEST_ASSERT_TRUE(done.image);
+    TEST_ASSERT_FALSE(klog_has("'demo' removed"));
+    tidy_end_case();
+}
+
+TEST_CASE("a silent AO_Storage ends the erase as a timeout",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    run_ticks(QF_SUPPORT_STEPS(APPMGR_WIPE_MS) / 2U);
+    TEST_ASSERT_FALSE_MESSAGE(erase_done(&done),
+        "the erase gave up before its deadline");
+    run_ticks((QF_SUPPORT_STEPS(APPMGR_WIPE_MS) / 2U) + 20U);
+
+    TEST_ASSERT_TRUE_MESSAGE(erase_done(&done),
+        "a silent AO_Storage held the erase for good");
+    TEST_ASSERT_EQUAL_UINT8(KODE_TIMEOUT, done.status);
+    TEST_ASSERT_TRUE(done.image);
+
+    /* The answer, long late, ends nothing a second time. */
+    wipe_rsp("demo", KODE_OK, 1U, 0U, 0U);
+    TEST_ASSERT_FALSE(erase_done(&done));
+    (void)storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo");
+    tidy_end_case();
+}
+
+/* An answer is taken only when it names the erase in flight. */
+TEST_CASE("a wipe answer for another project does not end the erase",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    wipe_rsp("other", KODE_OK, 3U, 0U, 0U);
+    TEST_ASSERT_FALSE_MESSAGE(erase_done(&done),
+        "an answer that names another project ended this erase");
+
+    wipe_rsp("demo", KODE_OK, 0U, 0U, 0U);
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(0U, done.fs.files);
+    tidy_end_case();
+}
+
+/* The console and the launcher both wait on the end of an erase: one that
+ * cannot start is told so, never dropped. */
+TEST_CASE("an erase asked while another is under way is answered busy",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    ask_erase("second");
+
+    TEST_ASSERT_TRUE_MESSAGE(erase_done(&done),
+        "an erase refused while busy went unanswered");
+    TEST_ASSERT_EQUAL_STRING("second", done.name);
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, done.status);
+    TEST_ASSERT_FALSE(done.image);
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "second"),
+        "a refused erase asked AO_Storage all the same");
+
+    wipe_rsp("demo", KODE_OK, 0U, 0U, 0U);
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_STRING("demo", done.name);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, done.status);
+    tidy_end_case();
+}
+
+TEST_CASE("an erase asked while an install is opening is answered busy",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+    ask_flash_dst("x.bin", (uint8_t)KFW_TARGET_APP);   /* now opening */
+
+    ask_erase("demo");
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, done.status);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, kdrv_apps_dir()->count,
+        "an app was erased in the middle of an install");
+    let_the_open_expire();
+    tidy_end_case();
+}
+
+/* The override is the person's word about that app: it goes with the app, or
+ * the next app of that name would wear it. */
+TEST_CASE("app_erase drops the app's category override",
+          "[appmgr_ao][tidy][erase]")
+{
+    char cats[KODE_APP_CATEGORY_MAX];
+
+    tidy_begin_case();
+    one_demo_installed();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kapp_cat_set("demo", "games"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kapp_cat_set("other", "tools"));
+
+    ask_erase("demo");
+
+    TEST_ASSERT_FALSE_MESSAGE(kapp_cat_resolve("demo", cats, sizeof(cats)),
+        "the erased app's override stayed");
+    TEST_ASSERT_TRUE_MESSAGE(kapp_cat_resolve("other", cats, sizeof(cats)),
+        "another app's override went");
+    (void)kapp_cat_clear("other");
+    tidy_settle();
+    tidy_end_case();
+}
+
+/* A mailbox that still holds the app would be adopted at the next boot, and
+ * the app would be back. */
+TEST_CASE("app_erase empties a mailbox that holds the same app",
+          "[appmgr_ao][tidy][erase]")
+{
+    uint32_t img = 0U;
+    uint32_t dec = 0U;
+
+    tidy_begin_case();
+    one_demo_installed();
+    (void)park_pending("demo");
+    TEST_ASSERT_TRUE(kdrv_apps_pending_present(&img, &dec));
+
+    ask_erase("demo");
+
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_pending_present(&img, &dec),
+        "the mailbox still holds the erased app");
+    tidy_settle();
+    tidy_end_case();
+}
+
+TEST_CASE("app_erase leaves a mailbox that holds another app",
+          "[appmgr_ao][tidy][erase]")
+{
+    uint32_t img = 0U;
+    uint32_t dec = 0U;
+
+    tidy_begin_case();
+    one_demo_installed();
+    (void)park_pending("other");
+
+    ask_erase("demo");
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_pending_present(&img, &dec),
+        "another app's mailbox image went with the erase");
+    (void)kdrv_apps_pending_consume();
+    tidy_settle();
     tidy_end_case();
 }
 
 /* The directory is committed before the tidy starts, so a listing is safe
- * while the folder goes: `app_erase` answers `>ok` at once and the console's
- * next `app_list` lands in tidying. */
+ * while the files go: the launcher asks for one right behind its erase, and it
+ * lands in tidying. */
 TEST_CASE("app_list is answered while the folder is tidied",
           "[appmgr_ao][tidy]")
 {
@@ -6210,8 +6588,8 @@ TEST_CASE("app_list is answered while the folder is tidied",
     e.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_REQ_SIG);
     (void)snprintf(e.file, sizeof(e.file), "%s", "demo");
     QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
-    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(APPDATA_RM_REQ_SIG, "demo"),
-        "the folder went with nothing asked of AO_Storage");
+    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"),
+        "the app's files went with nothing asked of AO_Storage");
 
     QASM_DISPATCH(AO_AppMgr, &list.super, 0U);
     for ( const QEvt *got = ao_spy_take(); NULL != got; got = ao_spy_take() )
@@ -6226,7 +6604,7 @@ TEST_CASE("app_list is answered while the folder is tidied",
     TEST_ASSERT_FALSE_MESSAGE(klog_has("busy tidying"),
         "the listing was refused as a busy request");
 
-    rm_rsp("demo", KODE_OK);
+    wipe_rsp("demo", KODE_OK, 0U, 0U, 0U);
     TEST_ASSERT_TRUE_MESSAGE(klog_has("'demo' removed"),
         "answering the listing disturbed the tidy");
     tidy_end_case();

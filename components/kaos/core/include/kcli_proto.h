@@ -21,7 +21,11 @@ typedef enum {
                            *   unknown enum member, or unknown key.
                            *   msg = the key.                              */
     KCLI_ERR_BUSY    = 4, /**< A multi-record command is still in flight;
-                           *   wait for its `>ok`/`>err` terminator.
+                           *   wait for its `>ok`/`>err` terminator. One
+                           *   verb does not wait: `wifi_scan_stop` is
+                           *   answered at once, on its own port, while
+                           *   the command in flight goes on to its own
+                           *   terminator.
                            *   Also answered when the owner is busy with
                            *   another request, which passes: nfc_field,
                            *   rfid_field, rfid_read and rfid_write while
@@ -89,7 +93,12 @@ typedef enum {
                            *   one word (status_word() in console_ao.c:
                            *   error, timeout, noresources, iofail, ...),
                            *   except that nfc_field says absent for its
-                           *   KODE_IO_ERROR, no reader fitted. */
+                           *   KODE_IO_ERROR, no reader fitted. wifi_scan:
+                           *   stopped, when its sweep was ended before its
+                           *   last channel, by `wifi_scan_stop` or by a
+                           *   job that needed the radio - the networks
+                           *   before it were heard, the rest of the air
+                           *   was not swept. */
     KCLI_ERR_TIMEOUT = 6, /**< The owning AO never answered: the command's
                            *   closing event did not arrive in time. The
                            *   console is idle again. msg = the verb.      */

@@ -2043,6 +2043,20 @@ void radio_boot_release(void);
 void wifi_scan_request(void);
 
 /**
+ * @brief Ask AO_Radio to end the listing in flight before its last channel.
+ *
+ * The sweep wifi_scan_request() started ends after its step on the air, a few
+ * seconds at most, and its WIFI_SCAN_END_SIG says @c cut, with the networks
+ * heard so far before it. No other sweep is touched: not an asked scan, the
+ * automatic join's round or a self-test row. With no listing in flight
+ * nothing happens. No answer of its own.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
+ */
+bool wifi_scan_stop_request(void);
+
+/**
  * @brief Scan for the AO @p who; kode_sys_wifi_scan()'s door.
  *
  * Brings the link up if needed. Entries are POSTED to @p who as WIFI_SCAN_ENTRY_SIG
@@ -3318,6 +3332,24 @@ void appdata_request(const char *project, QActive *who);
  */
 kode_status_t appdata_rm_request(const char *project, QActive *who);
 
+/**
+ * @brief Take every file of @p project off both media.
+ *
+ * The images at the root of the internal partition and of the card whose
+ * descriptor names @p project, whatever the files are called, and the app's
+ * data folder on each. `kodeos.bin` and `c5_slave.bin` are never opened. One
+ * file a step, so the walk never holds AO_Storage. Always answered once
+ * posted, with a StorageAppWipeRspEvt naming @p project; an absent card is
+ * said there, and is no failure.
+ *
+ * @param project The app's project name, as the binary declares it.
+ * @param who     Where STORAGE_APP_WIPE_RSP_SIG is posted. Never NULL.
+ * @return KODE_OK when the request is posted and an answer is owed;
+ *         KODE_NO_RESOURCES when the event pool is dry: nothing was posted and
+ *         no answer will come.
+ */
+kode_status_t storage_app_wipe_request(const char *project, QActive *who);
+
 /** @brief Write one app's data folder (APPDATA_PUT_REQ_SIG). */
 typedef struct {
     QEvt            super;
@@ -3478,8 +3510,24 @@ void appmgr_run_request(const char *name);
  */
 void appmgr_cancel_request(void);
 
-/** @brief Ask AO_AppMgr to remove the installed app named @p name. */
+/**
+ * @brief Ask AO_AppMgr to take everything of the app named @p name off the
+ *        board.
+ *
+ * The installed image and its directory entry, its category override, a
+ * mailbox image of that project, and through AO_Storage every image file of
+ * the project and its data folder on both media. The app need not be
+ * installed: its files alone are removed the same way. The end is published
+ * as APP_ERASE_DONE_SIG (AppEraseDoneEvt), a refusal included.
+ *
+ * @param name The app's project name.
+ */
 void appmgr_erase_request(const char *name);
+
+/** @brief How long AO_AppMgr waits for AO_Storage to take an erased app's
+ *         files off both media, in ms: one descriptor read per image file
+ *         there is, and the deletes. */
+#define APPMGR_WIPE_MS      (20000U)
 
 /**
  * @brief Ask AO_AppMgr to assign or drop an app's categories.

@@ -9319,6 +9319,296 @@ TEST_CASE("an autojoin that finds the vault empty says so once, however often it
     c5_case_end();
 }
 
+/* ---- wifi_scan_stop -------------------------------------------------------------- */
+
+/**
+ * @brief The listing's end, taken from the spy: every other event is read past.
+ * @return The end; the case fails when the listing was never closed.
+ */
+static const WifiScanEndEvt *listing_end(void)
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "the listing was never closed");
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            return (const WifiScanEndEvt *)(const void *)e;
+        }
+    }
+}
+
+/** @brief Ask for the stop the way `wifi_scan_stop` does, and let AO_Radio read it. */
+static void ask_stop(void)
+{
+    TEST_ASSERT_TRUE(wifi_scan_stop_request());
+    pump();
+}
+
+/* The stop is in before the fake worker starts the sweep, so not one step
+ * runs: the driver reads the cut between steps, the first included. The
+ * sweep's end withdraws it, and the next sweep runs whole. */
+TEST_CASE("a stop asked during a listed scan cuts the sweep short",
+          "[radio_ao][scan_stop]")
+{
+    const WifiScanEndEvt *end;
+
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: the scan ends after the step on the air"));
+
+    seed_air(2U, -50);
+    run_scan_rc(KODE_DENIED);
+    TEST_ASSERT_EQUAL_UINT(0U, s_starts);
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+
+    end = listing_end();
+    TEST_ASSERT_FALSE(end->ok);
+    TEST_ASSERT_FALSE(end->busy);
+    TEST_ASSERT_TRUE_MESSAGE(end->cut, "the end does not say the sweep was cut");
+    TEST_ASSERT_EQUAL_UINT8(0U, end->count);
+    TEST_ASSERT_FALSE(job_held());
+
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "the cut outlived the sweep it was for");
+}
+
+/* The steps that ran before the stop are on the bus already; the end counts
+ * them and says the list is not the whole air. */
+TEST_CASE("a stopped scan publishes what it heard and an end that says cut",
+          "[radio_ao][scan_stop]")
+{
+    const WifiScanEndEvt *end;
+    unsigned              entries = 0U;
+
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    seed_air(3U, -50);
+    run_scan();
+    pump();
+    ask_stop();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "the listing was never closed");
+        if ( (QSignal)WIFI_SCAN_ENTRY_SIG == e->sig )
+        {
+            ++entries;
+        }
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            end = (const WifiScanEndEvt *)(const void *)e;
+            break;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT(3U, entries);
+    TEST_ASSERT_FALSE(end->ok);
+    TEST_ASSERT_TRUE(end->cut);
+    TEST_ASSERT_EQUAL_UINT8(3U, end->count);
+}
+
+/* A sweep that failed, or that the link dropped under, was not cut by anybody. */
+TEST_CASE("a scan that fails is not said to be cut", "[radio_ao][scan_stop]")
+{
+    const WifiScanEndEvt *end;
+
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+
+    end = listing_end();
+    TEST_ASSERT_FALSE(end->ok);
+    TEST_ASSERT_FALSE(end->cut);
+}
+
+TEST_CASE("a stop with no scan running sets nothing, and the next sweep runs whole",
+          "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    go_up();
+    unsigned const before = job_submits();
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    TEST_ASSERT_EQUAL_UINT(before, job_submits());
+    TEST_ASSERT_FALSE(job_held());
+
+    seed_air(2U, -50);
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "a stop with nothing to stop cut the next sweep");
+}
+
+TEST_CASE("a stop with no link sets nothing", "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    unsigned const before = job_submits();
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(before, job_submits(), "a stop brought the link up");
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+
+    seed_air(2U, -50);
+    run_scan();
+    TEST_ASSERT_TRUE(1U < s_starts);
+}
+
+/* The round's sweep is not a listing: cut, the round would run it again. */
+TEST_CASE("a stop leaves the automatic round's sweep alone", "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("line-ap-0");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    seed_air(2U, -50);
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "the round's sweep was cut");
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    ao_spy_drain();
+}
+
+/* A row judged on half the air would fail a good unit. */
+TEST_CASE("a stop leaves the c5 row's sweep alone", "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    go_up();
+    ask_row();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_C5_INFO, running_job());
+    finish_info();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    finish_rest();   /* its sweep runs to its end, or run_scan() fails the case */
+    TEST_ASSERT_TRUE(take_verdict());
+}
+
+/* An asked scan is its asker's: its end would say the scan failed. */
+TEST_CASE("a stop leaves an asked scan alone", "[radio_ao][scan_stop]")
+{
+    scan_seen_t s;
+
+    radio_fresh();
+    go_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_wifi_scan(ao_spy()));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    scan_sweep(3U, -50, KODE_OK);
+
+    s = scan_take_spy();
+    TEST_ASSERT_EQUAL_UINT(3U, s.entries);
+    TEST_ASSERT_EQUAL_UINT(1U, s.ends);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, s.end->rc);
+    ao_spy_drain();
+}
+
+/* The sweep was past its last step when the stop came: the list is whole and
+ * says so, and the cut does not wait for the next sweep. */
+TEST_CASE("a stop after the last step leaves the scan whole and the cut withdrawn",
+          "[radio_ao][scan_stop]")
+{
+    const WifiScanEndEvt *end;
+
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    seed_air(2U, -50);
+    run_scan();
+    pump();
+
+    ask_stop();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+
+    end = listing_end();
+    TEST_ASSERT_TRUE(end->ok);
+    TEST_ASSERT_FALSE(end->cut);
+    TEST_ASSERT_EQUAL_UINT8(2U, end->count);
+
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "the cut waited for the next sweep");
+}
+
+/* The link drops with the stop asked and the sweep still on the worker: the
+ * listing is closed by the lost link, and the sweep that follows the next
+ * bring-up must not find the cut standing. */
+TEST_CASE("a stopped scan the link drops under leaves no cut standing",
+          "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    finish_lost(KODE_ERROR);
+    TEST_ASSERT_FALSE(listing_end()->ok);
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+
+    seed_air(2U, -50);
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "the cut outlived the link");
+    c5_case_end();
+}
+
+/* The door keeps AO_Radio's half of its queue: within the margin nothing is
+ * posted, and the caller is told. */
+TEST_CASE("a stop asked on a full radio queue is refused and posts nothing",
+          "[radio_ao][scan_stop]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+    const QEvt       *e      = NULL;
+
+    radio_fresh();
+    for ( uint32_t guard = 0U;
+         (64U > guard)
+         && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_POST_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    TEST_ASSERT_FALSE(wifi_scan_stop_request());
+    TEST_ASSERT_EQUAL_UINT(KQP_RADIO_POST_MARGIN, uxQueueSpacesAvailable(AO_Radio->eQueue));
+    while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+    {
+        TEST_ASSERT_NOT_EQUAL((int)WIFI_SCAN_STOP_REQ_SIG, (int)e->sig);
+        QF_gc(e);
+    }
+}
+
 /* The next file to run the AO cannot finish a job this one holds. */
 TEST_CASE("AO_Radio is left off for the next file", "[radio_ao]")
 {

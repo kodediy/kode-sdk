@@ -6471,6 +6471,39 @@ static bool line_handed_back(uint8_t src)
 }
 
 /**
+ * @brief Run a line that arrived with a command in flight, when it is its
+ *        owner's verb that does not wait (kverbs_t.nowait).
+ *
+ * Only the bare verb: with anything behind it the line is as busy as any
+ * other. The handler answers its one line and begins no command, so the
+ * command in flight keeps the console; the caller has pointed the replies at
+ * the new line's port.
+ *
+ * @param verb The line's first token.
+ * @param rest The line behind it.
+ * @return true when the line was run, and has answered.
+ */
+static bool console_exec_nowait(const char *verb, char *rest)
+{
+    const kverbs_t *owner = NULL;
+    const kverb_t * const row = kverbs_find(verb, &owner);
+    char *cur = rest;
+    char *tok = NULL;
+    bool  ran = false;
+
+    if ( (NULL != row) && (NULL != owner->nowait) && (strcmp(owner->nowait, row->verb) == 0)
+        && (CONSOLE_TOK_END == console_token(&cur, &tok)) )
+    {
+        karg_val_t vals[KCLI_MAX_KEYS];
+
+        (void)memset(vals, 0, sizeof(vals));
+        row->fn(row, vals);
+        ran = true;
+    }
+    return ran;
+}
+
+/**
  * @brief Parse and run one line: split it, find the verb, validate against
  *        its specs, hand the values to the handler.
  *
@@ -6516,12 +6549,16 @@ static void console_exec(Console *me, char *line)
     lowpower_input_note(me->src);
     if ( (uint8_t)KCLI_IDLE != me->inflight )
     {
-        /* Busy, whatever else is wrong with the line. The refusal goes to the
-         * NEW line's port; the running command keeps its own. */
+        /* Busy, whatever else is wrong with the line, unless it is a verb
+         * that does not wait. Either answer goes to the NEW line's port; the
+         * running command keeps its own. */
         uint8_t const running = me->cmd_src;
 
         me->cmd_src = me->src;
-        console_reply_err(KCLI_ERR_BUSY, "busy");
+        if ( !console_exec_nowait(tok, cur) )
+        {
+            console_reply_err(KCLI_ERR_BUSY, "busy");
+        }
         me->cmd_src = running;
         return;
     }
@@ -6656,6 +6693,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, RECV_FAIL_SIG);
     QActive_subscribe(&me->super, RECV_STALL_SIG);
     QActive_subscribe(&me->super, APP_CAT_RSP_SIG);
+    QActive_subscribe(&me->super, APP_ERASE_DONE_SIG);
     QActive_subscribe(&me->super, TEST_RESULT_SIG);
     QActive_subscribe(&me->super, AUTOTEST_BEGIN_SIG);
     QActive_subscribe(&me->super, AUTOTEST_ROW_SIG);

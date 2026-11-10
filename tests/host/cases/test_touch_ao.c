@@ -96,8 +96,8 @@ static void finger(bool down, int16_t x, int16_t y)
 /**
  * @brief Bring AO_Touch up, once for the whole binary, and idle.
  *
- * Once, for the same reason AO_Power is: Touch_tracking arms a PERIODIC
- * QTimeEvt on entry, and re-running the constructor over a timer that is
+ * Once, for the same reason AO_Power is: Touch_tracking arms a QTimeEvt
+ * on entry, and re-running the constructor over a timer that is
  * still linked into QF's list corrupts that list. The AO is left in
  * Touch_idle here and driven into sampling by the case that wants it.
  */
@@ -248,7 +248,7 @@ static const TouchEvt *published(void)
  * @brief Dispatch whatever is waiting in AO_Touch's queue.
  *
  * By hand rather than through qf_support_pump(): this AO is a background
- * one, for its periodic poll timer, and the pump drains every background
+ * one, for its poll timer, and the pump drains every background
  * queue before it dispatches - a request posted a moment ago included.
  */
 static void serve(void)
@@ -544,6 +544,39 @@ TEST_CASE("the IRQ falling starts the poll, and a press is read from it",
     TEST_ASSERT_EQUAL_INT16(50, e->y);
 
     /* Back to rest for the cases that follow. */
+    sample(false, 40, 50);
+    ao_spy_drain();
+    mock_down();
+}
+
+/* QP posts a time event with no margin, and a queue that is full is an
+ * assertion and a reset. A poll that is periodic goes on posting whether or
+ * not the AO took the last one: sixteen periods without the CPU fill its
+ * queue, and at ten milliseconds a period that is a stall of a sixth of a
+ * second. So one poll waits at most, and the one that is taken arms the next. */
+TEST_CASE("a poll nobody took is not followed by another; the one taken arms the next",
+          "[touch_ao]")
+{
+    touch_armed();
+    p6_moves(true);
+    finger(true, 40, 50);
+
+    /* Fifteen periods go by and AO_Touch never runs. */
+    for ( uint32_t i = 0U; i < (15U * KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS)); ++i )
+    {
+        QTIMEEVT_TICK_X(0U, (void *)0);
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, (unsigned)uxQueueMessagesWaiting(AO_Touch->eQueue),
+                                   "every period queued a poll the AO had not taken");
+
+    serve();
+    TEST_ASSERT_EQUAL_UINT(1U, s_reads);
+    TEST_ASSERT_NOT_NULL(published());
+
+    /* One period after the poll that was taken, the next. */
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Touch, 1U));
+    TEST_ASSERT_EQUAL_UINT(2U, s_reads);
+
     sample(false, 40, 50);
     ao_spy_drain();
     mock_down();
@@ -1541,6 +1574,28 @@ TEST_CASE("a contact still for a minute is released, stale, and refuses no round
     round_for(KODE_LP_ASLEEP);
     expect_answer(false, NULL);
     state_awake();
+    mock_down();
+}
+
+/* The same holds once a second: a contact that stopped counting is looked at
+ * by one poll at a time, however long AO_Touch goes without running. */
+TEST_CASE("a held contact's look nobody took is not followed by another",
+          "[touch_ao][still]")
+{
+    touch_sampling();
+    TEST_ASSERT_EQUAL_UINT(2U, hold_for(STILL_POLLS, 200, 250, 0));
+
+    /* Two of its periods go by and AO_Touch never runs. */
+    for ( uint32_t i = 0U; i < ((2U * KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS)) + 1U); ++i )
+    {
+        QTIMEEVT_TICK_X(0U, (void *)0);
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, (unsigned)uxQueueMessagesWaiting(AO_Touch->eQueue),
+                                   "every period queued a look the AO had not taken");
+
+    serve();
+    sample(false, 200, 250);
+    ao_spy_drain();
     mock_down();
 }
 

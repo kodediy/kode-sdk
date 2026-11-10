@@ -91,6 +91,28 @@ static kode_status_t verb_rows_check(const kverbs_t *table)
     return st;
 }
 
+/**
+ * @brief Whether the verb @p table says does not wait is one it may name.
+ *
+ * The console runs it with no values, on top of a command in flight: it has
+ * to be a row of the table, and one that takes no keys.
+ *
+ * @param table The table, its rows already checked.
+ * @return true with no such verb, or with one that is a keyless row.
+ */
+static bool verb_nowait_ok(const kverbs_t *table)
+{
+    bool ok = (NULL == table->nowait);
+
+    for ( size_t i = 0U; (i < table->n) && !ok; ++i )
+    {
+        const kverb_t * const r = &table->verbs[i];
+
+        ok = (strcmp(r->verb, table->nowait) == 0) && (0U == r->n_args);
+    }
+    return ok;
+}
+
 kode_status_t kverbs_add(const kverbs_t *table)
 {
     kode_status_t st = KODE_OK;
@@ -113,6 +135,11 @@ kode_status_t kverbs_add(const kverbs_t *table)
     else
     {
         st = verb_rows_check(table);
+        if ( (KODE_OK == st) && !verb_nowait_ok(table) )
+        {
+            KLOG_E(TAG, "'%s' does not wait, and is not a row with no keys", table->nowait);
+            st = KODE_DENIED;
+        }
         if ( KODE_OK == st )
         {
             size_t const at = verb_tables_in();

@@ -1068,6 +1068,13 @@ void wifi_scan_request(void)
     static const QEvt evt = QEVT_INITIALIZER(WIFI_SCAN_REQ_SIG);
     QACTIVE_POST(AO_Radio, &evt, NULL);
 }
+
+bool wifi_scan_stop_request(void)
+{
+    static const QEvt evt = QEVT_INITIALIZER(WIFI_SCAN_STOP_REQ_SIG);
+
+    return QACTIVE_POST_X(AO_Radio, &evt, KQP_RADIO_POST_MARGIN, NULL);
+}
 #endif /* CONFIG_KODEOS_WIFI */
 
 #if RADIO_ASKS
@@ -3236,6 +3243,7 @@ static void wifi_publish_scan_end(Radio * const me, uint8_t count, bool ok)
         e->count = count;
         e->ok    = ok;
         e->busy  = false;
+        e->cut   = false;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
 }
@@ -3256,9 +3264,58 @@ static void wifi_publish_scan_busy(Radio * const me)
         e->count = 0U;
         e->ok    = false;
         e->busy  = true;
+        e->cut   = false;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
     (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
+}
+
+/**
+ * @brief Publish the end of a Wi-Fi listing whose sweep was cut short.
+ *
+ * Not a whole list and not a failure: the networks before it were heard, and
+ * the rest of the air was never swept.
+ *
+ * @param me    The AO.
+ * @param count How many entries were published.
+ */
+static void wifi_publish_scan_cut(Radio * const me, uint8_t count)
+{
+    WifiScanEndEvt *e = Q_NEW_X(WifiScanEndEvt, 0U, WIFI_SCAN_END_SIG);
+    if ( NULL != e )
+    {
+        e->count = count;
+        e->ok    = false;
+        e->busy  = false;
+        e->cut   = true;
+        QACTIVE_PUBLISH(&e->super, &me->super);
+    }
+    (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
+}
+
+/**
+ * @brief wifi_scan_stop: end the listing in flight after its step on the air.
+ *
+ * Only a listing is cut. The flag is the driver's and every sweep reads it,
+ * so it is set only while the listing's own sweep is with the worker. That
+ * sweep's end withdraws it (RADIO_OUT_WIFI_SCAN_DONE), and so does the link's
+ * loss: it never waits for the next sweep. An asked scan, the automatic
+ * round, the row and the radio check run with @c scan_live false and are
+ * left whole.
+ *
+ * @param me The AO.
+ */
+static void wifi_scan_stop(Radio const * const me)
+{
+    if ( me->scan_live )
+    {
+        KLOG_N(TAG, "wifi_scan_stop: the scan ends after the step on the air");
+        kdrv_wifi_scan_abort(true);
+    }
+    else
+    {
+        KLOG_N(TAG, "wifi_scan_stop: no scan to stop");
+    }
 }
 
 /**
@@ -3337,9 +3394,16 @@ static void wifi_drain_scan(Radio * const me)
     }
 }
 
-/** @brief Close a listing: whatever is left in the ring, then the marker. */
-static void wifi_finish_scan(Radio * const me, bool ok)
+/**
+ * @brief Close a listing: whatever is left in the ring, then the marker.
+ * @param me    The AO.
+ * @param sweep How the sweep ended: KODE_OK at its last step, KODE_DENIED cut
+ *              short (kdrv_wifi_scan_abort()), anything else a failure.
+ */
+static void wifi_finish_scan(Radio * const me, kode_status_t sweep)
 {
+    bool const ok = (KODE_OK == sweep);
+
     wifi_drain_scan(me);
     if ( scan_ask_running(me, (uint8_t)KQP_SCAN_WIFI) )
     {
@@ -3360,7 +3424,14 @@ static void wifi_finish_scan(Radio * const me, bool ok)
     {
         count = (uint8_t)me->scan_sent;
     }
-    wifi_publish_scan_end(me, count, ok);
+    if ( KODE_DENIED == sweep )
+    {
+        wifi_publish_scan_cut(me, count);
+    }
+    else
+    {
+        wifi_publish_scan_end(me, count, ok);
+    }
     me->scan_live = false;
     me->scan_sent = 0U;
 }
@@ -3399,6 +3470,7 @@ static void wifi_publish_saved(Radio * const me, bool ok)
         end->count = sent;
         end->ok    = ok;
         end->busy  = false;
+        end->cut   = false;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
 }
@@ -3843,6 +3915,7 @@ static void ble_publish_scan(Radio * const me)
         end->count = sent;
         end->ok    = true;
         end->busy  = false;
+        end->cut   = false;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
 }
@@ -3856,6 +3929,7 @@ static void ble_publish_scan_end(Radio * const me, bool ok)
         end->count = 0U;
         end->ok    = ok;
         end->busy  = false;
+        end->cut   = false;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
 }
@@ -3873,6 +3947,7 @@ static void ble_publish_scan_busy(Radio * const me)
         end->count = 0U;
         end->ok    = false;
         end->busy  = true;
+        end->cut   = false;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
     (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
@@ -9429,6 +9504,11 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case WIFI_SCAN_STOP_REQ_SIG: {
+            wifi_scan_stop(me);   /* no link, so no listing: said, nothing set */
+            status = Q_HANDLED();
+            break;
+        }
         case WIFI_JOIN_REQ_SIG:
         case WIFI_LEAVE_REQ_SIG:
         case WIFI_AUTO_REQ_SIG: {
@@ -10440,8 +10520,12 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
                  * are real; the rest never will, and only the marker
                  * says so. */
                 KLOG_W(TAG, "the link dropped mid-scan");
-                wifi_finish_scan(me, false);
+                wifi_finish_scan(me, KODE_ERROR);
             }
+            /* A cut asked of the sweep in flight ends with the link: that
+             * sweep's job comes back to a state that reads no scan outcome,
+             * and the cut would be met by the first sweep of the next link. */
+            kdrv_wifi_scan_abort(false);
 #endif
             radio_relink_note(me, (kode_status_t)job->status);
             radio_unmount_for_teardown(me);
@@ -10542,7 +10626,7 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
                 /* Most of the listing is already on the wire; `ok` still
                  * means the sweep reached its end, so a cut-short one is a
                  * refusal behind the entries found, never a whole list. */
-                wifi_finish_scan(me, (uint8_t)KODE_OK == job->status);
+                wifi_finish_scan(me, (kode_status_t)job->status);
             }
             status = Q_HANDLED();
             break;
@@ -11186,6 +11270,11 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 me->scan_sent = 0U;
                 KLOG_I(TAG, "scanning; networks are listed as they are found");
             }
+            status = Q_HANDLED();
+            break;
+        }
+        case WIFI_SCAN_STOP_REQ_SIG: {
+            wifi_scan_stop(me);
             status = Q_HANDLED();
             break;
         }

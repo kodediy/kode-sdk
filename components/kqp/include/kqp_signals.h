@@ -361,6 +361,12 @@ enum KodeSignals {
                                  *   back, so any subscriber - AO_Console
                                  *   today - can close on it without AO_AppMgr
                                  *   knowing who asked.                       */
+    APP_ERASE_DONE_SIG,         /**< AO_AppMgr: an erase ended
+                                 *   (AppEraseDoneEvt): what went, what stayed
+                                 *   and where. Published, so the console and
+                                 *   the launcher both close on it; a request
+                                 *   refused while AO_AppMgr is busy ends the
+                                 *   same way.                                */
 
     /* The one *request* that is published rather than posted. AO_Gui lives in
      * kgui, which requires the SDK; the console lives in kaos, underneath it.
@@ -592,6 +598,15 @@ enum KodeSignals {
                                  *   step of a put in progress.               */
     APPDATA_PUT_RSP_SIG,        /**< To the asker: how that put ended
                                  *   (AppDataPutRspEvt).                      */
+    STORAGE_APP_WIPE_REQ_SIG,   /**< AO_Storage: take every file of one app
+                                 *   off both media (AppDataReqEvt again): the
+                                 *   images at a medium's root whose descriptor
+                                 *   names the project, and its data folder.
+                                 *   Posted directly, never published.        */
+    STORAGE_APP_WIPE_NEXT_SIG,  /**< AO_Storage private QTimeEvt: the next
+                                 *   file of the wipe in progress.            */
+    STORAGE_APP_WIPE_RSP_SIG,   /**< To the asker: what went and what stayed
+                                 *   on each medium (StorageAppWipeRspEvt).   */
     APPDATA_GET_REQ_SIG,        /**< AO_AppMgr: fetch one app's data folder
                                  *   from a URL and have AO_Storage write it
                                  *   (AppDataGetReqEvt). Posted directly.     */
@@ -1440,6 +1455,11 @@ enum KodeSignals {
     WIFI_SCAN_REQ_SIG,          /**< AO_Radio: scan. Entries follow on the
                                  *   bus as the sweep finds them, channel by
                                  *   channel, then WIFI_SCAN_END_SIG.        */
+    WIFI_SCAN_STOP_REQ_SIG,     /**< AO_Radio: end the listing in flight
+                                 *   after its step on the air
+                                 *   (wifi_scan_stop_request()). No payload
+                                 *   and no answer of its own: the listing's
+                                 *   WIFI_SCAN_END_SIG says it was cut.      */
     RADIO_SCAN_ASK_SIG,         /**< AO_Radio: a scan asked by an AO or a
                                  *   blocked task (ScanAskEvt), the sweep
                                  *   WIFI_SCAN_REQ_SIG runs or the listen
@@ -2519,6 +2539,54 @@ typedef struct {
                                             *   the answer that names it.     */
     uint8_t status;       /**< kode_status_t, as the four lines above read it. */
 } AppDataRmRspEvt;
+
+/** @brief What became of an app's data folder on one medium. */
+typedef enum {
+    APP_WIPE_FOLDER_NONE = 0,   /**< There was none.                          */
+    APP_WIPE_FOLDER_REMOVED,    /**< It is gone.                              */
+    APP_WIPE_FOLDER_LEFT        /**< It is there and something in it would not go. */
+} AppWipeFolder;
+
+/** @brief What a wipe of one app did on one medium. */
+typedef struct {
+    bool    present;   /**< The medium was mounted and its root was walked.   */
+    uint8_t files;     /**< Images of the project removed.                    */
+    uint8_t left;      /**< Images of the project that would not go.          */
+    uint8_t folder;    /**< AppWipeFolder.                                    */
+} AppWipeMedium;
+
+/**
+ * @brief How a wipe of one app's files ended (STORAGE_APP_WIPE_RSP_SIG).
+ *
+ * KODE_OK says the wipe ran to its end, and the two media say what it found
+ * and whether it went: a file left behind is in `left`, not in the status.
+ * KODE_DENIED a transfer was in flight and KODE_NO_RESOURCES there was no
+ * memory for the list of files: nothing was touched.
+ */
+typedef struct {
+    QEvt          super;
+    char          project[KODE_APP_PROJECT_MAX]; /**< Echoed: answers can cross. */
+    uint8_t       status;  /**< kode_status_t, as the lines above read it.     */
+    AppWipeMedium fs;      /**< The internal partition.                        */
+    AppWipeMedium sd;      /**< The card.                                      */
+} StorageAppWipeRspEvt;
+
+/**
+ * @brief How an erase ended (APP_ERASE_DONE_SIG).
+ *
+ * KODE_OK nothing of the app is left; KODE_ERROR there was nothing of that
+ * name anywhere; KODE_IO_ERROR something would not go, and the two media say
+ * what; KODE_DENIED AO_AppMgr or AO_Storage was busy and KODE_TIMEOUT
+ * AO_Storage did not answer: the files were not looked at.
+ */
+typedef struct {
+    QEvt          super;
+    char          name[KODE_APP_PROJECT_MAX]; /**< The project asked about.    */
+    uint8_t       status;  /**< kode_status_t, as the lines above read it.     */
+    bool          image;   /**< An installed image was removed.                */
+    AppWipeMedium fs;      /**< The internal partition.                        */
+    AppWipeMedium sd;      /**< The card.                                      */
+} AppEraseDoneEvt;
 
 /**
  * @brief The result of a self-test that could not be answered on the spot
@@ -4335,6 +4403,9 @@ typedef struct {
     bool    ok;         /**< false: the scan itself failed; count is 0.     */
     bool    busy;       /**< true: not started, the C5 was busy with another
                          *   job (ok is false, count 0); ask again.          */
+    bool    cut;        /**< true: a Wi-Fi sweep ended before its last step,
+                         *   for a stop or for a job that needed the radio
+                         *   (ok is false); count is what it had heard.      */
 } WifiScanEndEvt;
 
 /** @brief ScanAskEvt.kind: the Wi-Fi sweep; the rows are kdrv_wifi_ap_t. */

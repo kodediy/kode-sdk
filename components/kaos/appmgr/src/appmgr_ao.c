@@ -114,6 +114,7 @@ _Static_assert((KAPPS_MAX_ENTRIES + 1U) <= UINT8_MAX,
  * bounds how long a silent AO_Storage can hold the apps region's owner and
  * the install's end. */
 #define APPMGR_TIDY_TICKS   KQP_TICKS_PER_MS(APPMGR_TIDY_MS)   /**< APPMGR_TIDY_MS (kaos.h) in ticks. */
+#define APPMGR_WIPE_TICKS   KQP_TICKS_PER_MS(APPMGR_WIPE_MS)   /**< APPMGR_WIPE_MS (kaos.h) in ticks. */
 
 /* An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG): its two
  * files, by the names the folder gives them. */
@@ -170,7 +171,8 @@ enum {
     TIDY_AFTER_RECV,         /**< From the console: the done, the `>ok`, then
                               *   the launch.                                 */
     TIDY_AFTER_ADOPT,        /**< From the mailbox: the boot request.        */
-    TIDY_AFTER_ERASE,        /**< An app erased: the folder goes with it.    */
+    TIDY_AFTER_ERASE,        /**< An app erased: its files and its folder go
+                              *   with it, on both media.                    */
     TIDY_AFTER_KEEP          /**< Every app but one erased: the folders go,
                               *   then the asker is answered.                 */
 };
@@ -180,7 +182,9 @@ enum {
     TIDY_STEP_NONE = 0,      /**< None: nothing is owed.                      */
     TIDY_STEP_PUT,           /**< The installed app's folder is being written. */
     TIDY_STEP_RM_OWN,        /**< The installed app's folder is being deleted. */
-    TIDY_STEP_RM_VICTIM      /**< An evicted app's folder is being deleted.   */
+    TIDY_STEP_RM_VICTIM,     /**< An evicted app's folder is being deleted.   */
+    TIDY_STEP_WIPE           /**< An erased app's files are being taken off
+                              *   both media.                                 */
 };
 
 /** @brief What became of one victim's copy. */
@@ -396,6 +400,15 @@ typedef struct {
     char        (*victims)[KDRV_SLOT_PROJECT_MAX];
     uint32_t      victim_count;    /**< Names recorded in victims[].            */
     uint32_t      victim_next;     /**< The next one to ask AO_Storage about.   */
+
+    /* ---- The erase in hand (APP_ERASE_REQ_SIG) ----------------------------
+     * What its end says (AppEraseDoneEvt), kept from the idle step that took
+     * the image to the answer of AO_Storage's wipe; the name is tidy_name. */
+    bool          erase_image;     /**< An installed image was removed.         */
+    bool          erase_extra;     /**< Its override or a mailbox image went.   */
+    uint8_t       erase_status;    /**< kode_status_t the end carries.          */
+    AppWipeMedium erase_fs;        /**< What went on the internal partition.    */
+    AppWipeMedium erase_sd;        /**< What went on the card.                  */
 
     /* ---- An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG) ---
      * One buffer for both files, app.json then icon.k64, which is what
@@ -1435,6 +1448,121 @@ static void region_launch(const char *name)
     boot_app_run_request(d->e[idx].offset, d->e[idx].size, KBOOT_RUN_ONCE);
 }
 
+/* ---- The erase: everything of one app, and an end that says so --------------
+ * The image and its directory entry go in the idle step that takes the
+ * request, with the app's category override and a mailbox image of the same
+ * project; the files and the folders are AO_Storage's, asked in the tidy step.
+ * Every erase ends with one published AppEraseDoneEvt, a refusal included:
+ * the console and the launcher both wait on it.
+ */
+
+/**
+ * @brief Publish the end of an erase.
+ *
+ * @param name   The project the erase was about.
+ * @param st     How it ended; see AppEraseDoneEvt.
+ * @param image  An installed image was removed.
+ * @param fs     What went on the internal partition; NULL when it was not
+ *               looked at.
+ * @param sd     What went on the card; NULL when it was not looked at.
+ */
+static void erase_publish(const char *name, kode_status_t st, bool image,
+                          const AppWipeMedium *fs, const AppWipeMedium *sd)
+{
+    AppEraseDoneEvt *e = Q_NEW_X(AppEraseDoneEvt, 0U, APP_ERASE_DONE_SIG);
+    /* A request carries a file's name, longer than a project's: what does
+     * not fit is cut, and said to the format so the compiler knows. */
+    size_t const room = sizeof(e->name) - 1U;
+
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "out of events; the end of the erase of '%s' goes unsaid",
+               name);
+        return;
+    }
+    (void)snprintf(e->name, sizeof(e->name), "%.*s", (int)room, name);
+    e->status = (uint8_t)st;
+    e->image  = image;
+    (void)memset(&e->fs, 0, sizeof(e->fs));
+    (void)memset(&e->sd, 0, sizeof(e->sd));
+    if ( NULL != fs )
+    {
+        e->fs = *fs;
+    }
+    if ( NULL != sd )
+    {
+        e->sd = *sd;
+    }
+    QACTIVE_PUBLISH(&e->super, AO_AppMgr);
+}
+
+/**
+ * @brief Answer an erase that arrives while the AO is busy: KODE_DENIED,
+ *        published, so nobody waits on an erase that will not run.
+ *
+ * @param e  The request refused; any other signal is left alone.
+ */
+static void erase_deny(QEvt const * const e)
+{
+    if ( (QSignal)APP_ERASE_REQ_SIG == e->sig )
+    {
+        erase_publish(Q_EVT_CAST(AppFlashEvt)->file, KODE_DENIED, false,
+                      NULL, NULL);
+    }
+}
+
+/**
+ * @brief Whether a medium's share of a wipe left something of the app behind.
+ * @param m The medium's result.
+ * @return true for an image or a folder that would not go.
+ */
+static bool erase_left(const AppWipeMedium *m)
+{
+    return (0U != m->left) || ((uint8_t)APP_WIPE_FOLDER_LEFT == m->folder);
+}
+
+/**
+ * @brief Whether a medium's share of a wipe found anything of the app.
+ * @param m The medium's result.
+ * @return true for an image or a folder, gone or not.
+ */
+static bool erase_found(const AppWipeMedium *m)
+{
+    return (0U != m->files) || (0U != m->left)
+        || ((uint8_t)APP_WIPE_FOLDER_NONE != m->folder);
+}
+
+/**
+ * @brief Take AO_Storage's answer into what the erase's end will say.
+ *
+ * @param me  The AO, with an erase in hand.
+ * @param rsp The wipe's answer.
+ */
+static void erase_take_wipe(AppMgr * const me, StorageAppWipeRspEvt const * const rsp)
+{
+    if ( (uint8_t)KODE_OK != rsp->status )
+    {
+        /* Refused: the files were not looked at. */
+        me->erase_status = rsp->status;
+        return;
+    }
+    me->erase_fs = rsp->fs;
+    me->erase_sd = rsp->sd;
+    if ( erase_left(&rsp->fs) || erase_left(&rsp->sd) )
+    {
+        me->erase_status = (uint8_t)KODE_IO_ERROR;
+    }
+    else if ( me->erase_image || me->erase_extra || erase_found(&rsp->fs)
+             || erase_found(&rsp->sd) )
+    {
+        me->erase_status = (uint8_t)KODE_OK;
+    }
+    else
+    {
+        me->erase_status = (uint8_t)KODE_ERROR;   /* nothing of that name */
+    }
+}
+
 /* ---- Tidying: the folders, then the end ------------------------------------
  * After region_install() commits, the app's metadata folder is made to match
  * the container, and the folders of evicted apps with no copy on the card are
@@ -1514,7 +1642,8 @@ static bool tidy_ask_own(AppMgr * const me)
  *
  * The installed app's own first, then one delete per evicted app. A victim
  * with the installed app's own name is skipped: it is the app being replaced,
- * and its folder is the one just written.
+ * and its folder is the one just written. An erase has one request, the wipe
+ * of the app's files.
  *
  * @param me The AO.
  * @return true when a request is out and its answer is awaited.
@@ -1525,10 +1654,26 @@ static bool tidy_advance(AppMgr * const me)
     if ( !me->tidy_own_asked )
     {
         me->tidy_own_asked = true;
-        if ( tidy_ask_own(me) )
+        if ( (uint8_t)TIDY_AFTER_ERASE == me->tidy_after )
+        {
+            /* An erase asks for more than the folder: every file of the app,
+             * on both media, under a deadline of its own. */
+            if ( storage_app_wipe_request(me->tidy_name, &me->super) == KODE_OK )
+            {
+                me->tidy_step = (uint8_t)TIDY_STEP_WIPE;
+                (void)QTimeEvt_rearm(&me->tidy, APPMGR_WIPE_TICKS);
+                return true;
+            }
+            me->erase_status = (uint8_t)KODE_NO_RESOURCES;
+        }
+        else if ( tidy_ask_own(me) )
         {
             (void)QTimeEvt_rearm(&me->tidy, APPMGR_TIDY_TICKS);
             return true;
+        }
+        else
+        {
+            /* Nothing to ask for the installed app's own folder. */
         }
     }
     while ( me->victim_next < me->victim_count )
@@ -1620,7 +1765,18 @@ static void tidy_finish(AppMgr * const me)
             break;
         }
         default: {
-            KLOG_N(TAG, "'%s' removed", me->tidy_name);
+            /* TIDY_AFTER_ERASE: said in the log, then to whoever waits. */
+            if ( (uint8_t)KODE_OK == me->erase_status )
+            {
+                KLOG_N(TAG, "'%s' removed", me->tidy_name);
+            }
+            else
+            {
+                KLOG_W(TAG, "the erase of '%s' ended with code %u", me->tidy_name,
+                       (unsigned)me->erase_status);
+            }
+            erase_publish(me->tidy_name, (kode_status_t)me->erase_status,
+                          me->erase_image, &me->erase_fs, &me->erase_sd);
             break;
         }
     }
@@ -1715,7 +1871,7 @@ static QState tidy_state(AppMgr * const me)
  * and is not handled.
  *
  * @param me The AO.
- * @param e  APPDATA_PUT_RSP_SIG or APPDATA_RM_RSP_SIG.
+ * @param e  APPDATA_PUT_RSP_SIG, APPDATA_RM_RSP_SIG or STORAGE_APP_WIPE_RSP_SIG.
  * @return true when it is the answer awaited.
  */
 static bool tidy_awaited(const AppMgr * const me, QEvt const * const e)
@@ -1733,6 +1889,12 @@ static bool tidy_awaited(const AppMgr * const me, QEvt const * const e)
         awaited = (((uint8_t)TIDY_STEP_RM_OWN == me->tidy_step)
                    || ((uint8_t)TIDY_STEP_RM_VICTIM == me->tidy_step))
                && (strcmp(Q_EVT_CAST(AppDataRmRspEvt)->project,
+                          tidy_who(me)) == 0);
+    }
+    else if ( (QSignal)STORAGE_APP_WIPE_RSP_SIG == e->sig )
+    {
+        awaited = ((uint8_t)TIDY_STEP_WIPE == me->tidy_step)
+               && (strcmp(Q_EVT_CAST(StorageAppWipeRspEvt)->project,
                           tidy_who(me)) == 0);
     }
     else
@@ -2468,6 +2630,90 @@ static void url_label(char *out, size_t size, const char *url)
 }
 
 /**
+ * @brief Take the erase in hand: the image, the override, the mailbox, then
+ *        AO_Storage for the files.
+ *
+ * An app that is not installed is not the end of it: a file or a folder of
+ * that name may still be on a medium, and AO_Storage is asked all the same. A
+ * directory that will not commit ends the erase with nothing removed, and so
+ * does an empty name.
+ *
+ * @param me  The AO, idle.
+ * @param req The request: the project's name.
+ * @return The QP status: tidying while AO_Storage works, idle otherwise.
+ */
+static QState erase_begin(AppMgr * const me, AppFlashEvt const * const req)
+{
+    kapps_dir_t dir = *kdrv_apps_dir();
+    int const   idx = appmgr_find_idx(&dir, req->file);  /* -1 if absent */
+    char        cats[KODE_APP_CATEGORY_MAX];
+    uint32_t    img_len     = 0U;
+    uint32_t    decoded_len = 0U;
+
+    me->erase_image  = false;
+    me->erase_extra  = false;
+    me->erase_status = (uint8_t)KODE_TIMEOUT;   /* until AO_Storage answers */
+    (void)memset(&me->erase_fs, 0, sizeof(me->erase_fs));
+    (void)memset(&me->erase_sd, 0, sizeof(me->erase_sd));
+
+    if ( '\0' == req->file[0] )
+    {
+        /* No name is no app: nothing is looked for. */
+        erase_publish(req->file, KODE_ERROR, false, NULL, NULL);
+        return Q_HANDLED();
+    }
+
+    if ( 0 <= idx )
+    {
+        uint32_t const off = dir.e[idx].offset;
+
+        dir.e[idx].flags = 0U;
+        appdir_compact(&dir);
+        if ( kdrv_apps_dir_commit(&dir) != KODE_OK )
+        {
+            KLOG_E(TAG, "cannot update the directory; nothing erased");
+            erase_publish(req->file, KODE_IO_ERROR, false, NULL, NULL);
+            return Q_HANDLED();
+        }
+        /* Erase the image header too, so no stale 0xE9 is left at a
+         * bootable offset. The directory is what counts. */
+        (void)kdrv_apps_erase_header(off);   /* kdrv: erase first 4 KB */
+        me->erase_image = true;
+    }
+    else
+    {
+        KLOG_N(TAG, "'%s' is not installed; its files are looked for",
+               req->file);
+    }
+
+    /* The person's categories for the app go with it: one NVS write, made
+     * only when there is a row to drop. */
+    if ( kapp_cat_resolve(req->file, cats, sizeof(cats)) )
+    {
+        (void)kapp_cat_clear(req->file);
+        me->erase_extra = true;
+    }
+    /* A mailbox that still holds the app would bring it back at the next
+     * boot. */
+    if ( (NULL != me->chunk) && kdrv_apps_pending_present(&img_len, &decoded_len) )
+    {
+        char held[KDRV_SLOT_PROJECT_MAX];
+
+        pending_project(me, held, sizeof(held));
+        if ( strcmp(held, req->file) == 0 )
+        {
+            KLOG_N(TAG, "the mailbox held '%s'; emptied", req->file);
+            (void)kdrv_apps_pending_consume();
+            me->erase_extra = true;
+        }
+    }
+
+    victims_clear(me);
+    tidy_begin(me, req->file, (uint8_t)TIDY_AFTER_ERASE);
+    return tidy_state(me);
+}
+
+/**
  * @brief Nothing in flight: installs, runs, erases, listings and the other requests.
  *
  * @param me The AO.
@@ -2776,32 +3022,8 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case APP_ERASE_REQ_SIG: {   /* now carries a name (AppFlashEvt) */
-            AppFlashEvt const * const req = Q_EVT_CAST(AppFlashEvt);
-            kapps_dir_t dir = *kdrv_apps_dir();
-            int const   idx = appmgr_find_idx(&dir, req->file);  /* -1 if absent */
-            if ( 0 > idx )
-            {
-                KLOG_E(TAG, "'%s' is not installed", req->file);
-                status = Q_HANDLED();
-                break;
-            }
-            uint32_t const off = dir.e[idx].offset;
-            dir.e[idx].flags = 0U;
-            appdir_compact(&dir);
-            if ( kdrv_apps_dir_commit(&dir) != KODE_OK )
-            {
-                KLOG_E(TAG, "cannot update the directory; nothing erased");
-                status = Q_HANDLED();
-                break;
-            }
-            /* Erase the image header too, so no stale 0xE9 is left at a
-             * bootable offset. The directory is what counts. */
-            (void)kdrv_apps_erase_header(off);   /* kdrv: erase first 4 KB */
-            /* The folder goes with the app, before the erase is called done. */
-            victims_clear(me);
-            tidy_begin(me, req->file, (uint8_t)TIDY_AFTER_ERASE);
-            status = tidy_state(me);
+        case APP_ERASE_REQ_SIG: {
+            status = erase_begin(me, Q_EVT_CAST(AppFlashEvt));
             break;
         }
         case APPDATA_GET_REQ_SIG: {
@@ -3148,6 +3370,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
         case APP_ERASE_REQ_SIG:
         case APP_LIST_REQ_SIG: {
             KLOG_W(TAG, "busy opening '%s'; request ignored", me->file);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -3630,6 +3853,7 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy keeping apps on the card; request ignored");
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -3831,8 +4055,8 @@ static QState evict_ask(AppMgr * const me, QEvt const * const e)
  *        busy with it.
  *
  * What AppMgr_asking, AppMgr_finding and AppMgr_scrubbing all do: an install,
- * run, erase, listing or receive request is logged and dropped, and an app_cat
- * request is answered KODE_DENIED, so the console does not wait on it.
+ * run, listing or receive request is logged and dropped, and an erase or an
+ * app_cat request is answered KODE_DENIED, so nobody waits on it.
  *
  * @param me    The AO.
  * @param e     The event.
@@ -3852,6 +4076,7 @@ static bool busy_refused(AppMgr * const me, QEvt const * const e,
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy %s; request ignored", doing);
+            erase_deny(e);
             break;
         }
         case APP_CAT_REQ_SIG: {
@@ -4468,6 +4693,14 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case APP_ERASE_REQ_SIG: {
+            /* A state under this one that names no refusal of its own. */
+            KLOG_W(TAG, "busy; the erase of '%s' is refused",
+                   Q_EVT_CAST(AppFlashEvt)->file);
+            erase_deny(e);
+            status = Q_HANDLED();
+            break;
+        }
         case APP_EVICT_REQ_SIG: {
             AppEvictReqEvt const * const req = Q_EVT_CAST(AppEvictReqEvt);
 
@@ -4751,6 +4984,22 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
             }
             break;
         }
+        case STORAGE_APP_WIPE_RSP_SIG: {
+            status = Q_HANDLED();
+            if ( !tidy_awaited(me, e) )
+            {
+                KLOG_D(TAG, "an answer to a wipe nobody is waiting for");
+                break;
+            }
+            tidy_answered(me);
+            erase_take_wipe(me, Q_EVT_CAST(StorageAppWipeRspEvt));
+            if ( !tidy_advance(me) )
+            {
+                tidy_finish(me);
+                status = tidy_state(me);
+            }
+            break;
+        }
         case APP_TIDY_TIMEOUT_SIG: {
             status = Q_HANDLED();
             if ( me->tidy_swallow )
@@ -4774,6 +5023,7 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy tidying the data folder of '%s'; request ignored",
                    me->tidy_name);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4884,6 +5134,7 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             KLOG_W(TAG, "busy writing %s (%u%%); request ignored",
                    me->os_target ? "the kodeOS slot" : "the region",
                    (unsigned)((me->written * 100U) / me->total));
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4975,6 +5226,7 @@ static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e)
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "adopting the mailbox app; request ignored");
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
