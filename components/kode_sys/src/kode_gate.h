@@ -26,8 +26,8 @@ extern "C" {
  *  - a wake from OFF with BOT pressed: lets go of the holds and returns;
  *  - a wake from OFF with a pad button down, and the wake its release brings:
  *    back to OFF at once and with no light;
- *  - a wake from OFF with nothing down, a press too short to be read: a dim green
- *    pulse, then BOT is watched for a second. BOT turns it on from there with no
+ *  - a wake from OFF with nothing down, a press too short to be read: BOT is
+ *    watched for a second, with no light. BOT turns it on from there with no
  *    hold; otherwise it goes back to OFF.
  *
  * Whenever the board goes back to OFF the holds were never released, so the C5

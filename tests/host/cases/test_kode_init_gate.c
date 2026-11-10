@@ -278,23 +278,23 @@ TEST_CASE("a wake from OFF with an expander that will not answer goes on",
 
 /* ---- A press too short to be read ---------------------------------------- */
 
-/* A person's tap and a pad's tap look the same by now: the board answers both,
- * and only a board that was asked for it goes on. */
-TEST_CASE("a press over before the read gets a pulse and goes back with the holds kept",
+/* A person's tap and a pad's tap look the same by now: the board watches BOT
+ * for a second after both, dark, and only a board that was asked for it goes on. */
+TEST_CASE("a press over before the read lights nothing and goes back with the holds kept",
           "[kode_init_gate]")
 {
     gate_up(true, LEVELS_IDLE);
 
     kode_boot_gate();
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_led_lit, "no sign, and a person thinks it is dead");
-    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, s_led_last, "the LED was left lit through OFF");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_led_lit, "a short press lit the LED");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(51U, s_input_reads, "BOT was not watched for its second");
     TEST_ASSERT_EQUAL_UINT(1U, s_off_enter);
     TEST_ASSERT_EQUAL_UINT(0U, s_releases);
     gate_down();
 }
 
-TEST_CASE("BOT coming down in the second after the pulse goes on, dark and with the holds let go",
+TEST_CASE("BOT coming down in the second after a short press goes on, dark and with the holds let go",
           "[kode_init_gate]")
 {
     gate_up(true, LEVELS_IDLE);
@@ -304,7 +304,7 @@ TEST_CASE("BOT coming down in the second after the pulse goes on, dark and with 
 
     TEST_ASSERT_EQUAL_UINT(1U, s_releases);
     TEST_ASSERT_EQUAL_UINT(0U, s_off_enter);
-    TEST_ASSERT_EQUAL_HEX8(0U, s_led_last);
+    TEST_ASSERT_EQUAL_UINT(0U, s_led_lit);
     gate_down();
 }
 
@@ -367,11 +367,12 @@ TEST_CASE("a pad button still down gets no light and no window, nor does its rel
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_led_lit, "the release of that press lit the LED");
     TEST_ASSERT_EQUAL_UINT(1U, s_input_reads);
 
-    /* And it was one wake's silence: the next short press answers. */
+    /* And it was one wake's silence: the next short press gets its window. */
     s_input_reads = 0U;
     kode_boot_gate();
 
-    TEST_ASSERT_EQUAL_UINT(1U, s_led_lit);
+    TEST_ASSERT_EQUAL_UINT(51U, s_input_reads);
+    TEST_ASSERT_EQUAL_UINT(0U, s_led_lit);
     gate_down();
 }
 
@@ -767,7 +768,7 @@ TEST_CASE("a board still up after the ship write gets its battery back and boots
     cell_down();
 }
 
-TEST_CASE("a short press on a flat cell ships before the green pulse", "[kode_init_gate]")
+TEST_CASE("a short press on a flat cell ships before the second of watching", "[kode_init_gate]")
 {
     cell_up(3100U);
     Mockkhal_power_Destroy();
