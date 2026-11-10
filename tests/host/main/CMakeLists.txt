@@ -53,6 +53,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi_status.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi_scan.c"
+    "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi_frames.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_scan.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_ble.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_power.c"
