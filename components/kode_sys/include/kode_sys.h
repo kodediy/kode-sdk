@@ -1302,8 +1302,14 @@ kode_status_t kode_sys_wifi_scan(QActive *me);
  * listens on the network's own channel or refuses. One AO listens at a time.
  * AO_Radio posts the answers to @p me, never publishes them, and keeps
  * KQP_FRAMES_MARGIN slots of its queue free: what does not fit is counted in
- * the next tick's @c dropped. Without CONFIG_KODEOS_WIFI the request is
- * refused at once with KODE_DENIED.
+ * the next tick's @c dropped. That count is this chip's alone: a frame the
+ * C5 could not queue or fit in a batch is in @c heard and in no drop count,
+ * and a tick this chip could not post is counted nowhere. A tick's
+ * @c channel is the radio's when the batch was sent, so frames heard while a
+ * scan visited other channels carry the channel at the period's end. The
+ * board's rest, Wi-Fi stopped, a join and a C5 update end a stream, and @p me
+ * is told why. Without CONFIG_KODEOS_WIFI the request is refused at once
+ * with KODE_DENIED.
  */
 
 /* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */

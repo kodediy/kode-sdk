@@ -71,8 +71,9 @@ static void console_up(void)
         QASM_INIT(AO_Console, (void *)0, 0U);
         qf_support_background(AO_Console);
     }
-    /* A command a case left open is closed by the watchdog; a `wifi_frames`
-     * has none, and AO_Radio's answer closes it. */
+    /* A command a case left open is closed by the watchdog. A `wifi_frames`
+     * stretches its own past this tick (console_extend()), so AO_Radio's
+     * answer closes it: once for a start still waiting, again for its stop. */
     (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
     {
         WifiFramesStateEvt gone;

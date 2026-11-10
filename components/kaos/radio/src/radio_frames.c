@@ -32,8 +32,11 @@ static bool frames_waiting(const RadioFrames *f)
 /**
  * @brief Tell @p who how its request stands.
  *
- * With no margin: an answer is always owed, and an asker whose queue has not
- * one slot for it has a design fault QP reports.
+ * The event is taken with no pool margin and posted with
+ * KQP_FRAMES_ANSWER_MARGIN; neither failure asserts. An empty pool or an
+ * asker's queue without that room is logged as an error and the answer is
+ * lost: the asker hears nothing for its request, and the door's state is
+ * what the caller left it (freed for an end, still its own for a start).
  *
  * @param who     The asker.
  * @param on      Listening now.

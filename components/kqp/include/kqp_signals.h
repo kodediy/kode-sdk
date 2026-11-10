@@ -4419,6 +4419,13 @@ typedef enum {
     KWIFI_FRAMES_MEMORY,      /**< The C5 had no room.                        */
     KWIFI_FRAMES_RESTING      /**< The board is going to rest.                */
 } kwifi_frames_why_t;
+/* A request AO_Radio could not send, or that the C5 did not answer in time,
+ * reads as KWIFI_FRAMES_NO_LINK (KWIFI_FRAMES_BUSY when the service's one
+ * request is still out); a promiscuous call the C5's radio refuses reads as
+ * KWIFI_FRAMES_WIFI_OFF; no room for this chip's ring as KWIFI_FRAMES_MEMORY.
+ * A stream AO_Radio ends itself is told KWIFI_FRAMES_RESTING (the board's
+ * rest), KWIFI_FRAMES_WIFI_OFF (Wi-Fi stopped, or a join that may restart
+ * it) or KWIFI_FRAMES_BUSY (a C5 update). */
 
 /** @brief WIFI_FRAMES_REQ_SIG: start or stop, and who to tell. */
 typedef struct {
@@ -4438,10 +4445,21 @@ typedef struct {
     uint8_t why;        /**< kwifi_frames_why_t.                            */
 } WifiFramesStateEvt;
 
-/** @brief WIFI_FRAMES_TICK_SIG: what one period of listening heard. */
+/**
+ * @brief WIFI_FRAMES_TICK_SIG: what one period of listening heard.
+ *
+ * @c heard counts every frame the C5's callback saw, and @c dropped only what
+ * this chip lost: the ring's overflow and the frames the asker's queue or the
+ * pool had no room for. A record the C5 could not queue, or one past what a
+ * batch carries, is in @c heard and in no drop count. A tick this chip could
+ * not post is counted nowhere; the next one carries the totals since the
+ * start.
+ */
 typedef struct {
     QEvt     super;
-    uint8_t  channel;   /**< The radio's primary channel in the period.     */
+    uint8_t  channel;   /**< The radio's primary channel when the C5 sent the
+                         *   batch: frames heard while a scan visited other
+                         *   channels carry the channel at the period's end. */
     bool     joined;    /**< The station holds an association.              */
     int8_t   rssi_max;  /**< The strongest frame, dBm; -128 when none.      */
     uint32_t heard;     /**< Frames heard since the start.                  */

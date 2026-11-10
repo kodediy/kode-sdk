@@ -60,8 +60,10 @@ static radio_verb_kind_t s_radio_kind;
 #define RADIO_V_FRAMES_STOP_MS  1000U   /**< wifi_frames: how long a stop with no room in AO_Radio's queue is asked again. */
 #define RADIO_V_FRAMES_WAIT_MS  5000U   /**< wifi_frames: the longest wait for AO_Radio's answer to a start or a stop. Above AO_Radio's own 3 s
                                          *   deadline for a KODE request, so its answer wins and this is only the net. */
-#define RADIO_V_FRAMES_LATE_MS  (KODE_RADIO_SVC_SEND_GUARD_MS + RADIO_V_FRAMES_WAIT_MS) /**< wifi_frames: how long after the net caught a run an answer of
-                                         *   its requests may still arrive: AO_Radio's send guard, then its deadline. */
+#define RADIO_V_FRAMES_LATE_MS  (KODE_RADIO_SVC_SEND_GUARD_MS + RADIO_V_FRAMES_WAIT_MS) /**< wifi_frames: how long after the net caught a run the answer of
+                                         *   ONE request of it may still arrive: AO_Radio's send guard, then its deadline. A
+                                         *   start and the stop held behind it take longer; while either waits AO_Radio answers
+                                         *   the next run's start busy, so that run ends `busy` and is not misled. */
 
 /** @brief RADIO_V_ID: the records' word, `id` or `csr`. */
 static const char *s_radio_id_rec;
@@ -512,13 +514,16 @@ static uint32_t s_frames_late_ms;   /**< When, on khal_time_ms()'s clock.       
  * pass, stops, and prints one record of counts and levels, then `>ok`. An
  * address or a payload is never printed.
  *
- * The command holds the console until AO_Radio has answered the stop, so no
- * answer of one run can reach the next one, and the C5 is never left
- * listening for a console that has gone: AO_Radio answers a start and a stop,
- * its own deadline standing behind each, and the watchdog is the net under
- * that (RADIO_V_FRAMES_WAIT_MS); the window is counted in the console's pacer
- * slices (console_pace()). A run the net had to end leaves answers that may
- * still arrive, so the next run waits RADIO_V_FRAMES_LATE_MS.
+ * The command holds the console until AO_Radio has answered the stop, so an
+ * answer of a run that ended normally cannot reach the next one: AO_Radio
+ * answers a start and a stop, its own deadline standing behind each, and the
+ * watchdog is the net under that (RADIO_V_FRAMES_WAIT_MS); the window is
+ * counted in the console's pacer slices (console_pace()). A run the net had to
+ * end leaves answers that may still arrive. The next run waits
+ * RADIO_V_FRAMES_LATE_MS, which covers one request; a start and a stop that
+ * both still wait are covered by AO_Radio itself, which answers a start busy
+ * while a request of the service waits. A stream left with the console as
+ * its asker is stopped at its next tick (console_own()).
  */
 static void h_wifi_frames(const kverb_t *c, const karg_val_t *v)
 {
