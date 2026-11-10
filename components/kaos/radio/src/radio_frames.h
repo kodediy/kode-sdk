@@ -147,7 +147,9 @@ void radio_frames_drop(void);
  * @brief The C5 sent an event of the frames service. Runs on esp-hosted's thread.
  *
  * A batch is decoded into the ring and, when taken, AO_Radio is knocked with
- * a static event posted with a margin. Any other event is dropped.
+ * a static event posted with a margin, once: no second knock is posted while
+ * one waits in AO_Radio's queue, since its handler drains every batch the
+ * ring holds. Any other event is dropped.
  *
  * @param op   The event's op.
  * @param data Its payload; valid only during the call.

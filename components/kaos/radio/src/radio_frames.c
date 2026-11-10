@@ -20,6 +20,9 @@ _Static_assert(KWIFI_FRAME_HEAD_LEN == KODE_SNIFF_HEAD_LEN,
 _Static_assert(KWIFI_FRAMES_CHANNEL_MAX == KODE_SNIFF_CHANNEL_MAX,
                "the door refuses the channels the C5 refuses");
 
+/** @brief A knock waits in AO_Radio's queue: set on the link's thread, cleared by AO_Radio. */
+static bool s_knocked = false;
+
 /** @brief Whether a request of the frames service waits for its answer. */
 static bool frames_waiting(const RadioFrames *f)
 {
@@ -112,9 +115,17 @@ static bool frames_stop_send(RadioFrames *f)
     return sent;
 }
 
+/** @brief No knock waits any more: the next batch posts one. */
+static void frames_knock_clear(void)
+{
+    /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
+    __atomic_store_n(&s_knocked, false, __ATOMIC_RELEASE);
+}
+
 void radio_frames_init(RadioFrames *f, RadioFramesSend send, void *ctx)
 {
     frames_release(f);
+    frames_knock_clear();
     f->ring_ok = false;
     f->send    = send;
     f->ctx     = ctx;
@@ -122,6 +133,7 @@ void radio_frames_init(RadioFrames *f, RadioFramesSend send, void *ctx)
 
 void radio_frames_link(RadioFrames *f)
 {
+    frames_knock_clear();
     f->ring_ok = KODE_OK == kdrv_frames_init();
     if ( !f->ring_ok )
     {
@@ -473,6 +485,9 @@ static void frames_quiet(RadioFrames *f)
 
 void radio_frames_knock(RadioFrames *f)
 {
+    /* Cleared before the ring is read: a batch that lands from here on
+     * knocks again, so none waits unseen. */
+    frames_knock_clear();
     if ( NULL == f->who )
     {
         frames_quiet(f);
@@ -485,6 +500,7 @@ void radio_frames_knock(RadioFrames *f)
 
 void radio_frames_drop(void)
 {
+    frames_knock_clear();
     kdrv_frames_forget();
 }
 
@@ -499,9 +515,19 @@ void radio_frames_heard(uint8_t op, const uint8_t *data, size_t len)
     }
     if ( kdrv_frames_feed(data, len) )
     {
-        /* Static and posted with a margin: a batch is never worth a block
-         * from the pool, and a queue with no room for the knock keeps the
-         * batch in the ring for the next one. */
-        (void)QACTIVE_POST_X(AO_Radio, &knock, KQP_RADIO_POST_MARGIN, NULL);
+        /* One knock at a time: its handler drains every batch the ring
+         * holds. Static and posted with a margin: a batch is never worth a
+         * block from the pool, and a queue with no room for the knock keeps
+         * the batch in the ring for the next one, which knocks again. */
+        /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
+        bool const knocked = __atomic_exchange_n(&s_knocked, true, __ATOMIC_ACQ_REL);
+
+        if ( !knocked )
+        {
+            if ( !QACTIVE_POST_X(AO_Radio, &knock, KQP_RADIO_POST_MARGIN, NULL) )
+            {
+                frames_knock_clear();
+            }
+        }
     }
 }

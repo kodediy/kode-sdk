@@ -596,6 +596,50 @@ TEST_CASE("a lost link tells the asker, empties the ring and frees the door", "[
 
 /* ---- The board's rest, Wi-Fi and the radio's other work ---------------------- */
 
+/** @brief How many knocks wait in AO_Radio's queue; the queue is left as it was. */
+static unsigned knocks_queued(void)
+{
+    unsigned    knocks = 0U;
+    UBaseType_t n      = uxQueueMessagesWaiting(AO_Radio->eQueue);
+
+    for ( UBaseType_t i = 0U; i < n; ++i )
+    {
+        const QEvt *e = NULL;
+
+        TEST_ASSERT_TRUE(xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE);
+        if ( (QSignal)RADIO_FRAMES_KNOCK_SIG == e->sig )
+        {
+            knocks += 1U;
+        }
+        TEST_ASSERT_TRUE(xQueueSend(AO_Radio->eQueue, &e, 0U) == pdTRUE);
+    }
+    return knocks;
+}
+
+/** @brief Leave AO_Radio's queue with no more free slots than a door's margin. */
+static void radio_queue_to_margin(void)
+{
+    static const QEvt filler = QEVT_INITIALIZER(RADIO_STATE_REQ_SIG);
+
+    for ( unsigned guard = 0U;
+         (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_POST_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+}
+
+/** @brief Empty AO_Radio's queue without dispatching it. */
+static void radio_queue_empty(void)
+{
+    const QEvt *e = NULL;
+
+    while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+    {
+        QF_gc(e);
+    }
+}
+
 /** @brief The board is awake again, and the sentinel a round started is stopped. */
 static void frames_awake(void)
 {
@@ -706,6 +750,59 @@ TEST_CASE("a join, which may restart the station, ends a stream before it goes t
     {
         finish_whatever_runs();
     }
+    frames_end();
+}
+
+TEST_CASE("batches that land before AO_Radio runs knock once, and all their frames are handed over",
+          "[radio_frames]")
+{
+    /* The spy with the deep queue: a tick and six frames above the margin. */
+    frames_up();
+    start_listening(ao_spy(), FR_CH);
+
+    c5_batch(FR_TWO);
+    c5_batch(FR_TWO);
+    c5_batch(FR_TWO);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, knocks_queued(), "one knock per batch");
+
+    pump();
+    (void)take_tick(ao_spy());
+    for ( unsigned i = 0U; (3U * FR_TWO) > i; ++i )
+    {
+        (void)take_frame(ao_spy());
+    }
+    expect_nothing(ao_spy());
+    ao_spy_release();   /* the spy holds what it took: give the pool back, as a dispatch would */
+
+    /* Taken: the next batch knocks again. */
+    c5_batch(1U);
+    TEST_ASSERT_EQUAL_UINT(1U, knocks_queued());
+    pump();
+    (void)take_tick(ao_spy());
+    (void)take_frame(ao_spy());
+    frames_end();
+}
+
+TEST_CASE("a knock AO_Radio has no room for is not left pending: the next batch knocks",
+          "[radio_frames]")
+{
+    frames_up();
+    start_listening(ao_spy(), FR_CH);
+
+    radio_queue_to_margin();
+    c5_batch(FR_TWO);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, knocks_queued(), "a knock went past the margin");
+    radio_queue_empty();
+
+    c5_batch(FR_TWO);
+    TEST_ASSERT_EQUAL_UINT(1U, knocks_queued());
+    pump();
+    (void)take_tick(ao_spy());
+    for ( unsigned i = 0U; (2U * FR_TWO) > i; ++i )
+    {
+        (void)take_frame(ao_spy());
+    }
+    expect_nothing(ao_spy());
     frames_end();
 }
 
