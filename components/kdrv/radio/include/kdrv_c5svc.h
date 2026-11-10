@@ -22,8 +22,12 @@ extern "C" {
  *
  * Runs on esp-hosted's thread: copy what is needed, post, return.
  *
+ * It also carries a service's events: a frame whose op has KODE_OP_EVENT
+ * reaches the listener whether or not a request is in flight, and never
+ * completes one. An event for a service with no listener is dropped.
+ *
  * @param service KODE_SVC_*.
- * @param op      The request's op.
+ * @param op      The request's op, or the event's (KODE_OP_EVENT set).
  * @param status  KODE_ST_*.
  * @param data    Payload; valid only during the call.
  * @param len     Payload bytes.

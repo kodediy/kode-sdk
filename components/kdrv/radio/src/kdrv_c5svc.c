@@ -77,7 +77,26 @@ static void deliver(svc_slot_t *slot, const kode_hdr_t *h, const uint8_t *pay)
     }
 }
 
-/** @brief Every answer from the C5, on esp-hosted's thread. */
+/**
+ * @brief Hand an event to its service's listener; with none, drop it quietly.
+ *        The service is range-checked by the caller.
+ */
+static void deliver_event(const kode_hdr_t *h, const uint8_t *pay)
+{
+    khal_mutex_lock(s_svc.state);
+    kdrv_c5svc_cb_t const cb  = s_svc.slot[h->service].cb;
+    void           *const ctx = s_svc.slot[h->service].ctx;
+    khal_mutex_unlock(s_svc.state);
+    if ( NULL == cb )
+    {
+        KLOG_D(TAG, "an event for service %u op %u has no listener",
+               (unsigned)h->service, (unsigned)h->op);
+        return;
+    }
+    cb(h->service, h->op, h->status, pay, (size_t)h->len, ctx);
+}
+
+/** @brief Every answer and event from the C5, on esp-hosted's thread. */
 static void on_peer(const uint8_t *data, size_t len, void *ctx)
 {
     kode_hdr_t h;
@@ -101,6 +120,14 @@ static void on_peer(const uint8_t *data, size_t len, void *ctx)
     {
         KLOG_W(TAG, "a malformed answer (service %u, %u of %u bytes)",
                (unsigned)h.service, (unsigned)h.len, (unsigned)len);
+        return;
+    }
+
+    if ( 0U != (h.op & KODE_OP_EVENT) )
+    {
+        /* Unasked: the C5 says it, whether or not a request is out. It is
+         * never an answer, so it neither completes nor is judged by one. */
+        deliver_event(&h, &data[sizeof(h)]);
         return;
     }
 

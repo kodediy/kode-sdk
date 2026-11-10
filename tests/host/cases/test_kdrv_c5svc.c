@@ -235,3 +235,88 @@ TEST_CASE("the last INFO is kept for whoever reads it, until the link is forgott
     kdrv_c5svc_forget();
     TEST_ASSERT_FALSE(kdrv_c5svc_info(&got));
 }
+
+/** @brief One KODE_SNIFF_EVT_BATCH frame: an empty batch header, no records. */
+static void event_batch(uint8_t version)
+{
+    uint8_t m[sizeof(kode_hdr_t) + sizeof(kode_sniff_batch_t)];
+    kode_hdr_t h = { version, KODE_SVC_SNIFF, KODE_SNIFF_EVT_BATCH, 0U,
+                     KODE_ST_OK, 0U, (uint16_t)sizeof(kode_sniff_batch_t) };
+    (void)memset(m, 0, sizeof(m));
+    (void)memcpy(m, &h, sizeof(h));
+    fake_peer_deliver(KODE_MSG_RSP, m, sizeof(m));
+}
+
+/** @brief Whether any captured log line contains @p needle. */
+static bool logged_text(const char *needle)
+{
+    for ( unsigned i = 0U; fake_klog_count() > i; i++ )
+    {
+        const char *const l = fake_klog_line(i);
+        if ( (NULL != l) && (NULL != strstr(l, needle)) )
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST_CASE("an event reaches the listener with nothing in flight", "[c5svc]")
+{
+    fresh();
+    (void)kdrv_c5svc_listen(KODE_SVC_SNIFF, on_rsp, NULL);
+    event_batch(KODE_WIRE_VERSION);
+    TEST_ASSERT_EQUAL_INT(1, s_calls);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_EVT_BATCH, s_op);
+    TEST_ASSERT_EQUAL_UINT8(KODE_ST_OK, s_st);
+    TEST_ASSERT_EQUAL_size_t(sizeof(kode_sniff_batch_t), s_len);
+}
+
+TEST_CASE("an event with no listener is dropped quietly", "[c5svc]")
+{
+    fresh();
+    fake_klog_reset();
+    event_batch(KODE_WIRE_VERSION);
+    TEST_ASSERT_EQUAL_INT(0, s_calls);
+    TEST_ASSERT_FALSE(logged_text("late answer"));
+}
+
+TEST_CASE("an event does not complete a request in flight", "[c5svc]")
+{
+    fresh();
+    (void)kdrv_c5svc_listen(KODE_SVC_SNIFF, on_rsp, NULL);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_c5svc_send(KODE_SVC_SNIFF, KODE_SNIFF_STATE, NULL, 0U));
+    event_batch(KODE_WIRE_VERSION);
+    TEST_ASSERT_EQUAL_INT(1, s_calls);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_EVT_BATCH, s_op);
+    /* The request is still out: a second one is refused. */
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+        kdrv_c5svc_send(KODE_SVC_SNIFF, KODE_SNIFF_STATE, NULL, 0U));
+    answer(KODE_SVC_SNIFF, KODE_SNIFF_STATE, sent()->seq, KODE_ST_OK, NULL, 0U);
+    TEST_ASSERT_EQUAL_INT(2, s_calls);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_STATE, s_op);
+    /* The answer completed it: the service takes a request again. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_c5svc_send(KODE_SVC_SNIFF, KODE_SNIFF_STATE, NULL, 0U));
+}
+
+TEST_CASE("a bad-request answer is delivered", "[c5svc]")
+{
+    fresh();
+    (void)kdrv_c5svc_listen(KODE_SVC_SNIFF, on_rsp, NULL);
+    (void)kdrv_c5svc_send(KODE_SVC_SNIFF, KODE_SNIFF_STATE, NULL, 0U);
+    answer(KODE_SVC_SNIFF, KODE_SNIFF_STATE, sent()->seq,
+           KODE_ST_BAD_REQUEST, NULL, 0U);
+    TEST_ASSERT_EQUAL_INT(1, s_calls);
+    TEST_ASSERT_EQUAL_UINT8(KODE_ST_BAD_REQUEST, s_st);
+    TEST_ASSERT_EQUAL_size_t(0U, s_len);
+}
+
+TEST_CASE("an event of another wire version is dropped", "[c5svc]")
+{
+    fresh();
+    (void)kdrv_c5svc_listen(KODE_SVC_SNIFF, on_rsp, NULL);
+    event_batch(2U);
+    TEST_ASSERT_EQUAL_INT(0, s_calls);
+}
