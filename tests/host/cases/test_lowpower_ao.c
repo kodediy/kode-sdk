@@ -959,6 +959,23 @@ TEST_CASE("only a press of BOT wakes ASLEEP among the pad, the touch and the but
     lp_down();
 }
 
+TEST_CASE("the top button's line wakes ASLEEP and the log names the top button",
+          "[lowpower_ao]")
+{
+    static const QEvt top = QEVT_INITIALIZER(LOWPOWER_TOP_SIG);
+
+    lp_up(KODE_OK);
+    go_asleep();
+
+    feed(&top);
+
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_TOP, KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    TEST_ASSERT_TRUE_MESSAGE(log_has("AWAKE again (TOP)"), "the wake is said by its own name");
+    TEST_ASSERT_FALSE_MESSAGE(log_has("AWAKE again (boot)"), "a wake is never called a boot");
+    lp_down();
+}
+
 TEST_CASE("a message from the broker wakes ASLEEP", "[lowpower_ao]")
 {
     MqttMsgEvt m;
