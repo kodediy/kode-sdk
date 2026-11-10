@@ -4,7 +4,9 @@
  * @brief AO_Radio: the C5's owner, and the production row it runs on the chip.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -22,6 +24,7 @@
 #include "esp_app_desc.h"   /* to lay IDF's descriptor in a test image */
 
 #include "ao_spy.h"
+#include "ask_support.h"
 #include "config_support.h"
 #include "fake_wifi_events.h"
 #include "fake_khal_worker.h"
@@ -9605,6 +9608,220 @@ TEST_CASE("a stop asked on a full radio queue is refused and posts nothing",
         TEST_ASSERT_NOT_EQUAL((int)WIFI_SCAN_STOP_REQ_SIG, (int)e->sig);
         QF_gc(e);
     }
+}
+
+/* ---- AO_Radio held up: the two posts from other tasks that are refused ------
+ * AO_Radio is not dispatched in these bodies, which is what it is while a
+ * handler waits on a lock or on the C5. The board's queue is
+ * KQP_RADIO_QUEUE_LEN slots and the host's is longer, so the child swaps it for
+ * one of the board's length. Each body runs in a child: a QP assert aborts it,
+ * and Unity cannot report from there, so a check that fails names itself and
+ * ends the child with a status of its own. */
+
+/** @brief How a child ends when one of its checks failed. */
+#define CHILD_CHECK_FAILED  3
+
+/** @brief End the child, saying which check failed. */
+#define CHILD_CHECK(cond_, what_)                                          \
+    do {                                                                   \
+        if ( !(cond_) ) {                                                  \
+            (void)printf("  child check failed, line %d: %s\n", __LINE__, \
+                         (what_));                                         \
+            (void)fflush(stdout);                                          \
+            _exit(CHILD_CHECK_FAILED);                                     \
+        }                                                                  \
+    } while ( 0 )
+
+/** @brief The pools of the host's event store, the two of them. */
+#define EVENT_POOLS  2U
+
+/** @brief How many blocks are free in all the event pools. */
+static unsigned event_blocks_free(void)
+{
+    unsigned n = 0U;
+
+    for ( uint8_t pool = 1U; EVENT_POOLS >= pool; ++pool )
+    {
+        n += (unsigned)QF_getPoolFree(pool);
+    }
+    return n;
+}
+
+/** @brief Swap AO_Radio's empty queue for one of the board's length. */
+static void board_queue(void)
+{
+    const QEvt *held = NULL;
+    uint8_t *const store = malloc(KQP_RADIO_QUEUE_LEN * sizeof(QEvt *));
+
+    while ( xQueueReceive(AO_Radio->eQueue, &held, 0U) == pdTRUE )
+    {
+        QF_gc(held);
+    }
+    TEST_ASSERT_NOT_NULL(store);
+    AO_Radio->eQueue = xQueueCreateStatic(KQP_RADIO_QUEUE_LEN, sizeof(QEvt *),
+                                          store, &AO_Radio->osObject.queue);
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Radio->eQueue));
+}
+
+/** @brief The C5 answers the KODE request @p req, and the pump that would empty the queue does not run. */
+static void kode_answer_nopump(kode_hdr_t const *req, uint8_t st)
+{
+    static uint8_t m[sizeof(kode_hdr_t)];
+    kode_hdr_t const h = { KODE_WIRE_VERSION, req->service, req->op, req->seq,
+                           st, 0U, 0U };
+
+    (void)memcpy(m, &h, sizeof(h));
+    fake_peer_deliver(KODE_MSG_RSP, m, sizeof(h));
+}
+
+/** @brief Child body: a scan knock meets a queue with @p arg slots free; the sweep still lists every network. */
+static void scan_refused_body(void *arg)
+{
+    unsigned const left = *(unsigned const *)arg;
+
+    radio_fresh();
+    go_up();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    CHILD_CHECK((int)KDRV_RADIO_JOB_WIFI_SCAN == running_job(), "no scan with the worker");
+    seed_air(3U, -52);
+    board_queue();
+    radio_queue_fill_to(left);
+    ao_spy_drain();
+
+    run_scan();
+    CHILD_CHECK(left == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "the knock took one of the last slots");
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+
+    unsigned entries = 0U;
+    bool     closed  = false;
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)WIFI_SCAN_ENTRY_SIG == e->sig )
+        {
+            ++entries;
+        }
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            closed = ((const WifiScanEndEvt *)e)->ok
+                     && (3U == ((const WifiScanEndEvt *)e)->count);
+        }
+    }
+    CHILD_CHECK(3U == entries, "a network never reached the listing");
+    CHILD_CHECK(closed, "the listing's end does not count the three");
+}
+
+TEST_CASE("a scan knock refused by a full queue loses no network from the listing",
+          "[radio_ao][overflow]")
+{
+    unsigned none = 0U;
+    unsigned last = KQP_RADIO_DROP_MARGIN;
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&scan_refused_body, &none),
+                                     "no slot free: see the child's line above");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&scan_refused_body, &last),
+                                     "the droppable posts' margin free: see the child's line above");
+}
+
+/** @brief Child body: the C5's answer meets a queue with @p arg slots free; it is logged, and the asker is told on the deadline. */
+static void svc_refused_body(void *arg)
+{
+    unsigned const left = *(unsigned const *)arg;
+
+    radio_fresh();
+    fake_peer_reset();
+    go_up();
+    pump();
+    CHILD_CHECK(id_sign_request(ao_spy(), "abc"), "the request was not posted");
+    pump();
+    CHILD_CHECK(KODE_SVC_ID == kode_sent()->service, "the request never went to the C5");
+    kode_hdr_t const sign = *kode_sent();
+    ao_spy_drain();
+    board_queue();
+    radio_queue_fill_to(left);
+    fake_klog_reset();
+    unsigned const blocks = event_blocks_free();
+
+    kode_answer_nopump(&sign, KODE_ST_OK);
+    CHILD_CHECK(left == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused answer took a slot");
+    CHILD_CHECK(blocks == event_blocks_free(), "the refused answer was not recycled");
+    CHILD_CHECK(logged("no room for a KODE answer"), "the refusal was not said");
+    pump();
+    pump();
+    CHILD_CHECK(NULL == spy_take_sig(ID_SIGN_RSP_SIG), "the asker was answered before its deadline");
+
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    const QEvt *const e = spy_take_sig(ID_SIGN_RSP_SIG);
+    CHILD_CHECK(NULL != e, "the wait for the answer never ended");
+    CHILD_CHECK(KODE_ST_REFUSED == ((const IdSignRspEvt *)e)->status, "the asker was not told it failed");
+    CHILD_CHECK(logged("did not answer"), "the deadline said nothing");
+    CHILD_CHECK((int)KRADIO_UP == link_now(), "the link did not stay up");
+}
+
+TEST_CASE("a KODE answer refused by a full queue is logged and its wait ends on the deadline",
+          "[radio_ao][overflow]")
+{
+    unsigned none = 0U;
+    unsigned last = KQP_RADIO_DROP_MARGIN;
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&svc_refused_body, &none),
+                                     "no slot free: see the child's line above");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&svc_refused_body, &last),
+                                     "the droppable posts' margin free: see the child's line above");
+}
+
+/** @brief Child body: both droppable posts take a slot above KQP_RADIO_DROP_MARGIN and none of the last ones. */
+static void drop_margin_body(void *arg)
+{
+    (void)arg;
+    radio_fresh();
+    fake_peer_reset();
+    go_up();
+    pump();
+    kode_hdr_t const first = *kode_sent();
+    CHILD_CHECK(id_sign_request(ao_spy(), "abc"), "the request was not posted");
+    pump();
+    CHILD_CHECK(KODE_SVC_ID == kode_sent()->service, "the request never went to the C5");
+    kode_hdr_t const second = *kode_sent();
+    ao_spy_drain();
+    board_queue();
+    radio_queue_fill_to(KQP_RADIO_DROP_MARGIN + 1U);
+
+    seed_air(1U, -52);
+    run_scan();
+    CHILD_CHECK(KQP_RADIO_DROP_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a scan knock was refused with a slot above its margin free");
+    seed_air(1U, -52);
+    run_scan();
+    CHILD_CHECK(KQP_RADIO_DROP_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a scan knock took one of the last slots");
+
+    fake_klog_reset();
+    kode_answer_nopump(&first, KODE_ST_OK);
+    CHILD_CHECK(KQP_RADIO_DROP_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a KODE answer took one of the last slots");
+    CHILD_CHECK(logged("no room for a KODE answer"), "the refusal was not said");
+
+    radio_queue_flush();
+    radio_queue_fill_to(KQP_RADIO_DROP_MARGIN + 1U);
+    fake_klog_reset();
+    kode_answer_nopump(&second, KODE_ST_OK);
+    CHILD_CHECK(KQP_RADIO_DROP_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a KODE answer was refused with a slot above its margin free");
+    CHILD_CHECK(!logged("no room for a KODE answer"), "a KODE answer that fit was said refused");
+}
+
+TEST_CASE("the droppable posts stop short of the last slots of the queue",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&drop_margin_body, NULL),
+                                     "see the child's line above");
 }
 
 /* The next file to run the AO cannot finish a job this one holds. */

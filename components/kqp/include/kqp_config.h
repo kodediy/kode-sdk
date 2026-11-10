@@ -1694,12 +1694,19 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
 #define KQP_AO_STACK_BYTES      8192U /**< Default stack per AO.              */
 
 /* ---- Request doors: queue depths, and the post margin each leaves free (half a queue) ---- */
-#define KQP_RADIO_QUEUE_LEN     8U    /**< Events AO_Radio buffers.           */
+/* AO_Radio's queue: a scan knock and a KODE answer, posted from other tasks,
+ * leave KQP_RADIO_DROP_MARGIN slots free and are refused past it. The BLE
+ * state, the pairing note, the lost link and the AO's own time events post
+ * with no margin: a full queue is still an assertion for them. */
+#define KQP_RADIO_QUEUE_LEN     16U   /**< Events AO_Radio buffers.           */
 #define KQP_POWER_QUEUE_LEN     8U    /**< Events AO_Power buffers.           */
-#define KQP_RADIO_POST_MARGIN   4U    /**< Slots a Wi-Fi door or a link ask leaves free. */
+#define KQP_RADIO_POST_MARGIN   8U    /**< Slots a Wi-Fi door or a link ask leaves free. */
+#define KQP_RADIO_DROP_MARGIN   2U    /**< Slots a post that may be refused, a scan knock or a KODE answer, leaves free. */
 #define KQP_POWER_POST_MARGIN   4U    /**< Slots a power door leaves free.    */
 _Static_assert((KQP_RADIO_POST_MARGIN * 2U) == KQP_RADIO_QUEUE_LEN,
                "the radio door margin is half of AO_Radio's queue");
+_Static_assert((KQP_RADIO_DROP_MARGIN > 0U) && (KQP_RADIO_DROP_MARGIN < KQP_RADIO_POST_MARGIN),
+               "a post that may be refused goes deeper into AO_Radio's queue than a door does, and leaves slots");
 _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
                "the power door margin is half of AO_Power's queue");
 #define KQP_BOOT_QUEUE_LEN      8U    /**< Events AO_Boot buffers: an AO with few events. */
@@ -1728,7 +1735,7 @@ _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
 #define KQP_STORAGE_CMD_MARGIN  KQP_CMD_MARGIN                         /**< AO_Storage, KQP_AO_QUEUE_LEN.   */
 #define KQP_APPMGR_CMD_MARGIN   KQP_CMD_MARGIN                         /**< AO_AppMgr, KQP_AO_QUEUE_LEN.    */
 #define KQP_POWER_CMD_MARGIN    KQP_CMD_MARGIN                         /**< AO_Power, KQP_POWER_QUEUE_LEN.  */
-#define KQP_RADIO_CMD_MARGIN    KQP_CMD_MARGIN                         /**< AO_Radio, KQP_RADIO_QUEUE_LEN.  */
+#define KQP_RADIO_CMD_MARGIN    KQP_RADIO_POST_MARGIN                  /**< AO_Radio, KQP_RADIO_QUEUE_LEN: its doors' half.  */
 #define KQP_BOOT_CMD_MARGIN     KQP_CMD_MARGIN                         /**< AO_Boot, KQP_BOOT_QUEUE_LEN.    */
 #define KQP_DISPLAY_CMD_MARGIN  KQP_CMD_MARGIN                         /**< AO_Display, KQP_AO_QUEUE_LEN.   */
 #define KQP_HAPTIC_CMD_MARGIN   KQP_CMD_MARGIN                         /**< AO_Haptic, KQP_AO_QUEUE_LEN.    */
@@ -1771,8 +1778,8 @@ _Static_assert(KQP_LOWPOWER_CMD_MARGIN < KODE_LOWPOWER_QUEUE_LEN,
                "an app's rest requests leave AO_LowPower a round's answers and room of their own");
 _Static_assert((KQP_CMD_MARGIN * 2U) <= KQP_BOOT_QUEUE_LEN,
                "the default leaves at least half of the smallest queue to its owner");
-_Static_assert((KQP_CMD_MARGIN * 2U) <= KQP_RADIO_QUEUE_LEN,
-               "the default leaves at least half of the smallest queue to its owner");
+_Static_assert((KQP_RADIO_CMD_MARGIN * 2U) >= KQP_RADIO_QUEUE_LEN,
+               "a command leaves at least half of AO_Radio's queue to its owner");
 _Static_assert((KQP_CMD_MARGIN * 2U) <= KQP_POWER_QUEUE_LEN,
                "the default leaves at least half of the smallest queue to its owner");
 
