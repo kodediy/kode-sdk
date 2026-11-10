@@ -15,6 +15,7 @@
 #include "kdrv_c5svc.h"
 #include "kdrv_radio.h"
 #include "khal_identity.h"
+#include "kode_wire.h"
 #if CONFIG_KODEOS_BLE
 #include "kdrv_ble.h"
 #endif
@@ -37,6 +38,8 @@ typedef enum {
                           *   AO_Radio answers either way.                  */
     RADIO_V_WIFI_SCAN,   /**< wifi_scan: entries until WIFI_SCAN_END_SIG.   */
     RADIO_V_WIFI_SAVED,  /**< wifi_list: entries until WIFI_SAVED_END_SIG.  */
+    RADIO_V_FRAMES,      /**< wifi_frames: its window, then its record; the
+                          *   watchdog is the window's end.                 */
     RADIO_V_BLE,         /**< ble_*: closed by BLE_STATE_SIG.               */
     RADIO_V_BLE_SCAN     /**< ble_scan: entries until BLE_SCAN_END_SIG.     */
 } radio_verb_kind_t;
@@ -50,6 +53,8 @@ static radio_verb_kind_t s_radio_kind;
 /** @brief Room for @p n bytes as base64, padding and terminator included. */
 #define RADIO_V_B64_TEXT(n)  ((((((size_t)(n) + RADIO_V_B64_IN) - 1U) / RADIO_V_B64_IN) * RADIO_V_B64_OUT) + 1U)
 #define RADIO_V_WIPE_MS     12000U /**< c5_wipe: three steps, each with AO_Radio's own 3 s, and margin. */
+#define RADIO_V_FRAMES_MS_MIN   100U    /**< wifi_frames: the shortest window, one period of the C5's batches. */
+#define RADIO_V_FRAMES_MS_MAX   10000U  /**< wifi_frames: the longest window.                                 */
 
 /** @brief RADIO_V_ID: the records' word, `id` or `csr`. */
 static const char *s_radio_id_rec;
@@ -459,6 +464,159 @@ static void h_wifi_info(const kverb_t *c, const karg_val_t *v)
     console_begin(c->verb);
     s_radio_kind = RADIO_V_WIFI;
     wifi_state_request();
+}
+
+/** @brief What `wifi_frames` has counted in its window. */
+static struct {
+    uint32_t ms;         /**< The window.                                   */
+    uint8_t  channel;    /**< The radio's channel, as the last answer said. */
+    bool     joined;     /**< The station holds an association.             */
+    bool     listening;  /**< AO_Radio said the C5 listens.                 */
+    uint32_t heard;      /**< Frames heard since the start: the last tick's. */
+    uint32_t handed;     /**< Frames AO_Radio handed over.                  */
+    uint32_t dropped;    /**< Frames lost: the last tick's.                 */
+    uint32_t mgmt;       /**< Management frames, summed over the ticks.     */
+    uint32_t data;       /**< Data frames, summed over the ticks.           */
+    int8_t   rssi_max;   /**< The strongest tick's level, dBm.              */
+    bool     rssi_seen;  /**< A tick had a level.                           */
+} s_frames_run;
+
+/**
+ * @brief wifi_frames ch=<0..177> ms=<100..10000>: Wi-Fi frames heard on a
+ *        channel: counts.
+ *
+ * Starts listening on @p ch (0 stays where the radio is), lets the window
+ * pass, stops, and prints one record of counts and levels, then `>ok`. An
+ * address or a payload is never printed. The window is the command's
+ * watchdog: AO_Radio's answer to the start arms it, radio_timeout() ends it.
+ */
+static void h_wifi_frames(const kverb_t *c, const karg_val_t *v)
+{
+    console_begin(c->verb);
+    s_radio_kind = RADIO_V_FRAMES;
+    (void)memset(&s_frames_run, 0, sizeof(s_frames_run));
+    s_frames_run.ms = v[1].u;
+    /* The default watchdog stands until AO_Radio answers, which it always does. */
+    if ( !wifi_frames_request(AO_Console, true, (uint8_t)v[0].u) )
+    {
+        console_reply_err(KCLI_ERR_REJECT, c->verb);
+        console_end();
+    }
+}
+
+/**
+ * @brief End the command with the reason AO_Radio gave.
+ * @param why kwifi_frames_why_t.
+ */
+static void frames_fail(uint8_t why)
+{
+    static const char *const WORDS[] = {
+        "ok", "no_link", "no_service", "wifi_off", "joined", "channel", "busy", "memory",
+    };                                           /* kwifi_frames_why_t order */
+    _Static_assert((sizeof(WORDS) / sizeof(WORDS[0])) == ((size_t)KWIFI_FRAMES_MEMORY + 1U),
+                   "one word per reason");
+
+    if ( (uint8_t)KWIFI_FRAMES_BUSY == why )
+    {
+        console_reply_err(KCLI_ERR_BUSY, WORDS[why]);
+    }
+    else if ( ((uint8_t)KWIFI_FRAMES_OK < why) && ((uint8_t)KWIFI_FRAMES_MEMORY >= why) )
+    {
+        console_reply_err(KCLI_ERR_REJECT, WORDS[why]);
+    }
+    else
+    {
+        console_reply_err(KCLI_ERR_REJECT, console_verb());
+    }
+    console_end();
+}
+
+/** @brief Print the window's record: counts and levels, no address, no payload. */
+static void frames_record(void)
+{
+    if ( s_frames_run.rssi_seen )
+    {
+        console_reply(">|frames ch=%" PRIu32 " joined=%" PRIu32 " heard=%" PRIu32 " handed=%" PRIu32
+                      " dropped=%" PRIu32 " mgmt=%" PRIu32 " data=%" PRIu32 " rssi_max=%" PRId32,
+                      (uint32_t)s_frames_run.channel, (uint32_t)s_frames_run.joined, s_frames_run.heard,
+                      s_frames_run.handed, s_frames_run.dropped, s_frames_run.mgmt, s_frames_run.data,
+                      (int32_t)s_frames_run.rssi_max);
+    }
+    else
+    {
+        console_reply(">|frames ch=%" PRIu32 " joined=%" PRIu32 " heard=%" PRIu32 " handed=%" PRIu32
+                      " dropped=%" PRIu32 " mgmt=%" PRIu32 " data=%" PRIu32 " rssi_max=-",
+                      (uint32_t)s_frames_run.channel, (uint32_t)s_frames_run.joined, s_frames_run.heard,
+                      s_frames_run.handed, s_frames_run.dropped, s_frames_run.mgmt, s_frames_run.data);
+    }
+}
+
+/**
+ * @brief AO_Radio's answer to the start or the stop of `wifi_frames`.
+ * @param a The answer.
+ */
+static void frames_state(WifiFramesStateEvt const * const a)
+{
+    if ( a->on )
+    {
+        s_frames_run.listening = true;
+        s_frames_run.channel   = a->channel;
+        s_frames_run.joined    = a->joined;
+        console_extend(s_frames_run.ms);   /* the window runs from here */
+    }
+    else
+    {
+        /* A refusal, or the link going in the middle of the window. */
+        s_frames_run.listening = false;
+        frames_fail(a->why);
+    }
+}
+
+/**
+ * @brief One period's counts: the window's record sums them.
+ * @param t The tick.
+ */
+static void frames_tick(WifiFramesTickEvt const * const t)
+{
+    s_frames_run.channel = t->channel;
+    s_frames_run.joined  = t->joined;
+    s_frames_run.heard   = t->heard;
+    s_frames_run.dropped = t->dropped;
+    s_frames_run.mgmt   += t->mgmt;
+    s_frames_run.data   += t->data;
+    if ( (KODE_SNIFF_RSSI_NONE != t->rssi_max)
+        && ((!s_frames_run.rssi_seen) || (t->rssi_max > s_frames_run.rssi_max)) )
+    {
+        s_frames_run.rssi_max  = t->rssi_max;
+        s_frames_run.rssi_seen = true;
+    }
+}
+
+/**
+ * @brief The window of `wifi_frames` is over: stop, and say what was heard.
+ * @return true when the command is closed here.
+ */
+static bool frames_window_end(void)
+{
+    if ( !s_frames_run.listening )
+    {
+        return false;   /* no answer to the start: the ordinary timeout */
+    }
+    s_frames_run.listening = false;
+    s_radio_kind       = RADIO_V_NONE;
+    /* The stop is answered to nobody who waits: AO_Radio's answer comes to
+     * an idle console and is dropped. */
+    if ( wifi_frames_request(AO_Console, false, 0U) )
+    {
+        frames_record();
+        console_reply(">ok");
+    }
+    else
+    {
+        /* Still listening: the next `wifi_frames` stops it at its own end. */
+        console_reply_err(KCLI_ERR_REJECT, console_verb());
+    }
+    return true;
 }
 #endif /* CONFIG_KODEOS_WIFI */
 
@@ -894,6 +1052,39 @@ static bool radio_answer(QEvt const *e)
             }
             break;
         }
+        case WIFI_FRAMES_STATE_SIG: {
+            if ( RADIO_V_FRAMES == s_radio_kind )
+            {
+                frames_state(Q_EVT_CAST(WifiFramesStateEvt));
+            }
+            else
+            {
+                handled = false;
+            }
+            break;
+        }
+        case WIFI_FRAMES_TICK_SIG: {
+            if ( (RADIO_V_FRAMES == s_radio_kind) && s_frames_run.listening )
+            {
+                frames_tick(Q_EVT_CAST(WifiFramesTickEvt));
+            }
+            else
+            {
+                handled = false;
+            }
+            break;
+        }
+        case WIFI_FRAME_SIG: {
+            if ( (RADIO_V_FRAMES == s_radio_kind) && s_frames_run.listening )
+            {
+                s_frames_run.handed += 1U;
+            }
+            else
+            {
+                handled = false;
+            }
+            break;
+        }
         case WIFI_SAVED_ENTRY_SIG: {
             if ( RADIO_V_WIFI_SAVED == s_radio_kind )
             {
@@ -1057,6 +1248,20 @@ static bool radio_answer(QEvt const *e)
     return handled;
 }
 
+/** @brief The watchdog ran out: for `wifi_frames`, its window's ordinary end. */
+static bool radio_timeout(void)
+{
+    bool closed = false;
+
+#if CONFIG_KODEOS_WIFI
+    if ( RADIO_V_FRAMES == s_radio_kind )
+    {
+        closed = frames_window_end();
+    }
+#endif
+    return closed;
+}
+
 #if CONFIG_KODEOS_BLE
 static const karg_spec_t A_BLE_SCAN[] = {
     { .key = "ms", .required = false, .type = KARG_UINT,
@@ -1084,6 +1289,12 @@ static const karg_spec_t A_IDENT_CERT[] = {
  * typed whole between the quotes: `wifi_join ssid="Casa 5G" pass="a b#c"`. */
 static const karg_spec_t A_SSID[] = {
     { .key = "ssid", .required = true, .type = KARG_STRING },
+};
+static const karg_spec_t A_WIFI_FRAMES[] = {
+    { .key = "ch", .required = true, .type = KARG_UINT,
+      .min = 0U, .max = KWIFI_FRAMES_CHANNEL_MAX },
+    { .key = "ms", .required = true, .type = KARG_UINT,
+      .min = RADIO_V_FRAMES_MS_MIN, .max = RADIO_V_FRAMES_MS_MAX },
 };
 static const karg_spec_t A_WIFI_JOIN[] = {
     { .key = "ssid",     .required = true,  .type = KARG_STRING },
@@ -1115,6 +1326,7 @@ static const kverb_t RADIO_VERBS[] = {
     { "wifi_forget", A_SSID,               KVERB_KEYS(A_SSID),       h_wifi_forget },
     { "wifi_leave",  NULL,                 0U,                       h_wifi_leave  },
     { "wifi_info",   NULL,                 0U,                       h_wifi_info   },
+    { "wifi_frames", A_WIFI_FRAMES,        KVERB_KEYS(A_WIFI_FRAMES), h_wifi_frames },
 #endif
 #if CONFIG_KODEOS_BLE
     { "ble_up",      NULL,                 0U,                       h_ble_up      },
@@ -1128,6 +1340,7 @@ static const kverb_t RADIO_VERBS[] = {
 
 const kverbs_t radio_verbs = {
     .verbs  = RADIO_VERBS, .n = sizeof(RADIO_VERBS) / sizeof(RADIO_VERBS[0]),
-    .answer = radio_answer,
-    .info   = radio_info,
+    .answer  = radio_answer,
+    .timeout = radio_timeout,
+    .info    = radio_info,
 };
