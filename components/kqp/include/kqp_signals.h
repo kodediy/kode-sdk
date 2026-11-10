@@ -4403,7 +4403,8 @@ typedef struct {
     uint8_t     kind;   /**< KQP_SCAN_WIFI or KQP_SCAN_BLE.             */
 } ScanAskEvt;
 
-/** @brief The highest channel a frames request names (5 GHz channel 177). */
+/** @brief The highest channel a frames request names (5 GHz channel 177): the
+ *         wire's KODE_SNIFF_CHANNEL_MAX, which radio_frames.c asserts it equals. */
 #define KWIFI_FRAMES_CHANNEL_MAX  177U
 
 /** @brief Why a frames request is, or is not, listening (WifiFramesStateEvt.why). */

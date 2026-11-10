@@ -219,9 +219,11 @@ typedef struct __attribute__((packed)) {
 } kode_btkey_t;
 _Static_assert(sizeof(kode_btkey_t) == (KODE_TOKEN_LEN + KODE_BTKEY_LEN), "kode_btkey_t layout");
 
+#define KODE_SNIFF_CHANNEL_MAX  177U  /**< Highest channel a SNIFF_START names (5 GHz 177). */
+
 /** @brief SNIFF_START's request. */
 typedef struct __attribute__((packed)) {
-    uint8_t channel;    /**< 1..177, or 0: stay where the radio is.            */
+    uint8_t channel;    /**< 1..KODE_SNIFF_CHANNEL_MAX, or 0: stay where the radio is. */
     uint8_t reserved;   /**< 0.                                                */
 } kode_sniff_start_t;
 _Static_assert(sizeof(kode_sniff_start_t) == 2U, "kode_sniff_start_t layout");
