@@ -117,10 +117,18 @@ kode_status_t khal_timer_periodic(void (*cb)(void *), void *arg, uint64_t period
 {
     esp_timer_handle_t timer = NULL;
     periodic_slot_t *const slot = periodic_slot_for(cb);
+    /* A timer that is late is called once and goes on from there. esp_timer
+     * would otherwise call it once for every period it owes, back to back,
+     * and the QP tick is this timer: QP would be handed hundreds of ticks
+     * before any Active Object ran, and a time event that could not be
+     * posted is an assertion. esp_timer also leaves such a timer out of the
+     * time it lets a light sleep last, so an armed tick does not keep the
+     * board awake: the lock of khal_power_hold() does. */
     const esp_timer_create_args_t args = {
-        .callback = cb,
-        .arg      = arg,
-        .name     = "khal_tick",
+        .callback              = cb,
+        .arg                   = arg,
+        .name                  = "khal_tick",
+        .skip_unhandled_events = true,
     };
 
     if ( NULL == slot )

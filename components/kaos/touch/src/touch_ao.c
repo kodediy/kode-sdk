@@ -1051,16 +1051,22 @@ static QState Touch_armed(Touch * const me, QEvt const * const e)
     return status;
 }
 
-/** A finger is, or is about to be, on the glass: poll until it has gone. */
+/**
+ * @brief A finger is, or is about to be, on the glass: poll until it has gone.
+ *
+ * The poll is a one-shot that each poll taken arms again, NOT a periodic
+ * timer. QP posts a time event with no margin, and a periodic one goes on
+ * posting whether or not this AO has run: sixteen periods without the CPU
+ * fill its queue, a sixth of a second at this period, and a full queue is an
+ * assertion and a reset. Armed again by the poll itself, one waits at most.
+ */
 static QState Touch_tracking(Touch * const me, QEvt const * const e)
 {
     QState status;
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
-            QTimeEvt_armX(&me->poll,
-                          KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS),
-                          KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS));
+            QTimeEvt_armX(&me->poll, KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -1073,6 +1079,10 @@ static QState Touch_tracking(Touch * const me, QEvt const * const e)
             bool    pressed = false;
             int16_t rx = 0;
             int16_t ry = 0;
+
+            /* The next poll, a period from this one. A transition below
+             * leaves the state, and the exit takes it back. */
+            (void)QTimeEvt_rearm(&me->poll, KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS));
 
             /* A chip that did not answer ends the touch: a release goes out
              * with the last position rather than leave the GUI pressed. */
@@ -1203,9 +1213,8 @@ static QState Touch_held(Touch * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
-            QTimeEvt_armX(&me->poll,
-                          KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS),
-                          KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS));
+            /* One-shot, as Touch_tracking's: each look arms the next. */
+            QTimeEvt_armX(&me->poll, KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -1219,6 +1228,7 @@ static QState Touch_held(Touch * const me, QEvt const * const e)
             int16_t rx = 0;
             int16_t ry = 0;
 
+            (void)QTimeEvt_rearm(&me->poll, KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS));
             if ( kdrv_cst820_read(&pressed, &rx, &ry) != KODE_OK )
             {
                 pressed = false;
