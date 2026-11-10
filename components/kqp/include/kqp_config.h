@@ -825,6 +825,16 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 #define KODE_TOUCH_RESTORE_RETRY_MS 200U  /**< Between tries to write the controller back to its
                                        *   awake settings after a wake: a chip that went to
                                        *   sleep NAKs until a finger wakes it. */
+/* A touch controller that did not answer AO_Touch's bring-up is looked for
+ * again: soon, because the panel's bring-up has just pulsed the reset line the
+ * two share and the controller may still be coming back; then spaced, as
+ * AO_Display does for a panel; and whenever its interrupt line falls, because
+ * a controller in its low-power scan answers nothing until a finger touches
+ * the glass. Each look is one short probe. */
+#define KODE_TOUCH_LOOK_SOON_MS  { 200U, 300U, 500U, 1000U } /**< The waits before the first looks: 0.2, 0.5, 1 and 2 s after the bring-up's try. */
+#define KODE_TOUCH_LOOK_EVERY_MS 10000U  /**< Between the looks after those. */
+#define KODE_TOUCH_LOOK_FOR_MS   300000U /**< How long the spaced looks go on: five minutes, AO_Display's own patience with a panel. */
+#define KODE_TOUCH_LOOK_EDGE_MS  1000U   /**< The least time between two looks the interrupt line asks for: a contact pulses it many times a second. */
 #define KODE_TOUCH_REST_SLEEP_S 1U    /**< The auto-sleep time written for the rest: the controller
                                        *   sleeps a second after the last touch. */
 #define KODE_TOUCH_STILL_MS     60000U /**< A contact that stays within

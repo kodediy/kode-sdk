@@ -309,6 +309,173 @@ TEST_CASE("the controller is not touched until the panel says it is up, and a "
     mock_down();
 }
 
+/* ---- A controller that does not answer at the bring-up -------------------- */
+
+/* These cases run before any other brings the controller up, in this order:
+ * the AO has no way back to Touch_idle, and the last of them finds the chip. */
+
+static void round_for(kode_lp_state_t target);
+static void state_awake(void);
+static void expect_answer(bool busy, const char *why);
+
+static bool     s_answers;   /**< Whether the chip ACKs a probe.  */
+static unsigned s_probes;    /**< Probes asked of the bus.        */
+
+static bool on_probe(uint16_t addr, uint32_t timeout_ms, int ncalls)
+{
+    (void)addr; (void)timeout_ms; (void)ncalls;
+    ++s_probes;
+    return s_answers;
+}
+
+/** @brief The handle a bring-up gets: any address that is not NULL. */
+static khal_i2c_dev_t s_handle = (khal_i2c_dev_t)(void *)&s_handle;
+
+static kode_status_t on_add(uint16_t addr, khal_i2c_dev_t *out, int ncalls)
+{
+    (void)addr; (void)ncalls;
+    *out = s_handle;
+    return KODE_OK;
+}
+
+/**
+ * @brief Open a case with a chip that answers probes, or does not.
+ * @param answers Whether it ACKs.
+ */
+static void chip(bool answers)
+{
+    touch_up_once();
+    khal_i2c_remove_IgnoreAndReturn(KODE_OK);
+    khal_i2c_probe_StubWithCallback(&on_probe);
+    s_answers = answers;
+    s_probes  = 0U;
+}
+
+/** @brief Let @p ms go by: the clock and the AO's own timers. */
+static void run_ms(uint32_t ms)
+{
+    fake_time_advance_ms(ms);
+    (void)qf_support_tick(AO_Touch, QF_SUPPORT_STEPS(ms));
+}
+
+/* The panel's bring-up has just pulsed the reset line the two share, so the
+ * one try the AO used to make could land on a controller still coming back,
+ * and the touch stayed dead until a restart. The looks come at 0.2, 0.5, 1 and
+ * 2 s after that try, then every 10 s; each is one probe. */
+TEST_CASE("a controller silent at the bring-up is looked for again: four times soon, then spaced",
+          "[touch_ao]")
+{
+    chip(true);
+    (void)kdrv_cst820_park();      /* The driver lets go of the chip, as a boot finds it. */
+    TEST_ASSERT_FALSE(kdrv_cst820_present());
+    s_answers = false;
+
+    announce_panel(true);
+    TEST_ASSERT_TRUE_MESSAGE(logged("looking again"), "the first try's failure was final");
+    TEST_ASSERT_FALSE(kdrv_cst820_present());
+
+    s_probes = 0U;
+    run_ms(350U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "no look 0.2 s after the try");
+    run_ms(400U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_probes, "no look at 0.5 s");
+    run_ms(750U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(3U, s_probes, "no look at 1 s");
+    run_ms(1100U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(4U, s_probes, "no look at 2 s");
+    run_ms(8400U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(4U, s_probes, "a spaced look came early");
+    run_ms(2000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(5U, s_probes, "no look 10 s after the last soon one");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_reads, "a chip that never answered was read");
+    mock_down();
+}
+
+/* A board at rest is not woken every ten seconds to look for a chip. */
+TEST_CASE("a round stops the looks, and AWAKE starts them again", "[touch_ao][lowpower]")
+{
+    chip(false);
+
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+    run_ms(30000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_probes, "the board was woken to look for the chip");
+
+    state_awake();
+    run_ms(KODE_TOUCH_LOOK_EVERY_MS + 500U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "the looks did not start again at AWAKE");
+    mock_down();
+}
+
+/* A controller in its low-power scan answers nothing until a finger touches
+ * the glass, and its line is how it says so: the best moment to look. Not on
+ * every edge, though: a contact pulses the line many times a second. */
+TEST_CASE("the interrupt line falling looks at once, at most once a second", "[touch_ao]")
+{
+    chip(false);
+    fake_time_advance_ms(KODE_TOUCH_LOOK_EDGE_MS);
+
+    p6_moves(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "the edge did not look");
+    p6_moves(false);
+    p6_moves(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "a second edge within the second looked again");
+
+    fake_time_advance_ms(KODE_TOUCH_LOOK_EDGE_MS);
+    p6_moves(false);
+    p6_moves(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_probes, "a later edge did not look");
+    mock_down();
+}
+
+/* Five minutes, as AO_Display gives a panel. After that a board with no
+ * controller is left alone, but a touch still looks. */
+TEST_CASE("the timed looks end after five minutes, and say so; the interrupt still looks",
+          "[touch_ao]")
+{
+    chip(false);
+
+    run_ms(KODE_TOUCH_LOOK_FOR_MS + 20000U);
+    TEST_ASSERT_TRUE_MESSAGE(logged("only when the glass is touched"), "the end was not said");
+
+    s_probes = 0U;
+    run_ms(60000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_probes, "the timed looks went on past their end");
+    p6_moves(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "a touch no longer looks");
+    p6_moves(false);
+    mock_down();
+}
+
+/* The log line is the measurement: at which look, and how long after the panel. */
+TEST_CASE("the look that finds the controller arms the touch and says when", "[touch_ao]")
+{
+    chip(false);
+    fake_time_advance_ms(KODE_TOUCH_LOOK_EDGE_MS);
+
+    s_answers = true;
+    khal_i2c_add_StubWithCallback(&on_add);
+    p6_moves(true);                 /* A finger wakes it, and its line says so. */
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_cst820_present(), "the chip answered and was not taken");
+    TEST_ASSERT_TRUE_MESSAGE(logged("answered at look"), "when it answered was not said");
+    p6_moves(false);
+
+    /* Armed, like after a bring-up that worked at once. */
+    p6_moves(true);
+    sample(true, 50, 60);
+    const TouchEvt * const e = published();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "found, and its press was not published");
+    TEST_ASSERT_EQUAL_INT16(50, e->x);
+    TEST_ASSERT_EQUAL_INT16(60, e->y);
+    sample(false, 50, 60);
+    ao_spy_drain();
+
+    s_probes = 0U;
+    run_ms(KODE_TOUCH_LOOK_EVERY_MS * 2U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_probes, "the looks went on after the chip was found");
+    mock_down();
+}
+
 /* A calibration an older kodeOS stored is of no use to this one: the
  * controller's coordinates are the panel's. The record is in the store from
  * the first case of the file, and a sample at (100, 100) reaches everybody

@@ -20,6 +20,7 @@
 #define CST_PROBE_MS        50U
 #define CST_PROBE_TRIES     3U
 #define CST_PROBE_GAP_MS    20U
+#define CST_LOOK_MS         20U     /* one look's probe (kdrv_cst820_answers()) */
 #define CST_ID_TRIES        3U      /* reads of the identity before a part is judged not to be a CST8xx */
 #define CST_REG_FRAME       0x01U   /* gesture, fingers, xh, xl, yh, yl */
 #define CST_FRAME_LEN       6U
@@ -290,6 +291,15 @@ kode_status_t kdrv_cst820_park(void)
 bool kdrv_cst820_present(void)
 {
     return NULL != s_dev;
+}
+
+bool kdrv_cst820_answers(void)
+{
+    if ( NULL != s_dev )
+    {
+        return true;
+    }
+    return (khal_i2c_init() == KODE_OK) && khal_i2c_probe(KBSP_I2C_ADDR_TOUCH, CST_LOOK_MS);
 }
 
 kode_status_t kdrv_cst820_identity(uint8_t *chip_id, uint8_t *proj_id,
