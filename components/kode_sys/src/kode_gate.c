@@ -30,9 +30,7 @@
 
 #define TAP_POLL_MS      20U    /**< Between two looks at the buttons after a short press. */
 #define TAP_POLLS        50U    /**< How long BOT is watched: a second. */
-#define TAP_LIT_POLLS    10U    /**< How long the pulse stays lit: 200 ms. */
 #define TAP_BOT_READS    2U     /**< Reads in a row that make a press, not a glitch. */
-#define TAP_GREEN        0x03U, 0x40U, 0x14U   /**< A dim green, about 1.3 mA: the wake costs far more. */
 #define NOTE_PAD_DOWN    0x4B50ADU   /**< Went back to OFF with a pad button still down. */
 
 #define GAUGE_MIN_MV     2000   /**< Below this the gauge has no cell to measure. */
@@ -204,7 +202,7 @@ static void cell_gate(void)
 /**
  * @brief Answer a press that was over before the gate could read it.
  *
- * The pulse, and a second of watching BOT with the holds still held. The last
+ * A second of watching BOT with the holds still held, and no light. The last
  * look counts with one read: a person holding BOT from there on would otherwise
  * press a board that has just gone to sleep on a quiet line.
  *
@@ -217,16 +215,11 @@ static bool tap_answer(void)
     bool     go_on     = false;
     bool     stop      = false;
 
-    (void)kdrv_led_rgb(TAP_GREEN);
     for ( uint32_t i = 0U; (!stop) && (TAP_POLLS > i); ++i )
     {
         uint32_t down = 0U;
 
         khal_delay_ms(TAP_POLL_MS);
-        if ( TAP_LIT_POLLS == i )
-        {
-            (void)kdrv_led_rgb(0U, 0U, 0U);
-        }
         if ( !read_buttons(&down) )
         {
             go_on = true;
@@ -251,7 +244,6 @@ static bool tap_answer(void)
             }
         }
     }
-    (void)kdrv_led_rgb(0U, 0U, 0U);
     return go_on;
 }
 
@@ -283,7 +275,7 @@ static bool wake_decide(void)
     }
     else if ( !noted )
     {
-        /* Before the light: a flat cell has no second to spend on it. */
+        /* Before the wait: a flat cell has no second to spend on it. */
         cell_gate();
         go_on = tap_answer();
     }
