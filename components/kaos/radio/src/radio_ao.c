@@ -339,6 +339,8 @@ typedef struct {
                                *   ble_pair_until, or until a device pairs.     */
     uint32_t ble_pair_until;  /**< The time to pair ends here.                  */
     bool     ble_adv_hidden;  /**< The last advert planned hides the board.     */
+    uint8_t  ble_refused;     /**< KQP_BLE_REFUSED_*: what the next BLE state
+                               *   says of the request it answers.           */
     bool     ble_store_away;  /**< A DISCONNECT job is with the worker, which
                                *   takes NimBLE's store down with the link:
                                *   ble_bonds_seen stands for the count from the
@@ -3834,6 +3836,7 @@ static void ble_publish_state(Radio * const me)
          * on. The flag is the service; the driver is the machinery. */
         e->state      = me->ble_want ? (uint8_t)kdrv_ble_state()
                                      : (uint8_t)KDRV_BLE_OFF;
+        e->refused    = me->ble_refused;
         e->addr_known = kdrv_ble_addr(e->addr);
         if ( !e->addr_known )
         {
@@ -3849,6 +3852,8 @@ static void ble_publish_state(Radio * const me)
         e->pair_open = me->ble_pair_open;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
+    /* Said once, with the state that answers the request. */
+    me->ble_refused = (uint8_t)KQP_BLE_REFUSED_NONE;
     ble_app_link_edges(me);
 }
 
@@ -11620,6 +11625,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             if ( !me->ble_want )
             {
                 KLOG_W(TAG, "Bluetooth is off; `ble_up` first");
+                me->ble_refused = (uint8_t)KQP_BLE_REFUSED_OFF;
             }
             else
             {
@@ -11645,15 +11651,18 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                  * attached phone would keep a link whose key is gone.
                  * Disconnecting is what `ble_down` is for. */
                 KLOG_W(TAG, "a console is attached; `ble_down` first");
+                me->ble_refused = (uint8_t)KQP_BLE_REFUSED_ATTACHED;
                 ble_publish_state(me);
             }
             else if ( me->busy )
             {
                 radio_say_busy("ble_unpair", RADIO_BUSY_NO);
+                me->ble_refused = (uint8_t)KQP_BLE_REFUSED_BUSY;
                 ble_publish_state(me);
             }
             else if ( !radio_submit(me, KDRV_RADIO_JOB_BLE_UNPAIR) )
             {
+                me->ble_refused = (uint8_t)KQP_BLE_REFUSED_BUSY;
                 ble_publish_state(me);
             }
             else

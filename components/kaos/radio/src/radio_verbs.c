@@ -608,6 +608,34 @@ static void h_ble_info(const kverb_t *c, const karg_val_t *v)
     ble_state_request();
 }
 
+/**
+ * @brief Answer a BLE verb AO_Radio refused: the state it published says why.
+ * @param why KQP_BLE_REFUSED_*, from the state.
+ * @return true when the verb was refused and has been answered.
+ */
+static bool ble_refused_reply(uint8_t why)
+{
+    bool refused = true;
+
+    if ( (uint8_t)KQP_BLE_REFUSED_BUSY == why )
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
+    else if ( (uint8_t)KQP_BLE_REFUSED_OFF == why )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "off");
+    }
+    else if ( (uint8_t)KQP_BLE_REFUSED_ATTACHED == why )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "attached");
+    }
+    else
+    {
+        refused = false;
+    }
+    return refused;
+}
+
 /** @brief ble_unpair: forget every bonded peer. */
 static void h_ble_unpair(const kverb_t *c, const karg_val_t *v)
 {
@@ -998,7 +1026,17 @@ static bool radio_answer(QEvt const *e)
             break;
         }
         case BLE_STATE_SIG: {
+            bool refused = false;
+
             if ( RADIO_V_BLE == s_radio_kind )
+            {
+                refused = ble_refused_reply(Q_EVT_CAST(BleStateEvt)->refused);
+            }
+            if ( refused )
+            {
+                console_end();
+            }
+            else if ( RADIO_V_BLE == s_radio_kind )
             {
                 BleStateEvt const * const b = Q_EVT_CAST(BleStateEvt);
                 static const char *const STATES[] = {

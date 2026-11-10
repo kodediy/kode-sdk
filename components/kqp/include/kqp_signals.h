@@ -4526,6 +4526,12 @@ typedef struct {
     uint32_t ms;       /**< The whole check, from the request, ms.            */
 } RadioProbeEvt;
 
+/** @brief Why AO_Radio refused the request a BLE state answers (BleStateEvt.refused). */
+#define KQP_BLE_REFUSED_NONE      0U  /**< Not refused: the state is the answer.   */
+#define KQP_BLE_REFUSED_BUSY      1U  /**< The radio is busy; ask again.           */
+#define KQP_BLE_REFUSED_OFF       2U  /**< Bluetooth is off.                       */
+#define KQP_BLE_REFUSED_ATTACHED  3U  /**< A console is attached to the link.      */
+
 /** @brief The radio check, asked (RADIO_PROBE_REQ_SIG). */
 typedef struct {
     QEvt           super;
@@ -4540,6 +4546,8 @@ typedef struct {
     uint8_t  state;      /**< kdrv_ble_state_t                              */
     bool     addr_known; /**< false: the controller has not synchronised yet.*/
     uint8_t  addr[6];    /**< This board's own BLE address.                 */
+    uint8_t  refused;    /**< KQP_BLE_REFUSED_*: why the request this state
+                          *   answers was refused; NONE when it was not.    */
     bool     console;    /**< An authenticated central is subscribed to TX. */
     uint16_t tx_drop;    /**< Lines the output ring refused since attach.   */
     uint8_t  bonds;      /**< Bonded peers in the store.                    */
