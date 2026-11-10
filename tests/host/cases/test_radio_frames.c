@@ -760,3 +760,58 @@ TEST_CASE("a C5 update ends a stream first, and a start during it is busy",
     TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, sent_sniff()->op);
     frames_end();
 }
+
+TEST_CASE("while the radio joins a network a start that names a channel is busy; channel 0 is taken",
+          "[radio_frames]")
+{
+    kode_vault_list_t l;
+    uint8_t           m[sizeof(kode_hdr_t) + sizeof(kode_vault_list_t)];
+
+    radio_fresh();
+    kdrv_frames_forget();
+    ao_spy_drain();
+    ao_spy_other_drain();
+    other_release();
+    go_up();
+
+    /* The vault's LIST, asked at link up, answers with one name. */
+    const kode_hdr_t *const req = (const kode_hdr_t *)fake_peer_last_sent(NULL);
+    TEST_ASSERT_EQUAL_UINT8(KODE_SVC_VAULT, req->service);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_LIST, req->op);
+    (void)memset(&l, 0, sizeof(l));
+    l.count = 1U;
+    (void)snprintf(l.ssid[0], sizeof(l.ssid[0]), "%s", "line-ap-0");
+    {
+        kode_hdr_t const h = { KODE_WIRE_VERSION, req->service, req->op, req->seq,
+                               KODE_ST_OK, 0U, (uint16_t)sizeof(l) };
+        (void)memcpy(m, &h, sizeof(h));
+        (void)memcpy(&m[sizeof(h)], &l, sizeof(l));
+        fake_peer_deliver(KODE_MSG_RSP, m, sizeof(m));
+    }
+    pump();
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    fake_peer_reset();
+
+    ask(ao_spy_other(), true, FR_CH);
+    expect_state(ao_spy_other(), false, 0U, false, KWIFI_FRAMES_BUSY);
+    TEST_ASSERT_FALSE(anything_sent());
+
+    ask(ao_spy_other(), true, 0U);
+    const kode_hdr_t *const start = sent_sniff();
+    TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, start->op);
+    TEST_ASSERT_EQUAL_UINT8(0U, ((const uint8_t *)&start[1])[0]);
+    c5_answers(KODE_ST_OK, 1U, FR_CH, 0U, KODE_SNIFF_WHY_NONE);
+    pump();
+    expect_state(ao_spy_other(), true, FR_CH, false, KWIFI_FRAMES_OK);
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    frames_end();
+}

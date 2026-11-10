@@ -12314,6 +12314,22 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case WIFI_FRAMES_REQ_SIG: {
+            WifiFramesReqEvt const * const r = Q_EVT_CAST(WifiFramesReqEvt);
+
+            if ( r->on && (0U != r->channel) )
+            {
+                /* Tuning the radio mid-round can break the join: only a
+                 * stream on the channel the round leaves it on is taken. */
+                radio_frames_refuse(r, KWIFI_FRAMES_BUSY);
+                status = Q_HANDLED();
+            }
+            else
+            {
+                status = Q_SUPER(&Radio_up);
+            }
+            break;
+        }
         default: {
             status = Q_SUPER(&Radio_up);
             break;
