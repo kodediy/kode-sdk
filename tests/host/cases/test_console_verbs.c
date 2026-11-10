@@ -510,3 +510,98 @@ TEST_CASE("an owner's timeout hook closes its verb, and without one the watchdog
     TEST_ASSERT_TRUE(replied(">ok"));
     owners_back();
 }
+
+/* ---- A verb that does not wait --------------------------------------------- */
+
+static const karg_spec_t A_ONE_KEY[] = {
+    { .key = "n", .required = false, .type = KARG_UINT, .min = 0U, .max = 9U },
+};
+
+static uint32_t s_hook_i;   /**< Answers table I's hook closed its verb on. */
+
+/** @brief I's hook: the answer deliver() brings closes its verb; a line typed meanwhile is not its. */
+static bool hook_i(QEvt const *e)
+{
+    bool const mine = ((QSignal)NFC_INFO_RSP_SIG == e->sig);
+
+    if ( mine )
+    {
+        s_hook_i += 1U;
+        console_reply(">ok");
+        console_end();
+    }
+    return mine;
+}
+
+/** @brief An owner with a verb that holds the console and one that does not wait for it. */
+static const kverb_t I_VERBS[] = {
+    { "zz_i1", NULL, 0U, h_holds },
+    { "zz_i2", NULL, 0U, h_made_up },
+};
+static const kverbs_t I_TABLE = { .verbs = I_VERBS, .n = 2U, .answer = hook_i, .nowait = "zz_i2" };
+
+/** @brief An owner that names a verb it does not have. */
+static const kverb_t J_VERBS[] = { { "zz_j1", NULL, 0U, h_made_up } };
+static const kverbs_t J_TABLE = { .verbs = J_VERBS, .n = 1U, .nowait = "zz_i2" };
+
+/** @brief An owner whose verb that does not wait takes a key. */
+static const kverb_t K_VERBS[] = { { "zz_k1", A_ONE_KEY, 1U, h_made_up } };
+static const kverbs_t K_TABLE = { .verbs = K_VERBS, .n = 1U, .nowait = "zz_k1" };
+
+TEST_CASE("a verb that does not wait runs while another holds the console, which keeps its command",
+          "[console_verbs]")
+{
+    console_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kverbs_add(&I_TABLE));
+    s_hook_i = 0U;
+
+    /* Idle, it is a verb like any other. */
+    s_ran = NULL;
+    type_line("zz_i2");
+    TEST_ASSERT_EQUAL_STRING("zz_i2", s_ran);
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    type_line("zz_i1");
+    fake_klog_reset();
+    s_ran = NULL;
+    type_line("zz_i2");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("zz_i2", s_ran, "it waited behind the command in flight");
+    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_FALSE(replied(">err code=4 msg=busy"));
+
+    /* Its answer closed nothing: every other line is still turned away, the
+     * bare verb with something behind it included, and the owner still hears
+     * the answer to the command in flight. */
+    fake_klog_reset();
+    s_ran = NULL;
+    type_line("zz_i2 n=1");
+    type_line("ping");
+    TEST_ASSERT_NULL(s_ran);
+    TEST_ASSERT_TRUE(replied(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+    deliver();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_hook_i, "the command in flight lost the console");
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    fake_klog_reset();
+    type_line("ping");
+    TEST_ASSERT_TRUE(replied(">ok"));
+    owners_back();
+}
+
+TEST_CASE("a table's verb that does not wait must be one of its rows, with no keys",
+          "[console_verbs]")
+{
+    console_up();
+    size_t const before = kverbs_count();
+
+    fake_klog_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kverbs_add(&J_TABLE));
+    TEST_ASSERT_TRUE(replied("'zz_i2' does not wait, and is not a row with no keys"));
+    TEST_ASSERT_NULL(kverbs_find("zz_j1", NULL));
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kverbs_add(&K_TABLE));
+    TEST_ASSERT_NULL(kverbs_find("zz_k1", NULL));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)before, (uint32_t)kverbs_count());
+    owners_back();
+}
