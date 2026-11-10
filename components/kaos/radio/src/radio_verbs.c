@@ -58,6 +58,10 @@ static radio_verb_kind_t s_radio_kind;
 #define RADIO_V_FRAMES_MS_MAX   10000U  /**< wifi_frames: the longest window.                                 */
 #define RADIO_V_FRAMES_SLICE_MS 10U     /**< wifi_frames: the console pacer's slice, which the stop's retries count. */
 #define RADIO_V_FRAMES_STOP_MS  1000U   /**< wifi_frames: how long a stop with no room in AO_Radio's queue is asked again. */
+#define RADIO_V_FRAMES_WAIT_MS  5000U   /**< wifi_frames: the longest wait for AO_Radio's answer to a start or a stop. Above AO_Radio's own 3 s
+                                         *   deadline for a KODE request, so its answer wins and this is only the net. */
+#define RADIO_V_FRAMES_LATE_MS  (KODE_RADIO_SVC_SEND_GUARD_MS + RADIO_V_FRAMES_WAIT_MS) /**< wifi_frames: how long after the net caught a run an answer of
+                                         *   its requests may still arrive: AO_Radio's send guard, then its deadline. */
 
 /** @brief RADIO_V_ID: the records' word, `id` or `csr`. */
 static const char *s_radio_id_rec;
@@ -497,6 +501,9 @@ static struct {
     bool     rssi_seen;  /**< A tick had a level.                           */
 } s_frames_run;
 
+static bool     s_frames_late;      /**< A run was ended by the watchdog: an answer of its requests may still come. */
+static uint32_t s_frames_late_ms;   /**< When, on khal_time_ms()'s clock.                                          */
+
 /**
  * @brief wifi_frames ch=<0..177> ms=<100..10000>: Wi-Fi frames heard on a
  *        channel: counts.
@@ -507,19 +514,28 @@ static struct {
  *
  * The command holds the console until AO_Radio has answered the stop, so no
  * answer of one run can reach the next one, and the C5 is never left
- * listening for a console that has gone: AO_Radio always answers a start and
- * a stop (its own deadline stands behind each), so the watchdog is off for
- * those, and the window is counted in the console's pacer slices
- * (console_pace()).
+ * listening for a console that has gone: AO_Radio answers a start and a stop,
+ * its own deadline standing behind each, and the watchdog is the net under
+ * that (RADIO_V_FRAMES_WAIT_MS); the window is counted in the console's pacer
+ * slices (console_pace()). A run the net had to end leaves answers that may
+ * still arrive, so the next run waits RADIO_V_FRAMES_LATE_MS.
  */
 static void h_wifi_frames(const kverb_t *c, const karg_val_t *v)
 {
+    if ( s_frames_late && (RADIO_V_FRAMES_LATE_MS > (khal_time_ms() - s_frames_late_ms)) )
+    {
+        /* A run the watchdog ended may still have an answer on its way, and
+         * nothing tells it from the answer of this one's start: wait it out. */
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+        return;
+    }
+    s_frames_late = false;
     console_begin(c->verb);
     s_radio_kind = RADIO_V_FRAMES;
     (void)memset(&s_frames_run, 0, sizeof(s_frames_run));
     s_frames_run.ms    = v[1].u;
     s_frames_run.phase = (uint8_t)FRAMES_STARTING;
-    console_unwatched();
+    console_extend(RADIO_V_FRAMES_WAIT_MS);
     if ( !wifi_frames_request(AO_Console, true, (uint8_t)v[0].u) )
     {
         /* Nothing started, so nothing is left to stop. */
@@ -693,7 +709,7 @@ static void frames_slice(void)
         if ( wifi_frames_request(AO_Console, false, 0U) )
         {
             s_frames_run.stop_out = true;
-            console_unwatched();   /* AO_Radio's answer, which always comes, ends it */
+            console_extend(RADIO_V_FRAMES_WAIT_MS);   /* its answer, or the net */
         }
         else if ( (s_frames_run.tries * RADIO_V_FRAMES_SLICE_MS) < RADIO_V_FRAMES_STOP_MS )
         {
@@ -1351,18 +1367,34 @@ static bool radio_answer(QEvt const *e)
 }
 
 /**
- * @brief The watchdog ran out. `wifi_frames` arms it only between two slices,
- *        so it runs out only if the pacer stopped: the stop is asked for, as
- *        well as it can be, before the console's own timeout error.
+ * @brief The watchdog ran out.
+ *
+ * For `wifi_frames` it is the net under an answer of AO_Radio that never
+ * came, or a pacer that stopped. The stop is asked for unless one is out
+ * already (behind a start still waiting, AO_Radio holds it until the start
+ * is answered), the record is printed when there is one, and the console's
+ * own timeout error is the one terminal line. The answers of the requests
+ * left out are not told from the next run's, so h_wifi_frames() refuses the
+ * next run until they can no longer come.
+ *
  * @return false: the console says the command timed out.
  */
 static bool radio_timeout(void)
 {
 #if CONFIG_KODEOS_WIFI
-    if ( (RADIO_V_FRAMES == s_radio_kind) && frames_hearing() )
+    if ( (RADIO_V_FRAMES == s_radio_kind) && ((uint8_t)FRAMES_IDLE != s_frames_run.phase) )
     {
-        (void)wifi_frames_request(AO_Console, false, 0U);
+        if ( !s_frames_run.stop_out )
+        {
+            (void)wifi_frames_request(AO_Console, false, 0U);
+        }
+        if ( (uint8_t)FRAMES_STARTING != s_frames_run.phase )
+        {
+            frames_record();
+        }
         s_frames_run.phase = (uint8_t)FRAMES_IDLE;
+        s_frames_late      = true;
+        s_frames_late_ms   = khal_time_ms();
     }
 #endif
     return false;

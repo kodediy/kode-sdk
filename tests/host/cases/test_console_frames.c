@@ -36,6 +36,12 @@
 #define FRAMES_MS   200U
 #define FRAMES_CH   6U
 
+/** @brief The verb's longest wait for AO_Radio's answer, ms: above AO_Radio's own 3 s. */
+#define FRAMES_WAIT_MS  5000U
+
+/** @brief How long after a watchdog an answer of that run may still come, ms: the send guard and the wait. */
+#define FRAMES_LATE_MS  (KODE_RADIO_SVC_SEND_GUARD_MS + FRAMES_WAIT_MS)
+
 /** @brief How long the verb asks for a stop AO_Radio has no room for, ms: one second. */
 #define RADIO_FRAMES_STOP_TRIES_MS  1000U
 
@@ -44,6 +50,13 @@ static void console_up(void)
 {
     const QEvt *e;
 
+    /* The verb keeps the time of the last run the watchdog ended, across
+     * cases, and the clock starts again with each case: every case begins
+     * later than the last one's longest wait. */
+    static uint32_t s_epoch_ms;
+
+    s_epoch_ms += 2U * FRAMES_LATE_MS;
+    fake_time_advance_ms(s_epoch_ms);
     qf_support_init();
     (void)ao_spy();
     ao_spy_drain();
@@ -474,4 +487,116 @@ TEST_CASE("a stop AO_Radio never has room for ends the run saying so", "[console
     type_line("wifi_frames ch=6 ms=200");
     TEST_ASSERT_EQUAL_UINT(1U, posted_requests().starts);
     radio_says(false, 0U, false, KWIFI_FRAMES_NO_LINK);   /* leave the console free for the next file */
+}
+
+/** @brief How many console lines hold @p needle. */
+static unsigned lines_with(const char *needle)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const l = fake_klog_line(i);
+
+        if ( (NULL != l) && (strstr(l, needle) != NULL) )
+        {
+            n += 1U;
+        }
+    }
+    return n;
+}
+
+/** @brief Let the console's watchdog run out. */
+static void watchdog_runs_out(void)
+{
+    (void)qf_support_tick(AO_Console, WINDOW_TICKS(FRAMES_WAIT_MS));
+}
+
+TEST_CASE("a start AO_Radio never answers frees the console by itself, with one error",
+          "[console_frames]")
+{
+    posted_t p;
+
+    console_up();
+    type_line("wifi_frames ch=6 ms=200");
+    TEST_ASSERT_EQUAL_UINT(1U, posted_requests().starts);
+    TEST_ASSERT_EQUAL_UINT(0U, lines_with(">err"));
+
+    watchdog_runs_out();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, lines_with(">err"), "one terminal line");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=6 msg=wifi_frames"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+    /* The start may still be taken late: it is stopped behind itself. */
+    p = posted_requests();
+    TEST_ASSERT_EQUAL_UINT(1U, p.stops);
+    /* The console is free again. */
+    fake_klog_reset();
+    type_line("wifi_frames ch=200 ms=200");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=3 msg=ch"));
+}
+
+TEST_CASE("a stop AO_Radio never answers frees the console by itself, after the record",
+          "[console_frames]")
+{
+    posted_t p;
+
+    console_up();
+    run_to_the_stop();
+    p = posted_requests();
+    TEST_ASSERT_EQUAL_UINT(1U, p.starts);
+    TEST_ASSERT_EQUAL_UINT(1U, p.stops);
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    watchdog_runs_out();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(">|frames ch=6"), "the record comes first");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, lines_with(">err"), "one terminal line");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=6 msg=wifi_frames"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, posted_requests().count, "a stop was posted twice");
+    fake_klog_reset();
+    type_line("wifi_frames ch=200 ms=200");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=3 msg=ch"));
+}
+
+TEST_CASE("a stop's answer after the watchdog is never taken by the next run",
+          "[console_frames]")
+{
+    unsigned starts = 0U;
+    unsigned stops  = 0U;
+    posted_t p;
+
+    console_up();
+    run_to_the_stop();
+    p = posted_requests();
+    starts += p.starts;
+    stops  += p.stops;
+    watchdog_runs_out();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, lines_with(">err"), "the watchdog did not close the run");
+
+    /* The stop's answer may still be on its way, so the next run waits for it
+     * to have landed or become impossible: it is refused, and posts nothing. */
+    fake_klog_reset();
+    type_line("wifi_frames ch=6 ms=200");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_EQUAL_UINT(0U, posted_requests().count);
+
+    /* The late answer lands on an idle console and is dropped. */
+    radio_says(false, 0U, false, KWIFI_FRAMES_NO_LINK);
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    /* Past the longest an answer can take, the next run is whole, and no stream is left on. */
+    fake_time_advance_ms(FRAMES_LATE_MS + 1U);
+    fake_klog_reset();
+    run_to_the_stop();
+    p = posted_requests();
+    starts += p.starts;
+    stops  += p.stops;
+    radio_stops();
+    TEST_ASSERT_NOT_NULL(line_with(">|frames ch=6"));
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    TEST_ASSERT_NULL(line_with(">err"));
+    TEST_ASSERT_EQUAL_UINT(2U, starts);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(starts, stops, "a start was left without its stop");
 }
