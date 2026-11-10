@@ -4534,6 +4534,12 @@ typedef struct {
     radio_probe_t  req;   /**< What to check.                                 */
 } RadioProbeReqEvt;
 
+/** @brief The longest name the scan response carries, NUL included: the
+ *         packet's 31 bytes less the name's two of length and type. */
+#define KQP_BLE_NAME_MAX  30U
+/** @brief The most maker data it carries: the packet less two bytes. */
+#define KQP_BLE_DATA_MAX  29U
+
 /** @brief What the BLE half is doing (BLE_STATE_SIG). */
 typedef struct {
     QEvt     super;
@@ -4548,6 +4554,8 @@ typedef struct {
     bool     pair_open;  /**< Pair new device's time is running.            */
     uint16_t backlog;    /**< Bytes still queued for the central.           */
     uint16_t retry;      /**< Times the drain waited on NimBLE's buffers.   */
+    char     name[KQP_BLE_NAME_MAX]; /**< The name the board goes by: the
+                          *   advert's and its Device Name.                 */
 } BleStateEvt;
 
 /**
@@ -4572,12 +4580,6 @@ typedef struct {
                           *   KODE_BLE_SCAN_MIN_MS..KODE_BLE_SCAN_MAX_MS,
                           *   and anything else is refused.              */
 } BleScanReqEvt;
-
-/** @brief The longest name the scan response carries, NUL included: the
- *         packet's 31 bytes less the name's two of length and type. */
-#define KQP_BLE_NAME_MAX  30U
-/** @brief The most maker data it carries: the packet less two bytes. */
-#define KQP_BLE_DATA_MAX  29U
 
 /**
  * @brief What the scan response carries from now on (BLE_RSP_REQ_SIG): the

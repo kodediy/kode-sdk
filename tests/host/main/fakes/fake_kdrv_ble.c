@@ -30,6 +30,7 @@ static struct {
     uint32_t         adv_ms;
     bool             adv_hidden;
     bool             secure;
+    char             name[KDRV_BLE_ADV_MAX];  /**< What set_scan_rsp() named. */
     unsigned         conn_rest;   /**< kdrv_ble_conn_calm(true) calls.  */
     unsigned         conn_awake;  /**< kdrv_ble_conn_calm(false) calls. */
 } s_b;
@@ -388,7 +389,28 @@ kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_
     {
         who = kdrv_ble_serial_name();
     }
-    return kdrv_ble_adv_pack(who, data, len, buf, sizeof(buf), &n);
+    kode_status_t const rc = kdrv_ble_adv_pack(who, data, len, buf, sizeof(buf), &n);
+
+    if ( KODE_OK == rc )
+    {
+        s_b.name[0] = '\0';
+        if ( NULL != name )
+        {
+            (void)snprintf(s_b.name, sizeof(s_b.name), "%s", name);
+        }
+    }
+    return rc;
+}
+
+const char *kdrv_ble_name(void)
+{
+    const char *name = s_b.name;
+
+    if ( '\0' == s_b.name[0] )
+    {
+        name = kdrv_ble_serial_name();
+    }
+    return name;
 }
 
 kdrv_ble_state_t kdrv_ble_state(void)

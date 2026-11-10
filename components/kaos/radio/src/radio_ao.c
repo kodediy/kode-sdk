@@ -344,6 +344,8 @@ typedef struct {
                                *   ble_bonds_seen stands for the count from the
                                *   submit until the worker is back.            */
     uint8_t  ble_bonds_seen;  /**< The bond count the last BLE state published. */
+    char     ble_name[KQP_BLE_NAME_MAX]; /**< The name the last BLE state
+                               *   published; "" before the first.          */
     bool     ble_linked;      /**< A central was on, as BLE_LINK_SIG last saw it. */
 
     /* The link as BLE_APP_LINK_SIG last told it: whether a central was on,
@@ -3847,6 +3849,13 @@ static void ble_publish_state(Radio * const me)
         e->bonds   = me->ble_bonds_seen;
         e->hidden    = me->ble_adv_hidden;
         e->pair_open = me->ble_pair_open;
+        if ( !me->busy )
+        {
+            /* The worker writes the name: read only while no job is with it,
+             * and the last one read stands for it meanwhile. */
+            (void)snprintf(me->ble_name, sizeof(me->ble_name), "%s", kdrv_ble_name());
+        }
+        (void)snprintf(e->name, sizeof(e->name), "%s", me->ble_name);
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
     ble_app_link_edges(me);
