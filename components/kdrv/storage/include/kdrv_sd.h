@@ -71,7 +71,7 @@ typedef enum {
 
     /* What the next mount will ask for. Writable; neither touches the card. */
     KDRV_SD_WIDTH_REQ,      /**< Data lines to ask for: 1 or 4, nothing
-                             *   between. Default KBSP_SD_WIDTH.            */
+                             *   between. Default KDRV_SD_WIDTH_USE.        */
     KDRV_SD_FREQ_REQ_KHZ,   /**< Clock ceiling to ask for. Default
                              *   KBSP_SD_FREQ_KHZ.                          */
 
@@ -89,6 +89,14 @@ typedef struct {
     uint16_t    step;     /**< Resolution; always 1 here.                   */
     bool        writable; /**< True for the two knobs and nothing else.     */
 } kdrv_sd_field_info_t;
+
+/** @brief Data lines an everyday mount asks for: one. The counterfeit cards
+ *         shipped with some units read on four lines and fail to write on
+ *         them, and a failed write leaves the controller, which the C5's
+ *         link shares, unable to bring a card up again until the P4 resets.
+ *         Every card reads and writes on one. The slot's four lines
+ *         (KBSP_SD_WIDTH) are what `test component=sd` judges. */
+#define KDRV_SD_WIDTH_USE         1U
 
 /* ---- How long a call may take --------------------------------------------
  * The bounds a caller that runs these on a task of its own waits by. They are
