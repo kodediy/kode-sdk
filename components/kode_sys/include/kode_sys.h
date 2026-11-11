@@ -556,9 +556,9 @@ kode_status_t kode_sys_home_now(void);
  *
  * Immediate returns:
  *   KODE_OK            taken; the answer will come.
- *   KODE_DENIED        @p me is NULL (a plain task asks through kode.h), an
- *                      argument is bad, @p me's door of that kind is busy, or
- *                      the build has no such owner. Nothing was posted.
+ *   KODE_DENIED        @p me is NULL or not started (a plain task asks through
+ *                      kode.h), an argument is bad, @p me's door of that kind is
+ *                      busy, or the build has no such owner. Nothing was posted.
  *   KODE_NO_RESOURCES  the owner's queue is within its margin, or the event
  *                      pool is dry. Nothing was posted.
  *
@@ -567,6 +567,16 @@ kode_status_t kode_sys_home_now(void);
  * the same kind before then is refused at once. The door is free again just
  * before the answer is posted, so @p me may ask again from the answer's
  * handler.
+ *
+ * Who calls: any thread may make a request in @p me's name, @p me's own or a
+ * task's, as long as @p me is started. The answer arrives at @p me, never at
+ * the task: @p me's handler hands it on. The doors are @p me's, so a task and
+ * @p me share them: while one holds the door of a kind, the other asking that
+ * kind is refused at once. Two threads asking at the same moment get the same:
+ * one is taken, the other refused. A task adds no door, so it adds no slot to
+ * @p me's queue. The lent-buffer rule binds whichever thread made the call.
+ * The audio stream's ring has one writer: one thread at a time calls
+ * kode_sys_audio_stream_write().
  *
  * Answers: a request taken is answered exactly once, posted to @p me with no
  * margin and never published, with the final status in @c rc. The owner's
