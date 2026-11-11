@@ -5965,7 +5965,7 @@ TEST_CASE("a scan response asked while the radio is busy waits, and goes once th
     ble_case_end();
 }
 
-TEST_CASE("a scan response asked with Bluetooth off is kept, and goes once it is on",
+TEST_CASE("a scan response asked with Bluetooth off is kept, and goes with the start",
           "[radio_ao][ble_ask]")
 {
     radio_fresh();
@@ -5977,12 +5977,13 @@ TEST_CASE("a scan response asked with Bluetooth off is kept, and goes once it is
     TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a response went out with Bluetooth off");
 
     (void)radio_service_set(KSET_KEY_BLE, true);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_START, running_job());
+    TEST_ASSERT_TRUE_MESSAGE(held_req()->on, "the start went without the name");
+    TEST_ASSERT_EQUAL_STRING("later", held_req()->ssid);
     finish_ble_start();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_ADV, running_job());
     finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_RSP, running_job());
-    TEST_ASSERT_EQUAL_STRING("later", held_req()->ssid);
-    finish(KDRV_RADIO_JOB_BLE_RSP, KODE_OK);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the name went a second time");
     ao_spy_drain();
     ble_case_end();
 }
@@ -5991,8 +5992,9 @@ TEST_CASE("a scan response asked with Bluetooth off is kept, and goes once it is
  * is before the link exists, and AO_Audio asks for the amplifier at the same
  * time. The amplifier's job makes the bring-up's autojoin wait its turn, and
  * with no network in the vault that autojoin then ends without a job: nothing
- * comes back to pay what waited behind it. The name is one of those debts. */
-TEST_CASE("a scan response asked before a boot's link is up goes out when the bring-up ends "
+ * comes back to pay what waited behind it. The name rides the BLE start, so
+ * it goes out all the same, and before the first advert. */
+TEST_CASE("a scan response asked before a boot's link is up goes out in the bring-up, "
           "with no network to join", "[radio_ao][ble_ask]")
 {
     uint8_t const     on   = 1U;
@@ -6024,6 +6026,11 @@ TEST_CASE("a scan response asked before a boot's link is up goes out when the br
 
         if ( (int)KDRV_RADIO_JOB_BLE_START == job )
         {
+            if ( held_req()->on )
+            {
+                TEST_ASSERT_EQUAL_STRING("KODE zz", held_req()->ssid);
+                sent = true;
+            }
             finish_ble_start();
         }
         else if ( (int)KDRV_RADIO_JOB_BLE_ADV == job )
