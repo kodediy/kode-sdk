@@ -4567,14 +4567,20 @@ typedef struct {
 /** @brief Bytes of a frame's header kept after the MAC header (kode_wire.h's KODE_SNIFF_HEAD_LEN). */
 #define KWIFI_FRAME_HEAD_LEN  8U
 
+/** @brief Bytes of a frame's frame control (kdrv_frames.h's KDRV_FRAME_FC_LEN). */
+#define KWIFI_FRAME_FC_LEN    2U
+
+/** @brief Bytes of a frame's address (kdrv_frames.h's KDRV_FRAME_ADDR_LEN). */
+#define KWIFI_FRAME_ADDR_LEN  6U
+
 /** @brief WIFI_FRAME_SIG: one frame, as the C5 summarised it. */
 typedef struct {
     QEvt     super;
     uint8_t  channel;                      /**< The radio's primary channel then. */
     int8_t   rssi;                         /**< dBm.                              */
-    uint8_t  fc[2];                        /**< Frame control, as on the air.     */
-    uint8_t  addr1[6];                     /**< Address 1, as on the air.         */
-    uint8_t  addr2[6];                     /**< Address 2; zeros when it has none. */
+    uint8_t  fc[KWIFI_FRAME_FC_LEN];       /**< Frame control, as on the air.     */
+    uint8_t  addr1[KWIFI_FRAME_ADDR_LEN];  /**< Address 1, as on the air.         */
+    uint8_t  addr2[KWIFI_FRAME_ADDR_LEN];  /**< Address 2; zeros when it has none. */
     uint16_t len;                          /**< The frame's length on the air.    */
     uint8_t  head[KWIFI_FRAME_HEAD_LEN];   /**< After the MAC header; zeros past its end. */
 } WifiFrameEvt;
