@@ -800,6 +800,14 @@ void fake_ble_app_service_set(const kdrv_ble_app_service_t *svc);
 /** @brief How many times kdrv_ble_app_kick() was called since boot. */
 unsigned fake_ble_app_kicks(void);
 
+/** @brief Declare the Battery service kdrv_ble_battery_declared() reports, and
+ *         forget the level; it stays across fake_ble_reset(), so a case that
+ *         declares it puts false back. */
+void fake_ble_battery_declare(bool on);
+
+/** @brief The last level kdrv_ble_battery_set() was given; -1 for none since the declare. */
+int fake_ble_battery_pct(void);
+
 /** @brief How many scans have been run since the reset. */
 unsigned fake_ble_scans(void);
 

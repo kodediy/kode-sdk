@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sdkconfig.h"   /* CONFIG_KODE_BLE_APP_VALUE_MAX */
+
 #include "kode_colors.h"
 #include "kode_defs.h"
 #include "kode_init.h"
@@ -302,7 +304,12 @@ const char *kode_event_wifi_lost(void);
 #define KODE_EVENT_QUEUE_DEPTH 16U  /**< Events queued for the listeners; past it they drop. */
 #define KODE_EVENT_NAME_MAX    32U  /**< Bytes of an event name, NUL included. */
 #define KODE_EVENT_SOURCE_MAX  80U  /**< Bytes of a source, NUL included; longer is cut. */
-#define KODE_EVENT_TEXT_MAX    256U /**< Bytes of a text, NUL included: one MQTT payload. */
+#define KODE_EVENT_TEXT_MQTT   256U /**< Bytes of one MQTT payload's text, NUL included. */
+#if defined(CONFIG_KODE_BLE_APP_VALUE_MAX) && ((CONFIG_KODE_BLE_APP_VALUE_MAX + 1U) > KODE_EVENT_TEXT_MQTT)
+#define KODE_EVENT_TEXT_MAX    ((uint32_t)CONFIG_KODE_BLE_APP_VALUE_MAX + 1U) /**< Bytes of a text, NUL included: one Bluetooth value. */
+#else
+#define KODE_EVENT_TEXT_MAX    KODE_EVENT_TEXT_MQTT /**< Bytes of a text, NUL included: one MQTT payload. */
+#endif
 
 /** @brief An event, as a listener or a waiter receives it. */
 typedef struct {
@@ -1111,6 +1118,14 @@ int kode_ble_scan(kode_ble_device_t *out, size_t cap, uint32_t ms);
  * ble_disconnected (see the events). Throughput is not promised: the
  * notifications share the link with the console.
  *
+ * The service needs CONFIG_KODEOS_BLE_CONSOLE=y, whose pairing it uses.
+ * CONFIG_KODE_BLE_APP_VALUE_MAX sets the longest value (244 by default, up to
+ * 512). A read or a write carries a whole value; a notification carries at
+ * most 448 bytes, and a longer one is dropped while the value stays for a
+ * read. CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE puts the service's UUID in
+ * the advert instead of the console's, for the phone apps that scan with a
+ * filter on it. KODE_BLE_BATTERY_SERVICE() adds the standard Battery service.
+ *
  * A KODE_BLE_QUEUED characteristic gives each read the next value instead of
  * the same one, for a phone that drains it by reading until a read comes
  * back empty:
@@ -1123,7 +1138,11 @@ int kode_ble_scan(kode_ble_device_t *out, size_t cap, uint32_t ms);
  * last part. A phone that connects or leaves empties the queue. */
 
 #define KODE_BLE_CHARACTERISTICS_MAX      4U     /**< Characteristics one service may have.            */
-#define KODE_BLE_VALUE_MAX      244U   /**< Bytes of a value: one notification at an MTU of 247. */
+#ifdef CONFIG_KODE_BLE_APP_VALUE_MAX
+#define KODE_BLE_VALUE_MAX      ((uint32_t)CONFIG_KODE_BLE_APP_VALUE_MAX) /**< Bytes of a value: CONFIG_KODE_BLE_APP_VALUE_MAX, 244 by default. */
+#else
+#define KODE_BLE_VALUE_MAX      244U   /**< Bytes of a value, with Bluetooth left out: one notification at an MTU of 247. */
+#endif
 #define KODE_BLE_CHARACTERISTIC_NAME_MAX  16U    /**< Bytes of a characteristic's name, NUL included.  */
 #define KODE_BLE_READ           0x01U  /**< A phone may read the value.                      */
 #define KODE_BLE_WRITE          0x02U  /**< A phone may write it: ble_written.               */
@@ -1167,6 +1186,19 @@ typedef struct {
     KODE_BLE_LINKAGE_ const kode_ble_service_t kode_ble_app_service; \
     const kode_ble_service_t kode_ble_app_service = { \
         (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }
+
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that serve the battery, never used inside the SDK */
+/**
+ * @brief Serve the standard Battery service, at file scope, followed by a semicolon.
+ *
+ * The Bluetooth SIG's Battery (0x180F) with Battery Level (0x2A19): the
+ * charge AO_Power reads, in percent, which a phone reads or subscribes to
+ * and shows. Beside the app's own service, behind the same security. Defines
+ * the constant kode_ble_battery_service, the name the radio looks for.
+ */
+#define KODE_BLE_BATTERY_SERVICE() \
+    KODE_BLE_LINKAGE_ const uint8_t kode_ble_battery_service; \
+    const uint8_t kode_ble_battery_service = 1U
 
 /**
  * @brief Set what a phone that reads characteristic @p chr gets. Nothing is sent.

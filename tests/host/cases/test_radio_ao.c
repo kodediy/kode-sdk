@@ -8310,6 +8310,52 @@ TEST_CASE("AO_Radio pushes and clears a queued characteristic, and publishes eac
     fake_ble_app_service_set(NULL);
 }
 
+/** @brief A reading of AO_Power's with @p pct, dispatched to AO_Radio. */
+static void radio_power_reading(uint8_t pct)
+{
+    PowerEvt p;
+
+    (void)memset(&p, 0, sizeof(p));
+    p.super   = (QEvt)QEVT_INITIALIZER(POWER_EVT_SIG);
+    p.soc_pct = pct;
+    dispatch_evt(&p.super);
+}
+
+TEST_CASE("AO_Radio hands each charge AO_Power reads to the Battery service, and skips one "
+          "that comes while a job runs", "[radio_ao][ble_app]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_battery_declare(true);
+
+    /* Off: the reading still goes down. */
+    radio_power_reading(57U);
+    TEST_ASSERT_EQUAL_INT(57, fake_ble_battery_pct());
+
+    /* Up, and the host's start held by the worker: skipped. */
+    go_up();
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_TRUE(job_held());
+    radio_power_reading(60U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(57, fake_ble_battery_pct(),
+                                  "the level reached NimBLE while a worker job held it");
+    finish_ble_start();
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+
+    /* The next reading, with nothing running, goes down. */
+    radio_power_reading(61U);
+    TEST_ASSERT_EQUAL_INT(61, fake_ble_battery_pct());
+
+    fake_ble_battery_declare(false);
+    dispatch(BLE_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
+
 /* ---- The board's rest ------------------------------------------------------- */
 
 /** @brief Open a round on AO_Radio and run what it handed the worker. */

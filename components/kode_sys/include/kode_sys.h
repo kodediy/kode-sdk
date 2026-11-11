@@ -1656,7 +1656,9 @@ bool kode_sys_ble_enabled(void);
  * with the code on the glass reads, writes or subscribes; with Just Works
  * pairing (no passkey) the link is encrypted and bonded, not authenticated;
  * with console pairing off the service is as open as the console. The
- * console's service stays in the table and in the advert. A table the driver
+ * console's service stays in the table and in the advert, where
+ * CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE puts the app's UUID instead; the
+ * service needs CONFIG_KODEOS_BLE_CONSOLE=y. A table the driver
  * cannot serve (a UUID that is not 128 bits as 8-4-4-4-12 hex, no
  * characteristics or more than KODE_SYS_BLE_CHARS_MAX, a name missing, too
  * long or used twice, properties that are none of the three) is left out
@@ -1678,7 +1680,7 @@ bool kode_sys_ble_enabled(void);
  */
 
 #define KODE_SYS_BLE_CHARS_MAX      4U     /**< Characteristics one service may have.            */
-#define KODE_SYS_BLE_VALUE_MAX      244U   /**< Bytes of a value: one notification at an MTU of 247. */
+#define KODE_SYS_BLE_VALUE_MAX      KQP_BLE_APP_VALUE_MAX  /**< Bytes of a value: CONFIG_KODE_BLE_APP_VALUE_MAX, 244 by default. */
 #define KODE_SYS_BLE_CHAR_NAME_MAX  16U    /**< Bytes of a characteristic's name, NUL included.  */
 #define KODE_SYS_BLE_FAULT_MAX      80U    /**< Bytes of the reason a service is left out, NUL included. */
 #define KODE_SYS_BLE_READ           0x01U  /**< A central may read the value.                    */
@@ -1722,6 +1724,19 @@ typedef struct {
     KODE_SYS_BLE_LINKAGE_ const kode_sys_ble_service_t kode_ble_app_service; \
     const kode_sys_ble_service_t kode_ble_app_service = { \
         (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }
+
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that serve the battery, never used inside the SDK */
+/**
+ * @brief Serve the standard Battery service, at file scope, followed by a semicolon.
+ *
+ * The Bluetooth SIG's Battery (0x180F) with Battery Level (0x2A19), from
+ * AO_Power's readings (POWER_EVT_SIG), beside the app's own service and
+ * behind the same security. Defines the constant kode_ble_battery_service,
+ * the name the driver looks for.
+ */
+#define KODE_SYS_BLE_BATTERY_SERVICE() \
+    KODE_SYS_BLE_LINKAGE_ const uint8_t kode_ble_battery_service; \
+    const uint8_t kode_ble_battery_service = 1U
 
 /* cppcheck-suppress misra-c2012-2.3 ; an event's name for the apps that read it, never used inside the SDK */
 /**

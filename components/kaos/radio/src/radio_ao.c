@@ -6415,6 +6415,34 @@ static bool radio_ble_rsp(Radio * const me, QEvt const * const e)
 }
 
 /**
+ * @brief POWER_EVT_SIG: hand the charge to the Battery service, in every state.
+ *
+ * Subscribed only when the app declared the service. A reading that comes
+ * while a job of the worker runs is skipped, for radio_ble_value()'s reason:
+ * the next one, a poll of AO_Power's later, brings it.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return true when @p e was it and has been handled.
+ */
+static bool radio_ble_battery(Radio const * const me, QEvt const * const e)
+{
+    bool handled = false;
+
+    if ( (QSignal)POWER_EVT_SIG == e->sig )
+    {
+        PowerEvt const * const p = Q_EVT_CAST(PowerEvt);
+
+        if ( !me->winflight )
+        {
+            kdrv_ble_battery_set(p->soc_pct);
+        }
+        handled = true;
+    }
+    return handled;
+}
+
+/**
  * @brief BLE_APP_VALUE_REQ_SIG: set, or set and notify, one value of the
  *        app's service, or push on a queue or empty it, in every state, and
  *        answer a blocked task.
@@ -9371,6 +9399,12 @@ static QState Radio_initial(Radio * const me, void const * const par)
     (void)kdrv_ble_set_cb(&radio_on_ble);
     (void)kdrv_ble_app_set_write_cb(&radio_on_ble_write);
     (void)kdrv_ble_app_set_taken_cb(&radio_on_ble_taken);
+    /* The Battery service reports AO_Power's charge: its readings are heard
+     * only when the app asked for it. */
+    if ( kdrv_ble_battery_declared() )
+    {
+        QActive_subscribe(&me->super, POWER_EVT_SIG);
+    }
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
     (void)kdrv_ble_set_pair_cb(&radio_on_ble_pair);
 #endif
@@ -9783,6 +9817,10 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
                 status = Q_HANDLED();
             }
             else if ( radio_ble_value(me, e) )
+            {
+                status = Q_HANDLED();
+            }
+            else if ( radio_ble_battery(me, e) )
             {
                 status = Q_HANDLED();
             }
@@ -11961,6 +11999,10 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 status = Q_HANDLED();
             }
             else if ( radio_ble_value(me, e) )
+            {
+                status = Q_HANDLED();
+            }
+            else if ( radio_ble_battery(me, e) )
             {
                 status = Q_HANDLED();
             }

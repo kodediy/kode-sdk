@@ -1687,6 +1687,11 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
  * dropped. ~31 rows today; the rest is headroom for concurrent logging.
  * AO_Log's queue in log_ao.c must stay deeper than this pool. */
 #define KQP_LARGE_POOL_COUNT    48U
+/* The wide tier exists only in an app whose Bluetooth values are longer than
+ * the large tier carries (KQP_BLE_APP_WIDE), and holds them alone, in PSRAM.
+ * Eight: a central's writes waiting for the app, and the app's own values on
+ * their way to AO_Radio, which takes each in one step. */
+#define KQP_WIDE_POOL_COUNT     8U
 /* The jumbo tier holds two things: a piece of an image arriving on the
  * console (a terminal install), and a third of an app icon leaving a medium
  * (`app_data`). Four blocks cover everything one 4 KB protocol chunk can

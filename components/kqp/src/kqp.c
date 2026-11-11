@@ -7,6 +7,9 @@
 #include "kqp_bsp.h"
 #include "kqp_worker.h"
 #include "sdkconfig.h"
+#if KQP_BLE_APP_WIDE
+#include "khal_system.h"
+#endif
 #if CONFIG_KQP_AO_WATCH
 #include "kqp_watch_judge.h"
 #endif
@@ -23,6 +26,8 @@ static QSubscrList s_subscr_sto[MAX_PUB_SIG];
  *              installed), app-install requests and entries
  *   - large  : log lines - a whole formatted console line each
  *   - jumbo  : RecvDataEvt and AppDataIconEvt, the two things 4 KB wide
+ * and a fifth, wide, between large and jumbo, only in an app whose Bluetooth
+ * values are longer than the large tier carries (KQP_BLE_APP_WIDE).
  *
  * A block is a WIDTH, not a container. Declaring one in C needs a type, so
  * each tier is typedef'd from the widest event that has to fit in it: the
@@ -59,6 +64,26 @@ static KqpMediumBlock  s_medium_pool[KQP_MEDIUM_POOL_COUNT];
 static KqpLargeBlock   s_large_pool[KQP_LARGE_POOL_COUNT];
 static KqpJumboBlock   s_jumbo_pool[KQP_JUMBO_POOL_COUNT];
 
+#if KQP_BLE_APP_WIDE
+/* The wide tier: an app whose Bluetooth values are longer than the large
+ * tier carries (CONFIG_KODE_BLE_APP_VALUE_MAX over KQP_BLE_APP_VALUE_DEFAULT)
+ * gets a tier as wide as its value request, between large and jumbo. Its
+ * blocks are taken from PSRAM by kqp_init(), so the app that asks pays no
+ * internal RAM and the others pay nothing. A write is the same value with a
+ * smaller header, so it fits too. */
+typedef BleAppValueReqEvt KqpWideBlock;
+#define KQP_BLOCK_WIDE    sizeof(KqpWideBlock)
+
+Q_DEFINE_THIS_MODULE("kqp")
+
+_Static_assert(KQP_BLOCK_LARGE < KQP_BLOCK_WIDE,
+               "QP pools must have strictly increasing block sizes");
+_Static_assert(KQP_BLOCK_WIDE < KQP_BLOCK_JUMBO,
+               "QP pools must have strictly increasing block sizes");
+_Static_assert(sizeof(BleAppWriteEvt) <= KQP_BLOCK_WIDE,
+               "BleAppWriteEvt must fit the wide pool");
+#endif
+
 _Static_assert((KQP_TICKS_PER_SEC % 1000U) == 0U,
                "KQP_TICKS_PER_MS() is exact only for a whole number of kHz");
 _Static_assert(KQP_BLOCK_SMALL < KQP_BLOCK_MEDIUM,
@@ -73,10 +98,12 @@ _Static_assert(sizeof(LogEvt) <= KQP_BLOCK_LARGE,
                "LogEvt must fit the large pool");
 _Static_assert(KQP_BLOCK_LARGE < KQP_BLOCK_JUMBO,
                "QP pools must have strictly increasing block sizes");
+#if !KQP_BLE_APP_WIDE
 _Static_assert(sizeof(BleAppWriteEvt) <= KQP_BLOCK_LARGE,
                "BleAppWriteEvt must fit the large pool");
 _Static_assert(sizeof(BleAppValueReqEvt) <= KQP_BLOCK_LARGE,
                "BleAppValueReqEvt must fit the large pool");
+#endif
 _Static_assert(sizeof(BleAppLinkEvt) <= KQP_BLOCK_SMALL,
                "BleAppLinkEvt must fit the small pool");
 _Static_assert(sizeof(BleAppTakenEvt) <= KQP_BLOCK_MEDIUM,
@@ -533,6 +560,17 @@ void kqp_init(void)
     QF_poolInit(s_small_pool,  sizeof(s_small_pool),  sizeof(s_small_pool[0]));
     QF_poolInit(s_medium_pool, sizeof(s_medium_pool), sizeof(s_medium_pool[0]));
     QF_poolInit(s_large_pool,  sizeof(s_large_pool),  sizeof(s_large_pool[0]));
+#if KQP_BLE_APP_WIDE
+    {
+        size_t const bytes = (size_t)KQP_WIDE_POOL_COUNT * KQP_BLOCK_WIDE;
+        void *const  wide  = khal_alloc_psram(sizeof(void *), bytes);
+
+        /* Before any Active Object exists: a board with no PSRAM for 8 values
+         * stops here, not at the first write. */
+        Q_ASSERT_ID(10, NULL != wide);
+        QF_poolInit(wide, bytes, KQP_BLOCK_WIDE);
+    }
+#endif
     QF_poolInit(s_jumbo_pool,  sizeof(s_jumbo_pool),  sizeof(s_jumbo_pool[0]));
 
     /* Last: a framework with a clock but no pools would hand a QTimeEvt to an
