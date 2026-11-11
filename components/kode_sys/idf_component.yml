@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.1.1"
 description: "Kode Dot SDK: kode_init() and the calls for an app's own Active Objects"
 url: "https://docs.kode.diy/sdk/kode"
 repository: "https://github.com/kodediy/kode-sdk.git"
@@ -13,11 +13,11 @@ targets:
 ## these entries (see khal's manifest for the mechanism).
 dependencies:
   idf: ">=6.1"
-  kodediy/kdefs: {version: "==0.1.0", override_path: "../kdefs"}
-  kodediy/kaos:  {version: "==0.1.0", override_path: "../kaos"}
-  kodediy/kqp:   {version: "==0.1.0", override_path: "../kqp"}
-  kodediy/klog:  {version: "==0.1.0", override_path: "../klog"}
-  kodediy/khal:  {version: "==0.1.0", override_path: "../khal"}
-  kodediy/kdrv:  {version: "==0.1.0", override_path: "../kdrv"}
+  kodediy/kdefs: {version: "==0.1.1", override_path: "../kdefs"}
+  kodediy/kaos:  {version: "==0.1.1", override_path: "../kaos"}
+  kodediy/kqp:   {version: "==0.1.1", override_path: "../kqp"}
+  kodediy/klog:  {version: "==0.1.1", override_path: "../klog"}
+  kodediy/khal:  {version: "==0.1.1", override_path: "../khal"}
+  kodediy/kdrv:  {version: "==0.1.1", override_path: "../kdrv"}
   # kbsp came with the expansion header: kode_sys_exp.c claims KBSP_RES_EXP for it.
-  kodediy/kbsp:  {version: "==0.1.0", override_path: "../kbsp"}
+  kodediy/kbsp:  {version: "==0.1.1", override_path: "../kbsp"}

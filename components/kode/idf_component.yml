@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.1.1"
 description: "Kode Dot SDK: the standard layer, kode.h, and the one dependency an app names"
 url: "https://docs.kode.diy/sdk/kode"
 repository: "https://github.com/kodediy/kode-sdk.git"
@@ -34,6 +34,6 @@ examples:
 ## them: an app that draws names kode_screen, which brings the other two.
 dependencies:
   idf: ">=6.1"
-  kodediy/kode_sys: {version: "==0.1.0", override_path: "../kode_sys"}
-  kodediy/kdrv:     {version: "==0.1.0", override_path: "../kdrv"}
-  kodediy/khal:     {version: "==0.1.0", override_path: "../khal"}
+  kodediy/kode_sys: {version: "==0.1.1", override_path: "../kode_sys"}
+  kodediy/kdrv:     {version: "==0.1.1", override_path: "../kdrv"}
+  kodediy/khal:     {version: "==0.1.1", override_path: "../khal"}
