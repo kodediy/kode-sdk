@@ -1187,6 +1187,37 @@ typedef struct {
     const kode_ble_service_t kode_ble_app_service = { \
         (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }
 
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that declare a service, never used inside the SDK */
+/**
+ * @brief Declare one of several services the app may serve: the constant
+ *        @p name_, with @p uuid_ and the array @p chars_ of
+ *        kode_ble_characteristic_t, at file scope, followed by a semicolon.
+ *
+ * Nobody serves it until kode_ble_service_select() names it.
+ */
+#define KODE_BLE_SERVICE_NAMED(name_, uuid_, chars_) \
+    const kode_ble_service_t name_ = { \
+        (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }
+
+/**
+ * @brief Choose the service the app serves, in place of KODE_BLE_SERVICE()'s, or none.
+ *
+ * The radio reads the choice once, when it registers its table at
+ * Bluetooth's first start in the boot, so make the call at the app's start,
+ * before that. Not stored: the app keeps its own choice and makes this call
+ * at each start. The names kode_ble_set_value(), kode_ble_notify() and
+ * kode_ble_queue_push() take are the characteristics of the service chosen.
+ * Bluetooth off in Settings is not an error: the choice is kept for when it
+ * comes on.
+ *
+ * @param service A constant KODE_BLE_SERVICE_NAMED() declared, which must
+ *                outlive the app; NULL to serve no service of the app's.
+ * @return true when the choice is kept; false with kode_error() saying why:
+ *         the table is registered already, and nothing changes until the
+ *         next boot.
+ */
+bool kode_ble_service_select(const kode_ble_service_t *service);
+
 /* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that serve the battery, never used inside the SDK */
 /**
  * @brief Serve the standard Battery service, at file scope, followed by a semicolon.

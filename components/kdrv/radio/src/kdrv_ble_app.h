@@ -56,6 +56,24 @@ bool kdrv_ble_app_build(const kdrv_ble_app_service_t *svc, const kdrv_ble_app_pe
                         kdrv_ble_app_table_t *out);
 
 /**
+ * @brief Fix the app's choice of service for the boot, and answer it.
+ *
+ * kdrv_ble.c calls it when it builds the table it registers. From then on
+ * kdrv_ble_app_select() refuses, and kdrv_ble_app_service() answers what
+ * this answered.
+ *
+ * @return The service the table is built from; NULL for none.
+ */
+const kdrv_ble_app_service_t *kdrv_ble_app_fix(void);
+
+/**
+ * @brief Forget the choice and the fix, as a boot does.
+ *
+ * The host suite's: on the board a boot is the only way back.
+ */
+void kdrv_ble_app_select_forget(void);
+
+/**
  * @brief Bytes kdrv_ble.c keeps in the block for its NimBLE structures.
  *
  * Defined by kdrv_ble.c (by the host suite's fake there), read once, when
