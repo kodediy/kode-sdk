@@ -47,6 +47,7 @@ bool seam_ble_notify(const char *chr, const void *data, size_t len);
 const char *seam_event_ble_connected(void);
 const char *seam_event_ble_disconnected(void);
 const char *seam_event_ble_written(void);
+bool seam_ble_service_select(const kode_ble_service_t *service);
 
 #define kode_sys_ble_enabled        seam_enabled
 #define kode_sys_ble_set_name       seam_set_name
@@ -67,6 +68,7 @@ const char *seam_event_ble_written(void);
 #define kode_event_ble_connected    seam_event_ble_connected
 #define kode_event_ble_disconnected seam_event_ble_disconnected
 #define kode_event_ble_written      seam_event_ble_written
+#define kode_ble_service_select     seam_ble_service_select
 #include "kode_ble.c"
 #undef kode_sys_ble_enabled
 #undef kode_sys_ble_set_name
@@ -78,6 +80,7 @@ const char *seam_event_ble_written(void);
 #undef kode_ble_queue_push
 #undef kode_ble_queue_room
 #undef kode_ble_queue_clear
+#undef kode_ble_service_select
 #undef kode_event_ble_taken
 #undef kode_ble_set_name
 #undef kode_ble_set_manufacturer_data
