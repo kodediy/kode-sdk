@@ -753,7 +753,7 @@ bool kode_haptic_add_profile(const char *name, const uint16_t *pattern_ms, uint3
 /* ---- Audio ---- */
 
 /* 48 kHz, 16-bit, mono WAV or samples only. Audio calls take turns, and a play or a
- * recording to a file keeps its turn to the end. A call that finds the speaker
+ * recording to a file or a buffer keeps its turn to the end. A call that finds the speaker
  * or microphone held waits up to KODE_AUDIO_BUSY_MS, then fails with "audio is
  * busy"; a background recording waits the same, then ends with no frames.
  * kode_audio_set(), kode_audio_get(), kode_audio_play_stop(), kode_audio_is_playing()
@@ -866,6 +866,30 @@ uint32_t kode_audio_get(const char *setting);
  * @return true when the file is written; false with kode_error() saying why.
  */
 bool kode_audio_record_file(const char *path, uint32_t ms);
+
+/**
+ * @brief Record the microphone into a buffer of the caller's own and wait until it is full or the time is up.
+ *
+ * Blocks. Waits its turn for the microphone like kode_audio_record_file():
+ * a microphone another task holds fails with "audio is busy" after
+ * KODE_AUDIO_BUSY_MS. Refused while a recording or a sound runs in the
+ * background. Like every call of this layer it is for tasks, never for an
+ * Active Object.
+ *
+ * The frames are 48 kHz mono 16-bit samples. The recording lasts @p ms or
+ * until @p cap frames are in, whichever is first, so a buffer smaller than the
+ * time asked ends it early. @p frames can also be below that: the codec hands
+ * over what it has when the recording ends, down to none. Frames past
+ * @p frames are not written. The SDK records into memory of its own that it
+ * keeps after the first call, and the frames are copied out at the end.
+ *
+ * @param buf    Where the frames go; what it holds after a failure is unspecified.
+ * @param cap    Its room, in frames, above 0.
+ * @param ms     1 to KODE_AUDIO_RECORD_MAX_MS: how long to record.
+ * @param frames Out, may be NULL: the frames written; 0 on failure.
+ * @return true when the recording arrived; false with kode_error() saying why.
+ */
+bool kode_audio_record_samples(int16_t *buf, uint32_t cap, uint32_t ms, uint32_t *frames);
 
 /**
  * @brief Record the microphone into memory in the background; the previous recording is dropped.
