@@ -64,6 +64,10 @@ _Static_assert(KDRV_DISPLAY_FRAME_US ==
                      (KBSP_LCD_V_RES + DSI_VSYNC + DSI_VBP + DSI_VFP)) /
                     DSI_DPI_CLK_MHZ),
                "KDRV_DISPLAY_FRAME_US must follow the DPI timing");
+/* The framebuffers are allocated by IDF in whole cache lines of the PSRAM, and
+ * KDRV_DISPLAY_FB_BYTES says how many that is: the two must name one line. */
+_Static_assert(KDRV_DISPLAY_CACHE_LINE == CONFIG_CACHE_L2_CACHE_LINE_SIZE,
+               "KDRV_DISPLAY_CACHE_LINE must be the build's L2 cache line");
 /* What the bridge sends for a pixel the DMA did not deliver: black, in place
  * of its reset blue. Zero in every channel, whatever the RGB coding - see
  * panel_bring_up(). */
@@ -1988,8 +1992,7 @@ static esp_err_t panel_resume(uint8_t percent)
  */
 static esp_err_t video_begin(uint8_t *shown)
 {
-    size_t const bytes = (((size_t)KBSP_LCD_H_RES * (size_t)KBSP_LCD_V_RES * 2U) + 63U)
-                         & ~(size_t)63U;
+    size_t const bytes = KDRV_DISPLAY_FB_BYTES;
     bool const   other = (shown != s_fb[0]);
     esp_err_t    err   = ESP_OK;
 
