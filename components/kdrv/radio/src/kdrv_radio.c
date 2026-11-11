@@ -66,6 +66,7 @@ static struct {
     bool                c5_en_ours;  /**< C5_EN is an output this driver set.   */
     bool                adopted;     /**< The last CONNECT kept a parked C5.    */
     bool                exp_switched; /**< The last CONNECT drove J3's supply. */
+    bool                exp_level;   /**< The level it drove, or tried to.      */
 } s_radio;
 
 
@@ -82,6 +83,15 @@ void kdrv_radio_gate(bool closed)
     s_gate_closed = closed;
 }
 
+/** The wish for J3's supply: set by AO_Radio's thread alone, read once by the
+ *  CONNECT worker, one byte. */
+static volatile bool s_exp_wish;
+
+void kdrv_radio_exp_wish(bool on)
+{
+    s_exp_wish = on;
+}
+
 void kdrv_radio_note_leave(kdrv_radio_note_t target)
 {
     kdrv_radio_note_reg_write(kradio_note_pack((uint32_t)target));
@@ -95,6 +105,11 @@ bool kdrv_radio_adopted(void)
 bool kdrv_radio_exp_switched(void)
 {
     return s_radio.exp_switched;
+}
+
+bool kdrv_radio_exp_level(void)
+{
+    return s_radio.exp_level;
 }
 
 bool kdrv_radio_link_up(void)
@@ -582,14 +597,15 @@ static bool radio_c5_decide(bool wants_wifi)
 /**
  * The CONNECT job, start to finish, on the worker.
  *
- * @param exp_on     Where the expansion header's supply is left once the link
- *                   is up: the reset has let go of its enable, so it is driven
- *                   either way, and a link-up never needs a job of its own for
- *                   it.
+ * Once the link is up it drives the expansion header's supply enable to the
+ * wish as it is then (kdrv_radio_exp_wish()), read once, and keeps the level
+ * it drove for kdrv_radio_exp_level(). A reset C5 has let go of the pin and a
+ * parked one is not reset, so it is driven either way.
+ *
  * @param wants_wifi This boot wants Wi-Fi, so a C5 parked by the last
  *                   firmware may stay as it is.
  */
-static kode_status_t radio_do_connect(bool exp_on, bool wants_wifi)
+static kode_status_t radio_do_connect(bool wants_wifi)
 {
     s_radio.adopted      = false;
     s_radio.exp_switched = false;
@@ -691,8 +707,11 @@ static kode_status_t radio_do_connect(bool exp_on, bool wants_wifi)
     {
         KLOG_W(TAG, "link up, but the coprocessor would not describe itself");
     }
-    /* Not fatal either: `c5 field="pwr_ext"` reads what the pin holds. */
-    if ( kdrv_c5_exp_power(exp_on) != KODE_OK )
+    /* Not fatal either: `c5 field="pwr_ext"` reads what the pin holds. The
+     * wish is read here, once, so an "on" asked while the link came up is
+     * the one driven. */
+    s_radio.exp_level = s_exp_wish;
+    if ( kdrv_c5_exp_power(s_radio.exp_level) != KODE_OK )
     {
         KLOG_W(TAG, "link up, but J3's supply was not switched");
     }
@@ -1038,7 +1057,7 @@ kode_status_t kdrv_radio_run(const kdrv_radio_req_t *req)
     switch ( req->type )
     {
         case KDRV_RADIO_JOB_CONNECT:
-            rc = radio_do_connect(req->on, req->wants_wifi);
+            rc = radio_do_connect(req->wants_wifi);
             break;
         case KDRV_RADIO_JOB_DISCONNECT:
             rc = radio_do_disconnect();

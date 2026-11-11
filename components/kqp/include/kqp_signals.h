@@ -361,6 +361,12 @@ enum KodeSignals {
                                  *   back, so any subscriber - AO_Console
                                  *   today - can close on it without AO_AppMgr
                                  *   knowing who asked.                       */
+    APP_ERASE_DONE_SIG,         /**< AO_AppMgr: an erase ended
+                                 *   (AppEraseDoneEvt): what went, what stayed
+                                 *   and where. Published, so the console and
+                                 *   the launcher both close on it; a request
+                                 *   refused while AO_AppMgr is busy ends the
+                                 *   same way.                                */
 
     /* The one *request* that is published rather than posted. AO_Gui lives in
      * kgui, which requires the SDK; the console lives in kaos, underneath it.
@@ -592,6 +598,20 @@ enum KodeSignals {
                                  *   step of a put in progress.               */
     APPDATA_PUT_RSP_SIG,        /**< To the asker: how that put ended
                                  *   (AppDataPutRspEvt).                      */
+    STORAGE_APP_WIPE_REQ_SIG,   /**< AO_Storage: take every file of one app
+                                 *   off both media (AppDataReqEvt again): the
+                                 *   images at a medium's root whose descriptor
+                                 *   names the project, and its data folder.
+                                 *   Posted directly, never published.        */
+    STORAGE_APP_WIPE_NEXT_SIG,  /**< AO_Storage private QTimeEvt: the next
+                                 *   file of the wipe in progress.            */
+    STORAGE_APP_WIPE_RSP_SIG,   /**< To the asker: what went and what stayed
+                                 *   on each medium (StorageAppWipeRspEvt).   */
+    APPDATA_GET_REQ_SIG,        /**< AO_AppMgr: fetch one app's data folder
+                                 *   from a URL and have AO_Storage write it
+                                 *   (AppDataGetReqEvt). Posted directly.     */
+    APPDATA_GET_RSP_SIG,        /**< To the asker: how that fetch ended
+                                 *   (AppDataGetRspEvt).                      */
     STORAGE_FIELD_REQ_SIG,      /**< AO_Storage: read, write or dump one field
                                  *   of the card (StorageFieldReqEvt).
                                  *   Answered to StorageFieldReqEvt.who with
@@ -665,6 +685,8 @@ enum KodeSignals {
     FILE_READ_RSP_SIG,          /**< Answers kode_sys_file_read(), to the
                                  *   asking AO (FileRspEvt).                   */
     FILE_WRITE_RSP_SIG,         /**< Answers kode_sys_file_write(), to the
+                                 *   asking AO (FileRspEvt).                   */
+    FILE_SPACE_RSP_SIG,         /**< Answers kode_sys_file_space(), to the
                                  *   asking AO (FileRspEvt).                   */
     STORAGE_RECV_REQ_SIG,       /**< AO_Storage: a file is about to arrive on
                                  *   the console (StorageRecvEvt). Open the
@@ -971,9 +993,10 @@ enum KodeSignals {
                                  *   waits for it is told it failed. The
                                  *   guard stays up until the call does
                                  *   return.                                 */
-    IR_LINK_TO_SIG,             /**< AO_Ir private periodic QTimeEvt, while
-                                 *   requests wait for the C5 link: each one
-                                 *   past its own budget is answered
+    IR_LINK_TO_SIG,             /**< AO_Ir private one-shot QTimeEvt, armed
+                                 *   again by each one taken while requests
+                                 *   wait for the C5 link: each request past
+                                 *   its own budget is answered
                                  *   KODE_TIMEOUT.                           */
     NFC_READ_REQ_SIG,           /**< AO_Nfc: energise, and answer with the
                                  *   first tag activated inside the window
@@ -1264,10 +1287,12 @@ enum KodeSignals {
     HAPTIC_WAIT_SIG,            /**< AO_Haptic private one-shot QTimeEvt: the
                                  *   row's stillness window, or the deadline
                                  *   on a reply from AO_Imu.                */
-    POWER_POLL_SIG,             /**< AO_Power private polling QTimeEvt.       */
-    POWER_PULSE_SIG,            /**< AO_Power private periodic QTimeEvt: the
-                                 *   next half of the write pulse. Armed
-                                 *   only while a flash write is reporting
+    POWER_POLL_SIG,             /**< AO_Power private one-shot QTimeEvt, armed
+                                 *   again by each poll taken.               */
+    POWER_PULSE_SIG,            /**< AO_Power private one-shot QTimeEvt: the
+                                 *   next half of the write pulse, armed
+                                 *   again by each half taken. Armed only
+                                 *   while a flash write is reporting
                                  *   progress.                              */
     POWER_DUMP_REQ_SIG,         /**< AO_Power: log everything both chips say. */
     POWER_PEEK_REQ_SIG,         /**< AO_Power: take one reading, publish it and keep
@@ -1435,6 +1460,11 @@ enum KodeSignals {
     WIFI_SCAN_REQ_SIG,          /**< AO_Radio: scan. Entries follow on the
                                  *   bus as the sweep finds them, channel by
                                  *   channel, then WIFI_SCAN_END_SIG.        */
+    WIFI_SCAN_STOP_REQ_SIG,     /**< AO_Radio: end the listing in flight
+                                 *   after its step on the air
+                                 *   (wifi_scan_stop_request()). No payload
+                                 *   and no answer of its own: the listing's
+                                 *   WIFI_SCAN_END_SIG says it was cut.      */
     RADIO_SCAN_ASK_SIG,         /**< AO_Radio: a scan asked by an AO or a
                                  *   blocked task (ScanAskEvt), the sweep
                                  *   WIFI_SCAN_REQ_SIG runs or the listen
@@ -1680,7 +1710,8 @@ enum KodeSignals {
                                  *   (AutotestClientEvt).                     */
     AUTOTEST_REPORT_REQ_SIG,    /**< AO_Autotest: publish the kept report
                                  *   (AutotestClientEvt).                     */
-    POWER_TEST_STEP_SIG,        /**< AO_Power private one-shot QTimeEvt: the
+    POWER_TEST_STEP_SIG,        /**< AO_Power private one-shot QTimeEvt, armed
+                                 *   again by each look taken: the
                                  *   `power_plug` row looks at the cable
                                  *   again.                                   */
 
@@ -2057,6 +2088,12 @@ typedef enum {
  * lands here too - so every report says what it is and names the
  * file when there is one. A copy, as always, never a pointer into the
  * writer's own tables.
+ *
+ * An app's report also names its project once the writer knows it: the name
+ * the host gave with a stream, then the one the image's first chunk carries.
+ * The app's data folder is named for it and may be on the board before the
+ * app is, so the sheet can show the app's own name, icon and colour while it
+ * is written (appdata_request()).
  */
 typedef struct {
     QEvt    super;
@@ -2064,6 +2101,9 @@ typedef struct {
     uint8_t what;                     /**< kwrite_t                           */
     char    file[KODE_APP_FILE_MAX];  /**< What is being written; "" for a
                                        *   stream, which has no file name.    */
+    char    project[KODE_APP_PROJECT_MAX]; /**< The app's project name; ""
+                                       *   until it is known, and for kodeOS
+                                       *   and the radio, which are no app.   */
 } AppProgressEvt;
 
 /**
@@ -2085,8 +2125,9 @@ typedef struct {
     char name[32];   /**< The installed app's project name
                       *   (esp_app_desc_t.project_name is 32 bytes), the
                       *   identity appmgr_find_idx() compares. "" for
-                      *   AO_Radio's C5 image, for an image whose descriptor
-                      *   could not be read, and from a dry pool.            */
+                      *   AO_Radio's C5 image, for a park in the mailbox
+                      *   (no app is installed), for an image whose
+                      *   descriptor could not be read, and from a dry pool. */
 } AppFlashDoneEvt;
 
 /** @brief Why a write failed, as far as the glass needs to know. */
@@ -2522,6 +2563,54 @@ typedef struct {
                                             *   the answer that names it.     */
     uint8_t status;       /**< kode_status_t, as the four lines above read it. */
 } AppDataRmRspEvt;
+
+/** @brief What became of an app's data folder on one medium. */
+typedef enum {
+    APP_WIPE_FOLDER_NONE = 0,   /**< There was none.                          */
+    APP_WIPE_FOLDER_REMOVED,    /**< It is gone.                              */
+    APP_WIPE_FOLDER_LEFT        /**< It is there and something in it would not go. */
+} AppWipeFolder;
+
+/** @brief What a wipe of one app did on one medium. */
+typedef struct {
+    bool    present;   /**< The medium was mounted and its root was walked.   */
+    uint8_t files;     /**< Images of the project removed.                    */
+    uint8_t left;      /**< Images of the project that would not go.          */
+    uint8_t folder;    /**< AppWipeFolder.                                    */
+} AppWipeMedium;
+
+/**
+ * @brief How a wipe of one app's files ended (STORAGE_APP_WIPE_RSP_SIG).
+ *
+ * KODE_OK says the wipe ran to its end, and the two media say what it found
+ * and whether it went: a file left behind is in `left`, not in the status.
+ * KODE_DENIED a transfer was in flight and KODE_NO_RESOURCES there was no
+ * memory for the list of files: nothing was touched.
+ */
+typedef struct {
+    QEvt          super;
+    char          project[KODE_APP_PROJECT_MAX]; /**< Echoed: answers can cross. */
+    uint8_t       status;  /**< kode_status_t, as the lines above read it.     */
+    AppWipeMedium fs;      /**< The internal partition.                        */
+    AppWipeMedium sd;      /**< The card.                                      */
+} StorageAppWipeRspEvt;
+
+/**
+ * @brief How an erase ended (APP_ERASE_DONE_SIG).
+ *
+ * KODE_OK nothing of the app is left; KODE_ERROR there was nothing of that
+ * name anywhere; KODE_IO_ERROR something would not go, and the two media say
+ * what; KODE_DENIED AO_AppMgr or AO_Storage was busy and KODE_TIMEOUT
+ * AO_Storage did not answer: the files were not looked at.
+ */
+typedef struct {
+    QEvt          super;
+    char          name[KODE_APP_PROJECT_MAX]; /**< The project asked about.    */
+    uint8_t       status;  /**< kode_status_t, as the lines above read it.     */
+    bool          image;   /**< An installed image was removed.                */
+    AppWipeMedium fs;      /**< The internal partition.                        */
+    AppWipeMedium sd;      /**< The card.                                      */
+} AppEraseDoneEvt;
 
 /**
  * @brief The result of a self-test that could not be answered on the spot
@@ -4338,6 +4427,9 @@ typedef struct {
     bool    ok;         /**< false: the scan itself failed; count is 0.     */
     bool    busy;       /**< true: not started, the C5 was busy with another
                          *   job (ok is false, count 0); ask again.          */
+    bool    cut;        /**< true: a Wi-Fi sweep ended before its last step,
+                         *   for a stop or for a job that needed the radio
+                         *   (ok is false); count is what it had heard.      */
 } WifiScanEndEvt;
 
 /** @brief ScanAskEvt.kind: the Wi-Fi sweep; the rows are kdrv_wifi_ap_t. */
@@ -4553,6 +4645,12 @@ typedef struct {
     uint32_t ms;       /**< The whole check, from the request, ms.            */
 } RadioProbeEvt;
 
+/** @brief Why AO_Radio refused the request a BLE state answers (BleStateEvt.refused). */
+#define KQP_BLE_REFUSED_NONE      0U  /**< Not refused: the state is the answer.   */
+#define KQP_BLE_REFUSED_BUSY      1U  /**< The radio is busy; ask again.           */
+#define KQP_BLE_REFUSED_OFF       2U  /**< Bluetooth is off.                       */
+#define KQP_BLE_REFUSED_ATTACHED  3U  /**< A console is attached to the link.      */
+
 /** @brief The radio check, asked (RADIO_PROBE_REQ_SIG). */
 typedef struct {
     QEvt           super;
@@ -4561,20 +4659,33 @@ typedef struct {
     radio_probe_t  req;   /**< What to check.                                 */
 } RadioProbeReqEvt;
 
+/** @brief The longest name the scan response carries, NUL included: the
+ *         packet's 31 bytes less the name's two of length and type. */
+#define KQP_BLE_NAME_MAX  30U
+/** @brief The most maker data it carries: the packet less two bytes. */
+#define KQP_BLE_DATA_MAX  29U
+
 /** @brief What the BLE half is doing (BLE_STATE_SIG). */
 typedef struct {
     QEvt     super;
     uint8_t  state;      /**< kdrv_ble_state_t                              */
     bool     addr_known; /**< false: the controller has not synchronised yet.*/
     uint8_t  addr[6];    /**< This board's own BLE address.                 */
+    uint8_t  refused;    /**< KQP_BLE_REFUSED_*: why the request this state
+                          *   answers was refused; NONE when it was not.    */
     bool     console;    /**< An authenticated central is subscribed to TX. */
     uint16_t tx_drop;    /**< Lines the output ring refused since attach.   */
     uint8_t  bonds;      /**< Bonded peers in the store.                    */
     bool     hidden;     /**< The advert hides the board from all but its
                           *   bonded devices.                               */
     bool     pair_open;  /**< Pair new device's time is running.            */
+    bool     pair_wait;  /**< Pair new device was asked with a device
+                          *   connected: its time starts when that one
+                          *   leaves.                                       */
     uint16_t backlog;    /**< Bytes still queued for the central.           */
     uint16_t retry;      /**< Times the drain waited on NimBLE's buffers.   */
+    char     name[KQP_BLE_NAME_MAX]; /**< The name the board goes by: the
+                          *   advert's and its Device Name.                 */
 } BleStateEvt;
 
 /**
@@ -4599,12 +4710,6 @@ typedef struct {
                           *   KODE_BLE_SCAN_MIN_MS..KODE_BLE_SCAN_MAX_MS,
                           *   and anything else is refused.              */
 } BleScanReqEvt;
-
-/** @brief The longest name the scan response carries, NUL included: the
- *         packet's 31 bytes less the name's two of length and type. */
-#define KQP_BLE_NAME_MAX  30U
-/** @brief The most maker data it carries: the packet less two bytes. */
-#define KQP_BLE_DATA_MAX  29U
 
 /**
  * @brief What the scan response carries from now on (BLE_RSP_REQ_SIG): the
@@ -6076,9 +6181,18 @@ typedef struct {
 } FileStat;
 
 /**
+ * @brief How big a volume is and how much of it is free: kode_sys_file_space_t,
+ *        field for field. Whole kilobytes, as StorageInfoEvt counts them.
+ */
+typedef struct {
+    uint32_t total_kb;  /**< What the volume's filesystem spans.  */
+    uint32_t free_kb;   /**< What is left of it.                  */
+} FileSpace;
+
+/**
  * @brief Answers kode_sys's file requests: FILE_STATUS_RSP_SIG, FILE_LIST_END_SIG,
  *        FILE_FOLDER_RSP_SIG, FILE_DELETE_RSP_SIG, FILE_RENAME_RSP_SIG,
- *        FILE_READ_RSP_SIG and FILE_WRITE_RSP_SIG.
+ *        FILE_READ_RSP_SIG, FILE_WRITE_RSP_SIG and FILE_SPACE_RSP_SIG.
  */
 typedef struct {
     QEvt     super;
@@ -6088,7 +6202,11 @@ typedef struct {
     bool     more;    /**< The end of a listing: entries remain past it.    */
     uint16_t count;   /**< The end of a listing: entries this page posted.  */
     uint32_t got;     /**< A read: bytes written to the lent buffer.        */
-    FileStat stat;    /**< A status: what is at the path.                   */
+    union {
+        FileStat  stat;   /**< A status: what is at the path.                   */
+        FileSpace space;  /**< A space: how big the volume is and what is free. */
+    };                    /**< One answer is one kind, so the two share a place:
+                           *   every file answer keeps the room it had.          */
 } FileRspEvt;
 
 /**
@@ -6149,6 +6267,8 @@ typedef struct {
     bool        exists;  /**< STAT only, as StoragePathRspEvt.exists.      */
     bool        is_dir;  /**< STAT only.                                    */
     uint32_t    size;    /**< STAT: the file's bytes.                       */
+    uint32_t    total_kb;  /**< SPACE: the volume's kilobytes.              */
+    uint32_t    free_kb;   /**< SPACE: what is left of them.                */
     StorageRow *rows;    /**< LIST only: at least @c cap entries, filled in
                            *   the order the walk found them.               */
     char       *text;    /**< CAT only: at least @c cap bytes, filled with

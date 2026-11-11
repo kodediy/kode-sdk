@@ -21,6 +21,7 @@
 #include "esp_partition.h"
 
 #include "kaos.h"
+#include "kapp_cat.h"
 #include "kapp_desc.h"
 #include "kapps_fmt.h"
 #include "kdrv_apps.h"
@@ -1044,6 +1045,8 @@ TEST_CASE("an adopted app's listed offset is the one its launch asked for",
 static const QEvt *storage_take(enum_t sig);
 static bool storage_has_for(enum_t sig, const char *project);
 static void rm_rsp(const char *project, kode_status_t st);
+static void wipe_rsp(const char *project, kode_status_t st, uint8_t fs_files,
+                     uint8_t sd_files, uint8_t left);
 static void        answer_stat(bool exists, uint8_t rc);
 
 /* Fix 2: adoption plans and evicts BEFORE the copy, and the copy is what the
@@ -2701,6 +2704,214 @@ static uint32_t begin_install(uint8_t medium, const char *project)
     return len;
 }
 
+/* ---- A park ends on the same events as an install --------------------------
+ * The glass and the LED follow APP_FLASH_* alone: the 0 % that raises the
+ * Opening card goes out for a park as for any write, so the end has to go out
+ * with it. A park installs no app, so its done names none.
+ */
+
+/**
+ * @brief Count the write events the spy collected, draining it.
+ *
+ * @param[out] progress How many APP_FLASH_PROGRESS_SIG.
+ * @param[out] done     How many APP_FLASH_DONE_SIG.
+ * @param[out] fail     How many APP_FLASH_FAIL_SIG.
+ * @param[out] last     Overwritten by every done collected.
+ */
+static void spy_write_ends(unsigned *progress, unsigned *done, unsigned *fail,
+                           AppFlashDoneEvt *last)
+{
+    *progress = 0U;
+    *done     = 0U;
+    *fail     = 0U;
+    for ( ;; )
+    {
+        const QEvt * const got = ao_spy_take();
+        if ( NULL == got )
+        {
+            break;
+        }
+        if ( (enum_t)got->sig == APP_FLASH_PROGRESS_SIG )
+        {
+            ++*progress;
+        }
+        if ( (enum_t)got->sig == APP_FLASH_DONE_SIG )
+        {
+            *last = *(AppFlashDoneEvt const *)got;
+            ++*done;
+        }
+        if ( (enum_t)got->sig == APP_FLASH_FAIL_SIG )
+        {
+            ++*fail;
+        }
+    }
+}
+
+/** @brief Listen for the write events a park publishes. */
+static void spy_write_listen(void)
+{
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+    ao_spy_subscribe(APP_FLASH_DONE_SIG);
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+}
+
+/** @brief Stop listening for the write events and empty the spy. */
+static void spy_write_unlisten(void)
+{
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    QActive_unsubscribe(ao_spy(), APP_FLASH_DONE_SIG);
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+}
+
+/** @brief Ask AO_AppMgr to receive @p len bytes into the mailbox, as the console does. */
+static void ask_recv_pending(uint32_t len, uint32_t crc32_val)
+{
+    AppRecvReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(APP_RECV_REQ_SIG);
+    e.dst    = (uint8_t)KODE_FLASH_DST_PENDING;
+    e.size   = len;
+    e.crc32  = crc32_val;
+    e.launch = false;
+    e.src    = (uint8_t)KODE_CONSOLE_SRC_SERIAL;
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+TEST_CASE("a park from the terminal that lands ends in a done, so the card "
+          "that rose for it closes", "[appmgr_ao]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        len;
+    unsigned        progress;
+    unsigned        dones;
+    unsigned        fails;
+
+    len = image_named("parked");
+    recv_fresh();
+    kdrv_apps_pending_write_abort();
+    (void)kdrv_apps_pending_consume();
+    spy_write_listen();
+
+    (void)memset(&done, 0xA5, sizeof(done));
+    ask_recv_pending(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len));
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    (void)kdrv_apps_pending_consume();
+
+    TEST_ASSERT_GREATER_THAN_UINT_MESSAGE(0U, progress,
+        "the park is on the glass: it announced its 0 %");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, dones,
+        "a card the park raised is closed by a done, and only by one");
+    TEST_ASSERT_EQUAL_UINT(0U, fails);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", done.name,
+        "a park installs no app: its done names none");
+}
+
+TEST_CASE("a park from the terminal whose bytes do not add up ends in a "
+          "failure and no done", "[appmgr_ao]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        len;
+    unsigned        progress;
+    unsigned        dones;
+    unsigned        fails;
+
+    len = image_named("parked");
+    recv_fresh();
+    kdrv_apps_pending_write_abort();
+    (void)kdrv_apps_pending_consume();
+    spy_write_listen();
+
+    ask_recv_pending(len, 0xDEADBEEFU);                       /* wrong CRC */
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    (void)kdrv_apps_pending_consume();
+
+    TEST_ASSERT_EQUAL_UINT(0U, dones);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "the card is owed its failure");
+}
+
+TEST_CASE("a park from a medium that lands ends in a done, so the card that "
+          "rose for it closes", "[appmgr_ao]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        len;
+    unsigned        progress;
+    unsigned        dones;
+    unsigned        fails;
+
+    Mockkdrv_slot_Init();
+    len = image_named("parked");
+    keep_fresh();
+    kdrv_apps_pending_write_abort();
+    (void)kdrv_apps_pending_consume();
+    spy_write_listen();
+
+    (void)memset(&done, 0xA5, sizeof(done));
+    ask_flash_dst("parked.bin", (uint8_t)KODE_FLASH_DST_PENDING);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the park never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    answer_eof();
+
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    (void)kdrv_apps_pending_consume();
+    keep_end();
+
+    TEST_ASSERT_GREATER_THAN_UINT_MESSAGE(0U, progress,
+        "the park is on the glass: it announced its 0 %");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, dones,
+        "a card the park raised is closed by a done, and only by one");
+    TEST_ASSERT_EQUAL_UINT(0U, fails);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", done.name,
+        "a park installs no app: its done names none");
+}
+
+TEST_CASE("a park from a medium that cannot be read ends in a failure and no "
+          "done", "[appmgr_ao]")
+{
+    AppFlashDoneEvt done;
+    StorageDataEvt  d;
+    uint32_t        len;
+    unsigned        progress;
+    unsigned        dones;
+    unsigned        fails;
+
+    Mockkdrv_slot_Init();
+    len = image_named("parked");
+    keep_fresh();
+    kdrv_apps_pending_write_abort();
+    (void)kdrv_apps_pending_consume();
+    spy_write_listen();
+
+    ask_flash_dst("parked.bin", (uint8_t)KODE_FLASH_DST_PENDING);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the park never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DATA_SIG);
+    d.status = (uint8_t)KODE_ERROR;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    (void)kdrv_apps_pending_consume();
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT(0U, dones);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "the card is owed its failure");
+}
+
 /** @brief The bytes "old" fills: the whole data area. */
 static uint32_t old_bytes(void)
 {
@@ -3190,9 +3401,9 @@ TEST_CASE("erasing an installed app removes its entry and its header",
     named.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_REQ_SIG);
     (void)snprintf(named.file, sizeof(named.file), "%s", "old");
     QASM_DISPATCH(AO_AppMgr, &named.super, 0U);
-    /* The erase is done once the app's data folder has gone with it. */
-    TEST_ASSERT_TRUE(storage_has_for(APPDATA_RM_REQ_SIG, "old"));
-    rm_rsp("old", KODE_OK);
+    /* The erase is done once the app's files have gone with it. */
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "old"));
+    wipe_rsp("old", KODE_OK, 0U, 0U, 0U);
 
     TEST_ASSERT_FALSE_MESSAGE(old_installed(), "the entry is still listed");
     TEST_ASSERT_TRUE(klog_has("'old' removed"));
@@ -3203,7 +3414,9 @@ TEST_CASE("erasing an installed app removes its entry and its header",
     keep_end();
 }
 
-TEST_CASE("erasing a name nobody installed changes nothing", "[appmgr_ao]")
+/* A name that is not installed may still have files: AO_Storage is asked, and
+ * the apps that are installed are left as they were. */
+TEST_CASE("erasing a name nobody installed touches no installed app", "[appmgr_ao]")
 {
     AppFlashEvt named;
 
@@ -3217,7 +3430,10 @@ TEST_CASE("erasing a name nobody installed changes nothing", "[appmgr_ao]")
     QASM_DISPATCH(AO_AppMgr, &named.super, 0U);
 
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app nobody named was erased");
-    TEST_ASSERT_TRUE(klog_has("'nobody' is not installed"));
+    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "nobody"),
+        "the files of a name that is not installed were not asked about");
+    wipe_rsp("nobody", KODE_OK, 0U, 0U, 0U);
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app nobody named was erased");
     keep_end();
 }
 
@@ -5548,6 +5764,77 @@ static void rm_rsp(const char *project, kode_status_t st)
 }
 
 /**
+ * @brief Answer AppMgr's wipe of @p project's files, with both media there.
+ * @param project  The project the wipe was for.
+ * @param st       How the wipe ended.
+ * @param fs_files Images removed from the internal partition.
+ * @param sd_files Images removed from the card.
+ * @param left     Images that would not go from the card.
+ */
+static void wipe_rsp(const char *project, kode_status_t st, uint8_t fs_files,
+                     uint8_t sd_files, uint8_t left)
+{
+    StorageAppWipeRspEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.super = (QEvt)QEVT_INITIALIZER(STORAGE_APP_WIPE_RSP_SIG);
+    (void)snprintf(r.project, sizeof(r.project), "%s", project);
+    r.status     = (uint8_t)st;
+    r.fs.present = true;
+    r.fs.files   = fs_files;
+    r.sd.present = true;
+    r.sd.files   = sd_files;
+    r.sd.left    = left;
+    QASM_DISPATCH(AO_AppMgr, &r.super, 0U);
+}
+
+/**
+ * @brief The one APP_ERASE_DONE_SIG the spy heard, or none yet.
+ * @param out Receives it.
+ * @return true when exactly one was heard.
+ */
+static bool erase_done(AppEraseDoneEvt *out)
+{
+    unsigned n = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)e->sig == APP_ERASE_DONE_SIG )
+        {
+            *out = *(AppEraseDoneEvt const *)e;
+            ++n;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(1U >= n, "an erase ended more than once");
+    return 1U == n;
+}
+
+/** @brief Ask AO_AppMgr to erase @p name. */
+static void ask_erase(const char *name)
+{
+    AppFlashEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_REQ_SIG);
+    (void)snprintf(e.file, sizeof(e.file), "%s", name);
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/** @brief Install one app named "demo" at the region's first extent. */
+static void one_demo_installed(void)
+{
+    kapps_dir_t dir = s_keep_dir;
+
+    dir.count       = 1U;
+    dir.e[0].offset = KAPPS_DATA_OFF;
+    dir.e[0].size   = 0x1000U;
+    dir.e[0].seq    = 1U;
+    dir.e[0].flags  = KAPPS_ENTRY_VALID;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&dir));
+    plant_app(KAPPS_DATA_OFF, "demo");
+}
+
+/**
  * @brief Answer every folder request AO_Storage's queue holds, and the ones
  *        those answers bring, as success.
  *
@@ -5571,7 +5858,7 @@ static void tidy_settle(void)
                 (void)snprintf(project, sizeof(project), "%s",
                                ((AppDataPutEvt const *)e)->project);
             }
-            if ( APPDATA_RM_REQ_SIG == sig )
+            if ( (APPDATA_RM_REQ_SIG == sig) || (STORAGE_APP_WIPE_REQ_SIG == sig) )
             {
                 (void)snprintf(project, sizeof(project), "%s",
                                ((AppDataReqEvt const *)e)->project);
@@ -5585,6 +5872,11 @@ static void tidy_settle(void)
             else if ( APPDATA_RM_REQ_SIG == sig )
             {
                 rm_rsp(project, KODE_OK);
+                answered = true;
+            }
+            else if ( STORAGE_APP_WIPE_REQ_SIG == sig )
+            {
+                wipe_rsp(project, KODE_OK, 0U, 0U, 0U);
                 answered = true;
             }
             else
@@ -5656,6 +5948,7 @@ static void tidy_begin_case(void)
     fake_psram_reset();
     ao_spy_subscribe(APP_FLASH_DONE_SIG);
     ao_spy_subscribe(RECV_DONE_SIG);
+    ao_spy_subscribe(APP_ERASE_DONE_SIG);
 }
 
 /** @brief The end of every tidy case. */
@@ -5663,6 +5956,7 @@ static void tidy_end_case(void)
 {
     QActive_unsubscribe(ao_spy(), APP_FLASH_DONE_SIG);
     QActive_unsubscribe(ao_spy(), RECV_DONE_SIG);
+    QActive_unsubscribe(ao_spy(), APP_ERASE_DONE_SIG);
     ao_spy_drain();
     keep_end();
 }
@@ -6154,39 +6448,331 @@ TEST_CASE("an evicted app with the installed app's name keeps the new folder",
     tidy_end_case();
 }
 
-TEST_CASE("app_erase removes the folder", "[appmgr_ao][tidy]")
+/* ---- The erase: everything of the app, and an end that says so --------------- */
+
+TEST_CASE("app_erase takes the image, then every file of the app, then says so",
+          "[appmgr_ao][tidy][erase]")
 {
-    AppFlashEvt e;
+    AppEraseDoneEvt done;
 
     tidy_begin_case();
-    kapps_dir_t dir = s_keep_dir;
-    dir.count       = 1U;
-    dir.e[0].offset = KAPPS_DATA_OFF;
-    dir.e[0].size   = 0x1000U;
-    dir.e[0].seq    = 1U;
-    dir.e[0].flags  = KAPPS_ENTRY_VALID;
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&dir));
-    plant_app(KAPPS_DATA_OFF, "demo");
+    one_demo_installed();
 
-    (void)memset(&e, 0, sizeof(e));
-    e.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_REQ_SIG);
-    (void)snprintf(e.file, sizeof(e.file), "%s", "demo");
-    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+    ask_erase("demo");
 
-    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(APPDATA_RM_REQ_SIG, "demo"),
-        "the folder went with nothing asked of AO_Storage");
-    TEST_ASSERT_FALSE_MESSAGE(klog_has("'demo' removed"),
-        "the erase was reported before its folder was deleted");
-
-    rm_rsp("demo", KODE_OK);
-    TEST_ASSERT_TRUE(klog_has("'demo' removed"));
     TEST_ASSERT_EQUAL_UINT32(0U, kdrv_apps_dir()->count);
+    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"),
+        "the app's files went with nothing asked of AO_Storage");
+    TEST_ASSERT_FALSE_MESSAGE(erase_done(&done),
+        "the erase ended before its files were dealt with");
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("'demo' removed"),
+        "the erase was reported before its files were deleted");
+
+    wipe_rsp("demo", KODE_OK, 1U, 2U, 0U);
+
+    TEST_ASSERT_TRUE_MESSAGE(erase_done(&done), "the erase never said it ended");
+    TEST_ASSERT_EQUAL_STRING("demo", done.name);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, done.status);
+    TEST_ASSERT_TRUE(done.image);
+    TEST_ASSERT_EQUAL_UINT8(1U, done.fs.files);
+    TEST_ASSERT_EQUAL_UINT8(2U, done.sd.files);
+    TEST_ASSERT_TRUE(klog_has("'demo' removed"));
+    tidy_end_case();
+}
+
+/* A file of an app that was never installed, or was evicted, is the same row
+ * in the launcher: the erase reaches it by the same door. */
+TEST_CASE("app_erase of an app that is not installed still takes its files",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("ghost");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "ghost"));
+    wipe_rsp("ghost", KODE_OK, 0U, 1U, 0U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_STRING("ghost", done.name);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, done.status);
+    TEST_ASSERT_FALSE(done.image);
+    TEST_ASSERT_EQUAL_UINT8(1U, done.sd.files);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, kdrv_apps_dir()->count,
+        "an installed app went with a name that is not its own");
+    tidy_end_case();
+}
+
+TEST_CASE("app_erase of a name with nothing anywhere ends as an error",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+
+    ask_erase("nobody");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "nobody"));
+    wipe_rsp("nobody", KODE_OK, 0U, 0U, 0U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_ERROR, done.status);
+    TEST_ASSERT_FALSE(done.image);
+    TEST_ASSERT_FALSE(klog_has("'nobody' removed"));
+    tidy_end_case();
+}
+
+/* No name is no app: nothing is asked of AO_Storage, which would otherwise be
+ * asked for the files of every image that names no project. */
+TEST_CASE("app_erase with no name ends as an error and asks nobody",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("");
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_ERROR, done.status);
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, ""),
+        "AO_Storage was asked for the files of no app");
+    TEST_ASSERT_EQUAL_UINT32(1U, kdrv_apps_dir()->count);
+    tidy_end_case();
+}
+
+/* A card that fails its deletes leaves the file where it was: the end says
+ * so, and carries what did go. */
+TEST_CASE("app_erase says what would not go", "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    wipe_rsp("demo", KODE_OK, 1U, 0U, 1U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_IO_ERROR, done.status);
+    TEST_ASSERT_TRUE(done.image);
+    TEST_ASSERT_EQUAL_UINT8(1U, done.fs.files);
+    TEST_ASSERT_EQUAL_UINT8(1U, done.sd.left);
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("'demo' removed"),
+        "an app with a file left behind was called removed");
+    tidy_end_case();
+}
+
+TEST_CASE("app_erase says a data folder that would not empty was left",
+          "[appmgr_ao][tidy][erase]")
+{
+    StorageAppWipeRspEvt r;
+    AppEraseDoneEvt      done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    (void)memset(&r, 0, sizeof(r));
+    r.super = (QEvt)QEVT_INITIALIZER(STORAGE_APP_WIPE_RSP_SIG);
+    (void)snprintf(r.project, sizeof(r.project), "%s", "demo");
+    r.status     = (uint8_t)KODE_OK;
+    r.fs.present = true;
+    r.fs.folder  = (uint8_t)APP_WIPE_FOLDER_LEFT;
+    QASM_DISPATCH(AO_AppMgr, &r.super, 0U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_IO_ERROR, done.status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, done.fs.folder);
+    TEST_ASSERT_FALSE(done.sd.present);
+    tidy_end_case();
+}
+
+/* AO_Storage in the middle of a transfer refuses the wipe: the image is gone,
+ * and the end says the files were not looked at rather than calling them gone. */
+TEST_CASE("app_erase with AO_Storage busy says the files were not looked at",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    wipe_rsp("demo", KODE_DENIED, 0U, 0U, 0U);
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, done.status);
+    TEST_ASSERT_TRUE(done.image);
+    TEST_ASSERT_FALSE(klog_has("'demo' removed"));
+    tidy_end_case();
+}
+
+TEST_CASE("a silent AO_Storage ends the erase as a timeout",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    run_ticks(QF_SUPPORT_STEPS(APPMGR_WIPE_MS) / 2U);
+    TEST_ASSERT_FALSE_MESSAGE(erase_done(&done),
+        "the erase gave up before its deadline");
+    run_ticks((QF_SUPPORT_STEPS(APPMGR_WIPE_MS) / 2U) + 20U);
+
+    TEST_ASSERT_TRUE_MESSAGE(erase_done(&done),
+        "a silent AO_Storage held the erase for good");
+    TEST_ASSERT_EQUAL_UINT8(KODE_TIMEOUT, done.status);
+    TEST_ASSERT_TRUE(done.image);
+
+    /* The answer, long late, ends nothing a second time. */
+    wipe_rsp("demo", KODE_OK, 1U, 0U, 0U);
+    TEST_ASSERT_FALSE(erase_done(&done));
+    (void)storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo");
+    tidy_end_case();
+}
+
+/* An answer is taken only when it names the erase in flight. */
+TEST_CASE("a wipe answer for another project does not end the erase",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    wipe_rsp("other", KODE_OK, 3U, 0U, 0U);
+    TEST_ASSERT_FALSE_MESSAGE(erase_done(&done),
+        "an answer that names another project ended this erase");
+
+    wipe_rsp("demo", KODE_OK, 0U, 0U, 0U);
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(0U, done.fs.files);
+    tidy_end_case();
+}
+
+/* The console and the launcher both wait on the end of an erase: one that
+ * cannot start is told so, never dropped. */
+TEST_CASE("an erase asked while another is under way is answered busy",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+
+    ask_erase("demo");
+    TEST_ASSERT_TRUE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"));
+    ask_erase("second");
+
+    TEST_ASSERT_TRUE_MESSAGE(erase_done(&done),
+        "an erase refused while busy went unanswered");
+    TEST_ASSERT_EQUAL_STRING("second", done.name);
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, done.status);
+    TEST_ASSERT_FALSE(done.image);
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "second"),
+        "a refused erase asked AO_Storage all the same");
+
+    wipe_rsp("demo", KODE_OK, 0U, 0U, 0U);
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_STRING("demo", done.name);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, done.status);
+    tidy_end_case();
+}
+
+TEST_CASE("an erase asked while an install is opening is answered busy",
+          "[appmgr_ao][tidy][erase]")
+{
+    AppEraseDoneEvt done;
+
+    tidy_begin_case();
+    one_demo_installed();
+    ask_flash_dst("x.bin", (uint8_t)KFW_TARGET_APP);   /* now opening */
+
+    ask_erase("demo");
+
+    TEST_ASSERT_TRUE(erase_done(&done));
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, done.status);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, kdrv_apps_dir()->count,
+        "an app was erased in the middle of an install");
+    let_the_open_expire();
+    tidy_end_case();
+}
+
+/* The override is the person's word about that app: it goes with the app, or
+ * the next app of that name would wear it. */
+TEST_CASE("app_erase drops the app's category override",
+          "[appmgr_ao][tidy][erase]")
+{
+    char cats[KODE_APP_CATEGORY_MAX];
+
+    tidy_begin_case();
+    one_demo_installed();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kapp_cat_set("demo", "games"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kapp_cat_set("other", "tools"));
+
+    ask_erase("demo");
+
+    TEST_ASSERT_FALSE_MESSAGE(kapp_cat_resolve("demo", cats, sizeof(cats)),
+        "the erased app's override stayed");
+    TEST_ASSERT_TRUE_MESSAGE(kapp_cat_resolve("other", cats, sizeof(cats)),
+        "another app's override went");
+    (void)kapp_cat_clear("other");
+    tidy_settle();
+    tidy_end_case();
+}
+
+/* A mailbox that still holds the app would be adopted at the next boot, and
+ * the app would be back. */
+TEST_CASE("app_erase empties a mailbox that holds the same app",
+          "[appmgr_ao][tidy][erase]")
+{
+    uint32_t img = 0U;
+    uint32_t dec = 0U;
+
+    tidy_begin_case();
+    one_demo_installed();
+    (void)park_pending("demo");
+    TEST_ASSERT_TRUE(kdrv_apps_pending_present(&img, &dec));
+
+    ask_erase("demo");
+
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_pending_present(&img, &dec),
+        "the mailbox still holds the erased app");
+    tidy_settle();
+    tidy_end_case();
+}
+
+TEST_CASE("app_erase leaves a mailbox that holds another app",
+          "[appmgr_ao][tidy][erase]")
+{
+    uint32_t img = 0U;
+    uint32_t dec = 0U;
+
+    tidy_begin_case();
+    one_demo_installed();
+    (void)park_pending("other");
+
+    ask_erase("demo");
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_pending_present(&img, &dec),
+        "another app's mailbox image went with the erase");
+    (void)kdrv_apps_pending_consume();
+    tidy_settle();
     tidy_end_case();
 }
 
 /* The directory is committed before the tidy starts, so a listing is safe
- * while the folder goes: `app_erase` answers `>ok` at once and the console's
- * next `app_list` lands in tidying. */
+ * while the files go: the launcher asks for one right behind its erase, and it
+ * lands in tidying. */
 TEST_CASE("app_list is answered while the folder is tidied",
           "[appmgr_ao][tidy]")
 {
@@ -6210,8 +6796,8 @@ TEST_CASE("app_list is answered while the folder is tidied",
     e.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_REQ_SIG);
     (void)snprintf(e.file, sizeof(e.file), "%s", "demo");
     QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
-    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(APPDATA_RM_REQ_SIG, "demo"),
-        "the folder went with nothing asked of AO_Storage");
+    TEST_ASSERT_TRUE_MESSAGE(storage_has_for(STORAGE_APP_WIPE_REQ_SIG, "demo"),
+        "the app's files went with nothing asked of AO_Storage");
 
     QASM_DISPATCH(AO_AppMgr, &list.super, 0U);
     for ( const QEvt *got = ao_spy_take(); NULL != got; got = ao_spy_take() )
@@ -6226,7 +6812,7 @@ TEST_CASE("app_list is answered while the folder is tidied",
     TEST_ASSERT_FALSE_MESSAGE(klog_has("busy tidying"),
         "the listing was refused as a busy request");
 
-    rm_rsp("demo", KODE_OK);
+    wipe_rsp("demo", KODE_OK, 0U, 0U, 0U);
     TEST_ASSERT_TRUE_MESSAGE(klog_has("'demo' removed"),
         "answering the listing disturbed the tidy");
     tidy_end_case();
@@ -6788,4 +7374,570 @@ TEST_CASE("a URL longer than a file name is asked for whole and named by its "
         "the log printed the URL's query");
     (void)net_requests(NET_STREAM_CLOSE_REQ_SIG);
     (void)storage_requests();
+}
+
+/* ---- The project in the write reports -------------------------------------
+ * An app's data folder is named for its project and travels apart from the
+ * image, so it may be on the board before the app is. The Opening card can
+ * only show that folder's name, icon and colour when the reports say which
+ * project is being written: the end event names it too late. */
+
+/** @brief One write report, as far as these cases read it. */
+typedef struct {
+    uint8_t percent;
+    char    project[KODE_APP_PROJECT_MAX];
+} report_t;
+
+/** @brief The write reports the spy holds, in order, emptying it. */
+static unsigned reports_take(report_t *out, unsigned max)
+{
+    unsigned n = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( ((int)e->sig == APP_FLASH_PROGRESS_SIG) && (n < max) )
+        {
+            AppProgressEvt const * const p = (AppProgressEvt const *)e;
+            out[n].percent = p->percent;
+            (void)snprintf(out[n].project, sizeof(out[n].project), "%s",
+                           p->project);
+            ++n;
+        }
+    }
+    return n;
+}
+
+TEST_CASE("a terminal install that names its project says it from 0 %",
+          "[appmgr_ao][project]")
+{
+    report_t       r[8];
+    uint32_t const len = image_named("snake");
+
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+
+    ask_recv_named(len, 0xDEADBEEFU, false, "snake");
+    raw_armed(true);
+    unsigned n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n, "the ready's 0 % and nothing else yet");
+    TEST_ASSERT_EQUAL_UINT(0U, r[0].percent);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("snake", r[0].project,
+        "the host named the project: the card must not wait for the image");
+
+    /* The image says the same name: nothing new to tell, so no extra report. */
+    feed(s_named_img, (uint16_t)len);
+    n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n, "one report for the one chunk");
+    TEST_ASSERT_EQUAL_UINT(100U, r[0].percent);
+    TEST_ASSERT_EQUAL_STRING("snake", r[0].project);
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    ao_spy_drain();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("a terminal install with no name says its project at the first chunk",
+          "[appmgr_ao][project]")
+{
+    report_t       r[8];
+    uint32_t const len = image_named("snake");
+
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+
+    ask_recv(len, 0xDEADBEEFU, false);
+    raw_armed(true);
+    unsigned n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_EQUAL_UINT(1U, n);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", r[0].project,
+        "nobody has said what this is yet");
+
+    feed(s_named_img, (uint16_t)len);
+    n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, n,
+        "the name is told as soon as it is read, then the chunk's percent");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, r[0].percent,
+        "told at the first chunk, not a whole percent later");
+    TEST_ASSERT_EQUAL_STRING("snake", r[0].project);
+    TEST_ASSERT_EQUAL_UINT(100U, r[1].percent);
+    TEST_ASSERT_EQUAL_STRING("snake", r[1].project);
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    ao_spy_drain();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("the name the image carries wins over the one the host gave",
+          "[appmgr_ao][project]")
+{
+    report_t       r[8];
+    uint32_t const len = image_named("snake");
+
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+
+    ask_recv_named(len, 0xDEADBEEFU, false, "ladder");
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+    unsigned const n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_EQUAL_UINT(3U, n);
+    TEST_ASSERT_EQUAL_STRING("ladder", r[0].project);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("snake", r[1].project,
+        "the image is what is being written, whatever the host called it");
+    TEST_ASSERT_EQUAL_UINT(0U, r[1].percent);
+    TEST_ASSERT_EQUAL_STRING("snake", r[2].project);
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    ao_spy_drain();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("an install from a medium says its project once the first chunk is read",
+          "[appmgr_ao][project]")
+{
+    report_t       r[8];
+    uint32_t const len = image_named("new");
+
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    unsigned n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n, "the announce, before any byte");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", r[0].project,
+        "a file's name is not its project: nothing to say until it is read");
+
+    answer_data(len);
+    n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT(1U, n);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, r[0].percent,
+        "told at the first chunk, not a whole percent later");
+    TEST_ASSERT_EQUAL_STRING("new", r[0].project);
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    let_the_open_expire();
+    (void)storage_requests();
+    keep_end();
+}
+
+TEST_CASE("the project of one write does not leak into the next",
+          "[appmgr_ao][project]")
+{
+    report_t       r[8];
+    uint32_t const len = image_named("snake");
+
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    ao_spy_drain();
+
+    ask_recv(len, 0xDEADBEEFU, false);      /* a failed write of "snake" */
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+
+    ask_recv(len, 0xDEADBEEFU, false);      /* and one nobody has named */
+    raw_armed(true);
+    unsigned const n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_EQUAL_UINT(1U, n);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", r[0].project,
+        "the last write's project named a stranger");
+
+    feed(s_named_img, (uint16_t)len);
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    ao_spy_drain();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("a kodeOS write names no project", "[appmgr_ao][project]")
+{
+    report_t       r[8];
+    uint32_t const len = image_named("kodeos");
+
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    (void)memset(&s_slot_log, 0, sizeof(s_slot_log));
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+
+    kdrv_slot_present_ExpectAndReturn(true);
+    kdrv_slot_size_IgnoreAndReturn(0x400000U);
+    kdrv_slot_address_IgnoreAndReturn(0x420000U);
+    kdrv_slot_sink_ExpectAndReturn(&SLOT_FAKE_SINK);
+    kdrv_slot_desc_IgnoreAndReturn(KODE_ERROR);
+
+    ask_recv_os(len, 0xDEADBEEFU);
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+    unsigned const n = reports_take(r, Q_DIM(r));
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT(2U, n);
+    for ( unsigned i = 0U; i < n; ++i )
+    {
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("", r[i].project,
+            "kodeOS is no app: there is no data folder to look for");
+    }
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    ao_spy_drain();
+    Mockkdrv_slot_Destroy();
+}
+
+/* ---- An app's data folder fetched from a URL -------------------------------
+ * AO_AppMgr reads `<url>app.json` and `<url>icon.k64` through AO_Net's
+ * transfer and hands both to AO_Storage. AO_Net is a mailbox in this file, so
+ * its buffers do not exist here: these cases cover the requests, the lengths
+ * judged before a byte is read, the refusals and the deadline. The bytes'
+ * own road, from AO_Net's buffer to AO_Storage's folder, is not a host case;
+ * what an app.json may say is kapp_data_fetched()'s, in test_kapp_data.c. */
+
+#define GET_URL  "http://example.invalid/apps/snake/"
+
+/** @brief Ask AO_AppMgr for @p project's folder from @p url, answered to the spy. */
+static void ask_get(const char *project, const char *url)
+{
+    AppDataGetReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(APPDATA_GET_REQ_SIG);
+    (void)snprintf(e.project, sizeof(e.project), "%s", project);
+    (void)snprintf(e.url, sizeof(e.url), "%s", url);
+    e.who = ao_spy();
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/** @brief What AO_Net's queue holds: the opens and closes, and the last URL opened. */
+typedef struct {
+    unsigned opens;
+    unsigned closes;
+    unsigned reads;
+    char     url[KODE_FLASH_SRC_MAX];
+} net_seen_t;
+
+/** @brief Read and empty AO_Net's queue. */
+static net_seen_t net_seen(void)
+{
+    net_seen_t  n;
+    const QEvt *e;
+
+    (void)memset(&n, 0, sizeof(n));
+    while ( xQueueReceive(AO_Net->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (enum_t)e->sig == NET_STREAM_OPEN_REQ_SIG )
+        {
+            ++n.opens;
+            (void)snprintf(n.url, sizeof(n.url), "%s",
+                           ((NetStreamOpenEvt const *)e)->url);
+        }
+        if ( (enum_t)e->sig == NET_STREAM_CLOSE_REQ_SIG )
+        {
+            ++n.closes;
+        }
+        if ( (enum_t)e->sig == NET_STREAM_READ_REQ_SIG )
+        {
+            ++n.reads;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/** @brief Answer the open in flight the way AO_Net would. */
+static void fetch_opened(uint8_t status, uint32_t size)
+{
+    StorageOpenRspEvt rsp;
+
+    (void)memset(&rsp, 0, sizeof(rsp));
+    rsp.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_OPEN_RSP_SIG);
+    rsp.status = status;
+    rsp.size   = size;
+    QASM_DISPATCH(AO_AppMgr, &rsp.super, 0U);
+}
+
+/**
+ * @brief The one answer a fetch owes, taken from the spy.
+ *
+ * @param project Whose folder the answer must name.
+ * @return How it ended; fails the case when there is no answer, or two.
+ */
+static appdata_get_why_t fetch_answer(const char *project)
+{
+    appdata_get_why_t why     = APPDATA_GET_OK;
+    unsigned          answers = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (int)e->sig == APPDATA_GET_RSP_SIG )
+        {
+            AppDataGetRspEvt const * const g = (AppDataGetRspEvt const *)e;
+            TEST_ASSERT_EQUAL_STRING(project, g->project);
+            TEST_ASSERT_FALSE_MESSAGE(g->icon, "no folder was written");
+            why = (appdata_get_why_t)g->why;
+            ++answers;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, answers, "a fetch is answered once");
+    return why;
+}
+
+/** @brief The start of a fetch case: an idle AppMgr, empty mailboxes, a clean heap. */
+static void fetch_fresh(void)
+{
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    fake_psram_reset();
+    (void)net_seen();
+    (void)storage_requests();
+    ao_spy_drain();
+}
+
+/** @brief The end of one: nothing is held, and the AO takes the next fetch. */
+static void fetch_end(void)
+{
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(fake_psram_alloc_count(), fake_psram_free_count(),
+        "the fetch kept its buffer");
+    (void)net_seen();
+    ask_get("after", GET_URL);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_seen().opens,
+        "the AO did not go back to taking fetches");
+    fetch_opened((uint8_t)KODE_ERROR, 0U);
+    ao_spy_drain();
+    (void)net_seen();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("a fetch opens app.json at the base URL and answers nothing yet",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    net_seen_t const n = net_seen();
+    TEST_ASSERT_EQUAL_UINT(1U, n.opens);
+    TEST_ASSERT_EQUAL_STRING(GET_URL "app.json", n.url);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered before anything came");
+
+    fetch_opened((uint8_t)KODE_OK, 120U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_seen().reads,
+        "a file of a good length is read");
+
+    fetch_opened((uint8_t)KODE_ERROR, 0U);         /* ends it */
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    fetch_end();
+}
+
+TEST_CASE("a fetch for a name that cannot be a folder opens nothing",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    ask_get("../etc", GET_URL);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_NAME, fetch_answer("../etc"));
+    TEST_ASSERT_EQUAL_UINT(0U, net_seen().opens);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_psram_alloc_count(),
+        "a refused fetch took a buffer");
+    fetch_end();
+}
+
+TEST_CASE("a fetch whose file does not open says fetch",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_ERROR, 0U);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, net_seen().closes,
+        "nothing was opened: there is nothing to close");
+    fetch_end();
+}
+
+TEST_CASE("a fetched file with no length is not read",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_OK, 0U);            /* no Content-Length */
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    net_seen_t const n = net_seen();
+    TEST_ASSERT_EQUAL_UINT(0U, n.reads);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n.closes, "the transfer was left open");
+    fetch_end();
+}
+
+TEST_CASE("a fetched app.json longer than the reader takes is not read",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_OK, KAPP_DATA_JSON_MAX + 1U);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_JSON, fetch_answer("snake"));
+    net_seen_t const n = net_seen();
+    TEST_ASSERT_EQUAL_UINT(0U, n.reads);
+    TEST_ASSERT_EQUAL_UINT(1U, n.closes);
+    fetch_end();
+}
+
+TEST_CASE("a chunk in a buffer AO_Net has not got ends the fetch",
+          "[appmgr_ao][appdata_get]")
+{
+    StorageDataEvt d;
+
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    fetch_opened((uint8_t)KODE_OK, 64U);
+    (void)net_seen();
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.len    = 64U;
+    d.idx    = UINT8_MAX;                        /* no such buffer */
+    d.status = (uint8_t)KODE_OK;
+    d.eof    = true;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT(1U, net_seen().closes);
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(APPDATA_PUT_REQ_SIG, "snake"),
+        "a folder was written from a file that never arrived");
+    fetch_end();
+}
+
+TEST_CASE("a chunk that arrives before the file is opened is not that file's",
+          "[appmgr_ao][appdata_get]")
+{
+    StorageDataEvt d;
+
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    /* The end of a file closed a moment ago, crossing the next one's open. */
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.status = (uint8_t)KODE_OK;
+    d.eof    = true;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a stray chunk ended the fetch");
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(APPDATA_PUT_REQ_SIG, "snake"),
+        "a stray chunk was written as an empty file");
+    TEST_ASSERT_EQUAL_UINT(0U, net_seen().closes);
+
+    fetch_opened((uint8_t)KODE_ERROR, 0U);       /* the open's own answer ends it */
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    fetch_end();
+}
+
+TEST_CASE("a chunk that says the read failed ends the fetch",
+          "[appmgr_ao][appdata_get]")
+{
+    StorageDataEvt d;
+
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    fetch_opened((uint8_t)KODE_OK, 64U);
+    (void)net_seen();
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.status = (uint8_t)KODE_TIMEOUT;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT(1U, net_seen().closes);
+    fetch_end();
+}
+
+TEST_CASE("a second fetch asked while one runs is told busy",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    ask_get("ladder", GET_URL);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_BUSY, fetch_answer("ladder"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, net_seen().opens,
+        "the second fetch opened a transfer over the first's");
+
+    fetch_opened((uint8_t)KODE_ERROR, 0U);         /* the first goes on, and ends */
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    fetch_end();
+}
+
+TEST_CASE("a fetch asked while an image is written is told busy",
+          "[appmgr_ao][appdata_get]")
+{
+    uint32_t const len = image_named("snake");
+
+    fetch_fresh();
+
+    ask_recv(len, 0xDEADBEEFU, false);           /* a write in hand */
+    raw_armed(true);
+    ask_get("snake", GET_URL);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_BUSY, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT(0U, net_seen().opens);
+
+    feed(s_named_img, (uint16_t)len);            /* the write ends, CRC refused */
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    fetch_end();
+}
+
+TEST_CASE("a fetch nobody answers is given up on", "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    run_ticks(APPMGR_OPEN_DEADLINE_TICKS - 50U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "gave up before the deadline");
+
+    run_ticks(100U);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_seen().closes,
+        "the transfer asked for was never given back");
+    fetch_end();
+}
+
+TEST_CASE("the fetch's request refuses what it cannot post",
+          "[appmgr_ao][appdata_get]")
+{
+    static char long_url[KODE_APPDATA_URL_MAX + 1U];
+
+    fetch_fresh();
+    (void)memset(long_url, 'u', sizeof(long_url) - 1U);
+    long_url[sizeof(long_url) - 1U] = '\0';
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request(NULL, GET_URL, ao_spy()));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request("snake", NULL, ao_spy()));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request("snake", GET_URL, NULL));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        appmgr_appdata_get_request("snake", long_url, ao_spy()),
+        "a URL that does not fit the request was cut, not refused");
+    TEST_ASSERT_EQUAL_UINT(0U, (unsigned)uxQueueMessagesWaiting(AO_AppMgr->eQueue));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, appmgr_appdata_get_request("snake", GET_URL, ao_spy()));
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    net_seen_t const n = net_seen();
+    TEST_ASSERT_EQUAL_UINT(1U, n.opens);
+    TEST_ASSERT_EQUAL_STRING(GET_URL "app.json", n.url);
+    fetch_opened((uint8_t)KODE_ERROR, 0U);
+    ao_spy_drain();
+    fetch_end();
 }

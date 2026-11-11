@@ -3,6 +3,7 @@
  * @file appmgr_verbs.c
  * @brief AO_AppMgr's console verbs: `app_list`, `app_run`, `app_erase` and `app_cat`, registered by kaos_appmgr_start().
  */
+#include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
 
@@ -18,15 +19,22 @@
 
 #define APPMGR_V_PROJECT_MAX  32U    /**< A project name, as kapp_cat_row_t keeps it. */
 #define APPMGR_V_BYTES_PER_KB 1024U  /**< `size_kb=`'s unit. */
+#define APPMGR_V_ERASE_MARGIN_MS 5000U  /**< What `app_erase` waits past AO_AppMgr's own bound on AO_Storage. */
+#define APPMGR_V_ERASE_MS     (APPMGR_WIPE_MS + APPMGR_V_ERASE_MARGIN_MS) /**< `app_erase`'s deadline. */
 
 /** @brief Which app verb holds the console. */
 typedef enum {
     APPMGR_V_NONE = 0,  /**< None of them.                                  */
     APPMGR_V_LIST,      /**< app_list: APP_ENTRY_SIG pages until the end.   */
-    APPMGR_V_CAT        /**< app_cat set/clear: closed by APP_CAT_RSP_SIG.  */
+    APPMGR_V_CAT,       /**< app_cat set/clear: closed by APP_CAT_RSP_SIG.  */
+    APPMGR_V_ERASE      /**< app_erase: closed by APP_ERASE_DONE_SIG.       */
 } appmgr_verb_kind_t;
 
 static appmgr_verb_kind_t s_appmgr_kind;
+
+/** @brief APPMGR_V_ERASE: the app whose erase holds the console. The end of
+ *         an erase is published, and the launcher's ends on the same signal. */
+static char s_appmgr_erasing[APPMGR_V_PROJECT_MAX];
 
 /** @brief APPMGR_V_LIST: the position the next entry must carry, and the skip
  *         of the next page. */
@@ -62,12 +70,19 @@ static void h_app_run(const kverb_t *c, const karg_val_t *v)
     console_reply(">ok");
 }
 
-/** @brief app_erase name=<name>: remove one installed app. */
+/**
+ * @brief app_erase name=<name>: take everything of one app off the board.
+ *
+ * The line stays open until AO_AppMgr publishes the end of the erase, under
+ * a deadline past the one AO_AppMgr gives AO_Storage.
+ */
 static void h_app_erase(const kverb_t *c, const karg_val_t *v)
 {
-    (void)c;
+    console_begin(c->verb);
+    console_extend(APPMGR_V_ERASE_MS);
+    s_appmgr_kind = APPMGR_V_ERASE;
+    (void)snprintf(s_appmgr_erasing, sizeof(s_appmgr_erasing), "%s", v[0].s);
     appmgr_erase_request(v[0].s);
-    console_reply(">ok");
 }
 
 /** @brief app_cat with no name: the override table, read synchronously. */
@@ -252,6 +267,102 @@ static bool appmgr_cat_answer(QEvt const *e)
     return handled;
 }
 
+/**
+ * @brief One medium's record of an erase: what went, what stayed, or absent.
+ * @param where "fs" or "sd".
+ * @param m     The medium's result.
+ */
+static void appmgr_erase_medium(const char *where, const AppWipeMedium *m)
+{
+    const char *folder = "none";
+
+    if ( !m->present )
+    {
+        console_reply(">|erased where=%s state=absent", where);
+        return;
+    }
+    if ( (uint8_t)APP_WIPE_FOLDER_REMOVED == m->folder )
+    {
+        folder = "removed";
+    }
+    else if ( (uint8_t)APP_WIPE_FOLDER_LEFT == m->folder )
+    {
+        folder = "left";
+    }
+    else
+    {
+        /* There was none. */
+    }
+    console_reply(">|erased where=%s files=%u left=%u folder=%s", where,
+                  (unsigned)m->files, (unsigned)m->left, folder);
+}
+
+/** @brief app_erase's answer: the end of the erase of the app it named. */
+static bool appmgr_erase_answer(QEvt const *e)
+{
+    AppEraseDoneEvt const *d;
+    char                   qn[CONSOLE_QUOTED_MAX(KODE_APP_PROJECT_MAX)];
+    const char            *image = "none";
+    kode_status_t          st;
+
+    if ( (QSignal)APP_ERASE_DONE_SIG != e->sig )
+    {
+        return false;
+    }
+    d = Q_EVT_CAST(AppEraseDoneEvt);
+    if ( strcmp(d->name, s_appmgr_erasing) != 0 )
+    {
+        return false;   /* another app's erase: the launcher's */
+    }
+    st = (kode_status_t)d->status;
+    if ( d->image )
+    {
+        image = "removed";
+    }
+
+    /* The records say what was found, so an erase that found nothing and one
+     * refused outright have none; an image that went is said whatever came
+     * after it. */
+    if ( (KODE_OK == st) || (KODE_IO_ERROR == st) || d->image )
+    {
+        console_reply(">|erased name=%s image=%s",
+                      console_quote(qn, sizeof(qn), d->name), image);
+    }
+    if ( (KODE_OK == st) || (KODE_IO_ERROR == st) )
+    {
+        appmgr_erase_medium("fs", &d->fs);
+        appmgr_erase_medium("sd", &d->sd);
+    }
+
+    switch ( st )
+    {
+        case KODE_OK: {
+            console_reply(">ok");
+            break;
+        }
+        case KODE_ERROR: {
+            console_reply_err(KCLI_ERR_REJECT, "missing");
+            break;
+        }
+        case KODE_IO_ERROR: {
+            console_reply_err(KCLI_ERR_REJECT, "left");
+            break;
+        }
+        case KODE_DENIED: {
+            console_reply_err(KCLI_ERR_BUSY, "busy");
+            break;
+        }
+        default: {
+            /* AO_Storage kept silent or had no room: the files were not
+             * looked at. */
+            console_reply_err(KCLI_ERR_TIMEOUT, "storage");
+            break;
+        }
+    }
+    console_end();
+    return true;
+}
+
 /** @brief AO_AppMgr's answers to the verb in flight. */
 static bool appmgr_answer(QEvt const *e)
 {
@@ -264,6 +375,10 @@ static bool appmgr_answer(QEvt const *e)
     else if ( APPMGR_V_CAT == s_appmgr_kind )
     {
         handled = appmgr_cat_answer(e);
+    }
+    else if ( APPMGR_V_ERASE == s_appmgr_kind )
+    {
+        handled = appmgr_erase_answer(e);
     }
     else
     {

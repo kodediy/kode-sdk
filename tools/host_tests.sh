@@ -2,17 +2,18 @@
 #
 # The host suites: every test that does not need the board.
 #
-# There are seven binaries, not one, and the reason is a rule C gives us no way
+# There are eight binaries, not one, and the reason is a rule C gives us no way
 # around - one definition per binary. The main suite fakes or mocks a seam
 # that some other project wants to test for real: khal_nvs, khal_time,
-# kdrv_slot, kdrv_net and khal_pwm each get a project of their own rather than taking
-# their stand-in away from every driver and AO case in the main one.
-# The seventh, the screen analysis of the end-of-line test, fakes nothing: it
+# kdrv_slot, kdrv_net, khal_pwm and kdrv_es8311 each get a project of their
+# own rather than taking their stand-in away from every driver and AO case in
+# the main one.
+# The eighth, the screen analysis of the end-of-line test, fakes nothing: it
 # is pure C judged on photo frames, and its own project keeps those out of the
 # main one.
 #
 # Every project is built and run even when one before it failed, so one red
-# suite never hides the state of the other six; the last lines say which
+# suite never hides the state of the other seven; the last lines say which
 # failed and why, and the exit is 1 if any did.
 #
 #   usage: tools/host_tests.sh [--sanitize]
@@ -43,6 +44,7 @@ PROJECTS=(
     "tests/host_slot:kode_host_slot"
     "tests/host_net:kode_host_net"
     "tests/host_pwm:kode_host_pwm"
+    "tests/host_codec:kode_host_codec"
     "tests/host_tdan:kode_host_tdan"
 )
 

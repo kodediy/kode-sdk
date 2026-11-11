@@ -18,6 +18,10 @@
 static char s_fs_dir[256];
 static bool s_fs_mounted;
 
+/* What kdrv_fs_usage() says is free; fake_media_reset() puts it back. */
+#define FAKE_FS_FREE_BYTES  (8ULL * 1024ULL * 1024ULL)
+static uint64_t s_fs_free = FAKE_FS_FREE_BYTES;
+
 /* The failure knob and the call count of kdrv_fs_mount(); fake_media_reset()
  * puts both back. */
 static bool     s_fs_mount_fails;
@@ -103,6 +107,7 @@ void fake_media_reset(void)
      * it - and every later case would silently be testing the internal
      * partition instead of what it named. */
     s_fs_mounted = true;
+    s_fs_free = FAKE_FS_FREE_BYTES;
     s_fs_mount_fails = false;
     s_fs_mount_calls = 0U;
     (void)kdrv_sd_mount();
@@ -122,6 +127,11 @@ void fake_media_set_sd_present(bool present)
 const char *fake_media_sd_dir(void)
 {
     return fake_sdmmc_dir();
+}
+
+void fake_media_set_fs_free(uint64_t free_bytes)
+{
+    s_fs_free = free_bytes;
 }
 
 const char *fake_media_fs_dir(void)
@@ -263,6 +273,6 @@ kode_status_t kdrv_fs_usage(uint64_t *total, uint64_t *free_bytes)
         return KODE_DENIED;
     }
     if ( NULL != total )      { *total = 12ULL * 1024ULL * 1024ULL; }
-    if ( NULL != free_bytes ) { *free_bytes = 8ULL * 1024ULL * 1024ULL; }
+    if ( NULL != free_bytes ) { *free_bytes = s_fs_free; }
     return KODE_OK;
 }

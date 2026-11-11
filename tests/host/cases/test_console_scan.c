@@ -221,6 +221,68 @@ TEST_CASE("the longest ble_scan record fits one channel message",
     TEST_ASSERT_LESS_OR_EQUAL_size_t((size_t)KODE_MQTT_PAYLOAD_MAX, strlen(l) + 1U);
 }
 
+/* `ble_info` is the one record that says what the board calls itself on the
+ * air, so a script can check a change of name without a scanner. */
+TEST_CASE("ble_info says the name the board goes by, quoted as every text is",
+          "[console_scan]")
+{
+    BleStateEvt s;
+
+    console_up();
+    type_line("ble_info");
+
+    (void)memset(&s, 0, sizeof(s));
+    s.super = (QEvt)QEVT_INITIALIZER(BLE_STATE_SIG);
+    s.state = (uint8_t)KDRV_BLE_ADVERTISING;
+    (void)snprintf(s.name, sizeof(s.name), "%s", "KODE a\"b");
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(" name=\"KODE a\\\"b\""),
+                                 "the name a host parses");
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    (void)posted(BLE_STATE_REQ_SIG);
+}
+
+/* `pair=` has three words: a time to pair that waits for the connected device
+ * to leave is neither on nor off. */
+TEST_CASE("ble_info says pair=wait while Pair new device waits for the link",
+          "[console_scan]")
+{
+    BleStateEvt s;
+
+    console_up();
+    type_line("ble_info");
+    (void)memset(&s, 0, sizeof(s));
+    s.super     = (QEvt)QEVT_INITIALIZER(BLE_STATE_SIG);
+    s.state     = (uint8_t)KDRV_BLE_CONNECTED;
+    s.pair_wait = true;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+    TEST_ASSERT_NOT_NULL(line_with(" pair=wait"));
+
+    /* A time that runs with a device on the link shows the board no more
+     * than one that has not started. */
+    fake_klog_reset();
+    type_line("ble_info");
+    s.pair_wait = false;
+    s.pair_open = true;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(" pair=wait"), "said on with nothing on the air");
+
+    fake_klog_reset();
+    type_line("ble_info");
+    s.state = (uint8_t)KDRV_BLE_ADVERTISING;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+    TEST_ASSERT_NOT_NULL(line_with(" pair=on"));
+
+    /* And a board switched off shows itself to nobody. */
+    fake_klog_reset();
+    type_line("ble_info");
+    s.state = (uint8_t)KDRV_BLE_OFF;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(" pair=off"), "said on with Bluetooth off");
+    (void)posted(BLE_STATE_REQ_SIG);
+}
+
 TEST_CASE("wifi_scan prints the BSSID", "[console_scan]")
 {
     static const uint8_t BSSID[6] = { 0x3CU, 0x84U, 0x6AU, 0x0AU, 0x0BU, 0x0CU };
@@ -434,4 +496,233 @@ TEST_CASE("wifi_leave and wifi_auto with room post their request without an erro
         state.super = (QEvt)QEVT_INITIALIZER(WIFI_STATE_SIG);
         QASM_DISPATCH(AO_Console, &state.super, 0U);   /* AO_Radio's answer */
     }
+}
+
+/* ---- wifi_scan_stop ----------------------------------------------------------------
+ * The one verb the console takes while another command is in flight: a scan
+ * holds the console until its last channel, and the line that ends it early
+ * cannot wait for that.
+ */
+
+/** @brief One network of a listing, the way AO_Radio publishes it. */
+static void list_network(const char *ssid)
+{
+    WifiScanEntryEvt n;
+
+    (void)memset(&n, 0, sizeof(n));
+    n.super = (QEvt)QEVT_INITIALIZER(WIFI_SCAN_ENTRY_SIG);
+    (void)snprintf(n.ssid, sizeof(n.ssid), "%s", ssid);
+    n.rssi     = -40;
+    n.channel  = 6U;
+    n.authmode = 3U;
+    QASM_DISPATCH(AO_Console, &n.super, 0U);
+}
+
+/** @brief Close a listing whose sweep was cut, the way AO_Radio does. */
+static void end_cut(void)
+{
+    WifiScanEndEvt end;
+
+    (void)memset(&end, 0, sizeof(end));
+    end.super = (QEvt)QEVT_INITIALIZER(WIFI_SCAN_END_SIG);
+    end.cut   = true;
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+}
+
+TEST_CASE("wifi_scan_stop posts its request and answers ok", "[console_scan]")
+{
+    console_up();
+    type_line("wifi_scan_stop");
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    TEST_ASSERT_NULL(line_with(">err"));
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_STOP_REQ_SIG));
+
+    /* An accept, not a command that waits: the console is free at once. */
+    fake_klog_reset();
+    type_line("ble_scan ms=1500");
+    TEST_ASSERT_EQUAL_UINT32(1500U, posted_ble_ms());
+    end_listing(BLE_SCAN_END_SIG);
+}
+
+TEST_CASE("wifi_scan_stop on a full radio queue is refused busy and leaves the console free",
+          "[console_scan]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+
+    console_up();
+    for ( uint32_t guard = 0U;
+         (64U > guard)
+         && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_POST_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    fake_klog_reset();
+    type_line("wifi_scan_stop");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+    TEST_ASSERT_EQUAL_UINT(KQP_RADIO_POST_MARGIN, uxQueueSpacesAvailable(AO_Radio->eQueue));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));   /* also empties the queue */
+
+    fake_klog_reset();
+    type_line("ble_scan ms=1500");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1500U, posted_ble_ms(),
+                                     "the console is free for the next command");
+    end_listing(BLE_SCAN_END_SIG);
+}
+
+TEST_CASE("wifi_scan_stop is taken while wifi_scan holds the console, which keeps its command",
+          "[console_scan]")
+{
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    list_network("one");
+    fake_klog_reset();
+
+    type_line("wifi_scan_stop");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "the stop was refused behind the scan");
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_STOP_REQ_SIG));
+
+    /* The scan is still the command in flight: its step on the air is listed,
+     * its end closes it, and a line typed meanwhile is still turned away. */
+    fake_klog_reset();
+    list_network("two");
+    TEST_ASSERT_NOT_NULL(line_with(">|ssid=\"two\""));
+    type_line("wifi_leave");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(posted(WIFI_LEAVE_REQ_SIG));
+
+    fake_klog_reset();
+    end_cut();
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
+
+    fake_klog_reset();
+    type_line("ble_scan ms=1500");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1500U, posted_ble_ms(),
+                                     "the scan's end did not free the console");
+    end_listing(BLE_SCAN_END_SIG);
+}
+
+TEST_CASE("a stopped wifi_scan prints its networks and ends stopped, code 5",
+          "[console_scan]")
+{
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    list_network("one");
+    end_cut();
+
+    TEST_ASSERT_NOT_NULL(line_with(">|ssid=\"one\""));
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "a cut list was closed as a whole one");
+    TEST_ASSERT_NULL(line_with("msg=wifi_scan"));
+}
+
+TEST_CASE("any other line while wifi_scan holds the console is still answered busy",
+          "[console_scan]")
+{
+    static const char *const lines[] = {
+        "wifi_leave", "wifi_scan", "ping", "wifi_scan_stopp"
+    };
+
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    for ( uint32_t i = 0U; (uint32_t)(sizeof(lines) / sizeof(lines[0])) > i; ++i )
+    {
+        fake_klog_reset();
+        type_line(lines[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(line_with(">err code=4 msg=busy"), lines[i]);
+        TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), lines[i]);
+    }
+    TEST_ASSERT_FALSE(posted(WIFI_LEAVE_REQ_SIG));
+    end_listing(WIFI_SCAN_END_SIG);
+}
+
+TEST_CASE("wifi_scan_stop with a key is refused", "[console_scan]")
+{
+    console_up();
+    type_line("wifi_scan_stop now=on");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=3 msg=now"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));
+
+    /* Behind a command in flight the line is not looked at any further:
+     * busy, as every line but the bare verb is. */
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    fake_klog_reset();
+    type_line("wifi_scan_stop now=on");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));
+    end_listing(WIFI_SCAN_END_SIG);
+}
+
+/* The Kode channel's lines run in order: its sender holds a line the console
+ * is busy for and offers it again, the stop included. */
+TEST_CASE("wifi_scan_stop off the Kode channel waits its turn behind a command in flight",
+          "[console_scan]")
+{
+    ConsoleLineEvt e;
+
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    fake_klog_reset();
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CONSOLE_LINE_SIG);
+    e.src   = (uint8_t)KODE_CONSOLE_SRC_NET;
+    (void)snprintf(e.line, sizeof(e.line), "wifi_scan_stop");
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+
+    TEST_ASSERT_NULL(line_with(">ok"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));
+    end_listing(WIFI_SCAN_END_SIG);
+}
+
+/** @brief The BLE state AO_Radio answers a refused request with. */
+static void refuse_ble(uint8_t why)
+{
+    BleStateEvt s;
+
+    (void)memset(&s, 0, sizeof(s));
+    s.super   = (QEvt)QEVT_INITIALIZER(BLE_STATE_SIG);
+    s.state   = (uint8_t)KDRV_BLE_CONNECTED;
+    s.refused = why;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+}
+
+/* The warning goes to the log, and on the BLE console the terminator is all a
+ * client has: a refusal that ends in `>ok` reads as done. */
+TEST_CASE("a BLE verb AO_Radio refuses ends in an error that says why, never in ok",
+          "[console_scan]")
+{
+    console_up();
+    type_line("ble_unpair");
+    refuse_ble((uint8_t)KQP_BLE_REFUSED_ATTACHED);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=attached"));
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "a refusal read as done");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">|ble="), "a refusal carries no record");
+
+    fake_klog_reset();
+    type_line("ble_pair");
+    refuse_ble((uint8_t)KQP_BLE_REFUSED_OFF);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=off"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    fake_klog_reset();
+    type_line("ble_unpair");
+    refuse_ble((uint8_t)KQP_BLE_REFUSED_BUSY);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    /* The console is free again: a state that refuses nothing answers as before. */
+    fake_klog_reset();
+    type_line("ble_info");
+    refuse_ble((uint8_t)KQP_BLE_REFUSED_NONE);
+    TEST_ASSERT_NOT_NULL(line_with(">|ble=connected"));
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    (void)posted(BLE_STATE_REQ_SIG);
 }

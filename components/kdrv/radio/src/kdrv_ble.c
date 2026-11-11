@@ -207,6 +207,7 @@ static struct {
     uint8_t            rsp_len;     /**< Its bytes; 0 for none.             */
     bool               rsp_set;     /**< kdrv_ble_set_scan_rsp() has set it;
                                       *   until then the console's default.  */
+    char               name[KDRV_BLE_ADV_MAX]; /**< The name it set; "" for the serial. */
     /* Outside the console guard, unlike the three fields below it: hanging
      * up on a central is kdrv_ble_quiet()'s job and that exists whether or
      * not this firmware carries a console. */
@@ -229,9 +230,10 @@ static struct {
                                       *   one, because both report the same
                                       *   fact: the link, not either producer,
                                       *   is what failed.                    */
-    uint16_t           tx_retry;    /**< Times either drain found no
-                                      *   buffers - shared for the same
-                                      *   reason as tx_drop above.           */
+    uint16_t           tx_retry;    /**< Times a drain found no buffers,
+                                      *   its own or the stack's for the
+                                      *   notification's header - shared for
+                                      *   the same reason as tx_drop above.  */
 #if KDRV_BLE_MIRROR_PIPE
     bool               mirror_on;   /**< A central is subscribed to the
                                       *   mirror characteristic.             */
@@ -835,6 +837,16 @@ static void console_drain(struct ble_npl_event *ev)
                 return;
             }
             int const rc = ble_gatts_notify_custom(conn, s_tx_val_handle, om);
+            if ( BLE_HS_ENOMEM == rc )
+            {
+                /* Out of buffers inside the stack: the payload had its blocks
+                 * and the header found none. The same fact as no mbuf above,
+                 * and the same answer: the record stays pending and a timer
+                 * comes back for it. The callee has freed the mbuf. */
+                ++s_ble.tx_retry;
+                (void)ble_npl_callout_reset(&s_tx_co, KDRV_BLE_RETRY_TICKS);
+                return;
+            }
             if ( 0 != rc )
             {
                 /* The callee frees the mbuf on every failure path EXCEPT the
@@ -1099,6 +1111,15 @@ static void mirror_drain(struct ble_npl_event *ev)
             }
             int const rc = ble_gatts_notify_custom(conn, s_mirror_val_handle,
                                                     om);
+            if ( BLE_HS_ENOMEM == rc )
+            {
+                /* Out of buffers inside the stack: the slice stays pending,
+                 * as console_drain() says. */
+                ++s_ble.tx_retry;
+                (void)ble_npl_callout_reset(&s_mirror_tx_co,
+                                            KDRV_BLE_MIRROR_RETRY_TICKS);
+                return;
+            }
             if ( 0 != rc )
             {
                 if ( BLE_HS_ENOTSUP == rc )
@@ -1428,17 +1449,28 @@ static void app_drain(struct ble_npl_event *ev)
                 {
                     int const rc = ble_gatts_notify_custom(conn, a->val_handle[chr], om);
 
-                    if ( 0 != rc )
+                    if ( BLE_HS_ENOMEM == rc )
                     {
-                        /* Freed by the callee on every path but this one,
-                         * as console_drain() says. */
-                        if ( BLE_HS_ENOTSUP == rc )
-                        {
-                            (void)os_mbuf_free_chain(om);
-                        }
-                        ++s_ble.tx_drop;
+                        /* Out of buffers inside the stack: the notification
+                         * stays, as with no mbuf above. */
+                        ++s_ble.tx_retry;
+                        (void)ble_npl_callout_reset(&a->co, KDRV_BLE_RETRY_TICKS);
+                        more = false;
                     }
-                    kdrv_ble_app_pop();
+                    else
+                    {
+                        if ( 0 != rc )
+                        {
+                            /* Freed by the callee on every path but this
+                             * one, as console_drain() says. */
+                            if ( BLE_HS_ENOTSUP == rc )
+                            {
+                                (void)os_mbuf_free_chain(om);
+                            }
+                            ++s_ble.tx_drop;
+                        }
+                        kdrv_ble_app_pop();
+                    }
                 }
             }
         }
@@ -2440,6 +2472,13 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  * longer match (`ble_unpair` here, forget the board there). */
                 KLOG_W(TAG, "encryption failed (status %d)",
                        event->enc_change.status);
+                /* Whoever made it fail, the link goes: a peer that refuses
+                 * the pairing and stays connected would hold the one link
+                 * there is, and the board would be off the air for as long
+                 * as it liked. Most failures end the link by themselves, and
+                 * hanging up on one that is gone costs nothing. */
+                (void)ble_gap_terminate(event->enc_change.conn_handle,
+                                        BLE_ERR_AUTH_FAIL);
             }
             break;
         }
@@ -2631,7 +2670,7 @@ kode_status_t kdrv_ble_start(void)
      * found no such characteristic. */
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    (void)ble_svc_gap_device_name_set(kdrv_ble_serial_name());
+    (void)ble_svc_gap_device_name_set(kdrv_ble_name());
 
 #if CONFIG_KODEOS_BLE_CONSOLE
     console_build_table();
@@ -2783,7 +2822,7 @@ kode_status_t kdrv_ble_start(void)
 
     ble_set_state(KDRV_BLE_IDLE);
     KLOG_N(TAG, "BLE up (NimBLE here, the radio on the C5), as '%s'",
-           kdrv_ble_serial_name());
+           kdrv_ble_name());
     return KODE_OK;
 }
 
@@ -2946,6 +2985,17 @@ kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_
         return rc;
     }
     s_ble.rsp_set = true;
+    s_ble.name[0] = '\0';
+    if ( NULL != name )
+    {
+        (void)snprintf(s_ble.name, sizeof(s_ble.name), "%s", name);
+    }
+    if ( s_ble.up )
+    {
+        /* What a central reads once it has connected, and lists the board
+         * under from then on: the same name the scan response shows. */
+        (void)ble_svc_gap_device_name_set(kdrv_ble_name());
+    }
     if ( s_ble.synced && !s_ble.adv_hidden )
     {
         /* Legal while advertising: the next scan request is answered with it.
@@ -2960,6 +3010,17 @@ kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_
     KLOG_N(TAG, "scan response: %u of %u bytes", (unsigned)s_ble.rsp_len,
            (unsigned)KDRV_BLE_ADV_MAX);
     return KODE_OK;
+}
+
+const char *kdrv_ble_name(void)
+{
+    const char *name = s_ble.name;
+
+    if ( '\0' == s_ble.name[0] )
+    {
+        name = kdrv_ble_serial_name();
+    }
+    return name;
 }
 
 bool kdrv_ble_link_secure(void)
@@ -3128,7 +3189,7 @@ kode_status_t kdrv_ble_advertise(bool on)
     }
     else
     {
-        KLOG_I(TAG, "advertising as '%s'", kdrv_ble_serial_name());
+        KLOG_I(TAG, "advertising as '%s'", kdrv_ble_name());
     }
     return KODE_OK;
 }

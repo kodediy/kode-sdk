@@ -472,10 +472,14 @@ typedef ExpPowerDoneEvt kode_sys_exp_power_done_t;
  *
  * Its state at boot is not promised: a C5 that the last firmware parked, held
  * in reset or never linked lets go of IO5, and R72 then holds the rail on;
- * one whose link drove it off leaves it off. The wish starts off, and a
- * link-up drives the pin as the wish is. AO_Radio takes the rail as unknown
- * until the C5 has driven or let go of the pin, and again after a failed
- * bring-up, a lost link or a C5 update, so a request is carried out, never
+ * one whose link drove it off leaves it off. The wish starts off. A link-up
+ * drives the pin to the wish as it is at that moment, not as it was when the
+ * link was asked for, so an "on" asked while the link comes up is not undone
+ * by it. A wish that comes after the connect has read it is carried out by a
+ * job once the card is back: the job cannot run during the card's remount.
+ * AO_Radio takes the rail as unknown until the C5 has driven or let go of
+ * the pin, and again after a failed bring-up, a lost link or a C5 update, so
+ * a request is carried out, never
  * said done because the rail looked as asked; whoever needs a state asks for
  * it. The rail follows once the C5 can
  * carry the request out: a Wi-Fi sweep delays it by about 40 s and up to
@@ -556,9 +560,9 @@ kode_status_t kode_sys_home_now(void);
  *
  * Immediate returns:
  *   KODE_OK            taken; the answer will come.
- *   KODE_DENIED        @p me is NULL (a plain task asks through kode.h), an
- *                      argument is bad, @p me's door of that kind is busy, or
- *                      the build has no such owner. Nothing was posted.
+ *   KODE_DENIED        @p me is NULL or not started (a plain task asks through
+ *                      kode.h), an argument is bad, @p me's door of that kind is
+ *                      busy, or the build has no such owner. Nothing was posted.
  *   KODE_NO_RESOURCES  the owner's queue is within its margin, or the event
  *                      pool is dry. Nothing was posted.
  *
@@ -567,6 +571,16 @@ kode_status_t kode_sys_home_now(void);
  * the same kind before then is refused at once. The door is free again just
  * before the answer is posted, so @p me may ask again from the answer's
  * handler.
+ *
+ * Who calls: any thread may make a request in @p me's name, @p me's own or a
+ * task's, as long as @p me is started. The answer arrives at @p me, never at
+ * the task: @p me's handler hands it on. The doors are @p me's, so a task and
+ * @p me share them: while one holds the door of a kind, the other asking that
+ * kind is refused at once. Two threads asking at the same moment get the same:
+ * one is taken, the other refused. A task adds no door, so it adds no slot to
+ * @p me's queue. The lent-buffer rule binds whichever thread made the call.
+ * The audio stream's ring has one writer: one thread at a time calls
+ * kode_sys_audio_stream_write().
  *
  * Answers: a request taken is answered exactly once, posted to @p me with no
  * margin and never published, with the final status in @c rc. The owner's
@@ -1023,8 +1037,8 @@ kode_status_t kode_sys_rfid_emulate_start(QActive *me,
  */
 kode_status_t kode_sys_rfid_emulate_stop(QActive *me);
 
-/* ---- Files, AO_Storage: seven kinds, a status, a listing, a folder, a
- *      delete, a rename, a read and a write ----
+/* ---- Files, AO_Storage: eight kinds, a status, a listing, a folder, a
+ *      delete, a rename, a read, a write and a volume's space ----
  * Paths are absolute and virtual ("/sdcard/...", "/storage/..."), copied,
  * shorter than KODE_SYS_FILE_PATH_MAX. Every answer is a
  * kode_sys_file_answer_t; its @c rc is KODE_DENIED for a bad path or a
@@ -1054,11 +1068,15 @@ kode_status_t kode_sys_rfid_emulate_stop(QActive *me);
 /** @brief What one path is: @c exists, @c is_dir, @c size. */
 typedef FileStat kode_sys_file_status_t;
 
+/** @brief How big a volume is: @c total_kb, and @c free_kb of it, in whole kilobytes. */
+typedef FileSpace kode_sys_file_space_t;
+
 /* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
 /**
  * @brief Answers the file requests: @c rc; a status's @c stat (FILE_STATUS_RSP_SIG);
- *        a read's @c got (FILE_READ_RSP_SIG); a listing's end, @c count and
- *        @c more (FILE_LIST_END_SIG); the rest @c rc alone (FILE_FOLDER_RSP_SIG,
+ *        a space's @c space (FILE_SPACE_RSP_SIG); a read's @c got
+ *        (FILE_READ_RSP_SIG); a listing's end, @c count and @c more
+ *        (FILE_LIST_END_SIG); the rest @c rc alone (FILE_FOLDER_RSP_SIG,
  *        FILE_DELETE_RSP_SIG, FILE_RENAME_RSP_SIG, FILE_WRITE_RSP_SIG).
  */
 typedef FileRspEvt kode_sys_file_answer_t;
@@ -1078,6 +1096,19 @@ typedef StorageEntryEvt kode_sys_file_entry_t;
  * @return As the requests' rules above.
  */
 kode_status_t kode_sys_file_status(QActive *me, const char *path);
+
+/**
+ * @brief Ask how big a volume is and how much of it is free.
+ * @note On a large card the first count can take hundreds of milliseconds; the
+ *       answer is an event, so nothing waits for it.
+ * @param me     The asking AO; FILE_SPACE_RSP_SIG answers it, @c space filled
+ *               in whole kilobytes on KODE_OK and zero otherwise. A volume that will not mount (no
+ *               card) is KODE_ERROR, and @p volume that is not a volume's own
+ *               root is KODE_DENIED.
+ * @param volume A volume's root: "/sdcard" or "/storage".
+ * @return As the requests' rules above.
+ */
+kode_status_t kode_sys_file_space(QActive *me, const char *volume);
 
 /**
  * @brief List a page of a directory.

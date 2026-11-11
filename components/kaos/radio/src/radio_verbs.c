@@ -368,6 +368,27 @@ static void h_wifi_scan(const kverb_t *c, const karg_val_t *v)
     wifi_scan_request();
 }
 
+/**
+ * @brief wifi_scan_stop: ask AO_Radio to end the listing in flight.
+ *
+ * The table's verb that does not wait (kverbs_t.nowait): it runs while
+ * `wifi_scan` holds the console, so it begins no command and leaves
+ * @c s_radio_kind alone. `>ok` is an accept, with a listing in flight or
+ * without one; the cut `wifi_scan` closes itself, `>err code=5 msg=stopped`.
+ */
+static void h_wifi_scan_stop(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c; (void)v;
+    if ( wifi_scan_stop_request() )
+    {
+        console_reply(">ok");
+    }
+    else
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
+}
+
 /** @brief wifi_join ssid="<s>" [pass="<p>"] [remember=on|off]: closed by
  *         WIFI_STATE_SIG. remember=off is the factory's own network, which
  *         must not travel to the customer in the vault. */
@@ -848,6 +869,41 @@ static void h_ble_down(const kverb_t *c, const karg_val_t *v)
     ble_stop_request();
 }
 
+/**
+ * @brief The word after `pair=`: the board shows itself to a new device,
+ *        will once the connected one leaves, or was not asked to.
+ *
+ * `on` only with the link free: with a device on it nothing is on the air,
+ * whether the time to pair has started or waits. A board switched off shows
+ * itself to nobody.
+ *
+ * @param b The state.
+ * @return `on`, `wait` or `off`.
+ */
+static const char *ble_pair_word(BleStateEvt const * const b)
+{
+    bool const  linked = ((uint8_t)KDRV_BLE_CONNECTED == b->state);
+    const char *word   = "off";
+
+    if ( (uint8_t)KDRV_BLE_OFF == b->state )
+    {
+        /* off, whatever was asked before the switch */
+    }
+    else if ( b->pair_wait || (b->pair_open && linked) )
+    {
+        word = "wait";
+    }
+    else if ( b->pair_open )
+    {
+        word = "on";
+    }
+    else
+    {
+        /* off */
+    }
+    return word;
+}
+
 /** @brief ble_info: closed by BLE_STATE_SIG. */
 static void h_ble_info(const kverb_t *c, const karg_val_t *v)
 {
@@ -855,6 +911,34 @@ static void h_ble_info(const kverb_t *c, const karg_val_t *v)
     console_begin(c->verb);
     s_radio_kind = RADIO_V_BLE;
     ble_state_request();
+}
+
+/**
+ * @brief Answer a BLE verb AO_Radio refused: the state it published says why.
+ * @param why KQP_BLE_REFUSED_*, from the state.
+ * @return true when the verb was refused and has been answered.
+ */
+static bool ble_refused_reply(uint8_t why)
+{
+    bool refused = true;
+
+    if ( (uint8_t)KQP_BLE_REFUSED_BUSY == why )
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
+    else if ( (uint8_t)KQP_BLE_REFUSED_OFF == why )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "off");
+    }
+    else if ( (uint8_t)KQP_BLE_REFUSED_ATTACHED == why )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "attached");
+    }
+    else
+    {
+        refused = false;
+    }
+    return refused;
 }
 
 /** @brief ble_unpair: forget every bonded peer. */
@@ -1152,6 +1236,12 @@ static bool radio_answer(QEvt const *e)
                 {
                     console_reply_err(KCLI_ERR_BUSY, "busy");
                 }
+                else if ( end->cut )
+                {
+                    /* The networks above were heard; the rest of the air
+                     * was never swept. */
+                    console_reply_err(KCLI_ERR_REJECT, "stopped");
+                }
                 else
                 {
                     console_reply_err(KCLI_ERR_REJECT, console_verb());
@@ -1294,7 +1384,17 @@ static bool radio_answer(QEvt const *e)
             break;
         }
         case BLE_STATE_SIG: {
+            bool refused = false;
+
             if ( RADIO_V_BLE == s_radio_kind )
+            {
+                refused = ble_refused_reply(Q_EVT_CAST(BleStateEvt)->refused);
+            }
+            if ( refused )
+            {
+                console_end();
+            }
+            else if ( RADIO_V_BLE == s_radio_kind )
             {
                 BleStateEvt const * const b = Q_EVT_CAST(BleStateEvt);
                 static const char *const STATES[] = {
@@ -1302,6 +1402,7 @@ static bool radio_answer(QEvt const *e)
                 };                                  /* kdrv_ble_state_t order */
                 const char * const state =
                     console_word(STATES, sizeof(STATES) / sizeof(STATES[0]), b->state);
+                char name[CONSOLE_QUOTED_MAX(KQP_BLE_NAME_MAX)];
                 /* `idle` is a gap, not a resting place: BLE on means
                  * advertising, and this reports the instant between the
                  * stack coming up and the advert reaching the worker. */
@@ -1309,23 +1410,25 @@ static bool radio_answer(QEvt const *e)
                 {
                     console_reply(">|ble=%s addr=%02x:%02x:%02x:%02x:%02x:%02x "
                           "console=%s tx_drop=%" PRIu32 " bonds=%" PRIu32 " backlog=%" PRIu32 " retry=%" PRIu32
-                          " hidden=%s pair=%s",
+                          " hidden=%s pair=%s name=%s",
                           state,
                           b->addr[0], b->addr[1], b->addr[2],
                           b->addr[3], b->addr[4], b->addr[5],
                           console_on_off(b->console),
                           (uint32_t)b->tx_drop, (uint32_t)b->bonds,
                           (uint32_t)b->backlog, (uint32_t)b->retry,
-                          console_on_off(b->hidden), console_on_off(b->pair_open));
+                          console_on_off(b->hidden), ble_pair_word(b),
+                          console_kv_text(name, sizeof(name), b->name));
                 }
                 else
                 {
                     console_reply(">|ble=%s addr=unknown console=%s tx_drop=%" PRIu32 " "
-                          "bonds=%" PRIu32 " backlog=%" PRIu32 " retry=%" PRIu32 " hidden=%s pair=%s",
+                          "bonds=%" PRIu32 " backlog=%" PRIu32 " retry=%" PRIu32 " hidden=%s pair=%s name=%s",
                           state, console_on_off(b->console),
                           (uint32_t)b->tx_drop, (uint32_t)b->bonds,
                           (uint32_t)b->backlog, (uint32_t)b->retry,
-                          console_on_off(b->hidden), console_on_off(b->pair_open));
+                          console_on_off(b->hidden), ble_pair_word(b),
+                          console_kv_text(name, sizeof(name), b->name));
                 }
                 console_reply(">ok");
                 console_end();
@@ -1473,6 +1576,7 @@ static const kverb_t RADIO_VERBS[] = {
     { "wifi_up",     NULL,                 0U,                       h_wifi_up     },
     { "wifi_down",   NULL,                 0U,                       h_wifi_down   },
     { "wifi_scan",   NULL,                 0U,                       h_wifi_scan   },
+    { "wifi_scan_stop", NULL,              0U,                       h_wifi_scan_stop },
     { "wifi_join",   A_WIFI_JOIN,          KVERB_KEYS(A_WIFI_JOIN),  h_wifi_join   },
     { "wifi_auto",   NULL,                 0U,                       h_wifi_auto   },
     { "wifi_list",   NULL,                 0U,                       h_wifi_list   },
@@ -1496,4 +1600,7 @@ const kverbs_t radio_verbs = {
     .answer  = radio_answer,
     .timeout = radio_timeout,
     .info    = radio_info,
+#if CONFIG_KODEOS_WIFI
+    .nowait  = "wifi_scan_stop",
+#endif
 };

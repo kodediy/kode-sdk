@@ -93,6 +93,9 @@
 #define TEST_PARTIAL_FRAMES 1000U      /**< Frames a stopped recording holds.                          */
 #define TEST_SHORT_FRAMES 240U         /**< Frames a short second recording brings.                    */
 #define TEST_MID_FRAMES 480U           /**< Frames the recording that replaces a running one brings.   */
+#define TEST_SAMPLES_FRAMES 960U       /**< Frames of the caller's own buffer in the samples cases.    */
+#define TEST_SAMPLES_SENTINEL ((int16_t)-1) /**< What a frame the recording never wrote still holds.   */
+#define TEST_SAMPLES_ROOM 240U         /**< Room in a buffer smaller than the time asked.              */
 #define TEST_VOLUME "/storage/"        /**< The volume path every file of a case starts with.          */
 
 /* Stand-ins only record: an assertion in the player's task would end the wrong thread. */
@@ -1701,6 +1704,187 @@ TEST_CASE("record_file is busy past the bound while another holds the codec, and
     TEST_ASSERT_TRUE(kode_sys_time_ms() >= KODE_AUDIO_BUSY_MS);
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_audio_stream_close());
     TEST_ASSERT_TRUE_MESSAGE(kode_audio_record_file("flash/r.wav", TEST_REC_MS), kode_error());
+    audio_done();
+}
+
+/** @brief The caller's buffer in the samples cases. */
+static int16_t s_samples[TEST_SAMPLES_FRAMES];
+
+/** @brief Fill the caller's buffer with the sentinel. */
+static void samples_clear(void)
+{
+    for ( uint32_t i = 0U; i < TEST_SAMPLES_FRAMES; i++ )
+    {
+        s_samples[i] = TEST_SAMPLES_SENTINEL;
+    }
+}
+
+/** @brief Whether the first @p frames of the buffer are the recording's pattern and the rest is untouched. */
+static bool samples_are_recording(uint32_t frames)
+{
+    bool same = true;
+
+    for ( uint32_t i = 0U; same && (i < TEST_SAMPLES_FRAMES); i++ )
+    {
+        if ( i < frames )
+        {
+            same = (s_samples[i] == smp(TEST_SEED_REC, i));
+        }
+        else
+        {
+            same = (TEST_SAMPLES_SENTINEL == s_samples[i]);
+        }
+    }
+    return same;
+}
+
+TEST_CASE("record_samples fills the caller's buffer and says how many frames it holds",
+          "[kode_audio_standard]")
+{
+    uint32_t frames = UINT32_MAX;
+
+    audio_fresh();
+    samples_clear();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, TEST_REC_MS, &frames),
+                             kode_error());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_recs);
+    TEST_ASSERT_EQUAL_UINT32(TEST_REC_MS * TEST_FRAMES_PER_MS, s_rec_asked);
+    TEST_ASSERT_EQUAL_UINT32(TEST_REC_MS * TEST_FRAMES_PER_MS, frames);
+    TEST_ASSERT_TRUE_MESSAGE(samples_are_recording(frames), "the buffer is not the recording");
+    audio_done();
+}
+
+TEST_CASE("record_samples takes no more than the room given and ignores a NULL count",
+          "[kode_audio_standard]")
+{
+    audio_fresh();
+    samples_clear();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_record_samples(s_samples, TEST_SAMPLES_ROOM, TEST_REC_LONG_MS, NULL),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_SAMPLES_ROOM, s_rec_asked);
+    TEST_ASSERT_TRUE_MESSAGE(samples_are_recording(TEST_SAMPLES_ROOM), "the buffer is not the recording");
+
+    /* The longest recording is accepted. */
+    samples_clear();
+    TEST_ASSERT_TRUE_MESSAGE(
+        kode_audio_record_samples(s_samples, TEST_SAMPLES_ROOM, KODE_AUDIO_RECORD_MAX_MS, NULL), kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_SAMPLES_ROOM, s_rec_asked);
+    audio_done();
+}
+
+TEST_CASE("record_samples that brings fewer frames than asked reports the frames it brought",
+          "[kode_audio_standard]")
+{
+    uint32_t frames = UINT32_MAX;
+
+    audio_fresh();
+    samples_clear();
+    s_rec_give = TEST_SHORT_FRAMES;
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, TEST_REC_MS, &frames),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_SHORT_FRAMES, frames);
+    TEST_ASSERT_TRUE_MESSAGE(samples_are_recording(TEST_SHORT_FRAMES), "the buffer is not the recording");
+    audio_done();
+}
+
+TEST_CASE("record_samples refuses no buffer, no room and a length of 0 or over the limit, and asks for nothing",
+          "[kode_audio_standard]")
+{
+    uint32_t frames = UINT32_MAX;
+
+    audio_fresh();
+    TEST_ASSERT_FALSE(kode_audio_record_samples(NULL, TEST_SAMPLES_FRAMES, TEST_REC_MS, &frames));
+    TEST_ASSERT_EQUAL_STRING("no room to record into", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, frames);
+
+    frames = UINT32_MAX;
+    TEST_ASSERT_FALSE(kode_audio_record_samples(s_samples, 0U, TEST_REC_MS, &frames));
+    TEST_ASSERT_EQUAL_STRING("no room to record into", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, frames);
+
+    frames = UINT32_MAX;
+    TEST_ASSERT_FALSE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, 0U, &frames));
+    TEST_ASSERT_EQUAL_STRING("record length is 1 to 30000 ms", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, frames);
+
+    frames = UINT32_MAX;
+    TEST_ASSERT_FALSE(
+        kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, KODE_AUDIO_RECORD_MAX_MS + 1U, &frames));
+    TEST_ASSERT_EQUAL_STRING("record length is 1 to 30000 ms", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, frames);
+
+    TEST_ASSERT_FALSE(kode_audio_record_samples(NULL, 0U, 0U, NULL));
+    TEST_ASSERT_EQUAL_UINT32(0U, s_recs);
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Audio->eQueue));
+    audio_done();
+}
+
+TEST_CASE("record_samples is refused while a recording runs in the background and asks for nothing more",
+          "[kode_audio_standard]")
+{
+    uint32_t frames = UINT32_MAX;
+
+    audio_fresh();
+    s_rec_hold = true;
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_record_start(TEST_REC_LONG_MS), kode_error());
+    TEST_ASSERT_TRUE(wait_parked());
+
+    TEST_ASSERT_FALSE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, TEST_REC_MS, &frames));
+    TEST_ASSERT_EQUAL_STRING("a recording is already running", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, frames);
+    TEST_ASSERT_EQUAL_UINT32(1U, s_recs);
+    TEST_ASSERT_TRUE(kode_audio_record_status().recording);
+    audio_done();
+}
+
+TEST_CASE("record_samples is refused while a sound plays in the background", "[kode_audio_standard]")
+{
+    const wav_t w = wav_plain(TEST_SEED_A, TEST_LONG_FRAMES);
+
+    audio_fresh();
+    put_wav("a.wav", &w);
+    s_park_at = 1U;
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_play_start("flash/a.wav"), kode_error());
+    TEST_ASSERT_TRUE(wait_parked());
+
+    TEST_ASSERT_FALSE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, TEST_REC_MS, NULL));
+    TEST_ASSERT_EQUAL_STRING("audio is busy: a sound is playing", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_recs);
+    audio_done();
+}
+
+TEST_CASE("record_samples says why the codec refused it and reports no frames", "[kode_audio_standard]")
+{
+    uint32_t frames = UINT32_MAX;
+
+    audio_fresh();
+    s_rec_rc = KODE_IO_ERROR;
+    TEST_ASSERT_FALSE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, TEST_REC_MS, &frames));
+    TEST_ASSERT_EQUAL_STRING("the microphone failed", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, frames);
+
+    s_rec_rc       = KODE_OK;
+    s_answer_audio = false;
+    frames         = UINT32_MAX;
+    TEST_ASSERT_FALSE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, TEST_REC_MS, &frames));
+    TEST_ASSERT_EQUAL_STRING("the microphone did not answer", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, frames);
+    audio_done();
+}
+
+TEST_CASE("record_samples is busy past the bound while another holds the codec, and works after",
+          "[kode_audio_standard]")
+{
+    audio_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_audio_stream_open(KODE_SYS_AUDIO_RATE_HZ, 1U));
+    fake_time_reset();
+    TEST_ASSERT_FALSE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, TEST_REC_MS, NULL));
+    TEST_ASSERT_EQUAL_STRING("audio is busy", kode_error());
+    TEST_ASSERT_TRUE(kode_sys_time_ms() >= KODE_AUDIO_BUSY_MS);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_audio_stream_close());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_record_samples(s_samples, TEST_SAMPLES_FRAMES, TEST_REC_MS, NULL),
+                             kode_error());
     audio_done();
 }
 

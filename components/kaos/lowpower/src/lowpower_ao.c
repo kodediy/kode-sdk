@@ -229,8 +229,10 @@ static const char *cause_name(uint8_t cause)
 {
     static const char * const names[] = {
         "request", "idle", "off-after", "BOT", "BLE", "MQTT", "cable", "timer",
-        "boot"
+        "TOP", "boot"
     };
+    _Static_assert(Q_DIM(names) == ((size_t)KODE_LP_CAUSE_BOOT + 1U),
+                   "a name for every cause, BOOT being the last");
     const char *name = "?";
 
     if ( Q_DIM(names) > cause )

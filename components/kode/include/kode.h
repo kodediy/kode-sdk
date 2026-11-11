@@ -451,6 +451,28 @@ const char *kode_file_read(const char *path);
 const uint8_t *kode_file_read_bytes(const char *path, uint32_t *len);
 
 /**
+ * @brief Read up to @p cap bytes of a file, starting at @p offset.
+ *
+ * Blocks. The file can be of any size: KODE_FILE_READ_MAX does not limit it.
+ * The bytes land in @p buf; the task keeps nothing. A read that ends past the
+ * end of the file gives the bytes there are. A read at or past the end, of an
+ * empty file, or of 0 bytes gives none and is not an error. A file that is
+ * shorter than it was when the read began fails. An Active Object reads with
+ * kode_sys_file_read().
+ *
+ * @param path   "sd/..." or "flash/...".
+ * @param offset The first byte to read.
+ * @param buf    Where the bytes go: @p cap bytes of room. NULL is refused.
+ * @param cap    The most bytes to read.
+ * @param got    Out: the bytes read, fewer than @p cap only at the end of the
+ *               file; 0 on failure. NULL is refused.
+ * @return true when the read was done, even if it gave nothing; false
+ *         otherwise, with kode_error() saying why (no such file, a folder, a
+ *         bad path, a refused @p buf or @p got).
+ */
+bool kode_file_read_at(const char *path, uint32_t offset, void *buf, uint32_t cap, uint32_t *got);
+
+/**
  * @brief Create a file with @p text, or replace what it held.
  *
  * Blocks. "" empties the file. The folder must already exist. The text goes
@@ -475,6 +497,35 @@ bool kode_file_write(const char *path, const char *text);
 bool kode_file_append(const char *path, const char *text);
 
 /**
+ * @brief Create a file with @p len bytes, or replace what it held.
+ *
+ * Blocks. A 0 inside @p data is written like any byte. The folder must
+ * already exist. @p len is any size the volume can hold; the bytes go in
+ * parts, so a failure after the first leaves the file cut, not as it was. A
+ * @p len of 0 with a @p data that is not NULL empties the file. An Active
+ * Object writes with kode_sys_file_write().
+ *
+ * @param path "sd/..." or "flash/...".
+ * @param data The bytes. NULL is refused, whatever @p len is.
+ * @param len  How many.
+ * @return true when all of it is written; false otherwise, with
+ *         kode_error() saying how far it got.
+ */
+bool kode_file_write_bytes(const char *path, const void *data, uint32_t len);
+
+/**
+ * @brief Add @p len bytes at the end of a file, creating it if it is not there.
+ *
+ * Blocks. As kode_file_write_bytes(), but what the file held stays.
+ *
+ * @param path "sd/..." or "flash/...".
+ * @param data The bytes. NULL is refused, whatever @p len is.
+ * @param len  How many.
+ * @return As kode_file_write_bytes().
+ */
+bool kode_file_append_bytes(const char *path, const void *data, uint32_t len);
+
+/**
  * @brief What a path is.
  *
  * Blocks. A path with nothing at it is an answer, not an error.
@@ -483,6 +534,24 @@ bool kode_file_append(const char *path, const char *text);
  * @return The status; all false and 0 on failure (kode_error() says why).
  */
 kode_file_status_t kode_file_status(const char *path);
+
+/**
+ * @brief How big a volume is and how much of it is free.
+ *
+ * Blocks. On a large card the first count can take hundreds of milliseconds.
+ * An Active Object asks with kode_sys_file_space().
+ *
+ * @param volume       "sd" or "flash", with or without a "/" after it; a path
+ *                     inside a volume is refused.
+ * @param total_bytes  Out: what the volume's filesystem spans; 0 on failure.
+ *                     NULL is refused. A whole number of kilobytes.
+ * @param free_bytes   Out: what is left of it; 0 on failure. NULL is refused.
+ *                     A whole number of kilobytes.
+ * @return true when the volume was counted; false otherwise, with
+ *         kode_error() saying why (a bad volume, no card, storage busy or
+ *         silent).
+ */
+bool kode_file_space(const char *volume, uint64_t *total_bytes, uint64_t *free_bytes);
 
 /**
  * @brief Whether anything is at a path.
@@ -702,7 +771,7 @@ bool kode_haptic_add_profile(const char *name, const uint16_t *pattern_ms, uint3
 /* ---- Audio ---- */
 
 /* 48 kHz, 16-bit, mono WAV or samples only. Audio calls take turns, and a play or a
- * recording to a file keeps its turn to the end. A call that finds the speaker
+ * recording to a file or a buffer keeps its turn to the end. A call that finds the speaker
  * or microphone held waits up to KODE_AUDIO_BUSY_MS, then fails with "audio is
  * busy"; a background recording waits the same, then ends with no frames.
  * kode_audio_set(), kode_audio_get(), kode_audio_play_stop(), kode_audio_is_playing()
@@ -815,6 +884,30 @@ uint32_t kode_audio_get(const char *setting);
  * @return true when the file is written; false with kode_error() saying why.
  */
 bool kode_audio_record_file(const char *path, uint32_t ms);
+
+/**
+ * @brief Record the microphone into a buffer of the caller's own and wait until it is full or the time is up.
+ *
+ * Blocks. Waits its turn for the microphone like kode_audio_record_file():
+ * a microphone another task holds fails with "audio is busy" after
+ * KODE_AUDIO_BUSY_MS. Refused while a recording or a sound runs in the
+ * background. Like every call of this layer it is for tasks, never for an
+ * Active Object.
+ *
+ * The frames are 48 kHz mono 16-bit samples. The recording lasts @p ms or
+ * until @p cap frames are in, whichever is first, so a buffer smaller than the
+ * time asked ends it early. @p frames can also be below that: the codec hands
+ * over what it has when the recording ends, down to none. Frames past
+ * @p frames are not written. The SDK records into memory of its own that it
+ * keeps after the first call, and the frames are copied out at the end.
+ *
+ * @param buf    Where the frames go; what it holds after a failure is unspecified.
+ * @param cap    Its room, in frames, above 0.
+ * @param ms     1 to KODE_AUDIO_RECORD_MAX_MS: how long to record.
+ * @param frames Out, may be NULL: the frames written; 0 on failure.
+ * @return true when the recording arrived; false with kode_error() saying why.
+ */
+bool kode_audio_record_samples(int16_t *buf, uint32_t cap, uint32_t ms, uint32_t *frames);
 
 /**
  * @brief Record the microphone into memory in the background; the previous recording is dropped.

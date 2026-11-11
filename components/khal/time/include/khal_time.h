@@ -113,6 +113,11 @@ uint64_t khal_time_at_wall_s(int64_t wall_s);
  * timer per callback, and starting the same callback again replaces the
  * earlier entry (the earlier timer keeps running, unnamed).
  *
+ * A callback that is late is called once, not once for every period it
+ * owes: the periods a stall or a sleep took are skipped, and the next call
+ * comes one period after the late one. The timer does not count towards the
+ * time a light sleep may last.
+ *
  * @param cb        Runs in task context, above every AO but AO_Rfid.
  * @param arg       Passed through to @p cb.
  * @param period_us Period, microseconds.

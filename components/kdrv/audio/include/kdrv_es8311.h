@@ -104,7 +104,8 @@ extern "C" {
  *
  * Makes no sound and enables nothing. The device stays CLOSED - the analog
  * blocks are down, the DAC is muted and both I2S channels are idle - until
- * an OPEN job has been through kdrv_es8311_run().
+ * an OPEN job has been through kdrv_es8311_run(). The I2S master clock's pad
+ * is an input with the pull-up until then, and again after every CLOSE.
  * That is deliberate: the amplifier is enabled by the C5 from its own boot,
  * so an open DAC at rest would be a live class-D on a battery product.
  *
@@ -205,12 +206,14 @@ typedef enum {
                                *   holds. There is no second way to set
                                *   those: a job that carried its own copy
                                *   would be a mechanism doing a job another
-                               *   mechanism already does.                  */
+                               *   mechanism already does. The master clock
+                               *   is routed to its pad first.              */
     KDRV_ES8311_JOB_CLOSE,    /**< Mute the DAC, let its ramp reach silence,
                                *   then close; the analog blocks go down. The
                                *   order is what keeps the close from putting
                                *   a step into an amplifier this side never
-                               *   disables.                                  */
+                               *   disables. The master clock's pad is let go
+                               *   last.                                      */
     KDRV_ES8311_JOB_TONE,     /**< Emit one candidate for a while. Captures
                                *   nothing, and is the console's verb. After
                                *   a fresh open the settle blocks of silence

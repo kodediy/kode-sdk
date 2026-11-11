@@ -2090,6 +2090,81 @@ TEST_CASE("a request with the C5 link down asks AO_Radio for it once, waits, and
     Mockkdrv_ir_Destroy();
 }
 
+/** @brief How often AO_Ir looks for a held request past its budget, in ms, as a literal so a changed period is caught. */
+#define LINK_CHECK_MS  100U
+
+/* QP posts a time event with no margin, and a queue that is full is an
+ * assertion and a reset. The check of a held request is no exception: one that
+ * is periodic goes on posting whether or not the AO took the last, so one
+ * waits at most, and the check that is taken arms the next. The count of
+ * what waits fails on the periodic timer; the rest are guards. */
+TEST_CASE("a check of the held requests nobody took is not followed by another; "
+          "the one taken arms the next", "[ir_ao][link]")
+{
+    raw_up(KODE_OK);
+    radio_mailbox();
+    fake_radio_set_link(false);
+
+    ir_send_request(FRAME_ADDR, FRAME_CMD);
+    (void)qf_support_settle(AO_Ir);
+    TEST_ASSERT_EQUAL_UINT(1U, radio_ups());
+
+    /* Five periods go by and AO_Ir never runs. */
+    qf_support_time_passes(5U * KQP_TICKS_PER_MS(LINK_CHECK_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, (unsigned)uxQueueMessagesWaiting(AO_Ir->eQueue),
+                                   "every period queued a check the AO had not taken");
+
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_settle(AO_Ir));
+
+    /* One period after the check that was taken, the next. */
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Ir, QF_SUPPORT_STEPS(LINK_CHECK_MS)));
+
+    /* The link comes, the request is served, and no check follows. */
+    fake_radio_set_link(true);
+    kdrv_ir_rx_arm_ExpectAndReturn(KODE_OK);
+    link_says(KRADIO_UP);
+    run_jobs();
+    echo_window_drains();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_tick(AO_Ir, 2U * QF_SUPPORT_STEPS(LINK_CHECK_MS)),
+                                   "a check was queued after the wait had ended");
+    ao_spy_drain();
+
+    Mockkdrv_ir_Verify();
+    Mockkdrv_ir_Destroy();
+}
+
+/* A check queued before the wait ended is taken after it and arms nothing.
+ * Every assertion here is a guard that holds on the periodic timer too, which
+ * the end of the wait disarmed already. */
+TEST_CASE("a check of the held requests taken after the wait ended arms nothing",
+          "[ir_ao][link]")
+{
+    static const QEvt check = QEVT_INITIALIZER(IR_LINK_TO_SIG);
+
+    raw_up(KODE_OK);
+    radio_mailbox();
+    fake_radio_set_link(false);
+
+    ir_send_request(FRAME_ADDR, FRAME_CMD);
+    (void)qf_support_settle(AO_Ir);
+    TEST_ASSERT_EQUAL_UINT(1U, radio_ups());
+
+    fake_radio_set_link(true);
+    kdrv_ir_rx_arm_ExpectAndReturn(KODE_OK);
+    link_says(KRADIO_UP);
+    run_jobs();
+    echo_window_drains();
+
+    QASM_DISPATCH(AO_Ir, &check, 0U);
+    qf_support_time_passes(2U * KQP_TICKS_PER_MS(LINK_CHECK_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, (unsigned)uxQueueMessagesWaiting(AO_Ir->eQueue),
+                                   "a check followed a wait that had ended");
+    ao_spy_drain();
+
+    Mockkdrv_ir_Verify();
+    Mockkdrv_ir_Destroy();
+}
+
 TEST_CASE("once AO_Radio says the link will not come, requests are refused at once and "
           "ask nothing, until the link is seen up again", "[ir_ao][link]")
 {

@@ -24,6 +24,9 @@ extern "C" {
 #define KAPP_ICON_W             64U
 #define KAPP_ICON_H             64U
 #define KAPP_ICON_BYTES      12288U    /**< 64*64*2 RGB565 + 64*64 A8. */
+#define KAPP_DATA_JSON_NAME  "app.json"  /**< A data folder's first file.          */
+#define KAPP_DATA_ICON_NAME  "icon.k64"  /**< Its icon, when a writer of the folder
+                                          *   stores one.                          */
 
 /** @brief What kapp_data_parse() found, or why it found nothing. */
 typedef enum {
@@ -56,6 +59,30 @@ kapp_json_status_t kapp_data_parse(const char *text, size_t len, kapp_data_t *ou
 
 /** @brief The one-word name of a status, for the console and the log. */
 const char *kapp_json_status_name(kapp_json_status_t st);
+
+/** @brief What an app.json that arrived alone, ahead of its folder, asks for. */
+typedef enum {
+    KAPP_FETCH_NO_ICON = 0,  /**< A good file that names no icon: it is the folder. */
+    KAPP_FETCH_ICON,         /**< A good file that names KAPP_DATA_ICON_NAME:
+                              *   the icon is to be fetched beside it.          */
+    KAPP_FETCH_REFUSED       /**< Not what the board reads, or an icon by a name
+                              *   a writer of the folder does not store.        */
+} kapp_fetch_t;
+
+/**
+ * @brief Judge an app.json fetched to make a data folder of.
+ *
+ * A folder's writers store the icon as KAPP_DATA_ICON_NAME and nothing else,
+ * so a file that names another path would leave a folder whose reader looks
+ * for a file that is not there.
+ *
+ * @param text The file's bytes, not necessarily terminated.
+ * @param len  How many.
+ * @param why  Receives kapp_data_parse()'s status; KAPP_JSON_OK for a file
+ *             refused only for its icon's name. May be NULL.
+ * @return What the file asks for.
+ */
+kapp_fetch_t kapp_data_fetched(const char *text, size_t len, kapp_json_status_t *why);
 
 #ifdef __cplusplus
 }
