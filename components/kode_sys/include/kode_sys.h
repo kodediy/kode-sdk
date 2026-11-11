@@ -384,6 +384,31 @@ kode_status_t kode_sys_ble_set_value(const char *chr, const void *data, size_t l
  */
 kode_status_t kode_sys_ble_notify(const char *chr, const void *data, size_t len);
 
+/**
+ * @brief Push one value on queued characteristic @p chr, for a central's reads.
+ *
+ * Each read takes the oldest value pushed, and BLE_APP_TAKEN_SIG says what is
+ * left. A full queue (KODE_SYS_BLE_QUEUE_SLOTS values) refuses the value in
+ * AO_Radio, with nobody to tell: check kode_sys_ble_queue_room() first, or
+ * push again on BLE_APP_TAKEN_SIG. A link that begins or ends empties the
+ * queue: its values are for the central connected.
+ *
+ * @param chr  The characteristic's name; it carries KODE_SYS_BLE_QUEUED.
+ * @param data The bytes.
+ * @param len  1 to KODE_SYS_BLE_VALUE_MAX bytes.
+ * @return As the commands' rule above; KODE_DENIED as the section says, or
+ *         for 0 bytes or a characteristic without KODE_SYS_BLE_QUEUED.
+ */
+kode_status_t kode_sys_ble_queue_push(const char *chr, const void *data, size_t len);
+
+/**
+ * @brief Empty queued characteristic @p chr.
+ * @param chr The characteristic's name; it carries KODE_SYS_BLE_QUEUED.
+ * @return As the commands' rule above; KODE_DENIED as the section says, or
+ *         for a characteristic without KODE_SYS_BLE_QUEUED.
+ */
+kode_status_t kode_sys_ble_queue_clear(const char *chr);
+
 /* ---- Resting the board: to AO_LowPower ----
  * AO_LowPower asks every started owner to put its device away before the board
  * changes state, and an owner with work in hand can refuse. Both calls are
@@ -1641,11 +1666,15 @@ bool kode_sys_ble_enabled(void);
  * left out.
  *
  * A value is what a read gets. A notification goes into a ring in PSRAM that
- * NimBLE's host task drains, and shares the link with the console. The set
- * and the notify are commands to AO_Radio (above, beside the scan response's
- * name). A write arrives as a copy in BLE_APP_WRITE_SIG, and each edge of the
- * link as BLE_APP_LINK_SIG, to the AOs subscribed with
- * kode_sys_ble_subscribe().
+ * NimBLE's host task drains, and shares the link with the console. A
+ * characteristic with KODE_SYS_BLE_QUEUED has a queue instead of a value:
+ * each read takes the oldest value pushed, so a central that reads until it
+ * gets 0 bytes drains it. A value longer than one read is read in parts, and
+ * taken with its last part. The set, the notify, the push and the clear are
+ * commands to AO_Radio (above, beside the scan response's name). A write
+ * arrives as a copy in BLE_APP_WRITE_SIG, each edge of the link as
+ * BLE_APP_LINK_SIG, and each value a read takes as BLE_APP_TAKEN_SIG, to the
+ * AOs subscribed with kode_sys_ble_subscribe().
  */
 
 #define KODE_SYS_BLE_CHARS_MAX      4U     /**< Characteristics one service may have.            */
@@ -1655,12 +1684,15 @@ bool kode_sys_ble_enabled(void);
 #define KODE_SYS_BLE_READ           0x01U  /**< A central may read the value.                    */
 #define KODE_SYS_BLE_WRITE          0x02U  /**< A central may write it.                          */
 #define KODE_SYS_BLE_NOTIFY         0x04U  /**< A central may subscribe to its notifications.    */
+#define KODE_SYS_BLE_QUEUED         0x08U  /**< Reads take the values pushed, oldest first; a read of
+                                            *   an empty queue gets 0 bytes. A read.              */
+#define KODE_SYS_BLE_QUEUE_SLOTS    8U     /**< Values one queued characteristic holds.          */
 
 /** @brief One characteristic of the app's service. */
 typedef struct {
     const char *name;   /**< 1 to KODE_SYS_BLE_CHAR_NAME_MAX - 1 bytes, unique in the service. */
     const char *uuid;   /**< 128 bits as text, "6e400002-b5a3-f393-e0a9-e50e24dcca9e".          */
-    uint8_t     props;  /**< KODE_SYS_BLE_READ, _WRITE and _NOTIFY, at least one.              */
+    uint8_t     props;  /**< KODE_SYS_BLE_READ, _WRITE, _NOTIFY and _QUEUED, at least one.     */
 } kode_sys_ble_char_t;
 
 /** @brief The app's service: what KODE_SYS_BLE_SERVICE() defines. */
@@ -1702,11 +1734,19 @@ typedef BleAppWriteEvt kode_sys_ble_written_t;
 /** @brief A central connected or left (BLE_APP_LINK_SIG): @c connected. */
 typedef BleAppLinkEvt kode_sys_ble_link_t;
 
+/* cppcheck-suppress misra-c2012-2.3 ; an event's name for the apps that read it, never used inside the SDK */
 /**
- * @brief Subscribe @p me to the app's service: BLE_APP_WRITE_SIG and
- *        BLE_APP_LINK_SIG, and link AO_Radio.
+ * @brief A read took the oldest value of a queued characteristic
+ *        (BLE_APP_TAKEN_SIG): @c chr, its place in the table; @c name; @c left,
+ *        the values still queued.
+ */
+typedef BleAppTakenEvt kode_sys_ble_taken_t;
+
+/**
+ * @brief Subscribe @p me to the app's service: BLE_APP_WRITE_SIG,
+ *        BLE_APP_LINK_SIG and BLE_APP_TAKEN_SIG, and link AO_Radio.
  *
- * A bare subscription to either signal links nothing; this call is that
+ * A bare subscription to any of the three links nothing; this call is that
  * subscription with its owner linked.
  *
  * @param me The listening AO, started.
@@ -1723,6 +1763,20 @@ kode_status_t kode_sys_ble_subscribe(QActive *me);
  *         and always without CONFIG_KODEOS_BLE.
  */
 bool kode_sys_ble_service_fault(char *why, size_t cap);
+
+/**
+ * @brief How many more values queued characteristic @p chr takes now.
+ *
+ * A read of the queue's count under its lock, from any task: a push from
+ * another task, or a central's read, may change it the next moment.
+ *
+ * @param chr  The characteristic's name; it carries KODE_SYS_BLE_QUEUED.
+ * @param room Receives the count, 0 to KODE_SYS_BLE_QUEUE_SLOTS.
+ * @return KODE_OK; KODE_DENIED for a service left out or not declared, a name
+ *         no characteristic has, one without KODE_SYS_BLE_QUEUED, a NULL
+ *         @p room, or without CONFIG_KODEOS_BLE.
+ */
+kode_status_t kode_sys_ble_queue_room(const char *chr, size_t *room);
 
 /* ---- The battery: AO_Power's last reading ---- */
 

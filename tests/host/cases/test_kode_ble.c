@@ -31,9 +31,14 @@ static kode_status_t seam_set_name(const char *name);
 static kode_status_t seam_set_data(const uint8_t *data, size_t len);
 static kode_status_t seam_block_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t ms,
                                      uint32_t wait_ms);
-static kode_status_t seam_block_value(const char *chr, bool notify, const void *data,
+static kode_status_t seam_block_value(const char *chr, uint8_t op, const void *data,
                                       size_t len);
 static bool          seam_fault(char *why, size_t cap);
+static kode_status_t seam_queue_room(const char *chr, size_t *room);
+bool   seam_ble_queue_push(const char *chr, const void *data, size_t len);
+size_t seam_ble_queue_room(const char *chr);
+bool   seam_ble_queue_clear(const char *chr);
+const char *seam_event_ble_taken(void);
 bool seam_ble_set_name(const char *name);
 bool seam_ble_set_data(const uint8_t *data, size_t len);
 int  seam_ble_scan(kode_ble_device_t *out, size_t cap, uint32_t ms);
@@ -49,6 +54,11 @@ const char *seam_event_ble_written(void);
 #define kode_block_ble_scan         seam_block_scan
 #define kode_block_ble_value        seam_block_value
 #define kode_sys_ble_service_fault  seam_fault
+#define kode_sys_ble_queue_room     seam_queue_room
+#define kode_ble_queue_push         seam_ble_queue_push
+#define kode_ble_queue_room         seam_ble_queue_room
+#define kode_ble_queue_clear        seam_ble_queue_clear
+#define kode_event_ble_taken        seam_event_ble_taken
 #define kode_ble_set_name           seam_ble_set_name
 #define kode_ble_set_manufacturer_data           seam_ble_set_data
 #define kode_ble_scan               seam_ble_scan
@@ -64,6 +74,11 @@ const char *seam_event_ble_written(void);
 #undef kode_block_ble_scan
 #undef kode_block_ble_value
 #undef kode_sys_ble_service_fault
+#undef kode_sys_ble_queue_room
+#undef kode_ble_queue_push
+#undef kode_ble_queue_room
+#undef kode_ble_queue_clear
+#undef kode_event_ble_taken
 #undef kode_ble_set_name
 #undef kode_ble_set_manufacturer_data
 #undef kode_ble_scan
@@ -87,6 +102,9 @@ static uint32_t              s_seam_wait_ms;             /**< The bound it was h
 static kode_status_t         s_seam_value_rc;            /**< What set_value and notify answer. */
 static uint32_t              s_seam_values;              /**< Values and notifies handed down.  */
 static uint32_t              s_seam_notifies;            /**< Of those, the notifies.           */
+static uint8_t               s_seam_last_op;             /**< The last request's op.            */
+static kode_status_t         s_seam_room_rc;             /**< What the room door answers.       */
+static size_t                s_seam_room;                /**< The room it reports.              */
 static const char           *s_seam_fault;               /**< The reason the service is left out; NULL: served. */
 
 static bool seam_enabled(void)
@@ -109,16 +127,24 @@ static kode_status_t seam_set_data(const uint8_t *data, size_t len)
     return s_seam_set_rc;
 }
 
-static kode_status_t seam_block_value(const char *chr, bool notify, const void *data,
+static kode_status_t seam_block_value(const char *chr, uint8_t op, const void *data,
                                       size_t len)
 {
     (void)chr; (void)data; (void)len;
     s_seam_values++;
-    if ( notify )
+    s_seam_last_op = op;
+    if ( KQP_BLE_APP_OP_NOTIFY == op )
     {
         s_seam_notifies++;
     }
     return s_seam_value_rc;
+}
+
+static kode_status_t seam_queue_room(const char *chr, size_t *room)
+{
+    (void)chr;
+    *room = s_seam_room;
+    return s_seam_room_rc;
 }
 
 static bool seam_fault(char *why, size_t cap)
@@ -188,6 +214,9 @@ static void fresh(void)
     s_seam_value_rc = KODE_OK;
     s_seam_values   = 0U;
     s_seam_notifies = 0U;
+    s_seam_last_op  = 0xFFU;
+    s_seam_room_rc  = KODE_OK;
+    s_seam_room     = 0U;
     s_seam_fault    = NULL;
     seam_scan_script(NULL, 0U, KODE_OK);
 }
@@ -413,9 +442,63 @@ TEST_CASE("a value the radio does not take within a second fails naming the wait
                              "1000 ms", kode_error());
 }
 
-TEST_CASE("the three Bluetooth event constants name their events", "[kode_ble]")
+TEST_CASE("a push and a clear hand their operation down, and a push of no bytes asks nothing",
+          "[kode_ble]")
+{
+    fresh();
+    TEST_ASSERT_TRUE(seam_ble_queue_push("log", "ab", 2U));
+    TEST_ASSERT_EQUAL_UINT8(KQP_BLE_APP_OP_PUSH, s_seam_last_op);
+    TEST_ASSERT_TRUE(seam_ble_queue_clear("log"));
+    TEST_ASSERT_EQUAL_UINT8(KQP_BLE_APP_OP_CLEAR, s_seam_last_op);
+    TEST_ASSERT_EQUAL_UINT32(2U, s_seam_values);
+
+    TEST_ASSERT_FALSE(seam_ble_queue_push("log", "ab", 0U));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_queue_push: no bytes; a read of an empty queue already "
+                             "gets none", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(2U, s_seam_values);
+}
+
+TEST_CASE("a push to a full queue or to a characteristic with no queue fails naming it",
+          "[kode_ble]")
+{
+    fresh();
+    s_seam_value_rc = KODE_NO_RESOURCES;
+    TEST_ASSERT_FALSE(seam_ble_queue_push("log", "ab", 2U));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_queue_push: the queue of 'log' holds 8 values already; "
+                             "push again on ble_taken", kode_error());
+
+    s_seam_value_rc = KODE_DENIED;
+    TEST_ASSERT_FALSE(seam_ble_queue_push("temp", "ab", 2U));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_queue_push: the service has no characteristic 'temp' "
+                             "with KODE_BLE_QUEUED", kode_error());
+    TEST_ASSERT_FALSE(seam_ble_queue_clear("temp"));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_queue_clear: the service has no characteristic 'temp' "
+                             "with KODE_BLE_QUEUED", kode_error());
+}
+
+TEST_CASE("the room of a queue is what the radio reports, and 0 with the reason when it "
+          "refuses", "[kode_ble]")
+{
+    fresh();
+    s_seam_room_rc = KODE_OK;
+    s_seam_room    = 5U;
+    TEST_ASSERT_EQUAL_UINT(5U, seam_ble_queue_room("log"));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+
+    s_seam_room_rc = KODE_DENIED;
+    TEST_ASSERT_EQUAL_UINT(0U, seam_ble_queue_room("temp"));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_queue_room: the service has no characteristic 'temp' "
+                             "with KODE_BLE_QUEUED", kode_error());
+
+    s_seam_on = false;
+    TEST_ASSERT_EQUAL_UINT(0U, seam_ble_queue_room("log"));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_queue_room: Bluetooth is off in Settings", kode_error());
+}
+
+TEST_CASE("the four Bluetooth event constants name their events", "[kode_ble]")
 {
     TEST_ASSERT_EQUAL_STRING("ble_connected", seam_event_ble_connected());
     TEST_ASSERT_EQUAL_STRING("ble_disconnected", seam_event_ble_disconnected());
     TEST_ASSERT_EQUAL_STRING("ble_written", seam_event_ble_written());
+    TEST_ASSERT_EQUAL_STRING("ble_taken", seam_event_ble_taken());
 }

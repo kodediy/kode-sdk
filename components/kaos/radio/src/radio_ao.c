@@ -1436,22 +1436,23 @@ QEvt const *ble_rsp_evt(const char *name, const uint8_t *data, size_t len)
     return evt;
 }
 
-QEvt const *ble_value_evt(const char *chr, bool notify, const void *data, size_t len,
+QEvt const *ble_value_evt(const char *chr, uint8_t op, const void *data, size_t len,
                           BleValueWaiter *wait, uint32_t gen)
 {
     BleAppValueReqEvt *e   = NULL;
     QEvt const        *evt = NULL;
 
     if ( (NULL != chr) && (memchr(chr, (int)'\0', KQP_BLE_APP_NAME_MAX) != NULL)
+        && (KQP_BLE_APP_OP_CLEAR >= op)
         && (KQP_BLE_APP_VALUE_MAX >= len) && ((0U == len) || (NULL != data)) )
     {
         e = Q_NEW_X(BleAppValueReqEvt, 0U, BLE_APP_VALUE_REQ_SIG);
     }
     if ( NULL != e )
     {
-        e->wait   = wait;
-        e->gen    = gen;
-        e->notify = notify;
+        e->wait = wait;
+        e->gen  = gen;
+        e->op   = op;
         (void)snprintf(e->name, sizeof(e->name), "%s", chr);
         e->len = (uint16_t)len;
         if ( 0U < len )
@@ -4041,6 +4042,11 @@ _Static_assert(KQP_BLE_APP_NAME_MAX == KDRV_BLE_APP_NAME_MAX,
                "BleAppWriteEvt.name holds a characteristic's name");
 _Static_assert(KQP_BLE_APP_VALUE_MAX == KDRV_BLE_APP_VALUE_MAX,
                "BleAppWriteEvt.data holds a whole value");
+_Static_assert(KQP_BLE_APP_OP_SET == KDRV_BLE_APP_OP_SET, "a set is the driver's");
+_Static_assert(KQP_BLE_APP_OP_NOTIFY == KDRV_BLE_APP_OP_NOTIFY, "a notify is the driver's");
+_Static_assert(KQP_BLE_APP_OP_PUSH == KDRV_BLE_APP_OP_PUSH, "a push is the driver's");
+_Static_assert(KQP_BLE_APP_OP_CLEAR == KDRV_BLE_APP_OP_CLEAR, "a clear is the driver's");
+_Static_assert(KDRV_BLE_APP_QUEUE_SLOTS <= (uint32_t)UINT8_MAX, "BleAppTakenEvt.left holds a whole queue");
 
 /**
  * @brief Runs on NimBLE's host task: a central wrote to the app's service.
@@ -4077,6 +4083,28 @@ static bool radio_on_ble_write(uint8_t chr, const char *name, const uint8_t *dat
         /* the pool is dry: the write fails */
     }
     return posted;
+}
+
+/**
+ * @brief Runs on NimBLE's host task: a read took a queued value. A note goes
+ *        to AO_Radio, which publishes it. Post and go; a full queue or a dry
+ *        pool loses the note, and the next one says what is left.
+ * @param chr  The characteristic's place.
+ * @param name Its name.
+ * @param left Values still in its queue.
+ */
+static void radio_on_ble_taken(uint8_t chr, const char *name, uint8_t left)
+{
+    BleAppTakenEvt *e = Q_NEW_X(BleAppTakenEvt, RADIO_BLE_WRITE_POOL_MARGIN, BLE_APP_TAKEN_SIG);
+
+    if ( NULL != e )
+    {
+        e->chr  = chr;
+        e->left = left;
+        (void)snprintf(e->name, sizeof(e->name), "%s", name);
+        /* QP takes the event back when the queue is full. */
+        (void)QACTIVE_POST_X(AO_Radio, &e->super, KQP_RADIO_CMD_MARGIN, NULL);
+    }
 }
 
 /**
@@ -6388,12 +6416,14 @@ static bool radio_ble_rsp(Radio * const me, QEvt const * const e)
 
 /**
  * @brief BLE_APP_VALUE_REQ_SIG: set, or set and notify, one value of the
- *        app's service, in every state, and answer a blocked task.
+ *        app's service, or push on a queue or empty it, in every state, and
+ *        answer a blocked task.
  *
  * The driver queues a notification only for a subscribed central, so the
  * value is set whatever the link. The drain is woken here, unless a job of
  * the worker runs: that may be a start or a stop of the host, which the
- * wake-up would race, and the job's end wakes it instead.
+ * wake-up would race, and the job's end wakes it instead. A push needs no
+ * wake-up: the central reads when it reads.
  *
  * @param me The AO.
  * @param e  The event.
@@ -6408,17 +6438,24 @@ static bool radio_ble_value(Radio const * const me, QEvt const * const e)
     BleAppValueReqEvt const * const r = Q_EVT_CAST(BleAppValueReqEvt);
     kode_status_t                   rc;
 
-    if ( r->notify )
+    switch ( r->op )
     {
+    case KQP_BLE_APP_OP_NOTIFY:
         rc = kdrv_ble_app_notify(r->name, r->data, r->len);
         if ( (KODE_OK == rc) && !me->winflight )
         {
             kdrv_ble_app_kick();
         }
-    }
-    else
-    {
+        break;
+    case KQP_BLE_APP_OP_PUSH:
+        rc = kdrv_ble_app_queue_push(r->name, r->data, r->len);
+        break;
+    case KQP_BLE_APP_OP_CLEAR:
+        rc = kdrv_ble_app_queue_clear(r->name);
+        break;
+    default:
         rc = kdrv_ble_app_set_value(r->name, r->data, r->len);
+        break;
     }
     if ( NULL != r->wait )
     {
@@ -8302,6 +8339,7 @@ void ble_app_subscribe(QActive const *who)
 {
     QActive_subscribe(who, BLE_APP_WRITE_SIG);
     QActive_subscribe(who, BLE_APP_LINK_SIG);
+    QActive_subscribe(who, BLE_APP_TAKEN_SIG);
 }
 
 /* What each service is wanted as on a board whose store has never held its
@@ -9332,6 +9370,7 @@ static QState Radio_initial(Radio * const me, void const * const par)
 #if CONFIG_KODEOS_BLE
     (void)kdrv_ble_set_cb(&radio_on_ble);
     (void)kdrv_ble_app_set_write_cb(&radio_on_ble_write);
+    (void)kdrv_ble_app_set_taken_cb(&radio_on_ble_taken);
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
     (void)kdrv_ble_set_pair_cb(&radio_on_ble_pair);
 #endif
@@ -9644,9 +9683,10 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case BLE_APP_WRITE_SIG: {
+        case BLE_APP_WRITE_SIG:
+        case BLE_APP_TAKEN_SIG: {
             /* Posted by the host task before the link went: still a write
-             * the central made, so it goes out. */
+             * or a take the central made, so it goes out. */
             QACTIVE_PUBLISH(e, &me->super);
             status = Q_HANDLED();
             break;
@@ -11760,7 +11800,8 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case BLE_APP_WRITE_SIG: {
+        case BLE_APP_WRITE_SIG:
+        case BLE_APP_TAKEN_SIG: {
             /* The host task's copy, published as it came: QP holds it for
              * every subscriber, and each one reads the same bytes. */
             QACTIVE_PUBLISH(e, &me->super);

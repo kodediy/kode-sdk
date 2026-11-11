@@ -110,6 +110,7 @@ TEST_CASE("a write of 00 41 00 to 'cmd' arrives as ble_written, source cmd, valu
     TEST_ASSERT_TRUE(kode_event_add_listener(KODE_EVENT_BLE_WRITTEN, &listener_rec));
     TEST_ASSERT_TRUE(ble_subscribed(BLE_APP_WRITE_SIG));
     TEST_ASSERT_TRUE(ble_subscribed(BLE_APP_LINK_SIG));
+    TEST_ASSERT_TRUE(ble_subscribed(BLE_APP_TAKEN_SIG));
 
     BleAppWriteEvt *const w = Q_NEW(BleAppWriteEvt, BLE_APP_WRITE_SIG);
 
@@ -150,4 +151,24 @@ TEST_CASE("each edge of the link arrives as ble_connected or ble_disconnected",
     TEST_ASSERT_EQUAL_STRING("ble_disconnected", s_rec[1].name);
     TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_BLE_CONNECTED, &listener_rec));
     TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_BLE_DISCONNECTED, &listener_rec));
+}
+
+TEST_CASE("a value a central took from 'log' arrives as ble_taken, source log, value the "
+          "values left", "[kode_ble_events]")
+{
+    ble_events_up();
+    TEST_ASSERT_TRUE(kode_event_add_listener(KODE_EVENT_BLE_TAKEN, &listener_rec));
+
+    BleAppTakenEvt *const t = Q_NEW(BleAppTakenEvt, BLE_APP_TAKEN_SIG);
+
+    t->chr  = 0U;
+    t->left = 3U;
+    (void)snprintf(t->name, sizeof(t->name), "%s", "log");
+    QACTIVE_PUBLISH(&t->super, (void *)0);
+
+    TEST_ASSERT_TRUE(ble_rec_wait(1U));
+    TEST_ASSERT_EQUAL_STRING("ble_taken", s_rec[0].name);
+    TEST_ASSERT_EQUAL_STRING("log", s_rec[0].source);
+    TEST_ASSERT_EQUAL_INT32(3, s_rec[0].value);
+    TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_BLE_TAKEN, &listener_rec));
 }

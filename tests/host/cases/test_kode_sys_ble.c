@@ -417,14 +417,14 @@ TEST_CASE("an app's value and notification are checked at once, and those that p
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ble_set_value("temp", "1", 1U));
     v = value_head();
     TEST_ASSERT_NULL(v->wait);
-    TEST_ASSERT_FALSE(v->notify);
+    TEST_ASSERT_EQUAL_UINT8(KQP_BLE_APP_OP_SET, v->op);
     TEST_ASSERT_EQUAL_STRING("temp", v->name);
     TEST_ASSERT_EQUAL_UINT16(1U, v->len);
     TEST_ASSERT_EQUAL_HEX8('1', v->data[0]);
     QF_gc(&v->super);
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ble_notify("temp", "2", 1U));
     v = value_head();
-    TEST_ASSERT_TRUE(v->notify);
+    TEST_ASSERT_EQUAL_UINT8(KQP_BLE_APP_OP_NOTIFY, v->op);
     TEST_ASSERT_EQUAL_HEX8('2', v->data[0]);
     QF_gc(&v->super);
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_notify("cmd", "2", 1U));
@@ -439,6 +439,50 @@ TEST_CASE("an app's value and notification are checked at once, and those that p
     TEST_ASSERT_EQUAL_UINT(0U, radio_pending());
     fake_ble_app_service_set(NULL);
     TEST_ASSERT_FALSE(kode_sys_ble_service_fault(why, sizeof(why)));
+}
+
+/** @brief A queued characteristic beside a plain one. */
+static const kode_sys_ble_char_t s_queue_chars[] = {
+    { "log",  "6e400005-b5a3-f393-e0a9-e50e24dcca9e", KODE_SYS_BLE_READ | KODE_SYS_BLE_QUEUED },
+    { "temp", "6e400006-b5a3-f393-e0a9-e50e24dcca9e", KODE_SYS_BLE_READ },
+};
+
+/** @brief Their service. */
+static const kode_sys_ble_service_t s_queue_svc = {
+    "6e400004-b5a3-f393-e0a9-e50e24dcca9e", s_queue_chars,
+    sizeof(s_queue_chars) / sizeof(s_queue_chars[0]) };
+
+TEST_CASE("a push and a clear are posted with their operation, the room is read at once, "
+          "and a characteristic with no queue is refused all three", "[kode_sys_ble]")
+{
+    const BleAppValueReqEvt *v;
+    size_t                   room = 0U;
+
+    ble_fresh();
+    /* cppcheck-suppress misra-c2012-11.3 ; the two types are asserted equal in kode_sys_ble.c */
+    fake_ble_app_service_set((const kdrv_ble_app_service_t *)&s_queue_svc);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ble_queue_push("log", "ab", 2U));
+    v = value_head();
+    TEST_ASSERT_NULL(v->wait);
+    TEST_ASSERT_EQUAL_UINT8(KQP_BLE_APP_OP_PUSH, v->op);
+    TEST_ASSERT_EQUAL_STRING("log", v->name);
+    TEST_ASSERT_EQUAL_UINT16(2U, v->len);
+    QF_gc(&v->super);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ble_queue_clear("log"));
+    v = value_head();
+    TEST_ASSERT_EQUAL_UINT8(KQP_BLE_APP_OP_CLEAR, v->op);
+    TEST_ASSERT_EQUAL_UINT16(0U, v->len);
+    QF_gc(&v->super);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ble_queue_room("log", &room));
+    TEST_ASSERT_EQUAL_UINT(KODE_SYS_BLE_QUEUE_SLOTS, room);
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_queue_push("log", "ab", 0U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_queue_push("temp", "ab", 2U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_queue_clear("temp"));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_queue_room("temp", &room));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_queue_room("log", NULL));
+    TEST_ASSERT_EQUAL_UINT(0U, radio_pending());
+    fake_ble_app_service_set(NULL);
 }
 
 TEST_CASE("a value command AO_Radio's queue has no room for is NO_RESOURCES and posts nothing",
@@ -473,20 +517,20 @@ TEST_CASE("a blocking value returns AO_Radio's answer, the full ring's included"
 
     s_value_rc = KODE_OK;
     fake_sem_wait_hook(&radio_answers_value);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ble_value("temp", true, "2", 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ble_value("temp", KQP_BLE_APP_OP_NOTIFY, "2", 1U));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
 
     s_value_rc = KODE_NO_RESOURCES;
     fake_sem_wait_hook(&radio_answers_value);
-    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_ble_value("temp", true, "2", 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_ble_value("temp", KQP_BLE_APP_OP_NOTIFY, "2", 1U));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
 
     /* Refused at once, nothing posted: the table says no. */
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ble_value("cmd", true, "2", 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ble_value("cmd", KQP_BLE_APP_OP_NOTIFY, "2", 1U));
     TEST_ASSERT_EQUAL_UINT(0U, radio_pending());
 
     /* Nobody answers: a timeout, and the request stays with AO_Radio. */
-    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", false, "2", 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", KQP_BLE_APP_OP_SET, "2", 1U));
     TEST_ASSERT_EQUAL_UINT(1U, radio_pending());
     radio_flush();
     fake_ble_app_service_set(NULL);
@@ -526,7 +570,7 @@ TEST_CASE("the late answer to a call that timed out is dropped, and the next cal
     fake_ble_app_service_set((const kdrv_ble_app_service_t *)&s_app_svc);
 
     /* Nobody answers: the request stays with AO_Radio. */
-    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", true, "1", 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", KQP_BLE_APP_OP_NOTIFY, "1", 1U));
     TEST_ASSERT_EQUAL_UINT(1U, radio_pending());
 
     /* AO_Radio answers it late, ring full, and then the next call's, OK. */
@@ -534,7 +578,7 @@ TEST_CASE("the late answer to a call that timed out is dropped, and the next cal
     s_value_turns[1] = KODE_OK;
     s_value_turn     = 0U;
     fake_sem_wait_hook(&radio_answers_in_turn);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ble_value("temp", true, "2", 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ble_value("temp", KQP_BLE_APP_OP_NOTIFY, "2", 1U));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
     TEST_ASSERT_EQUAL_UINT(2U, s_value_turn);
     TEST_ASSERT_EQUAL_UINT(0U, radio_pending());
@@ -548,14 +592,14 @@ TEST_CASE("blocking values that time out again and again allocate nothing", "[ko
     fake_ble_app_service_set((const kdrv_ble_app_service_t *)&s_app_svc);
 
     /* The first call makes the door's semaphore and lock, if no case did. */
-    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", true, "1", 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", KQP_BLE_APP_OP_NOTIFY, "1", 1U));
     radio_flush();
     unsigned const psram = fake_psram_alloc_count();
     unsigned const sems  = fake_sem_creates();
 
     for ( uint32_t i = 0U; BLE_VALUE_TIMEOUTS > i; ++i )
     {
-        TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", true, "1", 1U));
+        TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", KQP_BLE_APP_OP_NOTIFY, "1", 1U));
         radio_flush();
     }
     TEST_ASSERT_EQUAL_UINT_MESSAGE(psram, fake_psram_alloc_count(), "a timeout took PSRAM");
@@ -581,7 +625,7 @@ TEST_CASE("a blocking value at a full queue tries again for a second, then times
     unsigned const before = radio_pending();
     uint32_t const t0     = khal_time_ms();
 
-    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", true, "2", 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_value("temp", KQP_BLE_APP_OP_NOTIFY, "2", 1U));
     TEST_ASSERT_EQUAL_UINT(before, radio_pending());
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_SYS_BLE_VALUE_WAIT_MS, khal_time_ms() - t0);
     radio_flush();
@@ -609,4 +653,5 @@ TEST_CASE("kode_sys_ble_subscribe() makes its AO hear the writes and the link, a
     ao_spy_drain();
     QActive_unsubscribe(spy, BLE_APP_LINK_SIG);
     QActive_unsubscribe(spy, BLE_APP_WRITE_SIG);
+    QActive_unsubscribe(spy, BLE_APP_TAKEN_SIG);
 }

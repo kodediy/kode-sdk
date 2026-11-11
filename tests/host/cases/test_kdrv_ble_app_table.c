@@ -3,6 +3,7 @@
  * @file test_kdrv_ble_app_table.c
  * @brief The app's own GATT service without NimBLE: its table, its values and its notify ring.
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
@@ -21,6 +22,9 @@
 #define NB_WRITE_AUTHEN   0x2000U   /**< BLE_GATT_CHR_F_WRITE_AUTHEN.           */
 #define NB_NOTIFY_ENC     0x8000U   /**< BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC.    */
 #define NB_NOTIFY_AUTHEN  0x10000U  /**< BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN. */
+
+/** @brief Bytes a read's answer carries in the cases: a whole value. */
+#define READ_SPAN  ((uint16_t)KDRV_BLE_APP_VALUE_MAX)
 
 /** @brief The service's UUID in the cases. */
 #define SVC_UUID  "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -170,7 +174,7 @@ TEST_CASE("a characteristic with no name, a long one, a twice-used one or no pro
     TEST_ASSERT_TRUE(kdrv_ble_app_fault(&s_twice, why, sizeof(why)));
     TEST_ASSERT_EQUAL_STRING("'x' names two characteristics", why);
     TEST_ASSERT_TRUE(kdrv_ble_app_fault(&s_no_props, why, sizeof(why)));
-    TEST_ASSERT_EQUAL_STRING("'x': the properties are not READ, WRITE or NOTIFY", why);
+    TEST_ASSERT_EQUAL_STRING("'x': the properties are not READ, WRITE, NOTIFY or QUEUED", why);
     TEST_ASSERT_TRUE(kdrv_ble_app_fault(&s_none, why, sizeof(why)));
     TEST_ASSERT_EQUAL_STRING("the service has no characteristics", why);
     TEST_ASSERT_FALSE(kdrv_ble_app_fault(&s_svc_two, why, sizeof(why)));
@@ -186,10 +190,10 @@ TEST_CASE("a value set is what a read gets, before the host has started", "[kdrv
 
     fresh();
     TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_set_value("cmd", v, sizeof(v)));
-    TEST_ASSERT_EQUAL_UINT16(3U, kdrv_ble_app_read(1U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT16(3U, kdrv_ble_app_read(1U, 0U, READ_SPAN, out, sizeof(out)));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(v, out, sizeof(v));
     TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_set_value("cmd", NULL, 0U));
-    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(1U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(1U, 0U, READ_SPAN, out, sizeof(out)));
     TEST_ASSERT_FALSE(kdrv_ble_app_queued());
     done();
 }
@@ -207,7 +211,7 @@ TEST_CASE("notify refuses a characteristic without NOTIFY, an unknown name and 2
     TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_notify("temp", big, sizeof(big)));
     TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_notify("temp", NULL, 2U));
     TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_notify("temp", big, KDRV_BLE_APP_VALUE_MAX));
-    TEST_ASSERT_EQUAL_UINT16(KDRV_BLE_APP_VALUE_MAX, kdrv_ble_app_read(0U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT16(KDRV_BLE_APP_VALUE_MAX, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
     done();
 }
 
@@ -219,18 +223,18 @@ TEST_CASE("the check before a set or a notify reads the declared table and touch
 
     fresh();
     TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_set_value("temp", NULL, 0U));
-    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_check("temp", true, "x", 1U));
-    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_check("cmd", false, "x", 1U));
-    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("cmd", true, "x", 1U));
-    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("nope", false, "x", 1U));
-    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check(NULL, false, "x", 1U));
-    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("temp", true, big, sizeof(big)));
-    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("temp", true, NULL, 2U));
-    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_check("temp", KDRV_BLE_APP_OP_NOTIFY, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_check("cmd", KDRV_BLE_APP_OP_SET, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("cmd", KDRV_BLE_APP_OP_NOTIFY, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("nope", KDRV_BLE_APP_OP_SET, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check(NULL, KDRV_BLE_APP_OP_SET, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("temp", KDRV_BLE_APP_OP_NOTIFY, big, sizeof(big)));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("temp", KDRV_BLE_APP_OP_NOTIFY, NULL, 2U));
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
     static const kdrv_ble_app_service_t five = { SVC_UUID, s_five, 5U };
 
     fake_ble_app_service_set(&five);
-    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("a", false, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("a", KDRV_BLE_APP_OP_SET, "x", 1U));
     done();
 }
 
@@ -243,7 +247,7 @@ TEST_CASE("notify with nobody subscribed sets the value, queues nothing and answ
 
     fresh();
     TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_notify("temp", "21.5", 4U));
-    TEST_ASSERT_EQUAL_UINT16(4U, kdrv_ble_app_read(0U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT16(4U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
     TEST_ASSERT_EQUAL_MEMORY("21.5", out, 4U);
     TEST_ASSERT_FALSE(kdrv_ble_app_peek(&chr, out, &len));
     TEST_ASSERT_FALSE(kdrv_ble_app_queued());
@@ -267,7 +271,7 @@ TEST_CASE("a subscribed central's notifications queue in order for the drain, an
     TEST_ASSERT_TRUE(kdrv_ble_app_queued());
     b = 0x77U;
     TEST_ASSERT_EQUAL(KODE_NO_RESOURCES, kdrv_ble_app_notify("temp", &b, 1U));
-    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
     TEST_ASSERT_EQUAL_HEX8(0x77U, out[0]);
 
     for ( b = 0U; (uint8_t)KDRV_BLE_APP_RING_SLOTS > b; b++ )
@@ -303,5 +307,156 @@ TEST_CASE("a write past the table or longer than a value is refused and kept now
     TEST_ASSERT_FALSE(kdrv_ble_app_written(KDRV_BLE_APP_CHARS_MAX, v, sizeof(v)));
     TEST_ASSERT_FALSE(kdrv_ble_app_written(1U, v, (uint16_t)(KDRV_BLE_APP_VALUE_MAX + 1U)));
     TEST_ASSERT_FALSE(kdrv_ble_app_written(1U, NULL, 2U));
+    done();
+}
+
+/* ---- Queued characteristics ----------------------------------------------- */
+
+/** @brief Three characteristics: a queue, one written, one read and notified. */
+static const kdrv_ble_app_char_t s_mesh[] = {
+    { "from_radio", "2c55e69e-4993-11ed-b878-0242ac120002", KDRV_BLE_APP_QUEUED },
+    { "to_radio",   "f75c76d2-129e-4dad-a1dd-7866124401e7", KDRV_BLE_APP_WRITE },
+    { "from_num",   "ed9da18c-a800-4f66-a670-aa7547e34453", KDRV_BLE_APP_READ | KDRV_BLE_APP_NOTIFY },
+};
+
+/** @brief The service of three. */
+static const kdrv_ble_app_service_t s_svc_mesh = { "6ba1b218-15a8-461f-9fa8-5dcae273eafd", s_mesh, 3U };
+
+/** @brief Takes the taken callback told, newest last. */
+static struct {
+    uint32_t n;                            /**< How many.            */
+    uint8_t  chr;                          /**< The last one's place. */
+    uint8_t  left;                         /**< What it left.         */
+    char     name[KDRV_BLE_APP_NAME_MAX];  /**< Its name.             */
+} s_taken;
+
+/** @brief The taken callback the cases install: keeps what it is told. */
+static void taken_rec(uint8_t chr, const char *name, uint8_t left)
+{
+    s_taken.n++;
+    s_taken.chr  = chr;
+    s_taken.left = left;
+    (void)snprintf(s_taken.name, sizeof(s_taken.name), "%s", name);
+}
+
+/** @brief A fresh case on the service of three, its queue empty, nothing taken. */
+static void fresh_mesh(void)
+{
+    fake_klog_reset();
+    fake_ble_app_service_set(&s_svc_mesh);
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_set_taken_cb(&taken_rec));
+    kdrv_ble_app_link_reset();
+    (void)memset(&s_taken, 0, sizeof(s_taken));
+}
+
+TEST_CASE("a queued characteristic is served with the read permission alone", "[kdrv_ble_app]")
+{
+    kdrv_ble_app_table_t t;
+
+    fresh_mesh();
+    TEST_ASSERT_TRUE(kdrv_ble_app_build(&s_svc_mesh, &s_perm, &t));
+    TEST_ASSERT_EQUAL_UINT8(3U, t.count);
+    TEST_ASSERT_EQUAL_HEX32(s_perm.read, t.flags[0]);
+    TEST_ASSERT_EQUAL_HEX32(s_perm.write, t.flags[1]);
+    TEST_ASSERT_EQUAL_HEX32(s_perm.read | s_perm.notify, t.flags[2]);
+    done();
+}
+
+TEST_CASE("each read of a queued characteristic takes the next value, an empty queue reads "
+          "0 bytes, and every take is told with what is left", "[kdrv_ble_app]")
+{
+    uint8_t out[KDRV_BLE_APP_VALUE_MAX];
+
+    fresh_mesh();
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_push("from_radio", "one", 3U));
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_push("from_radio", "second", 6U));
+    TEST_ASSERT_EQUAL_UINT16(3U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_MEMORY("one", out, 3U);
+    TEST_ASSERT_EQUAL_UINT32(1U, s_taken.n);
+    TEST_ASSERT_EQUAL_UINT8(0U, s_taken.chr);
+    TEST_ASSERT_EQUAL_UINT8(1U, s_taken.left);
+    TEST_ASSERT_EQUAL_STRING("from_radio", s_taken.name);
+    TEST_ASSERT_EQUAL_UINT16(6U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_MEMORY("second", out, 6U);
+    TEST_ASSERT_EQUAL_UINT32(2U, s_taken.n);
+    TEST_ASSERT_EQUAL_UINT8(0U, s_taken.left);
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT32(2U, s_taken.n);
+    done();
+}
+
+TEST_CASE("a queued value longer than one read is read in parts and taken with its last part",
+          "[kdrv_ble_app]")
+{
+    uint8_t out[KDRV_BLE_APP_VALUE_MAX];
+
+    /* An MTU of 23: a read carries 22 bytes, so 50 bytes take three reads. */
+    fresh_mesh();
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_push("from_radio",
+                      "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN", 50U));
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_push("from_radio", "z", 1U));
+    TEST_ASSERT_EQUAL_UINT16(50U, kdrv_ble_app_read(0U, 0U, 22U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT16(50U, kdrv_ble_app_read(0U, 22U, 22U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT32(0U, s_taken.n);
+    TEST_ASSERT_EQUAL_UINT16(50U, kdrv_ble_app_read(0U, 44U, 22U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_UINT32(1U, s_taken.n);
+    TEST_ASSERT_EQUAL_UINT8(1U, s_taken.left);
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, 22U, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_HEX8('z', out[0]);
+    done();
+}
+
+TEST_CASE("a full queue refuses a push, the room counts down, and a clear or a link that "
+          "ends empties it", "[kdrv_ble_app]")
+{
+    uint8_t out[KDRV_BLE_APP_VALUE_MAX];
+    size_t  room = 99U;
+    uint8_t b;
+
+    fresh_mesh();
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_room("from_radio", &room));
+    TEST_ASSERT_EQUAL_size_t(KDRV_BLE_APP_QUEUE_SLOTS, room);
+    for ( b = 0U; (uint8_t)KDRV_BLE_APP_QUEUE_SLOTS > b; b++ )
+    {
+        TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_push("from_radio", &b, 1U));
+    }
+    TEST_ASSERT_EQUAL(KODE_NO_RESOURCES, kdrv_ble_app_queue_push("from_radio", "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_room("from_radio", &room));
+    TEST_ASSERT_EQUAL_size_t(0U, room);
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_HEX8(0U, out[0]);
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_room("from_radio", &room));
+    TEST_ASSERT_EQUAL_size_t(1U, room);
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_clear("from_radio"));
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_push("from_radio", "y", 1U));
+    kdrv_ble_app_link_reset();
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, 0U, READ_SPAN, out, sizeof(out)));
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_queue_room("from_radio", &room));
+    TEST_ASSERT_EQUAL_size_t(KDRV_BLE_APP_QUEUE_SLOTS, room);
+    done();
+}
+
+TEST_CASE("a push needs a queued characteristic and bytes, a clear needs a queued one and none",
+          "[kdrv_ble_app]")
+{
+    static uint8_t big[KDRV_BLE_APP_VALUE_MAX + 1U];
+    size_t         room = 0U;
+
+    fresh_mesh();
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_check("from_radio", KDRV_BLE_APP_OP_PUSH, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("from_radio", KDRV_BLE_APP_OP_PUSH, NULL, 0U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("from_num", KDRV_BLE_APP_OP_PUSH, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("from_radio", KDRV_BLE_APP_OP_PUSH, big, sizeof(big)));
+    TEST_ASSERT_EQUAL(KODE_OK, kdrv_ble_app_check("from_radio", KDRV_BLE_APP_OP_CLEAR, NULL, 0U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("from_radio", KDRV_BLE_APP_OP_CLEAR, "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("to_radio", KDRV_BLE_APP_OP_CLEAR, NULL, 0U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_check("from_radio", 4U, NULL, 0U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_queue_push("from_num", "x", 1U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_queue_push("from_radio", NULL, 0U));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_queue_clear("to_radio"));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_queue_room("from_num", &room));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_queue_room("from_radio", NULL));
+    TEST_ASSERT_EQUAL(KODE_DENIED, kdrv_ble_app_set_taken_cb(NULL));
     done();
 }
