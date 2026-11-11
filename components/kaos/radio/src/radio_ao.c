@@ -927,6 +927,7 @@ static void c5_test_step(Radio * const me);
 static void c5_test_end(Radio * const me, bool ok, const char *why);
 #if CONFIG_KODEOS_BLE
 static void c5_test_judge_ble_start(Radio * const me, bool ok);
+static bool radio_ble_start(Radio * const me);
 #endif
 static void inst_end(Radio * const me, const QEvt *verdict);
 static void inst_fail(Radio * const me);
@@ -5260,7 +5261,7 @@ static void c5_test_step(Radio * const me)
              * the row judges what is there and moves on. */
             c5_test_judge_ble_start(me, true);
         }
-        else if ( radio_submit(me, KDRV_RADIO_JOB_BLE_START) )
+        else if ( radio_ble_start(me) )
         {
             me->test_job = true;
         }
@@ -6426,12 +6427,30 @@ static bool radio_exp_apply(Radio * const me)
 
 #if CONFIG_KODEOS_BLE
 /**
+ * @brief Put the scan response an app asked for into a job.
+ *
+ * The job borrows `rsp_sent`, so a request arriving while it runs changes
+ * `rsp_data` alone.
+ *
+ * @param me  The AO.
+ * @param req The BLE_RSP or BLE_START job to carry it.
+ */
+static void radio_rsp_fill(Radio * const me, kdrv_radio_req_t * const req)
+{
+    (void)memcpy(me->rsp_sent, me->rsp_data, sizeof(me->rsp_sent));
+    (void)snprintf(req->ssid, sizeof(req->ssid), "%s", me->rsp_name);
+    req->data = me->rsp_sent;
+    req->len  = me->rsp_len;
+}
+
+/**
  * @brief Hand the scan response an app asked for to the radio, if it can.
  *
  * A debt like the header's supply: kept while Bluetooth is off in Settings
  * or the link is down, and paid with a BLE_RSP job once the reconcile is
- * over and nothing else holds the channel. The advert is not touched; the
- * driver keeps the response for every advert after.
+ * over and nothing else holds the channel, or by the BLE start itself
+ * (radio_ble_start()). The advert is not touched; the driver keeps the
+ * response for every advert after.
  *
  * @param me The AO.
  * @return true when the job was submitted.
@@ -6452,12 +6471,40 @@ static bool radio_rsp_apply(Radio * const me)
     {
         return false;
     }
-    (void)memcpy(me->rsp_sent, me->rsp_data, sizeof(me->rsp_sent));
     (void)memset(&req, 0, sizeof(req));
     req.type = KDRV_RADIO_JOB_BLE_RSP;
-    (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->rsp_name);
-    req.data = me->rsp_sent;
-    req.len  = me->rsp_len;
+    radio_rsp_fill(me, &req);
+    if ( !radio_submit_req(me, &req) )
+    {
+        return false;
+    }
+    me->rsp_dirty = false;
+    return true;
+}
+
+/**
+ * @brief Submit a BLE start, with the scan response an app asked for if it
+ *        has not reached the radio yet.
+ *
+ * The driver sets it before the host comes up, so the first advert and the
+ * Device Name carry it. A bonded phone that reconnects at once and reads the
+ * table again (Service Changed) would otherwise list the board under its
+ * serial.
+ *
+ * @param me The AO.
+ * @return true when the job was submitted.
+ */
+static bool radio_ble_start(Radio * const me)
+{
+    kdrv_radio_req_t req;
+
+    (void)memset(&req, 0, sizeof(req));
+    req.type = KDRV_RADIO_JOB_BLE_START;
+    if ( me->rsp_dirty )
+    {
+        radio_rsp_fill(me, &req);
+        req.on = true;
+    }
     if ( !radio_submit_req(me, &req) )
     {
         return false;
@@ -6899,7 +6946,7 @@ static void radio_settle(Radio * const me)
         {
             me->ble_start_pending = false;   /* already up; nothing owed */
         }
-        else if ( radio_submit(me, KDRV_RADIO_JOB_BLE_START) )
+        else if ( radio_ble_start(me) )
         {
             me->ble_start_pending = false;
             return;
@@ -11813,7 +11860,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 radio_start_owed(me, SVC_BLE);
                 ble_publish_state(me);
             }
-            else if ( !radio_submit(me, KDRV_RADIO_JOB_BLE_START) )
+            else if ( !radio_ble_start(me) )
             {
                 /* Nothing will answer this one, so the debt keeps the start
                  * alive and the chain is told separately - ordering is moot

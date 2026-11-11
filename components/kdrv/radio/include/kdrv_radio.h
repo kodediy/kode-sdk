@@ -55,7 +55,10 @@ typedef enum {
                                   *   version, descriptor, MAC, heap, SDIO,
                                   *   the card pins. What the production
                                   *   row judges.                            */
-    KDRV_RADIO_JOB_BLE_START,    /**< Bring the BLE stack up, no more.       */
+    KDRV_RADIO_JOB_BLE_START,    /**< Bring the BLE stack up, no more. With
+                                  *   req.on, first the scan response a
+                                  *   BLE_RSP would set, from the same
+                                  *   fields.                               */
     KDRV_RADIO_JOB_BLE_ADV,      /**< Start or stop advertising (req.on).
                                   *   Carries no duration: an advert lasts
                                   *   until it is taken or stopped.         */
@@ -140,14 +143,15 @@ typedef struct {
 typedef struct {
     kdrv_radio_job_t type;
     char             ssid[KDRV_RADIO_SSID_BYTES]; /**< WIFI_PROBE: the first network wanted.
-                              *   BLE_FIND: the name.                        */
+                              *   BLE_FIND: the name. BLE_RSP, BLE_START:
+                              *   the board's name, "" for the serial.       */
     char             ssid2[KDRV_RADIO_SSID_BYTES]; /**< WIFI_PROBE: the second network, "" for none. */
     uint8_t          channel;  /**< WIFI_PROBE: the channel to listen on.       */
     uint16_t         dwell_ms; /**< WIFI_PROBE: the time on it.                 */
     char             pass[65];
-    const uint8_t   *data;   /**< C5_WRITE, BLE_RSP: borrowed until the
+    const uint8_t   *data;   /**< C5_WRITE, BLE_RSP, BLE_START: borrowed until the
                               *   outcome.                                  */
-    uint32_t         len;    /**< C5_WRITE, BLE_RSP: bytes. BLE_SCAN, BLE_FIND: ms.
+    uint32_t         len;    /**< C5_WRITE, BLE_RSP, BLE_START: bytes. BLE_SCAN, BLE_FIND: ms.
                               *   BLE_ADV: the time on the air in ms, 0 for no end. */
     uint16_t         itvl;   /**< BLE_ADV: the interval (KDRV_BLE_ITVL_*); 0 for slow. */
     bool             hidden; /**< BLE_ADV: hide the board (kdrv_ble_adv_plan()). */
@@ -155,7 +159,8 @@ typedef struct {
                               *   (true) or none (false). EXP_POWER:
                               *   J3's supply on (true) or off.
                               *   AMP: the amplifier on (true) or off.
-                              *   SLEEP: start the sentinel (true) or stop it. */
+                              *   SLEEP: start the sentinel (true) or stop it.
+                              *   BLE_START: set the scan response first. */
     bool             wants_wifi; /**< CONNECT: this boot wants Wi-Fi, so a C5
                               *   parked by the last firmware may be kept
                               *   running instead of reset.                  */

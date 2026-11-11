@@ -1997,6 +1997,11 @@ static void ble_forget_lost_key(const ble_addr_t *peer, int reason)
 }
 #endif /* CONFIG_KODEOS_BLE_CONSOLE_PAIRING */
 
+/** @brief The first and the last handle an attribute can have: Service
+ *         Changed over this range says the whole table may be new. */
+#define BLE_ATT_HANDLE_FIRST  0x0001U
+#define BLE_ATT_HANDLE_LAST   0xFFFFU
+
 /** @brief The controller answered: from here the stack knows its own address. */
 static void ble_on_sync(void)
 {
@@ -2021,6 +2026,14 @@ static void ble_on_sync(void)
     ble_store_hook();
     ble_migrate_old_keys();
 #endif
+    /* A bonded peer keeps the attribute table it found on its last visit,
+     * and the table is not the same from one firmware to the next: kodeOS
+     * and each app build their own. Without Service Changed, iOS reuses the
+     * table it kept and never finds an app's service. NimBLE marks every
+     * bond that subscribed to it, and indicates once on that bond's next
+     * encrypted connection, until the peer acknowledges. */
+    ble_svc_gatt_changed((uint16_t)BLE_ATT_HANDLE_FIRST,
+                         (uint16_t)BLE_ATT_HANDLE_LAST);
     s_ble.synced = true;
     (void)xEventGroupSetBits(s_ble.bits, BLE_BIT_SYNCED);
     KLOG_D(TAG, "controller in sync: %02x:%02x:%02x:%02x:%02x:%02x",

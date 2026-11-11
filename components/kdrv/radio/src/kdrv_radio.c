@@ -993,6 +993,23 @@ static kode_status_t radio_do_ble_find(const kdrv_radio_req_t *req)
 }
 
 /**
+ * @brief Give the driver the scan response a BLE_RSP or BLE_START carries.
+ * @param req The job: req.ssid the name ("" for the serial), req.data and
+ *            req.len the manufacturer data.
+ * @return The driver's answer.
+ */
+static kode_status_t radio_ble_rsp_set(const kdrv_radio_req_t *req)
+{
+    const char *name = NULL;   /* the serial */
+
+    if ( '\0' != req->ssid[0] )
+    {
+        name = req->ssid;
+    }
+    return radio_answer(kdrv_ble_set_scan_rsp(name, req->data, (size_t)req->len));
+}
+
+/**
  * @brief The BLE half of kdrv_radio_run().
  * @param req The job.
  * @param rc  Receives the job's status when it is one of these.
@@ -1005,6 +1022,13 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
     switch ( req->type )
     {
         case KDRV_RADIO_JOB_BLE_START:
+            if ( req->on )
+            {
+                /* The name first, so the first advert and the Device Name
+                 * carry it. A name refused leaves the serial; the start
+                 * goes on. */
+                (void)radio_ble_rsp_set(req);
+            }
             *rc = radio_answer(kdrv_ble_start());
             break;
         case KDRV_RADIO_JOB_BLE_ADV:
@@ -1029,16 +1053,9 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
         case KDRV_RADIO_JOB_BLE_STOP:
             *rc = kdrv_ble_stop();
             break;
-        case KDRV_RADIO_JOB_BLE_RSP: {
-            const char *name = NULL;   /* the serial */
-
-            if ( '\0' != req->ssid[0] )
-            {
-                name = req->ssid;
-            }
-            *rc = radio_answer(kdrv_ble_set_scan_rsp(name, req->data, (size_t)req->len));
+        case KDRV_RADIO_JOB_BLE_RSP:
+            *rc = radio_ble_rsp_set(req);
             break;
-        }
         default:
             mine = false;
             break;
