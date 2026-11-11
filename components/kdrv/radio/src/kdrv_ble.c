@@ -2455,7 +2455,19 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  * forever for a pairing nobody started. With Just Works this
                  * completes in a few hundred milliseconds and asks the human
                  * nothing. */
-                (void)ble_gap_security_initiate(event->connect.conn_handle);
+                {
+                    /* A bonded central that reconnects encrypts by itself, and
+                     * often before this event is handled. Asking it again then
+                     * starts a procedure it never answers, which ends 30 s later
+                     * as a failure on a link that is encrypted and in use. */
+                    struct ble_gap_conn_desc d;
+
+                    if ( (ble_gap_conn_find(event->connect.conn_handle, &d) != 0)
+                         || (0U == d.sec_state.encrypted) )
+                    {
+                        (void)ble_gap_security_initiate(event->connect.conn_handle);
+                    }
+                }
 #endif
             }
             else
@@ -2626,15 +2638,29 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  * that waited on a human used to end in; 12 is ECONTROLLER,
                  * which is usually a peer offering a key this side can no
                  * longer match (`ble_unpair` here, forget the board there). */
+                struct ble_gap_conn_desc d;
+
                 KLOG_W(TAG, "encryption failed (status %d)",
                        event->enc_change.status);
-                /* Whoever made it fail, the link goes: a peer that refuses
-                 * the pairing and stays connected would hold the one link
-                 * there is, and the board would be off the air for as long
-                 * as it liked. Most failures end the link by themselves, and
-                 * hanging up on one that is gone costs nothing. */
-                (void)ble_gap_terminate(event->enc_change.conn_handle,
-                                        BLE_ERR_AUTH_FAIL);
+                if ( (ble_gap_conn_find(event->enc_change.conn_handle, &d) == 0)
+                     && (0U != d.sec_state.encrypted) )
+                {
+                    /* A second procedure failed on a link that is encrypted
+                     * already (a request the central had no need to answer):
+                     * the link is good, and it stays. */
+                    KLOG_N(TAG, "the link is encrypted already; it stays");
+                    s_ble.secure = true;
+                }
+                else
+                {
+                    /* Whoever made it fail, the link goes: a peer that refuses
+                     * the pairing and stays connected would hold the one link
+                     * there is, and the board would be off the air for as long
+                     * as it liked. Most failures end the link by themselves, and
+                     * hanging up on one that is gone costs nothing. */
+                    (void)ble_gap_terminate(event->enc_change.conn_handle,
+                                            BLE_ERR_AUTH_FAIL);
+                }
             }
             break;
         }
