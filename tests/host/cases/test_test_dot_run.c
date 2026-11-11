@@ -376,9 +376,9 @@ TEST_CASE("test_fail_during_a_run_ends_it_and_stays", "[test_dot_run]")
 }
 
 /* The operator's records read exactly as the console's `test component=buttons`
- * and `tp` print them (Luismi's words), and the verdicts are his: a give-up
+ * and `tp` print them (the station's words), and the verdicts are its: a give-up
  * is a fail (spec 8.3), a step nobody answered a timeout. */
-TEST_CASE("test_operator_records_are_the_console_s_and_luismi_s_words", "[test_dot_run]")
+TEST_CASE("test_operator_records_are_the_console_s_and_the_station_s_words", "[test_dot_run]")
 {
     run_to_camera();
     TEST_ASSERT_TRUE(drive_until(">ok"));

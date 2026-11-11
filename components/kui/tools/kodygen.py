@@ -101,9 +101,10 @@ SHAPE_PATHS = ("sh", "rc", "el", "sr")
 
 HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-GENERATED = ("/* SPDX-License-Identifier: GPL-3.0-or-later */\n"
-             "/* Written by tools/kodygen.py from kody/assets/: change the sources there and run "
-             "the script, never this file. */")
+WRITTEN = ("/* Written by tools/kodygen.py from kody/assets/: change the sources there and run "
+           "the script, never this file. */")
+GENERATED = "/* SPDX-License-Identifier: GPL-3.0-or-later */\n" + WRITTEN
+GENERATED_ART = "/* SPDX-License-Identifier: CC-BY-SA-4.0 */\n" + WRITTEN  # Kody's art, as NOTICE.md says
 BYTES_PER_LINE = 16
 DEFLATE_LEVEL = 9  # zlib's smallest stream; the time it costs is this script's, not the board's
 SLACK_PCT = 5      # a held stream may be this much longer than a new one: room for another zlib build
@@ -494,7 +495,7 @@ def describe(a, frames, fps):
 def c_file(a, stream, json_len, frames, fps, recoloured):
     sym = f"kody_{a['name']}"
     lines = [
-        GENERATED,
+        GENERATED_ART,
         "/**",
         f" * @file {sym}.c",
         f" * @brief {sym}: kody/assets/{a['source']} on a {a['w']} x {a['h']} canvas.",

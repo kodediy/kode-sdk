@@ -47,7 +47,7 @@
 /** How long CONNECT waits for the C5's RPC layer after the transport is up.
  * The slave reboots on every bring-up (ESP_HOSTED_SLAVE_RESET_ON_EVERY_
  * HOST_BOOTUP) and its whole boot fits comfortably inside this; the value is
- * the one the validation runs waited (Kode-Dot-Val/02-ESP-HOSTED-MCU). */
+ * the one the validation runs waited. */
 #define RADIO_CP_INIT_MS    10000U
 #define RADIO_GATE_POLL_MS  5U   /**< How often the connect job looks at the gate (kdrv_radio_gate()). */
 

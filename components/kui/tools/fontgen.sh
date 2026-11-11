@@ -4,7 +4,7 @@
 # carry them, and four faces that are DM Sans from end to end: the pairing
 # code, the clock, and the two big figures (the code of the system screens and
 # the hero percentage). The sizes 28, 34, 40, 60 and 80 are the scale of
-# kshell's look (kode-dot-os), 22 and 26 the kit's own small ones.
+# kshell's look, 22 and 26 the kit's own small ones.
 #
 #   tools/fontgen.sh                              writes fonts/src/kui_font_*.c
 #   FONT_CONV="<command>" tools/fontgen.sh        another lv_font_conv, e.g.

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kui_test_dot_patterns.c
- * @brief The patterns the E5 camera photographs, pixel for pixel as Luismi's kgui_e5pat.c paints them.
+ * @brief The patterns the E5 camera photographs, pixel for pixel as the station's kgui_e5pat.c paints them.
  */
 #include "kui_test_dot.h"
 #include "kui_test_dot_paint.h"

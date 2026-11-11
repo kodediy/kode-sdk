@@ -208,7 +208,7 @@ TEST_CASE("a NULL argument is refused", "[knfc_emu_img]")
 }
 
 /* ---- a ready-made NDEF message ------------------------------------------ */
-/* The three cases below come from Luismi's kode-dot-os (0574a8f). */
+/* The three cases below are ported from kshell's own tests. */
 
 TEST_CASE("a raw NDEF message is wrapped as it is, ahead of uri and ndef", "[knfc_emu_img]")
 {

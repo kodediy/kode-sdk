@@ -8,8 +8,8 @@ license: "GPL-3.0-or-later AND LicenseRef-SLA0051"
 targets:
   - esp32p4
 
-## The panel stack. The version matches the board-validation examples
-## (Kode-Dot-Val/03-DISPLAY), which are the ones proven on this hardware.
+## The panel stack. The version matches the board-validation examples,
+## which are the ones proven on this hardware.
 ## The touch controller (CST820 @0x15) is kdrv_cst820, a register map over
 ## khal_i2c, and needs no component.
 ##
@@ -25,7 +25,7 @@ dependencies:
 
   # The ESP32-C5 radio link (kdrv_radio). Pinned exactly: host and slave must
   # run the same esp-hosted version, and 2.12.9 is what the slave firmware on
-  # the boards carries - the pair Kode-Dot-Val validated end to end. On the
+  # the boards carries - the pair the board validation proved end to end. On the
   # P4, esp_wifi.h *is* esp_wifi_remote (the chip has no radio of its own).
   esp_hosted: "==2.12.9"
   esp_wifi_remote: "==1.6.5"
@@ -35,7 +35,7 @@ dependencies:
   # this version's behaviour rather than a stable interface - the volume law
   # its register calculation implements, what its hw_gain arithmetic does to
   # that law, and which register its no_dac_ref flag writes. 1.5.10 is the
-  # version Kode-Dot-Val validated on this board with a scope on the output.
+  # version the board validation proved on this board with a scope on the output.
   esp_codec_dev: "==1.5.10"
 
   # The MQTT client (kdrv_net). It is here rather than absent because esp-mqtt

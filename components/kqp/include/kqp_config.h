@@ -1274,7 +1274,7 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 #define KODE_RADIO_GUARD_MS            180000U
 /** @brief The radio check's budget, ms: past it the readings so far are
  *         answered with KODE_TIMEOUT. It is the bound of the whole check
- *         (Luismi's lock_ms). Counted between its jobs, from the first one
+ *         (the station's lock_ms). Counted between its jobs, from the first one
  *         and again after a sweep it asked for, which the job guard bounds;
  *         putting the advert back is not cut by it. */
 #define KODE_RADIO_PROBE_MS             8000U

@@ -2786,7 +2786,7 @@ bool mqtt_channel_holds(void);
 void mqtt_state_request(void);
 
 /* ---- The Kode channel, run by AO_Net --------------------------------------
- * With Wi-Fi and a certificate on the C5, AO_Net joins Pablo's channel by itself
+ * With Wi-Fi and a certificate on the C5, AO_Net joins the Kode channel by itself
  * and stays joined, unless the `chan` setting is off. This is a window onto it
  * (CONFIG_KODEOS_CHANNEL, which needs MQTT and the console).
  */
