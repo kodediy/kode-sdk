@@ -44,8 +44,8 @@ bool         g_fail_data_if;
 bool         g_fail_codec_new;
 bool         g_fail_dev_new;
 bool         g_fail_vol_curve;
-unsigned     g_viol_pad;
-unsigned     g_viol_ctrl;
+uint32_t     g_viol_pad;
+uint32_t     g_viol_ctrl;
 
 static uint8_t s_tx_obj;                 /**< The address is the transmit handle. */
 static uint8_t s_rx_obj;                 /**< The address is the receive handle.  */
@@ -85,7 +85,7 @@ void fake_reset(void)
     (void)memset(&s_pins, 0, sizeof(s_pins));
 }
 
-unsigned fake_violations(void)
+uint32_t fake_violations(void)
 {
     return g_viol_pad + g_viol_ctrl;
 }

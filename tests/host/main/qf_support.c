@@ -491,10 +491,10 @@ void qf_support_time_passes(uint32_t ticks)
     }
 }
 
-unsigned qf_support_waiting_of(QActive *ao, QSignal sig)
+uint32_t qf_support_waiting_of(QActive *ao, QSignal sig)
 {
     const QEvt *e = NULL;
-    unsigned    n = 0U;
+    uint32_t    n = 0U;
 
     while ( (NULL != ao->eQueue) && (xQueueReceive(ao->eQueue, &e, 0U) == pdTRUE) )
     {

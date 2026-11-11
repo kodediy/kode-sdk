@@ -1508,7 +1508,7 @@ static void ask_wipe(const char *project)
 /** @brief Let the wipe walk its files, one a step, and take its one answer. */
 static const StorageAppWipeRspEvt *take_wipe(void)
 {
-    for ( unsigned i = 0U; (WIPE_STEPS_MAX > i) && (0U == ao_spy_count()); ++i )
+    for ( uint32_t i = 0U; (WIPE_STEPS_MAX > i) && (0U == ao_spy_count()); ++i )
     {
         (void)qf_support_pump(AO_Storage, 8U);
     }
@@ -3589,7 +3589,7 @@ TEST_CASE("a space ask refused for want of hold room is answered KODE_DENIED onc
     sys_fresh();
     fake_media_set_sd_present(true);
     ask_mount_job();
-    for ( unsigned i = 0U; KODE_STORAGE_DEFER_DEPTH > i; ++i )
+    for ( uint32_t i = 0U; KODE_STORAGE_DEFER_DEPTH > i; ++i )
     {
         storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_STAT, "/sdcard/x");
     }

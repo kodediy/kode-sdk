@@ -75,7 +75,7 @@ unsigned fake_ble_app_kicks(void)
 static bool s_batt_declared;
 
 /** @brief The last level handed down; not cleared by fake_ble_reset(). */
-static int s_batt_pct = -1;
+static int16_t s_batt_pct = -1;
 
 bool kdrv_ble_battery_declared(void)
 {
@@ -84,7 +84,7 @@ bool kdrv_ble_battery_declared(void)
 
 void kdrv_ble_battery_set(uint8_t pct)
 {
-    s_batt_pct = (int)pct;
+    s_batt_pct = (int16_t)pct;
 }
 
 void fake_ble_battery_declare(bool on)
@@ -93,7 +93,7 @@ void fake_ble_battery_declare(bool on)
     s_batt_pct      = -1;
 }
 
-int fake_ble_battery_pct(void)
+int16_t fake_ble_battery_pct(void)
 {
     return s_batt_pct;
 }

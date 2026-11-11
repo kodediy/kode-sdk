@@ -250,7 +250,7 @@ static void event_batch(uint8_t version)
 /** @brief Whether any captured log line contains @p needle. */
 static bool logged_text(const char *needle)
 {
-    for ( unsigned i = 0U; fake_klog_count() > i; i++ )
+    for ( uint32_t i = 0U; fake_klog_count() > i; i++ )
     {
         const char *const l = fake_klog_line(i);
         if ( (NULL != l) && (NULL != strstr(l, needle)) )

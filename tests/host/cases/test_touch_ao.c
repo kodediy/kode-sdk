@@ -319,7 +319,7 @@ static void state_awake(void);
 static void expect_answer(bool busy, const char *why);
 
 static bool     s_answers;   /**< Whether the chip ACKs a probe.  */
-static unsigned s_probes;    /**< Probes asked of the bus.        */
+static uint32_t s_probes;    /**< Probes asked of the bus.        */
 
 static bool on_probe(uint16_t addr, uint32_t timeout_ms, int ncalls)
 {
