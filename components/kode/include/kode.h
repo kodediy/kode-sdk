@@ -1195,6 +1195,7 @@ typedef struct {
  *
  * Nobody serves it until kode_ble_service_select() names it.
  */
+/* cppcheck-suppress misra-c2012-20.7 ; name_ is the name of the object declared, which no parenthesis can wrap */
 #define KODE_BLE_SERVICE_NAMED(name_, uuid_, chars_) \
     const kode_ble_service_t name_ = { \
         (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }

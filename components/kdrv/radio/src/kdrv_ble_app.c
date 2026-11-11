@@ -156,6 +156,7 @@ bool kdrv_ble_app_select(const kdrv_ble_app_service_t *svc)
     return took;
 }
 
+/* cppcheck-suppress misra-c2012-8.7 ; kdrv_ble.c builds the GATT table from it */
 const kdrv_ble_app_service_t *kdrv_ble_app_fix(void)
 {
     const kdrv_ble_app_service_t *was = atomic_load(&s_pick);
@@ -173,6 +174,7 @@ const kdrv_ble_app_service_t *kdrv_ble_app_fix(void)
     return atomic_load(&s_served);
 }
 
+/* cppcheck-suppress misra-c2012-8.7 ; the host suite starts each case from no choice with it */
 void kdrv_ble_app_select_forget(void)
 {
     atomic_store(&s_served, NULL);
