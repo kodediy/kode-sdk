@@ -43,7 +43,8 @@ typedef enum {
     T_LINK_UP,      /**< kdrv_display_link_set(true).                          */
     T_SLEEP_IN,     /**< kdrv_display_panel_sleep(true).                       */
     T_SLEEP_OUT,    /**< kdrv_display_panel_sleep(false).                      */
-    T_GRAM          /**< kdrv_display_gram_write().                            */
+    T_GRAM,         /**< kdrv_display_gram_write().                            */
+    T_RESET_LOW     /**< kdrv_display_reset_low().                             */
 } trace_t;
 
 /** @brief Longest sequence a case traces. */
@@ -220,6 +221,13 @@ static const DisplayStateEvt *announced(void)
 static kode_status_t s_link_down_rc;
 static kode_status_t s_link_up_rc;
 
+/** @brief What the sleep-in and the reset line's drive answer. */
+static kode_status_t s_sleep_in_rc;
+static kode_status_t s_reset_low_rc;
+
+/** @brief Requests AO_IoExp's queue held when the reset line went low. */
+static unsigned s_posts_at_reset;
+
 /** @brief Answers AO_LowPower already held when the link went down / the
  *         minute was written: the order of "rest, then answer". */
 static unsigned s_ready_at_link;
@@ -264,16 +272,27 @@ static kode_status_t on_link(bool up, int calls)
 
 static kode_status_t on_panel_sleep(bool sleep, int calls)
 {
+    kode_status_t rc = KODE_OK;
+
     (void)calls;
     if ( sleep )
     {
         trace(T_SLEEP_IN);
+        rc = s_sleep_in_rc;
     }
     else
     {
         trace(T_SLEEP_OUT);
     }
-    return KODE_OK;
+    return rc;
+}
+
+static kode_status_t on_reset_low(int calls)
+{
+    (void)calls;
+    trace(T_RESET_LOW);
+    s_posts_at_reset = fake_neighbour_ioexp_posts();
+    return s_reset_low_rc;
 }
 
 static kode_status_t on_gram(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
@@ -320,6 +339,9 @@ static void rest_mocks(void)
     s_trace_n       = 0U;
     s_link_down_rc  = KODE_OK;
     s_link_up_rc    = KODE_OK;
+    s_sleep_in_rc   = KODE_OK;
+    s_reset_low_rc  = KODE_OK;
+    s_posts_at_reset = 0xFFU;
     s_ready_at_link = 0xFFU;
     s_ready_at_gram = 0xFFU;
     s_flush_sent    = 0U;
@@ -328,6 +350,7 @@ static void rest_mocks(void)
     s_gram_fail     = 0U;
     kdrv_display_link_set_StubWithCallback(&on_link);
     kdrv_display_panel_sleep_StubWithCallback(&on_panel_sleep);
+    kdrv_display_reset_low_StubWithCallback(&on_reset_low);
     kdrv_display_gram_write_StubWithCallback(&on_gram);
     kdrv_display_flush_StubWithCallback(&on_flush);
     kdrv_display_flush_abort_StubWithCallback(&on_flush_abort);
@@ -361,6 +384,19 @@ static void state_awake(kode_lp_state_t prev)
     e.state = (uint8_t)KODE_LP_AWAKE;
     e.cause = (uint8_t)KODE_LP_CAUSE_REQUEST;
     e.prev  = (uint8_t)prev;
+    QASM_DISPATCH(AO_Display, &e.super, 0U);
+}
+
+/** @brief AO_LowPower says the board is ASLEEP. */
+static void state_asleep(void)
+{
+    LowPowerStateEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(LOWPOWER_STATE_SIG);
+    e.state = (uint8_t)KODE_LP_ASLEEP;
+    e.cause = (uint8_t)KODE_LP_CAUSE_REQUEST;
+    e.prev  = (uint8_t)KODE_LP_AWAKE;
     QASM_DISPATCH(AO_Display, &e.super, 0U);
 }
 
@@ -1035,8 +1071,9 @@ static void state_off(void)
 }
 
 /* OFF left the panel asleep with its supply on, an estimated 0.1-1 mA for as
- * long as the board was off. Once OFF is certain, P7 is asked low. */
-TEST_CASE("STATE(OFF) after the sleep-in asks AO_IoExp for the panel's supply off",
+ * long as the board was off. Once OFF is certain, the shared reset line goes
+ * low and only then is P7 asked low: the panel's power-off order. */
+TEST_CASE("STATE(OFF) after the sleep-in drives the reset line low, then asks for the supply off",
           "[display_ao][lowpower]")
 {
     unsigned asked;
@@ -1053,8 +1090,10 @@ TEST_CASE("STATE(OFF) after the sleep-in asks AO_IoExp for the panel's supply of
     state_off();
     TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(),
                                    "P7 is asked low once OFF is certain");
-    /* Nothing of the glass is touched: it is dark and asleep already. */
-    TEST_ASSERT_EQUAL_UINT(2U, s_trace_n);
+    /* The glass is dark and asleep already: the reset line is all that moves. */
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN, T_RESET_LOW);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked, s_posts_at_reset,
+                                   "the reset line goes low before P7 is asked");
 
     /* The board never comes back from here; the next case needs a glass. */
     state_awake(KODE_LP_AWAKE);
@@ -1062,8 +1101,35 @@ TEST_CASE("STATE(OFF) after the sleep-in asks AO_IoExp for the panel's supply of
     Mockkdrv_display_Destroy();
 }
 
-/* A panel whose sleep-in failed is still lit: losing its supply then is a
- * flash on the glass, so it keeps it. And the round for ASLEEP never lets go. */
+/* A reset line that cannot be driven (the driver refuses it) leaves the order
+ * as it was before: the supply still goes. */
+TEST_CASE("STATE(OFF) asks for the supply off even when the reset line is refused",
+          "[display_ao][lowpower]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    rest_mocks();
+    s_reset_low_rc = KODE_DENIED;
+
+    round_for(KODE_LP_OFF);
+    expect_answer(false, NULL);
+    asked = fake_neighbour_ioexp_posts();
+
+    state_off();
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN, T_RESET_LOW);
+    TEST_ASSERT_EQUAL_UINT(asked + 1U, fake_neighbour_ioexp_posts());
+
+    state_awake(KODE_LP_AWAKE);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A panel that did not sleep is still lit: losing its supply then is a flash
+ * on the glass, so the AO leaves the supply alone, and the shared reset line
+ * with it (the hold drives that line low at the deep sleep, not this AO). The
+ * round for ASLEEP never lets go of either. */
 TEST_CASE("the panel keeps its supply when it did not sleep, and for ASLEEP",
           "[display_ao][lowpower]")
 {
@@ -1072,16 +1138,44 @@ TEST_CASE("the panel keeps its supply when it did not sleep, and for ASLEEP",
     Mockkdrv_display_Init();
     display_up_once(0U);
     rest_mocks();
-    s_link_down_rc = KODE_ERROR;
 
+    /* ASLEEP, the glass at rest: no reset line, no supply. */
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+    asked = fake_neighbour_ioexp_posts();
+    s_trace_n = 0U;
+    state_asleep();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "ASLEEP touched the reset line");
+    TEST_ASSERT_EQUAL_UINT(asked, fake_neighbour_ioexp_posts());
+    state_awake(KODE_LP_ASLEEP);
+    ao_spy_drain();
+
+    /* A link that will not go down: not at the OFF rest, so P7 stays. */
+    s_link_down_rc = KODE_ERROR;
     round_for(KODE_LP_ASLEEP);
     expect_answer(true, "display link");
     asked = fake_neighbour_ioexp_posts();
+    s_trace_n = 0U;
     state_off();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the reset line moved under a lit glass");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(asked, fake_neighbour_ioexp_posts(),
                                    "a glass not at the OFF rest keeps P7");
-
     s_link_down_rc = KODE_OK;
+    state_awake(KODE_LP_AWAKE);
+    ao_spy_drain();
+
+    /* A sleep-in that failed: the panel is lit, so OFF leaves both alone. */
+    s_sleep_in_rc = KODE_TIMEOUT;
+    round_for(KODE_LP_OFF);
+    expect_answer(true, "display panel");
+    asked = fake_neighbour_ioexp_posts();
+    s_trace_n = 0U;
+    state_off();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the reset line moved under a lit panel");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked, fake_neighbour_ioexp_posts(),
+                                   "a panel that did not sleep keeps P7");
+
+    s_sleep_in_rc = KODE_OK;
     state_awake(KODE_LP_AWAKE);
     ao_spy_drain();
     Mockkdrv_display_Destroy();

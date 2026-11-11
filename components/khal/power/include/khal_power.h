@@ -135,10 +135,12 @@ void khal_power_holds_release(void);
  * @brief Enter deep sleep. Does not return.
  *
  * Holds the card's supply, the NFC chip's select, the LF front end and the
- * panel's reset at their rest levels, arms the expander's interrupt line
- * (low) as the one wake source, and only then holds the C5's enable low and
- * starts deep sleep: the C5 goes into reset as the last write before the
- * chip stops, so the esp-hosted tasks that still run never see it vanish.
+ * panel's reset at their rest levels (the reset low: the panel and the touch
+ * controller stay in reset, their supply being off), arms the expander's
+ * interrupt line (low) as the one wake source, and only then holds the C5's
+ * enable low and starts deep sleep: the C5 goes into reset as the last write
+ * before the chip stops, so the esp-hosted tasks that still run never see it
+ * vanish.
  * The caller has rested every device and cleared any pending expander edge.
  */
 void khal_power_off_enter(void);

@@ -122,6 +122,11 @@ _Static_assert(KDRV_DISPLAY_FRAME_US ==
 #define PANEL_COLD_RESET_LOW_MS  5U
 #define PANEL_COLD_FIRST_CMD_MS 20U   /* T3: 10 ms, from the line high to the first command */
 
+/* The panel going OFF (kdrv_display_reset_low()): the reset line low for at
+ * least 1 ms before the supply goes. vTaskDelay() of n ticks lasts between n-1
+ * and n, the tick being 1 ms, so 2 is the least that always covers it. */
+#define PANEL_OFF_RESET_LOW_MS   2U
+
 /* The glass kept lit across a restart (kdrv_display_keep_for_restart()). The
  * note lives in an LP store register for the reason the radio's does: an image's
  * RTC sections are its own, a register is the same address for all of them. It
@@ -653,9 +658,9 @@ static bool panel_present(void)
     (void)khal_gpio_output(KBSP_PIN_DSP_TP_RST, true);
     if ( esp_reset_reason() == ESP_RST_DEEPSLEEP )
     {
-        /* OFF held the line high with the controller in its low-power scan,
-         * where it answers nothing until a finger or a reset: AO_Touch's rest
-         * leaves it there. Reset first, and do not lose 100 ms finding out. */
+        /* OFF held the line low and cut the rail. A controller that missed its
+         * start answers nothing until a reset: reset first, and do not lose
+         * 100 ms finding out. */
         pulsed = true;
         (void)gpio_set_level((gpio_num_t)KBSP_PIN_DSP_TP_RST, 0U);
         khal_delay_ms(PANEL_COLD_RESET_LOW_MS);
@@ -671,8 +676,7 @@ static bool panel_present(void)
         if ( (PANEL_PROBE_PULSE_MS <= waited) && !pulsed )
         {
             /* A CST820 in its low-power scan NAKs everything until a finger or
-             * a reset, and OFF keeps the line high all the way through. A
-             * controller that is simply slow loses nothing by this. */
+             * a reset. A controller that is simply slow loses nothing by this. */
             pulsed = true;
             KLOG_W(TAG, "the touch controller is silent: a reset pulse before the verdict");
             (void)gpio_set_level((gpio_num_t)KBSP_PIN_DSP_TP_RST, 0U);
@@ -2107,6 +2111,23 @@ kode_status_t kdrv_display_link_set(bool up)
         return link_up();
     }
     return link_down();
+}
+
+kode_status_t kdrv_display_reset_low(void)
+{
+    kode_status_t st;
+
+    /* With the link up the video panel's object has the line: it is left alone. */
+    if ( !s_brought_up || s_ready )
+    {
+        return KODE_DENIED;
+    }
+    st = khal_gpio_output(KBSP_PIN_DSP_TP_RST, false);
+    if ( KODE_OK == st )
+    {
+        khal_delay_ms(PANEL_OFF_RESET_LOW_MS);
+    }
+    return st;
 }
 
 /** @brief One parameterless DCS command, behind the FIFO's bounded wait. */

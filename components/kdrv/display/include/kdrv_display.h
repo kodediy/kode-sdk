@@ -293,6 +293,24 @@ uint32_t kdrv_display_buffers_epoch(void);
 kode_status_t kdrv_display_panel_sleep(bool sleep);
 
 /**
+ * @brief Drive the reset line the panel shares with the touch controller low,
+ *        and wait out the least time the panel wants it low.
+ *
+ * The first step of the panel's power-off: after the sleep-in and with the
+ * link down, the line goes low, stays there for at least 1 ms, and only then
+ * may the panel's supply go. Both parts are in reset from here; the line is
+ * left low. Nothing brings it back but the next boot's bring-up, so it is for
+ * the board going OFF only. Blocks for the wait, as the sleep-in does.
+ * AO_Display's thread only.
+ *
+ * @return KODE_OK with the line low; KODE_DENIED before kdrv_display_init(),
+ *         or with the link up (the video panel owns the line then, and the
+ *         line is left as it is); the pin's own refusal when it would not be
+ *         driven, with no wait.
+ */
+kode_status_t kdrv_display_reset_low(void);
+
+/**
  * @brief Write a rectangle of RGB565 straight into the panel's memory, with
  *        the link down.
  *
