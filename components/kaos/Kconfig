@@ -263,6 +263,39 @@ menu "kodeOS active objects"
 
                 If unsure, say Y.
 
+        config KODE_BLE_APP_VALUE_MAX
+            int "Bytes of one value of the app's service"
+            depends on KODEOS_BLE
+            range 20 512
+            default 244
+            help
+                The longest value kode_ble_set_value(), kode_ble_notify() and
+                kode_ble_queue_push() take, and the longest write ble_written
+                carries. 244 is one notification at an MTU of 247.
+
+                Over 244, the values travel in a tier of events of their own,
+                in PSRAM, and the host asks the central for an MTU of the value
+                plus 3, at most 451. Reads and writes carry a whole value at
+                any MTU, as long reads and long writes; a notification carries
+                at most 448 bytes, and a longer one is dropped while the value
+                stays for a read. A phone protocol whose messages are 512
+                bytes needs 512.
+
+                If unsure, leave 244.
+
+        config KODE_BLE_ADVERTISE_APP_SERVICE
+            bool "The advert carries the app's service UUID"
+            depends on KODEOS_BLE
+            default n
+            help
+                The advert carries the UUID of the app's service instead of the
+                console's, so a phone that scans with a filter on that service
+                finds the board. Only one 128-bit UUID fits. The console is
+                still served; a client that filters on its UUID stops finding
+                the board. With no service declared, the advert stays as it is.
+
+                If unsure, say N.
+
     endmenu
 
     config KODEOS_NFC

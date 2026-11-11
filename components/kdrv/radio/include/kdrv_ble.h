@@ -427,7 +427,12 @@ bool kdrv_ble_addr(uint8_t out[6]);
  */
 
 #define KDRV_BLE_APP_CHARS_MAX  4U    /**< Characteristics one app's service may have.          */
-#define KDRV_BLE_APP_VALUE_MAX  244U  /**< Bytes of a value: one notification at an MTU of 247. */
+#define KDRV_BLE_APP_VALUE_DEFAULT 244U  /**< Bytes of a value by default: one notification at an MTU of 247. */
+#ifdef CONFIG_KODE_BLE_APP_VALUE_MAX
+#define KDRV_BLE_APP_VALUE_MAX  ((uint32_t)CONFIG_KODE_BLE_APP_VALUE_MAX) /**< Bytes of a value: the app's CONFIG_KODE_BLE_APP_VALUE_MAX. */
+#else
+#define KDRV_BLE_APP_VALUE_MAX  KDRV_BLE_APP_VALUE_DEFAULT                /**< Bytes of a value, with BLE off. */
+#endif
 #define KDRV_BLE_APP_NAME_MAX   16U   /**< Bytes of a characteristic's name, NUL included.      */
 #define KDRV_BLE_APP_WHY_MAX    80U   /**< Bytes of the reason a service is left out, NUL included. */
 #define KDRV_BLE_APP_READ       0x01U /**< A central may read the value.                       */
@@ -604,6 +609,28 @@ kode_status_t kdrv_ble_app_set_taken_cb(kdrv_ble_app_taken_cb_t cb);
  * start or a stop of the host there is what this would race.
  */
 void kdrv_ble_app_kick(void);
+
+/**
+ * @brief Whether the app asked for the Battery service (KODE_BLE_BATTERY_SERVICE()).
+ *
+ * Served beside the console's and the app's services: the Bluetooth SIG's
+ * Battery (0x180F) with Battery Level (0x2A19), read and notify, behind the
+ * app's service's permissions. Any thread.
+ *
+ * @return true when the app declared it.
+ */
+bool kdrv_ble_battery_declared(void);
+
+/**
+ * @brief The charge Battery Level reports, in percent.
+ *
+ * A level that moved is notified to a subscribed central from NimBLE's host
+ * task. AO_Radio's alone, from AO_Power's readings, and never while a job of
+ * its worker runs, for kdrv_ble_app_kick()'s reason.
+ *
+ * @param pct 0 to 100.
+ */
+void kdrv_ble_battery_set(uint8_t pct);
 
 /**
  * @brief How many connections a central has opened since boot.

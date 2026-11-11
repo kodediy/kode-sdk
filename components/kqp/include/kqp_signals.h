@@ -4656,8 +4656,27 @@ typedef struct {
 /** @brief Bytes of a characteristic's name in the app's service, NUL included. */
 #define KQP_BLE_APP_NAME_MAX   16U
 
-/** @brief Bytes of a value of the app's service. */
-#define KQP_BLE_APP_VALUE_MAX  244U
+/** @brief Bytes of a value of the app's service by default: one notification at an MTU of 247. */
+#define KQP_BLE_APP_VALUE_DEFAULT  244U
+
+/**
+ * @brief Bytes of a value of the app's service: CONFIG_KODE_BLE_APP_VALUE_MAX.
+ *
+ * A value over KQP_BLE_APP_VALUE_DEFAULT makes BleAppWriteEvt and
+ * BleAppValueReqEvt wider than the large tier, and kqp.c adds a tier of
+ * their width, in PSRAM (KQP_BLE_APP_WIDE).
+ */
+#ifdef CONFIG_KODE_BLE_APP_VALUE_MAX
+#define KQP_BLE_APP_VALUE_MAX  ((uint32_t)CONFIG_KODE_BLE_APP_VALUE_MAX)
+#if CONFIG_KODE_BLE_APP_VALUE_MAX > KQP_BLE_APP_VALUE_DEFAULT
+#define KQP_BLE_APP_WIDE       1   /**< The app's values need the wide tier. */
+#endif
+#else
+#define KQP_BLE_APP_VALUE_MAX  KQP_BLE_APP_VALUE_DEFAULT
+#endif
+#ifndef KQP_BLE_APP_WIDE
+#define KQP_BLE_APP_WIDE       0   /**< The app's values fit the large tier. */
+#endif
 
 #define KQP_BLE_APP_OP_SET     0U   /**< BleAppValueReqEvt.op: set the value.             */
 #define KQP_BLE_APP_OP_NOTIFY  1U   /**< BleAppValueReqEvt.op: set it and notify.         */

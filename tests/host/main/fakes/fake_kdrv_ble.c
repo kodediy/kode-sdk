@@ -71,6 +71,33 @@ unsigned fake_ble_app_kicks(void)
     return s_app_kicks;
 }
 
+/** @brief Whether the app declared the Battery service; not cleared by fake_ble_reset(). */
+static bool s_batt_declared;
+
+/** @brief The last level handed down; not cleared by fake_ble_reset(). */
+static int s_batt_pct = -1;
+
+bool kdrv_ble_battery_declared(void)
+{
+    return s_batt_declared;
+}
+
+void kdrv_ble_battery_set(uint8_t pct)
+{
+    s_batt_pct = (int)pct;
+}
+
+void fake_ble_battery_declare(bool on)
+{
+    s_batt_declared = on;
+    s_batt_pct      = -1;
+}
+
+int fake_ble_battery_pct(void)
+{
+    return s_batt_pct;
+}
+
 /* ---- The mirror half, unchanged in name and behaviour ----------------------- */
 
 static kode_status_t s_write_result = KODE_OK;
