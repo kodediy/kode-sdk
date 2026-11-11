@@ -461,10 +461,35 @@ typedef struct {
 } kdrv_ble_app_service_t;
 
 /**
- * @brief The service the app declared, found by name.
- * @return kode_ble_app_service; NULL when the app declares none. Any thread.
+ * @brief The service the app serves: the one kdrv_ble_app_select() chose,
+ *        else the one the app declared, found by name.
+ * @return It; NULL when the app chose none, or declares none. Any thread.
  */
 const kdrv_ble_app_service_t *kdrv_ble_app_service(void);
+
+/**
+ * @brief The service the app declared with KODE_BLE_SERVICE(), found by name.
+ *
+ * Defined by kdrv_ble.c (by the host suite's fake there). Only
+ * kdrv_ble_app_service() reads it: everything else asks that.
+ *
+ * @return kode_ble_app_service; NULL when the app declares none. Any thread.
+ */
+const kdrv_ble_app_service_t *kdrv_ble_app_declared(void);
+
+/**
+ * @brief Choose the service the table is built from at the host's start, in
+ *        place of the one declared; NULL serves none of the app's.
+ *
+ * A choice, not a table: it is read once, when kdrv_ble_start() registers
+ * the GATT table. Once that table is registered the choice is fixed for the
+ * boot, and this refuses and changes nothing (NimBLE's table is registered
+ * once per boot). Any thread.
+ *
+ * @param svc The service, which must outlive the boot; NULL for none.
+ * @return true when the choice is kept; false once the table is registered.
+ */
+bool kdrv_ble_app_select(const kdrv_ble_app_service_t *svc);
 
 /**
  * @brief Whether the service @p svc is declared but cannot be served, and why.

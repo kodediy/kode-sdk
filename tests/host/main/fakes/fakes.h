@@ -791,7 +791,7 @@ void fake_ble_adv_end(void);
 /** @brief How many times kdrv_ble_start() has been called since the reset. */
 unsigned fake_ble_starts(void);
 
-/** @brief Declare the app's service kdrv_ble_app_service() finds, NULL for
+/** @brief Declare the app's service kdrv_ble_app_declared() finds, NULL for
  *         none; it stays across fake_ble_reset(), so a case that sets one
  *         puts NULL back. fake_ble_central(true) counts a link
  *         (kdrv_ble_links()). */

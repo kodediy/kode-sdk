@@ -431,6 +431,22 @@ bool kode_sys_ble_service_fault(char *why, size_t cap)
     return kdrv_ble_app_fault(kdrv_ble_app_service(), why, cap);
 }
 
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_service_select(const kode_sys_ble_service_t *svc)
+{
+    kode_status_t rc = KODE_DENIED;
+
+    /* The layouts are held equal above, field by field; the driver reads
+     * the app's constant through its own mirror of the type, as it reads
+     * KODE_SYS_BLE_SERVICE()'s. */
+    /* cppcheck-suppress misra-c2012-11.3 ; layout-compatible types, asserted above */
+    if ( kdrv_ble_app_select((const kdrv_ble_app_service_t *)svc) )
+    {
+        rc = KODE_OK;
+    }
+    return rc;
+}
+
 /* ---- The listen ------------------------------------------------------------ */
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
