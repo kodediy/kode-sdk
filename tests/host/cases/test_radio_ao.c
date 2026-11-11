@@ -9433,6 +9433,77 @@ TEST_CASE("the same when the link is lost and the teardown is the AO's own, not 
     c5_case_end();
 }
 
+/** @brief Why the next BLE state in the spy says its request was refused; fails the case if none. */
+static uint8_t take_refused(void)
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "no BLE state was published");
+        if ( (QSignal)BLE_STATE_SIG == e->sig )
+        {
+            return ((const BleStateEvt *)e)->refused;
+        }
+    }
+}
+
+/* A request AO_Radio turns away is answered with the state, and the state has
+ * to say it was turned away: the console reads it as the verb's answer. */
+TEST_CASE("a BLE request that is refused says why in the state that answers it",
+          "[radio_ao]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_nvs_reset();
+    go_up();
+    ao_spy_subscribe(BLE_STATE_SIG);
+    ao_spy_drain();
+
+    /* Pair new device with Bluetooth off. */
+    TEST_ASSERT_FALSE(ble_enabled());
+    ble_pair_open_request();
+    pump();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_OFF, take_refused());
+    ao_spy_drain();
+
+    /* A question is never a refusal, and the one before it does not stick. */
+    dispatch(BLE_STATE_REQ_SIG);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_NONE, take_refused());
+    ao_spy_drain();
+
+    /* Forget all with a console attached to the link. */
+    fake_ble_set_bonds(1U);
+    fake_ble_mirror_set_attached(true);
+    ble_unpair_request();
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the store was cleared under a console");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_ATTACHED, take_refused());
+    ao_spy_drain();
+    fake_ble_mirror_set_attached(false);
+
+    /* Forget all while another job holds the radio. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, wifi_scan_ask(ao_spy()));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    ao_spy_drain();
+    ble_unpair_request();
+    pump();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_BUSY, take_refused());
+    ao_spy_drain();
+    scan_sweep(1U, -50, KODE_OK);
+    ao_spy_drain();
+
+    /* And one that is taken says so by not saying it. */
+    ble_unpair_request();
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_UNPAIR, running_job());
+    finish(KDRV_RADIO_JOB_BLE_UNPAIR, kdrv_ble_unpair());
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_NONE, take_refused());
+    ao_spy_drain();
+    fake_ble_reset();
+    c5_case_end();
+}
+
 TEST_CASE("an autojoin that finds the vault empty says so once, however often it is asked",
           "[radio_ao]")
 {

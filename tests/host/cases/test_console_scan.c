@@ -641,3 +641,48 @@ TEST_CASE("wifi_scan_stop off the Kode channel waits its turn behind a command i
     TEST_ASSERT_FALSE(posted(WIFI_SCAN_STOP_REQ_SIG));
     end_listing(WIFI_SCAN_END_SIG);
 }
+
+/** @brief The BLE state AO_Radio answers a refused request with. */
+static void refuse_ble(uint8_t why)
+{
+    BleStateEvt s;
+
+    (void)memset(&s, 0, sizeof(s));
+    s.super   = (QEvt)QEVT_INITIALIZER(BLE_STATE_SIG);
+    s.state   = (uint8_t)KDRV_BLE_CONNECTED;
+    s.refused = why;
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+}
+
+/* The warning goes to the log, and on the BLE console the terminator is all a
+ * client has: a refusal that ends in `>ok` reads as done. */
+TEST_CASE("a BLE verb AO_Radio refuses ends in an error that says why, never in ok",
+          "[console_scan]")
+{
+    console_up();
+    type_line("ble_unpair");
+    refuse_ble((uint8_t)KQP_BLE_REFUSED_ATTACHED);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=attached"));
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "a refusal read as done");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">|ble="), "a refusal carries no record");
+
+    fake_klog_reset();
+    type_line("ble_pair");
+    refuse_ble((uint8_t)KQP_BLE_REFUSED_OFF);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=off"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    fake_klog_reset();
+    type_line("ble_unpair");
+    refuse_ble((uint8_t)KQP_BLE_REFUSED_BUSY);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    /* The console is free again: a state that refuses nothing answers as before. */
+    fake_klog_reset();
+    type_line("ble_info");
+    refuse_ble((uint8_t)KQP_BLE_REFUSED_NONE);
+    TEST_ASSERT_NOT_NULL(line_with(">|ble=connected"));
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    (void)posted(BLE_STATE_REQ_SIG);
+}
