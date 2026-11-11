@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* SPDX-License-Identifier: CC-BY-SA-4.0 */
 /* Written by tools/kodygen.py from kody/assets/: change the sources there and run the script, never this file. */
 /**
  * @file kody_reloj_lee_aviso.c
