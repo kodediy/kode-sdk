@@ -919,6 +919,18 @@ void fake_radio_set_adopted(bool adopted);
  *         (kdrv_radio_exp_switched() false); fake_radio_reset() clears it. */
 void fake_radio_fail_exp_switch(bool fails);
 
+/** @brief The level the C5 holds J3's supply enable at: a CONNECT resets the
+ *         C5, which lets go of it (on), and a switch drives it. */
+bool fake_radio_exp_pin(void);
+
+/** @brief How many times the enable was driven low since fake_radio_reset(). */
+unsigned fake_radio_exp_off_drives(void);
+
+/** @brief The running CONNECT reads the wish now, as its worker does just
+ *         before it drives the pin: a wish asked after this is not the one
+ *         the connect drives. */
+void fake_radio_connect_read(void);
+
 /** @brief What kdrv_radio_fwversion() answers, and whether it answers. */
 void fake_radio_set_fw(uint32_t major, uint32_t minor, uint32_t patch,
                        bool known);

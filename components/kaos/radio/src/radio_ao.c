@@ -512,14 +512,14 @@ typedef struct {
      * wish, `exp_on` the believed rail, `exp_known` whether that belief is
      * the C5's doing this boot. A mismatch, or a rail not known, is a debt
      * radio_exp_apply() pays as soon as the C5 can. */
-    bool     exp_want;        /**< kode_sys_exp_power() or `exp_power` wants it on. */
+    bool     exp_want;        /**< kode_sys_exp_power() or `exp_power` wants it on;
+                               *   set only by radio_exp_wish_set().           */
     bool     exp_on;          /**< The rail is believed on.                    */
     bool     exp_known;       /**< The belief is the C5's doing this boot: it
                                *   drove IO5, or was reset and let go of it.
                                *   Cleared by a failed bring-up, a lost link,
                                *   a C5 update and a link-up whose switch did
                                *   not go through.                            */
-    bool     exp_link;        /**< What the connect in flight leaves it at.    */
     bool     exp_job;         /**< An EXP_POWER job is with the worker.        */
     bool     exp_owed;        /**< A request waits for EXP_POWER_SIG to say the
                                *   wish is carried out (radio_exp_said()).    */
@@ -4313,13 +4313,12 @@ static kode_status_t radio_connect_after_unmount(Radio * const me)
         return KODE_DENIED;
     }
     /* The bring-up resets the C5, which lets go of J3's supply enable, and
-     * then drives it as the wish is now: on from the reset, and where the
-     * wish says once the link is up. A pulse still running is the reset's
-     * now. */
+     * then drives it as the wish is when it gets there (kdrv_radio_exp_wish()):
+     * on from the reset, and where the wish says once the link is up. A pulse
+     * still running is the reset's now. */
     s_boot_card_stays = false;
     (void)memset(&req, 0, sizeof(req));
     req.type       = KDRV_RADIO_JOB_CONNECT;
-    req.on         = me->exp_want;
     /* A C5 the last firmware parked is kept only for a boot that joins. */
     req.wants_wifi = me->wifi_want;
     me->busy = false;
@@ -4332,7 +4331,6 @@ static kode_status_t radio_connect_after_unmount(Radio * const me)
     (void)QTimeEvt_disarm(&me->exp_pulse);
     me->exp_on    = true;   /* the bring-up resets the C5, which lets go of IO5 */
     me->exp_known = true;
-    me->exp_link  = me->exp_want;
     return KODE_OK;
 }
 
@@ -6149,6 +6147,18 @@ static bool radio_fast_apply(Radio * const me)
 #endif
 
 /**
+ * @brief Set the wish for the header's supply, here and for the connect worker.
+ *
+ * @param me The AO.
+ * @param on The wish: true for on.
+ */
+static void radio_exp_wish_set(Radio * const me, bool on)
+{
+    me->exp_want = on;
+    kdrv_radio_exp_wish(on);
+}
+
+/**
  * @brief Say that a switch of the header's supply is over: EXP_POWER_SIG.
  *
  * Published, to subscribers only. An end that names the wish pays a request
@@ -6209,7 +6219,7 @@ static void radio_exp_said(Radio * const me, bool on, kode_status_t rc)
  * @brief Say the wish is carried out when a request waits for it, the rail
  *        is known to be as wished and nothing is on its way that drives the
  *        pin: no switch with the worker, no link coming up (its connect
- *        leaves the rail as the wish was when it went out).
+ *        drives the rail as the wish is when it gets there).
  * @param me The AO.
  */
 static void radio_exp_settled(Radio * const me)
@@ -6612,7 +6622,7 @@ static bool radio_exp_power(Radio * const me, QEvt const * const e)
                     KLOG_N(TAG, "J3's supply is asked off");
                 }
             }
-            me->exp_want = on;
+            radio_exp_wish_set(me, on);
             me->exp_owed = true;
             (void)radio_exp_apply(me);
             break;
@@ -8123,12 +8133,11 @@ void Radio_ctor(void)
     /* Not known to be on: whoever ran before this boot may have left the
      * C5 driving the pin low, and a C5 still running keeps that level
      * across the P4's reset. */
-    me->exp_want    = false;
+    radio_exp_wish_set(me, false);
     me->exp_on      = false;
     me->exp_known   = false;
     me->exp_job     = false;
     me->exp_owed    = false;
-    me->exp_link    = false;
     me->amp_wished  = false;
     me->amp_off     = false;
     me->amp_low     = false;
@@ -10643,7 +10652,7 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
                 KLOG_E(TAG, "the C5 would not switch J3's supply; "
                             "ask again with exp_power");
                 me->exp_on   = !me->exp_on;
-                me->exp_want = me->exp_on;
+                radio_exp_wish_set(me, me->exp_on);
                 radio_exp_said(me, on, KODE_IO_ERROR);
                 if ( !later )
                 {
@@ -10978,13 +10987,14 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
              * keeps its link until `radio_down`. Nothing to settle on the way
              * in: the debts are incurred only with the link up, and both
              * no-link entries clear them. */
-            /* The one debt incurred with no link: the header's supply. The
-             * bring-up left the rail as the wish was at submit when its
-             * switch went through; it is not known when it did not. A wish
-             * changed since stays owed, and its kick is posted ahead of the
+            /* The one debt incurred with no link: the header's supply.
+             * exp_on is the level the connect's worker drove, which is the
+             * wish it read. exp_known says whether that drive went through;
+             * when it did not, the rail is not known. A wish that changed
+             * since stays owed, and its kick is posted ahead of the
              * reconcile so its short job goes before the autojoin. Only
              * Radio_up applies the kick. */
-            me->exp_on    = me->exp_link;
+            me->exp_on    = kdrv_radio_exp_level();
             me->exp_known = kdrv_radio_exp_switched();
             if ( (me->exp_want != me->exp_on) || (me->exp_owed && !me->exp_known) )
             {
