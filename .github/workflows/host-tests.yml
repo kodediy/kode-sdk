@@ -41,8 +41,7 @@ jobs:
     timeout-minutes: 15
     steps:
       # Deliberately without submodules. The only one is the C5's own
-      # firmware, a project() for another chip that nothing here compiles -
-      # and fetching it would need a deploy key this job otherwise does not.
+      # firmware, a project() for another chip that nothing here compiles.
       - uses: actions/checkout@v7
 
       # An example builds against the SDK tag its manifest pins, not against

@@ -132,7 +132,7 @@ static void pmic_defaults(void)
 
 /**
  * @brief What the last firmware left in the PMIC: HIZ on, charging off, and
- *        the 256 mA a parked bench board charges at (Kode-Dot-Val bq_park).
+ *        the 256 mA a parked bench board charges at.
  */
 static void pmic_leftovers(void)
 {

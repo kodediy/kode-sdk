@@ -813,7 +813,7 @@ TEST_CASE("one image past a page is a second page", "[storage_ao][pages]")
     TEST_ASSERT_EQUAL_UINT(1U, p.size[1]);
 }
 
-/* Luismi's case (kode-dot-os 5a257b6), ported: no image twice, none missing. */
+/* A case ported from kshell: no image twice, none missing. */
 TEST_CASE("the card's images come in pages past the ceiling",
           "[storage_ao][pages]")
 {

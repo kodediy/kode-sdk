@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kui_test_dot_screens.c
- * @brief The E5 operator's screens, one per phase, as Luismi's kgui_e5op.c and kgui_e5pat.c paint them; no text.
+ * @brief The E5 operator's screens, one per phase, as the station's kgui_e5op.c and kgui_e5pat.c paint them; no text.
  */
 #include <string.h>
 

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kui_test_dot_paint.c
- * @brief The E5 painter: Luismi's kgui_e5pat.c primitives, the same arithmetic in the same order.
+ * @brief The E5 painter: the station's kgui_e5pat.c primitives, the same arithmetic in the same order.
  */
 #include "kui_test_dot_paint.h"
 

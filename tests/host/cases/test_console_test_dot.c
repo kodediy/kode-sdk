@@ -264,7 +264,7 @@ TEST_CASE("test_relays_take_hex_or_decimal_and_refuse_the_forbidden_pair", "[con
     down();
 }
 
-/* Photos are numbered from one on the wire, as Luismi's station asks for
+/* Photos are numbered from one on the wire, as the station asks for
  * them again: there is no photo zero to ask for. */
 TEST_CASE("test_photos_only_counts_from_one", "[console_test_dot]")
 {

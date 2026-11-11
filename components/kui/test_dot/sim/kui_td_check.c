@@ -29,7 +29,7 @@
 #define CHECK_HEAP_STATS 0   /**< No exact count of live blocks here. */
 #endif
 
-#define CHECK_W            410U   /**< The panel's width, as Luismi's kgui_e5pat.c draws it. */
+#define CHECK_W            410U   /**< The panel's width, as the station's kgui_e5pat.c draws it. */
 #define CHECK_H            502U   /**< The panel's height. */
 #define CHECK_BUF_ROWS     50U    /**< Rows of the render buffer. */
 #define CHECK_BPP          2U     /**< Bytes per RGB565 pixel. */
@@ -41,9 +41,9 @@
 #define CHECK_GRID_CELL    5U     /**< The cell the grid checks change. */
 #define CHECK_ROUNDS       3U     /**< Builds of each view in the leak check: the first warms LVGL's caches. */
 
-/** Luismi's mark centres (kgui_e5pat.c, K_MARKS; e5cam_an.c's an_mark_centres()). */
+/** the station's mark centres (kgui_e5pat.c, K_MARKS; e5cam_an.c's an_mark_centres()). */
 static const int32_t MARKS[4][2] = { { 42, 167 }, { 368, 167 }, { 368, 338 }, { 42, 338 } };
-/** Luismi's witness centres (kgui_e5pat.c, apply_frame()). */
+/** the station's witness centres (kgui_e5pat.c, apply_frame()). */
 static const int32_t WITNESSES[4][2] = { { 50, 72 }, { 360, 72 }, { 55, 405 }, { 355, 405 } };
 
 /** How many checks failed. */
@@ -352,7 +352,7 @@ static void check_refusals_build_nothing(void)
     lv_obj_delete(parent);
 }
 
-/** @brief The marks sit where Luismi's code and the analysis put them, 24 px white on black, with no witness. */
+/** @brief The marks sit where the station's code and the analysis put them, 24 px white on black, with no witness. */
 static void check_marks_geometry(void)
 {
     lv_obj_t *parent = lv_obj_create(NULL);
@@ -371,7 +371,7 @@ static void check_marks_geometry(void)
              && (0x0000U == px_at(&s, x, (y - CHECK_MARK_HALF) - 1))
              && (0x0000U == px_at(&s, x, y + CHECK_MARK_HALF));
     }
-    expect(ok, "the four marks are 24 px white squares at Luismi's centres");
+    expect(ok, "the four marks are 24 px white squares at the station's centres");
     expect((NULL != s.buf) && (0x0000U == px_at(&s, CHECK_BAND_X, CHECK_BAND_Y)), "the marks' band is black");
     expect((NULL != s.buf) && (0x0000U == px_at(&s, WITNESSES[0][0], WITNESSES[0][1])), "the marks carry no witness");
     if ( NULL != s.buf )
@@ -381,7 +381,7 @@ static void check_marks_geometry(void)
     lv_obj_delete(parent);
 }
 
-/** @brief The colours and the grey are exact, and the witnesses sit where Luismi's code puts them, on all but black. */
+/** @brief The colours and the grey are exact, and the witnesses sit where the station's code puts them, on all but black. */
 static void check_colours_and_witnesses(void)
 {
     static const uint32_t RGB[KUI_TD_COLOUR_COUNT] = { 0x000000U, 0xFFFFFFU, 0xFF0000U, 0x00FF00U, 0x0000FFU };
@@ -405,7 +405,7 @@ static void check_colours_and_witnesses(void)
         }
         (void)snprintf(what, sizeof(what), "colour %u fills the band with its exact value", (unsigned)c);
         expect((NULL != s.buf) && (c565(RGB[c]) == px_at(&s, CHECK_BAND_X, CHECK_BAND_Y)), what);
-        (void)snprintf(what, sizeof(what), "colour %u carries Luismi's witnesses (none on black)", (unsigned)c);
+        (void)snprintf(what, sizeof(what), "colour %u carries the station's witnesses (none on black)", (unsigned)c);
         expect(wit, what);
         if ( NULL != s.buf )
         {
@@ -424,7 +424,7 @@ static void check_colours_and_witnesses(void)
         {
             wit = (c565(0xE12D2DU) == px_at(&si, WITNESSES[k][0], WITNESSES[k][1]));
         }
-        (void)snprintf(what, sizeof(what), "pattern %u carries Luismi's witnesses", (unsigned)p);
+        (void)snprintf(what, sizeof(what), "pattern %u carries the station's witnesses", (unsigned)p);
         expect(wit, what);
         if ( NULL != si.buf )
         {
