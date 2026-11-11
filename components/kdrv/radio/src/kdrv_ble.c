@@ -230,9 +230,10 @@ static struct {
                                       *   one, because both report the same
                                       *   fact: the link, not either producer,
                                       *   is what failed.                    */
-    uint16_t           tx_retry;    /**< Times either drain found no
-                                      *   buffers - shared for the same
-                                      *   reason as tx_drop above.           */
+    uint16_t           tx_retry;    /**< Times a drain found no buffers,
+                                      *   its own or the stack's for the
+                                      *   notification's header - shared for
+                                      *   the same reason as tx_drop above.  */
 #if KDRV_BLE_MIRROR_PIPE
     bool               mirror_on;   /**< A central is subscribed to the
                                       *   mirror characteristic.             */
@@ -836,6 +837,16 @@ static void console_drain(struct ble_npl_event *ev)
                 return;
             }
             int const rc = ble_gatts_notify_custom(conn, s_tx_val_handle, om);
+            if ( BLE_HS_ENOMEM == rc )
+            {
+                /* Out of buffers inside the stack: the payload had its blocks
+                 * and the header found none. The same fact as no mbuf above,
+                 * and the same answer: the record stays pending and a timer
+                 * comes back for it. The callee has freed the mbuf. */
+                ++s_ble.tx_retry;
+                (void)ble_npl_callout_reset(&s_tx_co, KDRV_BLE_RETRY_TICKS);
+                return;
+            }
             if ( 0 != rc )
             {
                 /* The callee frees the mbuf on every failure path EXCEPT the
@@ -1100,6 +1111,15 @@ static void mirror_drain(struct ble_npl_event *ev)
             }
             int const rc = ble_gatts_notify_custom(conn, s_mirror_val_handle,
                                                     om);
+            if ( BLE_HS_ENOMEM == rc )
+            {
+                /* Out of buffers inside the stack: the slice stays pending,
+                 * as console_drain() says. */
+                ++s_ble.tx_retry;
+                (void)ble_npl_callout_reset(&s_mirror_tx_co,
+                                            KDRV_BLE_MIRROR_RETRY_TICKS);
+                return;
+            }
             if ( 0 != rc )
             {
                 if ( BLE_HS_ENOTSUP == rc )
@@ -1429,17 +1449,28 @@ static void app_drain(struct ble_npl_event *ev)
                 {
                     int const rc = ble_gatts_notify_custom(conn, a->val_handle[chr], om);
 
-                    if ( 0 != rc )
+                    if ( BLE_HS_ENOMEM == rc )
                     {
-                        /* Freed by the callee on every path but this one,
-                         * as console_drain() says. */
-                        if ( BLE_HS_ENOTSUP == rc )
-                        {
-                            (void)os_mbuf_free_chain(om);
-                        }
-                        ++s_ble.tx_drop;
+                        /* Out of buffers inside the stack: the notification
+                         * stays, as with no mbuf above. */
+                        ++s_ble.tx_retry;
+                        (void)ble_npl_callout_reset(&a->co, KDRV_BLE_RETRY_TICKS);
+                        more = false;
                     }
-                    kdrv_ble_app_pop();
+                    else
+                    {
+                        if ( 0 != rc )
+                        {
+                            /* Freed by the callee on every path but this
+                             * one, as console_drain() says. */
+                            if ( BLE_HS_ENOTSUP == rc )
+                            {
+                                (void)os_mbuf_free_chain(om);
+                            }
+                            ++s_ble.tx_drop;
+                        }
+                        kdrv_ble_app_pop();
+                    }
                 }
             }
         }
