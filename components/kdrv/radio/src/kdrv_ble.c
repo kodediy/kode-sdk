@@ -2441,6 +2441,13 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  * longer match (`ble_unpair` here, forget the board there). */
                 KLOG_W(TAG, "encryption failed (status %d)",
                        event->enc_change.status);
+                /* Whoever made it fail, the link goes: a peer that refuses
+                 * the pairing and stays connected would hold the one link
+                 * there is, and the board would be off the air for as long
+                 * as it liked. Most failures end the link by themselves, and
+                 * hanging up on one that is gone costs nothing. */
+                (void)ble_gap_terminate(event->enc_change.conn_handle,
+                                        BLE_ERR_AUTH_FAIL);
             }
             break;
         }
