@@ -1504,9 +1504,10 @@ enum KodeSignals {
                                  *   ring.                                    */
     WIFI_JOIN_REQ_SIG,          /**< AO_Radio: join WifiJoinEvt's network
                                  *   and remember it if it works.            */
-    WIFI_LEAVE_REQ_SIG,         /**< AO_Radio: leave, and forget the stored
-                                 *   credentials - "leave" that reconnects
-                                 *   at the next boot would be a lie.        */
+    WIFI_LEAVE_REQ_SIG,         /**< AO_Radio: leave, and keep the stored
+                                 *   credentials (WIFI_FORGET_REQ_SIG
+                                 *   forgets); nothing rejoins by itself
+                                 *   until somebody asks.                    */
     WIFI_STATE_REQ_SIG,         /**< AO_Radio: publish WIFI_STATE_SIG now.
                                  *   Answerable in every state, link or no
                                  *   link: "not connected" is an answer.     */

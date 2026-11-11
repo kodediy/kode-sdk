@@ -198,8 +198,8 @@ menu "kodeOS active objects"
             help
                 The NimBLE host on the P4, its HCI over the same SDIO link, so
                 BLE goes down with the link. The board file turns on
-                BT_NIMBLE_ENABLED, so BLE is on in an app unless it sets
-                CONFIG_KODEOS_BLE=n.
+                BT_NIMBLE_ENABLED; an app that wants BLE also sets
+                CONFIG_KODEOS_BLE=y.
 
                 On in kodeOS, off in an app.
 
