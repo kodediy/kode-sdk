@@ -2969,12 +2969,6 @@ typedef enum {
     STORAGE_PATH_DELETE,    /**< UNLINK or RMDIR, whichever the path is, in
                              *   one step: storage_delete_ask()'s. Answered
                              *   with StoragePathRspEvt's shape.             */
-    STORAGE_PATH_SPACE,     /**< How big the volume at the path is and how much
-                             *   of it is free; the path is the volume's root.
-                             *   Answered to storage_space_ask() and to a
-                             *   blocked task's waiter only: a request that
-                             *   names neither is refused with
-                             *   StoragePathRspEvt's KODE_DENIED.            */
 } storage_path_op_t;
 
 /** @brief Ask AO_Storage to do @p op to @p medium. */
@@ -3225,19 +3219,6 @@ kode_status_t storage_read_ask(QActive *who, const char *path, uint32_t offset, 
  */
 kode_status_t storage_write_ask(QActive *who, const char *path, const void *data, uint32_t len,
                                 bool append);
-
-/**
- * @brief Ask how big the volume at @p path is and how much of it is free;
- *        answered with FILE_SPACE_RSP_SIG.
- *
- * The answer's @c rc is KODE_DENIED when @p path is not a volume's root,
- * KODE_ERROR when the volume will not mount or cannot be counted, and its
- * @c space is zero then.
- * @param who  The asking AO.
- * @param path A volume's root, absolute and virtual: "/sdcard" or "/storage".
- * @return As the asks above.
- */
-kode_status_t storage_space_ask(QActive *who, const char *path);
 
 /**
  * @brief Ask AO_Storage to receive a file arriving on the console.

@@ -1023,8 +1023,8 @@ kode_status_t kode_sys_rfid_emulate_start(QActive *me,
  */
 kode_status_t kode_sys_rfid_emulate_stop(QActive *me);
 
-/* ---- Files, AO_Storage: eight kinds, a status, a listing, a folder, a
- *      delete, a rename, a read, a write and a volume's space ----
+/* ---- Files, AO_Storage: seven kinds, a status, a listing, a folder, a
+ *      delete, a rename, a read and a write ----
  * Paths are absolute and virtual ("/sdcard/...", "/storage/..."), copied,
  * shorter than KODE_SYS_FILE_PATH_MAX. Every answer is a
  * kode_sys_file_answer_t; its @c rc is KODE_DENIED for a bad path or a
@@ -1054,15 +1054,11 @@ kode_status_t kode_sys_rfid_emulate_stop(QActive *me);
 /** @brief What one path is: @c exists, @c is_dir, @c size. */
 typedef FileStat kode_sys_file_status_t;
 
-/** @brief How big a volume is: @c total_kb, and @c free_kb of it, in whole kilobytes. */
-typedef FileSpace kode_sys_file_space_t;
-
 /* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
 /**
  * @brief Answers the file requests: @c rc; a status's @c stat (FILE_STATUS_RSP_SIG);
- *        a space's @c space (FILE_SPACE_RSP_SIG); a read's @c got
- *        (FILE_READ_RSP_SIG); a listing's end, @c count and @c more
- *        (FILE_LIST_END_SIG); the rest @c rc alone (FILE_FOLDER_RSP_SIG,
+ *        a read's @c got (FILE_READ_RSP_SIG); a listing's end, @c count and
+ *        @c more (FILE_LIST_END_SIG); the rest @c rc alone (FILE_FOLDER_RSP_SIG,
  *        FILE_DELETE_RSP_SIG, FILE_RENAME_RSP_SIG, FILE_WRITE_RSP_SIG).
  */
 typedef FileRspEvt kode_sys_file_answer_t;
@@ -1082,19 +1078,6 @@ typedef StorageEntryEvt kode_sys_file_entry_t;
  * @return As the requests' rules above.
  */
 kode_status_t kode_sys_file_status(QActive *me, const char *path);
-
-/**
- * @brief Ask how big a volume is and how much of it is free.
- * @note On a large card the first count can take hundreds of milliseconds; the
- *       answer is an event, so nothing waits for it.
- * @param me     The asking AO; FILE_SPACE_RSP_SIG answers it, @c space filled
- *               in whole kilobytes on KODE_OK and zero otherwise. A volume that will not mount (no
- *               card) is KODE_ERROR, and @p volume that is not a volume's own
- *               root is KODE_DENIED.
- * @param volume A volume's root: "/sdcard" or "/storage".
- * @return As the requests' rules above.
- */
-kode_status_t kode_sys_file_space(QActive *me, const char *volume);
 
 /**
  * @brief List a page of a directory.

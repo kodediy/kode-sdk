@@ -274,10 +274,6 @@ _Static_assert(sizeof(StoragePairEvt) <= KQP_BLOCK_MEDIUM,
 /* The answers kode_sys's file and network requests get, and the network's asks. */
 _Static_assert(sizeof(FileRspEvt) <= KQP_BLOCK_MEDIUM,
                "FileRspEvt must fit the medium pool");
-/* Every file answer is served from the small tier; a space answer shares the
- * status's room and widens nothing. */
-_Static_assert(sizeof(FileRspEvt) <= KQP_BLOCK_SMALL,
-               "FileRspEvt must stay in the small pool");
 _Static_assert(sizeof(NetHostRspEvt) <= KQP_BLOCK_MEDIUM,
                "NetHostRspEvt must fit the medium pool");
 _Static_assert(sizeof(NetHttpRspEvt) <= KQP_BLOCK_MEDIUM,
