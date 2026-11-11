@@ -207,6 +207,7 @@ static struct {
     uint8_t            rsp_len;     /**< Its bytes; 0 for none.             */
     bool               rsp_set;     /**< kdrv_ble_set_scan_rsp() has set it;
                                       *   until then the console's default.  */
+    char               name[KDRV_BLE_ADV_MAX]; /**< The name it set; "" for the serial. */
     /* Outside the console guard, unlike the three fields below it: hanging
      * up on a central is kdrv_ble_quiet()'s job and that exists whether or
      * not this firmware carries a console. */
@@ -229,9 +230,10 @@ static struct {
                                       *   one, because both report the same
                                       *   fact: the link, not either producer,
                                       *   is what failed.                    */
-    uint16_t           tx_retry;    /**< Times either drain found no
-                                      *   buffers - shared for the same
-                                      *   reason as tx_drop above.           */
+    uint16_t           tx_retry;    /**< Times a drain found no buffers,
+                                      *   its own or the stack's for the
+                                      *   notification's header - shared for
+                                      *   the same reason as tx_drop above.  */
 #if KDRV_BLE_MIRROR_PIPE
     bool               mirror_on;   /**< A central is subscribed to the
                                       *   mirror characteristic.             */
@@ -291,6 +293,16 @@ extern const kdrv_ble_app_service_t kode_ble_app_service __attribute__((weak));
 const kdrv_ble_app_service_t *kdrv_ble_app_service(void)
 {
     return &kode_ble_app_service;
+}
+
+/* The Battery service, asked for by KODE_BLE_BATTERY_SERVICE(): a weak
+ * reference too, for the same deviation, and one byte whose value nothing
+ * reads - its address is the answer. */
+extern const uint8_t kode_ble_battery_service __attribute__((weak));
+
+bool kdrv_ble_battery_declared(void)
+{
+    return NULL != &kode_ble_battery_service;
 }
 
 kode_status_t kdrv_ble_set_cb(kdrv_ble_cb_t cb)
@@ -835,6 +847,16 @@ static void console_drain(struct ble_npl_event *ev)
                 return;
             }
             int const rc = ble_gatts_notify_custom(conn, s_tx_val_handle, om);
+            if ( BLE_HS_ENOMEM == rc )
+            {
+                /* Out of buffers inside the stack: the payload had its blocks
+                 * and the header found none. The same fact as no mbuf above,
+                 * and the same answer: the record stays pending and a timer
+                 * comes back for it. The callee has freed the mbuf. */
+                ++s_ble.tx_retry;
+                (void)ble_npl_callout_reset(&s_tx_co, KDRV_BLE_RETRY_TICKS);
+                return;
+            }
             if ( 0 != rc )
             {
                 /* The callee frees the mbuf on every failure path EXCEPT the
@@ -1099,6 +1121,15 @@ static void mirror_drain(struct ble_npl_event *ev)
             }
             int const rc = ble_gatts_notify_custom(conn, s_mirror_val_handle,
                                                     om);
+            if ( BLE_HS_ENOMEM == rc )
+            {
+                /* Out of buffers inside the stack: the slice stays pending,
+                 * as console_drain() says. */
+                ++s_ble.tx_retry;
+                (void)ble_npl_callout_reset(&s_mirror_tx_co,
+                                            KDRV_BLE_MIRROR_RETRY_TICKS);
+                return;
+            }
             if ( 0 != rc )
             {
                 if ( BLE_HS_ENOTSUP == rc )
@@ -1188,8 +1219,20 @@ kode_status_t kdrv_ble_mirror_write(const uint8_t *data, size_t len)
 /** @brief Bytes a notification spends on its ATT header: an opcode and a handle. */
 #define BLE_ATT_NOTIFY_HDR  3U
 
-/** @brief Services in a table with the app's: the console's, the app's and the terminator. */
-#define BLE_APP_TABLE_SVCS  3U
+/** @brief Bytes a read's answer spends on its ATT header: an opcode. */
+#define BLE_ATT_READ_HDR    1U
+
+/** @brief The largest MTU the host asks for: an ATT PDU of 451 bytes. A PDU
+ *         of 515 never reaches the air over the link to the C5, while one of
+ *         451 does, so a longer value travels as a long read or a long write
+ *         and a notification carries at most 448 of its bytes. */
+#define BLE_APP_MTU_MAX     451U
+
+/** @brief Services in a table with the app's: the console's, the app's, Battery and the terminator. */
+#define BLE_APP_TABLE_SVCS  4U
+
+#define BLE_UUID_BATTERY_SVC    0x180FU  /**< The Bluetooth SIG's Battery service.            */
+#define BLE_UUID_BATTERY_LEVEL  0x2A19U  /**< Its Battery Level: one byte, 0 to 100 percent. */
 
 /**
  * @brief kdrv_ble.c's NimBLE structures for the app's service, in the block
@@ -1209,7 +1252,20 @@ typedef struct {
     bool                     live;    /**< The host runs with the drain's event set up.        */
     struct ble_npl_event     ev;      /**< The drain's wake-up.                                */
     struct ble_npl_callout   co;      /**< Its retry, timed for console_drain()'s reason.     */
+    struct ble_gatt_chr_def  batt_chr[2];  /**< Battery Level and the {0} terminator.         */
+    uint16_t                 batt_handle;  /**< Battery Level's value handle; 0 when not served. */
+    bool                     batt_live;    /**< The host runs with batt_ev set up.             */
+    struct ble_npl_event     batt_ev;      /**< A new level to notify.                         */
 } app_host_t;
+
+/** @brief The Battery service's UUID. */
+static const ble_uuid16_t s_batt_svc_uuid = BLE_UUID16_INIT(BLE_UUID_BATTERY_SVC);
+
+/** @brief Battery Level's UUID. */
+static const ble_uuid16_t s_batt_level_uuid = BLE_UUID16_INIT(BLE_UUID_BATTERY_LEVEL);
+
+/** @brief The last charge kdrv_ble_battery_set() was given, in percent; 0 before the first. */
+static _Atomic uint8_t s_batt_pct;
 
 size_t kdrv_ble_app_host_bytes(void)
 {
@@ -1262,7 +1318,12 @@ static uint8_t app_index(uint16_t attr)
 
 /**
  * @brief A read or a write of one of the app's characteristics. Host task.
- * @param conn_handle Unused.
+ *
+ * A read appends the whole value and NimBLE sends the part from the read's
+ * offset that fits the answer; a queued value is taken once the part sent
+ * reaches its end (kdrv_ble_app_read()).
+ *
+ * @param conn_handle The link, for its MTU.
  * @param attr_handle The value's handle.
  * @param ctxt        NimBLE's access context.
  * @param arg         Unused.
@@ -1271,7 +1332,6 @@ static uint8_t app_index(uint16_t attr)
 static int app_access(uint16_t conn_handle, uint16_t attr_handle,
                       struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn_handle;
     (void)arg;
 
     uint8_t const  i   = app_index(attr_handle);
@@ -1284,7 +1344,15 @@ static int app_access(uint16_t conn_handle, uint16_t attr_handle,
     }
     else if ( BLE_GATT_ACCESS_OP_READ_CHR == ctxt->op )
     {
-        uint16_t const n = kdrv_ble_app_read(i, buf, (uint16_t)KDRV_BLE_APP_VALUE_MAX);
+        uint16_t const mtu  = ble_att_mtu(conn_handle);
+        uint16_t       span = 0U;
+
+        if ( BLE_ATT_READ_HDR < mtu )
+        {
+            span = (uint16_t)(mtu - BLE_ATT_READ_HDR);
+        }
+        uint16_t const n = kdrv_ble_app_read(i, ctxt->offset, span, buf,
+                                             (uint16_t)KDRV_BLE_APP_VALUE_MAX);
 
         rc = BLE_ATT_ERR_INSUFFICIENT_RES;
         if ( os_mbuf_append(ctxt->om, buf, n) == 0 )
@@ -1322,8 +1390,56 @@ static int app_access(uint16_t conn_handle, uint16_t attr_handle,
 }
 
 /**
- * @brief The table to register: the console's alone, or the console's and the
- *        app's after it when the app's is served.
+ * @brief A read of Battery Level. Host task.
+ * @param conn_handle Unused.
+ * @param attr_handle Unused: the service has one value.
+ * @param ctxt        NimBLE's access context.
+ * @param arg         Unused.
+ * @return 0, or the ATT error the central gets.
+ */
+static int batt_access(uint16_t conn_handle, uint16_t attr_handle,
+                       struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    int rc = BLE_ATT_ERR_UNLIKELY;
+
+    if ( BLE_GATT_ACCESS_OP_READ_CHR == ctxt->op )
+    {
+        uint8_t const pct = atomic_load(&s_batt_pct);
+
+        rc = 0;
+        if ( os_mbuf_append(ctxt->om, &pct, sizeof(pct)) != 0 )
+        {
+            rc = BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+    }
+    return rc;
+}
+
+/**
+ * @brief Tell the subscribed central the new Battery Level. Host task.
+ * @param ev Unused; the level is s_batt_pct.
+ */
+static void batt_notify(struct ble_npl_event *ev)
+{
+    (void)ev;
+
+    const app_host_t *const a = app_host();
+
+    if ( (NULL != a) && (0U != a->batt_handle) )
+    {
+        /* NimBLE reads the value through batt_access() for each subscriber. */
+        ble_gatts_chr_updated(a->batt_handle);
+    }
+}
+
+/**
+ * @brief The table to register: the console's alone, or the console's with
+ *        the app's after it when the app's is served, and Battery after
+ *        those when KODE_BLE_BATTERY_SERVICE() asks for it.
  *
  * Called after console_build_table(). The table with the app's service is
  * the block's own copy, so the console's static table stays two entries.
@@ -1344,8 +1460,10 @@ static const struct ble_gatt_svc_def *app_build_table(void)
 
     if ( NULL != a )
     {
-        a->count = 0U;
-        a->live  = false;
+        a->count       = 0U;
+        a->live        = false;
+        a->batt_live   = false;
+        a->batt_handle = 0U;
         (void)memset(a->val_handle, 0, sizeof(a->val_handle));
     }
     if ( served && (NULL != a) )
@@ -1366,14 +1484,42 @@ static const struct ble_gatt_svc_def *app_build_table(void)
             };
         }
         a->chr[t.count] = (struct ble_gatt_chr_def){ 0 };
-        a->svc[0]       = s_svc_defs[0];
-        a->svc[1]       = (struct ble_gatt_svc_def){
-            .type            = BLE_GATT_SVC_TYPE_PRIMARY,
-            .uuid            = &a->uuid[0].u,
-            .characteristics = a->chr,
-        };
-        a->svc[2] = (struct ble_gatt_svc_def){ 0 };
-        a->count  = t.count;
+        a->count        = t.count;
+    }
+    if ( (NULL != a) && (served || kdrv_ble_battery_declared()) )
+    {
+        uint8_t n = 0U;
+
+        a->svc[n] = s_svc_defs[0];
+        ++n;
+        if ( served )
+        {
+            a->svc[n] = (struct ble_gatt_svc_def){
+                .type            = BLE_GATT_SVC_TYPE_PRIMARY,
+                .uuid            = &a->uuid[0].u,
+                .characteristics = a->chr,
+            };
+            ++n;
+        }
+        if ( kdrv_ble_battery_declared() )
+        {
+            /* Read and notify, behind the same permissions as the app's own
+             * characteristics: a bonded phone reads the charge. */
+            a->batt_chr[0] = (struct ble_gatt_chr_def){
+                .uuid       = &s_batt_level_uuid.u,
+                .access_cb  = &batt_access,
+                .flags      = (ble_gatt_chr_flags)(perm.read | perm.notify),
+                .val_handle = &a->batt_handle,
+            };
+            a->batt_chr[1] = (struct ble_gatt_chr_def){ 0 };
+            a->svc[n] = (struct ble_gatt_svc_def){
+                .type            = BLE_GATT_SVC_TYPE_PRIMARY,
+                .uuid            = &s_batt_svc_uuid.u,
+                .characteristics = a->batt_chr,
+            };
+            ++n;
+        }
+        a->svc[n] = (struct ble_gatt_svc_def){ 0 };
         defs      = a->svc;
     }
     return defs;
@@ -1428,17 +1574,28 @@ static void app_drain(struct ble_npl_event *ev)
                 {
                     int const rc = ble_gatts_notify_custom(conn, a->val_handle[chr], om);
 
-                    if ( 0 != rc )
+                    if ( BLE_HS_ENOMEM == rc )
                     {
-                        /* Freed by the callee on every path but this one,
-                         * as console_drain() says. */
-                        if ( BLE_HS_ENOTSUP == rc )
-                        {
-                            (void)os_mbuf_free_chain(om);
-                        }
-                        ++s_ble.tx_drop;
+                        /* Out of buffers inside the stack: the notification
+                         * stays, as with no mbuf above. */
+                        ++s_ble.tx_retry;
+                        (void)ble_npl_callout_reset(&a->co, KDRV_BLE_RETRY_TICKS);
+                        more = false;
                     }
-                    kdrv_ble_app_pop();
+                    else
+                    {
+                        if ( 0 != rc )
+                        {
+                            /* Freed by the callee on every path but this
+                             * one, as console_drain() says. */
+                            if ( BLE_HS_ENOTSUP == rc )
+                            {
+                                (void)os_mbuf_free_chain(om);
+                            }
+                            ++s_ble.tx_drop;
+                        }
+                        kdrv_ble_app_pop();
+                    }
                 }
             }
         }
@@ -1456,6 +1613,18 @@ void kdrv_ble_app_kick(void)
     }
 }
 
+void kdrv_ble_battery_set(uint8_t pct)
+{
+    app_host_t *const a = app_host();
+
+    /* Posted to the host's own queue, as the drain's wake-up is, and only
+     * for a level that moved: AO_Power publishes every reading. */
+    if ( (atomic_exchange(&s_batt_pct, pct) != pct) && (NULL != a) && a->batt_live )
+    {
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &a->batt_ev);
+    }
+}
+
 /** @brief The host is going: no kick reaches its queue until the next start sets the drain up. */
 static void app_quiet(void)
 {
@@ -1463,7 +1632,8 @@ static void app_quiet(void)
 
     if ( NULL != a )
     {
-        a->live = false;
+        a->live      = false;
+        a->batt_live = false;
     }
 }
 
@@ -1477,6 +1647,11 @@ size_t kdrv_ble_app_host_bytes(void)
 
 void kdrv_ble_app_kick(void)
 {
+}
+
+void kdrv_ble_battery_set(uint8_t pct)
+{
+    (void)pct;
 }
 
 bool kdrv_ble_console_attached(void)
@@ -1822,6 +1997,11 @@ static void ble_forget_lost_key(const ble_addr_t *peer, int reason)
 }
 #endif /* CONFIG_KODEOS_BLE_CONSOLE_PAIRING */
 
+/** @brief The first and the last handle an attribute can have: Service
+ *         Changed over this range says the whole table may be new. */
+#define BLE_ATT_HANDLE_FIRST  0x0001U
+#define BLE_ATT_HANDLE_LAST   0xFFFFU
+
 /** @brief The controller answered: from here the stack knows its own address. */
 static void ble_on_sync(void)
 {
@@ -1846,6 +2026,14 @@ static void ble_on_sync(void)
     ble_store_hook();
     ble_migrate_old_keys();
 #endif
+    /* A bonded peer keeps the attribute table it found on its last visit,
+     * and the table is not the same from one firmware to the next: kodeOS
+     * and each app build their own. Without Service Changed, iOS reuses the
+     * table it kept and never finds an app's service. NimBLE marks every
+     * bond that subscribed to it, and indicates once on that bond's next
+     * encrypted connection, until the peer acknowledges. */
+    ble_svc_gatt_changed((uint16_t)BLE_ATT_HANDLE_FIRST,
+                         (uint16_t)BLE_ATT_HANDLE_LAST);
     s_ble.synced = true;
     (void)xEventGroupSetBits(s_ble.bits, BLE_BIT_SYNCED);
     KLOG_D(TAG, "controller in sync: %02x:%02x:%02x:%02x:%02x:%02x",
@@ -2440,6 +2628,13 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  * longer match (`ble_unpair` here, forget the board there). */
                 KLOG_W(TAG, "encryption failed (status %d)",
                        event->enc_change.status);
+                /* Whoever made it fail, the link goes: a peer that refuses
+                 * the pairing and stays connected would hold the one link
+                 * there is, and the board would be off the air for as long
+                 * as it liked. Most failures end the link by themselves, and
+                 * hanging up on one that is gone costs nothing. */
+                (void)ble_gap_terminate(event->enc_change.conn_handle,
+                                        BLE_ERR_AUTH_FAIL);
             }
             break;
         }
@@ -2631,7 +2826,7 @@ kode_status_t kdrv_ble_start(void)
      * found no such characteristic. */
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    (void)ble_svc_gap_device_name_set(kdrv_ble_serial_name());
+    (void)ble_svc_gap_device_name_set(kdrv_ble_name());
 
 #if CONFIG_KODEOS_BLE_CONSOLE
     console_build_table();
@@ -2726,6 +2921,30 @@ kode_status_t kdrv_ble_start(void)
                                    &app_drain, NULL);
         app->live = true;
     }
+    if ( (NULL != app) && (0U != app->batt_handle) )
+    {
+        (void)memset(&app->batt_ev, 0, sizeof(app->batt_ev));
+        ble_npl_event_init(&app->batt_ev, &batt_notify, NULL);
+        app->batt_live = true;
+    }
+
+    /* A value longer than a notification at the preferred MTU makes the host
+     * ask for more, up to BLE_APP_MTU_MAX, so one notification carries one
+     * whole value where the link allows. Only an app that asked for long
+     * values (CONFIG_KODE_BLE_APP_VALUE_MAX) moves it; the central decides
+     * the MTU in the end, and a value it cannot take in one notification is
+     * dropped and counted (app_drain()). */
+    uint16_t want_mtu = (uint16_t)(KDRV_BLE_APP_VALUE_MAX + BLE_ATT_NOTIFY_HDR);
+
+    if ( (uint16_t)BLE_APP_MTU_MAX < want_mtu )
+    {
+        want_mtu = (uint16_t)BLE_APP_MTU_MAX;
+    }
+
+    if ( (ble_att_preferred_mtu() < want_mtu) && (ble_att_set_preferred_mtu(want_mtu) != 0) )
+    {
+        KLOG_W(TAG, "the host refused a preferred MTU of %u", (unsigned)want_mtu);
+    }
 
 #if KDRV_BLE_MIRROR_PIPE
     /* The mirror ring, set up the same way and for the same reason - see the
@@ -2783,7 +3002,7 @@ kode_status_t kdrv_ble_start(void)
 
     ble_set_state(KDRV_BLE_IDLE);
     KLOG_N(TAG, "BLE up (NimBLE here, the radio on the C5), as '%s'",
-           kdrv_ble_serial_name());
+           kdrv_ble_name());
     return KODE_OK;
 }
 
@@ -2946,6 +3165,17 @@ kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_
         return rc;
     }
     s_ble.rsp_set = true;
+    s_ble.name[0] = '\0';
+    if ( NULL != name )
+    {
+        (void)snprintf(s_ble.name, sizeof(s_ble.name), "%s", name);
+    }
+    if ( s_ble.up )
+    {
+        /* What a central reads once it has connected, and lists the board
+         * under from then on: the same name the scan response shows. */
+        (void)ble_svc_gap_device_name_set(kdrv_ble_name());
+    }
     if ( s_ble.synced && !s_ble.adv_hidden )
     {
         /* Legal while advertising: the next scan request is answered with it.
@@ -2960,6 +3190,17 @@ kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_
     KLOG_N(TAG, "scan response: %u of %u bytes", (unsigned)s_ble.rsp_len,
            (unsigned)KDRV_BLE_ADV_MAX);
     return KODE_OK;
+}
+
+const char *kdrv_ble_name(void)
+{
+    const char *name = s_ble.name;
+
+    if ( '\0' == s_ble.name[0] )
+    {
+        name = kdrv_ble_serial_name();
+    }
+    return name;
 }
 
 bool kdrv_ble_link_secure(void)
@@ -3030,6 +3271,18 @@ kode_status_t kdrv_ble_advertise(bool on)
      * Bluetooth, startDeviceScan([uuid]) in ble-plx. Without it a phone app
      * has to inspect every advertiser in the room. */
     fields.uuids128 = &s_svc_uuid;
+#if CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE
+    {
+        /* The app's UUID in its place, for the phones that filter on the
+         * app's protocol; only one 128-bit UUID fits. */
+        app_host_t *const a = app_host();
+
+        if ( (NULL != a) && (0U < a->count) )
+        {
+            fields.uuids128 = &a->uuid[0];
+        }
+    }
+#endif
     fields.num_uuids128 = 1U;
     fields.uuids128_is_complete = 1;
 #else
@@ -3128,7 +3381,7 @@ kode_status_t kdrv_ble_advertise(bool on)
     }
     else
     {
-        KLOG_I(TAG, "advertising as '%s'", kdrv_ble_serial_name());
+        KLOG_I(TAG, "advertising as '%s'", kdrv_ble_name());
     }
     return KODE_OK;
 }

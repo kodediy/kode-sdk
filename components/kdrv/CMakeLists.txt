@@ -158,6 +158,8 @@ if(CONFIG_KODEOS_RADIO)
     list(APPEND srcs "radio/src/kdrv_c5.c")
     # The KODE services on the C5 (vault, identity, BLE keys): kode_wire.h.
     list(APPEND srcs "radio/src/kdrv_c5svc.c")
+    # The Wi-Fi frames service's P4 end: the C5's batches decoded and held.
+    list(APPEND srcs "radio/src/kdrv_frames.c")
     if(CONFIG_KODEOS_WIFI)
         list(APPEND srcs "radio/src/kdrv_wifi.c")
         # The host's own stack, on top of the address the C5's radio earns.

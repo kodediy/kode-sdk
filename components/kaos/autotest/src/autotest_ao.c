@@ -306,7 +306,7 @@ void kaos_autotest_register(void)
           NULL, 0U, "Charger",
           "Charger not right",
           AUTOTEST_ORDER_PMIC },
-        { "gauge", AUTOTEST_ID_GAUGE, row_gauge, KROW_ASYNC, AUTOTEST_G_MAIN, KODE_TEST_ROW_BUDGET_MS,
+        { "gauge", AUTOTEST_ID_GAUGE, row_gauge, KROW_ASYNC, AUTOTEST_G_MAIN, KODE_GAUGE_TEST_BUDGET_MS,
           NULL, 0U, "Battery gauge",
           "Gauge not right",
           AUTOTEST_ORDER_GAUGE },

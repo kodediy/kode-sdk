@@ -138,6 +138,8 @@ if(CONFIG_KODEOS_CONSOLE)
 endif()
 if(CONFIG_KODEOS_RADIO)
     list(APPEND srcs "radio/src/radio_ao.c")
+    # The Wi-Fi frames door: its asker, its request and what it posts.
+    list(APPEND srcs "radio/src/radio_frames.c")
     if(CONFIG_KODEOS_CONSOLE)
         list(APPEND srcs "radio/src/radio_verbs.c")
     endif()

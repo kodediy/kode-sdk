@@ -85,6 +85,9 @@ typedef struct {
     bool     pmic;         /**< The BQ25896 answered and took the policy.   */
     bool     gauge;        /**< The CW2217 answered at startup.            */
     bool     gauge_ready;  /**< Its algorithm has reported ready since.    */
+    bool     gauge_owed;   /**< A gauge row waits for the algorithm.       */
+    uint8_t  gauge_depth;  /**< That row's POWER_DEPTH_*.                  */
+    uint32_t gauge_asked_ms; /**< khal_time_ms() when that row was asked.  */
     int32_t  ocv_x16;      /**< Filtered OCV, 1/16 mV; -1 before a reading. */
     int32_t  soc_disp;     /**< The percentage last shown; -1 before one.  */
     bool     charge_wanted; /**< The last charge request said on.           */
@@ -95,7 +98,7 @@ typedef struct {
     uint8_t  ctrl_tries;   /**< Reset polls so far.                        */
     bool     boost_wanted; /**< A boost was asked for and not yet stopped. */
     uint16_t vbat_mv;      /**< The last reading's cell; 0 before one.     */
-    QTimeEvt pulse;        /**< The write pulse's own periodic timer.      */
+    QTimeEvt pulse;        /**< The write pulse: one half at a time.       */
     bool     writing;      /**< A flash write is reporting progress.       */
     uint32_t write_ms;     /**< khal_time_ms() at the last report.         */
     bool     led_done;     /**< The green is on, and the pulse's timer ends it. */
@@ -316,6 +319,9 @@ void Power_ctor(void)
     me->pmic          = false;
     me->gauge         = false;
     me->gauge_ready   = false;
+    me->gauge_owed    = false;
+    me->gauge_depth   = POWER_DEPTH_FULL;
+    me->gauge_asked_ms = 0U;
     me->ocv_x16       = -1;
     me->soc_disp      = -1;
     me->charge_wanted = true;
@@ -796,8 +802,8 @@ static void led_write_step(Power * const me, bool writing)
         (void)QTimeEvt_disarm(&me->pulse);
         if ( writing )
         {
-            QTimeEvt_armX(&me->pulse, KQP_TICKS_PER_MS(KODE_LED_PULSE_MS),
-                          KQP_TICKS_PER_MS(KODE_LED_PULSE_MS));
+            /* A one-shot: each half taken arms the next (POWER_PULSE_SIG). */
+            QTimeEvt_armX(&me->pulse, KQP_TICKS_PER_MS(KODE_LED_PULSE_MS), 0U);
         }
         led_publish(me, writing);  /* the first half lit, or dark at the end */
     }
@@ -1312,13 +1318,38 @@ static bool test_gauge(uint8_t ammeter)
 }
 
 /**
- * @brief Run one chip's self-test and publish the verdict.
+ * @brief Whether the gauge is there and its algorithm is not up yet.
+ *
+ * Read off the chip rather than the poll's flag, because a row can be asked
+ * before the first poll has looked. A read that fails is not "coming up":
+ * the test itself says what it is.
+ *
+ * @param me The AO.
+ * @return true while the CW2217 answers READY = 0.
+ */
+static bool gauge_coming_up(Power const * const me)
+{
+    int32_t ready = 0;
+
+    if ( !me->gauge )
+    {
+        return false;
+    }
+    if ( kdrv_cw2217_get(KDRV_CW_READY, &ready) != KODE_OK )
+    {
+        return false;
+    }
+    return 0 == ready;
+}
+
+/**
+ * @brief Judge one chip's self-test and publish the verdict.
  *
  * @param me    The AO.
  * @param chip  POWER_CHIP_PMIC or POWER_CHIP_GAUGE.
  * @param depth POWER_DEPTH_*.
  */
-static void power_test(Power * const me, uint8_t chip, uint8_t depth)
+static void power_test_answer(Power * const me, uint8_t chip, uint8_t depth)
 {
     const char *name = "pmic";
     bool ok;
@@ -1345,6 +1376,63 @@ static void power_test(Power * const me, uint8_t chip, uint8_t depth)
         ev->origin = TEST_ORIGIN_AUTOTEST;
         QACTIVE_PUBLISH(&ev->super, &me->super);
     }
+}
+
+/**
+ * @brief Run one chip's self-test, or hold a gauge row until the chip is up.
+ *
+ * A gauge woken from shutdown (the cell just connected) takes about 1.5 s to
+ * come up, and a row asked in that time would fail a chip that is fine. That
+ * row waits: each poll looks again (gauge_test_due()), up to
+ * KODE_GAUGE_READY_WAIT_MS from the ask.
+ *
+ * @param me    The AO.
+ * @param chip  POWER_CHIP_PMIC or POWER_CHIP_GAUGE.
+ * @param depth POWER_DEPTH_*.
+ */
+static void power_test(Power * const me, uint8_t chip, uint8_t depth)
+{
+    if ( POWER_CHIP_GAUGE == chip )
+    {
+        if ( me->gauge_owed )
+        {
+            /* Already waiting: the one answer that comes covers this ask. */
+            return;
+        }
+        if ( gauge_coming_up(me) )
+        {
+            me->gauge_owed     = true;
+            me->gauge_depth    = depth;
+            me->gauge_asked_ms = khal_time_ms();
+            KLOG_N(TAG, "test gauge: the algorithm is not up yet; waiting up to %u ms",
+                   (unsigned)KODE_GAUGE_READY_WAIT_MS);
+            return;
+        }
+    }
+    power_test_answer(me, chip, depth);
+}
+
+/**
+ * @brief Answer a waiting gauge row once the chip is up or the wait is over.
+ *
+ * Past the wait the row is judged as it stands, so a gauge that never comes
+ * up still fails with its own reason ("not ready").
+ *
+ * @param me The AO.
+ */
+static void gauge_test_due(Power * const me)
+{
+    if ( !me->gauge_owed )
+    {
+        return;
+    }
+    if ( gauge_coming_up(me)
+        && ((khal_time_ms() - me->gauge_asked_ms) < KODE_GAUGE_READY_WAIT_MS) )
+    {
+        return;
+    }
+    me->gauge_owed = false;
+    power_test_answer(me, POWER_CHIP_GAUGE, me->gauge_depth);
 }
 
 /* ---- The `power_plug` row ------------------------------------------------ */
@@ -1431,12 +1519,16 @@ static void plug_start(Power * const me)
     plug_publish(1U, POWER_TEST_ASK_PLUG);
     me->plug_phase = PLUG_WAIT_IN;
     me->plug_looks = PLUG_LOOKS_STEP;
-    QTimeEvt_armX(&me->plug, KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS),
-                  KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS));
+    QTimeEvt_armX(&me->plug, KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS), 0U);
 }
 
 /**
  * @brief One look at the cable, and whatever it moves the row to.
+ *
+ * The look is a one-shot that each look taken arms again, NOT a periodic
+ * timer: QP posts a time event with no margin, and a periodic one goes on
+ * posting whether or not this AO has run. Armed again by the look itself, one
+ * waits at most; the end of the row takes it back (plug_end()).
  *
  * @param me The AO.
  */
@@ -1448,6 +1540,8 @@ static void plug_look(Power * const me)
     {
         return;
     }
+    (void)QTimeEvt_rearm(&me->plug,
+                         KQP_TICKS_PER_MS(KODE_POWER_PLUG_LOOK_MS));
     if ( !plug_vbus(&vbus) )
     {
         KLOG_E(TAG, "test power_plug: FAIL - the charger chip does not answer");
@@ -2412,7 +2506,8 @@ static QState Power_initial(Power * const me, void const * const par)
     }
 
     /* The gauge is optional: it is powered from the cell, so on a board with
-     * no battery it simply is not there. Woken, not waited for. */
+     * no battery it simply is not there. Woken if it is in shutdown, left
+     * running if a reset found it so; never waited for. */
     me->gauge = (kdrv_cw2217_init() == KODE_OK);
     if ( me->gauge && (kdrv_cw2217_wake() != KODE_OK) )
     {
@@ -2496,10 +2591,12 @@ static QState Power_polling(Power * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             /* First shot after the ADC has had time to convert; every one
-             * after that on the ordinary period. */
-            QTimeEvt_armX(&me->poll,
-                          KQP_TICKS_PER_MS(KODE_POWER_FIRST_MS),
-                          KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
+             * after that on the ordinary period, armed by the poll taken.
+             * A one-shot, NOT a periodic timer: QP posts a time event with no
+             * margin, and a periodic one goes on posting whether or not this
+             * AO has run, so a stall of a few periods fills the queue and
+             * resets the board. One waits at most. */
+            QTimeEvt_armX(&me->poll, KQP_TICKS_PER_MS(KODE_POWER_FIRST_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -2511,6 +2608,8 @@ static QState Power_polling(Power * const me, QEvt const * const e)
             break;
         }
         case POWER_POLL_SIG: {
+            (void)QTimeEvt_rearm(&me->poll,
+                                 KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
             /* A radio wake runs the tick while the ADC is rested: its
              * registers are stale and the minute's peek keeps the clock, so
              * there is nothing to read. */
@@ -2518,19 +2617,37 @@ static QState Power_polling(Power * const me, QEvt const * const e)
             {
                 power_poll(me);
             }
+            gauge_test_due(me);
             status = Q_HANDLED();
             break;
         }
         case POWER_PULSE_SIG: {
             if ( me->led_done )
             {
-                me->led_done = false;
-                led_publish(me, false);
+                if ( 0U == QTimeEvt_getCtr(&me->pulse) )
+                {
+                    me->led_done = false;
+                    led_publish(me, false);
+                }
+                else
+                {
+                    /* The green's own timer is still counting: this is a
+                     * half queued before the write ended, and the green
+                     * keeps its second. */
+                }
+            }
+            else if ( me->writing )
+            {
+                /* The next half, a period from this one. */
+                (void)QTimeEvt_rearm(&me->pulse,
+                                     KQP_TICKS_PER_MS(KODE_LED_PULSE_MS));
+                me->pulse_lit = !me->pulse_lit;
+                led_publish(me, me->pulse_lit);
             }
             else
             {
-                me->pulse_lit = !me->pulse_lit;
-                led_publish(me, me->pulse_lit);
+                /* A half queued before the write ended is dropped: it
+                 * lights nothing and arms nothing. */
             }
             status = Q_HANDLED();
             break;
@@ -2716,8 +2833,9 @@ static QState Power_polling(Power * const me, QEvt const * const e)
  *
  * A substate of Power_polling: the poll and everything else keep running,
  * only a second control request is turned away. The transition back is to
- * the superstate, which QP performs as an exit of this state alone, so the
- * poll timer armed on Power_polling's entry is never re-armed.
+ * the superstate, which QP performs as an exit of this state alone, so
+ * Power_polling's entry never runs again: the poll handler arms each next
+ * poll.
  */
 static QState Power_waiting(Power * const me, QEvt const * const e)
 {

@@ -24,6 +24,11 @@ static struct {
     bool               adopted;     /**< What kdrv_radio_adopted() answers. */
     bool               exp_fails;   /**< A CONNECT does not switch J3's supply. */
     bool               exp_switched; /**< What kdrv_radio_exp_switched() answers. */
+    bool               exp_pin;     /**< The level J3's supply enable holds.    */
+    uint32_t           exp_offs;    /**< Times the pin was driven low.          */
+    bool               read_done;   /**< The CONNECT worker has read the wish.  */
+    bool               read_on;     /**< What it read.                          */
+    bool               exp_level;   /**< What kdrv_radio_exp_level() answers.   */
     kdrv_radio_probe_result_t probe;  /**< What kdrv_radio_probe_result() answers. */
 #if CONFIG_KODE_LOWPOWER
     kdrv_radio_sleep_note_cb_t sleep_note; /**< What the last start was given. */
@@ -35,6 +40,19 @@ static struct {
     kode_status_t      sleep_rc;    /**< What the next start answers.       */
 #endif
 } s_r;
+
+/** The wish AO_Radio last set: kept across fake_radio_reset(), as the AO's own is. */
+static bool s_exp_wish;
+
+void kdrv_radio_exp_wish(bool on)
+{
+    s_exp_wish = on;
+}
+
+bool kdrv_radio_exp_level(void)
+{
+    return s_r.exp_level;
+}
 
 void fake_radio_reset(void)
 {
@@ -145,6 +163,32 @@ void fake_radio_set_fw(uint32_t major, uint32_t minor, uint32_t patch,
     s_r.fw_known  = known;
 }
 
+/** @brief The C5 drives J3's supply enable to @p on. */
+static void exp_drive(bool on)
+{
+    s_r.exp_pin = on;
+    if ( !on )
+    {
+        s_r.exp_offs += 1U;
+    }
+}
+
+bool fake_radio_exp_pin(void)
+{
+    return s_r.exp_pin;
+}
+
+uint32_t fake_radio_exp_off_drives(void)
+{
+    return s_r.exp_offs;
+}
+
+void fake_radio_connect_read(void)
+{
+    s_r.read_done = true;
+    s_r.read_on   = s_exp_wish;
+}
+
 void fake_radio_effects(kdrv_radio_job_t job, kode_status_t rc)
 {
     /* What the real driver does on the way out of the two link jobs, so a
@@ -154,6 +198,22 @@ void fake_radio_effects(kdrv_radio_job_t job, kode_status_t rc)
     {
         s_r.link_up      = true;
         s_r.exp_switched = !s_r.exp_fails;
+        if ( s_r.read_done )
+        {
+            s_r.exp_level = s_r.read_on;
+        }
+        else
+        {
+            s_r.exp_level = s_exp_wish;
+        }
+        if ( !s_r.exp_fails )
+        {
+            exp_drive(s_r.exp_level);
+        }
+    }
+    if ( (KDRV_RADIO_JOB_EXP_POWER == job) && (KODE_OK == rc) )
+    {
+        exp_drive(s_r.ran.on);
     }
     if ( (KDRV_RADIO_JOB_CONNECT == job) && (KODE_OK != rc) )
     {
@@ -247,6 +307,8 @@ kode_status_t kdrv_radio_run(const kdrv_radio_req_t *req)
         s_r.connected    = true;
         s_r.c5_held      = false;
         s_r.exp_switched = false;
+        s_r.read_done    = false;
+        s_r.exp_pin      = true;   /* the reset lets go of the enable */
     }
     return KODE_OK;
 }

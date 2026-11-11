@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "kbsp_board.h"
 #include "kode_defs.h"
 #include "khal_sync.h"
 
@@ -21,6 +22,33 @@ extern "C" {
 #define KDRV_DISPLAY_FRAME_US 16829U /**< One refresh of the panel, in us,
                                       *   from the DPI timing in
                                       *   kdrv_display.c.                  */
+
+#define KDRV_DISPLAY_CACHE_LINE 64U /**< The PSRAM cache line of the board's
+                                     *   cache setup (kdrv_display.c asserts
+                                     *   it matches the build's).          */
+
+#define KDRV_DISPLAY_BYTES_PER_PIXEL 2U /**< RGB565. */
+
+/**
+ * The size of each framebuffer in bytes: the one ESP-IDF's panel driver
+ * allocates for it, the picture rounded up to whole cache lines. It is what
+ * kdrv_display_back_buffer() and kdrv_display_front_buffer() point into, so a
+ * consumer that tells another driver how big the buffer is - a PPA output -
+ * says this, not the picture's own 410 x 502 x 2.
+ */
+#define KDRV_DISPLAY_FB_BYTES \
+    ((((size_t)KBSP_LCD_H_RES * KBSP_LCD_V_RES * KDRV_DISPLAY_BYTES_PER_PIXEL) \
+      + (KDRV_DISPLAY_CACHE_LINE - 1U)) & ~((size_t)KDRV_DISPLAY_CACHE_LINE - 1U))
+
+_Static_assert(0U == (KDRV_DISPLAY_FB_BYTES % KDRV_DISPLAY_CACHE_LINE),
+               "a framebuffer is whole cache lines");
+_Static_assert(KDRV_DISPLAY_FB_BYTES >=
+                   ((size_t)KBSP_LCD_H_RES * KBSP_LCD_V_RES * KDRV_DISPLAY_BYTES_PER_PIXEL),
+               "a framebuffer holds the picture");
+_Static_assert(KDRV_DISPLAY_FB_BYTES <
+                   (((size_t)KBSP_LCD_H_RES * KBSP_LCD_V_RES * KDRV_DISPLAY_BYTES_PER_PIXEL)
+                    + KDRV_DISPLAY_CACHE_LINE),
+               "a framebuffer is the picture plus less than one cache line");
 
 /**
  * @brief Leave the frame on the glass through the restart that comes next.
@@ -152,13 +180,16 @@ kode_status_t kdrv_display_flush(int32_t x1, int32_t y1, int32_t x2, int32_t y2,
  * then the engine may still be reading it.
  *
  * The PPA refuses an output whose address or size is not a multiple of the
- * cache line, and a 410 x 502 RGB565 frame is 411640 bytes, 56 past one. Its
- * tallest output that fits is 410 x 496 (a row is 820 bytes, so only a
- * multiple of 16 rows lands on a line); the caller fills the last six rows
+ * cache line, and a 410 x 502 RGB565 frame is 411640 bytes, 56 past one. The
+ * buffer itself is KDRV_DISPLAY_FB_BYTES long, whole lines, so that is the
+ * size to name as the output's. A caller that names the picture's own size
+ * instead gets its tallest output that fits, 410 x 496 (a row is 820 bytes,
+ * so only a multiple of 16 rows lands on a line), and fills the last six rows
  * itself.
  *
- * @return The back buffer, 410 x 502 RGB565 with a stride of 820 bytes, or
- *         NULL when the panel is not up or runs on a single framebuffer.
+ * @return The back buffer, 410 x 502 RGB565 with a stride of 820 bytes in a
+ *         KDRV_DISPLAY_FB_BYTES allocation, or NULL when the panel is not up
+ *         or runs on a single framebuffer.
  */
 void *kdrv_display_back_buffer(void);
 
@@ -291,6 +322,24 @@ uint32_t kdrv_display_buffers_epoch(void);
  *         state is unchanged for this driver and the call may be repeated.
  */
 kode_status_t kdrv_display_panel_sleep(bool sleep);
+
+/**
+ * @brief Drive the reset line the panel shares with the touch controller low,
+ *        and wait out the least time the panel wants it low.
+ *
+ * The first step of the panel's power-off: after the sleep-in and with the
+ * link down, the line goes low, stays there for at least 1 ms, and only then
+ * may the panel's supply go. Both parts are in reset from here; the line is
+ * left low. Nothing brings it back but the next boot's bring-up, so it is for
+ * the board going OFF only. Blocks for the wait, as the sleep-in does.
+ * AO_Display's thread only.
+ *
+ * @return KODE_OK with the line low; KODE_DENIED before kdrv_display_init(),
+ *         or with the link up (the video panel owns the line then, and the
+ *         line is left as it is); the pin's own refusal when it would not be
+ *         driven, with no wait.
+ */
+kode_status_t kdrv_display_reset_low(void);
 
 /**
  * @brief Write a rectangle of RGB565 straight into the panel's memory, with

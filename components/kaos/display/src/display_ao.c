@@ -408,14 +408,18 @@ typedef struct {
      * self-posted step, then asks the bench about each field. */
     uint8_t   test_field;      /**< DISPLAY_FIELD_* being painted or asked
                                 *   about.                                   */
+    uint8_t   test_stage;      /**< TEST_STAGE_*: the opening screen, the
+                                *   renderer's last frame, or the fields.    */
     bool      test_asking;     /**< The field is on the glass and its
                                 *   question is out: a press is an answer.   */
     bool      flush_owed;      /**< The renderer is owed one completion: one
                                 *   it had not collected when a field started
                                 *   going up, or a flush it asked for since.
                                 *   Paid when the last band has landed.      */
-    QTimeEvt  test_wait;       /**< DISPLAY_TEST_WAIT_SIG: the operator's
-                                *   deadline for this field.                 */
+    QTimeEvt  test_wait;       /**< DISPLAY_TEST_WAIT_SIG: the end of the
+                                *   opening screen or of the renderer's last
+                                *   frame, then the operator's deadline for
+                                *   each field.                              */
     bool      test_wait_live;  /**< An arming is outstanding.                */
     uint32_t  test_wait_stale; /**< Expiries queued for a field that was
                                 *   already answered.                        */
@@ -1070,9 +1074,14 @@ static void rest_restore_retry(Display * const me)
  * STATE(OFF) is the point of no return: deep sleep follows. Only there is
  * VCI_EN (P7) let go, and only with the panel in sleep-in and the link down;
  * a panel that refused sleep-in keeps its supply rather than lose it lit. The
- * expander holds P7 low through deep sleep, so the next boot powers the panel
- * up cold. No answer is asked: if the request misses the grace, the panel
- * stays powered and asleep.
+ * panel's power-off order has the reset line low, for at least 1 ms, before
+ * the supply: the driver drives the line low and waits that time before this
+ * asks the expander's owner for P7. A panel that did not sleep gets neither
+ * the line nor the supply from this AO; there the hold alone drives the line
+ * low, at the deep sleep (khal_power_off_enter()), and it stays low through
+ * it. The expander holds P7 low through deep sleep, so the next boot powers
+ * the panel up cold. No answer is asked: if the request misses the grace, the
+ * panel stays powered and asleep.
  *
  * @param me The AO.
  * @param s  The change.
@@ -1086,6 +1095,13 @@ static void rest_state(Display * const me, const LowPowerStateEvt * const s)
     else if ( ((uint8_t)KODE_LP_OFF == s->state) && (REST_OFF == me->rest)
              && me->panel_asleep )
     {
+        kode_status_t const st = kdrv_display_reset_low();
+
+        if ( KODE_OK != st )
+        {
+            KLOG_W(TAG, "OFF: the reset line would not go low (rc %d); the supply goes all the same",
+                   (int)st);
+        }
         ioexp_field_request(NULL, FIELD_OP_SET, (uint16_t)KDRV_TCA_O7, 0);
         KLOG_N(TAG, "OFF: the panel's supply goes (P7 low)");
     }
@@ -1793,6 +1809,12 @@ static void mirror_pass(Display * const me)
  * or tinted; BUTTON_BOT: it is not; no answer in KODE_DISPLAY_TEST_STEP_MS:
  * nobody there. A press answers; a press while a field is painting is dropped.
  *
+ * The fields carry no words, so the row opens with the glass still the
+ * renderer's (DISPLAY_TEST_INTRO): whoever draws it says what the pad will
+ * mean, until BUTTON_TOP or KODE_DISPLAY_TEST_INTRO_MS. Then the renderer's
+ * flushes are held for KODE_DISPLAY_TEST_SETTLE_MS before the first band, so
+ * a frame it started on the opening screen lands before the field, not on it.
+ *
  * A substate of active: everything else still works, but a renderer flush is
  * completed at once and dropped, so the launcher cannot paint over the field.
  * The renderer's completion shares a binary semaphore with the bands' waits,
@@ -1820,6 +1842,11 @@ static const uint16_t TEST_FIELD_RGB[DISPLAY_FIELD_COUNT] = {
  *         quarter of a millisecond; this is a ceiling on a panel that has
  *         stopped answering, not a figure anything waits out. */
 #define TEST_FLUSH_MS     20U
+
+/* Where the row stands (Display.test_stage). */
+#define TEST_STAGE_INTRO   0U  /**< The opening screen is up.                */
+#define TEST_STAGE_SETTLE  1U  /**< The renderer finishes its last frame.    */
+#define TEST_STAGE_FIELDS  2U  /**< The fields are painted and asked about.  */
 
 /** @brief What a field is called in the log. */
 static const char *field_name(uint8_t field)
@@ -1914,6 +1941,19 @@ static void wait_stop(Display * const me)
     me->test_wait_live = false;
 }
 
+/**
+ * @brief Arm the row's one-shot for @p ms.
+ *
+ * @param me The AO.
+ * @param ms How long from now.
+ */
+static void wait_arm(Display * const me, uint32_t ms)
+{
+    wait_stop(me);
+    QTimeEvt_armX(&me->test_wait, KQP_TICKS_PER_MS(ms), 0U);
+    me->test_wait_live = true;
+}
+
 /** @brief Ask this AO for the next band of the field being painted. */
 static void paint_step_post(Display * const me)
 {
@@ -1975,11 +2015,31 @@ static void paint_done(Display * const me)
            field_name(me->test_field));
     test_record(me, (uint8_t)DISPLAY_TEST_ASK);
     me->test_asking = true;
+    wait_arm(me, KODE_DISPLAY_TEST_STEP_MS);
+}
 
-    wait_stop(me);
-    QTimeEvt_armX(&me->test_wait,
-                  KQP_TICKS_PER_MS(KODE_DISPLAY_TEST_STEP_MS), 0U);
-    me->test_wait_live = true;
+/**
+ * @brief The opening screen is done with: hold the renderer's flushes, and
+ *        give the frame it may be drawing the time to land.
+ *
+ * @param me The AO.
+ */
+static void intro_end(Display * const me)
+{
+    me->test_stage = (uint8_t)TEST_STAGE_SETTLE;
+    wait_arm(me, KODE_DISPLAY_TEST_SETTLE_MS);
+}
+
+/**
+ * @brief The renderer's last frame has landed: the first field goes up.
+ *
+ * @param me The AO.
+ */
+static void fields_start(Display * const me)
+{
+    me->test_stage = (uint8_t)TEST_STAGE_FIELDS;
+    (void)kdrv_display_brightness((uint8_t)KODE_DISPLAY_TEST_BRIGHT);
+    paint_start(me);
 }
 
 /**
@@ -1997,6 +2057,7 @@ static QState Display_testing(Display * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             me->test_field      = (uint8_t)DISPLAY_FIELD_WHITE;
+            me->test_stage      = (uint8_t)TEST_STAGE_INTRO;
             me->test_asking     = false;
             me->flush_owed      = false;
             /* Zeroed per row: an expiry left by the previous row was dropped
@@ -2016,8 +2077,11 @@ static QState Display_testing(Display * const me, QEvt const * const e)
             }
             else
             {
-                (void)kdrv_display_brightness((uint8_t)KODE_DISPLAY_TEST_BRIGHT);
-                paint_start(me);
+                KLOG_N(TAG, "test display: five fields follow; TOP starts "
+                            "them, or they start in %u ms",
+                       (unsigned)KODE_DISPLAY_TEST_INTRO_MS);
+                test_record(me, (uint8_t)DISPLAY_TEST_INTRO);
+                wait_arm(me, KODE_DISPLAY_TEST_INTRO_MS);
             }
             status = Q_HANDLED();
             break;
@@ -2046,10 +2110,17 @@ static QState Display_testing(Display * const me, QEvt const * const e)
             break;
         }
         case DISPLAY_FLUSH_SIG: {
-            /* The rectangle is dropped so the launcher does not paint over
-             * the field. The renderer is released at once while a question is
-             * out; while a field goes up it is owed, since a release between
-             * two bands is a token the next band takes. */
+            /* The opening screen is the renderer's, so its frames go to the
+             * panel as ever. After it the rectangle is dropped so the
+             * launcher does not paint over the field. The renderer is
+             * released at once while a question is out; until then it is
+             * owed, since a release between two bands is a token the next
+             * band takes. */
+            if ( (uint8_t)TEST_STAGE_INTRO == me->test_stage )
+            {
+                status = Q_SUPER(&Display_active);
+                break;
+            }
 #if CONFIG_KODE_LOWPOWER
             me->renderer_seen = true;
 #endif
@@ -2113,10 +2184,19 @@ static QState Display_testing(Display * const me, QEvt const * const e)
         case BUTTON_EVT_SIG: {
             ButtonEvt const * const b = Q_EVT_CAST(ButtonEvt);
 
+            if ( b->pressed && ((uint8_t)KDRV_BTN_TOP == b->id)
+                && ((uint8_t)TEST_STAGE_INTRO == me->test_stage) )
+            {
+                /* Read, and the operator is ready. */
+                intro_end(me);
+                status = Q_HANDLED();
+                break;
+            }
             if ( !b->pressed || !me->test_asking )
             {
-                /* A release, or a press that landed while the field was
-                 * still going up: nothing has been asked yet. */
+                /* A release, the opening screen's other buttons, or a press
+                 * that landed while the field was still going up: nothing
+                 * has been asked yet. */
                 status = Q_HANDLED();
                 break;
             }
@@ -2169,6 +2249,18 @@ static QState Display_testing(Display * const me, QEvt const * const e)
                 break;
             }
             me->test_wait_live = false;   /* this event IS its expiry */
+            if ( (uint8_t)TEST_STAGE_INTRO == me->test_stage )
+            {
+                intro_end(me);
+                status = Q_HANDLED();
+                break;
+            }
+            if ( (uint8_t)TEST_STAGE_SETTLE == me->test_stage )
+            {
+                fields_start(me);
+                status = Q_HANDLED();
+                break;
+            }
             /* Nobody is there, and nobody will be there for the next field
              * either: the row ends here rather than waiting out the rest. */
             test_record(me, (uint8_t)DISPLAY_TEST_TIMEOUT);

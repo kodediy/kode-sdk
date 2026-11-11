@@ -34,6 +34,14 @@ extern QSubscrList * QActive_subscrList_;
  *         past it. */
 #define STEP_TICKS    ((KODE_DISPLAY_TEST_STEP_MS / 10U) + 1U)
 
+/** @brief The opening screen and the renderer's last frame, in whole steps. */
+#define INTRO_STEPS   (KODE_DISPLAY_TEST_INTRO_MS / 10U)
+#define SETTLE_STEPS  (KODE_DISPLAY_TEST_SETTLE_MS / 10U)
+
+/** @brief Enough steps to run out a row left anywhere: its opening, its last
+ *         frame and one field's deadline, with room. */
+#define DRAIN_STEPS   (INTRO_STEPS + SETTLE_STEPS + STEP_TICKS + 3U)
+
 /** @brief How many bands one field costs: 502 rows, 16 at a time. */
 #define BAND_ROWS     ((int32_t)KODE_DISPLAY_TEST_BAND_ROWS)
 #define BANDS         ((((int32_t)KBSP_LCD_V_RES) + BAND_ROWS - 1) / BAND_ROWS)
@@ -199,7 +207,7 @@ static void display_test_up_once(void)
      * this AO can arrive here inside the row: paint whatever was going up
      * and let the deadline behind it pass. */
     (void)qf_support_pump(AO_Display, (unsigned)BANDS + 8U);
-    (void)qf_support_tick(AO_Display, STEP_TICKS);
+    (void)qf_support_tick(AO_Display, DRAIN_STEPS);
 
     /* A number for the row to restore, and a state event that carries it. */
     BrightnessEvt b;
@@ -225,7 +233,7 @@ static void display_test_up_once(void)
 static void display_test_down(void)
 {
     (void)qf_support_pump(AO_Display, (unsigned)BANDS + 8U);
-    (void)qf_support_tick(AO_Display, STEP_TICKS);
+    (void)qf_support_tick(AO_Display, DRAIN_STEPS);
     ao_spy_drain();
 }
 
@@ -352,6 +360,34 @@ static void verdict_expect(uint8_t field, bool ok)
 }
 
 /**
+ * @brief Run the steps until the renderer's last frame is over and the first
+ *        field is about to go up, and no further: the first band is posted,
+ *        not painted.
+ */
+static void fields_wait(void)
+{
+    driver_forget();
+    for ( unsigned i = 0U; (0U == s_drives) && ((SETTLE_STEPS + 2U) > i); ++i )
+    {
+        (void)qf_support_pump(AO_Display, 1U);
+    }
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KODE_DISPLAY_TEST_BRIGHT, s_driven,
+        "the fields are shown at whatever the user had the glass at");
+}
+
+/**
+ * @brief Ask for the row and start its fields the way the operator does:
+ *        the opening screen, then BUTTON_TOP.
+ */
+static void row_start(void)
+{
+    row_request();
+    record_expect((uint8_t)DISPLAY_FIELD_WHITE, (uint8_t)DISPLAY_TEST_INTRO);
+    answer_yes();
+    fields_wait();
+}
+
+/**
  * @brief Start the row and confirm every field before @p field.
  *
  * Leaves the question about @p field outstanding, so the case decides what
@@ -361,9 +397,7 @@ static void verdict_expect(uint8_t field, bool ok)
  */
 static void row_to_field(uint8_t field)
 {
-    row_request();
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KODE_DISPLAY_TEST_BRIGHT, s_driven,
-        "the fields are shown at whatever the user had the glass at");
+    row_start();
     driver_forget();
     for ( uint8_t f = (uint8_t)DISPLAY_FIELD_WHITE; ; ++f )
     {
@@ -378,6 +412,123 @@ static void row_to_field(uint8_t field)
         answer_yes();
         record_expect(f, (uint8_t)DISPLAY_TEST_PASS);
     }
+}
+
+/* ---- 0. The opening screen ------------------------------------------------- */
+
+/** @brief Ask the renderer's way for a 10 x 10 corner of one colour. */
+static void renderer_flush(void)
+{
+    static uint8_t px[10U * 10U * sizeof(uint16_t)];
+    FlushEvt f;
+
+    (void)memset(&f, 0, sizeof(f));
+    f.super  = (QEvt)QEVT_INITIALIZER(DISPLAY_FLUSH_SIG);
+    f.x2     = 10;
+    f.y2     = 10;
+    f.pixels = px;
+    f.last   = true;
+    QASM_DISPATCH(AO_Display, &f.super, 0U);
+}
+
+/* The fields carry no words, so the row opens on the renderer's glass for it
+ * to say what the pad will mean: its frames still reach the panel, nothing
+ * is painted, the brightness is the user's, and only BUTTON_TOP moves on. */
+TEST_CASE("the row opens on the renderer's glass and paints nothing",
+          "[display_test]")
+{
+    Mockkdrv_display_Init();
+    kdrv_display_video_expected_IgnoreAndReturn(false);
+    kdrv_display_link_Ignore();
+    kdrv_display_recoveries_IgnoreAndReturn(0U);
+    kdrv_display_recoveries_set_Ignore();
+    display_test_up_once();
+
+    row_request();
+    record_expect((uint8_t)DISPLAY_FIELD_WHITE, (uint8_t)DISPLAY_TEST_INTRO);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_drives,
+        "the glass was driven to the row's brightness before any field");
+
+    renderer_flush();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_flushes,
+        "the opening screen never reached the panel");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_aborts,
+        "a frame that went to the panel was also released by hand");
+
+    answer_no();
+    button(KDRV_BTN_UP, true);
+    (void)qf_support_pump(AO_Display, 8U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the opening screen took an answer");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_flushes,
+        "a field went up with nobody having started it");
+
+    display_test_down();
+    Mockkdrv_display_Destroy();
+}
+
+/* An operator who reads and does not press is not stuck there: the fields
+ * start on their own once KODE_DISPLAY_TEST_INTRO_MS and the renderer's last
+ * frame have passed, and not a step sooner. */
+TEST_CASE("the fields start on their own after the opening screen",
+          "[display_test]")
+{
+    Mockkdrv_display_Init();
+    kdrv_display_video_expected_IgnoreAndReturn(false);
+    kdrv_display_link_Ignore();
+    kdrv_display_recoveries_IgnoreAndReturn(0U);
+    kdrv_display_recoveries_set_Ignore();
+    display_test_up_once();
+
+    row_request();
+    record_expect((uint8_t)DISPLAY_FIELD_WHITE, (uint8_t)DISPLAY_TEST_INTRO);
+    (void)qf_support_tick(AO_Display, INTRO_STEPS - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_flushes, "the fields started before their time");
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    (void)qf_support_tick(AO_Display, SETTLE_STEPS + 3U);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KODE_DISPLAY_TEST_BRIGHT, s_driven,
+        "the fields are shown at whatever the user had the glass at");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)BANDS, s_flushes,
+        "the first field was not painted once the opening screen ended");
+    record_expect((uint8_t)DISPLAY_FIELD_WHITE, (uint8_t)DISPLAY_TEST_ASK);
+
+    display_test_down();
+    Mockkdrv_display_Destroy();
+}
+
+/* A frame the renderer began on the opening screen may still be on its way
+ * when BUTTON_TOP is pressed. It must land before the first band, never on
+ * the field: held, not painted, and released once the field is up. */
+TEST_CASE("a frame after the opening screen is held until the field is up",
+          "[display_test]")
+{
+    Mockkdrv_display_Init();
+    kdrv_display_video_expected_IgnoreAndReturn(false);
+    kdrv_display_link_Ignore();
+    kdrv_display_recoveries_IgnoreAndReturn(0U);
+    kdrv_display_recoveries_set_Ignore();
+    display_test_up_once();
+
+    row_request();
+    record_expect((uint8_t)DISPLAY_FIELD_WHITE, (uint8_t)DISPLAY_TEST_INTRO);
+    answer_yes();
+    driver_forget();
+    renderer_flush();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_flushes,
+        "a frame after the opening screen reached the panel");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_aborts,
+        "the renderer was released before the field, and draws on over it");
+
+    fields_wait();
+    (void)qf_support_pump(AO_Display, (unsigned)BANDS + 8U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)BANDS, s_flushes,
+        "the held frame took a band's place on the glass");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_aborts,
+        "the held frame was never released, and the renderer sits out its deadline");
+    record_expect((uint8_t)DISPLAY_FIELD_WHITE, (uint8_t)DISPLAY_TEST_ASK);
+
+    display_test_down();
+    Mockkdrv_display_Destroy();
 }
 
 /* ---- 1. What the row does to a renderer ------------------------------------ */
@@ -434,7 +585,7 @@ TEST_CASE("a completion the renderer has not collected is kept for it, not spent
     kdrv_display_recoveries_set_Ignore();
     display_test_up_once();
 
-    row_request();
+    row_start();
     driver_forget();
     (void)qf_support_pump(AO_Display, (unsigned)BANDS + 8U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_aborts,
@@ -476,7 +627,7 @@ TEST_CASE("a flush while a field is going up is released once the field is up",
     kdrv_display_recoveries_set_Ignore();
     display_test_up_once();
 
-    row_request();
+    row_start();
     driver_forget();
 
     (void)memset(&f, 0, sizeof(f));
@@ -520,7 +671,7 @@ TEST_CASE("the bands cover all 502 rows, the last one short", "[display_test]")
     kdrv_display_recoveries_set_Ignore();
     display_test_up_once();
 
-    row_request();
+    row_start();
     driver_forget();
     (void)qf_support_pump(AO_Display, (unsigned)BANDS + 8U);
 
@@ -653,7 +804,7 @@ TEST_CASE("a press while a field is being painted is not an answer",
     kdrv_display_recoveries_set_Ignore();
     display_test_up_once();
 
-    row_request();
+    row_start();
     driver_forget();
     answer_yes();
     answer_no();

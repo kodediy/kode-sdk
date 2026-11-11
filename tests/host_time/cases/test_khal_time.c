@@ -121,7 +121,7 @@ TEST_CASE("milliseconds wrap at 32 bits, as the log format assumes",
 TEST_CASE("a timer is created with the caller's callback and argument",
           "[khal_time]")
 {
-    static int    marker;
+    static uint8_t marker;
 
     Mockesp_timer_Init();
     fresh();
@@ -136,6 +136,33 @@ TEST_CASE("a timer is created with the caller's callback and argument",
     TEST_ASSERT_EQUAL_PTR(&never_fired, s_args.callback);
     TEST_ASSERT_EQUAL_PTR(&marker, s_args.arg);
     TEST_ASSERT_EQUAL_STRING("khal_tick", s_args.name);
+
+    Mockesp_timer_Verify();
+    Mockesp_timer_Destroy();
+}
+
+/* The QP tick is this timer, and QP posts a time event with no margin. A
+ * timer that is late and is called once for every period it owes hands QP
+ * hundreds of ticks back to back, before any Active Object has run, and the
+ * first periodic time event overflows its owner's queue. esp_timer calls a
+ * late timer once only when it is created to skip what it owes. */
+TEST_CASE("a late periodic timer is called once, not once for every period it owes",
+          "[khal_time]")
+{
+    static uint8_t marker;
+
+    Mockesp_timer_Init();
+    fresh();
+
+    esp_timer_create_Stub(&capture_create);
+    esp_timer_start_periodic_ExpectAndReturn(s_timer, 1000U, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        khal_timer_periodic(&never_fired, &marker, 1000U));
+
+    TEST_ASSERT_EQUAL_INT(1, s_creates);
+    TEST_ASSERT_TRUE_MESSAGE(s_args.skip_unhandled_events,
+                             "the periods a late timer owes are replayed back to back");
 
     Mockesp_timer_Verify();
     Mockesp_timer_Destroy();

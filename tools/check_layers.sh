@@ -288,7 +288,9 @@ standard_allowed="$(find components/kode components/kode_sys components/kdefs \
                        -not -path '*/build/*' -not -path '*managed_components*' \
                        2>/dev/null \
                   | sed 's|.*/||; s|\.|\\.|g' | sort -u | paste -sd'|' -)"
-standard_allowed="${standard_allowed}|khal_system\\.h|khal_sync\\.h|khal_once\\.h"
+# sdkconfig.h is the build's own settings, no layer's: kode.h sizes a
+# Bluetooth value by the app's CONFIG_KODE_BLE_APP_VALUE_MAX.
+standard_allowed="${standard_allowed}|khal_system\\.h|khal_sync\\.h|khal_once\\.h|sdkconfig\\.h"
 report "components/kode includes only kode_sys and the layers below it" \
   "The standard layer reaches the system through kode_sys.h; the screen is kode_screen's." \
   "$(scan '#include "' "#include \"(${standard_allowed})\"" \

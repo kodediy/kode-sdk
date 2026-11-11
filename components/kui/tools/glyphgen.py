@@ -4,7 +4,7 @@
     tools/glyphgen.py           write images/assets/glyph_<name>_<size>.png and core/include/kui_glyphs.h
     tools/glyphgen.py --check   exit 1 when a PNG or the header on disk is not what this script draws
 
-This script adapts components/kshell/tools/gen_glyphs.py of kodediy/kode-dot-os:
+This script adapts kshell's tools/gen_glyphs.py:
 the SVG bodies, the sun, the drawing and the table of sizes are its own; what
 changes is the output (PNG files for the kit's imagegen flow and a header,
 where kshell writes C files).

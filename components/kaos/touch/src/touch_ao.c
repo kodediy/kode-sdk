@@ -35,6 +35,15 @@
 /** The controller's IRQ, as a bit of the expander's byte. */
 #define TP_INT_BIT ((uint8_t)(1U << KBSP_IOEXP_BIT_TP_INT))
 
+/* The timed looks for a controller that did not answer the bring-up
+ * (kqp_config.h): the waits before the first ones, then the spaced ones. */
+static const uint16_t LOOK_SOON_MS[] = KODE_TOUCH_LOOK_SOON_MS;
+#define LOOK_SOON    ((uint8_t)Q_DIM(LOOK_SOON_MS))   /**< How many looks come soon. */
+#define LOOK_SPACED  ((uint8_t)(KODE_TOUCH_LOOK_FOR_MS / KODE_TOUCH_LOOK_EVERY_MS)) /**< How many spaced looks follow. */
+#define LOOK_TIMED   ((uint8_t)(LOOK_SOON + LOOK_SPACED))   /**< All the timed looks. */
+_Static_assert((Q_DIM(LOOK_SOON_MS) + (KODE_TOUCH_LOOK_FOR_MS / KODE_TOUCH_LOOK_EVERY_MS)) <= UINT8_MAX,
+               "the timed looks are counted in a uint8_t");
+
 /* The guided test's script: the board's two targets (kbsp_board.h). The test
  * checks the panel; it calibrates nothing. A tap off the target is a slip,
  * forgiven until the KODE_TOUCH_TEST_TRIES-th on the same target, which fails
@@ -81,6 +90,14 @@ typedef struct {
     int32_t      sum_x;        /**< The raw samples of this step's tap,      */
     int32_t      sum_y;        /**<   summed, and                            */
     uint16_t     n_samples;    /**<   how many.                              */
+
+    /* The looks for a controller that did not answer the bring-up. */
+    QTimeEvt     look;         /**< One-shot: the next timed look.           */
+    bool         missing;      /**< The panel is up and no controller answered. */
+    uint8_t      looks;        /**< Timed looks made since the bring-up's try. */
+    uint16_t     asked;        /**< Every look since then, the interrupt's too. */
+    uint32_t     missing_ms;   /**< khal_time_ms() of the bring-up's try.    */
+    uint32_t     look_ms;      /**< khal_time_ms() of the last look.         */
 #if CONFIG_KODE_LOWPOWER
     QTimeEvt      restore_tmo;  /**< One-shot: the next try at the awake settings. */
     uint8_t       lp_who;       /**< The id lowpower_join() gave.            */
@@ -175,6 +192,12 @@ void Touch_ctor(void)
     me->sum_x       = 0;
     me->sum_y       = 0;
     me->n_samples   = 0U;
+    QTimeEvt_ctorX(&me->look, &me->super, TOUCH_LOOK_SIG, 0U);
+    me->missing     = false;
+    me->looks       = 0U;
+    me->asked       = 0U;
+    me->missing_ms  = 0U;
+    me->look_ms     = 0U;
 #if CONFIG_KODE_LOWPOWER
     QTimeEvt_ctorX(&me->restore_tmo, &me->super, TOUCH_RESTORE_SIG, 0U);
     me->lp_who      = KODE_LOWPOWER_WHO_NONE;
@@ -707,6 +730,91 @@ static void touch_state(Touch * const me, const LowPowerStateEvt * const s)
 }
 #endif /* CONFIG_KODE_LOWPOWER */
 
+/* ---- A controller that did not answer the bring-up ------------------------- */
+
+/**
+ * @brief Arm the next timed look, if any is left.
+ *
+ * The first ones come soon, the rest spaced (kqp_config.h); past the last
+ * nothing is armed and only the interrupt line asks for a look.
+ *
+ * @param me The AO.
+ */
+static void look_arm(Touch * const me)
+{
+    uint32_t wait_ms = KODE_TOUCH_LOOK_EVERY_MS;
+
+    if ( LOOK_TIMED <= me->looks )
+    {
+        return;
+    }
+    if ( LOOK_SOON > me->looks )
+    {
+        wait_ms = LOOK_SOON_MS[me->looks];
+    }
+    (void)QTimeEvt_disarm(&me->look);
+    QTimeEvt_armX(&me->look, KQP_TICKS_PER_MS(wait_ms), 0U);
+}
+
+/**
+ * @brief The bring-up's try found no controller: start looking for it.
+ *
+ * @param me The AO.
+ */
+static void look_begin(Touch * const me)
+{
+    me->missing    = true;
+    me->looks      = 0U;
+    me->asked      = 0U;
+    me->missing_ms = khal_time_ms();
+    me->look_ms    = me->missing_ms;
+    look_arm(me);
+}
+
+/**
+ * @brief Stop looking: the controller is up, or there is no panel to carry one.
+ *
+ * @param me The AO.
+ */
+static void look_end(Touch * const me)
+{
+    (void)QTimeEvt_disarm(&me->look);
+    me->missing = false;
+}
+
+/**
+ * @brief Look once for the controller, and bring it up if it answers.
+ *
+ * One short probe; the bring-up, with its identity check, only when something
+ * answered. Says at which look it answered and how long after the bring-up's
+ * try: the measurement of how late a controller can be.
+ *
+ * @param me The AO.
+ * @return true when the controller is up.
+ */
+static bool look_once(Touch * const me)
+{
+    bool up = false;
+
+    me->look_ms = khal_time_ms();
+    if ( UINT16_MAX > me->asked )
+    {
+        me->asked++;
+    }
+    if ( kdrv_cst820_answers() && (kdrv_cst820_init() == KODE_OK) )
+    {
+        look_end(me);
+#if CONFIG_KODE_LOWPOWER
+        awake_read(me);
+#endif
+        KLOG_N(TAG, "the CST820 answered at look %u, %lu ms after the bring-up's try; "
+                    "armed on the expander's P6",
+               (unsigned)me->asked, (unsigned long)(me->look_ms - me->missing_ms));
+        up = true;
+    }
+    return up;
+}
+
 /* ---- States -------------------------------------------------------------- */
 
 /** Waiting for the panel: the shared reset makes any earlier init pointless. */
@@ -719,12 +827,26 @@ static QState Touch_idle(Touch * const me, QEvt const * const e)
             if ( !Q_EVT_CAST(DisplayStateEvt)->up )
             {
                 KLOG_W(TAG, "no panel; touch shares its reset line, so no touch");
+                look_end(me);
                 status = Q_HANDLED();
+            }
+            else if ( me->missing )
+            {
+                /* The panel said again that it is up: one more look, not a
+                 * second bring-up's worth of probes. */
+                status = Q_HANDLED();
+                if ( look_once(me) )
+                {
+                    status = Q_TRAN(&Touch_armed);
+                }
             }
             else if ( kdrv_cst820_init() != KODE_OK )
             {
-                KLOG_W(TAG, "no CST820 at 0x%02X; input stays console-only",
+                /* The panel's bring-up has just pulsed the reset line the two
+                 * share: the controller may still be coming back. */
+                KLOG_W(TAG, "no CST820 at 0x%02X yet; looking again",
                        (unsigned)KBSP_I2C_ADDR_TOUCH);
+                look_begin(me);
                 status = Q_HANDLED();
             }
             else
@@ -735,6 +857,43 @@ static QState Touch_idle(Touch * const me, QEvt const * const e)
                 KLOG_I(TAG, "up; armed on the expander's P6, polling every %ums "
                             "while a finger is down", (unsigned)KODE_TOUCH_POLL_MS);
                 status = Q_TRAN(&Touch_armed);
+            }
+            break;
+        }
+        case TOUCH_LOOK_SIG: {
+            status = Q_HANDLED();
+            if ( me->missing )
+            {
+                me->looks++;
+                if ( look_once(me) )
+                {
+                    status = Q_TRAN(&Touch_armed);
+                }
+                else if ( LOOK_TIMED <= me->looks )
+                {
+                    KLOG_W(TAG, "no CST820 in %u looks over %u s; from here it is looked "
+                                "for only when the glass is touched",
+                           (unsigned)me->asked,
+                           (unsigned)((khal_time_ms() - me->missing_ms) / TOUCH_MS_PER_S));
+                }
+                else
+                {
+                    look_arm(me);
+                }
+            }
+            break;
+        }
+        case IOEXP_INPUT_SIG: {
+            /* A controller in its low-power scan answers nothing until a
+             * finger touches the glass, and this line is how it says so. */
+            status = Q_HANDLED();
+            if ( me->missing && irq_fell(Q_EVT_CAST(IoexpInputEvt))
+                && (KODE_TOUCH_LOOK_EDGE_MS <= (khal_time_ms() - me->look_ms)) )
+            {
+                if ( look_once(me) )
+                {
+                    status = Q_TRAN(&Touch_armed);
+                }
             }
             break;
         }
@@ -760,9 +919,19 @@ static QState Touch_idle(Touch * const me, QEvt const * const e)
         }
 #if CONFIG_KODE_LOWPOWER
         case LOWPOWER_ROUND_SIG: {
-            /* No controller: nothing to rest. */
+            /* No controller: nothing to rest. The timed looks stop with the
+             * board, which is not woken to look for a chip. */
+            (void)QTimeEvt_disarm(&me->look);
             lowpower_ready(me->lp_who, Q_EVT_CAST(LowPowerRoundEvt)->round,
                            false, NULL);
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_STATE_SIG: {
+            if ( ((uint8_t)KODE_LP_AWAKE == Q_EVT_CAST(LowPowerStateEvt)->state) && me->missing )
+            {
+                look_arm(me);
+            }
             status = Q_HANDLED();
             break;
         }
@@ -882,16 +1051,22 @@ static QState Touch_armed(Touch * const me, QEvt const * const e)
     return status;
 }
 
-/** A finger is, or is about to be, on the glass: poll until it has gone. */
+/**
+ * @brief A finger is, or is about to be, on the glass: poll until it has gone.
+ *
+ * The poll is a one-shot that each poll taken arms again, NOT a periodic
+ * timer. QP posts a time event with no margin, and a periodic one goes on
+ * posting whether or not this AO has run: sixteen periods without the CPU
+ * fill its queue, a sixth of a second at this period, and a full queue is an
+ * assertion and a reset. Armed again by the poll itself, one waits at most.
+ */
 static QState Touch_tracking(Touch * const me, QEvt const * const e)
 {
     QState status;
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
-            QTimeEvt_armX(&me->poll,
-                          KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS),
-                          KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS));
+            QTimeEvt_armX(&me->poll, KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -904,6 +1079,10 @@ static QState Touch_tracking(Touch * const me, QEvt const * const e)
             bool    pressed = false;
             int16_t rx = 0;
             int16_t ry = 0;
+
+            /* The next poll, a period from this one. A transition below
+             * leaves the state, and the exit takes it back. */
+            (void)QTimeEvt_rearm(&me->poll, KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS));
 
             /* A chip that did not answer ends the touch: a release goes out
              * with the last position rather than leave the GUI pressed. */
@@ -1034,9 +1213,8 @@ static QState Touch_held(Touch * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
-            QTimeEvt_armX(&me->poll,
-                          KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS),
-                          KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS));
+            /* One-shot, as Touch_tracking's: each look arms the next. */
+            QTimeEvt_armX(&me->poll, KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -1050,6 +1228,7 @@ static QState Touch_held(Touch * const me, QEvt const * const e)
             int16_t rx = 0;
             int16_t ry = 0;
 
+            (void)QTimeEvt_rearm(&me->poll, KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS));
             if ( kdrv_cst820_read(&pressed, &rx, &ry) != KODE_OK )
             {
                 pressed = false;

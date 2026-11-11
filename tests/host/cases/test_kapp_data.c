@@ -102,3 +102,51 @@ TEST_CASE("a file over 1 KB is refused before parsing", "[kapp_data]")
     (void)memset(big, ' ', sizeof(big));
     TEST_ASSERT_EQUAL_INT(KAPP_JSON_SIZE, kapp_data_parse(big, sizeof(big), &d));
 }
+
+/* ---- An app.json fetched ahead of its folder -------------------------------
+ * An app's data may reach the board before the app, read from a URL. The file
+ * says whether an icon is to be fetched beside it, and it can only name the
+ * one file a folder's writers store. */
+
+TEST_CASE("a fetched app.json with no icon key is the whole folder", "[kapp_data]")
+{
+    const char         t[] = "{\"kode\":\"1\",\"name\":\"Snake\",\"color\":\"#30D158\"}";
+    kapp_json_status_t why = KAPP_JSON_NONE;
+
+    TEST_ASSERT_EQUAL_INT(KAPP_FETCH_NO_ICON, kapp_data_fetched(t, strlen(t), &why));
+    TEST_ASSERT_EQUAL_INT(KAPP_JSON_OK, why);
+}
+
+TEST_CASE("a fetched app.json that names icon.k64 asks for the icon", "[kapp_data]")
+{
+    const char         t[] = "{\"kode\":\"1\",\"icon\":\"icon.k64\"}";
+    kapp_json_status_t why = KAPP_JSON_NONE;
+
+    TEST_ASSERT_EQUAL_INT(KAPP_FETCH_ICON, kapp_data_fetched(t, strlen(t), &why));
+    TEST_ASSERT_EQUAL_INT(KAPP_JSON_OK, why);
+}
+
+TEST_CASE("a fetched app.json that names another icon is refused", "[kapp_data]")
+{
+    const char         png[]  = "{\"kode\":\"1\",\"icon\":\"icon.png\"}";
+    const char         deep[] = "{\"kode\":\"1\",\"icon\":\"art/icon.k64\"}";
+    kapp_json_status_t why    = KAPP_JSON_NONE;
+
+    TEST_ASSERT_EQUAL_INT(KAPP_FETCH_REFUSED, kapp_data_fetched(png, strlen(png), &why));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KAPP_JSON_OK, why,
+        "the file is read; only its icon's name is not one a folder stores");
+    TEST_ASSERT_EQUAL_INT(KAPP_FETCH_REFUSED, kapp_data_fetched(deep, strlen(deep), NULL));
+}
+
+TEST_CASE("a fetched app.json the reader would refuse is refused, with its status",
+          "[kapp_data]")
+{
+    const char         rev[] = "{\"kode\":\"2\",\"icon\":\"icon.k64\"}";
+    const char         syn[] = "{\"kode\":\"1\",\"icon\":\"icon.k64\"";
+    kapp_json_status_t why   = KAPP_JSON_OK;
+
+    TEST_ASSERT_EQUAL_INT(KAPP_FETCH_REFUSED, kapp_data_fetched(rev, strlen(rev), &why));
+    TEST_ASSERT_EQUAL_INT(KAPP_JSON_REVISION, why);
+    TEST_ASSERT_EQUAL_INT(KAPP_FETCH_REFUSED, kapp_data_fetched(syn, strlen(syn), &why));
+    TEST_ASSERT_EQUAL_INT(KAPP_JSON_SYNTAX, why);
+}

@@ -244,6 +244,9 @@ enum KodeSignals {
                                  *   the bytes).                             */
     BLE_APP_LINK_SIG,           /**< AO_Radio: a central connected or left
                                  *   (BleAppLinkEvt), one edge each.         */
+    BLE_APP_TAKEN_SIG,          /**< AO_Radio: a read took the oldest value
+                                 *   of a queued characteristic
+                                 *   (BleAppTakenEvt: what is left).         */
     NET_PING_ENTRY_SIG,         /**< AO_Net: one ICMP echo's outcome
                                  *   (NetPingEntryEvt). One event per echo,
                                  *   a timeout included - a row missing is a
@@ -361,6 +364,12 @@ enum KodeSignals {
                                  *   back, so any subscriber - AO_Console
                                  *   today - can close on it without AO_AppMgr
                                  *   knowing who asked.                       */
+    APP_ERASE_DONE_SIG,         /**< AO_AppMgr: an erase ended
+                                 *   (AppEraseDoneEvt): what went, what stayed
+                                 *   and where. Published, so the console and
+                                 *   the launcher both close on it; a request
+                                 *   refused while AO_AppMgr is busy ends the
+                                 *   same way.                                */
 
     /* The one *request* that is published rather than posted. AO_Gui lives in
      * kgui, which requires the SDK; the console lives in kaos, underneath it.
@@ -592,6 +601,20 @@ enum KodeSignals {
                                  *   step of a put in progress.               */
     APPDATA_PUT_RSP_SIG,        /**< To the asker: how that put ended
                                  *   (AppDataPutRspEvt).                      */
+    STORAGE_APP_WIPE_REQ_SIG,   /**< AO_Storage: take every file of one app
+                                 *   off both media (AppDataReqEvt again): the
+                                 *   images at a medium's root whose descriptor
+                                 *   names the project, and its data folder.
+                                 *   Posted directly, never published.        */
+    STORAGE_APP_WIPE_NEXT_SIG,  /**< AO_Storage private QTimeEvt: the next
+                                 *   file of the wipe in progress.            */
+    STORAGE_APP_WIPE_RSP_SIG,   /**< To the asker: what went and what stayed
+                                 *   on each medium (StorageAppWipeRspEvt).   */
+    APPDATA_GET_REQ_SIG,        /**< AO_AppMgr: fetch one app's data folder
+                                 *   from a URL and have AO_Storage write it
+                                 *   (AppDataGetReqEvt). Posted directly.     */
+    APPDATA_GET_RSP_SIG,        /**< To the asker: how that fetch ended
+                                 *   (AppDataGetRspEvt).                      */
     STORAGE_FIELD_REQ_SIG,      /**< AO_Storage: read, write or dump one field
                                  *   of the card (StorageFieldReqEvt).
                                  *   Answered to StorageFieldReqEvt.who with
@@ -665,6 +688,8 @@ enum KodeSignals {
     FILE_READ_RSP_SIG,          /**< Answers kode_sys_file_read(), to the
                                  *   asking AO (FileRspEvt).                   */
     FILE_WRITE_RSP_SIG,         /**< Answers kode_sys_file_write(), to the
+                                 *   asking AO (FileRspEvt).                   */
+    FILE_SPACE_RSP_SIG,         /**< Answers kode_sys_file_space(), to the
                                  *   asking AO (FileRspEvt).                   */
     STORAGE_RECV_REQ_SIG,       /**< AO_Storage: a file is about to arrive on
                                  *   the console (StorageRecvEvt). Open the
@@ -825,6 +850,9 @@ enum KodeSignals {
                                  *   SIG with the mirror's current state -
                                  *   the DISPLAY_STATE_REQ_SIG pattern.       */
     TOUCH_POLL_SIG,             /**< AO_Touch private polling QTimeEvt.       */
+    TOUCH_LOOK_SIG,             /**< AO_Touch private QTimeEvt, one-shot:
+                                 *   look again for a controller that did
+                                 *   not answer the bring-up.               */
     TOUCH_FIELD_REQ_SIG,        /**< AO_Touch: read, write or dump one field
                                  *   of the CST820 (TouchFieldReqEvt).
                                  *   Answered to TouchFieldReqEvt.who with
@@ -968,9 +996,10 @@ enum KodeSignals {
                                  *   waits for it is told it failed. The
                                  *   guard stays up until the call does
                                  *   return.                                 */
-    IR_LINK_TO_SIG,             /**< AO_Ir private periodic QTimeEvt, while
-                                 *   requests wait for the C5 link: each one
-                                 *   past its own budget is answered
+    IR_LINK_TO_SIG,             /**< AO_Ir private one-shot QTimeEvt, armed
+                                 *   again by each one taken while requests
+                                 *   wait for the C5 link: each request past
+                                 *   its own budget is answered
                                  *   KODE_TIMEOUT.                           */
     NFC_READ_REQ_SIG,           /**< AO_Nfc: energise, and answer with the
                                  *   first tag activated inside the window
@@ -1261,10 +1290,12 @@ enum KodeSignals {
     HAPTIC_WAIT_SIG,            /**< AO_Haptic private one-shot QTimeEvt: the
                                  *   row's stillness window, or the deadline
                                  *   on a reply from AO_Imu.                */
-    POWER_POLL_SIG,             /**< AO_Power private polling QTimeEvt.       */
-    POWER_PULSE_SIG,            /**< AO_Power private periodic QTimeEvt: the
-                                 *   next half of the write pulse. Armed
-                                 *   only while a flash write is reporting
+    POWER_POLL_SIG,             /**< AO_Power private one-shot QTimeEvt, armed
+                                 *   again by each poll taken.               */
+    POWER_PULSE_SIG,            /**< AO_Power private one-shot QTimeEvt: the
+                                 *   next half of the write pulse, armed
+                                 *   again by each half taken. Armed only
+                                 *   while a flash write is reporting
                                  *   progress.                              */
     POWER_DUMP_REQ_SIG,         /**< AO_Power: log everything both chips say. */
     POWER_PEEK_REQ_SIG,         /**< AO_Power: take one reading, publish it and keep
@@ -1432,6 +1463,11 @@ enum KodeSignals {
     WIFI_SCAN_REQ_SIG,          /**< AO_Radio: scan. Entries follow on the
                                  *   bus as the sweep finds them, channel by
                                  *   channel, then WIFI_SCAN_END_SIG.        */
+    WIFI_SCAN_STOP_REQ_SIG,     /**< AO_Radio: end the listing in flight
+                                 *   after its step on the air
+                                 *   (wifi_scan_stop_request()). No payload
+                                 *   and no answer of its own: the listing's
+                                 *   WIFI_SCAN_END_SIG says it was cut.      */
     RADIO_SCAN_ASK_SIG,         /**< AO_Radio: a scan asked by an AO or a
                                  *   blocked task (ScanAskEvt), the sweep
                                  *   WIFI_SCAN_REQ_SIG runs or the listen
@@ -1449,11 +1485,29 @@ enum KodeSignals {
                                  *   asking AO (RadioProbeEvt).               */
     WIFI_SCAN_RSP_SIG,          /**< Answers kode_sys_wifi_scan(), to the
                                  *   asking AO (ScanRspEvt).                 */
+    WIFI_FRAMES_REQ_SIG,        /**< AO_Radio: start or stop telling an AO about
+                                 *   the Wi-Fi frames the C5 hears
+                                 *   (WifiFramesReqEvt), wifi_frames_request().
+                                 *   Answered to the asker in every state,
+                                 *   always, with WIFI_FRAMES_STATE_SIG.      */
+    WIFI_FRAMES_STATE_SIG,      /**< To the asker: listening or not, and why
+                                 *   (WifiFramesStateEvt). Posted, never
+                                 *   published.                              */
+    WIFI_FRAMES_TICK_SIG,       /**< To the asker: one period's counts
+                                 *   (WifiFramesTickEvt), before the frames of
+                                 *   its batch. Posted, never published.      */
+    WIFI_FRAME_SIG,             /**< To the asker: one frame heard
+                                 *   (WifiFrameEvt). Posted, never published. */
+    RADIO_FRAMES_KNOCK_SIG,     /**< AO_Radio private (a static event, posted
+                                 *   with a margin from esp-hosted's thread):
+                                 *   a batch of frames waits in kdrv_frames'
+                                 *   ring.                                    */
     WIFI_JOIN_REQ_SIG,          /**< AO_Radio: join WifiJoinEvt's network
                                  *   and remember it if it works.            */
-    WIFI_LEAVE_REQ_SIG,         /**< AO_Radio: leave, and forget the stored
-                                 *   credentials - "leave" that reconnects
-                                 *   at the next boot would be a lie.        */
+    WIFI_LEAVE_REQ_SIG,         /**< AO_Radio: leave, and keep the stored
+                                 *   credentials (WIFI_FORGET_REQ_SIG
+                                 *   forgets); nothing rejoins by itself
+                                 *   until somebody asks.                    */
     WIFI_STATE_REQ_SIG,         /**< AO_Radio: publish WIFI_STATE_SIG now.
                                  *   Answerable in every state, link or no
                                  *   link: "not connected" is an answer.     */
@@ -1660,7 +1714,8 @@ enum KodeSignals {
                                  *   (AutotestClientEvt).                     */
     AUTOTEST_REPORT_REQ_SIG,    /**< AO_Autotest: publish the kept report
                                  *   (AutotestClientEvt).                     */
-    POWER_TEST_STEP_SIG,        /**< AO_Power private one-shot QTimeEvt: the
+    POWER_TEST_STEP_SIG,        /**< AO_Power private one-shot QTimeEvt, armed
+                                 *   again by each look taken: the
                                  *   `power_plug` row looks at the cable
                                  *   again.                                   */
 
@@ -2037,6 +2092,12 @@ typedef enum {
  * lands here too - so every report says what it is and names the
  * file when there is one. A copy, as always, never a pointer into the
  * writer's own tables.
+ *
+ * An app's report also names its project once the writer knows it: the name
+ * the host gave with a stream, then the one the image's first chunk carries.
+ * The app's data folder is named for it and may be on the board before the
+ * app is, so the sheet can show the app's own name, icon and colour while it
+ * is written (appdata_request()).
  */
 typedef struct {
     QEvt    super;
@@ -2044,6 +2105,9 @@ typedef struct {
     uint8_t what;                     /**< kwrite_t                           */
     char    file[KODE_APP_FILE_MAX];  /**< What is being written; "" for a
                                        *   stream, which has no file name.    */
+    char    project[KODE_APP_PROJECT_MAX]; /**< The app's project name; ""
+                                       *   until it is known, and for kodeOS
+                                       *   and the radio, which are no app.   */
 } AppProgressEvt;
 
 /**
@@ -2065,8 +2129,9 @@ typedef struct {
     char name[32];   /**< The installed app's project name
                       *   (esp_app_desc_t.project_name is 32 bytes), the
                       *   identity appmgr_find_idx() compares. "" for
-                      *   AO_Radio's C5 image, for an image whose descriptor
-                      *   could not be read, and from a dry pool.            */
+                      *   AO_Radio's C5 image, for a park in the mailbox
+                      *   (no app is installed), for an image whose
+                      *   descriptor could not be read, and from a dry pool. */
 } AppFlashDoneEvt;
 
 /** @brief Why a write failed, as far as the glass needs to know. */
@@ -2502,6 +2567,54 @@ typedef struct {
                                             *   the answer that names it.     */
     uint8_t status;       /**< kode_status_t, as the four lines above read it. */
 } AppDataRmRspEvt;
+
+/** @brief What became of an app's data folder on one medium. */
+typedef enum {
+    APP_WIPE_FOLDER_NONE = 0,   /**< There was none.                          */
+    APP_WIPE_FOLDER_REMOVED,    /**< It is gone.                              */
+    APP_WIPE_FOLDER_LEFT        /**< It is there and something in it would not go. */
+} AppWipeFolder;
+
+/** @brief What a wipe of one app did on one medium. */
+typedef struct {
+    bool    present;   /**< The medium was mounted and its root was walked.   */
+    uint8_t files;     /**< Images of the project removed.                    */
+    uint8_t left;      /**< Images of the project that would not go.          */
+    uint8_t folder;    /**< AppWipeFolder.                                    */
+} AppWipeMedium;
+
+/**
+ * @brief How a wipe of one app's files ended (STORAGE_APP_WIPE_RSP_SIG).
+ *
+ * KODE_OK says the wipe ran to its end, and the two media say what it found
+ * and whether it went: a file left behind is in `left`, not in the status.
+ * KODE_DENIED a transfer was in flight and KODE_NO_RESOURCES there was no
+ * memory for the list of files: nothing was touched.
+ */
+typedef struct {
+    QEvt          super;
+    char          project[KODE_APP_PROJECT_MAX]; /**< Echoed: answers can cross. */
+    uint8_t       status;  /**< kode_status_t, as the lines above read it.     */
+    AppWipeMedium fs;      /**< The internal partition.                        */
+    AppWipeMedium sd;      /**< The card.                                      */
+} StorageAppWipeRspEvt;
+
+/**
+ * @brief How an erase ended (APP_ERASE_DONE_SIG).
+ *
+ * KODE_OK nothing of the app is left; KODE_ERROR there was nothing of that
+ * name anywhere; KODE_IO_ERROR something would not go, and the two media say
+ * what; KODE_DENIED AO_AppMgr or AO_Storage was busy and KODE_TIMEOUT
+ * AO_Storage did not answer: the files were not looked at.
+ */
+typedef struct {
+    QEvt          super;
+    char          name[KODE_APP_PROJECT_MAX]; /**< The project asked about.    */
+    uint8_t       status;  /**< kode_status_t, as the lines above read it.     */
+    bool          image;   /**< An installed image was removed.                */
+    AppWipeMedium fs;      /**< The internal partition.                        */
+    AppWipeMedium sd;      /**< The card.                                      */
+} AppEraseDoneEvt;
 
 /**
  * @brief The result of a self-test that could not be answered on the spot
@@ -4318,6 +4431,9 @@ typedef struct {
     bool    ok;         /**< false: the scan itself failed; count is 0.     */
     bool    busy;       /**< true: not started, the C5 was busy with another
                          *   job (ok is false, count 0); ask again.          */
+    bool    cut;        /**< true: a Wi-Fi sweep ended before its last step,
+                         *   for a stop or for a job that needed the radio
+                         *   (ok is false); count is what it had heard.      */
 } WifiScanEndEvt;
 
 /** @brief ScanAskEvt.kind: the Wi-Fi sweep; the rows are kdrv_wifi_ap_t. */
@@ -4382,6 +4498,93 @@ typedef struct {
                          *   KQP_SCAN_WIFI.                             */
     uint8_t     kind;   /**< KQP_SCAN_WIFI or KQP_SCAN_BLE.             */
 } ScanAskEvt;
+
+/** @brief The highest channel a frames request names (5 GHz channel 177): the
+ *         wire's KODE_SNIFF_CHANNEL_MAX, which radio_frames.c asserts it equals. */
+#define KWIFI_FRAMES_CHANNEL_MAX  177U
+
+/** @brief Why a frames request is, or is not, listening (WifiFramesStateEvt.why). */
+typedef enum {
+    KWIFI_FRAMES_OK = 0,      /**< Listening, or stopped as asked.            */
+    KWIFI_FRAMES_NO_LINK,     /**< The C5 link is down.                       */
+    KWIFI_FRAMES_NO_SERVICE,  /**< This C5 does not carry the service.        */
+    KWIFI_FRAMES_WIFI_OFF,    /**< Wi-Fi is not started.                      */
+    KWIFI_FRAMES_JOINED,      /**< Joined: only the network's channel.        */
+    KWIFI_FRAMES_CHANNEL,     /**< The radio refused the channel.             */
+    KWIFI_FRAMES_BUSY,        /**< Somebody else is listening.                */
+    KWIFI_FRAMES_MEMORY,      /**< The C5 had no room.                        */
+    KWIFI_FRAMES_RESTING      /**< The board is going to rest.                */
+} kwifi_frames_why_t;
+/* A request AO_Radio could not send, or that the C5 did not answer in time,
+ * reads as KWIFI_FRAMES_NO_LINK (KWIFI_FRAMES_BUSY when the service's one
+ * request is still out); a promiscuous call the C5's radio refuses reads as
+ * KWIFI_FRAMES_WIFI_OFF; no room for this chip's ring as KWIFI_FRAMES_MEMORY.
+ * A stream AO_Radio ends itself is told KWIFI_FRAMES_RESTING (the board's
+ * rest), KWIFI_FRAMES_WIFI_OFF (Wi-Fi stopped, or a join that may restart
+ * it) or KWIFI_FRAMES_BUSY (a C5 update). */
+
+/** @brief WIFI_FRAMES_REQ_SIG: start or stop, and who to tell. */
+typedef struct {
+    QEvt     super;
+    QActive *who;       /**< Where every answer goes.                       */
+    bool     on;        /**< true to listen, false to stop.                 */
+    uint8_t  channel;   /**< 1..KWIFI_FRAMES_CHANNEL_MAX, or 0 to stay where
+                         *   the radio is; ignored for a stop.              */
+} WifiFramesReqEvt;
+
+/** @brief WIFI_FRAMES_STATE_SIG: the answer to every request. */
+typedef struct {
+    QEvt    super;
+    bool    on;         /**< Listening now.                                 */
+    uint8_t channel;    /**< The radio's primary channel, when the C5 said. */
+    bool    joined;     /**< The station holds an association.              */
+    uint8_t why;        /**< kwifi_frames_why_t.                            */
+} WifiFramesStateEvt;
+
+/**
+ * @brief WIFI_FRAMES_TICK_SIG: what one period of listening heard.
+ *
+ * @c heard counts every frame the C5's callback saw, and @c dropped only what
+ * this chip lost: the ring's overflow and the frames the asker's queue or the
+ * pool had no room for. A record the C5 could not queue, or one past what a
+ * batch carries, is in @c heard and in no drop count. A tick this chip could
+ * not post is counted nowhere; the next one carries the totals since the
+ * start.
+ */
+typedef struct {
+    QEvt     super;
+    uint8_t  channel;   /**< The radio's primary channel when the C5 sent the
+                         *   batch: frames heard while a scan visited other
+                         *   channels carry the channel at the period's end. */
+    bool     joined;    /**< The station holds an association.              */
+    int8_t   rssi_max;  /**< The strongest frame, dBm; -128 when none.      */
+    uint32_t heard;     /**< Frames heard since the start.                  */
+    uint16_t mgmt;      /**< Management frames in the period.               */
+    uint16_t data;      /**< Data frames in the period.                     */
+    uint32_t dropped;   /**< Frames lost since the start: the ring's, and
+                         *   those the asker's queue had no room for.       */
+} WifiFramesTickEvt;
+
+/** @brief Bytes of a frame's header kept after the MAC header (kode_wire.h's KODE_SNIFF_HEAD_LEN). */
+#define KWIFI_FRAME_HEAD_LEN  8U
+
+/** @brief Bytes of a frame's frame control (kdrv_frames.h's KDRV_FRAME_FC_LEN). */
+#define KWIFI_FRAME_FC_LEN    2U
+
+/** @brief Bytes of a frame's address (kdrv_frames.h's KDRV_FRAME_ADDR_LEN). */
+#define KWIFI_FRAME_ADDR_LEN  6U
+
+/** @brief WIFI_FRAME_SIG: one frame, as the C5 summarised it. */
+typedef struct {
+    QEvt     super;
+    uint8_t  channel;                      /**< The radio's primary channel then. */
+    int8_t   rssi;                         /**< dBm.                              */
+    uint8_t  fc[KWIFI_FRAME_FC_LEN];       /**< Frame control, as on the air.     */
+    uint8_t  addr1[KWIFI_FRAME_ADDR_LEN];  /**< Address 1, as on the air.         */
+    uint8_t  addr2[KWIFI_FRAME_ADDR_LEN];  /**< Address 2; zeros when it has none. */
+    uint16_t len;                          /**< The frame's length on the air.    */
+    uint8_t  head[KWIFI_FRAME_HEAD_LEN];   /**< After the MAC header; zeros past its end. */
+} WifiFrameEvt;
 
 /** @brief Bytes of a network name in the radio check: 32 characters and the terminator. */
 #define RADIO_PROBE_SSID_BYTES  33U
@@ -4452,6 +4655,12 @@ typedef struct {
     uint32_t ms;       /**< The whole check, from the request, ms.            */
 } RadioProbeEvt;
 
+/** @brief Why AO_Radio refused the request a BLE state answers (BleStateEvt.refused). */
+#define KQP_BLE_REFUSED_NONE      0U  /**< Not refused: the state is the answer.   */
+#define KQP_BLE_REFUSED_BUSY      1U  /**< The radio is busy; ask again.           */
+#define KQP_BLE_REFUSED_OFF       2U  /**< Bluetooth is off.                       */
+#define KQP_BLE_REFUSED_ATTACHED  3U  /**< A console is attached to the link.      */
+
 /** @brief The radio check, asked (RADIO_PROBE_REQ_SIG). */
 typedef struct {
     QEvt           super;
@@ -4460,20 +4669,33 @@ typedef struct {
     radio_probe_t  req;   /**< What to check.                                 */
 } RadioProbeReqEvt;
 
+/** @brief The longest name the scan response carries, NUL included: the
+ *         packet's 31 bytes less the name's two of length and type. */
+#define KQP_BLE_NAME_MAX  30U
+/** @brief The most maker data it carries: the packet less two bytes. */
+#define KQP_BLE_DATA_MAX  29U
+
 /** @brief What the BLE half is doing (BLE_STATE_SIG). */
 typedef struct {
     QEvt     super;
     uint8_t  state;      /**< kdrv_ble_state_t                              */
     bool     addr_known; /**< false: the controller has not synchronised yet.*/
     uint8_t  addr[6];    /**< This board's own BLE address.                 */
+    uint8_t  refused;    /**< KQP_BLE_REFUSED_*: why the request this state
+                          *   answers was refused; NONE when it was not.    */
     bool     console;    /**< An authenticated central is subscribed to TX. */
     uint16_t tx_drop;    /**< Lines the output ring refused since attach.   */
     uint8_t  bonds;      /**< Bonded peers in the store.                    */
     bool     hidden;     /**< The advert hides the board from all but its
                           *   bonded devices.                               */
     bool     pair_open;  /**< Pair new device's time is running.            */
+    bool     pair_wait;  /**< Pair new device was asked with a device
+                          *   connected: its time starts when that one
+                          *   leaves.                                       */
     uint16_t backlog;    /**< Bytes still queued for the central.           */
     uint16_t retry;      /**< Times the drain waited on NimBLE's buffers.   */
+    char     name[KQP_BLE_NAME_MAX]; /**< The name the board goes by: the
+                          *   advert's and its Device Name.                 */
 } BleStateEvt;
 
 /**
@@ -4498,12 +4720,6 @@ typedef struct {
                           *   KODE_BLE_SCAN_MIN_MS..KODE_BLE_SCAN_MAX_MS,
                           *   and anything else is refused.              */
 } BleScanReqEvt;
-
-/** @brief The longest name the scan response carries, NUL included: the
- *         packet's 31 bytes less the name's two of length and type. */
-#define KQP_BLE_NAME_MAX  30U
-/** @brief The most maker data it carries: the packet less two bytes. */
-#define KQP_BLE_DATA_MAX  29U
 
 /**
  * @brief What the scan response carries from now on (BLE_RSP_REQ_SIG): the
@@ -4545,8 +4761,32 @@ typedef struct {
 /** @brief Bytes of a characteristic's name in the app's service, NUL included. */
 #define KQP_BLE_APP_NAME_MAX   16U
 
-/** @brief Bytes of a value of the app's service. */
-#define KQP_BLE_APP_VALUE_MAX  244U
+/** @brief Bytes of a value of the app's service by default: one notification at an MTU of 247. */
+#define KQP_BLE_APP_VALUE_DEFAULT  244U
+
+/**
+ * @brief Bytes of a value of the app's service: CONFIG_KODE_BLE_APP_VALUE_MAX.
+ *
+ * A value over KQP_BLE_APP_VALUE_DEFAULT makes BleAppWriteEvt and
+ * BleAppValueReqEvt wider than the large tier, and kqp.c adds a tier of
+ * their width, in PSRAM (KQP_BLE_APP_WIDE).
+ */
+#ifdef CONFIG_KODE_BLE_APP_VALUE_MAX
+#define KQP_BLE_APP_VALUE_MAX  ((uint32_t)CONFIG_KODE_BLE_APP_VALUE_MAX)
+#if CONFIG_KODE_BLE_APP_VALUE_MAX > KQP_BLE_APP_VALUE_DEFAULT
+#define KQP_BLE_APP_WIDE       1   /**< The app's values need the wide tier. */
+#endif
+#else
+#define KQP_BLE_APP_VALUE_MAX  KQP_BLE_APP_VALUE_DEFAULT
+#endif
+#ifndef KQP_BLE_APP_WIDE
+#define KQP_BLE_APP_WIDE       0   /**< The app's values fit the large tier. */
+#endif
+
+#define KQP_BLE_APP_OP_SET     0U   /**< BleAppValueReqEvt.op: set the value.             */
+#define KQP_BLE_APP_OP_NOTIFY  1U   /**< BleAppValueReqEvt.op: set it and notify.         */
+#define KQP_BLE_APP_OP_PUSH    2U   /**< BleAppValueReqEvt.op: push it on the queue.      */
+#define KQP_BLE_APP_OP_CLEAR   3U   /**< BleAppValueReqEvt.op: empty the queue; no bytes. */
 
 /** @brief A central wrote to the app's own service (BLE_APP_WRITE_SIG). */
 typedef struct {
@@ -4569,12 +4809,12 @@ typedef struct {
     khal_sem_t done;   /**< Signalled once the answer is written.               */
     uint32_t   ack;    /**< The request's generation, stamped (release) just
                         *   before @c done.                                     */
-    uint8_t    rc;     /**< kode_status_t: kdrv_ble_app_set_value()'s or
-                        *   kdrv_ble_app_notify()'s answer.                     */
+    uint8_t    rc;     /**< kode_status_t: the driver's answer to the request.  */
 } BleValueWaiter;
 
 /**
- * @brief Set or notify one value of the app's own service (BLE_APP_VALUE_REQ_SIG).
+ * @brief Set or notify one value of the app's own service, or push a value
+ *        on a queued characteristic or empty it (BLE_APP_VALUE_REQ_SIG).
  *
  * Posted to AO_Radio, the service's owner, with a copy of the bytes. A
  * command carries no waiter; a blocked task's request carries its own.
@@ -4583,7 +4823,7 @@ typedef struct {
     QEvt            super;
     BleValueWaiter *wait;                          /**< The task's waiter; NULL for a command. */
     uint32_t        gen;                           /**< The task's tag for this request.        */
-    bool            notify;                        /**< true: notify; false: set the value.     */
+    uint8_t         op;                            /**< KQP_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR. */
     char            name[KQP_BLE_APP_NAME_MAX];    /**< The characteristic's name.              */
     uint16_t        len;                           /**< Bytes in @c data.                       */
     uint8_t         data[KQP_BLE_APP_VALUE_MAX];   /**< The value, NULs included.               */
@@ -4594,6 +4834,14 @@ typedef struct {
     QEvt super;
     bool connected;   /**< true: a link began; false: it ended. */
 } BleAppLinkEvt;
+
+/** @brief A read took the oldest value of a queued characteristic (BLE_APP_TAKEN_SIG). */
+typedef struct {
+    QEvt    super;
+    uint8_t chr;                         /**< The characteristic's place in the table. */
+    uint8_t left;                        /**< Values still in its queue.               */
+    char    name[KQP_BLE_APP_NAME_MAX];  /**< Its name.                                */
+} BleAppTakenEvt;
 
 /** @brief One remembered network (WIFI_SAVED_ENTRY_SIG). Name only. */
 typedef struct {
@@ -5741,10 +5989,11 @@ typedef struct {
     uint16_t n;          /**< Witness samples this record rests on.        */
 } HapticTestEvt;
 
-/* What one DISPLAY_TEST_SIG record is about. The row paints a field over the
- * whole glass and asks the operator whether the glass took it - every pixel,
- * the colour that was named, nothing dark and nothing stuck. The pad is the
- * answer: BUTTON_TOP says yes, BUTTON_BOT says no. */
+/* What one DISPLAY_TEST_SIG record is about. The row opens with the glass
+ * still the renderer's, for whoever draws it to say what is coming; then it
+ * paints a field over the whole glass and asks the operator whether the glass
+ * took it - every pixel, the colour that was named, nothing dark and nothing
+ * stuck. The pad is the answer: BUTTON_TOP says yes, BUTTON_BOT says no. */
 #define DISPLAY_TEST_ASK     0U  /**< `field` is on the glass: answer now.   */
 #define DISPLAY_TEST_PASS    1U  /**< The operator said yes.                 */
 #define DISPLAY_TEST_FAIL    2U  /**< The operator said no.                  */
@@ -5753,6 +6002,10 @@ typedef struct {
 #define DISPLAY_TEST_DONE    4U  /**< The row is over; the verdict follows.  */
 #define DISPLAY_TEST_ABSENT  5U  /**< No panel on this board: the row answers
                                   *   at once and asks nobody anything.      */
+#define DISPLAY_TEST_INTRO   6U  /**< The row has started and the glass is
+                                  *   still the renderer's: say what the pad
+                                  *   will mean. BUTTON_TOP starts the fields,
+                                  *   or KODE_DISPLAY_TEST_INTRO_MS does.    */
 
 /* Which field DisplayTestEvt.field is about. */
 #define DISPLAY_FIELD_WHITE 0U  /**< All three channels.                    */
@@ -5767,7 +6020,8 @@ typedef struct {
  *
  * ButtonsTestEvt's shape: a question and its outcome share a step number, so
  * the console prints them as a pair and whoever draws the glass knows from
- * the first ASK that the pad is not navigation until DONE.
+ * the INTRO that the pad is not navigation until DONE, and from the first ASK
+ * that the glass is the row's.
  */
 typedef struct {
     QEvt     super;
@@ -5975,9 +6229,18 @@ typedef struct {
 } FileStat;
 
 /**
+ * @brief How big a volume is and how much of it is free: kode_sys_file_space_t,
+ *        field for field. Whole kilobytes, as StorageInfoEvt counts them.
+ */
+typedef struct {
+    uint32_t total_kb;  /**< What the volume's filesystem spans.  */
+    uint32_t free_kb;   /**< What is left of it.                  */
+} FileSpace;
+
+/**
  * @brief Answers kode_sys's file requests: FILE_STATUS_RSP_SIG, FILE_LIST_END_SIG,
  *        FILE_FOLDER_RSP_SIG, FILE_DELETE_RSP_SIG, FILE_RENAME_RSP_SIG,
- *        FILE_READ_RSP_SIG and FILE_WRITE_RSP_SIG.
+ *        FILE_READ_RSP_SIG, FILE_WRITE_RSP_SIG and FILE_SPACE_RSP_SIG.
  */
 typedef struct {
     QEvt     super;
@@ -5987,7 +6250,11 @@ typedef struct {
     bool     more;    /**< The end of a listing: entries remain past it.    */
     uint16_t count;   /**< The end of a listing: entries this page posted.  */
     uint32_t got;     /**< A read: bytes written to the lent buffer.        */
-    FileStat stat;    /**< A status: what is at the path.                   */
+    union {
+        FileStat  stat;   /**< A status: what is at the path.                   */
+        FileSpace space;  /**< A space: how big the volume is and what is free. */
+    };                    /**< One answer is one kind, so the two share a place:
+                           *   every file answer keeps the room it had.          */
 } FileRspEvt;
 
 /**
@@ -6048,6 +6315,8 @@ typedef struct {
     bool        exists;  /**< STAT only, as StoragePathRspEvt.exists.      */
     bool        is_dir;  /**< STAT only.                                    */
     uint32_t    size;    /**< STAT: the file's bytes.                       */
+    uint32_t    total_kb;  /**< SPACE: the volume's kilobytes.              */
+    uint32_t    free_kb;   /**< SPACE: what is left of them.                */
     StorageRow *rows;    /**< LIST only: at least @c cap entries, filled in
                            *   the order the walk found them.               */
     char       *text;    /**< CAT only: at least @c cap bytes, filled with

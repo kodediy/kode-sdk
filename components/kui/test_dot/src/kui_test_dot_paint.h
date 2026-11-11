@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kui_test_dot_paint.h
- * @brief The E5 painter: RGB565 pixels written one by one, with Luismi's anti-aliasing, and the canvas that holds them.
+ * @brief The E5 painter: RGB565 pixels written one by one, with the station's anti-aliasing, and the canvas that holds them.
  */
 #ifndef KUI_TEST_DOT_PAINT_H
 #define KUI_TEST_DOT_PAINT_H

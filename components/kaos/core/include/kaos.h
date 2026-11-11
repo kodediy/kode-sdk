@@ -1569,11 +1569,14 @@ void display_mirror_info_request(void);
 /**
  * @brief Ask AO_Display to self-test the panel - `test component=display`.
  *
- * Verdict: a published TEST_RESULT_SIG "display". White, red, green, blue, black
- * are painted as DISPLAY_TEST_SIG questions: BUTTON_TOP confirms, BUTTON_BOT
- * denies, KODE_DISPLAY_TEST_STEP_MS fails; no panel answers `panel=absent` at once.
- * Flushes meanwhile are completed but not painted, so it ends with
- * DISPLAY_REPAINT_SIG. Presses are answers until DISPLAY_TEST_DONE: do not act on them.
+ * Verdict: a published TEST_RESULT_SIG "display". It opens with
+ * DISPLAY_TEST_INTRO, the glass still the renderer's to say what is coming,
+ * until BUTTON_TOP or KODE_DISPLAY_TEST_INTRO_MS. Then white, red, green, blue,
+ * black are painted as DISPLAY_TEST_SIG questions: BUTTON_TOP confirms,
+ * BUTTON_BOT denies, KODE_DISPLAY_TEST_STEP_MS fails; no panel answers
+ * `panel=absent` at once. Flushes after the opening are completed but not
+ * painted, so it ends with DISPLAY_REPAINT_SIG. Presses are answers until
+ * DISPLAY_TEST_DONE: do not act on them.
  */
 void display_test_request(void);
 
@@ -2043,6 +2046,20 @@ void radio_boot_release(void);
 void wifi_scan_request(void);
 
 /**
+ * @brief Ask AO_Radio to end the listing in flight before its last channel.
+ *
+ * The sweep wifi_scan_request() started ends after its step on the air, a few
+ * seconds at most, and its WIFI_SCAN_END_SIG says @c cut, with the networks
+ * heard so far before it. No other sweep is touched: not an asked scan, the
+ * automatic join's round or a self-test row. With no listing in flight
+ * nothing happens. No answer of its own.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
+ */
+bool wifi_scan_stop_request(void);
+
+/**
  * @brief Scan for the AO @p who; kode_sys_wifi_scan()'s door.
  *
  * Brings the link up if needed. Entries are POSTED to @p who as WIFI_SCAN_ENTRY_SIG
@@ -2071,6 +2088,29 @@ kode_status_t wifi_scan_ask(QActive *who);
  * @param gen  The task's tag for this request, never 0.
  */
 void wifi_scan_request_wait(ScanWaiter *wait, uint32_t gen);
+
+/**
+ * @brief Ask AO_Radio to start or stop telling @p who about Wi-Fi frames.
+ *
+ * Posts and returns. Always answered to @p who with WIFI_FRAMES_STATE_SIG, in
+ * every state of the link: with it down the answer is KWIFI_FRAMES_NO_LINK.
+ * While on, @p who gets one WIFI_FRAMES_TICK_SIG per period in which the C5
+ * heard a frame, and after it one WIFI_FRAME_SIG per frame handed over; all of
+ * them are posted to @p who with a margin, never published, and what its queue
+ * has no room for is counted in the next tick's @c dropped. Receive only.
+ * Starts nothing that was off and never leaves a network: joined, only channel
+ * 0 or the network's. One asker listens at a time: another is answered
+ * KWIFI_FRAMES_BUSY, and its stop changes nothing.
+ *
+ * @param who     Where the answers go. Never NULL.
+ * @param on      true to listen, false to stop.
+ * @param channel 1..KWIFI_FRAMES_CHANNEL_MAX, or 0 to stay where the radio is.
+ *                Ignored for a stop.
+ * @return true when the request was posted; false when the event pool was dry
+ *         or AO_Radio's queue is within KQP_RADIO_CMD_MARGIN of full, and then
+ *         nothing answers.
+ */
+bool wifi_frames_request(QActive *who, bool on, uint8_t channel);
 
 /**
  * @brief Ask AO_Radio to join @p ssid.
@@ -2262,22 +2302,23 @@ QEvt const *ble_rsp_evt(const char *name, const uint8_t *data, size_t len);
 
 /**
  * @brief The request that sets, or sets and notifies, one value of the app's
- *        own service: AO_Radio, its owner, hands the copy to the driver.
+ *        own service, or pushes a value on a queued characteristic or empties
+ *        it: AO_Radio, its owner, hands the copy to the driver.
  *
  * A command carries no waiter and has no answer; a blocked task passes its
- * waiter and its tag, and AO_Radio writes kdrv_ble_app_set_value()'s or
- * kdrv_ble_app_notify()'s status into it in the step that receives it.
+ * waiter and its tag, and AO_Radio writes the driver's status into it in the
+ * step that receives it.
  *
- * @param chr    The characteristic's name, shorter than KQP_BLE_APP_NAME_MAX.
- * @param notify true to notify a subscribed central too.
- * @param data   The bytes; NULL when @p len is 0.
- * @param len    Their count, 0 to KQP_BLE_APP_VALUE_MAX.
- * @param wait   A blocked task's waiter; NULL for a command.
- * @param gen    The task's tag; 0 for a command.
+ * @param chr  The characteristic's name, shorter than KQP_BLE_APP_NAME_MAX.
+ * @param op   KQP_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR.
+ * @param data The bytes; NULL when @p len is 0.
+ * @param len  Their count, 0 to KQP_BLE_APP_VALUE_MAX.
+ * @param wait A blocked task's waiter; NULL for a command.
+ * @param gen  The task's tag; 0 for a command.
  * @return The event, for kode_sys_cmd_post(); NULL when the pool is dry or an
  *         argument does not fit the event.
  */
-QEvt const *ble_value_evt(const char *chr, bool notify, const void *data, size_t len,
+QEvt const *ble_value_evt(const char *chr, uint8_t op, const void *data, size_t len,
                           BleValueWaiter *wait, uint32_t gen);
 
 /**
@@ -2521,8 +2562,8 @@ void radio_amp_request(bool on);
 
 /**
  * @brief Subscribe @p who to the app's own Bluetooth service: BLE_APP_WRITE_SIG,
- *        a copy of each write a central makes, and BLE_APP_LINK_SIG, each edge
- *        of the link.
+ *        a copy of each write a central makes, BLE_APP_LINK_SIG, each edge of
+ *        the link, and BLE_APP_TAKEN_SIG, each value a read takes from a queue.
  *
  * Beside AO_Radio's start, so the call links AO_Radio (tools/check_starts.sh).
  * The service itself is the app's KODE_SYS_BLE_SERVICE() or KODE_BLE_SERVICE().
@@ -2771,7 +2812,7 @@ bool mqtt_channel_holds(void);
 void mqtt_state_request(void);
 
 /* ---- The Kode channel, run by AO_Net --------------------------------------
- * With Wi-Fi and a certificate on the C5, AO_Net joins Pablo's channel by itself
+ * With Wi-Fi and a certificate on the C5, AO_Net joins the Kode channel by itself
  * and stays joined, unless the `chan` setting is off. This is a window onto it
  * (CONFIG_KODEOS_CHANNEL, which needs MQTT and the console).
  */
@@ -2955,6 +2996,12 @@ typedef enum {
     STORAGE_PATH_DELETE,    /**< UNLINK or RMDIR, whichever the path is, in
                              *   one step: storage_delete_ask()'s. Answered
                              *   with StoragePathRspEvt's shape.             */
+    STORAGE_PATH_SPACE,     /**< How big the volume at the path is and how much
+                             *   of it is free; the path is the volume's root.
+                             *   Answered to storage_space_ask() and to a
+                             *   blocked task's waiter only: a request that
+                             *   names neither is refused with
+                             *   StoragePathRspEvt's KODE_DENIED.            */
 } storage_path_op_t;
 
 /** @brief Ask AO_Storage to do @p op to @p medium. */
@@ -3207,6 +3254,19 @@ kode_status_t storage_write_ask(QActive *who, const char *path, const void *data
                                 bool append);
 
 /**
+ * @brief Ask how big the volume at @p path is and how much of it is free;
+ *        answered with FILE_SPACE_RSP_SIG.
+ *
+ * The answer's @c rc is KODE_DENIED when @p path is not a volume's root,
+ * KODE_ERROR when the volume will not mount or cannot be counted, and its
+ * @c space is zero then.
+ * @param who  The asking AO.
+ * @param path A volume's root, absolute and virtual: "/sdcard" or "/storage".
+ * @return As the asks above.
+ */
+kode_status_t storage_space_ask(QActive *who, const char *path);
+
+/**
  * @brief Ask AO_Storage to receive a file arriving on the console.
  *
  * `file_put`: AO_Log hands over exactly @p size raw bytes, written to @p path
@@ -3318,6 +3378,24 @@ void appdata_request(const char *project, QActive *who);
  */
 kode_status_t appdata_rm_request(const char *project, QActive *who);
 
+/**
+ * @brief Take every file of @p project off both media.
+ *
+ * The images at the root of the internal partition and of the card whose
+ * descriptor names @p project, whatever the files are called, and the app's
+ * data folder on each. `kodeos.bin` and `c5_slave.bin` are never opened. One
+ * file a step, so the walk never holds AO_Storage. Always answered once
+ * posted, with a StorageAppWipeRspEvt naming @p project; an absent card is
+ * said there, and is no failure.
+ *
+ * @param project The app's project name, as the binary declares it.
+ * @param who     Where STORAGE_APP_WIPE_RSP_SIG is posted. Never NULL.
+ * @return KODE_OK when the request is posted and an answer is owed;
+ *         KODE_NO_RESOURCES when the event pool is dry: nothing was posted and
+ *         no answer will come.
+ */
+kode_status_t storage_app_wipe_request(const char *project, QActive *who);
+
 /** @brief Write one app's data folder (APPDATA_PUT_REQ_SIG). */
 typedef struct {
     QEvt            super;
@@ -3334,7 +3412,8 @@ typedef struct {
 typedef struct {
     QEvt          super;
     char          project[KDRV_SLOT_PROJECT_MAX]; /**< Echoed: answers can cross. */
-    kode_status_t rc;      /**< KODE_OK, KODE_DENIED, KODE_ERROR or KODE_IO_ERROR. */
+    kode_status_t rc;      /**< KODE_OK, KODE_DENIED, KODE_ERROR, KODE_IO_ERROR,
+                            *   or KODE_NO_RESOURCES: no room for a new folder. */
 } AppDataPutRspEvt;
 
 /**
@@ -3345,7 +3424,9 @@ typedef struct {
  * `app.json` and, if @p icon_len, `icon.k64` in two steps. Never the card. Once
  * posted, AO_Storage owns @p buf and frees it on every path. Always answered with an
  * AppDataPutRspEvt: KODE_OK; KODE_DENIED bad name, length, NULL buffer or busy;
- * KODE_ERROR not mounted; KODE_IO_ERROR. A failed put leaves no folder.
+ * KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when a new folder
+ * would leave the partition under KODE_APPDATA_FREE_MIN_BYTES (a folder that is
+ * there is always replaced). A failed put leaves no folder.
  *
  * @param project  The app's project name, as the binary declares it.
  * @param buf      app.json then icon.k64, one allocation from khal_alloc_psram()
@@ -3475,8 +3556,24 @@ void appmgr_run_request(const char *name);
  */
 void appmgr_cancel_request(void);
 
-/** @brief Ask AO_AppMgr to remove the installed app named @p name. */
+/**
+ * @brief Ask AO_AppMgr to take everything of the app named @p name off the
+ *        board.
+ *
+ * The installed image and its directory entry, its category override, a
+ * mailbox image of that project, and through AO_Storage every image file of
+ * the project and its data folder on both media. The app need not be
+ * installed: its files alone are removed the same way. The end is published
+ * as APP_ERASE_DONE_SIG (AppEraseDoneEvt), a refusal included.
+ *
+ * @param name The app's project name.
+ */
 void appmgr_erase_request(const char *name);
+
+/** @brief How long AO_AppMgr waits for AO_Storage to take an erased app's
+ *         files off both media, in ms: one descriptor read per image file
+ *         there is, and the deletes. */
+#define APPMGR_WIPE_MS      (20000U)
 
 /**
  * @brief Ask AO_AppMgr to assign or drop an app's categories.
@@ -3604,6 +3701,62 @@ bool appmgr_find_request(const char *project, QActive *who);
  *         coming.
  */
 bool appmgr_keep_only_request(const char *project, QActive *who);
+
+/** @brief How a fetch of an app's data folder ended (AppDataGetRspEvt.why). */
+typedef enum {
+    APPDATA_GET_OK = 0,   /**< The folder is written.                           */
+    APPDATA_GET_BUSY,     /**< AO_AppMgr or AO_Storage was busy with a write.   */
+    APPDATA_GET_NAME,     /**< The project cannot name a folder.                */
+    APPDATA_GET_FETCH,    /**< A file did not come: no network, no 200, no
+                           *   Content-Length, fewer bytes than it said, or
+                           *   silence.                                         */
+    APPDATA_GET_JSON,     /**< app.json is longer than KAPP_DATA_JSON_MAX, is
+                           *   not what the board reads, or names an icon
+                           *   other than icon.k64.                             */
+    APPDATA_GET_ICON,     /**< icon.k64 is not KAPP_ICON_BYTES long.            */
+    APPDATA_GET_FULL,     /**< The internal partition has no room for it.       */
+    APPDATA_GET_STORE     /**< The folder could not be written.                 */
+} appdata_get_why_t;
+
+/** @brief Fetch one app's data folder from a URL (APPDATA_GET_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    char     project[KDRV_SLOT_PROJECT_MAX]; /**< The app's project name.       */
+    char     url[KODE_APPDATA_URL_MAX];      /**< The base URL; the two file
+                                              *   names are added to it.        */
+    QActive *who;                            /**< Where APPDATA_GET_RSP_SIG is
+                                              *   posted.                       */
+} AppDataGetReqEvt;
+
+/** @brief How a fetch of one app's data folder ended (APPDATA_GET_RSP_SIG). */
+typedef struct {
+    QEvt    super;
+    char    project[KDRV_SLOT_PROJECT_MAX]; /**< Echoed.                        */
+    uint8_t why;                            /**< appdata_get_why_t.             */
+    bool    icon;                           /**< The folder holds an icon.      */
+} AppDataGetRspEvt;
+
+/**
+ * @brief Ask AO_AppMgr to fetch @p project's data folder from @p url and write it.
+ *
+ * An app's data travels apart from its image and may be on the board before the
+ * app is. Two files are read, `<url>app.json` and, when that names an icon,
+ * `<url>icon.k64`; both must come with a Content-Length, and they are checked
+ * as the folder's own reader checks them before AO_Storage writes the folder
+ * (appdata_put_request()), replacing one that was there. One APPDATA_GET_RSP_SIG
+ * to @p who, refusals included: AO_AppMgr does one thing at a time and answers
+ * APPDATA_GET_BUSY while it writes an image. Any task or AO.
+ *
+ * @param project The app's project name, as its image declares it.
+ * @param url     The base URL, ending where the file names begin; shorter than
+ *                KODE_APPDATA_URL_MAX.
+ * @param who     The Active Object the answer is posted to. Not NULL.
+ * @return KODE_OK when the request is posted and an answer is owed; KODE_ERROR
+ *         for a NULL argument or a URL that does not fit; KODE_NO_RESOURCES when
+ *         the pool is dry or the queue full. Nothing was posted for the last two.
+ */
+kode_status_t appmgr_appdata_get_request(const char *project, const char *url,
+                                         QActive *who);
 
 /* ---- AO_Boot: owner of otadata AND the apps boot request ----------------
  * kodeOS lives in `factory` or its OTA slot; apps live in the `apps` region.

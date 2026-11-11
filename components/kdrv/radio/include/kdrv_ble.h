@@ -319,9 +319,9 @@ const char *kdrv_ble_serial_name(void);
  *
  * The advert is untouched: with the console service it carries the
  * service's UUID and has 7 of its 31 bytes left, so whatever names the board
- * rides the scan response, which has a packet of its own. Applied at once
- * when the host is up, and kept for every advert after, the host's restarts
- * included. Until this is called, the scan response carries the serial alone
+ * rides the scan response, which has a packet of its own, and is the Device
+ * Name a connected central reads. Applied at once when the host is up, and
+ * kept for every advert after, the host's restarts included. Until this is called, the scan response carries the serial alone
  * with the console service, and nothing without it.
  *
  * Belongs to the kdrv_radio worker, like every call here that talks to the
@@ -334,6 +334,16 @@ const char *kdrv_ble_serial_name(void);
  *         left as it was; KODE_ERROR when the host refused the packet.
  */
 kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_t len);
+
+/**
+ * @brief The name the board goes by: the scan response's and its Device Name.
+ *
+ * The one kdrv_ble_set_scan_rsp() last set, and the serial until then. Written
+ * by the kdrv_radio worker, so it is read while no job is with it.
+ *
+ * @return The name; never NULL.
+ */
+const char *kdrv_ble_name(void);
 
 /**
  * @brief Scan for @p ms milliseconds. Blocks for about that long.
@@ -399,30 +409,48 @@ bool kdrv_ble_addr(uint8_t out[6]);
  * A table that cannot be served (kdrv_ble_app_fault()) is left out whole,
  * with one log line at the build; the console's service stays. A value is
  * what a read gets; a notification goes into a ring that NimBLE's host task
- * drains. The values, the ring and every NimBLE structure of the service
- * live in one PSRAM block, taken when a service is first served or a value
- * first set, so an app that declares none pays no internal RAM for it.
+ * drains. A characteristic with KDRV_BLE_APP_QUEUED has a queue instead:
+ * each read takes the oldest value pushed, a read of an empty queue gets 0
+ * bytes, and the take is told through the taken callback. The values, the
+ * ring and every NimBLE structure of the service live in one PSRAM block,
+ * taken when a service is first served or a value first set, so an app that
+ * declares none pays no internal RAM for it; each queue is a PSRAM block of
+ * its own, taken for a queued characteristic alone.
  *
  * AO_Radio owns the service the way it owns the radio: it alone calls
- * kdrv_ble_app_set_value(), kdrv_ble_app_notify() and kdrv_ble_app_kick(),
- * and kode_sys asks it by event. kdrv_ble_app_check() is the one call any
- * task may make, a read of the declared constant. A write arrives as a copy
- * through the write callback, on NimBLE's host task.
+ * kdrv_ble_app_set_value(), kdrv_ble_app_notify(), kdrv_ble_app_queue_push(),
+ * kdrv_ble_app_queue_clear() and kdrv_ble_app_kick(), and kode_sys asks it by
+ * event. kdrv_ble_app_check() and kdrv_ble_app_queue_room() are the calls any
+ * task may make, reads of the declared constant and of a queue's count. A
+ * write arrives as a copy through the write callback, and a take through the
+ * taken callback, both on NimBLE's host task.
  */
 
 #define KDRV_BLE_APP_CHARS_MAX  4U    /**< Characteristics one app's service may have.          */
-#define KDRV_BLE_APP_VALUE_MAX  244U  /**< Bytes of a value: one notification at an MTU of 247. */
+#define KDRV_BLE_APP_VALUE_DEFAULT 244U  /**< Bytes of a value by default: one notification at an MTU of 247. */
+#ifdef CONFIG_KODE_BLE_APP_VALUE_MAX
+#define KDRV_BLE_APP_VALUE_MAX  ((uint32_t)CONFIG_KODE_BLE_APP_VALUE_MAX) /**< Bytes of a value: the app's CONFIG_KODE_BLE_APP_VALUE_MAX. */
+#else
+#define KDRV_BLE_APP_VALUE_MAX  KDRV_BLE_APP_VALUE_DEFAULT                /**< Bytes of a value, with BLE off. */
+#endif
 #define KDRV_BLE_APP_NAME_MAX   16U   /**< Bytes of a characteristic's name, NUL included.      */
 #define KDRV_BLE_APP_WHY_MAX    80U   /**< Bytes of the reason a service is left out, NUL included. */
 #define KDRV_BLE_APP_READ       0x01U /**< A central may read the value.                       */
 #define KDRV_BLE_APP_WRITE      0x02U /**< A central may write it.                             */
 #define KDRV_BLE_APP_NOTIFY     0x04U /**< A central may subscribe to its notifications.       */
+#define KDRV_BLE_APP_QUEUED     0x08U /**< Reads take the values pushed, oldest first; a read. */
+#define KDRV_BLE_APP_QUEUE_SLOTS 8U   /**< Values one queued characteristic holds.             */
+
+#define KDRV_BLE_APP_OP_SET     0U    /**< kdrv_ble_app_check(): set the value.               */
+#define KDRV_BLE_APP_OP_NOTIFY  1U    /**< kdrv_ble_app_check(): set it and notify.           */
+#define KDRV_BLE_APP_OP_PUSH    2U    /**< kdrv_ble_app_check(): push a value on the queue.   */
+#define KDRV_BLE_APP_OP_CLEAR   3U    /**< kdrv_ble_app_check(): empty the queue.             */
 
 /** @brief One characteristic of the app's service, as the app declares it. */
 typedef struct {
     const char *name;   /**< 1 to KDRV_BLE_APP_NAME_MAX - 1 bytes; unique in the service. */
     const char *uuid;   /**< 128 bits as text, "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".    */
-    uint8_t     props;  /**< KDRV_BLE_APP_READ, _WRITE and _NOTIFY, at least one.         */
+    uint8_t     props;  /**< KDRV_BLE_APP_READ, _WRITE, _NOTIFY and _QUEUED, at least one. */
 } kdrv_ble_app_char_t;
 
 /** @brief The app's service, as the app declares it: kode_ble_app_service. */
@@ -454,21 +482,21 @@ const kdrv_ble_app_service_t *kdrv_ble_app_service(void);
 bool kdrv_ble_app_fault(const kdrv_ble_app_service_t *svc, char *why, size_t cap);
 
 /**
- * @brief Whether a set or a notify of characteristic @p chr would be refused
- *        before any value is touched.
+ * @brief Whether a set, a notify, a push or a clear of characteristic @p chr
+ *        would be refused before any value is touched.
  *
  * Judged against the declared constant alone: the service served, the name,
- * NOTIFY for a notify, the length and the data. Pure: no lock, no PSRAM, any
- * thread.
+ * NOTIFY for a notify, QUEUED for a push or a clear, the length and the data.
+ * Pure: no lock, no PSRAM, any thread.
  *
- * @param chr    The characteristic's name.
- * @param notify true for a notify.
- * @param data   The bytes; NULL when @p len is 0.
- * @param len    Their count.
- * @return KODE_OK when kdrv_ble_app_set_value() or kdrv_ble_app_notify()
- *         would go on; KODE_DENIED as they refuse.
+ * @param chr  The characteristic's name.
+ * @param op   KDRV_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR.
+ * @param data The bytes; NULL when @p len is 0.
+ * @param len  Their count: 1 or more for a push, 0 for a clear.
+ * @return KODE_OK when the call @p op names would go on; KODE_DENIED as it
+ *         refuses.
  */
-kode_status_t kdrv_ble_app_check(const char *chr, bool notify, const void *data, size_t len);
+kode_status_t kdrv_ble_app_check(const char *chr, uint8_t op, const void *data, size_t len);
 
 /**
  * @brief Set what a read of characteristic @p chr gets.
@@ -524,6 +552,60 @@ typedef bool (*kdrv_ble_app_write_cb_t)(uint8_t chr, const char *name,
 kode_status_t kdrv_ble_app_set_write_cb(kdrv_ble_app_write_cb_t cb);
 
 /**
+ * @brief Push one value on characteristic @p chr's queue, behind the others.
+ *
+ * Copied under the lock NimBLE's host task takes for a read; it works before
+ * the host has started, though a link that begins or ends empties the queue.
+ * AO_Radio's alone.
+ *
+ * @param chr  The characteristic's name; it carries KDRV_BLE_APP_QUEUED.
+ * @param data The bytes.
+ * @param len  Their count, 1 to KDRV_BLE_APP_VALUE_MAX.
+ * @return KODE_OK; KODE_DENIED as kdrv_ble_app_check() refuses a push;
+ *         KODE_NO_RESOURCES when the queue holds KDRV_BLE_APP_QUEUE_SLOTS
+ *         values; KODE_ERROR when PSRAM refused the queue.
+ */
+kode_status_t kdrv_ble_app_queue_push(const char *chr, const void *data, size_t len);
+
+/**
+ * @brief Empty characteristic @p chr's queue. AO_Radio's alone.
+ * @param chr The characteristic's name; it carries KDRV_BLE_APP_QUEUED.
+ * @return KODE_OK; KODE_DENIED as kdrv_ble_app_check() refuses a clear.
+ */
+kode_status_t kdrv_ble_app_queue_clear(const char *chr);
+
+/**
+ * @brief How many more values characteristic @p chr's queue takes now.
+ *
+ * A read of the count under the queue's lock: any task.
+ *
+ * @param chr  The characteristic's name; it carries KDRV_BLE_APP_QUEUED.
+ * @param room Receives the count, 0 to KDRV_BLE_APP_QUEUE_SLOTS.
+ * @return KODE_OK; KODE_DENIED as kdrv_ble_app_check() refuses a clear, or
+ *         for a NULL @p room.
+ */
+kode_status_t kdrv_ble_app_queue_room(const char *chr, size_t *room);
+
+/**
+ * @brief Told that a read took the oldest value of a queued characteristic.
+ *
+ * Called from NimBLE's host task once the read reached the value's last
+ * byte. Post an event and return, as kdrv_ble_cb_t does.
+ *
+ * @param chr  The characteristic's place in the table.
+ * @param name Its name.
+ * @param left Values still in its queue.
+ */
+typedef void (*kdrv_ble_app_taken_cb_t)(uint8_t chr, const char *name, uint8_t left);
+
+/**
+ * @brief Install the taken callback. Before the first start; NULL is refused.
+ * @param cb The callback.
+ * @return KODE_OK, or KODE_DENIED for a NULL @p cb.
+ */
+kode_status_t kdrv_ble_app_set_taken_cb(kdrv_ble_app_taken_cb_t cb);
+
+/**
  * @brief Wake NimBLE's host task to send what the ring holds.
  *
  * Does nothing while the host is not running the app's service or the ring
@@ -531,6 +613,28 @@ kode_status_t kdrv_ble_app_set_write_cb(kdrv_ble_app_write_cb_t cb);
  * start or a stop of the host there is what this would race.
  */
 void kdrv_ble_app_kick(void);
+
+/**
+ * @brief Whether the app asked for the Battery service (KODE_BLE_BATTERY_SERVICE()).
+ *
+ * Served beside the console's and the app's services: the Bluetooth SIG's
+ * Battery (0x180F) with Battery Level (0x2A19), read and notify, behind the
+ * app's service's permissions. Any thread.
+ *
+ * @return true when the app declared it.
+ */
+bool kdrv_ble_battery_declared(void);
+
+/**
+ * @brief The charge Battery Level reports, in percent.
+ *
+ * A level that moved is notified to a subscribed central from NimBLE's host
+ * task. AO_Radio's alone, from AO_Power's readings, and never while a job of
+ * its worker runs, for kdrv_ble_app_kick()'s reason.
+ *
+ * @param pct 0 to 100.
+ */
+void kdrv_ble_battery_set(uint8_t pct);
 
 /**
  * @brief How many connections a central has opened since boot.

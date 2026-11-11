@@ -68,10 +68,16 @@ kode_status_t kdrv_cw2217_init(void);
 bool kdrv_cw2217_present(void);
 
 /**
- * @brief Leave shutdown: CONFIG <- 0x30, 20 ms, CONFIG <- 0x00.
+ * @brief Leave shutdown, if the chip is in it.
  *
- * Returns at once. The algorithm takes about a second to come up; poll
+ * Reads CONFIG first. A chip that reads 0x00 is already active and is left
+ * alone: the start sequence on an active chip is a restart, which throws its
+ * estimate away and drops READY for about 1.5 s. Any other value gets
+ * CONFIG <- 0x30, 20 ms, CONFIG <- 0x00, and the call returns at once; poll
  * KDRV_CW_READY before believing any other register.
+ *
+ * @return KODE_OK, KODE_DENIED before kdrv_cw2217_init(), KODE_ERROR on a bus
+ *         failure.
  */
 kode_status_t kdrv_cw2217_wake(void);
 

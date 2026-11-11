@@ -96,8 +96,8 @@ static void finger(bool down, int16_t x, int16_t y)
 /**
  * @brief Bring AO_Touch up, once for the whole binary, and idle.
  *
- * Once, for the same reason AO_Power is: Touch_tracking arms a PERIODIC
- * QTimeEvt on entry, and re-running the constructor over a timer that is
+ * Once, for the same reason AO_Power is: Touch_tracking arms a QTimeEvt
+ * on entry, and re-running the constructor over a timer that is
  * still linked into QF's list corrupts that list. The AO is left in
  * Touch_idle here and driven into sampling by the case that wants it.
  */
@@ -248,7 +248,7 @@ static const TouchEvt *published(void)
  * @brief Dispatch whatever is waiting in AO_Touch's queue.
  *
  * By hand rather than through qf_support_pump(): this AO is a background
- * one, for its periodic poll timer, and the pump drains every background
+ * one, for its poll timer, and the pump drains every background
  * queue before it dispatches - a request posted a moment ago included.
  */
 static void serve(void)
@@ -306,6 +306,173 @@ TEST_CASE("the controller is not touched until the panel says it is up, and a "
     TEST_ASSERT_EQUAL_UINT16((uint16_t)KDRV_CST_AUTO_SLEEP_TIME, a->field);
     TEST_ASSERT_EQUAL_UINT(0U, s_reads);
 
+    mock_down();
+}
+
+/* ---- A controller that does not answer at the bring-up -------------------- */
+
+/* These cases run before any other brings the controller up, in this order:
+ * the AO has no way back to Touch_idle, and the last of them finds the chip. */
+
+static void round_for(kode_lp_state_t target);
+static void state_awake(void);
+static void expect_answer(bool busy, const char *why);
+
+static bool     s_answers;   /**< Whether the chip ACKs a probe.  */
+static uint32_t s_probes;    /**< Probes asked of the bus.        */
+
+static bool on_probe(uint16_t addr, uint32_t timeout_ms, int ncalls)
+{
+    (void)addr; (void)timeout_ms; (void)ncalls;
+    ++s_probes;
+    return s_answers;
+}
+
+/** @brief The handle a bring-up gets: any address that is not NULL. */
+static khal_i2c_dev_t s_handle = (khal_i2c_dev_t)(void *)&s_handle;
+
+static kode_status_t on_add(uint16_t addr, khal_i2c_dev_t *out, int ncalls)
+{
+    (void)addr; (void)ncalls;
+    *out = s_handle;
+    return KODE_OK;
+}
+
+/**
+ * @brief Open a case with a chip that answers probes, or does not.
+ * @param answers Whether it ACKs.
+ */
+static void chip(bool answers)
+{
+    touch_up_once();
+    khal_i2c_remove_IgnoreAndReturn(KODE_OK);
+    khal_i2c_probe_StubWithCallback(&on_probe);
+    s_answers = answers;
+    s_probes  = 0U;
+}
+
+/** @brief Let @p ms go by: the clock and the AO's own timers. */
+static void run_ms(uint32_t ms)
+{
+    fake_time_advance_ms(ms);
+    (void)qf_support_tick(AO_Touch, QF_SUPPORT_STEPS(ms));
+}
+
+/* The panel's bring-up has just pulsed the reset line the two share, so the
+ * one try the AO used to make could land on a controller still coming back,
+ * and the touch stayed dead until a restart. The looks come at 0.2, 0.5, 1 and
+ * 2 s after that try, then every 10 s; each is one probe. */
+TEST_CASE("a controller silent at the bring-up is looked for again: four times soon, then spaced",
+          "[touch_ao]")
+{
+    chip(true);
+    (void)kdrv_cst820_park();      /* The driver lets go of the chip, as a boot finds it. */
+    TEST_ASSERT_FALSE(kdrv_cst820_present());
+    s_answers = false;
+
+    announce_panel(true);
+    TEST_ASSERT_TRUE_MESSAGE(logged("looking again"), "the first try's failure was final");
+    TEST_ASSERT_FALSE(kdrv_cst820_present());
+
+    s_probes = 0U;
+    run_ms(350U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "no look 0.2 s after the try");
+    run_ms(400U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_probes, "no look at 0.5 s");
+    run_ms(750U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(3U, s_probes, "no look at 1 s");
+    run_ms(1100U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(4U, s_probes, "no look at 2 s");
+    run_ms(8400U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(4U, s_probes, "a spaced look came early");
+    run_ms(2000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(5U, s_probes, "no look 10 s after the last soon one");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_reads, "a chip that never answered was read");
+    mock_down();
+}
+
+/* A board at rest is not woken every ten seconds to look for a chip. */
+TEST_CASE("a round stops the looks, and AWAKE starts them again", "[touch_ao][lowpower]")
+{
+    chip(false);
+
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+    run_ms(30000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_probes, "the board was woken to look for the chip");
+
+    state_awake();
+    run_ms(KODE_TOUCH_LOOK_EVERY_MS + 500U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "the looks did not start again at AWAKE");
+    mock_down();
+}
+
+/* A controller in its low-power scan answers nothing until a finger touches
+ * the glass, and its line is how it says so: the best moment to look. Not on
+ * every edge, though: a contact pulses the line many times a second. */
+TEST_CASE("the interrupt line falling looks at once, at most once a second", "[touch_ao]")
+{
+    chip(false);
+    fake_time_advance_ms(KODE_TOUCH_LOOK_EDGE_MS);
+
+    p6_moves(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "the edge did not look");
+    p6_moves(false);
+    p6_moves(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "a second edge within the second looked again");
+
+    fake_time_advance_ms(KODE_TOUCH_LOOK_EDGE_MS);
+    p6_moves(false);
+    p6_moves(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_probes, "a later edge did not look");
+    mock_down();
+}
+
+/* Five minutes, as AO_Display gives a panel. After that a board with no
+ * controller is left alone, but a touch still looks. */
+TEST_CASE("the timed looks end after five minutes, and say so; the interrupt still looks",
+          "[touch_ao]")
+{
+    chip(false);
+
+    run_ms(KODE_TOUCH_LOOK_FOR_MS + 20000U);
+    TEST_ASSERT_TRUE_MESSAGE(logged("only when the glass is touched"), "the end was not said");
+
+    s_probes = 0U;
+    run_ms(60000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_probes, "the timed looks went on past their end");
+    p6_moves(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_probes, "a touch no longer looks");
+    p6_moves(false);
+    mock_down();
+}
+
+/* The log line is the measurement: at which look, and how long after the panel. */
+TEST_CASE("the look that finds the controller arms the touch and says when", "[touch_ao]")
+{
+    chip(false);
+    fake_time_advance_ms(KODE_TOUCH_LOOK_EDGE_MS);
+
+    s_answers = true;
+    khal_i2c_add_StubWithCallback(&on_add);
+    p6_moves(true);                 /* A finger wakes it, and its line says so. */
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_cst820_present(), "the chip answered and was not taken");
+    TEST_ASSERT_TRUE_MESSAGE(logged("answered at look"), "when it answered was not said");
+    p6_moves(false);
+
+    /* Armed, like after a bring-up that worked at once. */
+    p6_moves(true);
+    sample(true, 50, 60);
+    const TouchEvt * const e = published();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "found, and its press was not published");
+    TEST_ASSERT_EQUAL_INT16(50, e->x);
+    TEST_ASSERT_EQUAL_INT16(60, e->y);
+    sample(false, 50, 60);
+    ao_spy_drain();
+
+    s_probes = 0U;
+    run_ms(KODE_TOUCH_LOOK_EVERY_MS * 2U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_probes, "the looks went on after the chip was found");
     mock_down();
 }
 
@@ -377,6 +544,39 @@ TEST_CASE("the IRQ falling starts the poll, and a press is read from it",
     TEST_ASSERT_EQUAL_INT16(50, e->y);
 
     /* Back to rest for the cases that follow. */
+    sample(false, 40, 50);
+    ao_spy_drain();
+    mock_down();
+}
+
+/* QP posts a time event with no margin, and a queue that is full is an
+ * assertion and a reset. A poll that is periodic goes on posting whether or
+ * not the AO took the last one: sixteen periods without the CPU fill its
+ * queue, and at ten milliseconds a period that is a stall of a sixth of a
+ * second. So one poll waits at most, and the one that is taken arms the next. */
+TEST_CASE("a poll nobody took is not followed by another; the one taken arms the next",
+          "[touch_ao]")
+{
+    touch_armed();
+    p6_moves(true);
+    finger(true, 40, 50);
+
+    /* Fifteen periods go by and AO_Touch never runs. */
+    for ( uint32_t i = 0U; (15U * KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS)) > i; ++i )
+    {
+        QTIMEEVT_TICK_X(0U, (void *)0);
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, (unsigned)uxQueueMessagesWaiting(AO_Touch->eQueue),
+                                   "every period queued a poll the AO had not taken");
+
+    serve();
+    TEST_ASSERT_EQUAL_UINT(1U, s_reads);
+    TEST_ASSERT_NOT_NULL(published());
+
+    /* One period after the poll that was taken, the next. */
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Touch, 1U));
+    TEST_ASSERT_EQUAL_UINT(2U, s_reads);
+
     sample(false, 40, 50);
     ao_spy_drain();
     mock_down();
@@ -1374,6 +1574,28 @@ TEST_CASE("a contact still for a minute is released, stale, and refuses no round
     round_for(KODE_LP_ASLEEP);
     expect_answer(false, NULL);
     state_awake();
+    mock_down();
+}
+
+/* The same holds once a second: a contact that stopped counting is looked at
+ * by one poll at a time, however long AO_Touch goes without running. */
+TEST_CASE("a held contact's look nobody took is not followed by another",
+          "[touch_ao][still]")
+{
+    touch_sampling();
+    TEST_ASSERT_EQUAL_UINT(2U, hold_for(STILL_POLLS, 200, 250, 0));
+
+    /* Two of its periods go by and AO_Touch never runs. */
+    for ( uint32_t i = 0U; ((2U * KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS)) + 1U) > i; ++i )
+    {
+        QTIMEEVT_TICK_X(0U, (void *)0);
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, (unsigned)uxQueueMessagesWaiting(AO_Touch->eQueue),
+                                   "every period queued a look the AO had not taken");
+
+    serve();
+    sample(false, 200, 250);
+    ao_spy_drain();
     mock_down();
 }
 

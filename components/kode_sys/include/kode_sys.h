@@ -384,6 +384,31 @@ kode_status_t kode_sys_ble_set_value(const char *chr, const void *data, size_t l
  */
 kode_status_t kode_sys_ble_notify(const char *chr, const void *data, size_t len);
 
+/**
+ * @brief Push one value on queued characteristic @p chr, for a central's reads.
+ *
+ * Each read takes the oldest value pushed, and BLE_APP_TAKEN_SIG says what is
+ * left. A full queue (KODE_SYS_BLE_QUEUE_SLOTS values) refuses the value in
+ * AO_Radio, with nobody to tell: check kode_sys_ble_queue_room() first, or
+ * push again on BLE_APP_TAKEN_SIG. A link that begins or ends empties the
+ * queue: its values are for the central connected.
+ *
+ * @param chr  The characteristic's name; it carries KODE_SYS_BLE_QUEUED.
+ * @param data The bytes.
+ * @param len  1 to KODE_SYS_BLE_VALUE_MAX bytes.
+ * @return As the commands' rule above; KODE_DENIED as the section says, or
+ *         for 0 bytes or a characteristic without KODE_SYS_BLE_QUEUED.
+ */
+kode_status_t kode_sys_ble_queue_push(const char *chr, const void *data, size_t len);
+
+/**
+ * @brief Empty queued characteristic @p chr.
+ * @param chr The characteristic's name; it carries KODE_SYS_BLE_QUEUED.
+ * @return As the commands' rule above; KODE_DENIED as the section says, or
+ *         for a characteristic without KODE_SYS_BLE_QUEUED.
+ */
+kode_status_t kode_sys_ble_queue_clear(const char *chr);
+
 /* ---- Resting the board: to AO_LowPower ----
  * AO_LowPower asks every started owner to put its device away before the board
  * changes state, and an owner with work in hand can refuse. Both calls are
@@ -472,10 +497,14 @@ typedef ExpPowerDoneEvt kode_sys_exp_power_done_t;
  *
  * Its state at boot is not promised: a C5 that the last firmware parked, held
  * in reset or never linked lets go of IO5, and R72 then holds the rail on;
- * one whose link drove it off leaves it off. The wish starts off, and a
- * link-up drives the pin as the wish is. AO_Radio takes the rail as unknown
- * until the C5 has driven or let go of the pin, and again after a failed
- * bring-up, a lost link or a C5 update, so a request is carried out, never
+ * one whose link drove it off leaves it off. The wish starts off. A link-up
+ * drives the pin to the wish as it is at that moment, not as it was when the
+ * link was asked for, so an "on" asked while the link comes up is not undone
+ * by it. A wish that comes after the connect has read it is carried out by a
+ * job once the card is back: the job cannot run during the card's remount.
+ * AO_Radio takes the rail as unknown until the C5 has driven or let go of
+ * the pin, and again after a failed bring-up, a lost link or a C5 update, so
+ * a request is carried out, never
  * said done because the rail looked as asked; whoever needs a state asks for
  * it. The rail follows once the C5 can
  * carry the request out: a Wi-Fi sweep delays it by about 40 s and up to
@@ -556,9 +585,9 @@ kode_status_t kode_sys_home_now(void);
  *
  * Immediate returns:
  *   KODE_OK            taken; the answer will come.
- *   KODE_DENIED        @p me is NULL (a plain task asks through kode.h), an
- *                      argument is bad, @p me's door of that kind is busy, or
- *                      the build has no such owner. Nothing was posted.
+ *   KODE_DENIED        @p me is NULL or not started (a plain task asks through
+ *                      kode.h), an argument is bad, @p me's door of that kind is
+ *                      busy, or the build has no such owner. Nothing was posted.
  *   KODE_NO_RESOURCES  the owner's queue is within its margin, or the event
  *                      pool is dry. Nothing was posted.
  *
@@ -567,6 +596,16 @@ kode_status_t kode_sys_home_now(void);
  * the same kind before then is refused at once. The door is free again just
  * before the answer is posted, so @p me may ask again from the answer's
  * handler.
+ *
+ * Who calls: any thread may make a request in @p me's name, @p me's own or a
+ * task's, as long as @p me is started. The answer arrives at @p me, never at
+ * the task: @p me's handler hands it on. The doors are @p me's, so a task and
+ * @p me share them: while one holds the door of a kind, the other asking that
+ * kind is refused at once. Two threads asking at the same moment get the same:
+ * one is taken, the other refused. A task adds no door, so it adds no slot to
+ * @p me's queue. The lent-buffer rule binds whichever thread made the call.
+ * The audio stream's ring has one writer: one thread at a time calls
+ * kode_sys_audio_stream_write().
  *
  * Answers: a request taken is answered exactly once, posted to @p me with no
  * margin and never published, with the final status in @c rc. The owner's
@@ -1023,8 +1062,8 @@ kode_status_t kode_sys_rfid_emulate_start(QActive *me,
  */
 kode_status_t kode_sys_rfid_emulate_stop(QActive *me);
 
-/* ---- Files, AO_Storage: seven kinds, a status, a listing, a folder, a
- *      delete, a rename, a read and a write ----
+/* ---- Files, AO_Storage: eight kinds, a status, a listing, a folder, a
+ *      delete, a rename, a read, a write and a volume's space ----
  * Paths are absolute and virtual ("/sdcard/...", "/storage/..."), copied,
  * shorter than KODE_SYS_FILE_PATH_MAX. Every answer is a
  * kode_sys_file_answer_t; its @c rc is KODE_DENIED for a bad path or a
@@ -1054,11 +1093,15 @@ kode_status_t kode_sys_rfid_emulate_stop(QActive *me);
 /** @brief What one path is: @c exists, @c is_dir, @c size. */
 typedef FileStat kode_sys_file_status_t;
 
+/** @brief How big a volume is: @c total_kb, and @c free_kb of it, in whole kilobytes. */
+typedef FileSpace kode_sys_file_space_t;
+
 /* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
 /**
  * @brief Answers the file requests: @c rc; a status's @c stat (FILE_STATUS_RSP_SIG);
- *        a read's @c got (FILE_READ_RSP_SIG); a listing's end, @c count and
- *        @c more (FILE_LIST_END_SIG); the rest @c rc alone (FILE_FOLDER_RSP_SIG,
+ *        a space's @c space (FILE_SPACE_RSP_SIG); a read's @c got
+ *        (FILE_READ_RSP_SIG); a listing's end, @c count and @c more
+ *        (FILE_LIST_END_SIG); the rest @c rc alone (FILE_FOLDER_RSP_SIG,
  *        FILE_DELETE_RSP_SIG, FILE_RENAME_RSP_SIG, FILE_WRITE_RSP_SIG).
  */
 typedef FileRspEvt kode_sys_file_answer_t;
@@ -1078,6 +1121,19 @@ typedef StorageEntryEvt kode_sys_file_entry_t;
  * @return As the requests' rules above.
  */
 kode_status_t kode_sys_file_status(QActive *me, const char *path);
+
+/**
+ * @brief Ask how big a volume is and how much of it is free.
+ * @note On a large card the first count can take hundreds of milliseconds; the
+ *       answer is an event, so nothing waits for it.
+ * @param me     The asking AO; FILE_SPACE_RSP_SIG answers it, @c space filled
+ *               in whole kilobytes on KODE_OK and zero otherwise. A volume that will not mount (no
+ *               card) is KODE_ERROR, and @p volume that is not a volume's own
+ *               root is KODE_DENIED.
+ * @param volume A volume's root: "/sdcard" or "/storage".
+ * @return As the requests' rules above.
+ */
+kode_status_t kode_sys_file_space(QActive *me, const char *volume);
 
 /**
  * @brief List a page of a directory.
@@ -1293,6 +1349,48 @@ typedef ScanRspEvt kode_sys_wifi_scan_answer_t;
  * @return As the requests' rules above.
  */
 kode_status_t kode_sys_wifi_scan(QActive *me);
+
+/* ---- Wi-Fi frames, AO_Radio: hearing them on one channel ----
+ * The C5 can listen on one channel and say what it hears: for each period in
+ * which it heard a frame, a count and the strongest level, and a summary of
+ * each frame (kind, levels, addresses and the first bytes after the header).
+ * Receive only: nothing is sent, and the station is never moved: joined, it
+ * listens on the network's own channel or refuses. One AO listens at a time.
+ * AO_Radio posts the answers to @p me, never publishes them, and keeps
+ * KQP_FRAMES_MARGIN slots of its queue free: what does not fit is counted in
+ * the next tick's @c dropped. That count is this chip's alone: a frame the
+ * C5 could not queue or fit in a batch is in @c heard and in no drop count,
+ * and a tick this chip could not post is counted nowhere. A tick's
+ * @c channel is the radio's when the batch was sent, so frames heard while a
+ * scan visited other channels carry the channel at the period's end. The
+ * board's rest, Wi-Fi stopped, a join and a C5 update end a stream, and @p me
+ * is told why. Without CONFIG_KODEOS_WIFI the request is refused at once
+ * with KODE_DENIED.
+ */
+
+/* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
+/** @brief Answers every request (WIFI_FRAMES_STATE_SIG): @c on, @c channel, @c joined and @c why (kwifi_frames_why_t). */
+typedef WifiFramesStateEvt kode_sys_wifi_frames_state_t;
+
+/* cppcheck-suppress misra-c2012-2.3 ; a tick's name for the apps that read it, never used inside the SDK */
+/** @brief One period's counts (WIFI_FRAMES_TICK_SIG): @c heard since the start, @c mgmt and @c data in the period, @c rssi_max, @c dropped. */
+typedef WifiFramesTickEvt kode_sys_wifi_frames_tick_t;
+
+/* cppcheck-suppress misra-c2012-2.3 ; a frame's name for the apps that read it, never used inside the SDK */
+/** @brief One frame heard (WIFI_FRAME_SIG): @c channel, @c rssi, @c fc, @c addr1, @c addr2, @c len and @c head. */
+typedef WifiFrameEvt kode_sys_wifi_frame_t;
+
+/**
+ * @brief Start or stop hearing Wi-Fi frames on one channel. Receive only.
+ * @param me      The asking AO; the three signals above come to it, the
+ *                answer always, in every state of the link.
+ * @param on      true to listen, false to stop.
+ * @param channel 1..177, or 0 to stay where the radio is. Ignored for a stop.
+ * @return As the requests' rules of this header: KODE_DENIED without
+ *         CONFIG_KODEOS_WIFI or for a NULL @p me, KODE_NO_RESOURCES when the
+ *         request could not be posted.
+ */
+kode_status_t kode_sys_wifi_frames(QActive *me, bool on, uint8_t channel);
 
 /* ---- Bluetooth, AO_Radio: one kind, a scan ----
  * The listen the console's `ble_scan` runs, for @p ms. A device that
@@ -1600,7 +1698,9 @@ bool kode_sys_ble_enabled(void);
  * with the code on the glass reads, writes or subscribes; with Just Works
  * pairing (no passkey) the link is encrypted and bonded, not authenticated;
  * with console pairing off the service is as open as the console. The
- * console's service stays in the table and in the advert. A table the driver
+ * console's service stays in the table and in the advert, where
+ * CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE puts the app's UUID instead; the
+ * service needs CONFIG_KODEOS_BLE_CONSOLE=y. A table the driver
  * cannot serve (a UUID that is not 128 bits as 8-4-4-4-12 hex, no
  * characteristics or more than KODE_SYS_BLE_CHARS_MAX, a name missing, too
  * long or used twice, properties that are none of the three) is left out
@@ -1610,26 +1710,33 @@ bool kode_sys_ble_enabled(void);
  * left out.
  *
  * A value is what a read gets. A notification goes into a ring in PSRAM that
- * NimBLE's host task drains, and shares the link with the console. The set
- * and the notify are commands to AO_Radio (above, beside the scan response's
- * name). A write arrives as a copy in BLE_APP_WRITE_SIG, and each edge of the
- * link as BLE_APP_LINK_SIG, to the AOs subscribed with
- * kode_sys_ble_subscribe().
+ * NimBLE's host task drains, and shares the link with the console. A
+ * characteristic with KODE_SYS_BLE_QUEUED has a queue instead of a value:
+ * each read takes the oldest value pushed, so a central that reads until it
+ * gets 0 bytes drains it. A value longer than one read is read in parts, and
+ * taken with its last part. The set, the notify, the push and the clear are
+ * commands to AO_Radio (above, beside the scan response's name). A write
+ * arrives as a copy in BLE_APP_WRITE_SIG, each edge of the link as
+ * BLE_APP_LINK_SIG, and each value a read takes as BLE_APP_TAKEN_SIG, to the
+ * AOs subscribed with kode_sys_ble_subscribe().
  */
 
 #define KODE_SYS_BLE_CHARS_MAX      4U     /**< Characteristics one service may have.            */
-#define KODE_SYS_BLE_VALUE_MAX      244U   /**< Bytes of a value: one notification at an MTU of 247. */
+#define KODE_SYS_BLE_VALUE_MAX      KQP_BLE_APP_VALUE_MAX  /**< Bytes of a value: CONFIG_KODE_BLE_APP_VALUE_MAX, 244 by default. */
 #define KODE_SYS_BLE_CHAR_NAME_MAX  16U    /**< Bytes of a characteristic's name, NUL included.  */
 #define KODE_SYS_BLE_FAULT_MAX      80U    /**< Bytes of the reason a service is left out, NUL included. */
 #define KODE_SYS_BLE_READ           0x01U  /**< A central may read the value.                    */
 #define KODE_SYS_BLE_WRITE          0x02U  /**< A central may write it.                          */
 #define KODE_SYS_BLE_NOTIFY         0x04U  /**< A central may subscribe to its notifications.    */
+#define KODE_SYS_BLE_QUEUED         0x08U  /**< Reads take the values pushed, oldest first; a read of
+                                            *   an empty queue gets 0 bytes. A read.              */
+#define KODE_SYS_BLE_QUEUE_SLOTS    8U     /**< Values one queued characteristic holds.          */
 
 /** @brief One characteristic of the app's service. */
 typedef struct {
     const char *name;   /**< 1 to KODE_SYS_BLE_CHAR_NAME_MAX - 1 bytes, unique in the service. */
     const char *uuid;   /**< 128 bits as text, "6e400002-b5a3-f393-e0a9-e50e24dcca9e".          */
-    uint8_t     props;  /**< KODE_SYS_BLE_READ, _WRITE and _NOTIFY, at least one.              */
+    uint8_t     props;  /**< KODE_SYS_BLE_READ, _WRITE, _NOTIFY and _QUEUED, at least one.     */
 } kode_sys_ble_char_t;
 
 /** @brief The app's service: what KODE_SYS_BLE_SERVICE() defines. */
@@ -1660,6 +1767,19 @@ typedef struct {
     const kode_sys_ble_service_t kode_ble_app_service = { \
         (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }
 
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that serve the battery, never used inside the SDK */
+/**
+ * @brief Serve the standard Battery service, at file scope, followed by a semicolon.
+ *
+ * The Bluetooth SIG's Battery (0x180F) with Battery Level (0x2A19), from
+ * AO_Power's readings (POWER_EVT_SIG), beside the app's own service and
+ * behind the same security. Defines the constant kode_ble_battery_service,
+ * the name the driver looks for.
+ */
+#define KODE_SYS_BLE_BATTERY_SERVICE() \
+    KODE_SYS_BLE_LINKAGE_ const uint8_t kode_ble_battery_service; \
+    const uint8_t kode_ble_battery_service = 1U
+
 /* cppcheck-suppress misra-c2012-2.3 ; an event's name for the apps that read it, never used inside the SDK */
 /**
  * @brief A central wrote to the app's service (BLE_APP_WRITE_SIG): @c chr, its place in
@@ -1671,11 +1791,19 @@ typedef BleAppWriteEvt kode_sys_ble_written_t;
 /** @brief A central connected or left (BLE_APP_LINK_SIG): @c connected. */
 typedef BleAppLinkEvt kode_sys_ble_link_t;
 
+/* cppcheck-suppress misra-c2012-2.3 ; an event's name for the apps that read it, never used inside the SDK */
 /**
- * @brief Subscribe @p me to the app's service: BLE_APP_WRITE_SIG and
- *        BLE_APP_LINK_SIG, and link AO_Radio.
+ * @brief A read took the oldest value of a queued characteristic
+ *        (BLE_APP_TAKEN_SIG): @c chr, its place in the table; @c name; @c left,
+ *        the values still queued.
+ */
+typedef BleAppTakenEvt kode_sys_ble_taken_t;
+
+/**
+ * @brief Subscribe @p me to the app's service: BLE_APP_WRITE_SIG,
+ *        BLE_APP_LINK_SIG and BLE_APP_TAKEN_SIG, and link AO_Radio.
  *
- * A bare subscription to either signal links nothing; this call is that
+ * A bare subscription to any of the three links nothing; this call is that
  * subscription with its owner linked.
  *
  * @param me The listening AO, started.
@@ -1692,6 +1820,20 @@ kode_status_t kode_sys_ble_subscribe(QActive *me);
  *         and always without CONFIG_KODEOS_BLE.
  */
 bool kode_sys_ble_service_fault(char *why, size_t cap);
+
+/**
+ * @brief How many more values queued characteristic @p chr takes now.
+ *
+ * A read of the queue's count under its lock, from any task: a push from
+ * another task, or a central's read, may change it the next moment.
+ *
+ * @param chr  The characteristic's name; it carries KODE_SYS_BLE_QUEUED.
+ * @param room Receives the count, 0 to KODE_SYS_BLE_QUEUE_SLOTS.
+ * @return KODE_OK; KODE_DENIED for a service left out or not declared, a name
+ *         no characteristic has, one without KODE_SYS_BLE_QUEUED, a NULL
+ *         @p room, or without CONFIG_KODEOS_BLE.
+ */
+kode_status_t kode_sys_ble_queue_room(const char *chr, size_t *room);
 
 /* ---- The battery: AO_Power's last reading ---- */
 

@@ -534,6 +534,16 @@ static void ble_written_event(const BleAppWriteEvt *w)
 }
 
 /**
+ * @brief Push "ble_taken" for a read that took a queued value.
+ *
+ * @param t The take: the characteristic's name is the source, what is left the value.
+ */
+static void ble_taken_event(const BleAppTakenEvt *t)
+{
+    kode_event_push(KODE_EVENT_BLE_TAKEN_NAME, t->name, (int32_t)t->left, NULL);
+}
+
+/**
  * @brief Push "ble_connected" or "ble_disconnected" for an edge of the link.
  *
  * @param l The edge.
@@ -727,6 +737,11 @@ static QState KodeStandard_running(KodeStandard * const me, QEvt const * const e
         }
         case BLE_APP_LINK_SIG: {
             ble_link_event(Q_EVT_CAST(BleAppLinkEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case BLE_APP_TAKEN_SIG: {
+            ble_taken_event(Q_EVT_CAST(BleAppTakenEvt));
             status = Q_HANDLED();
             break;
         }

@@ -760,6 +760,22 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 #define KODE_APP_PROJECT_MAX    32U   /**< == KDRV_SLOT_PROJECT_MAX: a
                                        *   project name, terminator
                                        *   included.                        */
+/* An app's data folder (app.json and icon.k64) may reach the internal
+ * partition before its app does, so nothing bounds how many there are but the
+ * partition itself. A new one is refused when it would leave less than the
+ * floor free: Kody's pack is staged beside the one in use when it updates. */
+#define KODE_APPDATA_FOLDER_BYTES   (20U * 1024U)  /**< What one data folder
+                                       *   takes: five 4 KB clusters, one for
+                                       *   the directory, one for app.json,
+                                       *   three for the icon.              */
+#define KODE_APPDATA_FREE_MIN_BYTES (128U * 1024U) /**< What a new data folder
+                                       *   must leave free on the internal
+                                       *   partition.                       */
+#define KODE_APPDATA_URL_MAX    200U  /**< The base URL an app's data folder is
+                                       *   fetched from (`appdata_get`),
+                                       *   terminator included: what a console
+                                       *   line has room for beside the verb
+                                       *   and a project name.              */
 #define KODE_APP_DATE_MAX       16U   /**< == KAPP_IDF_DATE_MAX: a build date,
                                        *   "Oct 24 2026".                   */
 #define KODE_APP_TIME_MAX       16U   /**< == KAPP_IDF_TIME_MAX: a build
@@ -825,6 +841,16 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 #define KODE_TOUCH_RESTORE_RETRY_MS 200U  /**< Between tries to write the controller back to its
                                        *   awake settings after a wake: a chip that went to
                                        *   sleep NAKs until a finger wakes it. */
+/* A touch controller that did not answer AO_Touch's bring-up is looked for
+ * again: soon, because the panel's bring-up has just pulsed the reset line the
+ * two share and the controller may still be coming back; then spaced, as
+ * AO_Display does for a panel; and whenever its interrupt line falls, because
+ * a controller in its low-power scan answers nothing until a finger touches
+ * the glass. Each look is one short probe. */
+#define KODE_TOUCH_LOOK_SOON_MS  { 200U, 300U, 500U, 1000U } /**< The waits before the first looks: 0.2, 0.5, 1 and 2 s after the bring-up's try. */
+#define KODE_TOUCH_LOOK_EVERY_MS 10000U  /**< Between the looks after those. */
+#define KODE_TOUCH_LOOK_FOR_MS   300000U /**< How long the spaced looks go on: five minutes, AO_Display's own patience with a panel. */
+#define KODE_TOUCH_LOOK_EDGE_MS  1000U   /**< The least time between two looks the interrupt line asks for: a contact pulses it many times a second. */
 #define KODE_TOUCH_REST_SLEEP_S 1U    /**< The auto-sleep time written for the rest: the controller
                                        *   sleeps a second after the last touch. */
 #define KODE_TOUCH_STILL_MS     60000U /**< A contact that stays within
@@ -1248,7 +1274,7 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 #define KODE_RADIO_GUARD_MS            180000U
 /** @brief The radio check's budget, ms: past it the readings so far are
  *         answered with KODE_TIMEOUT. It is the bound of the whole check
- *         (Luismi's lock_ms). Counted between its jobs, from the first one
+ *         (the station's lock_ms). Counted between its jobs, from the first one
  *         and again after a sweep it asked for, which the job guard bounds;
  *         putting the advert back is not cut by it. */
 #define KODE_RADIO_PROBE_MS             8000U
@@ -1440,15 +1466,25 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         The guided button test's figure, for its reason: long enough to
  *         look, short enough that an empty bench ends the row. */
 #define KODE_DISPLAY_TEST_STEP_MS  10000U
+/** @brief How long the display row's opening screen stays up before the first
+ *         field, unless BUTTON_TOP starts the fields sooner: time to read
+ *         what the pad will mean. */
+#define KODE_DISPLAY_TEST_INTRO_MS  8000U
+/** @brief How long the renderer is given, once the opening screen is done
+ *         with, to finish a frame it may have started on it before the first
+ *         field goes up. Two of its longest frames. */
+#define KODE_DISPLAY_TEST_SETTLE_MS  200U
 /** @brief The level the `led` row drives each sink at, of 255: bright enough
  *         to name the colour under a bench lamp, and well short of a sink
  *         somebody has to stare into. */
 #define KODE_LED_TEST_LEVEL           96U
 /** @brief How long the operator has to answer one colour of the LED row. */
 #define KODE_LED_TEST_STEP_MS      10000U
-/** @brief The panel's row: five fields each waited out in full, the paints
- *         between them, margin. */
-#define KODE_DISPLAY_TEST_BUDGET_MS  ((5U * KODE_DISPLAY_TEST_STEP_MS) + 3000U)
+/** @brief The panel's row: the opening screen, five fields each waited out
+ *         in full, the paints between them, margin. */
+#define KODE_DISPLAY_TEST_BUDGET_MS  (KODE_DISPLAY_TEST_INTRO_MS \
+                                      + KODE_DISPLAY_TEST_SETTLE_MS \
+                                      + (5U * KODE_DISPLAY_TEST_STEP_MS) + 3000U)
 /** @brief The LED's row: three colours each waited out in full, margin. */
 #define KODE_LED_TEST_BUDGET_MS      ((3U * KODE_LED_TEST_STEP_MS) + 2000U)
 
@@ -1515,6 +1551,21 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  */
 #define KODE_POWER_POLL_MS      2000U
 #define KODE_POWER_FIRST_MS     1500U
+
+/* ---- The gauge row (`test component=gauge`) ---------------------------------
+ * A CW2217 in shutdown (the cell just connected) takes about 1.5 s from
+ * AO_Power's wake to report ready (0xA7). A row asked sooner waits for it,
+ * looking at each poll, and is judged once the chip is up or once
+ * KODE_GAUGE_READY_WAIT_MS has passed since the ask, whichever comes first.
+ * The poll that sees the deadline comes up to KODE_POWER_POLL_MS after it.
+ */
+/** @brief How long the row waits for the gauge's algorithm, from the ask. */
+#define KODE_GAUGE_READY_WAIT_MS   3000U
+/** @brief What the row's budget adds to the wait and the poll: the judging and the verdict's way back. */
+#define KODE_GAUGE_TEST_MARGIN_MS  1000U
+/** @brief The row's budget: the wait, the poll that ends it, the margin. */
+#define KODE_GAUGE_TEST_BUDGET_MS  (KODE_GAUGE_READY_WAIT_MS + KODE_POWER_POLL_MS \
+                                    + KODE_GAUGE_TEST_MARGIN_MS)
 
 /**
  * @brief How long the cable stays out before AO_Power tells whoever armed it.
@@ -1646,6 +1697,11 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
  * dropped. ~31 rows today; the rest is headroom for concurrent logging.
  * AO_Log's queue in log_ao.c must stay deeper than this pool. */
 #define KQP_LARGE_POOL_COUNT    48U
+/* The wide tier exists only in an app whose Bluetooth values are longer than
+ * the large tier carries (KQP_BLE_APP_WIDE), and holds them alone, in PSRAM.
+ * Eight: a central's writes waiting for the app, and the app's own values on
+ * their way to AO_Radio, which takes each in one step. */
+#define KQP_WIDE_POOL_COUNT     8U
 /* The jumbo tier holds two things: a piece of an image arriving on the
  * console (a terminal install), and a third of an app icon leaving a medium
  * (`app_data`). Four blocks cover everything one 4 KB protocol chunk can
@@ -1669,12 +1725,19 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
 #define KQP_AO_STACK_BYTES      8192U /**< Default stack per AO.              */
 
 /* ---- Request doors: queue depths, and the post margin each leaves free (half a queue) ---- */
-#define KQP_RADIO_QUEUE_LEN     8U    /**< Events AO_Radio buffers.           */
+/* AO_Radio's queue: a scan knock and a KODE answer, posted from other tasks,
+ * leave KQP_RADIO_DROP_MARGIN slots free and are refused past it. The BLE
+ * state, the pairing note, the lost link and the AO's own time events post
+ * with no margin: a full queue is still an assertion for them. */
+#define KQP_RADIO_QUEUE_LEN     16U   /**< Events AO_Radio buffers.           */
 #define KQP_POWER_QUEUE_LEN     8U    /**< Events AO_Power buffers.           */
-#define KQP_RADIO_POST_MARGIN   4U    /**< Slots a Wi-Fi door or a link ask leaves free. */
+#define KQP_RADIO_POST_MARGIN   8U    /**< Slots a Wi-Fi door or a link ask leaves free. */
+#define KQP_RADIO_DROP_MARGIN   2U    /**< Slots a post that may be refused, a scan knock or a KODE answer, leaves free. */
 #define KQP_POWER_POST_MARGIN   4U    /**< Slots a power door leaves free.    */
 _Static_assert((KQP_RADIO_POST_MARGIN * 2U) == KQP_RADIO_QUEUE_LEN,
                "the radio door margin is half of AO_Radio's queue");
+_Static_assert((KQP_RADIO_DROP_MARGIN > 0U) && (KQP_RADIO_DROP_MARGIN < KQP_RADIO_POST_MARGIN),
+               "a post that may be refused goes deeper into AO_Radio's queue than a door does, and leaves slots");
 _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
                "the power door margin is half of AO_Power's queue");
 #define KQP_BOOT_QUEUE_LEN      8U    /**< Events AO_Boot buffers: an AO with few events. */
@@ -1684,6 +1747,13 @@ _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
 #define KQP_WORKER_POST_MARGIN  0U    /**< Slots a worker's done event leaves free: 0 only asks that there be one. */
 #define KQP_ID_PART_MARGIN      1U    /**< Slots an identity part leaves free in its asker's queue: the end's. */
 #define KQP_ID_ANSWER_MARGIN    0U    /**< Slots an identity, signature or wipe answer leaves free: 0 only asks that there be one. */
+#define KQP_FRAMES_MARGIN       4U    /**< Slots a Wi-Fi frames tick or frame leaves free in its asker's queue: room for its own traffic and the answer to a stop. */
+#define KQP_FRAMES_ANSWER_MARGIN 0U   /**< Slots a Wi-Fi frames answer leaves free: 0 only asks that there be one. */
+#define KQP_FRAMES_POOL_MARGIN  16U   /**< Blocks a Wi-Fi frames tick (the small tier) or frame (the medium tier) leaves free in its tier, for every other AO's events; kqp.c pins each event to its tier. */
+_Static_assert((KQP_FRAMES_POOL_MARGIN > 0U) && (KQP_FRAMES_POOL_MARGIN < KQP_SMALL_POOL_COUNT),
+               "a tick leaves some of the small tier free, and the tier has more than that");
+_Static_assert(KQP_FRAMES_POOL_MARGIN < KQP_MEDIUM_POOL_COUNT,
+               "a frame leaves some of the medium tier free, and the tier has more than that");
 #define KQP_NET_MQTT_MARGIN     12U   /**< Slots inbound MQTT leaves free in AO_Net's queue: an identity answer's room, KODE_ID_PARTS_MAX parts and the end. */
 #define KQP_NET_LINK_MARGIN     0U    /**< Slots an MQTT link event leaves free in AO_Net's queue: it yields last of all. */
 #define KQP_NET_WAKE_MARGIN     1U    /**< Slots the channel's ring wake leaves free in AO_Net's queue. */
@@ -1703,7 +1773,7 @@ _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
 #define KQP_STORAGE_CMD_MARGIN  KQP_CMD_MARGIN                         /**< AO_Storage, KQP_AO_QUEUE_LEN.   */
 #define KQP_APPMGR_CMD_MARGIN   KQP_CMD_MARGIN                         /**< AO_AppMgr, KQP_AO_QUEUE_LEN.    */
 #define KQP_POWER_CMD_MARGIN    KQP_CMD_MARGIN                         /**< AO_Power, KQP_POWER_QUEUE_LEN.  */
-#define KQP_RADIO_CMD_MARGIN    KQP_CMD_MARGIN                         /**< AO_Radio, KQP_RADIO_QUEUE_LEN.  */
+#define KQP_RADIO_CMD_MARGIN    KQP_RADIO_POST_MARGIN                  /**< AO_Radio, KQP_RADIO_QUEUE_LEN: its doors' half.  */
 #define KQP_BOOT_CMD_MARGIN     KQP_CMD_MARGIN                         /**< AO_Boot, KQP_BOOT_QUEUE_LEN.    */
 #define KQP_DISPLAY_CMD_MARGIN  KQP_CMD_MARGIN                         /**< AO_Display, KQP_AO_QUEUE_LEN.   */
 #define KQP_HAPTIC_CMD_MARGIN   KQP_CMD_MARGIN                         /**< AO_Haptic, KQP_AO_QUEUE_LEN.    */
@@ -1746,8 +1816,8 @@ _Static_assert(KQP_LOWPOWER_CMD_MARGIN < KODE_LOWPOWER_QUEUE_LEN,
                "an app's rest requests leave AO_LowPower a round's answers and room of their own");
 _Static_assert((KQP_CMD_MARGIN * 2U) <= KQP_BOOT_QUEUE_LEN,
                "the default leaves at least half of the smallest queue to its owner");
-_Static_assert((KQP_CMD_MARGIN * 2U) <= KQP_RADIO_QUEUE_LEN,
-               "the default leaves at least half of the smallest queue to its owner");
+_Static_assert((KQP_RADIO_CMD_MARGIN * 2U) >= KQP_RADIO_QUEUE_LEN,
+               "a command leaves at least half of AO_Radio's queue to its owner");
 _Static_assert((KQP_CMD_MARGIN * 2U) <= KQP_POWER_QUEUE_LEN,
                "the default leaves at least half of the smallest queue to its owner");
 

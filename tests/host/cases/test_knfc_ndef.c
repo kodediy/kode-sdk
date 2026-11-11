@@ -125,7 +125,7 @@ TEST_CASE("every writable prefix survives a round trip", "[knfc_ndef]")
 {
     static const char *const URIS[] = {
         "https://www.kode.diy", "http://www.kode.diy", "https://kode.diy",
-        "http://kode.diy",      "mailto:hola@kode.diy", "tel:+34600000000",
+        "http://kode.diy",      "mailto:hello@kode.diy", "tel:+34600000000",
         "gopher://kode.diy",
     };
     char out[128];
@@ -273,7 +273,7 @@ TEST_CASE("what reads as a link, and what does not", "[knfc_ndef]")
     TEST_ASSERT_TRUE(knfc_ndef_looks_like_uri("kode.diy/v30jul"));
 
     TEST_ASSERT_FALSE(knfc_ndef_looks_like_uri("1234"));
-    TEST_ASSERT_FALSE(knfc_ndef_looks_like_uri("hola Victor"));
+    TEST_ASSERT_FALSE(knfc_ndef_looks_like_uri("hola mundo"));
     TEST_ASSERT_FALSE(knfc_ndef_looks_like_uri("3.14"));
     TEST_ASSERT_FALSE(knfc_ndef_looks_like_uri("192.168.1.1"));
     TEST_ASSERT_FALSE(knfc_ndef_looks_like_uri(""));

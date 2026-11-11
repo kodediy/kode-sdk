@@ -89,7 +89,7 @@ static const held_pin_t s_held[] = {
     { KBSP_PIN_SD_PWR,     true  },   /* the card's supply off              */
     { KBSP_PIN_NFC_CS,     true  },   /* the ST25R deselected               */
     { KBSP_PIN_RFID_PULL,  true  },   /* the LF front end at rest           */
-    { KBSP_PIN_DSP_TP_RST, true  },   /* the panel and touch out of reset   */
+    { KBSP_PIN_DSP_TP_RST, false },   /* the panel and touch held in reset  */
 };
 
 /* cppcheck-suppress misra-c2012-2.5 ; used below, in a region cppcheck reads under CONFIG_KODE_LOWPOWER, whose macro uses it does not record */
@@ -157,7 +157,7 @@ static esp_err_t IRAM_ATTR sleep_exit_cb(int64_t sleep_time_us, void *arg)
     (void)arg;
     /* ESP-IDF calls the exit callbacks also when the sleep was skipped or
      * refused, with 0 as the time slept: that is not a sleep. */
-    if ( sleep_time_us <= 0 )
+    if ( 0 >= sleep_time_us )
     {
         return ESP_OK;
     }
@@ -216,7 +216,7 @@ kode_status_t khal_power_lock_new(const char *name, khal_power_lock_t *out)
         return KODE_DENIED;
     }
     unsigned int const slot = atomic_fetch_add(&s_locks_used, 1U);
-    if ( slot >= LOCK_COUNT )
+    if ( LOCK_COUNT <= slot )
     {
         atomic_store(&s_locks_used, (unsigned int)LOCK_COUNT);
         return KODE_NO_RESOURCES;
@@ -231,7 +231,7 @@ kode_status_t khal_power_lock_new(const char *name, khal_power_lock_t *out)
 
 void khal_power_lock(khal_power_lock_t l, bool hold)
 {
-    if ( l >= LOCK_COUNT )
+    if ( LOCK_COUNT <= l )
     {
         return;
     }
@@ -286,7 +286,7 @@ static gpio_int_type_t wake_type(bool level_high)
  */
 static wake_line_t *wake_find(uint32_t gpio)
 {
-    for ( size_t i = 0U; i < KHAL_POWER_WAKE_LINES; i++ )
+    for ( size_t i = 0U; KHAL_POWER_WAKE_LINES > i; i++ )
     {
         if ( s_lines[i].used && (s_lines[i].gpio == gpio) )
         {
@@ -310,7 +310,7 @@ static wake_line_t *wake_take(uint32_t gpio)
     {
         return line;
     }
-    for ( size_t i = 0U; i < KHAL_POWER_WAKE_LINES; i++ )
+    for ( size_t i = 0U; KHAL_POWER_WAKE_LINES > i; i++ )
     {
         if ( !s_lines[i].used )
         {
@@ -449,7 +449,7 @@ void khal_power_holds_release(void)
     {
         return;   /* nothing is held; do not reset the C5 on a cold boot */
     }
-    for ( size_t i = 0U; i < HELD_COUNT; i++ )
+    for ( size_t i = 0U; HELD_COUNT > i; i++ )
     {
         pin_release(&s_held[i]);
     }
@@ -468,7 +468,7 @@ uint32_t khal_power_off_note(void)
 
 void khal_power_off_enter(void)
 {
-    for ( size_t i = 0U; i < HELD_COUNT; i++ )
+    for ( size_t i = 0U; HELD_COUNT > i; i++ )
     {
         pin_hold(&s_held[i]);
     }

@@ -4,7 +4,9 @@
  * @brief AO_Radio: the C5's owner, and the production row it runs on the chip.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -22,6 +24,7 @@
 #include "esp_app_desc.h"   /* to lay IDF's descriptor in a test image */
 
 #include "ao_spy.h"
+#include "ask_support.h"
 #include "config_support.h"
 #include "fake_wifi_events.h"
 #include "fake_khal_worker.h"
@@ -3193,6 +3196,8 @@ static write_seen_t write_seen(void)
             {
                 w.no_name = false;
             }
+            TEST_ASSERT_EQUAL_STRING_MESSAGE("", p->project,
+                "the radio's image is no app: its reports name no project");
         }
         else if ( (int)e->sig == APP_FLASH_DONE_SIG )
         {
@@ -4498,8 +4503,8 @@ TEST_CASE("the old Wi-Fi store on the P4 is erased at boot, once and only if the
 /* ---- The expansion header's supply -------------------------------------------
  *
  * J3's +3.3V_EXT is switched by the C5's IO5, pulled up on the board. The
- * wish starts off; a link-up leaves the pin as the wish was when the connect
- * went out; with the link up a wish is a job of its own; with no link "on"
+ * wish starts off; a link-up drives the pin as the wish is when the connect
+ * reaches it; with the link up a wish is a job of its own; with no link "on"
  * is a reset of the C5 and "off" waits for the next link-up.
  */
 
@@ -4539,12 +4544,121 @@ TEST_CASE("a link-up switches J3's supply off when nobody asked for it",
 
     dispatch(RADIO_UP_REQ_SIG);
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
-    TEST_ASSERT_FALSE_MESSAGE(held_req()->on,
-                              "the connect would leave the supply on");
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
     TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(),
+                              "the connect left the supply on");
+    TEST_ASSERT_EQUAL_UINT(1U, fake_radio_exp_off_drives());
     TEST_ASSERT_NOT_EQUAL_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
                                   "the link-up needed a job of its own");
+    exp_case_end();
+}
+
+TEST_CASE("an on asked while the boot connect is in flight is never followed by a drive to off",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    exp_ask(true);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the on needed a job of its own");
+    TEST_ASSERT_TRUE_MESSAGE(fake_radio_exp_pin(), "the rail did not end on");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_radio_exp_off_drives(),
+                                   "the pin was driven off while an on was asked");
+    exp_case_end();
+}
+
+TEST_CASE("an on asked after the connect has read the wish is carried out by the job that follows",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    fake_radio_connect_read();
+    exp_ask(true);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
+                                  "the wish that came after the read was not carried out");
+    TEST_ASSERT_TRUE(held_req()->on);
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+    TEST_ASSERT_FALSE(job_held());
+    exp_case_end();
+}
+
+/** @brief End the job the worker holds, which must be @p job. */
+static void boot_step(kdrv_radio_job_t job, kode_status_t rc, const char *what)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)job, running_job(), what);
+    finish(job, rc);
+}
+
+/** @brief The boot's own jobs, in order, with nothing else between them. */
+static void boot_jobs_in_order(void)
+{
+    boot_step(KDRV_RADIO_JOB_BLE_START, KODE_OK, "Bluetooth does not start right after the connect");
+    boot_step(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR, "the autojoin does not follow Bluetooth");
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a job the boot does not own followed the autojoin");
+    TEST_ASSERT_FALSE_MESSAGE(logged("the C5 is busy"), "a request met the busy channel");
+}
+
+TEST_CASE("the boot's jobs go connect, Bluetooth start, autojoin, with the wish off",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+
+    dispatch(BLE_START_REQ_SIG);
+    dispatch(WIFI_START_REQ_SIG);
+    boot_step(KDRV_RADIO_JOB_CONNECT, KODE_OK, "the first job is not the connect");
+    boot_jobs_in_order();
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(), "the supply did not end off");
+    TEST_ASSERT_EQUAL_UINT(1U, fake_radio_exp_off_drives());
+    dispatch(BLE_STOP_REQ_SIG);
+    dispatch(WIFI_STOP_REQ_SIG);
+    exp_case_end();
+}
+
+TEST_CASE("the boot's jobs go connect, Bluetooth start, autojoin, with an on asked during the connect",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+
+    dispatch(BLE_START_REQ_SIG);
+    dispatch(WIFI_START_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
+                                  "the first job is not the connect");
+    exp_ask(true);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    boot_jobs_in_order();
+    TEST_ASSERT_TRUE_MESSAGE(fake_radio_exp_pin(), "the supply did not end on");
+    TEST_ASSERT_EQUAL_UINT(0U, fake_radio_exp_off_drives());
+    dispatch(BLE_STOP_REQ_SIG);
+    dispatch(WIFI_STOP_REQ_SIG);
+    exp_case_end();
+}
+
+TEST_CASE("the boot's jobs go connect, Bluetooth start, autojoin, with an on asked before the connect",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(true);
+    tick(QF_SUPPORT_STEPS(EXP_PULSE_MS) + 1U);
+
+    dispatch(BLE_START_REQ_SIG);
+    dispatch(WIFI_START_REQ_SIG);
+    boot_step(KDRV_RADIO_JOB_CONNECT, KODE_OK, "the first job is not the connect");
+    boot_jobs_in_order();
+    TEST_ASSERT_TRUE_MESSAGE(fake_radio_exp_pin(), "the supply did not end on");
+    TEST_ASSERT_EQUAL_UINT(0U, fake_radio_exp_off_drives());
+    dispatch(BLE_STOP_REQ_SIG);
+    dispatch(WIFI_STOP_REQ_SIG);
     exp_case_end();
 }
 
@@ -4641,27 +4755,28 @@ TEST_CASE("an off with no link brings the link up, and the link-up carries it",
     pump();
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
                                   "the off did not bring the link up");
-    TEST_ASSERT_FALSE(held_req()->on);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(), "the connect would leave the supply on");
     exp_case_end();
 }
 
-TEST_CASE("a wish changed while the link comes up is applied once it is up",
+TEST_CASE("an off asked while the link comes up is the one the connect drives",
           "[radio_ao]")
 {
     radio_fresh();
-    exp_ask(false);
+    exp_ask(true);
+    tick(QF_SUPPORT_STEPS(EXP_PULSE_MS) + 1U);
 
     dispatch(RADIO_UP_REQ_SIG);
-    TEST_ASSERT_FALSE(held_req()->on);
-    exp_ask(true);
+    exp_ask(false);
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
                                   "the wish did not wait for the connect");
 
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
     TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
-    TEST_ASSERT_TRUE(held_req()->on);
-    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the link-up needed a job of its own");
+    TEST_ASSERT_FALSE(fake_radio_exp_pin());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_radio_exp_off_drives());
     exp_case_end();
 }
 
@@ -4878,8 +4993,8 @@ TEST_CASE("an off with no link, Wi-Fi and Bluetooth off, brings the link up and 
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, exp_heard().n, "said before the link could carry it");
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
-    TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the connect would leave the supply on");
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(), "the connect would leave the supply on");
     exp_heard_one(false, KODE_OK);
 
     pump();
@@ -4966,7 +5081,7 @@ TEST_CASE("a switch of J3's supply asked during a sweep goes before the autojoin
     exp_case_end();
 }
 
-TEST_CASE("an on asked while the link comes up is said once the link-up's job has switched it",
+TEST_CASE("an on asked while the link comes up is said once the connect has driven it",
           "[radio_ao][exp_power]")
 {
     radio_fresh();
@@ -4979,11 +5094,72 @@ TEST_CASE("an on asked while the link comes up is said once the link-up's job ha
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, exp_heard().n, "said before the link could carry it");
 
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
-    TEST_ASSERT_EQUAL_UINT(0U, exp_heard().n);
-    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the link-up needed a job of its own");
     exp_heard_one(true, KODE_OK);
     exp_listen_end();
+}
+
+TEST_CASE("an on asked during the card's remount waits for it, then one job drives it and says it",
+          "[radio_ao][exp_power]")
+{
+    uint32_t submits;
+
+    radio_fresh();
+    exp_ask(false);
+    exp_listen();
+
+    dispatch(RADIO_UP_REQ_SIG);
+    (void)exp_heard();
+    finish_only(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_STARTING, link_now());
+    TEST_ASSERT_FALSE(fake_radio_exp_pin());
+    submits = job_submits();
+
+    /* The connect has read the wish and driven the pin off; the answer of
+     * the card's remount has not come. */
+    exp_ask(true);
+    pump();
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a job ran during the card's remount");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, exp_heard().n, "said before the pin was driven");
+    TEST_ASSERT_FALSE(fake_radio_exp_pin());
+
+    dispatch(STORAGE_CMD_RSP_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
+                                  "no job drove the wish asked during the remount");
+    TEST_ASSERT_TRUE(held_req()->on);
+    TEST_ASSERT_EQUAL_UINT(0U, exp_heard().n);
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(submits + 1U, job_submits(), "more than one job drove the wish");
+    exp_heard_one(true, KODE_OK);
+    exp_listen_end();
+}
+
+TEST_CASE("a switch the C5 refused leaves the wish at the rail, and the next connect drives that",
+          "[radio_ao][exp_power]")
+{
+    radio_fresh();
+    exp_ask(false);
+    go_up();
+
+    exp_ask(true);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_ERROR);
+    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_FALSE(fake_radio_exp_pin());
+
+    settle_to_off();
+    storage_drain();
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(fake_radio_exp_pin(),
+                              "the connect drove a wish that was dropped");
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the link-up needed a job of its own");
+    exp_case_end();
 }
 
 TEST_CASE("a switch of J3's supply inside the worker when the link goes is said owed to the next link, once",
@@ -5710,6 +5886,62 @@ TEST_CASE("the scan response an app asks for goes to the radio as one job, the a
     ble_case_end();
 }
 
+/** @brief The name the next BLE state in the spy says; fails the case if none. */
+static void take_ble_name(char out[KQP_BLE_NAME_MAX])
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "no BLE state was published");
+        if ( (QSignal)BLE_STATE_SIG == e->sig )
+        {
+            (void)snprintf(out, KQP_BLE_NAME_MAX, "%s", ((const BleStateEvt *)e)->name);
+            return;
+        }
+    }
+}
+
+TEST_CASE("the BLE state says the name the board goes by: the serial, then the one that was set",
+          "[radio_ao][ble_ask]")
+{
+    char          name[KQP_BLE_NAME_MAX];
+    kode_status_t rc;
+
+    ble_on_up();
+    ao_spy_subscribe(BLE_STATE_SIG);
+    ao_spy_drain();
+
+    dispatch(BLE_STATE_REQ_SIG);
+    take_ble_name(name);
+    TEST_ASSERT_EQUAL_STRING(kdrv_ble_serial_name(), name);
+    ao_spy_drain();
+
+    ble_rsp_ask("KODE zz", NULL, 0U);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_RSP, running_job());
+    /* The worker is writing the name: a state asked now says the one it had. */
+    rc = kdrv_ble_set_scan_rsp(held_req()->ssid, held_req()->data, held_req()->len);
+    dispatch(BLE_STATE_REQ_SIG);
+    take_ble_name(name);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(kdrv_ble_serial_name(), name,
+                                     "the name was read under the worker");
+    ao_spy_drain();
+
+    finish(KDRV_RADIO_JOB_BLE_RSP, rc);
+    dispatch(BLE_STATE_REQ_SIG);
+    take_ble_name(name);
+    TEST_ASSERT_EQUAL_STRING("KODE zz", name);
+    ao_spy_drain();
+
+    /* Back to the serial. */
+    ble_rsp_ask(NULL, NULL, 0U);
+    finish(KDRV_RADIO_JOB_BLE_RSP, kdrv_ble_set_scan_rsp(NULL, NULL, 0U));
+    dispatch(BLE_STATE_REQ_SIG);
+    take_ble_name(name);
+    TEST_ASSERT_EQUAL_STRING(kdrv_ble_serial_name(), name);
+    ao_spy_drain();
+    ble_case_end();
+}
+
 TEST_CASE("a scan response asked while the radio is busy waits, and goes once the job ends",
           "[radio_ao][ble_ask]")
 {
@@ -5733,7 +5965,7 @@ TEST_CASE("a scan response asked while the radio is busy waits, and goes once th
     ble_case_end();
 }
 
-TEST_CASE("a scan response asked with Bluetooth off is kept, and goes once it is on",
+TEST_CASE("a scan response asked with Bluetooth off is kept, and goes with the start",
           "[radio_ao][ble_ask]")
 {
     radio_fresh();
@@ -5745,14 +5977,102 @@ TEST_CASE("a scan response asked with Bluetooth off is kept, and goes once it is
     TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a response went out with Bluetooth off");
 
     (void)radio_service_set(KSET_KEY_BLE, true);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_START, running_job());
+    TEST_ASSERT_TRUE_MESSAGE(held_req()->on, "the start went without the name");
+    TEST_ASSERT_EQUAL_STRING("later", held_req()->ssid);
     finish_ble_start();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_ADV, running_job());
     finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_RSP, running_job());
-    TEST_ASSERT_EQUAL_STRING("later", held_req()->ssid);
-    finish(KDRV_RADIO_JOB_BLE_RSP, KODE_OK);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the name went a second time");
     ao_spy_drain();
     ble_case_end();
+}
+
+/* The interface sends the stored name as soon as it can post, which on a boot
+ * is before the link exists, and AO_Audio asks for the amplifier at the same
+ * time. The amplifier's job makes the bring-up's autojoin wait its turn, and
+ * with no network in the vault that autojoin then ends without a job: nothing
+ * comes back to pay what waited behind it. The name rides the BLE start, so
+ * it goes out all the same, and before the first advert. */
+TEST_CASE("a scan response asked before a boot's link is up goes out in the bring-up, "
+          "with no network to join", "[radio_ao][ble_ask]")
+{
+    uint8_t const     on   = 1U;
+    uint8_t const     off  = 0U;
+    bool              sent = false;
+    kode_vault_list_t none;
+
+    radio_fresh();
+    fake_ble_reset();
+    fake_nvs_reset();
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_WIFI, &on, sizeof(on));
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_BLE, &on, sizeof(on));
+    radio_reboot();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+
+    dispatch(C5_AMP_OFF_SIG);
+    ble_rsp_ask("KODE zz", NULL, 0U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
+                                  "something went out with the link down");
+
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    (void)memset(&none, 0, sizeof(none));
+    kode_answer(KODE_ST_OK, &none, (uint16_t)sizeof(none));
+
+    /* Every job of the bring-up, in whatever order the AO runs them. */
+    for ( uint32_t guard = 0U; job_held() && (12U > guard); ++guard )
+    {
+        int const job = running_job();
+
+        if ( (int)KDRV_RADIO_JOB_BLE_START == job )
+        {
+            if ( held_req()->on )
+            {
+                TEST_ASSERT_EQUAL_STRING("KODE zz", held_req()->ssid);
+                sent = true;
+            }
+            finish_ble_start();
+        }
+        else if ( (int)KDRV_RADIO_JOB_BLE_ADV == job )
+        {
+            finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+        }
+        else if ( (int)KDRV_RADIO_JOB_BLE_RSP == job )
+        {
+            TEST_ASSERT_EQUAL_STRING("KODE zz", held_req()->ssid);
+            sent = true;
+            finish(KDRV_RADIO_JOB_BLE_RSP, KODE_OK);
+        }
+        else
+        {
+            finish((kdrv_radio_job_t)job, KODE_OK);
+        }
+        pump();
+    }
+    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_TRUE_MESSAGE(logged("no networks remembered"),
+                             "the bring-up did not end at the empty vault");
+    TEST_ASSERT_TRUE_MESSAGE(sent, "the bring-up is over and the name was never sent");
+
+    /* Both wishes and the amplifier back as the cases after this one expect
+     * them, the link walked down, and a last boot that wants nothing: this AO
+     * outlives the case. */
+    ao_spy_drain();
+    (void)radio_service_set(KSET_KEY_BLE, false);
+    (void)radio_service_set(KSET_KEY_WIFI, false);
+    radio_amp_request(true);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    c5_case_end();
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_WIFI, &off, sizeof(off));
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_BLE, &off, sizeof(off));
+    radio_reboot();
+    c5_case_end();
+    fake_nvs_reset();
+    fake_ble_reset();
 }
 
 /* Switching wifi on from a dark link is `wifi_up`: the C5 is asked for the
@@ -7741,6 +8061,7 @@ TEST_CASE("a central's write to the app's service is published as a copy, and th
     /* Leave the flags and the subscriptions as this file found them. */
     QActive_unsubscribe(ao_spy(), BLE_APP_WRITE_SIG);
     QActive_unsubscribe(ao_spy(), BLE_APP_LINK_SIG);
+    QActive_unsubscribe(ao_spy(), BLE_APP_TAKEN_SIG);
     fake_ble_app_service_set(NULL);
     dispatch(BLE_STOP_REQ_SIG);
     pump();
@@ -7784,6 +8105,7 @@ TEST_CASE("a reconnect folded into one read of the state is told as an end and a
 
     QActive_unsubscribe(ao_spy(), BLE_APP_WRITE_SIG);
     QActive_unsubscribe(ao_spy(), BLE_APP_LINK_SIG);
+    QActive_unsubscribe(ao_spy(), BLE_APP_TAKEN_SIG);
     fake_ble_central(false);
     pump();
     ao_spy_drain();
@@ -7798,14 +8120,26 @@ TEST_CASE("a reconnect folded into one read of the state is told as an end and a
 /** @brief The generation the value cases stamp their waiter with. */
 #define VALUE_TEST_GEN 7U
 
-/** @brief Post an app's value or notification to AO_Radio, as kode_sys_ble.c builds it. */
-static void post_value(const char *chr, bool notify, const char *text, BleValueWaiter *wait)
+/** @brief Post one of the app's value operations to AO_Radio, as kode_sys_ble.c builds it. */
+static void post_op(const char *chr, uint8_t op, const char *text, BleValueWaiter *wait)
 {
-    QEvt const *const e = ble_value_evt(chr, notify, text, strlen(text), wait, VALUE_TEST_GEN);
+    QEvt const *const e = ble_value_evt(chr, op, text, strlen(text), wait, VALUE_TEST_GEN);
 
     TEST_ASSERT_NOT_NULL(e);
     QACTIVE_POST(AO_Radio, e, NULL);
     pump();
+}
+
+/** @brief Post an app's value or notification to AO_Radio. */
+static void post_value(const char *chr, bool notify, const char *text, BleValueWaiter *wait)
+{
+    uint8_t op = KQP_BLE_APP_OP_SET;
+
+    if ( notify )
+    {
+        op = KQP_BLE_APP_OP_NOTIFY;
+    }
+    post_op(chr, op, text, wait);
 }
 
 TEST_CASE("AO_Radio sets the app's values and queues its notifications, answers a full ring "
@@ -7822,7 +8156,7 @@ TEST_CASE("AO_Radio sets the app's values and queues its notifications, answers 
 
     /* A command sets the value and answers nobody. */
     post_value("temp", false, "a", NULL);
-    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, got, (uint16_t)sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got, (uint16_t)sizeof(got)));
     TEST_ASSERT_EQUAL_HEX8('a', got[0]);
     TEST_ASSERT_FALSE(kdrv_ble_app_queued());
     TEST_ASSERT_EQUAL_UINT(kicks, fake_ble_app_kicks());
@@ -7845,7 +8179,7 @@ TEST_CASE("AO_Radio sets the app's values and queues its notifications, answers 
     TEST_ASSERT_EQUAL_UINT32(VALUE_TEST_GEN, __atomic_load_n(&w.ack, __ATOMIC_ACQUIRE));
     TEST_ASSERT_EQUAL_UINT(1U, fake_sem_signals());
     TEST_ASSERT_EQUAL_UINT(kicks + KDRV_BLE_APP_RING_SLOTS, fake_ble_app_kicks());
-    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, got, (uint16_t)sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got, (uint16_t)sizeof(got)));
     TEST_ASSERT_EQUAL_HEX8('c', got[0]);
 
     /* A characteristic the table refuses is answered DENIED, nothing queued. */
@@ -7892,6 +8226,142 @@ TEST_CASE("a notification queued while a job runs wakes the host when the job en
     }
 }
 
+
+/** @brief A service with one queued characteristic, the log a central drains. */
+static const kdrv_ble_app_char_t s_queue_chars[] = {
+    { "log", "6e400005-b5a3-f393-e0a9-e50e24dcca9e", KDRV_BLE_APP_READ | KDRV_BLE_APP_QUEUED },
+    { "temp", "6e400006-b5a3-f393-e0a9-e50e24dcca9e", KDRV_BLE_APP_READ },
+};
+
+/** @brief The service of the two. */
+static const kdrv_ble_app_service_t s_queue_svc = {
+    "6e400004-b5a3-f393-e0a9-e50e24dcca9e", s_queue_chars, 2U };
+
+/** @brief A fresh waiter, its answer not yet given. */
+static void waiter_arm(BleValueWaiter *w)
+{
+    w->ack = 0U;
+    w->rc  = (uint8_t)KODE_ERROR;
+}
+
+TEST_CASE("AO_Radio pushes and clears a queued characteristic, and publishes each value a "
+          "central takes with how many are left", "[radio_ao][ble_app]")
+{
+    BleValueWaiter w;
+    uint8_t        got[KDRV_BLE_APP_VALUE_MAX];
+
+    radio_fresh();
+    fake_sem_reset();
+    w.done = khal_sem_create();
+    fake_ble_app_service_set(&s_queue_svc);
+    kdrv_ble_app_link_reset();
+    ble_app_subscribe(ao_spy());
+    ao_spy_drain();
+
+    /* Two pushes, each answered into the waiter. */
+    waiter_arm(&w);
+    post_op("log", KQP_BLE_APP_OP_PUSH, "x", &w);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)w.rc);
+    TEST_ASSERT_EQUAL_UINT32(VALUE_TEST_GEN, __atomic_load_n(&w.ack, __ATOMIC_ACQUIRE));
+    waiter_arm(&w);
+    post_op("log", KQP_BLE_APP_OP_PUSH, "yz", &w);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)w.rc);
+
+    /* The central reads the first: it is taken, one left, and that is published. */
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+    TEST_ASSERT_EQUAL_HEX8('x', got[0]);
+    pump();
+    const BleAppTakenEvt *t = (const BleAppTakenEvt *)spy_take_sig(BLE_APP_TAKEN_SIG);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT8(0U, t->chr);
+    TEST_ASSERT_EQUAL_STRING("log", t->name);
+    TEST_ASSERT_EQUAL_UINT8(1U, t->left);
+    ao_spy_drain();
+
+    /* The second, and then nothing: a read of the empty queue publishes nothing. */
+    TEST_ASSERT_EQUAL_UINT16(2U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+    pump();
+    t = (const BleAppTakenEvt *)spy_take_sig(BLE_APP_TAKEN_SIG);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT8(0U, t->left);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+    pump();
+    TEST_ASSERT_NULL(spy_take_sig(BLE_APP_TAKEN_SIG));
+
+    /* A clear empties what a push left. */
+    post_op("log", KQP_BLE_APP_OP_PUSH, "a", NULL);
+    waiter_arm(&w);
+    post_op("log", KQP_BLE_APP_OP_CLEAR, "", &w);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)w.rc);
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+
+    /* A push to a characteristic that is not queued is refused, nothing set. */
+    post_op("temp", KQP_BLE_APP_OP_SET, "", NULL);
+    waiter_arm(&w);
+    post_op("temp", KQP_BLE_APP_OP_PUSH, "b", &w);
+    TEST_ASSERT_EQUAL_INT((int)KODE_DENIED, (int)w.rc);
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(1U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+
+    khal_sem_delete(w.done);
+    QActive_unsubscribe(ao_spy(), BLE_APP_WRITE_SIG);
+    QActive_unsubscribe(ao_spy(), BLE_APP_LINK_SIG);
+    QActive_unsubscribe(ao_spy(), BLE_APP_TAKEN_SIG);
+    ao_spy_drain();
+    kdrv_ble_app_link_reset();
+    fake_ble_app_service_set(NULL);
+}
+
+/** @brief A reading of AO_Power's with @p pct, dispatched to AO_Radio. */
+static void radio_power_reading(uint8_t pct)
+{
+    PowerEvt p;
+
+    (void)memset(&p, 0, sizeof(p));
+    p.super   = (QEvt)QEVT_INITIALIZER(POWER_EVT_SIG);
+    p.soc_pct = pct;
+    dispatch_evt(&p.super);
+}
+
+TEST_CASE("AO_Radio hands each charge AO_Power reads to the Battery service, and skips one "
+          "that comes while a job runs", "[radio_ao][ble_app]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_battery_declare(true);
+
+    /* Off: the reading still goes down. */
+    radio_power_reading(57U);
+    TEST_ASSERT_EQUAL_INT(57, fake_ble_battery_pct());
+
+    /* Up, and the host's start held by the worker: skipped. */
+    go_up();
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_TRUE(job_held());
+    radio_power_reading(60U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(57, fake_ble_battery_pct(),
+                                  "the level reached NimBLE while a worker job held it");
+    finish_ble_start();
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+
+    /* The next reading, with nothing running, goes down. */
+    radio_power_reading(61U);
+    TEST_ASSERT_EQUAL_INT(61, fake_ble_battery_pct());
+
+    fake_ble_battery_declare(false);
+    dispatch(BLE_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
 
 /* ---- The board's rest ------------------------------------------------------- */
 
@@ -7976,7 +8446,7 @@ TEST_CASE("a network that goes away is said at once, and tried again with "
 
     static const uint32_t WAITS_MS[] = { 5000U, 30000U, 120000U, 600000U, 600000U };
 
-    for ( size_t i = 0U; i < (sizeof(WAITS_MS) / sizeof(WAITS_MS[0])); ++i )
+    for ( size_t i = 0U; (sizeof(WAITS_MS) / sizeof(WAITS_MS[0])) > i; ++i )
     {
         retry_wait(WAITS_MS[i] - 1000U);
         TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "tried before its wait");
@@ -9224,6 +9694,119 @@ TEST_CASE("Pair new device with Bluetooth off puts nothing on the air", "[radio_
     ble_adv_case_end();
 }
 
+/** @brief The next BLE state in the spy, copied; fails the case if none. */
+static BleStateEvt take_ble_state(void)
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "no BLE state was published");
+        if ( (QSignal)BLE_STATE_SIG == e->sig )
+        {
+            return *(const BleStateEvt *)e;
+        }
+    }
+}
+
+/* The board has one link. With a device on it nothing is on the air, so a
+ * time to pair that began then would run out unseen: it waits for the link,
+ * and nothing says "visible" before the advert is there. */
+TEST_CASE("Pair new device asked with a device connected waits for it to leave, "
+          "and its time starts then", "[radio_ao]")
+{
+    BleStateEvt s;
+
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_set_bonds(1U);
+    go_up();
+    ao_spy_subscribe(BLE_STATE_SIG);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, true);
+
+    /* The bonded phone connects, and somebody asks to pair another. */
+    fake_ble_secure(true);
+    fake_ble_central(true);
+    pump();
+    ao_spy_drain();
+    fake_klog_reset();
+    dispatch(BLE_PAIR_OPEN_REQ_SIG);
+    pump();
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "an advert was asked for under a link");
+    s = take_ble_state();
+    TEST_ASSERT_FALSE_MESSAGE(s.pair_open, "said visible with nothing on the air");
+    TEST_ASSERT_TRUE_MESSAGE(s.pair_wait, "the request was dropped without a word");
+    TEST_ASSERT_TRUE(logged("when it leaves"));
+    TEST_ASSERT_FALSE_MESSAGE(logged("visible for"), "the log said visible");
+    ao_spy_drain();
+
+    /* Six minutes on the phone leaves: the whole time to pair starts now. */
+    fake_time_advance_ms(360000U);
+    fake_klog_reset();
+    fake_ble_central(false);
+    pump();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+    TEST_ASSERT_TRUE(logged("visible for 300 s"));
+    dispatch(BLE_STATE_REQ_SIG);
+    s = take_ble_state();
+    TEST_ASSERT_TRUE(s.pair_open);
+    TEST_ASSERT_FALSE(s.pair_wait);
+    ao_spy_drain();
+
+    /* The fast leg ends with 270 s of the time left; when those are gone the
+     * board hides again. */
+    fake_time_advance_ms(30000U);
+    fake_ble_adv_end();
+    pump();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 270000U, false);
+    fake_time_advance_ms(270000U);
+    fake_ble_adv_end();
+    pump();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, true);
+    ble_adv_case_end();
+}
+
+TEST_CASE("Pair new device that waits for the link is dropped when Bluetooth is switched off",
+          "[radio_ao]")
+{
+    BleStateEvt s;
+
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_set_bonds(1U);
+    go_up();
+    ao_spy_subscribe(BLE_STATE_SIG);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, true);
+    fake_ble_central(true);
+    pump();
+    dispatch(BLE_PAIR_OPEN_REQ_SIG);
+    pump();
+    ao_spy_drain();
+
+    dispatch(BLE_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    fake_ble_central(false);
+    pump();
+    ao_spy_drain();
+    dispatch(BLE_STATE_REQ_SIG);
+    s = take_ble_state();
+    TEST_ASSERT_FALSE_MESSAGE(s.pair_wait, "a board switched off still waits to show itself");
+    TEST_ASSERT_FALSE(s.pair_open);
+    ao_spy_drain();
+    ble_adv_case_end();
+}
+
 /* ---- The bond count and the store a teardown frees ---------------------------------- */
 
 /** @brief The bond count of the next BLE state in the spy; fails the case if none. */
@@ -9296,6 +9879,77 @@ TEST_CASE("the same when the link is lost and the teardown is the AO's own, not 
     c5_case_end();
 }
 
+/** @brief Why the next BLE state in the spy says its request was refused; fails the case if none. */
+static uint8_t take_refused(void)
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "no BLE state was published");
+        if ( (QSignal)BLE_STATE_SIG == e->sig )
+        {
+            return ((const BleStateEvt *)e)->refused;
+        }
+    }
+}
+
+/* A request AO_Radio turns away is answered with the state, and the state has
+ * to say it was turned away: the console reads it as the verb's answer. */
+TEST_CASE("a BLE request that is refused says why in the state that answers it",
+          "[radio_ao]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_nvs_reset();
+    go_up();
+    ao_spy_subscribe(BLE_STATE_SIG);
+    ao_spy_drain();
+
+    /* Pair new device with Bluetooth off. */
+    TEST_ASSERT_FALSE(ble_enabled());
+    ble_pair_open_request();
+    pump();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_OFF, take_refused());
+    ao_spy_drain();
+
+    /* A question is never a refusal, and the one before it does not stick. */
+    dispatch(BLE_STATE_REQ_SIG);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_NONE, take_refused());
+    ao_spy_drain();
+
+    /* Forget all with a console attached to the link. */
+    fake_ble_set_bonds(1U);
+    fake_ble_mirror_set_attached(true);
+    ble_unpair_request();
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the store was cleared under a console");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_ATTACHED, take_refused());
+    ao_spy_drain();
+    fake_ble_mirror_set_attached(false);
+
+    /* Forget all while another job holds the radio. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, wifi_scan_ask(ao_spy()));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    ao_spy_drain();
+    ble_unpair_request();
+    pump();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_BUSY, take_refused());
+    ao_spy_drain();
+    scan_sweep(1U, -50, KODE_OK);
+    ao_spy_drain();
+
+    /* And one that is taken says so by not saying it. */
+    ble_unpair_request();
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_UNPAIR, running_job());
+    finish(KDRV_RADIO_JOB_BLE_UNPAIR, kdrv_ble_unpair());
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_NONE, take_refused());
+    ao_spy_drain();
+    fake_ble_reset();
+    c5_case_end();
+}
+
 TEST_CASE("an autojoin that finds the vault empty says so once, however often it is asked",
           "[radio_ao]")
 {
@@ -9315,6 +9969,510 @@ TEST_CASE("an autojoin that finds the vault empty says so once, however often it
     TEST_ASSERT_EQUAL_UINT(1U, logged("no networks remembered"));
     TEST_ASSERT_FALSE(job_held());
     c5_case_end();
+}
+
+/* ---- wifi_scan_stop -------------------------------------------------------------- */
+
+/**
+ * @brief The listing's end, taken from the spy: every other event is read past.
+ * @return The end; the case fails when the listing was never closed.
+ */
+static const WifiScanEndEvt *listing_end(void)
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "the listing was never closed");
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            return (const WifiScanEndEvt *)(const void *)e;
+        }
+    }
+}
+
+/** @brief Ask for the stop the way `wifi_scan_stop` does, and let AO_Radio read it. */
+static void ask_stop(void)
+{
+    TEST_ASSERT_TRUE(wifi_scan_stop_request());
+    pump();
+}
+
+/* The stop is in before the fake worker starts the sweep, so not one step
+ * runs: the driver reads the cut between steps, the first included. The
+ * sweep's end withdraws it, and the next sweep runs whole. */
+TEST_CASE("a stop asked during a listed scan cuts the sweep short",
+          "[radio_ao][scan_stop]")
+{
+    const WifiScanEndEvt *end;
+
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: the scan ends after the step on the air"));
+
+    seed_air(2U, -50);
+    run_scan_rc(KODE_DENIED);
+    TEST_ASSERT_EQUAL_UINT(0U, s_starts);
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+
+    end = listing_end();
+    TEST_ASSERT_FALSE(end->ok);
+    TEST_ASSERT_FALSE(end->busy);
+    TEST_ASSERT_TRUE_MESSAGE(end->cut, "the end does not say the sweep was cut");
+    TEST_ASSERT_EQUAL_UINT8(0U, end->count);
+    TEST_ASSERT_FALSE(job_held());
+
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "the cut outlived the sweep it was for");
+}
+
+/* The steps that ran before the stop are on the bus already; the end counts
+ * them and says the list is not the whole air. */
+TEST_CASE("a stopped scan publishes what it heard and an end that says cut",
+          "[radio_ao][scan_stop]")
+{
+    const WifiScanEndEvt *end;
+    uint32_t              entries = 0U;
+
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    seed_air(3U, -50);
+    run_scan();
+    pump();
+    ask_stop();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "the listing was never closed");
+        if ( (QSignal)WIFI_SCAN_ENTRY_SIG == e->sig )
+        {
+            ++entries;
+        }
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            end = (const WifiScanEndEvt *)(const void *)e;
+            break;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT(3U, entries);
+    TEST_ASSERT_FALSE(end->ok);
+    TEST_ASSERT_TRUE(end->cut);
+    TEST_ASSERT_EQUAL_UINT8(3U, end->count);
+}
+
+/* A sweep that failed, or that the link dropped under, was not cut by anybody. */
+TEST_CASE("a scan that fails is not said to be cut", "[radio_ao][scan_stop]")
+{
+    const WifiScanEndEvt *end;
+
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+
+    end = listing_end();
+    TEST_ASSERT_FALSE(end->ok);
+    TEST_ASSERT_FALSE(end->cut);
+}
+
+TEST_CASE("a stop with no scan running sets nothing, and the next sweep runs whole",
+          "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    go_up();
+    uint32_t const before = job_submits();
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    TEST_ASSERT_EQUAL_UINT(before, job_submits());
+    TEST_ASSERT_FALSE(job_held());
+
+    seed_air(2U, -50);
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "a stop with nothing to stop cut the next sweep");
+}
+
+TEST_CASE("a stop with no link sets nothing", "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    uint32_t const before = job_submits();
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(before, job_submits(), "a stop brought the link up");
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+
+    seed_air(2U, -50);
+    run_scan();
+    TEST_ASSERT_TRUE(1U < s_starts);
+}
+
+/* The round's sweep is not a listing: cut, the round would run it again. */
+TEST_CASE("a stop leaves the automatic round's sweep alone", "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("line-ap-0");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    seed_air(2U, -50);
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "the round's sweep was cut");
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    ao_spy_drain();
+}
+
+/* A row judged on half the air would fail a good unit. */
+TEST_CASE("a stop leaves the c5 row's sweep alone", "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    go_up();
+    ask_row();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_C5_INFO, running_job());
+    finish_info();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    finish_rest();   /* its sweep runs to its end, or run_scan() fails the case */
+    TEST_ASSERT_TRUE(take_verdict());
+}
+
+/* An asked scan is its asker's: its end would say the scan failed. */
+TEST_CASE("a stop leaves an asked scan alone", "[radio_ao][scan_stop]")
+{
+    scan_seen_t s;
+
+    radio_fresh();
+    go_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_wifi_scan(ao_spy()));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
+    scan_sweep(3U, -50, KODE_OK);
+
+    s = scan_take_spy();
+    TEST_ASSERT_EQUAL_UINT(3U, s.entries);
+    TEST_ASSERT_EQUAL_UINT(1U, s.ends);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, s.end->rc);
+    ao_spy_drain();
+}
+
+/* The sweep was past its last step when the stop came: the list is whole and
+ * says so, and the cut does not wait for the next sweep. */
+TEST_CASE("a stop after the last step leaves the scan whole and the cut withdrawn",
+          "[radio_ao][scan_stop]")
+{
+    const WifiScanEndEvt *end;
+
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    seed_air(2U, -50);
+    run_scan();
+    pump();
+
+    ask_stop();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+
+    end = listing_end();
+    TEST_ASSERT_TRUE(end->ok);
+    TEST_ASSERT_FALSE(end->cut);
+    TEST_ASSERT_EQUAL_UINT8(2U, end->count);
+
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "the cut waited for the next sweep");
+}
+
+/* The link drops with the stop asked and the sweep still on the worker: the
+ * listing is closed by the lost link, and the sweep that follows the next
+ * bring-up must not find the cut standing. */
+TEST_CASE("a stopped scan the link drops under leaves no cut standing",
+          "[radio_ao][scan_stop]")
+{
+    radio_fresh();
+    go_up();
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    ask_stop();
+    finish_lost(KODE_ERROR);
+    TEST_ASSERT_FALSE(listing_end()->ok);
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+
+    seed_air(2U, -50);
+    run_scan();
+    TEST_ASSERT_TRUE_MESSAGE(1U < s_starts, "the cut outlived the link");
+    c5_case_end();
+}
+
+/* The door keeps AO_Radio's half of its queue: within the margin nothing is
+ * posted, and the caller is told. */
+TEST_CASE("a stop asked on a full radio queue is refused and posts nothing",
+          "[radio_ao][scan_stop]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+    const QEvt       *e      = NULL;
+
+    radio_fresh();
+    for ( uint32_t guard = 0U;
+         (64U > guard)
+         && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_POST_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    TEST_ASSERT_FALSE(wifi_scan_stop_request());
+    TEST_ASSERT_EQUAL_UINT(KQP_RADIO_POST_MARGIN, uxQueueSpacesAvailable(AO_Radio->eQueue));
+    while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+    {
+        TEST_ASSERT_NOT_EQUAL((int)WIFI_SCAN_STOP_REQ_SIG, (int)e->sig);
+        QF_gc(e);
+    }
+}
+
+/* ---- AO_Radio held up: the two posts from other tasks that are refused ------
+ * AO_Radio is not dispatched in these bodies, which is what it is while a
+ * handler waits on a lock or on the C5. The board's queue is
+ * KQP_RADIO_QUEUE_LEN slots and the host's is longer, so the child swaps it for
+ * one of the board's length. Each body runs in a child: a QP assert aborts it,
+ * and Unity cannot report from there, so a check that fails names itself and
+ * ends the child with a status of its own. */
+
+/** @brief How a child ends when one of its checks failed. */
+#define CHILD_CHECK_FAILED  3
+
+/** @brief End the child, saying which check failed. */
+#define CHILD_CHECK(cond_, what_)                                          \
+    do {                                                                   \
+        if ( !(cond_) ) {                                                  \
+            (void)printf("  child check failed, line %d: %s\n", __LINE__, \
+                         (what_));                                         \
+            (void)fflush(stdout);                                          \
+            _exit(CHILD_CHECK_FAILED);                                     \
+        }                                                                  \
+    } while ( 0 )
+
+/** @brief The pools of the host's event store, the two of them. */
+#define EVENT_POOLS  2U
+
+/** @brief How many blocks are free in all the event pools. */
+static uint32_t event_blocks_free(void)
+{
+    uint32_t n = 0U;
+
+    for ( uint8_t pool = 1U; EVENT_POOLS >= pool; ++pool )
+    {
+        n += (uint32_t)QF_getPoolFree(pool);
+    }
+    return n;
+}
+
+/** @brief Swap AO_Radio's empty queue for one of the board's length. */
+static void board_queue(void)
+{
+    const QEvt *held = NULL;
+    uint8_t *const store = malloc(KQP_RADIO_QUEUE_LEN * sizeof(QEvt *));
+
+    while ( xQueueReceive(AO_Radio->eQueue, &held, 0U) == pdTRUE )
+    {
+        QF_gc(held);
+    }
+    TEST_ASSERT_NOT_NULL(store);
+    AO_Radio->eQueue = xQueueCreateStatic(KQP_RADIO_QUEUE_LEN, sizeof(QEvt *),
+                                          store, &AO_Radio->osObject.queue);
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Radio->eQueue));
+}
+
+/** @brief The C5 answers the KODE request @p req, and the pump that would empty the queue does not run. */
+static void kode_answer_nopump(kode_hdr_t const *req, uint8_t st)
+{
+    static uint8_t m[sizeof(kode_hdr_t)];
+    kode_hdr_t const h = { KODE_WIRE_VERSION, req->service, req->op, req->seq,
+                           st, 0U, 0U };
+
+    (void)memcpy(m, &h, sizeof(h));
+    fake_peer_deliver(KODE_MSG_RSP, m, sizeof(h));
+}
+
+/** @brief Child body: a scan knock meets a queue with @p arg slots free; the sweep still lists every network. */
+static void scan_refused_body(void *arg)
+{
+    uint32_t const left = *(uint32_t const *)arg;
+
+    radio_fresh();
+    go_up();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    CHILD_CHECK((int)KDRV_RADIO_JOB_WIFI_SCAN == running_job(), "no scan with the worker");
+    seed_air(3U, -52);
+    board_queue();
+    radio_queue_fill_to(left);
+    ao_spy_drain();
+
+    run_scan();
+    CHILD_CHECK(uxQueueSpacesAvailable(AO_Radio->eQueue) == left,
+                "the knock took one of the last slots");
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+
+    uint32_t entries = 0U;
+    bool     closed  = false;
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)WIFI_SCAN_ENTRY_SIG == e->sig )
+        {
+            ++entries;
+        }
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            closed = ((const WifiScanEndEvt *)e)->ok
+                     && (3U == ((const WifiScanEndEvt *)e)->count);
+        }
+    }
+    CHILD_CHECK(3U == entries, "a network never reached the listing");
+    CHILD_CHECK(closed, "the listing's end does not count the three");
+}
+
+TEST_CASE("a scan knock refused by a full queue loses no network from the listing",
+          "[radio_ao][overflow]")
+{
+    uint32_t none = 0U;
+    uint32_t last = KQP_RADIO_DROP_MARGIN;
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&scan_refused_body, &none),
+                                     "no slot free: see the child's line above");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&scan_refused_body, &last),
+                                     "the droppable posts' margin free: see the child's line above");
+}
+
+/** @brief Child body: the C5's answer meets a queue with @p arg slots free; it is logged, and the asker is told on the deadline. */
+static void svc_refused_body(void *arg)
+{
+    uint32_t const left = *(uint32_t const *)arg;
+
+    radio_fresh();
+    fake_peer_reset();
+    go_up();
+    pump();
+    CHILD_CHECK(id_sign_request(ao_spy(), "abc"), "the request was not posted");
+    pump();
+    CHILD_CHECK(KODE_SVC_ID == kode_sent()->service, "the request never went to the C5");
+    kode_hdr_t const sign = *kode_sent();
+    ao_spy_drain();
+    board_queue();
+    radio_queue_fill_to(left);
+    fake_klog_reset();
+    uint32_t const blocks = event_blocks_free();
+
+    kode_answer_nopump(&sign, KODE_ST_OK);
+    CHILD_CHECK(uxQueueSpacesAvailable(AO_Radio->eQueue) == left, "the refused answer took a slot");
+    CHILD_CHECK(event_blocks_free() == blocks, "the refused answer was not recycled");
+    CHILD_CHECK(logged("no room for a KODE answer"), "the refusal was not said");
+    pump();
+    pump();
+    CHILD_CHECK(NULL == spy_take_sig(ID_SIGN_RSP_SIG), "the asker was answered before its deadline");
+
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    const QEvt *const e = spy_take_sig(ID_SIGN_RSP_SIG);
+    CHILD_CHECK(NULL != e, "the wait for the answer never ended");
+    CHILD_CHECK(KODE_ST_REFUSED == ((const IdSignRspEvt *)e)->status, "the asker was not told it failed");
+    CHILD_CHECK(logged("did not answer"), "the deadline said nothing");
+    CHILD_CHECK((int)KRADIO_UP == link_now(), "the link did not stay up");
+}
+
+TEST_CASE("a KODE answer refused by a full queue is logged and its wait ends on the deadline",
+          "[radio_ao][overflow]")
+{
+    uint32_t none = 0U;
+    uint32_t last = KQP_RADIO_DROP_MARGIN;
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&svc_refused_body, &none),
+                                     "no slot free: see the child's line above");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&svc_refused_body, &last),
+                                     "the droppable posts' margin free: see the child's line above");
+}
+
+/** @brief Child body: both droppable posts take a slot above KQP_RADIO_DROP_MARGIN and none of the last ones. */
+static void drop_margin_body(void *arg)
+{
+    (void)arg;
+    radio_fresh();
+    fake_peer_reset();
+    go_up();
+    pump();
+    kode_hdr_t const first = *kode_sent();
+    CHILD_CHECK(id_sign_request(ao_spy(), "abc"), "the request was not posted");
+    pump();
+    CHILD_CHECK(KODE_SVC_ID == kode_sent()->service, "the request never went to the C5");
+    kode_hdr_t const second = *kode_sent();
+    ao_spy_drain();
+    board_queue();
+    radio_queue_fill_to(KQP_RADIO_DROP_MARGIN + 1U);
+
+    seed_air(1U, -52);
+    run_scan();
+    CHILD_CHECK(KQP_RADIO_DROP_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a scan knock was refused with a slot above its margin free");
+    seed_air(1U, -52);
+    run_scan();
+    CHILD_CHECK(KQP_RADIO_DROP_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a scan knock took one of the last slots");
+
+    fake_klog_reset();
+    kode_answer_nopump(&first, KODE_ST_OK);
+    CHILD_CHECK(KQP_RADIO_DROP_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a KODE answer took one of the last slots");
+    CHILD_CHECK(logged("no room for a KODE answer"), "the refusal was not said");
+
+    radio_queue_flush();
+    radio_queue_fill_to(KQP_RADIO_DROP_MARGIN + 1U);
+    fake_klog_reset();
+    kode_answer_nopump(&second, KODE_ST_OK);
+    CHILD_CHECK(KQP_RADIO_DROP_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a KODE answer was refused with a slot above its margin free");
+    CHILD_CHECK(!logged("no room for a KODE answer"), "a KODE answer that fit was said refused");
+}
+
+TEST_CASE("the droppable posts stop short of the last slots of the queue",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&drop_margin_body, NULL),
+                                     "see the child's line above");
 }
 
 /* The next file to run the AO cannot finish a job this one holds. */

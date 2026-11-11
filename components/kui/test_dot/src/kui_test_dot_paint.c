@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kui_test_dot_paint.c
- * @brief The E5 painter: Luismi's kgui_e5pat.c primitives, the same arithmetic in the same order.
+ * @brief The E5 painter: the station's kgui_e5pat.c primitives, the same arithmetic in the same order.
  */
 #include "kui_test_dot_paint.h"
 
@@ -136,10 +136,10 @@ static bool inside(int32_t x, int32_t y)
 void kui_td_fill(const kui_td_px_t *g, uint32_t rgb)
 {
     uint16_t const c = kui_td_565(rgb);
-    for ( int32_t y = 0; y < KUI_TD_H_PX; y++ )
+    for ( int32_t y = 0; KUI_TD_H_PX > y; y++ )
     {
         uint16_t *row = at(g, 0, y);
-        for ( int32_t x = 0; x < KUI_TD_W_PX; x++ )
+        for ( int32_t x = 0; KUI_TD_W_PX > x; x++ )
         {
             row[x] = c;
         }
@@ -149,9 +149,9 @@ void kui_td_fill(const kui_td_px_t *g, uint32_t rgb)
 void kui_td_rect(const kui_td_px_t *g, int32_t x0, int32_t y0, int32_t w, int32_t h, uint32_t rgb)
 {
     uint16_t const c = kui_td_565(rgb);
-    for ( int32_t y = y0; y < (y0 + h); y++ )
+    for ( int32_t y = y0; (y0 + h) > y; y++ )
     {
-        for ( int32_t x = x0; x < (x0 + w); x++ )
+        for ( int32_t x = x0; (x0 + w) > x; x++ )
         {
             if ( inside(x, y) )
             {
@@ -172,11 +172,11 @@ void kui_td_rect(const kui_td_px_t *g, int32_t x0, int32_t y0, int32_t w, int32_
 static void blend(const kui_td_px_t *g, int32_t x, int32_t y, uint32_t rgb, float cov)
 {
     float a = cov;
-    if ( (!inside(x, y)) || (a <= 0.0f) )
+    if ( (!inside(x, y)) || (0.0f >= a) )
     {
         return;
     }
-    if ( a > 1.0f )
+    if ( 1.0f < a )
     {
         a = 1.0f;
     }
@@ -203,9 +203,9 @@ void kui_td_disc(const kui_td_px_t *g, kui_td_pt_t c, float rad, uint32_t rgb)
     float const bottom = c.y + rad;
     float const left = c.x - rad;
     float const right = c.x + rad;
-    for ( int32_t y = (int32_t)top - 1; y <= ((int32_t)bottom + 1); y++ )
+    for ( int32_t y = (int32_t)top - 1; ((int32_t)bottom + 1) >= y; y++ )
     {
-        for ( int32_t x = (int32_t)left - 1; x <= ((int32_t)right + 1); x++ )
+        for ( int32_t x = (int32_t)left - 1; ((int32_t)right + 1) >= x; x++ )
         {
             float const dx = ((float)x + PX_MID) - c.x;
             float const dy = ((float)y + PX_MID) - c.y;
@@ -230,7 +230,7 @@ void kui_td_stroke(const kui_td_px_t *g, kui_td_pt_t a, kui_td_pt_t b, float hw,
             float const px = (float)x + PX_MID;
             float const py = (float)y + PX_MID;
             float t = 0.0f;
-            if ( l2 > 0.0f )
+            if ( 0.0f < l2 )
             {
                 t = (((px - a.x) * dx) + ((py - a.y) * dy)) / l2;
             }
@@ -287,13 +287,13 @@ void kui_td_rrect(const kui_td_px_t *g, kui_td_pt_t c, float hx, float hy, float
     float const bottom = c.y + hy;
     float const left = c.x - hx;
     float const right = c.x + hx;
-    for ( int32_t y = (int32_t)top - AA_MARGIN; y <= ((int32_t)bottom + AA_MARGIN); y++ )
+    for ( int32_t y = (int32_t)top - AA_MARGIN; ((int32_t)bottom + AA_MARGIN) >= y; y++ )
     {
-        for ( int32_t x = (int32_t)left - AA_MARGIN; x <= ((int32_t)right + AA_MARGIN); x++ )
+        for ( int32_t x = (int32_t)left - AA_MARGIN; ((int32_t)right + AA_MARGIN) >= x; x++ )
         {
             float const d = sd_rrect(kui_td_pt((float)x + PX_MID, (float)y + PX_MID), c, hx, hy, rad);
             float a = fminf(1.0f, fmaxf(0.0f, PX_MID - d));
-            if ( ow > 0.0f )
+            if ( 0.0f < ow )
             {
                 a *= fminf(1.0f, fmaxf(0.0f, (d + ow) + PX_MID));
             }
@@ -346,8 +346,8 @@ static bool in_tri(kui_td_pt_t p, kui_td_pt_t a, kui_td_pt_t b, kui_td_pt_t c)
     float const d0 = ((p.x - b.x) * (a.y - b.y)) - ((a.x - b.x) * (p.y - b.y));
     float const d1 = ((p.x - c.x) * (b.y - c.y)) - ((b.x - c.x) * (p.y - c.y));
     float const d2 = ((p.x - a.x) * (c.y - a.y)) - ((c.x - a.x) * (p.y - a.y));
-    bool const neg = (d0 < 0.0f) || (d1 < 0.0f) || (d2 < 0.0f);
-    bool const pos = (d0 > 0.0f) || (d1 > 0.0f) || (d2 > 0.0f);
+    bool const neg = (0.0f > d0) || (0.0f > d1) || (0.0f > d2);
+    bool const pos = (0.0f < d0) || (0.0f < d1) || (0.0f < d2);
     return !(neg && pos);
 }
 
@@ -362,9 +362,9 @@ void kui_td_tri(const kui_td_px_t *g, kui_td_pt_t a, kui_td_pt_t b, kui_td_pt_t 
         for ( int32_t x = xa; x <= xb; x++ )
         {
             int32_t n = 0;
-            for ( int32_t sy = 0; sy < TRI_SS; sy++ )
+            for ( int32_t sy = 0; TRI_SS > sy; sy++ )
             {
-                for ( int32_t sx = 0; sx < TRI_SS; sx++ )
+                for ( int32_t sx = 0; TRI_SS > sx; sx++ )
                 {
                     kui_td_pt_t const s = kui_td_pt((float)x + (((float)sx + PX_MID) / (float)TRI_SS),
                                              (float)y + (((float)sy + PX_MID) / (float)TRI_SS));
@@ -415,7 +415,7 @@ static void hand(const kui_td_px_t *g, kui_td_pt_t c, float k, uint32_t rgb)
     static const float FX[FINGERS] = { -24.0f, -8.0f, 8.0f, 24.0f };  /* each finger's x from the centre */
     static const float FH[FINGERS] = { 40.0f, 50.0f, 50.0f, 42.0f };  /* each finger's length */
     kui_td_rrect(g, kui_td_pt(c.x, c.y + (PALM_DY * k)), PALM_HX * k, PALM_HY * k, PALM_R * k, rgb, 0.0f);
-    for ( int32_t i = 0; i < FINGERS; i++ )
+    for ( int32_t i = 0; FINGERS > i; i++ )
     {
         float const half = FH[i] / 2.0f;
         kui_td_rrect(g, kui_td_pt(c.x + (FX[i] * k), c.y - (((FINGER_BASE + half) - FINGER_JOIN) * k)), FINGER_HX * k,
@@ -443,7 +443,7 @@ void kui_td_marks(const kui_td_px_t *g)
         { KUI_TD_MARK_LEFT_X_PX, KUI_TD_MARK_BOTTOM_Y_PX },
     };
     int32_t const half = KUI_TD_MARK_SIZE_PX / 2;
-    for ( uint32_t k = 0U; k < KUI_TD_MARKS; k++ )
+    for ( uint32_t k = 0U; KUI_TD_MARKS > k; k++ )
     {
         kui_td_rect(g, AT[k][0] - half, AT[k][1] - half, KUI_TD_MARK_SIZE_PX, KUI_TD_MARK_SIZE_PX, KUI_TD_MARK_RGB);
     }
@@ -458,7 +458,7 @@ void kui_td_witnesses(const kui_td_px_t *g, bool rim)
         { KUI_TD_WITNESS_BL_X_PX, KUI_TD_WITNESS_BOT_Y_PX },
         { KUI_TD_WITNESS_BR_X_PX, KUI_TD_WITNESS_BOT_Y_PX },
     };
-    for ( uint32_t i = 0U; i < KUI_TD_WITNESSES; i++ )
+    for ( uint32_t i = 0U; KUI_TD_WITNESSES > i; i++ )
     {
         kui_td_pt_t const c = kui_td_pt((float)WITNESS_AT[i][0], (float)WITNESS_AT[i][1]);
         if ( rim )

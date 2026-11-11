@@ -601,3 +601,94 @@ TEST_CASE("led_activity off keeps a write dark, a pulse in flight included",
     power_led_down();
     Mockkhal_i2c_Destroy();
 }
+
+/* ---- One time event waits at a time ---------------------------------------- */
+
+/* QP posts a time event with no margin, and a queue that is full is an
+ * assertion and a reset. A pulse that is periodic goes on posting whether or
+ * not the AO took the last half, so one that did not run for a few halves
+ * finds that many waiting. One half waits at most, and the half that is taken
+ * arms the next. The two counts of what waits fail on the periodic timer; the
+ * word the dark half says and the stale half's silence are guards. */
+TEST_CASE("a half of the pulse nobody took is not followed by another; the one taken arms the next",
+          "[power_led]")
+{
+    static const QEvt pulse = QEVT_INITIALIZER(POWER_PULSE_SIG);
+
+    power_led_up();
+    led_quiet();
+    (void)qf_support_waiting_of(AO_Power, POWER_PULSE_SIG);
+
+    progress(0U);
+    one_word(ORANGE_R, ORANGE_G, ORANGE_B, "a write starts with the orange lit");
+
+    /* Three halves go by and AO_Power never runs. */
+    qf_support_time_passes(3U * KQP_TICKS_PER_MS(KODE_LED_PULSE_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_waiting_of(AO_Power, POWER_PULSE_SIG),
+                                   "every half queued a pulse the AO had not taken");
+
+    words_forget();
+    QASM_DISPATCH(AO_Power, &pulse, 0U);
+    words_collect();
+    one_word(0U, 0U, 0U, "the half that was taken is the dark one");
+
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_LED_PULSE_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_waiting_of(AO_Power, POWER_PULSE_SIG),
+                                   "one half after the one that was taken, the next");
+
+    /* The write fails, and no pulse follows it: a half queued before the end
+     * is taken after it, says nothing and arms nothing. */
+    (void)qf_support_waiting_of(AO_Power, POWER_PULSE_SIG);
+    flash_ends(APP_FLASH_FAIL_SIG);
+    words_forget();
+    QASM_DISPATCH(AO_Power, &pulse, 0U);
+    words_collect();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nwords,
+                                   "a half queued before the write ended lit the LED after it");
+    qf_support_time_passes(2U * KQP_TICKS_PER_MS(KODE_LED_PULSE_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_waiting_of(AO_Power, POWER_PULSE_SIG),
+                                   "a pulse followed a write that had ended");
+
+    power_led_down();
+    Mockkhal_i2c_Destroy();
+}
+
+/* The same for a write that ends well: a half queued before the end must
+ * neither cut the green short nor light anything after it. Only the stale
+ * half's silence fails on the code that took it for the green's end. */
+TEST_CASE("a half of the pulse queued before a write ended leaves the green its second",
+          "[power_led]")
+{
+    static const QEvt pulse = QEVT_INITIALIZER(POWER_PULSE_SIG);
+
+    power_led_up();
+    led_quiet();
+    (void)qf_support_waiting_of(AO_Power, POWER_PULSE_SIG);
+
+    progress(0U);
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_LED_PULSE_MS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_waiting_of(AO_Power, POWER_PULSE_SIG),
+                                   "a half is queued");
+
+    words_forget();
+    flash_ends(APP_FLASH_DONE_SIG);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_nwords, "the pulse stops dark and the green follows");
+
+    words_forget();
+    QASM_DISPATCH(AO_Power, &pulse, 0U);
+    words_collect();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nwords,
+                                   "a half queued before the end cut the green short");
+
+    quiet_ms(DONE_MS - KODE_LED_PULSE_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nwords, "the green went before its second");
+    quiet_ms(2U * KODE_LED_PULSE_MS);
+    one_word(0U, 0U, 0U, "the green's second over leaves the LED dark");
+
+    words_forget();
+    quiet_ms(2000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nwords, "something lit after the green");
+
+    power_led_down();
+    Mockkhal_i2c_Destroy();
+}

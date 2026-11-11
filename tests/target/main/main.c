@@ -35,6 +35,8 @@ static void link_standard_layer(void)
 {
     kode_event_t ev;
     kode_buttons_t pad;
+    uint64_t space_total = 0U;
+    uint64_t space_free = 0U;
 
     (void)kode_error();
 
@@ -75,6 +77,7 @@ static void link_standard_layer(void)
     (void)kode_audio_set("volume", 0U);
     (void)kode_audio_get("volume");
     (void)kode_audio_record_file("flash/x.wav", 1U);
+    (void)kode_audio_record_samples(NULL, 0U, 1U, NULL);
     (void)kode_audio_record_start(1U);
     (void)kode_audio_record_status();
     (void)kode_audio_record_stop();
@@ -84,7 +87,11 @@ static void link_standard_layer(void)
     (void)kode_file_read_bytes("flash/x", NULL);
     (void)kode_file_write("flash/x", "");
     (void)kode_file_append("flash/x", "");
+    (void)kode_file_read_at("flash/x", 0U, NULL, 0U, NULL);
+    (void)kode_file_write_bytes("flash/x", NULL, 0U);
+    (void)kode_file_append_bytes("flash/x", NULL, 0U);
     (void)kode_file_status("flash/x");
+    (void)kode_file_space("flash", &space_total, &space_free);
     (void)kode_file_exists("flash/x");
     (void)kode_file_list("flash");
     (void)kode_file_delete("flash/x");
@@ -250,6 +257,7 @@ static void link_file_net_requests(void)
     static uint8_t buf[1];
 
     (void)kode_sys_file_status(&s_link_ao, "/storage/x");
+    (void)kode_sys_file_space(&s_link_ao, "/storage");
     (void)kode_sys_file_list(&s_link_ao, "/storage", 0U);
     (void)kode_sys_file_create_folder(&s_link_ao, "/storage/d");
     (void)kode_sys_file_delete(&s_link_ao, "/storage/x");

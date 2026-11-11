@@ -538,7 +538,7 @@ TEST_CASE("test_end_while_dormant_gives_the_glass_back", "[test_dot_ao]")
     td_down();
 }
 
-/* Luismi's station counts the photos from one, and its retry of one photo
+/* The station counts the photos from one, and its retry of one photo
  * (`only=`) expects no total. */
 TEST_CASE("test_photos_count_from_one_and_a_retry_says_no_total", "[test_dot_ao]")
 {
@@ -654,7 +654,7 @@ static void radio_answer(uint8_t fw_patch, bool widest)
     td_settle();
 }
 
-/* The card's record and the readings read as Luismi's `e5ficha` and
+/* The card's record and the readings read as the station's `e5ficha` and
  * `e5radio` meant them: the chip by name and number, both versions, the
  * SDIO link, and what each part took. */
 TEST_CASE("test_radio_records_carry_the_card_and_the_times", "[test_dot_ao]")

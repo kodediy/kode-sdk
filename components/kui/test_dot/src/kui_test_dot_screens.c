@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kui_test_dot_screens.c
- * @brief The E5 operator's screens, one per phase, as Luismi's kgui_e5op.c and kgui_e5pat.c paint them; no text.
+ * @brief The E5 operator's screens, one per phase, as the station's kgui_e5op.c and kgui_e5pat.c paint them; no text.
  */
 #include <string.h>
 
@@ -236,7 +236,7 @@ static void pad_keys(const kui_td_px_t *g, const uint8_t *st, bool on)
     static const float DY[ARROWS] = { -1.0f, 1.0f, 0.0f, 0.0f };  /* each key's step from the hub, y */
     float const half = PAD_K / 2.0f;
     kui_td_rrect(g, kui_td_pt(PAD_X, PAD_Y), half + HUB_GROW, half + HUB_GROW, HUB_R, C_HUB, 0.0f);
-    for ( uint32_t i = 0U; i < ARROWS; i++ )
+    for ( uint32_t i = 0U; ARROWS > i; i++ )
     {
         kui_td_pt_t const c = kui_td_pt(PAD_X + (DX[i] * PAD_K), PAD_Y + (DY[i] * PAD_K));
         uint32_t fill = C_PENDING;
@@ -296,7 +296,7 @@ static void pad_buttons(const kui_td_px_t *g, const uint8_t *st, bool on)
     static const float BY[2] = { 215.0f, 290.0f };         /* centre y */
     static const float BR[2] = { 34.0f, 30.0f };           /* radius */
     static const uint32_t COLOUR[2] = { C_TOP_BTN, C_BOT_BTN };
-    for ( uint32_t j = 0U; j < 2U; j++ )
+    for ( uint32_t j = 0U; 2U > j; j++ )
     {
         kui_td_pt_t const c = kui_td_pt(BX[j], BY[j]);
         float const rr = BR[j];
@@ -342,7 +342,7 @@ static void paint_touch(const kui_td_px_t *g, const uint8_t *st, bool on)
         { (float)KBSP_TOUCH_TEST_A_X_PX, (float)KBSP_TOUCH_TEST_A_Y_PX },
         { (float)KBSP_TOUCH_TEST_B_X_PX, (float)KBSP_TOUCH_TEST_B_Y_PX },
     };
-    for ( uint32_t i = 0U; i < KUI_TD_TARGETS; i++ )
+    for ( uint32_t i = 0U; KUI_TD_TARGETS > i; i++ )
     {
         if ( KUI_TD_ST_OK == st[i] )
         {
@@ -350,7 +350,7 @@ static void paint_touch(const kui_td_px_t *g, const uint8_t *st, bool on)
             kui_td_glyph_check(g, AT[i], TARGET_CHECK, TARGET_CHECK_W, C_INK);
         }
     }
-    for ( uint32_t i = 0U; i < KUI_TD_TARGETS; i++ )
+    for ( uint32_t i = 0U; KUI_TD_TARGETS > i; i++ )
     {
         if ( KUI_TD_ST_CURRENT == st[i] )
         {
@@ -452,7 +452,7 @@ static void screen_paint(kui_td_canvas_t *c)
             break;
         case KUI_TD_SCREEN_AUTO:
             kui_td_glyph_no_touch(g, C_HANDS, C_FAIL);
-            for ( uint32_t i = 0U; i < KUI_TD_GRID_CELLS; i++ )
+            for ( uint32_t i = 0U; KUI_TD_GRID_CELLS > i; i++ )
             {
                 paint_cell(g, i, c->arg[i]);
             }
@@ -504,7 +504,7 @@ static uint32_t motion_ms(const kui_td_canvas_t *c)
     }
     else if ( (uint8_t)KUI_TD_SCREEN_BUTTONS == c->kind )
     {
-        for ( uint32_t i = 0U; i < KUI_TD_PAD_KEYS; i++ )
+        for ( uint32_t i = 0U; KUI_TD_PAD_KEYS > i; i++ )
         {
             if ( asked(c->arg[i]) )
             {
@@ -514,7 +514,7 @@ static uint32_t motion_ms(const kui_td_canvas_t *c)
     }
     else if ( (uint8_t)KUI_TD_SCREEN_TOUCH == c->kind )
     {
-        for ( uint32_t i = 0U; i < KUI_TD_TARGETS; i++ )
+        for ( uint32_t i = 0U; KUI_TD_TARGETS > i; i++ )
         {
             if ( KUI_TD_ST_CURRENT == c->arg[i] )
             {
@@ -546,7 +546,7 @@ void kui_td_screen_build(lv_obj_t *parent, kui_td_screen_t s, const uint8_t *arg
     {
         n = 0U;
     }
-    if ( n > sizeof(c->arg) )
+    if ( sizeof(c->arg) < n )
     {
         n = sizeof(c->arg);
     }

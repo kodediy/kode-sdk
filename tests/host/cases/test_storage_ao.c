@@ -14,6 +14,8 @@
 
 #include "qpc.h"
 
+#include "esp_app_desc.h"
+
 #include "ao_spy.h"
 #include "ask_support.h"
 #include "fake_khal_worker.h"
@@ -811,7 +813,7 @@ TEST_CASE("one image past a page is a second page", "[storage_ao][pages]")
     TEST_ASSERT_EQUAL_UINT(1U, p.size[1]);
 }
 
-/* Luismi's case (kode-dot-os 5a257b6), ported: no image twice, none missing. */
+/* A case ported from kshell: no image twice, none missing. */
 TEST_CASE("the card's images come in pages past the ceiling",
           "[storage_ao][pages]")
 {
@@ -1441,6 +1443,306 @@ TEST_CASE("appdata_rm answers with the project it was asked about",
     TEST_ASSERT_EQUAL_STRING("scope", ((const AppDataRmRspEvt *)ev)->project);
 }
 
+/* ---- Taking every file of one app ------------------------------------------- */
+
+/* An erase leaves nothing of the app on either medium: the images at a
+ * medium's root that say they are that project, whatever they are called, and
+ * the data folder. One file a step, one answer to whoever asked, and the
+ * answer says what went and what stayed on each medium. */
+
+/** @brief An image prefix whose IDF descriptor names @p project. */
+static const uint8_t *image_of(const char *project)
+{
+    static uint8_t prefix[KAPP_PREFIX_LEN];
+    esp_app_desc_t desc;
+
+    (void)memset(prefix, 0xFF, sizeof(prefix));
+    (void)memset(&desc, 0, sizeof(desc));
+    desc.magic_word = ESP_APP_DESC_MAGIC_WORD;
+    (void)snprintf(desc.project_name, sizeof(desc.project_name), "%s", project);
+    (void)memcpy(&prefix[KAPP_IDF_DESC_OFF], &desc, sizeof(desc));
+    return prefix;
+}
+
+/** @brief Put an image of @p project at the internal partition's root. */
+static void put_fs_image(const char *name, const char *project)
+{
+    fake_media_put_fs_path(name, image_of(project), KAPP_PREFIX_LEN);
+}
+
+/** @brief Put an image of @p project at the card's root. */
+static void put_sd_image(const char *name, const char *project)
+{
+    fake_media_put_sd_path(name, image_of(project), KAPP_PREFIX_LEN);
+}
+
+/** @brief Whether @p name is at the internal partition's root. */
+static bool on_fs(const char *name)
+{
+    return fake_media_file_exists(fake_media_fs_dir(), name);
+}
+
+/** @brief Whether @p name is at the card's root. */
+static bool on_sd(const char *name)
+{
+    return fake_media_file_exists(fake_media_sd_dir(), name);
+}
+
+/** @brief Post STORAGE_APP_WIPE_REQ_SIG for @p project with the spy as the asker. */
+static void ask_wipe(const char *project)
+{
+    static AppDataReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(STORAGE_APP_WIPE_REQ_SIG);
+    (void)snprintf(e.project, sizeof(e.project), "%s", project);
+    e.who = ao_spy();
+
+    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+}
+
+/** @brief Steps a wipe may take before a case calls it silent: far more than
+ *         the files any case plants. */
+#define WIPE_STEPS_MAX  64U
+
+/** @brief Let the wipe walk its files, one a step, and take its one answer. */
+static const StorageAppWipeRspEvt *take_wipe(void)
+{
+    for ( uint32_t i = 0U; (WIPE_STEPS_MAX > i) && (0U == ao_spy_count()); ++i )
+    {
+        (void)qf_support_pump(AO_Storage, 8U);
+    }
+
+    const QEvt *ev = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(ev, "the wipe went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_APP_WIPE_RSP_SIG, (int)ev->sig);
+    return (const StorageAppWipeRspEvt *)ev;
+}
+
+/* The file's name says nothing: a copy the person renamed is the app all the
+ * same, and a file that carries the app's name with another project inside is
+ * not. */
+TEST_CASE("an app wipe removes every image of the project on both media, "
+          "whatever the file is called", "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_fs_image("demo.bin", "demo");
+    put_fs_image("renamed.bin", "demo");
+    put_fs_image("other.bin", "other");
+    fake_media_put_fs_file("notes.txt", "demo");
+    put_sd_image("copy-of-demo.bin", "demo");
+    put_sd_image("demo2.bin", "scope");
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_STRING("demo", r->project);
+    TEST_ASSERT_TRUE(r->fs.present);
+    TEST_ASSERT_EQUAL_UINT8(2U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.left);
+    TEST_ASSERT_TRUE(r->sd.present);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->sd.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->sd.left);
+    TEST_ASSERT_FALSE(on_fs("demo.bin"));
+    TEST_ASSERT_FALSE(on_fs("renamed.bin"));
+    TEST_ASSERT_FALSE(on_sd("copy-of-demo.bin"));
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("other.bin"), "another app's image went");
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("notes.txt"), "a file that is no image went");
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("demo2.bin"), "another app's image went");
+}
+
+/* The OS image and the coprocessor's are skipped by name before anything is
+ * read: no descriptor, however it reads, puts them within reach of an erase. */
+TEST_CASE("an app wipe never takes the OS image nor the coprocessor's",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_fs_image("kodeos.bin", "demo");
+    put_fs_image("c5_slave.bin", "demo");
+    put_sd_image("kodeos.bin", "demo");
+    put_sd_image("KODEOS.BIN", "demo");
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->sd.files);
+    TEST_ASSERT_TRUE(on_fs("kodeos.bin"));
+    TEST_ASSERT_TRUE(on_fs("c5_slave.bin"));
+    TEST_ASSERT_TRUE(on_sd("kodeos.bin"));
+}
+
+TEST_CASE("an app wipe takes the data folder on both media",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_sd_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_sd_path(".kode/appsdata/other/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->fs.folder);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->sd.folder);
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/demo/app.json"));
+    TEST_ASSERT_FALSE(on_sd(".kode/appsdata/demo/app.json"));
+    TEST_ASSERT_TRUE_MESSAGE(on_sd(".kode/appsdata/other/app.json"),
+                             "another app's folder went");
+}
+
+/* Nothing there is an answer too, and not a failure: the asker decides what
+ * an app with no file and no folder means. */
+TEST_CASE("an app wipe that finds nothing says so on both media",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_fs_image("other.bin", "other");
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_TRUE(r->fs.present);
+    TEST_ASSERT_TRUE(r->sd.present);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->sd.files);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_NONE, r->fs.folder);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_NONE, r->sd.folder);
+    TEST_ASSERT_TRUE(on_fs("other.bin"));
+}
+
+/* A board with no card still loses the app: the card is said absent, and the
+ * partition is cleaned as if it were the only medium there is. */
+TEST_CASE("an app wipe with no card cleans the partition and says the card is absent",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(false);
+    put_fs_image("demo.bin", "demo");
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_FALSE(r->sd.present);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->fs.folder);
+    TEST_ASSERT_FALSE(on_fs("demo.bin"));
+}
+
+/* A folder the format does not describe (two levels down) does not empty, and
+ * the answer says the folder is still there instead of calling the app gone. */
+TEST_CASE("an app wipe says a folder that would not empty was left",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_put_fs_path(".kode/appsdata/demo/a/b/deep.bin", "x", 1U);
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, r->fs.folder);
+}
+
+/* A file too short to hold a descriptor names no project, so it is nobody's
+ * and it stays. */
+TEST_CASE("an app wipe leaves a file too short to say what it is",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_put_fs_path("demo.bin", "demo", 4U);
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.files);
+    TEST_ASSERT_TRUE(on_fs("demo.bin"));
+}
+
+/* An image whose descriptor names no project is nobody's: a wipe asked with
+ * no name must not take every such file for its own. */
+TEST_CASE("an app wipe with no name takes no file", "[storage_ao][wipe]")
+{
+    storage_fresh();
+    put_fs_image("blank.bin", "");
+    put_fs_image("demo.bin", "demo");
+
+    ask_wipe("");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.files);
+    TEST_ASSERT_TRUE(on_fs("blank.bin"));
+    TEST_ASSERT_TRUE(on_fs("demo.bin"));
+}
+
+/* The driver has one reader for the whole system: a wipe under a transfer
+ * would read descriptors through the handle the transfer holds. */
+TEST_CASE("an app wipe is refused while a transfer is in flight, and touches nothing",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    make_file("held.bin", 16U);
+    ask_open("held.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, r->status);
+    TEST_ASSERT_TRUE(on_fs("demo.bin"));
+}
+
+/* One file a step: the request's own step reads nothing, so three images are
+ * never three descriptor reads and three deletes in one go. */
+TEST_CASE("an app wipe reads no file in the step that asks for it",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    put_fs_image("a.bin", "demo");
+    put_fs_image("b.bin", "demo");
+    put_fs_image("c.bin", "demo");
+
+    ask_wipe("demo");
+
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the wipe answered in one step");
+    TEST_ASSERT_TRUE(on_fs("a.bin"));
+    TEST_ASSERT_TRUE(on_fs("b.bin"));
+    TEST_ASSERT_TRUE(on_fs("c.bin"));
+
+    TEST_ASSERT_EQUAL_UINT8(3U, take_wipe()->fs.files);
+}
+
+/* While the wipe walks, the reader is its own: a manifest or an open that
+ * arrives between two files is refused, as under any transfer. */
+TEST_CASE("an open is refused while an app wipe is walking",
+          "[storage_ao][wipe]")
+{
+    storage_fresh();
+    put_fs_image("a.bin", "demo");
+    put_fs_image("b.bin", "demo");
+
+    ask_wipe("demo");
+    ask_open("a.bin");
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_open_status());
+    TEST_ASSERT_EQUAL_UINT8(2U, take_wipe()->fs.files);
+}
+
 /* ---- Writing one app's data folder ------------------------------------------ */
 
 /* The folder's third writer, the install of a container that carries
@@ -1544,6 +1846,59 @@ TEST_CASE("put writes app.json and icon.k64 into the internal folder",
                                              ".kode/appsdata/demo/app.json"));
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
                                              ".kode/appsdata/demo/icon.k64"));
+}
+
+/* A data folder may arrive before its app, and nothing bounds how many do but
+ * the partition: a new folder is refused when it would leave the partition
+ * under its floor, where Kody's pack is staged beside the one in use. */
+TEST_CASE("put refuses a new folder that would leave the partition under its floor",
+          "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FREE_MIN_BYTES
+                           + (uint64_t)KODE_APPDATA_FOLDER_BYTES - 1U);
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size(".kode/appsdata/demo/app.json"),
+        "a refused folder was written all the same");
+}
+
+TEST_CASE("put takes a new folder that leaves the partition at its floor",
+          "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FREE_MIN_BYTES
+                           + (uint64_t)KODE_APPDATA_FOLDER_BYTES);
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("put replaces a folder that is there however full the partition is",
+          "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
+    fake_media_set_fs_free(0U);
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "a replacement takes the room it gives back");
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+                          (int)fs_size(".kode/appsdata/demo/app.json"));
 }
 
 TEST_CASE("put without an icon writes app.json only and removes an old icon",
@@ -3081,6 +3436,252 @@ TEST_CASE("two AOs asking a file's status are both accepted and both answered",
     ao_spy_drain();
 }
 
+/** @brief The internal volume's size as the host fake reports it, in kilobytes. */
+#define SPACE_FS_TOTAL_KB  (12U * 1024U)
+
+/** @brief What is free of it, in kilobytes. */
+#define SPACE_FS_FREE_KB   (8U * 1024U)
+
+TEST_CASE("kode_sys_file_space answers the asking AO once, publishes nothing, and its door opens again",
+          "[storage_ao][ask]")
+{
+    const FileRspEvt *a;
+
+    sys_fresh();
+    /* Subscribed, so a published info would arrive as well as the answer. */
+    ao_spy_subscribe(STORAGE_INFO_SIG);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kode_sys_file_space(ao_spy(), "/storage"),
+                                  "a second request of the kind waits for the first's answer");
+    settle_card();
+    a = sys_take(FILE_SPACE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_TOTAL_KB, a->space.total_kb);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_FREE_KB, a->space.free_kb);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "posted once, not published as well");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"),
+                                  "the answer opens the door again");
+    settle_card();
+    a = sys_take(FILE_SPACE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    QActive_unsubscribe(ao_spy(), STORAGE_INFO_SIG);
+    ao_spy_drain();
+}
+
+TEST_CASE("two AOs asking a volume's space are both accepted and both answered",
+          "[storage_ao][ask]")
+{
+    const QEvt *o;
+
+    sys_fresh();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy_other(), "/storage"),
+                                  "the door is the asker's, not the kind's");
+    settle_card();
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
+    o = ao_spy_other_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(o, "the second asker is answered too");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)FILE_SPACE_RSP_SIG, (uint32_t)o->sig);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_TOTAL_KB, ((const FileRspEvt *)(const void *)o)->space.total_kb);
+    QF_gc(o);
+    TEST_ASSERT_NULL(ao_spy_other_take());
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    ao_spy_drain();
+}
+
+TEST_CASE("the card's space is asked as the volume's root and is no more than the card",
+          "[storage_ao][ask]")
+{
+    const FileRspEvt *a;
+
+    sys_fresh();
+    fake_media_set_sd_present(true);
+    (void)kdrv_storage_mount(KDRV_MEDIUM_SD);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/sdcard"));
+    settle_card();
+    a = sys_take(FILE_SPACE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_TRUE(0U < a->space.total_kb);
+    TEST_ASSERT_TRUE(a->space.free_kb <= a->space.total_kb);
+    ao_spy_drain();
+}
+
+TEST_CASE("a volume that will not mount answers KODE_ERROR with nothing counted",
+          "[storage_ao][ask][worker]")
+{
+    const FileRspEvt *a;
+
+    sys_fresh();
+    fake_media_set_sd_present(false);
+    storage_request(KDRV_MEDIUM_SD, STORAGE_OP_UNMOUNT);
+    settle_card();
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/sdcard"));
+    settle_card();
+    a = sys_take(FILE_SPACE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_ERROR, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->space.total_kb);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->space.free_kb);
+    ao_spy_drain();
+    fake_media_set_sd_present(true);
+}
+
+TEST_CASE("a name that is not a volume's own root is answered KODE_DENIED with nothing counted",
+          "[storage_ao][ask]")
+{
+    static const char *const bad[] = { "/", "/elsewhere", "/storagex", "/storage/", "/storage/sub",
+                                       "/sdcard/x", "/storage/.." };
+    const FileRspEvt        *a;
+
+    sys_fresh();
+    for ( size_t i = 0U; (sizeof(bad) / sizeof(bad[0])) > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), bad[i]), bad[i]);
+        settle_card();
+        a = sys_take(FILE_SPACE_RSP_SIG);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE((uint32_t)KODE_DENIED, a->rc, bad[i]);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, a->space.total_kb, bad[i]);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, a->space.free_kb, bad[i]);
+        ao_spy_drain();
+    }
+}
+
+TEST_CASE("a space ask of the card waits for a call to the card, and the internal volume's does not",
+          "[storage_ao][ask][worker]")
+{
+    sys_fresh();
+    fake_media_set_sd_present(true);
+    ask_mount_job();
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/sdcard"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy_other(), "/storage"));
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the card's was served while a call to it was out");
+    {
+        const QEvt *o = ao_spy_other_take();
+
+        TEST_ASSERT_NOT_NULL_MESSAGE(o, "the internal volume's waited for the card");
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)FILE_SPACE_RSP_SIG, (uint32_t)o->sig);
+        QF_gc(o);
+    }
+
+    TEST_ASSERT_TRUE(run_sd_job());
+    settle_card();
+    take_cmd_rsp();
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the held ask was answered or published twice");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_other_take(), "the other asker was answered again");
+    ao_spy_drain();
+}
+
+TEST_CASE("a space ask refused for want of hold room is answered KODE_DENIED once, with no sizes",
+          "[storage_ao][ask][worker]")
+{
+    const QEvt *o;
+
+    sys_fresh();
+    fake_media_set_sd_present(true);
+    ask_mount_job();
+    for ( uint32_t i = 0U; KODE_STORAGE_DEFER_DEPTH > i; ++i )
+    {
+        storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_STAT, "/sdcard/x");
+    }
+    (void)qf_support_pump(AO_Storage, 16U);
+    ao_spy_drain();
+    ao_spy_other_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy_other(), "/sdcard"));
+    (void)qf_support_pump(AO_Storage, 4U);
+    o = ao_spy_other_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(o, "a refused space ask would wait for the console's watchdog");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)FILE_SPACE_RSP_SIG, (uint32_t)o->sig);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, ((const FileRspEvt *)(const void *)o)->rc);
+    TEST_ASSERT_EQUAL_UINT32(0U, ((const FileRspEvt *)(const void *)o)->space.total_kb);
+    TEST_ASSERT_EQUAL_UINT32(0U, ((const FileRspEvt *)(const void *)o)->space.free_kb);
+    QF_gc(o);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_other_take(), "answered twice");
+
+    TEST_ASSERT_TRUE(run_sd_job());
+    settle_card();
+    ao_spy_drain();
+    ao_spy_other_drain();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy_other(), "/sdcard"),
+                                  "the refusal left the door shut");
+    settle_card();
+    o = ao_spy_other_take();
+    TEST_ASSERT_NOT_NULL(o);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, ((const FileRspEvt *)(const void *)o)->rc);
+    QF_gc(o);
+    ao_spy_drain();
+}
+
+TEST_CASE("a status asked after a space is answered with its own stat, from the same blocks",
+          "[storage_ao][ask]")
+{
+    const FileRspEvt *a;
+
+    sys_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"));
+    settle_card();
+    (void)sys_take(FILE_SPACE_RSP_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_status(ao_spy(), "/storage/none.bin"));
+    settle_card();
+    a = sys_take(FILE_STATUS_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_FALSE(a->stat.exists);
+    TEST_ASSERT_FALSE(a->stat.is_dir);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->stat.size);
+    ao_spy_drain();
+}
+
+TEST_CASE("a volume's info is still published for the console, with the same sizes",
+          "[storage_ao][ask]")
+{
+    const QEvt           *e;
+    StorageInfoEvt const *i;
+
+    sys_fresh();
+    ao_spy_subscribe(STORAGE_INFO_SIG);
+
+    storage_request(KDRV_MEDIUM_FS, STORAGE_OP_INFO);
+    settle_card();
+    e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_INT(STORAGE_INFO_SIG, (int)e->sig);
+    i = (StorageInfoEvt const *)(const void *)e;
+    TEST_ASSERT_TRUE(i->mounted);
+    TEST_ASSERT_TRUE(i->usage_known);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_TOTAL_KB, i->total_kb);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_FREE_KB, i->free_kb);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    QActive_unsubscribe(ao_spy(), STORAGE_INFO_SIG);
+    ao_spy_drain();
+}
+
+TEST_CASE("a space request that names no asker and no waiter is refused, not dropped",
+          "[storage_ao][ask]")
+{
+    const QEvt *e;
+
+    sys_fresh();
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_SPACE, "/storage");
+    settle_card();
+    e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "every request is answered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, ((const StoragePathRspEvt *)(const void *)e)->rc);
+    ao_spy_drain();
+}
+
 TEST_CASE("a listing arrives as entries then its end, posted to the asker and published nowhere",
           "[storage_ao][ask]")
 {
@@ -3459,6 +4060,9 @@ TEST_CASE("a plain task's or a badly asked file request is refused at once and p
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_status(NULL, "/storage/x"));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_status(ao_spy(), NULL));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_status(ao_spy(), longpath));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_space(NULL, "/storage"));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_space(ao_spy(), NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_space(ao_spy(), longpath));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_list(NULL, "/storage", 0U));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_create_folder(ao_spy(), ""));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_delete(NULL, "/storage/x"));
@@ -3488,6 +4092,7 @@ TEST_CASE("a full AO_Storage queue refuses kode_sys's file requests with no reso
     TEST_ASSERT_TRUE_MESSAGE(qf_support_queue_stuff(AO_Storage, &s_sys_filler), "the queue never filled");
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_status(ao_spy(), "/storage/x"));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_list(ao_spy(), "/storage", 0U));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_space(ao_spy(), "/storage"));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_rename(ao_spy(), "/storage/x", "/storage/y"));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_read(ao_spy(), "/storage/x", 0U, buf, SYS_BUF));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_write(ao_spy(), "/storage/x", buf, 1U, false));
@@ -3495,8 +4100,11 @@ TEST_CASE("a full AO_Storage queue refuses kode_sys's file requests with no reso
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_status(ao_spy(), "/storage/x"),
                                   "nothing was posted, so the door is open");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"),
+                                  "the refused space ask left its door shut");
     settle_card();
     (void)sys_take(FILE_STATUS_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
     ao_spy_drain();
 }
 
@@ -3518,6 +4126,7 @@ TEST_CASE("a dry pool refuses kode_sys's file request with no resources and post
     }
     TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(SYS_DRY_MAX, n, "the pool never ran dry");
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_status(ao_spy(), "/storage/x"));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_space(ao_spy(), "/storage"));
     TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Storage->eQueue));
     for ( uint32_t i = 0U; i < n; i++ )
     {
@@ -3526,8 +4135,11 @@ TEST_CASE("a dry pool refuses kode_sys's file request with no resources and post
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_status(ao_spy(), "/storage/x"),
                                   "nothing was posted, so the door is open");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"),
+                                  "the refused space ask left its door shut");
     settle_card();
     (void)sys_take(FILE_STATUS_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
     ao_spy_drain();
 }
 

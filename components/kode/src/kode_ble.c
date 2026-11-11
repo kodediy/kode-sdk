@@ -31,6 +31,8 @@ _Static_assert(KODE_BLE_CHARACTERISTIC_NAME_MAX == KODE_SYS_BLE_CHAR_NAME_MAX, "
 _Static_assert(KODE_BLE_READ == KODE_SYS_BLE_READ, "READ is the system's");
 _Static_assert(KODE_BLE_WRITE == KODE_SYS_BLE_WRITE, "WRITE is the system's");
 _Static_assert(KODE_BLE_NOTIFY == KODE_SYS_BLE_NOTIFY, "NOTIFY is the system's");
+_Static_assert(KODE_BLE_QUEUED == KODE_SYS_BLE_QUEUED, "QUEUED is the system's");
+_Static_assert(KODE_BLE_QUEUE_SLOTS == KODE_SYS_BLE_QUEUE_SLOTS, "a queue is the system's");
 
 /* The radio reads the constant KODE_BLE_SERVICE() defines as kode_sys's type
  * (kode_sys_ble.c holds that one to the driver's), so the layouts are held
@@ -353,17 +355,28 @@ static bool ble_value_enter(const char *api, const char *chr, const void *data, 
 }
 
 /**
- * @brief Keep why the system refused a set or a notify as the task's error.
- * @param api    The public name of the call.
- * @param chr    The characteristic's name.
- * @param rc     What the system answered.
- * @param notify true for kode_ble_notify().
+ * @brief Keep why the system refused a set, a notify, a push or a clear as the task's error.
+ * @param api The public name of the call.
+ * @param chr The characteristic's name.
+ * @param rc  What the system answered.
+ * @param op  KQP_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR.
  */
-static void ble_value_fail(const char *api, const char *chr, kode_status_t rc, bool notify)
+static void ble_value_fail(const char *api, const char *chr, kode_status_t rc, uint8_t op)
 {
-    if ( (KODE_DENIED == rc) && notify )
+    bool const queued = (KQP_BLE_APP_OP_PUSH == op) || (KQP_BLE_APP_OP_CLEAR == op);
+
+    if ( (KODE_DENIED == rc) && (KQP_BLE_APP_OP_NOTIFY == op) )
     {
         kode_err_set("%s: the service has no characteristic '%s' that notifies", api, chr);
+    }
+    else if ( (KODE_DENIED == rc) && queued )
+    {
+        kode_err_set("%s: the service has no characteristic '%s' with KODE_BLE_QUEUED", api, chr);
+    }
+    else if ( (KODE_NO_RESOURCES == rc) && queued )
+    {
+        kode_err_set("%s: the queue of '%s' holds %u values already; push again on ble_taken",
+                     api, chr, (unsigned)KODE_BLE_QUEUE_SLOTS);
     }
     else if ( KODE_DENIED == rc )
     {
@@ -394,12 +407,12 @@ bool kode_ble_set_value(const char *chr, const void *data, size_t len)
 
     if ( ble_value_enter(api, chr, data, len) )
     {
-        kode_status_t const rc = kode_block_ble_value(chr, false, data, len);
+        kode_status_t const rc = kode_block_ble_value(chr, KQP_BLE_APP_OP_SET, data, len);
 
         ok = (KODE_OK == rc);
         if ( !ok )
         {
-            ble_value_fail(api, chr, rc, false);
+            ble_value_fail(api, chr, rc, KQP_BLE_APP_OP_SET);
         }
     }
     return ok;
@@ -413,12 +426,73 @@ bool kode_ble_notify(const char *chr, const void *data, size_t len)
 
     if ( ble_value_enter(api, chr, data, len) )
     {
-        kode_status_t const rc = kode_block_ble_value(chr, true, data, len);
+        kode_status_t const rc = kode_block_ble_value(chr, KQP_BLE_APP_OP_NOTIFY, data, len);
 
         ok = (KODE_OK == rc);
         if ( !ok )
         {
-            ble_value_fail(api, chr, rc, true);
+            ble_value_fail(api, chr, rc, KQP_BLE_APP_OP_NOTIFY);
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_queue_push(const char *chr, const void *data, size_t len)
+{
+    static const char api[] = "kode_ble_queue_push";
+    bool              ok     = false;
+
+    if ( !ble_value_enter(api, chr, data, len) )
+    {
+        /* the error is set */
+    }
+    else if ( 0U == len )
+    {
+        kode_err_set("%s: no bytes; a read of an empty queue already gets none", api);
+    }
+    else
+    {
+        kode_status_t const rc = kode_block_ble_value(chr, KQP_BLE_APP_OP_PUSH, data, len);
+
+        ok = (KODE_OK == rc);
+        if ( !ok )
+        {
+            ble_value_fail(api, chr, rc, KQP_BLE_APP_OP_PUSH);
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+size_t kode_ble_queue_room(const char *chr)
+{
+    static const char api[] = "kode_ble_queue_room";
+    size_t            room   = 0U;
+
+    if ( ble_value_enter(api, chr, NULL, 0U)
+        && (kode_sys_ble_queue_room(chr, &room) != KODE_OK) )
+    {
+        room = 0U;
+        ble_value_fail(api, chr, KODE_DENIED, KQP_BLE_APP_OP_CLEAR);
+    }
+    return room;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_queue_clear(const char *chr)
+{
+    static const char api[] = "kode_ble_queue_clear";
+    bool              ok     = false;
+
+    if ( ble_value_enter(api, chr, NULL, 0U) )
+    {
+        kode_status_t const rc = kode_block_ble_value(chr, KQP_BLE_APP_OP_CLEAR, NULL, 0U);
+
+        ok = (KODE_OK == rc);
+        if ( !ok )
+        {
+            ble_value_fail(api, chr, rc, KQP_BLE_APP_OP_CLEAR);
         }
     }
     return ok;
@@ -440,4 +514,10 @@ const char *kode_event_ble_disconnected(void)
 const char *kode_event_ble_written(void)
 {
     return KODE_EVENT_BLE_WRITTEN_NAME;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+const char *kode_event_ble_taken(void)
+{
+    return KODE_EVENT_BLE_TAKEN_NAME;
 }

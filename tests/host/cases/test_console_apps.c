@@ -268,10 +268,50 @@ TEST_CASE("nvs_del with a key too long for the store is refused", "[console_apps
 
 /* ---- app_erase --------------------------------------------------------------- */
 
-/* The erase itself is AO_AppMgr's, on its own thread; the console's whole job
- * is to hand it the name exactly as typed, once, and say ok. */
-TEST_CASE("app_erase posts the erase request with the name it was typed with",
-          "[console_apps]")
+/**
+ * @brief Publish the end of an erase to the console, as AO_AppMgr does.
+ * @param name   The app the erase was about.
+ * @param st     How it ended.
+ * @param image  An installed image was removed.
+ * @param fs     What happened on the internal partition.
+ * @param sd     What happened on the card.
+ */
+static void erase_ends(const char *name, kode_status_t st, bool image,
+                       AppWipeMedium fs, AppWipeMedium sd)
+{
+    AppEraseDoneEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(APP_ERASE_DONE_SIG);
+    (void)snprintf(e.name, sizeof(e.name), "%s", name);
+    e.status = (uint8_t)st;
+    e.image  = image;
+    e.fs     = fs;
+    e.sd     = sd;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief A medium that was there, with @p files removed and @p left behind. */
+static AppWipeMedium medium_with(uint8_t files, uint8_t left, AppWipeFolder folder)
+{
+    AppWipeMedium const m = { .present = true, .files = files, .left = left,
+                              .folder = (uint8_t)folder };
+    return m;
+}
+
+/** @brief A medium that was not there. */
+static AppWipeMedium medium_absent(void)
+{
+    AppWipeMedium const m = { .present = false, .files = 0U, .left = 0U,
+                              .folder = (uint8_t)APP_WIPE_FOLDER_NONE };
+    return m;
+}
+
+/* The erase itself is AO_AppMgr's, on its own thread; the console hands it the
+ * name exactly as typed, once, and keeps the line open until the erase says
+ * how it ended: an `>ok` before that would promise what has not happened. */
+TEST_CASE("app_erase posts the erase request with the name it was typed with, "
+          "and waits for its end", "[console_apps]")
 {
     char name[KODE_APP_FILE_MAX];
 
@@ -279,10 +319,131 @@ TEST_CASE("app_erase posts the erase request with the name it was typed with",
 
     ask("app_erase name=\"scope\"");
 
-    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"),
+                              "the line closed before the erase ended");
     TEST_ASSERT_EQUAL_UINT(1U, take_posted(APP_ERASE_REQ_SIG, name, sizeof(name),
                                            NULL, NULL));
     TEST_ASSERT_EQUAL_STRING("scope", name);
+
+    erase_ends("scope", KODE_OK, true,
+               medium_with(1U, 0U, APP_WIPE_FOLDER_REMOVED),
+               medium_with(2U, 0U, APP_WIPE_FOLDER_NONE));
+
+    TEST_ASSERT_TRUE(replied(">|erased name=\"scope\" image=removed"));
+    TEST_ASSERT_TRUE(replied(">|erased where=fs files=1 left=0 folder=removed"));
+    TEST_ASSERT_TRUE(replied(">|erased where=sd files=2 left=0 folder=none"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_FALSE(replied(">err"));
+
+    console_end();
+}
+
+/* A board with no card has still lost the app: the card is said absent, and
+ * that is no error. */
+TEST_CASE("app_erase with no card says the card is absent and ends well",
+          "[console_apps]")
+{
+    console_up();
+
+    ask("app_erase name=\"scope\"");
+    erase_ends("scope", KODE_OK, false,
+               medium_with(1U, 0U, APP_WIPE_FOLDER_NONE), medium_absent());
+
+    TEST_ASSERT_TRUE(replied(">|erased name=\"scope\" image=none"));
+    TEST_ASSERT_TRUE(replied(">|erased where=fs files=1 left=0 folder=none"));
+    TEST_ASSERT_TRUE(replied(">|erased where=sd state=absent"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    console_end();
+}
+
+/* What would not go is in the records, and the line ends as a failure: a
+ * script that reads only the last line must not take a half erase for a
+ * whole one. */
+TEST_CASE("app_erase that leaves a file behind says where and ends as an error",
+          "[console_apps]")
+{
+    console_up();
+
+    ask("app_erase name=\"scope\"");
+    erase_ends("scope", KODE_IO_ERROR, true,
+               medium_with(1U, 0U, APP_WIPE_FOLDER_REMOVED),
+               medium_with(0U, 1U, APP_WIPE_FOLDER_LEFT));
+
+    TEST_ASSERT_TRUE(replied(">|erased name=\"scope\" image=removed"));
+    TEST_ASSERT_TRUE(replied(">|erased where=sd files=0 left=1 folder=left"));
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=left"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    console_end();
+}
+
+TEST_CASE("app_erase of a name with nothing anywhere answers missing",
+          "[console_apps]")
+{
+    console_up();
+
+    ask("app_erase name=\"nobody\"");
+    erase_ends("nobody", KODE_ERROR, false,
+               medium_with(0U, 0U, APP_WIPE_FOLDER_NONE),
+               medium_with(0U, 0U, APP_WIPE_FOLDER_NONE));
+
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=missing"));
+    TEST_ASSERT_FALSE(replied(">|erased"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    console_end();
+}
+
+TEST_CASE("app_erase refused by a busy AO_AppMgr answers busy", "[console_apps]")
+{
+    console_up();
+
+    ask("app_erase name=\"scope\"");
+    erase_ends("scope", KODE_DENIED, false, medium_absent(), medium_absent());
+
+    TEST_ASSERT_TRUE(replied(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(replied(">|erased"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    console_end();
+}
+
+/* The image went and AO_Storage then refused or kept silent: the record says
+ * the image is gone, and the error that the files were not looked at. */
+TEST_CASE("app_erase whose files were not looked at says the image went",
+          "[console_apps]")
+{
+    console_up();
+
+    ask("app_erase name=\"scope\"");
+    erase_ends("scope", KODE_TIMEOUT, true, medium_absent(), medium_absent());
+
+    TEST_ASSERT_TRUE(replied(">|erased name=\"scope\" image=removed"));
+    TEST_ASSERT_FALSE(replied("where="));
+    TEST_ASSERT_TRUE(replied(">err code=6 msg=storage"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    console_end();
+}
+
+/* The end of an erase is published: the launcher's erase of another app ends
+ * on the same signal, and must not close this line. */
+TEST_CASE("app_erase is not closed by the end of another app's erase",
+          "[console_apps]")
+{
+    console_up();
+
+    ask("app_erase name=\"scope\"");
+    erase_ends("other", KODE_OK, true,
+               medium_with(0U, 0U, APP_WIPE_FOLDER_NONE), medium_absent());
+
+    TEST_ASSERT_FALSE(replied(">|erased"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    erase_ends("scope", KODE_OK, true,
+               medium_with(0U, 0U, APP_WIPE_FOLDER_NONE), medium_absent());
+    TEST_ASSERT_TRUE(replied(">ok"));
 
     console_end();
 }

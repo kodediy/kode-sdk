@@ -29,7 +29,7 @@
 #define CHECK_HEAP_STATS 0   /**< No exact count of live blocks here. */
 #endif
 
-#define CHECK_W            410U   /**< The panel's width, as Luismi's kgui_e5pat.c draws it. */
+#define CHECK_W            410U   /**< The panel's width, as the station's kgui_e5pat.c draws it. */
 #define CHECK_H            502U   /**< The panel's height. */
 #define CHECK_BUF_ROWS     50U    /**< Rows of the render buffer. */
 #define CHECK_BPP          2U     /**< Bytes per RGB565 pixel. */
@@ -41,9 +41,9 @@
 #define CHECK_GRID_CELL    5U     /**< The cell the grid checks change. */
 #define CHECK_ROUNDS       3U     /**< Builds of each view in the leak check: the first warms LVGL's caches. */
 
-/** Luismi's mark centres (kgui_e5pat.c, K_MARKS; e5cam_an.c's an_mark_centres()). */
+/** the station's mark centres (kgui_e5pat.c, K_MARKS; e5cam_an.c's an_mark_centres()). */
 static const int32_t MARKS[4][2] = { { 42, 167 }, { 368, 167 }, { 368, 338 }, { 42, 338 } };
-/** Luismi's witness centres (kgui_e5pat.c, apply_frame()). */
+/** the station's witness centres (kgui_e5pat.c, apply_frame()). */
 static const int32_t WITNESSES[4][2] = { { 50, 72 }, { 360, 72 }, { 55, 405 }, { 355, 405 } };
 
 /** How many checks failed. */
@@ -189,7 +189,7 @@ static uint16_t px_at(const shot_t *s, int32_t x, int32_t y)
 static bool same_pixels(const shot_t *a, const shot_t *b)
 {
     bool same = (NULL != a->buf) && (NULL != b->buf);
-    for ( uint32_t y = 0U; same && (y < CHECK_H); y++ )
+    for ( uint32_t y = 0U; same && (CHECK_H > y); y++ )
     {
         const uint8_t *ra = (const uint8_t *)a->buf->data + ((size_t)y * a->buf->header.stride);
         const uint8_t *rb = (const uint8_t *)b->buf->data + ((size_t)y * b->buf->header.stride);
@@ -266,17 +266,17 @@ static void check_nothing_leaks(void)
         (void)printf("SKIP  the leak check: no exact count of live blocks in this build\n");
         return;
     }
-    for ( uint32_t v = 0U; v < ((uint32_t)KUI_TD_SCREEN_COUNT + (uint32_t)KUI_TD_PAT_COUNT); v++ )
+    for ( uint32_t v = 0U; ((uint32_t)KUI_TD_SCREEN_COUNT + (uint32_t)KUI_TD_PAT_COUNT) > v; v++ )
     {
         char what[96];
-        bool const screen = (v < (uint32_t)KUI_TD_SCREEN_COUNT);
+        bool const screen = ((uint32_t)KUI_TD_SCREEN_COUNT > v);
         uint32_t id = v;
         long kept = 0L;
         if ( !screen )
         {
             id = v - (uint32_t)KUI_TD_SCREEN_COUNT;
         }
-        for ( uint32_t r = 0U; r < CHECK_ROUNDS; r++ )
+        for ( uint32_t r = 0U; CHECK_ROUNDS > r; r++ )
         {
             kept = build_and_free(screen, id, BUSY, sizeof(BUSY), (uint8_t)KUI_TD_COLOUR_WHITE);
         }
@@ -296,7 +296,7 @@ static void check_nothing_leaks(void)
 static void check_screens_stay_on_their_parent(void)
 {
     lv_obj_t *other = lv_obj_create(NULL);
-    for ( uint32_t s = 0U; s < (uint32_t)KUI_TD_SCREEN_COUNT; s++ )
+    for ( uint32_t s = 0U; (uint32_t)KUI_TD_SCREEN_COUNT > s; s++ )
     {
         char what[96];
         lv_obj_t *parent = lv_obj_create(NULL);
@@ -309,7 +309,7 @@ static void check_screens_stay_on_their_parent(void)
         expect(same_objects(&before, &after), what);
         lv_obj_delete(parent);
         (void)snprintf(what, sizeof(what), "screen %u leaves no timer behind", (unsigned)s);
-        expect(before.timers == timer_count(), what);
+        expect(timer_count() == before.timers, what);
     }
     lv_obj_delete(other);
 }
@@ -318,7 +318,7 @@ static void check_screens_stay_on_their_parent(void)
 static void check_patterns_stay_on_their_parent(void)
 {
     lv_obj_t *other = lv_obj_create(NULL);
-    for ( uint32_t p = 0U; p < (uint32_t)KUI_TD_PAT_COUNT; p++ )
+    for ( uint32_t p = 0U; (uint32_t)KUI_TD_PAT_COUNT > p; p++ )
     {
         char what[96];
         uint32_t want = 1U;
@@ -331,7 +331,7 @@ static void check_patterns_stay_on_their_parent(void)
             want = 0U;
         }
         (void)snprintf(what, sizeof(what), "pattern %u builds %u canvas on its parent", (unsigned)p, (unsigned)want);
-        expect(want == lv_obj_get_child_count(parent), what);
+        expect(lv_obj_get_child_count(parent) == want, what);
         (void)snprintf(what, sizeof(what), "pattern %u leaves every other parent and the timers alone", (unsigned)p);
         expect(same_objects(&before, &after) && (before.timers == after.timers), what);
         lv_obj_delete(parent);
@@ -352,14 +352,14 @@ static void check_refusals_build_nothing(void)
     lv_obj_delete(parent);
 }
 
-/** @brief The marks sit where Luismi's code and the analysis put them, 24 px white on black, with no witness. */
+/** @brief The marks sit where the station's code and the analysis put them, 24 px white on black, with no witness. */
 static void check_marks_geometry(void)
 {
     lv_obj_t *parent = lv_obj_create(NULL);
     kui_td_pattern_build(parent, KUI_TD_PAT_MARKS, 0U);
     shot_t s = shoot(parent);
     bool ok = (NULL != s.buf);
-    for ( uint32_t k = 0U; ok && (k < 4U); k++ )
+    for ( uint32_t k = 0U; ok && (4U > k); k++ )
     {
         int32_t const x = MARKS[k][0];
         int32_t const y = MARKS[k][1];
@@ -371,7 +371,7 @@ static void check_marks_geometry(void)
              && (0x0000U == px_at(&s, x, (y - CHECK_MARK_HALF) - 1))
              && (0x0000U == px_at(&s, x, y + CHECK_MARK_HALF));
     }
-    expect(ok, "the four marks are 24 px white squares at Luismi's centres");
+    expect(ok, "the four marks are 24 px white squares at the station's centres");
     expect((NULL != s.buf) && (0x0000U == px_at(&s, CHECK_BAND_X, CHECK_BAND_Y)), "the marks' band is black");
     expect((NULL != s.buf) && (0x0000U == px_at(&s, WITNESSES[0][0], WITNESSES[0][1])), "the marks carry no witness");
     if ( NULL != s.buf )
@@ -381,11 +381,11 @@ static void check_marks_geometry(void)
     lv_obj_delete(parent);
 }
 
-/** @brief The colours and the grey are exact, and the witnesses sit where Luismi's code puts them, on all but black. */
+/** @brief The colours and the grey are exact, and the witnesses sit where the station's code puts them, on all but black. */
 static void check_colours_and_witnesses(void)
 {
     static const uint32_t RGB[KUI_TD_COLOUR_COUNT] = { 0x000000U, 0xFFFFFFU, 0xFF0000U, 0x00FF00U, 0x0000FFU };
-    for ( uint32_t c = 0U; c < KUI_TD_COLOUR_COUNT; c++ )
+    for ( uint32_t c = 0U; KUI_TD_COLOUR_COUNT > c; c++ )
     {
         char what[96];
         lv_obj_t *parent = lv_obj_create(NULL);
@@ -398,14 +398,14 @@ static void check_colours_and_witnesses(void)
         {
             want_dot = 0x0000U;
         }
-        for ( uint32_t k = 0U; wit && (k < 4U); k++ )
+        for ( uint32_t k = 0U; wit && (4U > k); k++ )
         {
-            wit = (want_dot == px_at(&s, WITNESSES[k][0], WITNESSES[k][1]))
-                  && (want_rim == px_at(&s, WITNESSES[k][0] + CHECK_RIM_DX, WITNESSES[k][1]));
+            wit = (px_at(&s, WITNESSES[k][0], WITNESSES[k][1]) == want_dot)
+                  && (px_at(&s, WITNESSES[k][0] + CHECK_RIM_DX, WITNESSES[k][1]) == want_rim);
         }
         (void)snprintf(what, sizeof(what), "colour %u fills the band with its exact value", (unsigned)c);
         expect((NULL != s.buf) && (c565(RGB[c]) == px_at(&s, CHECK_BAND_X, CHECK_BAND_Y)), what);
-        (void)snprintf(what, sizeof(what), "colour %u carries Luismi's witnesses (none on black)", (unsigned)c);
+        (void)snprintf(what, sizeof(what), "colour %u carries the station's witnesses (none on black)", (unsigned)c);
         expect(wit, what);
         if ( NULL != s.buf )
         {
@@ -413,18 +413,18 @@ static void check_colours_and_witnesses(void)
         }
         lv_obj_delete(parent);
     }
-    for ( uint32_t p = (uint32_t)KUI_TD_PAT_OK; p <= (uint32_t)KUI_TD_PAT_FAIL; p++ )
+    for ( uint32_t p = (uint32_t)KUI_TD_PAT_OK; (uint32_t)KUI_TD_PAT_FAIL >= p; p++ )
     {
         char what[96];
         lv_obj_t *icon = lv_obj_create(NULL);
         kui_td_pattern_build(icon, (kui_td_pattern_t)p, 0U);
         shot_t si = shoot(icon);
         bool wit = (NULL != si.buf);
-        for ( uint32_t k = 0U; wit && (k < 4U); k++ )
+        for ( uint32_t k = 0U; wit && (4U > k); k++ )
         {
             wit = (c565(0xE12D2DU) == px_at(&si, WITNESSES[k][0], WITNESSES[k][1]));
         }
-        (void)snprintf(what, sizeof(what), "pattern %u carries Luismi's witnesses", (unsigned)p);
+        (void)snprintf(what, sizeof(what), "pattern %u carries the station's witnesses", (unsigned)p);
         expect(wit, what);
         if ( NULL != si.buf )
         {
@@ -452,7 +452,7 @@ static void check_grid_set_matches_a_rebuild(void)
     lv_obj_t *live = lv_obj_create(NULL);
     (void)memset(arg, KUI_TD_ST_PENDING, sizeof(arg));
     kui_td_screen_build(live, KUI_TD_SCREEN_AUTO, arg, sizeof(arg));
-    for ( uint32_t i = 0U; same && (i < KUI_TD_GRID_CELLS); i++ )
+    for ( uint32_t i = 0U; same && (KUI_TD_GRID_CELLS > i); i++ )
     {
         uint8_t const st = STATES[i % 4U];
         lv_obj_t *fresh = lv_obj_create(NULL);
@@ -501,7 +501,7 @@ static void check_result_verdict(void)
 {
     static const uint8_t VERDICTS[3] = { KUI_TD_ST_OK, KUI_TD_ST_FAILED, (uint8_t)'?' };
     static const uint32_t WANT[3] = { KUI_PALETTE_OK_GREEN, KUI_PALETTE_DANGER_RED, KUI_PALETTE_DANGER_RED };
-    for ( uint32_t i = 0U; i < 3U; i++ )
+    for ( uint32_t i = 0U; 3U > i; i++ )
     {
         lv_obj_t *parent = lv_obj_create(NULL);
         kui_td_screen_build(parent, KUI_TD_SCREEN_RESULT, &VERDICTS[i], 1U);
@@ -532,9 +532,9 @@ static void check_moving_screens_own_a_timer(void)
     lv_obj_delete(a);
     a = lv_obj_create(NULL);
     kui_td_screen_build(a, KUI_TD_SCREEN_BUTTONS, NULL, 0U);
-    expect(base == timer_count(), "a pad with nothing asked owns no timer");
+    expect(timer_count() == base, "a pad with nothing asked owns no timer");
     lv_obj_delete(a);
-    expect(base == timer_count(), "every timer went with its screen");
+    expect(timer_count() == base, "every timer went with its screen");
 }
 
 /**

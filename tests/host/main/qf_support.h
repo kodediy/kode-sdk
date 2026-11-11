@@ -222,6 +222,28 @@ void qf_support_tick_escaped(void);
  */
 void qf_support_reap_timers(void);
 
+/**
+ * @brief Let @p ticks of QP time pass and dispatch nothing.
+ *
+ * Every armed time event counts down and posts to its owner's queue, and no
+ * Active Object runs: what a stalled owner finds when it runs again.
+ *
+ * @param ticks How many QP ticks.
+ */
+void qf_support_time_passes(uint32_t ticks);
+
+/**
+ * @brief Take everything out of @p ao's queue and say how many were @p sig.
+ *
+ * The rest is thrown away. Counts what waited, so a case can say that one
+ * time event waits where a periodic one would have posted several.
+ *
+ * @param ao  The Active Object whose queue is emptied.
+ * @param sig The signal to count.
+ * @return How many of the events that waited carried it.
+ */
+uint32_t qf_support_waiting_of(QActive *ao, QSignal sig);
+
 /** @brief Most blocks qf_support_pool_dry_second() takes out of a pool. */
 #define QF_SUPPORT_DRY_MAX  128U
 

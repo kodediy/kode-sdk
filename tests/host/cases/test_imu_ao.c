@@ -10,6 +10,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include "qpc.h"
 #include "Mockkhal_i2c.h"
@@ -24,6 +25,7 @@
 #include "kdrv_qmc5883p.h"
 #include "kdrv_qmi8658.h"
 #include "khal_nvs.h"
+#include "khal_system.h"
 #include "khal_sync.h"
 #include "kimu_energy.h"
 #include "kode_sys.h"
@@ -2219,6 +2221,79 @@ TEST_CASE("a second motion request of a kind before its answer is refused at onc
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_imu_read(ao_spy()),
                                   "the answer opens the door again");
+    a = (const kode_sys_imu_answer_t *)sys_answer(IMU_SAMPLE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    ao_spy_release();
+    imu_down();
+}
+
+/** @brief Stack of the asking task, in bytes. */
+#define TASK_ASK_STACK_BYTES 8192U
+
+/** @brief Priority of the asking task. */
+#define TASK_ASK_PRIO 1U
+
+/** @brief The longest a case waits for the asking task, in ms. */
+#define TASK_ASK_WAIT_MS 4000U
+
+/** @brief What the asking task is given and gives back. */
+typedef struct {
+    QActive          *me;    /**< The AO it asks in the name of.        */
+    SemaphoreHandle_t done;  /**< Given once the call has returned.     */
+    kode_status_t     rc;    /**< What kode_sys_imu_read() returned.    */
+} task_ask_t;
+
+/** @brief A task that makes one IMU request in @c me's name and ends. */
+static void task_asks(void *arg)
+{
+    task_ask_t * const t = (task_ask_t *)arg;
+
+    t->rc = kode_sys_imu_read(t->me);
+    (void)xSemaphoreGive(t->done);
+}
+
+/**
+ * @brief Make one IMU request from a task that is not an AO's own thread.
+ * @param me The started AO the task asks for.
+ * @return What the call returned.
+ */
+static kode_status_t ask_from_task(QActive *me)
+{
+    task_ask_t t = { me, xSemaphoreCreateBinary(), KODE_ERROR };
+
+    TEST_ASSERT_NOT_NULL(t.done);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_task_start(&task_asks, "t_imu_ask", TASK_ASK_STACK_BYTES,
+                                                    TASK_ASK_PRIO, &t));
+    TEST_ASSERT_EQUAL_INT(pdTRUE, xSemaphoreTake(t.done, pdMS_TO_TICKS(TASK_ASK_WAIT_MS)));
+    vSemaphoreDelete(t.done);
+    return t.rc;
+}
+
+TEST_CASE("a task asks in a started AO's name and the answer arrives at that AO",
+          "[imu_ao]")
+{
+    const kode_sys_imu_answer_t *a;
+
+    bus_up(true, true);
+    imu_up();
+    gyro_settled();
+    sys_up();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, ask_from_task(ao_spy()),
+                                  "a task's request is taken as the AO's own is");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kode_sys_imu_read(ao_spy()),
+                                  "the AO's own thread shares the door the task shut");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, ask_from_task(ao_spy()),
+                                  "a second task of the AO finds the door shut too");
+    TEST_ASSERT_EQUAL_UINT32(1U, (uint32_t)uxQueueMessagesWaiting(AO_Imu->eQueue));
+
+    a = (const kode_sys_imu_answer_t *)sys_answer(IMU_SAMPLE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "answered once, to the AO");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_imu_read(ao_spy()),
+                                  "the answer opens the door for the AO's own thread");
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, ask_from_task(ao_spy()));
     a = (const kode_sys_imu_answer_t *)sys_answer(IMU_SAMPLE_RSP_SIG);
     TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
     ao_spy_release();

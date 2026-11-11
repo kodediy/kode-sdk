@@ -55,8 +55,9 @@
 // kqp_config.h puts it.
 #define QF_MAX_ACTIVE       25U
 
-// Event pools (small/medium/large/jumbo)
-#define QF_MAX_EPOOL        4U
+// Event pools (small/medium/large/jumbo, and wide between large and jumbo
+// in an app with long Bluetooth values)
+#define QF_MAX_EPOOL        5U
 
 // Single QP tick rate (driven from kbsp via esp_timer)
 #define QF_MAX_TICK_RATE    1U

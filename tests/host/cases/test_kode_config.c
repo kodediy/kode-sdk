@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file test_kode_config.c
- * @brief kode_config_post() and kode_config_answer(): a request to its owner and the answer back.
+ * @brief kode_config_post(), kode_config_answer() and kode_config_find(): a request to its
+ *        owner, the answer back and a setting's row.
  */
 #include <stddef.h>
 #include <stdio.h>
@@ -237,5 +238,52 @@ TEST_CASE("a request the owner's margin has no room for is refused", "[kode_conf
     TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
 
     ao_spy_drain();
+    kconfig_reset();
+}
+
+/* ---- kode_config_find() ------------------------------------------------- */
+
+/** @brief The words of the enum row the finding cases register. */
+static const char *const FIND_WORDS[] = { "low", "mid", "high" };
+
+/** @brief The table the finding cases register: a boolean and an enum. */
+static const kode_config_t FIND_CONFIG[] = {
+    { .name = "mode", .type = KODE_TYPE_BOOL },
+    { .name = "level", .type = KODE_TYPE_ENUM, .enums = FIND_WORDS,
+      .n_enums = (uint8_t)(sizeof(FIND_WORDS) / sizeof(FIND_WORDS[0])) },
+};
+
+/* An interface offers an enum's words in the owner's order: the row it gets
+ * is the owner's own, words and count included. */
+TEST_CASE("the row of an enum setting carries the owner's words", "[kode_config]")
+{
+    const kode_config_t *row;
+
+    (void)answer_spy();
+    kconfig_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, KODE_CONFIG_ADD(ao_spy(), KODE_CONFIG_MARGIN, FIND_CONFIG));
+
+    row = kode_config_find("level");
+    TEST_ASSERT_NOT_NULL(row);
+    TEST_ASSERT_EQUAL_STRING("level", row->name);
+    TEST_ASSERT_EQUAL_INT((int)KODE_TYPE_ENUM, (int)row->type);
+    TEST_ASSERT_EQUAL_UINT8(3U, row->n_enums);
+    TEST_ASSERT_EQUAL_PTR(FIND_WORDS, row->enums);
+    TEST_ASSERT_EQUAL_STRING("high", row->enums[2]);
+    TEST_ASSERT_EQUAL_PTR(&FIND_CONFIG[1], row);
+
+    kconfig_reset();
+}
+
+/* A key no table holds, and no key at all, have no row. */
+TEST_CASE("a key no table holds, or no key, has no row", "[kode_config]")
+{
+    (void)answer_spy();
+    kconfig_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, KODE_CONFIG_ADD(ao_spy(), KODE_CONFIG_MARGIN, FIND_CONFIG));
+
+    TEST_ASSERT_NULL(kode_config_find("nosuch"));
+    TEST_ASSERT_NULL(kode_config_find(NULL));
+
     kconfig_reset();
 }

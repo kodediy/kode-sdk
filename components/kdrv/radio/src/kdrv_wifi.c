@@ -806,8 +806,8 @@ kode_status_t kdrv_wifi_scan(void)
     {
         if ( s_scan_abort )
         {
-            KLOG_N(TAG, "scan: ended early at step %u of %u (the radio check "
-                        "needs the channel)", (unsigned)step, (unsigned)steps);
+            KLOG_N(TAG, "scan: ended early at step %u of %u, as its owner asked",
+                   (unsigned)step, (unsigned)steps);
             cut = true;
             out = KODE_DENIED;
             break;

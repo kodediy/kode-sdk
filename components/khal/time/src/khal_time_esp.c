@@ -60,15 +60,18 @@ uint64_t khal_time_at_wall_s(int64_t wall_s)
 {
     uint64_t at = 0U;
 
-    if (wall_s >= 0) {
+    if ( 0 <= wall_s )
+    {
         uint64_t const due_wall = (uint64_t)wall_s * US_PER_S;
         uint64_t const wall     = khal_time_wall_us();
 
         at = khal_time_us();
-        if (due_wall > wall) {
+        if ( due_wall > wall )
+        {
             at += due_wall - wall;
         }
-        if (at == 0U) {
+        if ( 0U == at )
+        {
             at = 1U;
         }
     }
@@ -99,7 +102,7 @@ static periodic_slot_t *periodic_slot_for(void (*cb)(void *))
 {
     periodic_slot_t *free_slot = NULL;
 
-    for ( size_t i = 0U; i < KHAL_TIMER_PERIODIC_SLOTS; i++ )
+    for ( size_t i = 0U; KHAL_TIMER_PERIODIC_SLOTS > i; i++ )
     {
         if ( s_periodic[i].cb == cb )
         {
@@ -117,10 +120,18 @@ kode_status_t khal_timer_periodic(void (*cb)(void *), void *arg, uint64_t period
 {
     esp_timer_handle_t timer = NULL;
     periodic_slot_t *const slot = periodic_slot_for(cb);
+    /* A timer that is late is called once and goes on from there. esp_timer
+     * would otherwise call it once for every period it owes, back to back,
+     * and the QP tick is this timer: QP would be handed hundreds of ticks
+     * before any Active Object ran, and a time event that could not be
+     * posted is an assertion. esp_timer also leaves such a timer out of the
+     * time it lets a light sleep last, so an armed tick does not keep the
+     * board awake: the lock of khal_power_hold() does. */
     const esp_timer_create_args_t args = {
-        .callback = cb,
-        .arg      = arg,
-        .name     = "khal_tick",
+        .callback              = cb,
+        .arg                   = arg,
+        .name                  = "khal_tick",
+        .skip_unhandled_events = true,
     };
 
     if ( NULL == slot )
@@ -147,7 +158,7 @@ kode_status_t khal_timer_periodic_run(void (*cb)(void *), bool run)
 {
     periodic_slot_t *slot = NULL;
 
-    for ( size_t i = 0U; (i < KHAL_TIMER_PERIODIC_SLOTS) && (NULL != cb); i++ )
+    for ( size_t i = 0U; (KHAL_TIMER_PERIODIC_SLOTS > i) && (NULL != cb); i++ )
     {
         if ( s_periodic[i].cb == cb )
         {
@@ -212,7 +223,7 @@ kode_status_t khal_timer_once(void (*cb)(void *), void *arg, uint64_t delay_us)
     {
         return KODE_DENIED;
     }
-    for ( size_t i = 0U; i < KHAL_TIMER_ONCE_SLOTS; i++ )
+    for ( size_t i = 0U; KHAL_TIMER_ONCE_SLOTS > i; i++ )
     {
         once_slot_t *const slot = &s_once[i];
 

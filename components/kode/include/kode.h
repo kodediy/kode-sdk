@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sdkconfig.h"   /* CONFIG_KODE_BLE_APP_VALUE_MAX */
+
 #include "kode_colors.h"
 #include "kode_defs.h"
 #include "kode_init.h"
@@ -217,14 +219,16 @@ kode_buttons_t kode_button_read_all(void);
  * the console's included. ble_written: a phone wrote to the app's own
  * service (KODE_BLE_SERVICE); the source is the characteristic's name, the
  * value how many bytes, and the text the bytes themselves, NULs included,
- * followed by one NUL. A listener or a waiter for any of the three has the
- * radio send them.
+ * followed by one NUL. ble_taken: a phone's read took a value from a
+ * KODE_BLE_QUEUED characteristic; the source is its name, the value how many
+ * are still queued. A listener or a waiter for any of the four has the radio
+ * send them.
  *
  * An event comes only from an owner the app links, and an app links an owner
- * by naming one of its calls. Nine events have an owner no other call need
+ * by naming one of its calls. Ten events have an owner no other call need
  * link: ir_received (the infrared), wifi_connected and wifi_lost (the radio,
  * which joins a remembered network by itself), the three touch events (the
- * touch panel) and the three Bluetooth events (the radio). Name those with
+ * touch panel) and the four Bluetooth events (the radio). Name those with
  * KODE_EVENT_IR_RECEIVED, KODE_EVENT_WIFI_CONNECTED, KODE_EVENT_WIFI_LOST, the
  * KODE_EVENT_TOUCH_ constants and the KODE_EVENT_BLE_ constants, which link
  * it. Typed as a string in an app that links no such owner, the event is
@@ -250,6 +254,9 @@ kode_buttons_t kode_button_read_all(void);
 /* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
 /** @brief "ble_written", naming the radio so the app links it. */
 #define KODE_EVENT_BLE_WRITTEN      kode_event_ble_written()
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
+/** @brief "ble_taken", naming the radio so the app links it. */
+#define KODE_EVENT_BLE_TAKEN        kode_event_ble_taken()
 
 /**
  * @brief The radio's event name for a phone that connected; what KODE_EVENT_BLE_CONNECTED calls.
@@ -268,6 +275,12 @@ const char *kode_event_ble_disconnected(void);
  * @return "ble_written".
  */
 const char *kode_event_ble_written(void);
+
+/**
+ * @brief The radio's event name for a read that took a queued value; what KODE_EVENT_BLE_TAKEN calls.
+ * @return "ble_taken".
+ */
+const char *kode_event_ble_taken(void);
 
 /**
  * @brief The infrared's event name; what KODE_EVENT_IR_RECEIVED calls.
@@ -291,7 +304,12 @@ const char *kode_event_wifi_lost(void);
 #define KODE_EVENT_QUEUE_DEPTH 16U  /**< Events queued for the listeners; past it they drop. */
 #define KODE_EVENT_NAME_MAX    32U  /**< Bytes of an event name, NUL included. */
 #define KODE_EVENT_SOURCE_MAX  80U  /**< Bytes of a source, NUL included; longer is cut. */
-#define KODE_EVENT_TEXT_MAX    256U /**< Bytes of a text, NUL included: one MQTT payload. */
+#define KODE_EVENT_TEXT_MQTT   256U /**< Bytes of one MQTT payload's text, NUL included. */
+#if defined(CONFIG_KODE_BLE_APP_VALUE_MAX) && ((CONFIG_KODE_BLE_APP_VALUE_MAX + 1U) > KODE_EVENT_TEXT_MQTT)
+#define KODE_EVENT_TEXT_MAX    ((uint32_t)CONFIG_KODE_BLE_APP_VALUE_MAX + 1U) /**< Bytes of a text, NUL included: one Bluetooth value. */
+#else
+#define KODE_EVENT_TEXT_MAX    KODE_EVENT_TEXT_MQTT /**< Bytes of a text, NUL included: one MQTT payload. */
+#endif
 
 /** @brief An event, as a listener or a waiter receives it. */
 typedef struct {
@@ -451,6 +469,28 @@ const char *kode_file_read(const char *path);
 const uint8_t *kode_file_read_bytes(const char *path, uint32_t *len);
 
 /**
+ * @brief Read up to @p cap bytes of a file, starting at @p offset.
+ *
+ * Blocks. The file can be of any size: KODE_FILE_READ_MAX does not limit it.
+ * The bytes land in @p buf; the task keeps nothing. A read that ends past the
+ * end of the file gives the bytes there are. A read at or past the end, of an
+ * empty file, or of 0 bytes gives none and is not an error. A file that is
+ * shorter than it was when the read began fails. An Active Object reads with
+ * kode_sys_file_read().
+ *
+ * @param path   "sd/..." or "flash/...".
+ * @param offset The first byte to read.
+ * @param buf    Where the bytes go: @p cap bytes of room. NULL is refused.
+ * @param cap    The most bytes to read.
+ * @param got    Out: the bytes read, fewer than @p cap only at the end of the
+ *               file; 0 on failure. NULL is refused.
+ * @return true when the read was done, even if it gave nothing; false
+ *         otherwise, with kode_error() saying why (no such file, a folder, a
+ *         bad path, a refused @p buf or @p got).
+ */
+bool kode_file_read_at(const char *path, uint32_t offset, void *buf, uint32_t cap, uint32_t *got);
+
+/**
  * @brief Create a file with @p text, or replace what it held.
  *
  * Blocks. "" empties the file. The folder must already exist. The text goes
@@ -475,6 +515,35 @@ bool kode_file_write(const char *path, const char *text);
 bool kode_file_append(const char *path, const char *text);
 
 /**
+ * @brief Create a file with @p len bytes, or replace what it held.
+ *
+ * Blocks. A 0 inside @p data is written like any byte. The folder must
+ * already exist. @p len is any size the volume can hold; the bytes go in
+ * parts, so a failure after the first leaves the file cut, not as it was. A
+ * @p len of 0 with a @p data that is not NULL empties the file. An Active
+ * Object writes with kode_sys_file_write().
+ *
+ * @param path "sd/..." or "flash/...".
+ * @param data The bytes. NULL is refused, whatever @p len is.
+ * @param len  How many.
+ * @return true when all of it is written; false otherwise, with
+ *         kode_error() saying how far it got.
+ */
+bool kode_file_write_bytes(const char *path, const void *data, uint32_t len);
+
+/**
+ * @brief Add @p len bytes at the end of a file, creating it if it is not there.
+ *
+ * Blocks. As kode_file_write_bytes(), but what the file held stays.
+ *
+ * @param path "sd/..." or "flash/...".
+ * @param data The bytes. NULL is refused, whatever @p len is.
+ * @param len  How many.
+ * @return As kode_file_write_bytes().
+ */
+bool kode_file_append_bytes(const char *path, const void *data, uint32_t len);
+
+/**
  * @brief What a path is.
  *
  * Blocks. A path with nothing at it is an answer, not an error.
@@ -483,6 +552,24 @@ bool kode_file_append(const char *path, const char *text);
  * @return The status; all false and 0 on failure (kode_error() says why).
  */
 kode_file_status_t kode_file_status(const char *path);
+
+/**
+ * @brief How big a volume is and how much of it is free.
+ *
+ * Blocks. On a large card the first count can take hundreds of milliseconds.
+ * An Active Object asks with kode_sys_file_space().
+ *
+ * @param volume       "sd" or "flash", with or without a "/" after it; a path
+ *                     inside a volume is refused.
+ * @param total_bytes  Out: what the volume's filesystem spans; 0 on failure.
+ *                     NULL is refused. A whole number of kilobytes.
+ * @param free_bytes   Out: what is left of it; 0 on failure. NULL is refused.
+ *                     A whole number of kilobytes.
+ * @return true when the volume was counted; false otherwise, with
+ *         kode_error() saying why (a bad volume, no card, storage busy or
+ *         silent).
+ */
+bool kode_file_space(const char *volume, uint64_t *total_bytes, uint64_t *free_bytes);
 
 /**
  * @brief Whether anything is at a path.
@@ -702,7 +789,7 @@ bool kode_haptic_add_profile(const char *name, const uint16_t *pattern_ms, uint3
 /* ---- Audio ---- */
 
 /* 48 kHz, 16-bit, mono WAV or samples only. Audio calls take turns, and a play or a
- * recording to a file keeps its turn to the end. A call that finds the speaker
+ * recording to a file or a buffer keeps its turn to the end. A call that finds the speaker
  * or microphone held waits up to KODE_AUDIO_BUSY_MS, then fails with "audio is
  * busy"; a background recording waits the same, then ends with no frames.
  * kode_audio_set(), kode_audio_get(), kode_audio_play_stop(), kode_audio_is_playing()
@@ -815,6 +902,30 @@ uint32_t kode_audio_get(const char *setting);
  * @return true when the file is written; false with kode_error() saying why.
  */
 bool kode_audio_record_file(const char *path, uint32_t ms);
+
+/**
+ * @brief Record the microphone into a buffer of the caller's own and wait until it is full or the time is up.
+ *
+ * Blocks. Waits its turn for the microphone like kode_audio_record_file():
+ * a microphone another task holds fails with "audio is busy" after
+ * KODE_AUDIO_BUSY_MS. Refused while a recording or a sound runs in the
+ * background. Like every call of this layer it is for tasks, never for an
+ * Active Object.
+ *
+ * The frames are 48 kHz mono 16-bit samples. The recording lasts @p ms or
+ * until @p cap frames are in, whichever is first, so a buffer smaller than the
+ * time asked ends it early. @p frames can also be below that: the codec hands
+ * over what it has when the recording ends, down to none. Frames past
+ * @p frames are not written. The SDK records into memory of its own that it
+ * keeps after the first call, and the frames are copied out at the end.
+ *
+ * @param buf    Where the frames go; what it holds after a failure is unspecified.
+ * @param cap    Its room, in frames, above 0.
+ * @param ms     1 to KODE_AUDIO_RECORD_MAX_MS: how long to record.
+ * @param frames Out, may be NULL: the frames written; 0 on failure.
+ * @return true when the recording arrived; false with kode_error() saying why.
+ */
+bool kode_audio_record_samples(int16_t *buf, uint32_t cap, uint32_t ms, uint32_t *frames);
 
 /**
  * @brief Record the microphone into memory in the background; the previous recording is dropped.
@@ -933,8 +1044,8 @@ int kode_wifi_scan(kode_wifi_network_t *out, size_t cap);
  *
  * Not stored: every boot starts from the board's serial. The console's own
  * service stays in the advert whatever the name. The device's GAP name (the
- * Device Name characteristic, 0x2A00) stays the serial, so a phone that has
- * connected shows the serial, not this name.
+ * Device Name characteristic, 0x2A00) takes the same name, so a phone that
+ * has connected shows it too.
  *
  * @param name Up to KODE_BLE_NAME_MAX - 1 bytes; NULL or "" for the serial.
  * @return true when the radio has the name; false with kode_error() saying why:
@@ -1005,20 +1116,47 @@ int kode_ble_scan(kode_ble_device_t *out, size_t cap, uint32_t ms);
  * kode_ble_set_value() and kode_ble_notify() fail saying why. A write arrives
  * as ble_written, and a central that connects or leaves as ble_connected and
  * ble_disconnected (see the events). Throughput is not promised: the
- * notifications share the link with the console. */
+ * notifications share the link with the console.
+ *
+ * The service needs CONFIG_KODEOS_BLE_CONSOLE=y, whose pairing it uses.
+ * CONFIG_KODE_BLE_APP_VALUE_MAX sets the longest value (244 by default, up to
+ * 512). A read or a write carries a whole value; a notification carries at
+ * most 448 bytes, and a longer one is dropped while the value stays for a
+ * read. CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE puts the service's UUID in
+ * the advert instead of the console's, for the phone apps that scan with a
+ * filter on it. KODE_BLE_BATTERY_SERVICE() adds the standard Battery service.
+ *
+ * A KODE_BLE_QUEUED characteristic gives each read the next value instead of
+ * the same one, for a phone that drains it by reading until a read comes
+ * back empty:
+ *
+ *     { "from_radio", "2c55e69e-4993-11ed-b878-0242ac120002", KODE_BLE_QUEUED },
+ *
+ * kode_ble_queue_push() puts values behind the others, each read takes the
+ * oldest, and ble_taken says how many are left, so the app refills without
+ * looking. A value longer than one read is read in parts and taken with its
+ * last part. A phone that connects or leaves empties the queue. */
 
 #define KODE_BLE_CHARACTERISTICS_MAX      4U     /**< Characteristics one service may have.            */
-#define KODE_BLE_VALUE_MAX      244U   /**< Bytes of a value: one notification at an MTU of 247. */
+#ifdef CONFIG_KODE_BLE_APP_VALUE_MAX
+#define KODE_BLE_VALUE_MAX      ((uint32_t)CONFIG_KODE_BLE_APP_VALUE_MAX) /**< Bytes of a value: CONFIG_KODE_BLE_APP_VALUE_MAX, 244 by default. */
+#else
+#define KODE_BLE_VALUE_MAX      244U   /**< Bytes of a value, with Bluetooth left out: one notification at an MTU of 247. */
+#endif
 #define KODE_BLE_CHARACTERISTIC_NAME_MAX  16U    /**< Bytes of a characteristic's name, NUL included.  */
 #define KODE_BLE_READ           0x01U  /**< A phone may read the value.                      */
 #define KODE_BLE_WRITE          0x02U  /**< A phone may write it: ble_written.               */
 #define KODE_BLE_NOTIFY         0x04U  /**< A phone may subscribe: kode_ble_notify().        */
+#define KODE_BLE_QUEUED         0x08U  /**< Reads take the values kode_ble_queue_push() queued,
+                                        *   oldest first; a read with none left gets 0 bytes.
+                                        *   A phone may read it.                              */
+#define KODE_BLE_QUEUE_SLOTS    8U     /**< Values one queued characteristic holds.          */
 
 /** @brief One characteristic of the app's service. */
 typedef struct {
     const char *name;   /**< 1 to KODE_BLE_CHARACTERISTIC_NAME_MAX - 1 bytes, unique in the service.  */
     const char *uuid;   /**< 128 bits as text, "6e400002-b5a3-f393-e0a9-e50e24dcca9e".       */
-    uint8_t     props;  /**< KODE_BLE_READ, KODE_BLE_WRITE and KODE_BLE_NOTIFY, at least one. */
+    uint8_t     props;  /**< KODE_BLE_READ, _WRITE, _NOTIFY and _QUEUED, at least one. */
 } kode_ble_characteristic_t;
 
 /** @brief The app's service: what KODE_BLE_SERVICE() defines. */
@@ -1048,6 +1186,19 @@ typedef struct {
     KODE_BLE_LINKAGE_ const kode_ble_service_t kode_ble_app_service; \
     const kode_ble_service_t kode_ble_app_service = { \
         (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }
+
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that serve the battery, never used inside the SDK */
+/**
+ * @brief Serve the standard Battery service, at file scope, followed by a semicolon.
+ *
+ * The Bluetooth SIG's Battery (0x180F) with Battery Level (0x2A19): the
+ * charge AO_Power reads, in percent, which a phone reads or subscribes to
+ * and shows. Beside the app's own service, behind the same security. Defines
+ * the constant kode_ble_battery_service, the name the radio looks for.
+ */
+#define KODE_BLE_BATTERY_SERVICE() \
+    KODE_BLE_LINKAGE_ const uint8_t kode_ble_battery_service; \
+    const uint8_t kode_ble_battery_service = 1U
 
 /**
  * @brief Set what a phone that reads characteristic @p chr gets. Nothing is sent.
@@ -1084,6 +1235,43 @@ bool kode_ble_set_value(const char *chr, const void *data, size_t len);
  *         try again), or the radio not taking it in time.
  */
 bool kode_ble_notify(const char *chr, const void *data, size_t len);
+
+/**
+ * @brief Queue one value for the reads of characteristic @p chr, behind the others.
+ *
+ * Each read a phone makes takes the oldest value queued, and ble_taken says
+ * how many are left. Waits for the radio to take it, as kode_ble_set_value()
+ * does.
+ *
+ * @param chr  The characteristic's name; it has KODE_BLE_QUEUED.
+ * @param data The value.
+ * @param len  1 to KODE_BLE_VALUE_MAX bytes.
+ * @return true when it is queued; false with kode_error() saying why: as
+ *         kode_ble_set_value(), a characteristic without KODE_BLE_QUEUED, no
+ *         bytes, or the queue full (KODE_BLE_QUEUE_SLOTS values).
+ */
+bool kode_ble_queue_push(const char *chr, const void *data, size_t len);
+
+/**
+ * @brief How many more values characteristic @p chr's queue takes now.
+ *
+ * Does not wait: a read the phone makes may change it the next moment.
+ *
+ * @param chr The characteristic's name; it has KODE_BLE_QUEUED.
+ * @return 0 to KODE_BLE_QUEUE_SLOTS; 0 with kode_error() saying why when it
+ *         cannot be told: Bluetooth off in Settings, the service left out or
+ *         not declared, no characteristic of that name, or one without
+ *         KODE_BLE_QUEUED.
+ */
+size_t kode_ble_queue_room(const char *chr);
+
+/**
+ * @brief Empty characteristic @p chr's queue. Waits for the radio, as kode_ble_set_value() does.
+ * @param chr The characteristic's name; it has KODE_BLE_QUEUED.
+ * @return true when it is empty; false with kode_error() saying why: as
+ *         kode_ble_queue_room(), or the radio not taking it in time.
+ */
+bool kode_ble_queue_clear(const char *chr);
 
 /* ---- HTTP ---- */
 

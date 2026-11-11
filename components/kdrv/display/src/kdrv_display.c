@@ -64,6 +64,10 @@ _Static_assert(KDRV_DISPLAY_FRAME_US ==
                      (KBSP_LCD_V_RES + DSI_VSYNC + DSI_VBP + DSI_VFP)) /
                     DSI_DPI_CLK_MHZ),
                "KDRV_DISPLAY_FRAME_US must follow the DPI timing");
+/* The framebuffers are allocated by IDF in whole cache lines of the PSRAM, and
+ * KDRV_DISPLAY_FB_BYTES says how many that is: the two must name one line. */
+_Static_assert(KDRV_DISPLAY_CACHE_LINE == CONFIG_CACHE_L2_CACHE_LINE_SIZE,
+               "KDRV_DISPLAY_CACHE_LINE must be the build's L2 cache line");
 /* What the bridge sends for a pixel the DMA did not deliver: black, in place
  * of its reset blue. Zero in every channel, whatever the RGB coding - see
  * panel_bring_up(). */
@@ -121,6 +125,11 @@ _Static_assert(KDRV_DISPLAY_FRAME_US ==
 #define PANEL_RAIL_SETTLE_MS    20U   /* T2: 10 ms, from VDDI to the reset line high */
 #define PANEL_COLD_RESET_LOW_MS  5U
 #define PANEL_COLD_FIRST_CMD_MS 20U   /* T3: 10 ms, from the line high to the first command */
+
+/* The panel going OFF (kdrv_display_reset_low()): the reset line low for at
+ * least 1 ms before the supply goes. vTaskDelay() of n ticks lasts between n-1
+ * and n, the tick being 1 ms, so 2 is the least that always covers it. */
+#define PANEL_OFF_RESET_LOW_MS   2U
 
 /* The glass kept lit across a restart (kdrv_display_keep_for_restart()). The
  * note lives in an LP store register for the reason the radio's does: an image's
@@ -653,9 +662,9 @@ static bool panel_present(void)
     (void)khal_gpio_output(KBSP_PIN_DSP_TP_RST, true);
     if ( esp_reset_reason() == ESP_RST_DEEPSLEEP )
     {
-        /* OFF held the line high with the controller in its low-power scan,
-         * where it answers nothing until a finger or a reset: AO_Touch's rest
-         * leaves it there. Reset first, and do not lose 100 ms finding out. */
+        /* OFF held the line low and cut the rail. A controller that missed its
+         * start answers nothing until a reset: reset first, and do not lose
+         * 100 ms finding out. */
         pulsed = true;
         (void)gpio_set_level((gpio_num_t)KBSP_PIN_DSP_TP_RST, 0U);
         khal_delay_ms(PANEL_COLD_RESET_LOW_MS);
@@ -671,8 +680,7 @@ static bool panel_present(void)
         if ( (PANEL_PROBE_PULSE_MS <= waited) && !pulsed )
         {
             /* A CST820 in its low-power scan NAKs everything until a finger or
-             * a reset, and OFF keeps the line high all the way through. A
-             * controller that is simply slow loses nothing by this. */
+             * a reset. A controller that is simply slow loses nothing by this. */
             pulsed = true;
             KLOG_W(TAG, "the touch controller is silent: a reset pulse before the verdict");
             (void)gpio_set_level((gpio_num_t)KBSP_PIN_DSP_TP_RST, 0U);
@@ -976,7 +984,7 @@ static bool panel_answers(void)
     uint8_t id = 0U;
     for ( uint32_t i = 0U; 3U > i; ++i )
     {
-        if ( i > 0U ) { khal_delay_ms(20U); }
+        if ( 0U < i ) { khal_delay_ms(20U); }
         if ( panel_read1(0x04U, &id) == KODE_OK ) { return true; }
     }
     return false;
@@ -1984,8 +1992,7 @@ static esp_err_t panel_resume(uint8_t percent)
  */
 static esp_err_t video_begin(uint8_t *shown)
 {
-    size_t const bytes = (((size_t)KBSP_LCD_H_RES * (size_t)KBSP_LCD_V_RES * 2U) + 63U)
-                         & ~(size_t)63U;
+    size_t const bytes = KDRV_DISPLAY_FB_BYTES;
     bool const   other = (shown != s_fb[0]);
     esp_err_t    err   = ESP_OK;
 
@@ -2107,6 +2114,23 @@ kode_status_t kdrv_display_link_set(bool up)
         return link_up();
     }
     return link_down();
+}
+
+kode_status_t kdrv_display_reset_low(void)
+{
+    kode_status_t st;
+
+    /* With the link up the video panel's object has the line: it is left alone. */
+    if ( !s_brought_up || s_ready )
+    {
+        return KODE_DENIED;
+    }
+    st = khal_gpio_output(KBSP_PIN_DSP_TP_RST, false);
+    if ( KODE_OK == st )
+    {
+        khal_delay_ms(PANEL_OFF_RESET_LOW_MS);
+    }
+    return st;
 }
 
 /** @brief One parameterless DCS command, behind the FIFO's bounded wait. */

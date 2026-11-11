@@ -44,14 +44,16 @@ typedef struct {
     bool (*answer)(QEvt const *e);        /**< An event while one of its verbs holds the console; true when it was the owner's. NULL: none. */
     bool (*timeout)(void);                /**< The watchdog fired on one of its verbs; true when the owner closed it. NULL: the timeout error. */
     void (*info)(void);                   /**< Its records in `info`. NULL: none. */
+    const char    *nowait;                /**< Its verb that does not wait: a row with no keys, which the console runs while another command is in flight. It answers one line and begins no command. NULL: none. */
 } kverbs_t;
 
 /**
  * @brief Register an owner's table. The same table twice is one registration.
  * @param table The table; it must outlive the console.
- * @return KODE_OK; KODE_DENIED for a malformed row; KODE_EXISTS for a verb
- *         already taken; KODE_NO_RESOURCES past KVERBS_TABLES_MAX. A refusal
- *         logs why and registers nothing.
+ * @return KODE_OK; KODE_DENIED for a malformed row, or a @c nowait that is
+ *         not a row of the table with no keys; KODE_EXISTS for a verb already
+ *         taken; KODE_NO_RESOURCES past KVERBS_TABLES_MAX. A refusal logs why
+ *         and registers nothing.
  */
 kode_status_t kverbs_add(const kverbs_t *table);
 

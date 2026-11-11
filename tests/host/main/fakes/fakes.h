@@ -521,6 +521,10 @@ const char *fake_media_sd_dir(void);
 /** @brief The directory standing in for the internal FAT mount point. */
 const char *fake_media_fs_dir(void);
 
+/** @brief What the internal partition reports as free from now on;
+ *         fake_media_reset() puts back its 8 MB. */
+void fake_media_set_fs_free(uint64_t free_bytes);
+
 /**
  * @brief Does @p name exist under @p dir?
  * @param dir  One of the two directories above.
@@ -796,6 +800,14 @@ void fake_ble_app_service_set(const kdrv_ble_app_service_t *svc);
 /** @brief How many times kdrv_ble_app_kick() was called since boot. */
 unsigned fake_ble_app_kicks(void);
 
+/** @brief Declare the Battery service kdrv_ble_battery_declared() reports, and
+ *         forget the level; it stays across fake_ble_reset(), so a case that
+ *         declares it puts false back. */
+void fake_ble_battery_declare(bool on);
+
+/** @brief The last level kdrv_ble_battery_set() was given; -1 for none since the declare. */
+int16_t fake_ble_battery_pct(void);
+
 /** @brief How many scans have been run since the reset. */
 unsigned fake_ble_scans(void);
 
@@ -914,6 +926,18 @@ void fake_radio_set_adopted(bool adopted);
 /** @brief Whether a CONNECT that succeeds leaves J3's supply unswitched
  *         (kdrv_radio_exp_switched() false); fake_radio_reset() clears it. */
 void fake_radio_fail_exp_switch(bool fails);
+
+/** @brief The level the C5 holds J3's supply enable at: a CONNECT resets the
+ *         C5, which lets go of it (on), and a switch drives it. */
+bool fake_radio_exp_pin(void);
+
+/** @brief How many times the enable was driven low since fake_radio_reset(). */
+uint32_t fake_radio_exp_off_drives(void);
+
+/** @brief The running CONNECT reads the wish now, as its worker does just
+ *         before it drives the pin: a wish asked after this is not the one
+ *         the connect drives. */
+void fake_radio_connect_read(void);
 
 /** @brief What kdrv_radio_fwversion() answers, and whether it answers. */
 void fake_radio_set_fw(uint32_t major, uint32_t minor, uint32_t patch,

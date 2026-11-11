@@ -33,11 +33,23 @@
 #define HEX_LETTER_BASE 10U
 
 /** @brief Every property a characteristic may carry. */
-#define APP_PROPS_ALL  (KDRV_BLE_APP_READ | KDRV_BLE_APP_WRITE | KDRV_BLE_APP_NOTIFY)
+#define APP_PROPS_ALL  (KDRV_BLE_APP_READ | KDRV_BLE_APP_WRITE | KDRV_BLE_APP_NOTIFY | KDRV_BLE_APP_QUEUED)
+
+/** @brief The properties a central reads by. */
+#define APP_PROPS_READ (KDRV_BLE_APP_READ | KDRV_BLE_APP_QUEUED)
 
 _Static_assert(KDRV_BLE_APP_CHARS_MAX == 4U, "the reasons say at most 4 characteristics");
 _Static_assert(KDRV_BLE_APP_NAME_MAX == 16U, "the reasons say names of 1 to 15 bytes");
 _Static_assert(KDRV_BLE_APP_VALUE_MAX <= (size_t)UINT16_MAX, "a value's length fits its counter");
+_Static_assert(KDRV_BLE_APP_QUEUE_SLOTS <= (size_t)UINT8_MAX, "what is left in a queue fits a byte");
+
+/** @brief One queued characteristic's values, a PSRAM block of its own. */
+typedef struct {
+    uint32_t head;                                                  /**< The oldest value.  */
+    uint32_t count;                                                 /**< Values waiting.    */
+    uint16_t len[KDRV_BLE_APP_QUEUE_SLOTS];                         /**< Bytes of each.     */
+    uint8_t  data[KDRV_BLE_APP_QUEUE_SLOTS][KDRV_BLE_APP_VALUE_MAX]; /**< The values.        */
+} app_queue_t;
 
 /** @brief One notification waiting for the host task. */
 typedef struct {
@@ -55,6 +67,7 @@ typedef struct {
     uint32_t     head;                                             /**< The oldest notification.        */
     uint32_t     count;                                            /**< Notifications waiting.          */
     app_note_t   ring[KDRV_BLE_APP_RING_SLOTS];                    /**< The ring.                       */
+    app_queue_t *queue[KDRV_BLE_APP_CHARS_MAX];                    /**< Each queued one's; NULL until taken. */
     uint8_t      scratch[KDRV_BLE_APP_VALUE_MAX];                  /**< The host task's alone.          */
 } app_mem_t;
 
@@ -70,6 +83,9 @@ static app_mem_t *s_mem;
 
 /** @brief What a write is handed to; NULL takes every write. */
 static kdrv_ble_app_write_cb_t s_write_cb;
+
+/** @brief What a take from a queue is told to; NULL tells nobody. */
+static kdrv_ble_app_taken_cb_t s_taken_cb;
 
 /** @brief Take the block and its lock. @return true when both exist. */
 static bool app_mem_make(void)
@@ -295,7 +311,7 @@ static bool char_fault(const kdrv_ble_app_service_t *svc, size_t i, char *why, s
     }
     else if ( (0U == c->props) || ((c->props & (uint8_t)~APP_PROPS_ALL) != 0U) )
     {
-        why_name(why, cap, c->name, ": the properties are not READ, WRITE or NOTIFY");
+        why_name(why, cap, c->name, ": the properties are not READ, WRITE, NOTIFY or QUEUED");
     }
     else
     {
@@ -378,7 +394,7 @@ bool kdrv_ble_app_build(const kdrv_ble_app_service_t *svc, const kdrv_ble_app_pe
             uint32_t      flags = 0U;
 
             (void)uuid_parse(svc->chars[i].uuid, out->uuid[i]);
-            if ( (props & KDRV_BLE_APP_READ) != 0U )
+            if ( (props & APP_PROPS_READ) != 0U )
             {
                 flags |= perm->read;
             }
@@ -454,13 +470,45 @@ static kode_status_t app_enter(const char *chr, const void *data, size_t len, ui
     return rc;
 }
 
-kode_status_t kdrv_ble_app_check(const char *chr, bool notify, const void *data, size_t len)
+/**
+ * @brief Whether characteristic properties @p props and @p len suit the call @p op names.
+ * @param op    KDRV_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR.
+ * @param props The characteristic's properties.
+ * @param len   The bytes' count.
+ * @return true when they do.
+ */
+static bool op_fits(uint8_t op, uint8_t props, size_t len)
+{
+    bool fits = false;
+
+    switch ( op )
+    {
+    case KDRV_BLE_APP_OP_SET:
+        fits = true;
+        break;
+    case KDRV_BLE_APP_OP_NOTIFY:
+        fits = (props & KDRV_BLE_APP_NOTIFY) != 0U;
+        break;
+    case KDRV_BLE_APP_OP_PUSH:
+        fits = ((props & KDRV_BLE_APP_QUEUED) != 0U) && (0U < len);
+        break;
+    case KDRV_BLE_APP_OP_CLEAR:
+        fits = ((props & KDRV_BLE_APP_QUEUED) != 0U) && (0U == len);
+        break;
+    default:
+        /* no such call */
+        break;
+    }
+    return fits;
+}
+
+kode_status_t kdrv_ble_app_check(const char *chr, uint8_t op, const void *data, size_t len)
 {
     uint8_t       i     = 0U;
     uint8_t       props = 0U;
     kode_status_t rc    = app_find(chr, data, len, &i, &props);
 
-    if ( (KODE_OK == rc) && notify && ((props & KDRV_BLE_APP_NOTIFY) == 0U) )
+    if ( (KODE_OK == rc) && !op_fits(op, props, len) )
     {
         rc = KODE_DENIED;
     }
@@ -550,6 +598,133 @@ kode_status_t kdrv_ble_app_set_write_cb(kdrv_ble_app_write_cb_t cb)
     return rc;
 }
 
+kode_status_t kdrv_ble_app_set_taken_cb(kdrv_ble_app_taken_cb_t cb)
+{
+    kode_status_t rc = KODE_DENIED;
+
+    if ( NULL != cb )
+    {
+        s_taken_cb = cb;
+        rc         = KODE_OK;
+    }
+    return rc;
+}
+
+/**
+ * @brief Characteristic @p i's queue, taken from PSRAM the first time when @p make.
+ * @note Called with the lock held.
+ * @param i    Its place in the table.
+ * @param make true to take it when it does not exist yet.
+ * @return It; NULL when it does not exist, or PSRAM refused it.
+ */
+static app_queue_t *queue_of(uint8_t i, bool make)
+{
+    app_queue_t *q = s_mem->queue[i];
+
+    if ( (NULL == q) && make )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() hands back an untyped block aligned as asked */
+        q = (app_queue_t *)khal_alloc_psram(APP_ALIGN, sizeof(app_queue_t));
+        if ( NULL != q )
+        {
+            (void)memset(q, 0, sizeof(*q));
+            s_mem->queue[i] = q;
+        }
+    }
+    return q;
+}
+
+kode_status_t kdrv_ble_app_queue_push(const char *chr, const void *data, size_t len)
+{
+    uint8_t       i     = 0U;
+    uint8_t       props = 0U;
+    kode_status_t rc    = app_enter(chr, data, len, &i, &props);
+
+    if ( (KODE_OK == rc) && !op_fits(KDRV_BLE_APP_OP_PUSH, props, len) )
+    {
+        rc = KODE_DENIED;
+    }
+    if ( KODE_OK == rc )
+    {
+        khal_mutex_lock(s_mem->lock);
+        app_queue_t *const q = queue_of(i, true);
+
+        if ( NULL == q )
+        {
+            rc = KODE_ERROR;
+        }
+        else if ( KDRV_BLE_APP_QUEUE_SLOTS <= q->count )
+        {
+            rc = KODE_NO_RESOURCES;
+        }
+        else
+        {
+            uint32_t const at = (q->head + q->count) % KDRV_BLE_APP_QUEUE_SLOTS;
+
+            (void)memcpy(q->data[at], data, len);
+            q->len[at] = (uint16_t)len;
+            q->count++;
+        }
+        khal_mutex_unlock(s_mem->lock);
+    }
+    return rc;
+}
+
+kode_status_t kdrv_ble_app_queue_clear(const char *chr)
+{
+    uint8_t       i     = 0U;
+    uint8_t       props = 0U;
+    kode_status_t rc    = app_find(chr, NULL, 0U, &i, &props);
+
+    if ( (KODE_OK == rc) && !op_fits(KDRV_BLE_APP_OP_CLEAR, props, 0U) )
+    {
+        rc = KODE_DENIED;
+    }
+    if ( (KODE_OK == rc) && (NULL != s_mem) )
+    {
+        khal_mutex_lock(s_mem->lock);
+        app_queue_t *const q = queue_of(i, false);
+
+        if ( NULL != q )
+        {
+            q->head  = 0U;
+            q->count = 0U;
+        }
+        khal_mutex_unlock(s_mem->lock);
+    }
+    return rc;
+}
+
+kode_status_t kdrv_ble_app_queue_room(const char *chr, size_t *room)
+{
+    uint8_t       i     = 0U;
+    uint8_t       props = 0U;
+    kode_status_t rc    = app_find(chr, NULL, 0U, &i, &props);
+
+    if ( (KODE_OK == rc) && (!op_fits(KDRV_BLE_APP_OP_CLEAR, props, 0U) || (NULL == room)) )
+    {
+        rc = KODE_DENIED;
+    }
+    if ( KODE_OK == rc )
+    {
+        size_t used = 0U;
+
+        if ( NULL != s_mem )
+        {
+            khal_mutex_lock(s_mem->lock);
+            const app_queue_t *const q = queue_of(i, false);
+
+            if ( NULL != q )
+            {
+                used = q->count;
+            }
+            khal_mutex_unlock(s_mem->lock);
+        }
+        *room = KDRV_BLE_APP_QUEUE_SLOTS - used;
+    }
+    return rc;
+}
+
 /* cppcheck-suppress misra-c2012-8.7 ; external, not static: kdrv_ble.c calls it from its own translation unit, kept apart from this one so the host suite compiles these rules without NimBLE */
 void *kdrv_ble_app_host(void)
 {
@@ -585,6 +760,16 @@ void kdrv_ble_app_link_reset(void)
         (void)memset(s_mem->sub, 0, sizeof(s_mem->sub));
         s_mem->head  = 0U;
         s_mem->count = 0U;
+        for ( uint8_t i = 0U; KDRV_BLE_APP_CHARS_MAX > i; i++ )
+        {
+            app_queue_t *const q = queue_of(i, false);
+
+            if ( NULL != q )
+            {
+                q->head  = 0U;
+                q->count = 0U;
+            }
+        }
         khal_mutex_unlock(s_mem->lock);
     }
 }
@@ -624,24 +809,82 @@ bool kdrv_ble_app_written(uint8_t chr, const uint8_t *data, uint16_t len)
     return took;
 }
 
-/* cppcheck-suppress misra-c2012-8.7 ; external, not static: kdrv_ble.c calls it from its own translation unit, kept apart from this one so the host suite compiles these rules without NimBLE */
-uint16_t kdrv_ble_app_read(uint8_t chr, uint8_t *out, uint16_t cap)
+/**
+ * @brief Copy queue @p q's oldest value out, and take it once the read reaches its end.
+ * @note Called with the lock held.
+ * @param q      The queue.
+ * @param offset As kdrv_ble_app_read().
+ * @param span   As kdrv_ble_app_read().
+ * @param out    As kdrv_ble_app_read().
+ * @param cap    As kdrv_ble_app_read().
+ * @param taken  Set true when the value was taken out.
+ * @return Its bytes; 0 for an empty queue.
+ */
+static uint16_t queue_read(app_queue_t *q, uint16_t offset, uint16_t span, uint8_t *out,
+                           uint16_t cap, bool *taken)
 {
     uint16_t n = 0U;
 
-    if ( (NULL != s_mem) && (KDRV_BLE_APP_CHARS_MAX > chr) && (NULL != out) )
+    if ( 0U < q->count )
     {
-        khal_mutex_lock(s_mem->lock);
-        n = s_mem->vlen[chr];
+        uint16_t const whole = q->len[q->head];
+
+        n = whole;
         if ( n > cap )
         {
             n = cap;
         }
-        if ( 0U < n )
+        (void)memcpy(out, q->data[q->head], n);
+        if ( ((uint32_t)offset + (uint32_t)span) >= (uint32_t)whole )
         {
-            (void)memcpy(out, s_mem->value[chr], n);
+            q->head = (q->head + 1U) % KDRV_BLE_APP_QUEUE_SLOTS;
+            q->count--;
+            *taken = true;
+        }
+    }
+    return n;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; external, not static: kdrv_ble.c calls it from its own translation unit, kept apart from this one so the host suite compiles these rules without NimBLE */
+uint16_t kdrv_ble_app_read(uint8_t chr, uint16_t offset, uint16_t span, uint8_t *out,
+                           uint16_t cap)
+{
+    const kdrv_ble_app_service_t *const svc   = kdrv_ble_app_service();
+    uint16_t                            n     = 0U;
+    bool                                taken = false;
+    uint8_t                             left  = 0U;
+
+    if ( (NULL != s_mem) && (NULL != svc) && (chr < svc->count)
+        && (KDRV_BLE_APP_CHARS_MAX > chr) && (NULL != out) )
+    {
+        khal_mutex_lock(s_mem->lock);
+        if ( (svc->chars[chr].props & KDRV_BLE_APP_QUEUED) != 0U )
+        {
+            app_queue_t *const q = queue_of(chr, false);
+
+            if ( NULL != q )
+            {
+                n    = queue_read(q, offset, span, out, cap, &taken);
+                left = (uint8_t)q->count;
+            }
+        }
+        else
+        {
+            n = s_mem->vlen[chr];
+            if ( n > cap )
+            {
+                n = cap;
+            }
+            if ( 0U < n )
+            {
+                (void)memcpy(out, s_mem->value[chr], n);
+            }
         }
         khal_mutex_unlock(s_mem->lock);
+    }
+    if ( taken && (NULL != s_taken_cb) )
+    {
+        s_taken_cb(chr, svc->chars[chr].name, left);
     }
     return n;
 }

@@ -15,6 +15,7 @@
 #include "kapp_cat.h"
 #include "kdrv_apps.h"
 #include "kdrv_kfw.h"
+#include "kapp_data.h"
 #include "sdkconfig.h"
 #include "kode_log.h"
 #include "khal_crc32.h"
@@ -59,7 +60,7 @@
  * region: the same 32 KB the writes use, so a step stays short (rule 5). */
 #define APPMGR_KEEP_CHUNK      (32U * 1024U)
 /* Re-publish the percent this often while the card writes a copy. AO_Power
- * takes the LED's blue pulse back after three seconds without a report, and
+ * takes the LED's orange pulse back after three seconds without a report, and
  * a multi-MB write has none of its own. */
 #define APPMGR_KEEP_BEAT_TICKS KQP_TICKS_PER_MS(1000U)
 /* How long the card may take over one copy before it is given up on: a base
@@ -89,6 +90,12 @@ _Static_assert(KODE_APP_DATE_MAX == sizeof(((kdrv_slot_desc_t *)NULL)->date),
                "AppEntryEvt.build_date is the size of kdrv_slot_desc_t.date");
 _Static_assert(KODE_APP_TIME_MAX == sizeof(((kdrv_slot_desc_t *)NULL)->time),
                "AppEntryEvt.build_time is the size of kdrv_slot_desc_t.time");
+/* A fetch request carries a base URL: it has to stay out of the jumbo pool,
+ * which a FlashReqEvt, the widest request of this AO, is asserted to (kqp.c). */
+_Static_assert(sizeof(AppDataGetReqEvt) <= sizeof(FlashReqEvt),
+               "AppDataGetReqEvt must not reach the jumbo pool");
+_Static_assert(sizeof(AppDataGetRspEvt) <= sizeof(AppFindRspEvt),
+               "AppDataGetRspEvt must fit the pool an AppFindRspEvt fits");
 /* What a listing and an eviction answer hold at once, in medium-tier events:
  * AO_Gui can hold a page of apps and a page of files (KODE_STORAGE_LIST_MAX
  * entries and an end each) while an eviction answer (KODE_APP_EVICT_MAX and an
@@ -107,6 +114,19 @@ _Static_assert((KAPPS_MAX_ENTRIES + 1U) <= UINT8_MAX,
  * bounds how long a silent AO_Storage can hold the apps region's owner and
  * the install's end. */
 #define APPMGR_TIDY_TICKS   KQP_TICKS_PER_MS(APPMGR_TIDY_MS)   /**< APPMGR_TIDY_MS (kaos.h) in ticks. */
+#define APPMGR_WIPE_TICKS   KQP_TICKS_PER_MS(APPMGR_WIPE_MS)   /**< APPMGR_WIPE_MS (kaos.h) in ticks. */
+
+/* An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG): its two
+ * files, by the names the folder gives them. */
+#define GET_JSON_NAME   KAPP_DATA_JSON_NAME   /**< The folder's first file.               */
+#define GET_ICON_NAME   KAPP_DATA_ICON_NAME   /**< Its second, and what app.json calls it. */
+
+/* Which part of a fetch is out. */
+enum {
+    GET_STEP_JSON = 0,   /**< app.json is being read from the URL.   */
+    GET_STEP_ICON,       /**< icon.k64 is.                           */
+    GET_STEP_PUT         /**< AO_Storage is writing the folder.      */
+};
 
 /* Immutable (statically allocated) outcome events, published on the QF bus.
  * Static events are never garbage-collected, so publishing them repeatedly is
@@ -151,7 +171,8 @@ enum {
     TIDY_AFTER_RECV,         /**< From the console: the done, the `>ok`, then
                               *   the launch.                                 */
     TIDY_AFTER_ADOPT,        /**< From the mailbox: the boot request.        */
-    TIDY_AFTER_ERASE,        /**< An app erased: the folder goes with it.    */
+    TIDY_AFTER_ERASE,        /**< An app erased: its files and its folder go
+                              *   with it, on both media.                    */
     TIDY_AFTER_KEEP          /**< Every app but one erased: the folders go,
                               *   then the asker is answered.                 */
 };
@@ -161,7 +182,9 @@ enum {
     TIDY_STEP_NONE = 0,      /**< None: nothing is owed.                      */
     TIDY_STEP_PUT,           /**< The installed app's folder is being written. */
     TIDY_STEP_RM_OWN,        /**< The installed app's folder is being deleted. */
-    TIDY_STEP_RM_VICTIM      /**< An evicted app's folder is being deleted.   */
+    TIDY_STEP_RM_VICTIM,     /**< An evicted app's folder is being deleted.   */
+    TIDY_STEP_WIPE           /**< An erased app's files are being taken off
+                              *   both media.                                 */
 };
 
 /** @brief What became of one victim's copy. */
@@ -236,6 +259,9 @@ typedef struct {
     uint32_t recv_crc;       /**< Running CRC over what has arrived.         */
     char     recv_name[KODE_APP_PROJECT_MAX]; /**< The project the host says
                               *   the image is, or "": the app it replaces. */
+    char     project[KODE_APP_PROJECT_MAX];   /**< The app being written, by
+                              *   its project name, for the reports; ""
+                              *   until it is known (project_note()).       */
     uint32_t recv_want;      /**< What that CRC must equal at the end.       */
     /* The chunk buffer of the two transfers that bring their own bytes,
      * adoption and a console stream. A stream fills a whole KODE_RECV_CHUNK
@@ -374,6 +400,32 @@ typedef struct {
     char        (*victims)[KDRV_SLOT_PROJECT_MAX];
     uint32_t      victim_count;    /**< Names recorded in victims[].            */
     uint32_t      victim_next;     /**< The next one to ask AO_Storage about.   */
+
+    /* ---- The erase in hand (APP_ERASE_REQ_SIG) ----------------------------
+     * What its end says (AppEraseDoneEvt), kept from the idle step that took
+     * the image to the answer of AO_Storage's wipe; the name is tidy_name. */
+    bool          erase_image;     /**< An installed image was removed.         */
+    bool          erase_extra;     /**< Its override or a mailbox image went.   */
+    uint8_t       erase_status;    /**< kode_status_t the end carries.          */
+    AppWipeMedium erase_fs;        /**< What went on the internal partition.    */
+    AppWipeMedium erase_sd;        /**< What went on the card.                  */
+
+    /* ---- An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG) ---
+     * One buffer for both files, app.json then icon.k64, which is what
+     * appdata_put_request() takes: PSRAM, this AO's until AO_Storage has it.
+     * The base URL is kept in PSRAM too, for the icon's open (rule 8: 200
+     * bytes of internal RAM held for a fetch that rarely happens). */
+    QActive      *get_who;         /**< Who asked.                              */
+    char          get_project[KODE_APP_PROJECT_MAX]; /**< Whose folder.         */
+    char         *get_url;         /**< The base URL, KODE_APPDATA_URL_MAX of
+                                    *   PSRAM; NULL outside a fetch.            */
+    uint8_t      *get_buf;         /**< The two files; NULL when not this AO's. */
+    uint16_t      get_json_len;    /**< Bytes of app.json in it.                */
+    uint16_t      get_icon_len;    /**< Bytes of icon.k64 after them.           */
+    uint32_t      get_want;        /**< What the file in hand said it brings.   */
+    uint32_t      get_fill;        /**< How much of it has arrived.             */
+    uint8_t       get_step;        /**< GET_STEP_*: which part is out.          */
+    bool          get_open;        /**< A transfer is open with AO_Net.         */
 } AppMgr;
 
 static AppMgr l_appMgr;
@@ -390,11 +442,14 @@ static QState AppMgr_asking(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_finding(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_scrubbing(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e);
+static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e);
 
 /* The four transfer wrappers are used by flash_cleanup(), which is declared
  * ahead of them because it is what every failure path calls. */
 static void          medium_read(AppMgr * const me);
 static void          medium_close(AppMgr * const me);
+static void          project_note(AppMgr * const me, const char *name);
+static QState        get_begin(AppMgr * const me, AppDataGetReqEvt const * const req);
 static const uint8_t *medium_buf(AppMgr * const me, uint8_t idx);
 static void          medium_return(AppMgr * const me, uint8_t idx);
 static kode_status_t xfer_begin(AppMgr * const me, uint8_t want, uint32_t src_len);
@@ -513,6 +568,32 @@ bool appmgr_keep_only_request(const char *project, QActive *who)
         return false;
     }
     return true;
+}
+
+kode_status_t appmgr_appdata_get_request(const char *project, const char *url,
+                                         QActive *who)
+{
+    if ( (NULL == project) || (NULL == url) || (NULL == who)
+        || (strlen(url) >= (size_t)KODE_APPDATA_URL_MAX) )
+    {
+        return KODE_ERROR;
+    }
+    AppDataGetReqEvt *e = Q_NEW_X(AppDataGetReqEvt, 0U, APPDATA_GET_REQ_SIG);
+    if ( NULL == e )
+    {
+        KLOG_W(TAG, "out of events; the fetch of a data folder is dropped");
+        return KODE_NO_RESOURCES;
+    }
+    (void)snprintf(e->project, sizeof(e->project), "%s", project);
+    (void)snprintf(e->url, sizeof(e->url), "%s", url);
+    e->who = who;
+    if ( !QACTIVE_POST_X(AO_AppMgr, &e->super, 0U, NULL) )
+    {
+        KLOG_W(TAG, "AO_AppMgr's queue is full; the fetch of a data folder "
+                    "is dropped");
+        return KODE_NO_RESOURCES;
+    }
+    return KODE_OK;
 }
 
 void appmgr_cat_request(const char *project, const char *cats, bool clear)
@@ -1367,6 +1448,121 @@ static void region_launch(const char *name)
     boot_app_run_request(d->e[idx].offset, d->e[idx].size, KBOOT_RUN_ONCE);
 }
 
+/* ---- The erase: everything of one app, and an end that says so --------------
+ * The image and its directory entry go in the idle step that takes the
+ * request, with the app's category override and a mailbox image of the same
+ * project; the files and the folders are AO_Storage's, asked in the tidy step.
+ * Every erase ends with one published AppEraseDoneEvt, a refusal included:
+ * the console and the launcher both wait on it.
+ */
+
+/**
+ * @brief Publish the end of an erase.
+ *
+ * @param name   The project the erase was about.
+ * @param st     How it ended; see AppEraseDoneEvt.
+ * @param image  An installed image was removed.
+ * @param fs     What went on the internal partition; NULL when it was not
+ *               looked at.
+ * @param sd     What went on the card; NULL when it was not looked at.
+ */
+static void erase_publish(const char *name, kode_status_t st, bool image,
+                          const AppWipeMedium *fs, const AppWipeMedium *sd)
+{
+    AppEraseDoneEvt *e = Q_NEW_X(AppEraseDoneEvt, 0U, APP_ERASE_DONE_SIG);
+    /* A request carries a file's name, longer than a project's: what does
+     * not fit is cut, and said to the format so the compiler knows. */
+    size_t const room = sizeof(e->name) - 1U;
+
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "out of events; the end of the erase of '%s' goes unsaid",
+               name);
+        return;
+    }
+    (void)snprintf(e->name, sizeof(e->name), "%.*s", (int)room, name);
+    e->status = (uint8_t)st;
+    e->image  = image;
+    (void)memset(&e->fs, 0, sizeof(e->fs));
+    (void)memset(&e->sd, 0, sizeof(e->sd));
+    if ( NULL != fs )
+    {
+        e->fs = *fs;
+    }
+    if ( NULL != sd )
+    {
+        e->sd = *sd;
+    }
+    QACTIVE_PUBLISH(&e->super, AO_AppMgr);
+}
+
+/**
+ * @brief Answer an erase that arrives while the AO is busy: KODE_DENIED,
+ *        published, so nobody waits on an erase that will not run.
+ *
+ * @param e  The request refused; any other signal is left alone.
+ */
+static void erase_deny(QEvt const * const e)
+{
+    if ( (QSignal)APP_ERASE_REQ_SIG == e->sig )
+    {
+        erase_publish(Q_EVT_CAST(AppFlashEvt)->file, KODE_DENIED, false,
+                      NULL, NULL);
+    }
+}
+
+/**
+ * @brief Whether a medium's share of a wipe left something of the app behind.
+ * @param m The medium's result.
+ * @return true for an image or a folder that would not go.
+ */
+static bool erase_left(const AppWipeMedium *m)
+{
+    return (0U != m->left) || ((uint8_t)APP_WIPE_FOLDER_LEFT == m->folder);
+}
+
+/**
+ * @brief Whether a medium's share of a wipe found anything of the app.
+ * @param m The medium's result.
+ * @return true for an image or a folder, gone or not.
+ */
+static bool erase_found(const AppWipeMedium *m)
+{
+    return (0U != m->files) || (0U != m->left)
+        || ((uint8_t)APP_WIPE_FOLDER_NONE != m->folder);
+}
+
+/**
+ * @brief Take AO_Storage's answer into what the erase's end will say.
+ *
+ * @param me  The AO, with an erase in hand.
+ * @param rsp The wipe's answer.
+ */
+static void erase_take_wipe(AppMgr * const me, StorageAppWipeRspEvt const * const rsp)
+{
+    if ( (uint8_t)KODE_OK != rsp->status )
+    {
+        /* Refused: the files were not looked at. */
+        me->erase_status = rsp->status;
+        return;
+    }
+    me->erase_fs = rsp->fs;
+    me->erase_sd = rsp->sd;
+    if ( erase_left(&rsp->fs) || erase_left(&rsp->sd) )
+    {
+        me->erase_status = (uint8_t)KODE_IO_ERROR;
+    }
+    else if ( me->erase_image || me->erase_extra || erase_found(&rsp->fs)
+             || erase_found(&rsp->sd) )
+    {
+        me->erase_status = (uint8_t)KODE_OK;
+    }
+    else
+    {
+        me->erase_status = (uint8_t)KODE_ERROR;   /* nothing of that name */
+    }
+}
+
 /* ---- Tidying: the folders, then the end ------------------------------------
  * After region_install() commits, the app's metadata folder is made to match
  * the container, and the folders of evicted apps with no copy on the card are
@@ -1446,7 +1642,8 @@ static bool tidy_ask_own(AppMgr * const me)
  *
  * The installed app's own first, then one delete per evicted app. A victim
  * with the installed app's own name is skipped: it is the app being replaced,
- * and its folder is the one just written.
+ * and its folder is the one just written. An erase has one request, the wipe
+ * of the app's files.
  *
  * @param me The AO.
  * @return true when a request is out and its answer is awaited.
@@ -1457,10 +1654,26 @@ static bool tidy_advance(AppMgr * const me)
     if ( !me->tidy_own_asked )
     {
         me->tidy_own_asked = true;
-        if ( tidy_ask_own(me) )
+        if ( (uint8_t)TIDY_AFTER_ERASE == me->tidy_after )
+        {
+            /* An erase asks for more than the folder: every file of the app,
+             * on both media, under a deadline of its own. */
+            if ( storage_app_wipe_request(me->tidy_name, &me->super) == KODE_OK )
+            {
+                me->tidy_step = (uint8_t)TIDY_STEP_WIPE;
+                (void)QTimeEvt_rearm(&me->tidy, APPMGR_WIPE_TICKS);
+                return true;
+            }
+            me->erase_status = (uint8_t)KODE_NO_RESOURCES;
+        }
+        else if ( tidy_ask_own(me) )
         {
             (void)QTimeEvt_rearm(&me->tidy, APPMGR_TIDY_TICKS);
             return true;
+        }
+        else
+        {
+            /* Nothing to ask for the installed app's own folder. */
         }
     }
     while ( me->victim_next < me->victim_count )
@@ -1552,7 +1765,18 @@ static void tidy_finish(AppMgr * const me)
             break;
         }
         default: {
-            KLOG_N(TAG, "'%s' removed", me->tidy_name);
+            /* TIDY_AFTER_ERASE: said in the log, then to whoever waits. */
+            if ( (uint8_t)KODE_OK == me->erase_status )
+            {
+                KLOG_N(TAG, "'%s' removed", me->tidy_name);
+            }
+            else
+            {
+                KLOG_W(TAG, "the erase of '%s' ended with code %u", me->tidy_name,
+                       (unsigned)me->erase_status);
+            }
+            erase_publish(me->tidy_name, (kode_status_t)me->erase_status,
+                          me->erase_image, &me->erase_fs, &me->erase_sd);
             break;
         }
     }
@@ -1647,7 +1871,7 @@ static QState tidy_state(AppMgr * const me)
  * and is not handled.
  *
  * @param me The AO.
- * @param e  APPDATA_PUT_RSP_SIG or APPDATA_RM_RSP_SIG.
+ * @param e  APPDATA_PUT_RSP_SIG, APPDATA_RM_RSP_SIG or STORAGE_APP_WIPE_RSP_SIG.
  * @return true when it is the answer awaited.
  */
 static bool tidy_awaited(const AppMgr * const me, QEvt const * const e)
@@ -1665,6 +1889,12 @@ static bool tidy_awaited(const AppMgr * const me, QEvt const * const e)
         awaited = (((uint8_t)TIDY_STEP_RM_OWN == me->tidy_step)
                    || ((uint8_t)TIDY_STEP_RM_VICTIM == me->tidy_step))
                && (strcmp(Q_EVT_CAST(AppDataRmRspEvt)->project,
+                          tidy_who(me)) == 0);
+    }
+    else if ( (QSignal)STORAGE_APP_WIPE_RSP_SIG == e->sig )
+    {
+        awaited = ((uint8_t)TIDY_STEP_WIPE == me->tidy_step)
+               && (strcmp(Q_EVT_CAST(StorageAppWipeRspEvt)->project,
                           tidy_who(me)) == 0);
     }
     else
@@ -1723,6 +1953,7 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
                (unsigned long)img_len, (unsigned long)me->dst_offset);
         return KODE_OK;   /* one image, one slot: nothing to place */
     }
+    project_note(me, name);   /* the image's own word for what it is */
 
     kapps_plan_t plan;
     kapps_dir_t  dir = *kdrv_apps_dir();          /* work on a copy */
@@ -1954,6 +2185,9 @@ static void flash_finish(AppMgr * const me)
         KLOG_N(TAG, "parked %u bytes in the mailbox; `install src=\"pending\" "
                     "dst=...` installs it", (unsigned)me->written);
         me->bypass = false;
+        /* The card that rose for the write ends on the done, which names no
+         * app: none was installed. */
+        QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);
         return;
     }
 
@@ -2005,9 +2239,38 @@ static void progress_publish(AppMgr * const me, unsigned pct)
         }
         ev->percent = (uint8_t)pct;
         (void)snprintf(ev->file, sizeof(ev->file), "%s", me->file);
+        ev->project[0] = '\0';
+        if ( !me->os_target )
+        {
+            (void)snprintf(ev->project, sizeof(ev->project), "%s", me->project);
+        }
         QACTIVE_PUBLISH(&ev->super, &me->super);
     }
     me->reported = pct;
+}
+
+/**
+ * @brief Note which project is being written and, when that is news, say it.
+ *
+ * The reports name the project so the Opening sheet can show the app's own
+ * data folder. A write already announced learns the name later than its 0 %
+ * (a file's or a URL's first chunk carries it), and the same percent is then
+ * reported again at once: a big image would otherwise keep the sheet
+ * nameless for a whole percent of its bytes.
+ *
+ * @param me   The AO.
+ * @param name The project name; NULL or the one already noted changes nothing.
+ */
+static void project_note(AppMgr * const me, const char *name)
+{
+    if ( (NULL != name) && (strcmp(me->project, name) != 0) )
+    {
+        (void)snprintf(me->project, sizeof(me->project), "%s", name);
+        if ( me->writing && !me->os_target )
+        {
+            progress_publish(me, me->reported);
+        }
+    }
 }
 
 /** @brief Percent of the whole install: the copies, then the image. */
@@ -2033,7 +2296,7 @@ static unsigned progress_pct(const AppMgr * const me)
  *        percent, in the log every APPMGR_PROGRESS.
  *
  * A medium's chunks and the console's both come through here. The bus needs
- * the percent step: the Opening pill moves by it, and AO_Power drops its blue
+ * the percent step: the Opening pill moves by it, and AO_Power drops its orange
  * pulse after POWER_LED_WRITE_MS without a report.
  *
  * @param me The AO.
@@ -2370,6 +2633,90 @@ static void url_label(char *out, size_t size, const char *url)
 }
 
 /**
+ * @brief Take the erase in hand: the image, the override, the mailbox, then
+ *        AO_Storage for the files.
+ *
+ * An app that is not installed is not the end of it: a file or a folder of
+ * that name may still be on a medium, and AO_Storage is asked all the same. A
+ * directory that will not commit ends the erase with nothing removed, and so
+ * does an empty name.
+ *
+ * @param me  The AO, idle.
+ * @param req The request: the project's name.
+ * @return The QP status: tidying while AO_Storage works, idle otherwise.
+ */
+static QState erase_begin(AppMgr * const me, AppFlashEvt const * const req)
+{
+    kapps_dir_t dir = *kdrv_apps_dir();
+    int const   idx = appmgr_find_idx(&dir, req->file);  /* -1 if absent */
+    char        cats[KODE_APP_CATEGORY_MAX];
+    uint32_t    img_len     = 0U;
+    uint32_t    decoded_len = 0U;
+
+    me->erase_image  = false;
+    me->erase_extra  = false;
+    me->erase_status = (uint8_t)KODE_TIMEOUT;   /* until AO_Storage answers */
+    (void)memset(&me->erase_fs, 0, sizeof(me->erase_fs));
+    (void)memset(&me->erase_sd, 0, sizeof(me->erase_sd));
+
+    if ( '\0' == req->file[0] )
+    {
+        /* No name is no app: nothing is looked for. */
+        erase_publish(req->file, KODE_ERROR, false, NULL, NULL);
+        return Q_HANDLED();
+    }
+
+    if ( 0 <= idx )
+    {
+        uint32_t const off = dir.e[idx].offset;
+
+        dir.e[idx].flags = 0U;
+        appdir_compact(&dir);
+        if ( kdrv_apps_dir_commit(&dir) != KODE_OK )
+        {
+            KLOG_E(TAG, "cannot update the directory; nothing erased");
+            erase_publish(req->file, KODE_IO_ERROR, false, NULL, NULL);
+            return Q_HANDLED();
+        }
+        /* Erase the image header too, so no stale 0xE9 is left at a
+         * bootable offset. The directory is what counts. */
+        (void)kdrv_apps_erase_header(off);   /* kdrv: erase first 4 KB */
+        me->erase_image = true;
+    }
+    else
+    {
+        KLOG_N(TAG, "'%s' is not installed; its files are looked for",
+               req->file);
+    }
+
+    /* The person's categories for the app go with it: one NVS write, made
+     * only when there is a row to drop. */
+    if ( kapp_cat_resolve(req->file, cats, sizeof(cats)) )
+    {
+        (void)kapp_cat_clear(req->file);
+        me->erase_extra = true;
+    }
+    /* A mailbox that still holds the app would bring it back at the next
+     * boot. */
+    if ( (NULL != me->chunk) && kdrv_apps_pending_present(&img_len, &decoded_len) )
+    {
+        char held[KDRV_SLOT_PROJECT_MAX];
+
+        pending_project(me, held, sizeof(held));
+        if ( strcmp(held, req->file) == 0 )
+        {
+            KLOG_N(TAG, "the mailbox held '%s'; emptied", req->file);
+            (void)kdrv_apps_pending_consume();
+            me->erase_extra = true;
+        }
+    }
+
+    victims_clear(me);
+    tidy_begin(me, req->file, (uint8_t)TIDY_AFTER_ERASE);
+    return tidy_state(me);
+}
+
+/**
  * @brief Nothing in flight: installs, runs, erases, listings and the other requests.
  *
  * @param me The AO.
@@ -2461,6 +2808,8 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             me->written    = 0U;
             (void)snprintf(me->recv_name, sizeof(me->recv_name), "%s",
                            req->name);
+            /* What the reports call it until the image says so itself. */
+            (void)snprintf(me->project, sizeof(me->project), "%s", req->name);
             /* The ready publishes 0 % and the reports count on from there.
              * A stream has no file name, and one left over from the last
              * write would name a stranger on the card. */
@@ -2606,6 +2955,9 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 status = Q_HANDLED();
                 break;
             }
+            /* A file's name is not its project's, nor is a URL's: the
+             * reports name none until the first chunk is read. */
+            me->project[0] = '\0';
             /* A URL fits KODE_FLASH_SRC_MAX and travels whole; me->file
              * only names it. A file name has to fit me->file, which is the
              * shorter of the two. Refuse rather than truncate: a silently
@@ -2673,32 +3025,12 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case APP_ERASE_REQ_SIG: {   /* now carries a name (AppFlashEvt) */
-            AppFlashEvt const * const req = Q_EVT_CAST(AppFlashEvt);
-            kapps_dir_t dir = *kdrv_apps_dir();
-            int const   idx = appmgr_find_idx(&dir, req->file);  /* -1 if absent */
-            if ( 0 > idx )
-            {
-                KLOG_E(TAG, "'%s' is not installed", req->file);
-                status = Q_HANDLED();
-                break;
-            }
-            uint32_t const off = dir.e[idx].offset;
-            dir.e[idx].flags = 0U;
-            appdir_compact(&dir);
-            if ( kdrv_apps_dir_commit(&dir) != KODE_OK )
-            {
-                KLOG_E(TAG, "cannot update the directory; nothing erased");
-                status = Q_HANDLED();
-                break;
-            }
-            /* Erase the image header too, so no stale 0xE9 is left at a
-             * bootable offset. The directory is what counts. */
-            (void)kdrv_apps_erase_header(off);   /* kdrv: erase first 4 KB */
-            /* The folder goes with the app, before the erase is called done. */
-            victims_clear(me);
-            tidy_begin(me, req->file, (uint8_t)TIDY_AFTER_ERASE);
-            status = tidy_state(me);
+        case APP_ERASE_REQ_SIG: {
+            status = erase_begin(me, Q_EVT_CAST(AppFlashEvt));
+            break;
+        }
+        case APPDATA_GET_REQ_SIG: {
+            status = get_begin(me, Q_EVT_CAST(AppDataGetReqEvt));
             break;
         }
         case APP_FIND_REQ_SIG: {
@@ -3041,6 +3373,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
         case APP_ERASE_REQ_SIG:
         case APP_LIST_REQ_SIG: {
             KLOG_W(TAG, "busy opening '%s'; request ignored", me->file);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -3523,6 +3856,7 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy keeping apps on the card; request ignored");
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -3724,8 +4058,8 @@ static QState evict_ask(AppMgr * const me, QEvt const * const e)
  *        busy with it.
  *
  * What AppMgr_asking, AppMgr_finding and AppMgr_scrubbing all do: an install,
- * run, erase, listing or receive request is logged and dropped, and an app_cat
- * request is answered KODE_DENIED, so the console does not wait on it.
+ * run, listing or receive request is logged and dropped, and an erase or an
+ * app_cat request is answered KODE_DENIED, so nobody waits on it.
  *
  * @param me    The AO.
  * @param e     The event.
@@ -3745,6 +4079,7 @@ static bool busy_refused(AppMgr * const me, QEvt const * const e,
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy %s; request ignored", doing);
+            erase_deny(e);
             break;
         }
         case APP_CAT_REQ_SIG: {
@@ -3928,6 +4263,421 @@ static QState keep_only_ask(AppMgr * const me, QEvt const * const e)
     return Q_TRAN(&AppMgr_scrubbing);
 }
 
+/* ---- An app's data folder fetched from a URL -------------------------------
+ * An app's data travels apart from its image and may come first. This AO reads
+ * the folder's two files from a base URL into one buffer and hands it to
+ * AO_Storage, which is the folder's only writer. One fetch at a time, and none
+ * while an image is written: the transfer is AO_Net's one.
+ */
+
+/**
+ * @brief Answer a fetch.
+ *
+ * @param who     The asker.
+ * @param project Whose folder.
+ * @param why     How it ended.
+ * @param icon    Whether the folder written holds an icon.
+ */
+static void get_reply(QActive * const who, const char *project,
+                      appdata_get_why_t why, bool icon)
+{
+    AppDataGetRspEvt * const ev = Q_NEW_X(AppDataGetRspEvt, 0U,
+                                          APPDATA_GET_RSP_SIG);
+
+    if ( NULL == ev )
+    {
+        KLOG_W(TAG, "out of events; the answer to a data folder's fetch is lost");
+        return;
+    }
+    (void)snprintf(ev->project, sizeof(ev->project), "%s", project);
+    ev->why  = (uint8_t)why;
+    ev->icon = icon;
+    if ( !QACTIVE_POST_X(who, &ev->super, 0U, AO_AppMgr) )
+    {
+        KLOG_W(TAG, "the asker's queue is full; the answer to a data folder's "
+                    "fetch is lost");
+    }
+}
+
+#if CONFIG_KODEOS_NET
+/**
+ * @brief Give back what a fetch still holds: the files' buffer, unless
+ *        AO_Storage has it, and the base URL.
+ *
+ * @param me The AO.
+ */
+static void get_release(AppMgr * const me)
+{
+    if ( NULL != me->get_buf )
+    {
+        khal_free(me->get_buf);
+        me->get_buf = NULL;
+    }
+    if ( NULL != me->get_url )
+    {
+        khal_free(me->get_url);
+        me->get_url = NULL;
+    }
+}
+
+/* A base URL with either file name after it is a URL a transfer takes whole. */
+_Static_assert((KODE_APPDATA_URL_MAX + sizeof(GET_JSON_NAME)) <= KODE_FLASH_SRC_MAX,
+               "a data folder's base URL and a file name fit a transfer's URL");
+_Static_assert(sizeof(GET_ICON_NAME) == sizeof(GET_JSON_NAME),
+               "the folder's two file names are the same length");
+
+/**
+ * @brief Open one of the folder's two files at the base URL.
+ *
+ * The answer's deadline is the caller's to arm: the first file is opened on
+ * the way into the state, whose entry arms it.
+ *
+ * @param me   The AO.
+ * @param file The file's name.
+ */
+static void get_open_file(AppMgr * const me, const char *file)
+{
+    char url[KODE_FLASH_SRC_MAX];
+
+    (void)snprintf(url, sizeof(url), "%s%s", me->get_url, file);
+    me->get_want = 0U;
+    me->get_fill = 0U;
+    me->get_open = true;
+    net_stream_open_request(url, &me->super);
+}
+
+/**
+ * @brief End a fetch that did not make a folder.
+ *
+ * @param me  The AO.
+ * @param why What went wrong.
+ * @return The transition to idle.
+ */
+static QState get_fail(AppMgr * const me, appdata_get_why_t why)
+{
+    if ( me->get_open )
+    {
+        net_stream_close_request();
+        me->get_open = false;
+    }
+    get_reply(me->get_who, me->get_project, why, false);
+    return Q_TRAN(&AppMgr_idle);
+}
+
+/**
+ * @brief Hand the fetched folder to AO_Storage.
+ *
+ * @param me The AO.
+ * @return The state's answer: it stays for AO_Storage's, or ends busy.
+ */
+static QState get_put(AppMgr * const me)
+{
+    if ( appdata_put_request(me->get_project, me->get_buf, me->get_json_len,
+                             me->get_icon_len, &me->super) != KODE_OK )
+    {
+        return get_fail(me, APPDATA_GET_BUSY);   /* the buffer is still ours */
+    }
+    me->get_buf  = NULL;                         /* AO_Storage's from here */
+    me->get_step = (uint8_t)GET_STEP_PUT;
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_TIDY_TICKS);
+    return Q_HANDLED();
+}
+
+/**
+ * @brief The file in hand has arrived whole: check it and go on.
+ *
+ * app.json is read with the folder's own parser, so a file AO_Storage would
+ * refuse to show is never written. It says whether there is an icon: one it
+ * names must be icon.k64, the name the folder gives it, and is fetched next.
+ *
+ * @param me The AO.
+ * @return The state's answer.
+ */
+static QState get_file_done(AppMgr * const me)
+{
+    net_stream_close_request();
+    me->get_open = false;
+
+    if ( (uint8_t)GET_STEP_ICON == me->get_step )
+    {
+        me->get_icon_len = (uint16_t)me->get_fill;
+        return get_put(me);
+    }
+
+    kapp_json_status_t why = KAPP_JSON_NONE;
+    kapp_fetch_t const ask = kapp_data_fetched((const char *)me->get_buf,
+                                               me->get_fill, &why);
+    if ( KAPP_FETCH_REFUSED == ask )
+    {
+        KLOG_W(TAG, "the app.json fetched for '%s' is refused (%s); it must be "
+                    "one the board reads, and name no icon but "
+                    GET_ICON_NAME, me->get_project, kapp_json_status_name(why));
+        return get_fail(me, APPDATA_GET_JSON);
+    }
+    me->get_json_len = (uint16_t)me->get_fill;
+    if ( KAPP_FETCH_NO_ICON == ask )
+    {
+        return get_put(me);                      /* an app with no icon */
+    }
+    me->get_step = (uint8_t)GET_STEP_ICON;
+    get_open_file(me, GET_ICON_NAME);
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
+    return Q_HANDLED();
+}
+
+/**
+ * @brief The open of the file in hand was answered.
+ *
+ * The length is judged before a byte is read: app.json may be anything up to
+ * the reader's limit, an icon is one size.
+ *
+ * @param me  The AO.
+ * @param rsp The answer.
+ * @return The state's answer.
+ */
+static QState get_opened(AppMgr * const me, StorageOpenRspEvt const * const rsp)
+{
+    if ( (uint8_t)KODE_OK != rsp->status )
+    {
+        me->get_open = false;                    /* nothing was opened */
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    if ( 0U == rsp->size )
+    {
+        KLOG_W(TAG, "the server gave no length for a file of '%s'",
+               me->get_project);
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    if ( (uint8_t)GET_STEP_JSON == me->get_step )
+    {
+        if ( KAPP_DATA_JSON_MAX < rsp->size )
+        {
+            return get_fail(me, APPDATA_GET_JSON);
+        }
+    }
+    else if ( KAPP_ICON_BYTES != rsp->size )
+    {
+        KLOG_W(TAG, "the icon fetched for '%s' is %lu bytes, not %lu",
+               me->get_project, (unsigned long)rsp->size,
+               (unsigned long)KAPP_ICON_BYTES);
+        return get_fail(me, APPDATA_GET_ICON);
+    }
+    else
+    {
+        /* An icon of the one size there is. */
+    }
+    me->get_want = rsp->size;
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
+    net_stream_read_request();
+    return Q_HANDLED();
+}
+
+/**
+ * @brief A chunk of the file in hand arrived.
+ *
+ * get_want is the file's length from its open's answer, and 0 between a
+ * file's end and the next one's open.
+ *
+ * @param me The AO.
+ * @param d  The chunk.
+ * @return The state's answer.
+ */
+static QState get_chunk(AppMgr * const me, StorageDataEvt const * const d)
+{
+    if ( 0U == me->get_want )
+    {
+        /* No file is open: the open in flight has not been answered. This is
+         * a chunk of the file before it, sent before its close was read, and
+         * taking it for the new file's would end that file empty. */
+        return Q_HANDLED();
+    }
+    if ( (uint8_t)KODE_OK != d->status )
+    {
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    if ( (uint32_t)d->len > (me->get_want - me->get_fill) )
+    {
+        KLOG_W(TAG, "a file of '%s' brought more than it said", me->get_project);
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    /* app.json fills the buffer's start; the icon goes right after it. */
+    size_t at = (size_t)me->get_fill;
+    if ( (uint8_t)GET_STEP_ICON == me->get_step )
+    {
+        at += (size_t)me->get_json_len;
+    }
+    const uint8_t * const src = net_stream_buf(d->idx);
+    if ( NULL == src )
+    {
+        return get_fail(me, APPDATA_GET_FETCH);  /* a buffer AO_Net has not got */
+    }
+    (void)memcpy(&me->get_buf[at], src, d->len);
+    me->get_fill += (uint32_t)d->len;
+
+    if ( me->get_fill == me->get_want )
+    {
+        return get_file_done(me);
+    }
+    if ( d->eof )
+    {
+        KLOG_W(TAG, "a file of '%s' ended %lu bytes short", me->get_project,
+               (unsigned long)(me->get_want - me->get_fill));
+        return get_fail(me, APPDATA_GET_FETCH);
+    }
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
+    net_stream_return(d->idx);                   /* and asks for the next */
+    return Q_HANDLED();
+}
+#endif /* CONFIG_KODEOS_NET */
+
+/**
+ * @brief Begin a fetch: refuse what cannot be one, take the buffer, open app.json.
+ *
+ * @param me  The AO, idle.
+ * @param req The request.
+ * @return The transition to AppMgr_fetching, or handled when it was refused.
+ */
+static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
+{
+    char folder[KODE_PATH_MAX];
+
+    if ( NULL == req->who )
+    {
+        return Q_HANDLED();
+    }
+    if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
+                              req->project) )
+    {
+        KLOG_W(TAG, "'%s' cannot name a data folder", req->project);
+        get_reply(req->who, req->project, APPDATA_GET_NAME, false);
+        return Q_HANDLED();
+    }
+#if CONFIG_KODEOS_NET
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+    me->get_buf = (uint8_t *)khal_alloc_psram(1U, (size_t)KAPP_DATA_JSON_MAX
+                                                  + (size_t)KAPP_ICON_BYTES);
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+    me->get_url = (char *)khal_alloc_psram(1U, (size_t)KODE_APPDATA_URL_MAX);
+    if ( (NULL == me->get_buf) || (NULL == me->get_url) )
+    {
+        KLOG_W(TAG, "no PSRAM to fetch the data folder of '%s'", req->project);
+        get_release(me);
+        get_reply(req->who, req->project, APPDATA_GET_BUSY, false);
+        return Q_HANDLED();
+    }
+    me->get_who      = req->who;
+    me->get_step     = (uint8_t)GET_STEP_JSON;
+    me->get_json_len = 0U;
+    me->get_icon_len = 0U;
+    me->get_open     = false;
+    (void)snprintf(me->get_project, sizeof(me->get_project), "%s", req->project);
+    (void)snprintf(me->get_url, (size_t)KODE_APPDATA_URL_MAX, "%s", req->url);
+    KLOG_N(TAG, "fetching the data folder of '%s'", me->get_project);
+    get_open_file(me, GET_JSON_NAME);
+    return Q_TRAN(&AppMgr_fetching);
+#else
+    KLOG_E(TAG, "this firmware has no network services");
+    get_reply(req->who, req->project, APPDATA_GET_FETCH, false);
+    return Q_HANDLED();
+#endif
+}
+
+/**
+ * @brief Reading an app's data folder from a URL, then waiting for AO_Storage
+ *        to write it.
+ *
+ * Every wait has the deadline timer the other transfers use; the states are
+ * mutually exclusive and each disarms it on the way out. The buffer is this
+ * AO's until AO_Storage takes it, and whatever is still held is freed on the
+ * way out.
+ */
+static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
+{
+    QState status;
+    switch ( e->sig )
+    {
+#if CONFIG_KODEOS_NET
+        case Q_ENTRY_SIG: {
+            QTimeEvt_armX(&me->idle, APPMGR_OPEN_TICKS, 0U);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_STREAM_OPEN_RSP_SIG: {
+            status = get_opened(me, Q_EVT_CAST(StorageOpenRspEvt));
+            break;
+        }
+        case NET_STREAM_DATA_SIG: {
+            status = get_chunk(me, Q_EVT_CAST(StorageDataEvt));
+            break;
+        }
+        case APPDATA_PUT_RSP_SIG: {
+            AppDataPutRspEvt const * const rsp = Q_EVT_CAST(AppDataPutRspEvt);
+
+            status = Q_HANDLED();
+            if ( ((uint8_t)GET_STEP_PUT == me->get_step)
+                && (strcmp(rsp->project, me->get_project) == 0) )
+            {
+                appdata_get_why_t why = APPDATA_GET_STORE;
+
+                if ( KODE_OK == rsp->rc )
+                {
+                    why = APPDATA_GET_OK;
+                }
+                else if ( KODE_NO_RESOURCES == rsp->rc )
+                {
+                    why = APPDATA_GET_FULL;
+                }
+                else if ( KODE_DENIED == rsp->rc )
+                {
+                    why = APPDATA_GET_BUSY;
+                }
+                else
+                {
+                    /* The folder could not be written. */
+                }
+                get_reply(me->get_who, me->get_project, why,
+                          (APPDATA_GET_OK == why) && (0U != me->get_icon_len));
+                status = Q_TRAN(&AppMgr_idle);
+            }
+            break;
+        }
+        case APP_RECV_IDLE_SIG: {
+            if ( (uint8_t)GET_STEP_PUT == me->get_step )
+            {
+                KLOG_W(TAG, "AO_Storage never said how the data folder of '%s' "
+                            "went", me->get_project);
+                status = get_fail(me, APPDATA_GET_STORE);
+            }
+            else
+            {
+                KLOG_W(TAG, "the data folder of '%s' was never answered",
+                       me->get_project);
+                status = get_fail(me, APPDATA_GET_FETCH);
+            }
+            break;
+        }
+        case Q_EXIT_SIG: {
+            (void)QTimeEvt_disarm(&me->idle);
+            get_release(me);
+            status = Q_HANDLED();
+            break;
+        }
+#endif /* CONFIG_KODEOS_NET */
+        default: {
+            if ( busy_refused(me, e, "fetching an app's data folder") )
+            {
+                status = Q_HANDLED();
+            }
+            else
+            {
+                status = Q_SUPER(&AppMgr_busy);
+            }
+            break;
+        }
+    }
+    return status;
+}
+
 /**
  * @brief The parent of every state with work in hand.
  *
@@ -3943,6 +4693,14 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
         case STORAGE_PATH_RSP_SIG:
         case STORAGE_WRITE_RSP_SIG: {
             (void)keep_owed_answer(me, e);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_ERASE_REQ_SIG: {
+            /* A state under this one that names no refusal of its own. */
+            KLOG_W(TAG, "busy; the erase of '%s' is refused",
+                   Q_EVT_CAST(AppFlashEvt)->file);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -3983,6 +4741,18 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
                 KLOG_W(TAG, "busy; keep-only request for '%s' denied",
                        req->project);
                 keep_only_reply(req->who, KODE_DENIED, 0U);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APPDATA_GET_REQ_SIG: {
+            AppDataGetReqEvt const * const req = Q_EVT_CAST(AppDataGetReqEvt);
+
+            if ( NULL != req->who )
+            {
+                KLOG_W(TAG, "busy; the fetch of the data folder of '%s' is "
+                            "refused", req->project);
+                get_reply(req->who, req->project, APPDATA_GET_BUSY, false);
             }
             status = Q_HANDLED();
             break;
@@ -4217,6 +4987,22 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
             }
             break;
         }
+        case STORAGE_APP_WIPE_RSP_SIG: {
+            status = Q_HANDLED();
+            if ( !tidy_awaited(me, e) )
+            {
+                KLOG_D(TAG, "an answer to a wipe nobody is waiting for");
+                break;
+            }
+            tidy_answered(me);
+            erase_take_wipe(me, Q_EVT_CAST(StorageAppWipeRspEvt));
+            if ( !tidy_advance(me) )
+            {
+                tidy_finish(me);
+                status = tidy_state(me);
+            }
+            break;
+        }
         case APP_TIDY_TIMEOUT_SIG: {
             status = Q_HANDLED();
             if ( me->tidy_swallow )
@@ -4240,6 +5026,7 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy tidying the data folder of '%s'; request ignored",
                    me->tidy_name);
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4350,6 +5137,7 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             KLOG_W(TAG, "busy writing %s (%u%%); request ignored",
                    me->os_target ? "the kodeOS slot" : "the region",
                    (unsigned)((me->written * 100U) / me->total));
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4441,6 +5229,7 @@ static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e)
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "adopting the mailbox app; request ignored");
+            erase_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4523,6 +5312,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
         KLOG_N(TAG, "parked %u bytes in the mailbox; `install src=\"pending\" "
                     "dst=...` installs it", (unsigned)me->written);
         me->bypass = false;
+        QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);   /* names no app */
         QACTIVE_PUBLISH(&s_recv_done_evt, &me->super);
         return Q_TRAN(&AppMgr_idle);
     }

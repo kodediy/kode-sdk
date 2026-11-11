@@ -46,14 +46,30 @@ _Static_assert((unsigned)LV_DRAW_THREAD_PRIO == KODE_PRIO_USER_GUI,
  */
 #define KSCREEN_BUF_LINES        (KBSP_LCD_V_RES / 10U)
 
-/** @brief Bytes per draw buffer: RGB565, two bytes a pixel. */
-#define KSCREEN_BUF_BYTES        ((size_t)KBSP_LCD_H_RES * KSCREEN_BUF_LINES * 2U)
+/** @brief Bytes of the rows one draw buffer holds: RGB565, two bytes a pixel. */
+#define KSCREEN_BUF_ROW_BYTES    ((size_t)KBSP_LCD_H_RES * KSCREEN_BUF_LINES * 2U)
+
+/**
+ * @brief Bytes per draw buffer, as allocated and as told to LVGL: the rows
+ *        rounded up to whole cache lines, which the PPA demands of a buffer.
+ *
+ * The few bytes past the last row are less than one row, so LVGL still draws
+ * KSCREEN_BUF_LINES rows into a partial buffer.
+ */
+#define KSCREEN_BUF_BYTES \
+    ((KSCREEN_BUF_ROW_BYTES + (KDRV_DISPLAY_CACHE_LINE - 1U)) \
+     & ~((size_t)KDRV_DISPLAY_CACHE_LINE - 1U))
+
+_Static_assert(0U == (KSCREEN_BUF_BYTES % KDRV_DISPLAY_CACHE_LINE),
+               "a draw buffer is whole cache lines");
+_Static_assert((KSCREEN_BUF_BYTES - KSCREEN_BUF_ROW_BYTES) < ((size_t)KBSP_LCD_H_RES * 2U),
+               "the rounding never adds a row to a draw buffer");
 
 /** @brief Degrees in one quarter turn of the glass, for the log. */
 #define KSCREEN_DEGREES_PER_TURN 90U
 
 /** @brief Draw-buffer alignment, comfortably above LV_DRAW_BUF_ALIGN. */
-#define KSCREEN_BUF_ALIGN        64U
+#define KSCREEN_BUF_ALIGN        KDRV_DISPLAY_CACHE_LINE
 
 /**
  * @brief How long LVGL may wait for the panel to finish one flush.
@@ -277,13 +293,18 @@ static lv_indev_t *indev_open(kscreen_t *s, lv_display_t *disp)
  * flips the panel - AO_Display's own test row - breaks that, which is why
  * kscreen_repaint() calls this again.
  *
+ * The size told to LVGL is the framebuffers' real one, whole cache lines
+ * (KDRV_DISPLAY_FB_BYTES): LVGL's PPA draw unit names it to the PPA as the
+ * output's size, and the PPA refuses one that is not. LVGL draws the picture
+ * and nothing past it.
+ *
  * @param disp The renderer's display, in direct mode.
  */
 static void buffers_align(lv_display_t *disp)
 {
     lv_display_set_buffers(disp, kdrv_display_back_buffer(),
                            kdrv_display_front_buffer(),
-                           (uint32_t)KBSP_LCD_H_RES * KBSP_LCD_V_RES * 2U,
+                           (uint32_t)KDRV_DISPLAY_FB_BYTES,
                            LV_DISPLAY_RENDER_MODE_DIRECT);
 }
 
@@ -640,7 +661,7 @@ void kscreen_test_dot_event(kscreen_t *s, QEvt const *e)
     }
     if ( auto_again )
     {
-        for ( uint8_t i = 0U; (i < (uint8_t)KUI_TD_GRID_CELLS) && (i < r->len); i++ )
+        for ( uint8_t i = 0U; ((uint8_t)KUI_TD_GRID_CELLS > i) && (i < r->len); i++ )
         {
             if ( s_td_grid[i] != r->arg[i] )
             {
@@ -675,7 +696,7 @@ void kscreen_test_dot_event(kscreen_t *s, QEvt const *e)
         {
             uint8_t const pattern = r->kind & (uint8_t)~TEST_DOT_PAT_FLAG;
             uint8_t arg = 0U;
-            if ( r->len > 0U )
+            if ( 0U < r->len )
             {
                 arg = r->arg[0];
             }
@@ -689,7 +710,7 @@ void kscreen_test_dot_event(kscreen_t *s, QEvt const *e)
         (void)memset(s_td_grid, (int)KUI_TD_ST_PENDING, sizeof(s_td_grid));
         if ( TEST_DOT_SCR_AUTO == r->kind )
         {
-            for ( uint8_t i = 0U; (i < (uint8_t)KUI_TD_GRID_CELLS) && (i < r->len); i++ )
+            for ( uint8_t i = 0U; ((uint8_t)KUI_TD_GRID_CELLS > i) && (i < r->len); i++ )
             {
                 s_td_grid[i] = r->arg[i];
             }

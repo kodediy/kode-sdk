@@ -23,8 +23,9 @@ extern "C" {
 typedef enum {
     KDRV_RADIO_JOB_CONNECT = 0,  /**< Bring the link up: reset the C5, SDIO
                                   *   transport, wait for CP_INIT, read the
-                                  *   coprocessor version, and leave J3's
-                                  *   supply as req.on says.                */
+                                  *   coprocessor version, and drive J3's
+                                  *   supply to the wish as it is then
+                                  *   (kdrv_radio_exp_wish()).              */
     KDRV_RADIO_JOB_DISCONNECT,   /**< Tear the link down (esp-hosted deinit).
                                   *   The C5 keeps running - only the
                                   *   conversation ends.                    */
@@ -54,7 +55,10 @@ typedef enum {
                                   *   version, descriptor, MAC, heap, SDIO,
                                   *   the card pins. What the production
                                   *   row judges.                            */
-    KDRV_RADIO_JOB_BLE_START,    /**< Bring the BLE stack up, no more.       */
+    KDRV_RADIO_JOB_BLE_START,    /**< Bring the BLE stack up, no more. With
+                                  *   req.on, first the scan response a
+                                  *   BLE_RSP would set, from the same
+                                  *   fields.                               */
     KDRV_RADIO_JOB_BLE_ADV,      /**< Start or stop advertising (req.on).
                                   *   Carries no duration: an advert lasts
                                   *   until it is taken or stopped.         */
@@ -139,22 +143,24 @@ typedef struct {
 typedef struct {
     kdrv_radio_job_t type;
     char             ssid[KDRV_RADIO_SSID_BYTES]; /**< WIFI_PROBE: the first network wanted.
-                              *   BLE_FIND: the name.                        */
+                              *   BLE_FIND: the name. BLE_RSP, BLE_START:
+                              *   the board's name, "" for the serial.       */
     char             ssid2[KDRV_RADIO_SSID_BYTES]; /**< WIFI_PROBE: the second network, "" for none. */
     uint8_t          channel;  /**< WIFI_PROBE: the channel to listen on.       */
     uint16_t         dwell_ms; /**< WIFI_PROBE: the time on it.                 */
     char             pass[65];
-    const uint8_t   *data;   /**< C5_WRITE, BLE_RSP: borrowed until the
+    const uint8_t   *data;   /**< C5_WRITE, BLE_RSP, BLE_START: borrowed until the
                               *   outcome.                                  */
-    uint32_t         len;    /**< C5_WRITE, BLE_RSP: bytes. BLE_SCAN, BLE_FIND: ms.
+    uint32_t         len;    /**< C5_WRITE, BLE_RSP, BLE_START: bytes. BLE_SCAN, BLE_FIND: ms.
                               *   BLE_ADV: the time on the air in ms, 0 for no end. */
     uint16_t         itvl;   /**< BLE_ADV: the interval (KDRV_BLE_ITVL_*); 0 for slow. */
     bool             hidden; /**< BLE_ADV: hide the board (kdrv_ble_adv_plan()). */
     bool             on;     /**< BLE_ADV: start or stop. WIFI_PS: modem save
-                              *   (true) or none (false). EXP_POWER and
-                              *   CONNECT: J3's supply on (true) or off.
+                              *   (true) or none (false). EXP_POWER:
+                              *   J3's supply on (true) or off.
                               *   AMP: the amplifier on (true) or off.
-                              *   SLEEP: start the sentinel (true) or stop it. */
+                              *   SLEEP: start the sentinel (true) or stop it.
+                              *   BLE_START: set the scan response first. */
     bool             wants_wifi; /**< CONNECT: this boot wants Wi-Fi, so a C5
                               *   parked by the last firmware may be kept
                               *   running instead of reset.                  */
@@ -424,13 +430,37 @@ void kdrv_radio_sleep_stats(kdrv_radio_sleep_stats_t *out);
 #endif /* CONFIG_KODE_LOWPOWER */
 
 /**
- * @brief Whether the last CONNECT drove J3's supply as it was asked to.
+ * @brief Set the wish for J3's supply: what the next CONNECT drives the pin to.
  *
- * True after a CONNECT_DONE whose link-up switched the C5's IO5 as the
- * request's @c on said; false when that step failed (the link works all the
- * same) or the CONNECT failed. Every CONNECT clears it first.
+ * Written by AO_Radio alone, whenever its own wish changes, and read by the
+ * CONNECT worker once, just before it drives the enable. The constructor's
+ * write runs on the boot thread before the worker exists, so nothing reads it
+ * then. It is one byte, so the read is atomic on this chip and needs no lock;
+ * the worker drives what it reads and decides nothing. A wish set after that read is not
+ * the one driven, and AO_Radio pays it with a job of its own.
+ *
+ * @param on true for the supply on.
+ */
+void kdrv_radio_exp_wish(bool on);
+
+/**
+ * @brief Whether the last CONNECT drove J3's supply to the wish it read.
+ *
+ * True after a CONNECT_DONE whose link-up switched the C5's IO5; false when
+ * that step failed (the link works all the same) or the CONNECT failed. Every
+ * CONNECT clears it first.
  */
 bool kdrv_radio_exp_switched(void);
+
+/**
+ * @brief The level the last CONNECT drove J3's supply enable to.
+ *
+ * The wish it read, whether or not the drive went through. Meaningful only
+ * after a CONNECT that succeeded; AO_Radio reads it once that CONNECT is done.
+ *
+ * @return true for the supply on.
+ */
+bool kdrv_radio_exp_level(void);
 
 /**
  * @brief Called when the C5 sends peer data with the id that was listened for.

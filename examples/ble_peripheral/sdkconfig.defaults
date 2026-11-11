@@ -19,6 +19,9 @@ CONFIG_KODEOS_CONSOLE=y
 CONFIG_KODEOS_RADIO=y
 CONFIG_BT_ENABLED=y
 CONFIG_KODEOS_BLE=y
+# The app's service rides beside the console's and uses its pairing: without
+# the BLE console it is left out.
+CONFIG_KODEOS_BLE_CONSOLE=y
 
 # The SDK's own log lines are compiled in at every level, and most of them are
 # INFO: a shipped app that will never print them can compile them away, which

@@ -97,6 +97,17 @@ kode_status_t kdrv_cst820_init(void);
 bool kdrv_cst820_present(void);
 
 /**
+ * @brief Does anything answer at the controller's address right now?
+ *
+ * One short probe, for an owner that looks again for a controller that was
+ * silent at the bring-up: on a board where nothing answers it costs a small
+ * part of kdrv_cst820_init(). Writes nothing and brings nothing up.
+ *
+ * @return true when the controller is up already, or something ACKs at 0x15.
+ */
+bool kdrv_cst820_answers(void);
+
+/**
  * @brief Put the controller in deep sleep, for a board with no owner for it.
  *
  * Brought up as kdrv_cst820_init() does, then sent to deep sleep: no scan and

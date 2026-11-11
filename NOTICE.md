@@ -10,6 +10,7 @@ The repository holds the work of these owners:
 | `components/qpc/` | Quantum Leaps, LLC | GPL-3.0-or-later, or a commercial licence of Quantum Leaps |
 | `components/kdrv/rfal/rfal/` and `components/kdrv/rfal/chip/` | STMicroelectronics | SLA0051, which is not an open source licence |
 | `components/kui/fonts/assets/` and `components/kui/fonts/` | the authors of the fonts | SIL Open Font License 1.1 |
+| `components/kui/kody/assets/`, `components/kui/kody/pack/` and the files `components/kui/kody/src/kody_*.c` | Kode | Creative Commons Attribution-ShareAlike 4.0 |
 
 ## The code of Kode
 
@@ -27,9 +28,15 @@ The two files in `components/kdrv/rfal/port/` are code of Kode. They are the por
 
 If you modify this Program, or any covered work, by linking or combining it with the RF Abstraction Layer (RFAL) and the ST25R3916 driver of STMicroelectronics (or a modified version of those libraries), containing parts covered by the terms of the STMicroelectronics SLA0051 licence, the licensors of this Program grant you additional permission to convey the resulting work. Corresponding Source for a non-source form of such a combination shall include the source code for the parts of RFAL and of the ST25R3916 driver used as well as that of the covered work.
 
-This permission applies only to the code of which Kode holds the copyright. Kode cannot give it for the code of another owner, and so it does not apply to QP/C.
-
 If you change the code of Kode, you can remove this permission from your version. Section 7 of the GNU General Public License allows this.
+
+### Trademarks, under GNU GPL version 3 section 7(e)
+
+This licence gives no right to use the names Kode, Kode Dot, kodeOS and Kody, or the character Kody, as trademarks. `TRADEMARKS.md` in the repository `kodediy/.github` says how you can use them.
+
+## Kody
+
+The drawings and animations of Kody are art of Kode. Their licence is Creative Commons Attribution-ShareAlike 4.0 (<https://creativecommons.org/licenses/by-sa/4.0/>): `components/kui/kody/assets/` holds the animations, `components/kui/kody/pack/` the pack that a Kode Dot stores, and the files `components/kui/kody/src/kody_*.c` the same animations in the form of C code. The player that shows them, `components/kui/kody/src/kui_kody.c` and `kui_kody_anchor.c`, is code of Kode under the GNU General Public License.
 
 ## QP/C
 

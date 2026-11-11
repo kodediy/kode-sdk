@@ -553,3 +553,143 @@ TEST_CASE("a page that brings nothing ends app_list with an error",
     TEST_ASSERT_EQUAL_UINT(1U, replies_with(">err code=5 msg=app_list"));
     TEST_ASSERT_EQUAL_UINT(0U, replies_with(">ok"));
 }
+
+/* ---- appdata_get ---------------------------------------------------------
+ * An app's data folder fetched from a URL: the verb hands the project and the
+ * base URL to AO_AppMgr, which is a mailbox in this file, and says what
+ * AO_AppMgr answers. */
+
+/** @brief The fetch AO_AppMgr's mailbox holds, emptying it; false when none. */
+static bool get_asked(AppDataGetReqEvt *out)
+{
+    const QEvt *e;
+    bool        found = false;
+
+    while ( xQueueReceive(AO_AppMgr->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (enum_t)e->sig == APPDATA_GET_REQ_SIG )
+        {
+            *out  = *(AppDataGetReqEvt const *)e;
+            found = true;
+        }
+        QF_gc(e);
+    }
+    return found;
+}
+
+/** @brief Answer the fetch in flight the way AO_AppMgr would. */
+static void get_answered(const char *project, appdata_get_why_t why, bool icon)
+{
+    AppDataGetRspEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(APPDATA_GET_RSP_SIG);
+    (void)snprintf(e.project, sizeof(e.project), "%s", project);
+    e.why  = (uint8_t)why;
+    e.icon = icon;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+TEST_CASE("appdata_get hands the project and the URL to AO_AppMgr and waits",
+          "[console_appdata]")
+{
+    AppDataGetReqEvt req;
+
+    console_up_once();
+    (void)get_asked(&req);
+
+    type_line("appdata_get name=\"snake\" url=\"https://example.invalid/apps/snake/\"");
+
+    TEST_ASSERT_TRUE_MESSAGE(get_asked(&req), "the fetch was never asked for");
+    TEST_ASSERT_EQUAL_STRING("snake", req.project);
+    TEST_ASSERT_EQUAL_STRING("https://example.invalid/apps/snake/", req.url);
+    TEST_ASSERT_EQUAL_PTR(AO_Console, req.who);
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), "answered before the folder was there");
+
+    get_answered("snake", APPDATA_GET_OK, true);
+    TEST_ASSERT_TRUE(replied(">|appdata project=\"snake\" json=ok icon=ok"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+TEST_CASE("appdata_get says a folder with no icon has none", "[console_appdata]")
+{
+    AppDataGetReqEvt req;
+
+    console_up_once();
+    type_line("appdata_get name=\"snake\" url=\"http://example.invalid/s/\"");
+    (void)get_asked(&req);
+
+    get_answered("snake", APPDATA_GET_OK, false);
+    TEST_ASSERT_TRUE(replied(">|appdata project=\"snake\" json=ok icon=none"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+TEST_CASE("appdata_get says why no folder was made", "[console_appdata]")
+{
+    static const struct {
+        appdata_get_why_t why;
+        const char       *line;
+    } CASES[] = {
+        { APPDATA_GET_BUSY,  ">err code=5 msg=busy"  },
+        { APPDATA_GET_NAME,  ">err code=5 msg=name"  },
+        { APPDATA_GET_FETCH, ">err code=5 msg=fetch" },
+        { APPDATA_GET_JSON,  ">err code=5 msg=json"  },
+        { APPDATA_GET_ICON,  ">err code=5 msg=icon"  },
+        { APPDATA_GET_FULL,  ">err code=5 msg=full"  },
+        { APPDATA_GET_STORE, ">err code=5 msg=store" },
+    };
+    AppDataGetReqEvt req;
+
+    for ( size_t i = 0U; (sizeof(CASES) / sizeof(CASES[0])) > i; ++i )
+    {
+        console_up_once();
+        type_line("appdata_get name=\"snake\" url=\"http://example.invalid/s/\"");
+        (void)get_asked(&req);
+
+        get_answered("snake", CASES[i].why, false);
+        TEST_ASSERT_TRUE_MESSAGE(replied(CASES[i].line), CASES[i].line);
+        TEST_ASSERT_FALSE(replied(">|appdata"));
+        TEST_ASSERT_FALSE(replied(">ok"));
+    }
+}
+
+TEST_CASE("appdata_get refuses a URL that does not fit its request",
+          "[console_appdata]")
+{
+    static char      line[KODE_CONSOLE_LINE_MAX];
+    static char      url[KODE_APPDATA_URL_MAX + 1U];
+    AppDataGetReqEvt req;
+
+    console_up_once();
+    (void)get_asked(&req);
+    (void)memset(url, 'u', sizeof(url) - 1U);
+    url[sizeof(url) - 1U] = '\0';
+    TEST_ASSERT_TRUE(snprintf(line, sizeof(line), "appdata_get name=\"s\" url=\"%s\"", url)
+                     < (int)sizeof(line));
+
+    type_line(line);
+
+    TEST_ASSERT_TRUE(replied(">err code=3 msg=url"));
+    TEST_ASSERT_FALSE_MESSAGE(get_asked(&req), "a URL too long was asked for, cut");
+}
+
+TEST_CASE("appdata_get needs both its keys", "[console_appdata]")
+{
+    AppDataGetReqEvt req;
+
+    console_up_once();
+    (void)get_asked(&req);
+
+    type_line("appdata_get name=\"snake\"");
+    TEST_ASSERT_TRUE(replied(">err code=2 msg=url"));
+    TEST_ASSERT_FALSE(get_asked(&req));
+}
+
+TEST_CASE("an answer to a fetch nobody typed says nothing", "[console_appdata]")
+{
+    console_up_once();
+
+    get_answered("snake", APPDATA_GET_OK, true);
+    TEST_ASSERT_FALSE(replied(">|appdata"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+}
