@@ -1675,7 +1675,15 @@ static void radio_on_svc(uint8_t service, uint8_t op, uint8_t status,
     e->op      = op;
     e->status  = status;
     e->len     = (uint16_t)n;
-    QACTIVE_POST(AO_Radio, &e->super, NULL);
+    /* A margin refuses the post while the queue is nearly full, and QP takes
+     * the refused event back. The request's deadline (KODE_SVC_TMO_SIG) is
+     * armed for as long as the answer is awaited, so the asker hears of the
+     * loss from it. */
+    if ( !QACTIVE_POST_X(AO_Radio, &e->super, KQP_RADIO_DROP_MARGIN, NULL) )
+    {
+        KLOG_E(TAG, "no room for a KODE answer (service %u); its wait ends on "
+                    "its deadline", (unsigned)service);
+    }
 }
 
 /**
@@ -2698,11 +2706,14 @@ static void radio_on_wifi_lost(void)
 }
 
 /** Runs on the radio worker, inside a scan: say a channel is in and
- *  return. Static event, so this cannot fail and costs no pool block. */
+ *  return. A static event, so it costs no pool block, posted with a margin
+ *  (KQP_RADIO_DROP_MARGIN): a nearly full queue refuses it. The handler
+ *  empties the whole hand-over ring and so does the sweep's end, so the
+ *  next knock, or the end, lists what a refused one would have. */
 static void radio_on_scan_more(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(RADIO_SCAN_MORE_SIG);
-    QACTIVE_POST(AO_Radio, &evt, NULL);
+    (void)QACTIVE_POST_X(AO_Radio, &evt, KQP_RADIO_DROP_MARGIN, NULL);
 }
 #endif
 
