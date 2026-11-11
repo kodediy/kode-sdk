@@ -598,7 +598,11 @@ kode_status_t kdrv_ble_app_queue_room(const char *chr, size_t *room);
  */
 typedef void (*kdrv_ble_app_taken_cb_t)(uint8_t chr, const char *name, uint8_t left);
 
-/** @brief Install the taken callback. Before the first start; NULL is refused. */
+/**
+ * @brief Install the taken callback. Before the first start; NULL is refused.
+ * @param cb The callback.
+ * @return KODE_OK, or KODE_DENIED for a NULL @p cb.
+ */
 kode_status_t kdrv_ble_app_set_taken_cb(kdrv_ble_app_taken_cb_t cb);
 
 /**

@@ -106,7 +106,10 @@ bool kdrv_frames_tick_take(kdrv_frames_tick_t *out);
  */
 bool kdrv_frames_next(kdrv_frame_t *out);
 
-/** @brief Records the ring refused since the last kdrv_frames_forget(). */
+/**
+ * @brief Records the ring refused since the last kdrv_frames_forget().
+ * @return The count; 0 before the ring exists.
+ */
 uint32_t kdrv_frames_dropped(void);
 
 /** @brief Empty the ring, the tick and the count. */

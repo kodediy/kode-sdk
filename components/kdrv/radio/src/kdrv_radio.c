@@ -595,7 +595,7 @@ static bool radio_c5_decide(bool wants_wifi)
 }
 
 /**
- * The CONNECT job, start to finish, on the worker.
+ * @brief The CONNECT job, start to finish, on the worker.
  *
  * Once the link is up it drives the expansion header's supply enable to the
  * wish as it is then (kdrv_radio_exp_wish()), read once, and keeps the level
@@ -604,6 +604,7 @@ static bool radio_c5_decide(bool wants_wifi)
  *
  * @param wants_wifi This boot wants Wi-Fi, so a C5 parked by the last
  *                   firmware may stay as it is.
+ * @return KODE_OK once the link is up, KODE_TIMEOUT or KODE_ERROR otherwise.
  */
 static kode_status_t radio_do_connect(bool wants_wifi)
 {
