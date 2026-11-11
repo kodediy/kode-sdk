@@ -35,6 +35,11 @@ bool kode_config_post(KodeConfigReqEvt *req, void const *sender)
     return sent;
 }
 
+const kode_config_t *kode_config_find(const char *key)
+{
+    return kconfig_find(key);
+}
+
 bool kode_config_answer(QActive *owner, const KodeConfigReqEvt *req,
                         kode_status_t status, bool stored, const char *value)
 {
