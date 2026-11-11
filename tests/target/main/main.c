@@ -84,6 +84,9 @@ static void link_standard_layer(void)
     (void)kode_file_read_bytes("flash/x", NULL);
     (void)kode_file_write("flash/x", "");
     (void)kode_file_append("flash/x", "");
+    (void)kode_file_read_at("flash/x", 0U, NULL, 0U, NULL);
+    (void)kode_file_write_bytes("flash/x", NULL, 0U);
+    (void)kode_file_append_bytes("flash/x", NULL, 0U);
     (void)kode_file_status("flash/x");
     (void)kode_file_exists("flash/x");
     (void)kode_file_list("flash");
