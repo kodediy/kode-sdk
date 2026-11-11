@@ -5755,6 +5755,87 @@ TEST_CASE("a scan response asked with Bluetooth off is kept, and goes once it is
     ble_case_end();
 }
 
+/* The interface sends the stored name as soon as it can post, which on a boot
+ * is before the link exists, and AO_Audio asks for the amplifier at the same
+ * time. The amplifier's job makes the bring-up's autojoin wait its turn, and
+ * with no network in the vault that autojoin then ends without a job: nothing
+ * comes back to pay what waited behind it. The name is one of those debts. */
+TEST_CASE("a scan response asked before a boot's link is up goes out when the bring-up ends "
+          "with no network to join", "[radio_ao][ble_ask]")
+{
+    uint8_t const     on   = 1U;
+    uint8_t const     off  = 0U;
+    bool              sent = false;
+    kode_vault_list_t none;
+
+    radio_fresh();
+    fake_ble_reset();
+    fake_nvs_reset();
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_WIFI, &on, sizeof(on));
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_BLE, &on, sizeof(on));
+    radio_reboot();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+
+    dispatch(C5_AMP_OFF_SIG);
+    ble_rsp_ask("KODE zz", NULL, 0U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
+                                  "something went out with the link down");
+
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    (void)memset(&none, 0, sizeof(none));
+    kode_answer(KODE_ST_OK, &none, (uint16_t)sizeof(none));
+
+    /* Every job of the bring-up, in whatever order the AO runs them. */
+    for ( unsigned guard = 0U; job_held() && (12U > guard); ++guard )
+    {
+        int const job = running_job();
+
+        if ( (int)KDRV_RADIO_JOB_BLE_START == job )
+        {
+            finish_ble_start();
+        }
+        else if ( (int)KDRV_RADIO_JOB_BLE_ADV == job )
+        {
+            finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+        }
+        else if ( (int)KDRV_RADIO_JOB_BLE_RSP == job )
+        {
+            TEST_ASSERT_EQUAL_STRING("KODE zz", held_req()->ssid);
+            sent = true;
+            finish(KDRV_RADIO_JOB_BLE_RSP, KODE_OK);
+        }
+        else
+        {
+            finish((kdrv_radio_job_t)job, KODE_OK);
+        }
+        pump();
+    }
+    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_TRUE_MESSAGE(logged("no networks remembered"),
+                             "the bring-up did not end at the empty vault");
+    TEST_ASSERT_TRUE_MESSAGE(sent, "the bring-up is over and the name was never sent");
+
+    /* Both wishes and the amplifier back as the cases after this one expect
+     * them, the link walked down, and a last boot that wants nothing: this AO
+     * outlives the case. */
+    ao_spy_drain();
+    (void)radio_service_set(KSET_KEY_BLE, false);
+    (void)radio_service_set(KSET_KEY_WIFI, false);
+    radio_amp_request(true);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    c5_case_end();
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_WIFI, &off, sizeof(off));
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_BLE, &off, sizeof(off));
+    radio_reboot();
+    c5_case_end();
+    fake_nvs_reset();
+    fake_ble_reset();
+}
+
 /* Switching wifi on from a dark link is `wifi_up`: the C5 is asked for the
  * link, and that is what makes the wish more than a stored byte. */
 TEST_CASE("config wifi on with the link off asks the C5 for the link",
