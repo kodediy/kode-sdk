@@ -482,3 +482,27 @@ void qf_support_pool_give_back(qf_support_dry_t *dry)
         QF_gc(dry->held[dry->n]);
     }
 }
+
+void qf_support_time_passes(uint32_t ticks)
+{
+    for ( uint32_t i = 0U; i < ticks; ++i )
+    {
+        QTIMEEVT_TICK_X(0U, (void *)0);
+    }
+}
+
+unsigned qf_support_waiting_of(QActive *ao, QSignal sig)
+{
+    const QEvt *e = NULL;
+    unsigned    n = 0U;
+
+    while ( (NULL != ao->eQueue) && (xQueueReceive(ao->eQueue, &e, 0U) == pdTRUE) )
+    {
+        if ( sig == e->sig )
+        {
+            ++n;
+        }
+        QF_gc(e);
+    }
+    return n;
+}

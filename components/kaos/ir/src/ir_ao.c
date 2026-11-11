@@ -181,8 +181,9 @@ typedef struct {
     bool             link_refused;/**< AO_Radio said OFF or FAILED: until the
                                  *   link is seen up, a request needing it is
                                  *   refused at once.                         */
-    QTimeEvt         linkchk;   /**< Periodic while it lasts: a held request
-                                 *   past its budget is answered.             */
+    QTimeEvt         linkchk;   /**< One-shot, armed again by each check taken
+                                 *   while the wait lasts: a held request past
+                                 *   its budget is answered.                  */
     QEQueue          deferq;    /**< Requests held while a call is out, or
                                  *   while the link is asked for.             */
     QEvtPtr          defer_sto[KODE_IR_DEFER_DEPTH - 1U]; /**< Its ring; the queue
@@ -1954,7 +1955,7 @@ static void link_hold(Ir * const me, QEvt const * const e)
         me->link_since = khal_time_ms();
         KLOG_I(TAG, "the C5 link is down; asked for, and the request waits");
         QActive_subscribe(&me->super, RADIO_STATE_SIG);
-        QTimeEvt_armX(&me->linkchk, (QTimeEvtCtr)ticks, (QTimeEvtCtr)ticks);
+        QTimeEvt_armX(&me->linkchk, (QTimeEvtCtr)ticks, 0U);
         radio_up_request();
     }
 }
@@ -2040,6 +2041,11 @@ static bool held_late(Ir const * const me, QEvt const * const e, uint32_t now)
  * and the asker's door is free again. When nothing is left the wait ends, and
  * the next request asks for the link again.
  *
+ * The check is a one-shot that each check taken arms again, NOT a periodic
+ * timer: QP posts a time event with no margin, and a periodic one goes on
+ * posting whether or not this AO has run. One waits at most; the end of the
+ * wait takes it back (link_end()).
+ *
  * @param me The AO.
  */
 static void held_expire(Ir * const me)
@@ -2051,6 +2057,7 @@ static void held_expire(Ir * const me)
     {
         return;
     }
+    (void)QTimeEvt_rearm(&me->linkchk, (QTimeEvtCtr)ms_ticks(IR_LINK_CHECK_MS));
     for ( uint16_t i = 0U; i < held; ++i )
     {
         QEvt const * const e = QEQueue_get(&me->deferq, me->super.prio);
