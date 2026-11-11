@@ -1006,6 +1006,7 @@ static bool radio_answer(QEvt const *e)
                 };                                  /* kdrv_ble_state_t order */
                 const char * const state =
                     console_word(STATES, sizeof(STATES) / sizeof(STATES[0]), b->state);
+                char name[CONSOLE_QUOTED_MAX(KQP_BLE_NAME_MAX)];
                 /* `idle` is a gap, not a resting place: BLE on means
                  * advertising, and this reports the instant between the
                  * stack coming up and the advert reaching the worker. */
@@ -1013,23 +1014,25 @@ static bool radio_answer(QEvt const *e)
                 {
                     console_reply(">|ble=%s addr=%02x:%02x:%02x:%02x:%02x:%02x "
                           "console=%s tx_drop=%" PRIu32 " bonds=%" PRIu32 " backlog=%" PRIu32 " retry=%" PRIu32
-                          " hidden=%s pair=%s",
+                          " hidden=%s pair=%s name=%s",
                           state,
                           b->addr[0], b->addr[1], b->addr[2],
                           b->addr[3], b->addr[4], b->addr[5],
                           console_on_off(b->console),
                           (uint32_t)b->tx_drop, (uint32_t)b->bonds,
                           (uint32_t)b->backlog, (uint32_t)b->retry,
-                          console_on_off(b->hidden), console_on_off(b->pair_open));
+                          console_on_off(b->hidden), console_on_off(b->pair_open),
+                          console_kv_text(name, sizeof(name), b->name));
                 }
                 else
                 {
                     console_reply(">|ble=%s addr=unknown console=%s tx_drop=%" PRIu32 " "
-                          "bonds=%" PRIu32 " backlog=%" PRIu32 " retry=%" PRIu32 " hidden=%s pair=%s",
+                          "bonds=%" PRIu32 " backlog=%" PRIu32 " retry=%" PRIu32 " hidden=%s pair=%s name=%s",
                           state, console_on_off(b->console),
                           (uint32_t)b->tx_drop, (uint32_t)b->bonds,
                           (uint32_t)b->backlog, (uint32_t)b->retry,
-                          console_on_off(b->hidden), console_on_off(b->pair_open));
+                          console_on_off(b->hidden), console_on_off(b->pair_open),
+                          console_kv_text(name, sizeof(name), b->name));
                 }
                 console_reply(">ok");
                 console_end();

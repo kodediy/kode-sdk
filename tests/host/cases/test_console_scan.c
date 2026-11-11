@@ -221,6 +221,28 @@ TEST_CASE("the longest ble_scan record fits one channel message",
     TEST_ASSERT_LESS_OR_EQUAL_size_t((size_t)KODE_MQTT_PAYLOAD_MAX, strlen(l) + 1U);
 }
 
+/* `ble_info` is the one record that says what the board calls itself on the
+ * air, so a script can check a change of name without a scanner. */
+TEST_CASE("ble_info says the name the board goes by, quoted as every text is",
+          "[console_scan]")
+{
+    BleStateEvt s;
+
+    console_up();
+    type_line("ble_info");
+
+    (void)memset(&s, 0, sizeof(s));
+    s.super = (QEvt)QEVT_INITIALIZER(BLE_STATE_SIG);
+    s.state = (uint8_t)KDRV_BLE_ADVERTISING;
+    (void)snprintf(s.name, sizeof(s.name), "%s", "KODE a\"b");
+    QASM_DISPATCH(AO_Console, &s.super, 0U);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(" name=\"KODE a\\\"b\""),
+                                 "the name a host parses");
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    (void)posted(BLE_STATE_REQ_SIG);
+}
+
 TEST_CASE("wifi_scan prints the BSSID", "[console_scan]")
 {
     static const uint8_t BSSID[6] = { 0x3CU, 0x84U, 0x6AU, 0x0AU, 0x0BU, 0x0CU };

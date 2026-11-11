@@ -319,9 +319,9 @@ const char *kdrv_ble_serial_name(void);
  *
  * The advert is untouched: with the console service it carries the
  * service's UUID and has 7 of its 31 bytes left, so whatever names the board
- * rides the scan response, which has a packet of its own. Applied at once
- * when the host is up, and kept for every advert after, the host's restarts
- * included. Until this is called, the scan response carries the serial alone
+ * rides the scan response, which has a packet of its own, and is the Device
+ * Name a connected central reads. Applied at once when the host is up, and
+ * kept for every advert after, the host's restarts included. Until this is called, the scan response carries the serial alone
  * with the console service, and nothing without it.
  *
  * Belongs to the kdrv_radio worker, like every call here that talks to the
@@ -334,6 +334,16 @@ const char *kdrv_ble_serial_name(void);
  *         left as it was; KODE_ERROR when the host refused the packet.
  */
 kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_t len);
+
+/**
+ * @brief The name the board goes by: the scan response's and its Device Name.
+ *
+ * The one kdrv_ble_set_scan_rsp() last set, and the serial until then. Written
+ * by the kdrv_radio worker, so it is read while no job is with it.
+ *
+ * @return The name; never NULL.
+ */
+const char *kdrv_ble_name(void);
 
 /**
  * @brief Scan for @p ms milliseconds. Blocks for about that long.

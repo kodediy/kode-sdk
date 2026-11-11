@@ -207,6 +207,7 @@ static struct {
     uint8_t            rsp_len;     /**< Its bytes; 0 for none.             */
     bool               rsp_set;     /**< kdrv_ble_set_scan_rsp() has set it;
                                       *   until then the console's default.  */
+    char               name[KDRV_BLE_ADV_MAX]; /**< The name it set; "" for the serial. */
     /* Outside the console guard, unlike the three fields below it: hanging
      * up on a central is kdrv_ble_quiet()'s job and that exists whether or
      * not this firmware carries a console. */
@@ -2631,7 +2632,7 @@ kode_status_t kdrv_ble_start(void)
      * found no such characteristic. */
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    (void)ble_svc_gap_device_name_set(kdrv_ble_serial_name());
+    (void)ble_svc_gap_device_name_set(kdrv_ble_name());
 
 #if CONFIG_KODEOS_BLE_CONSOLE
     console_build_table();
@@ -2783,7 +2784,7 @@ kode_status_t kdrv_ble_start(void)
 
     ble_set_state(KDRV_BLE_IDLE);
     KLOG_N(TAG, "BLE up (NimBLE here, the radio on the C5), as '%s'",
-           kdrv_ble_serial_name());
+           kdrv_ble_name());
     return KODE_OK;
 }
 
@@ -2946,6 +2947,17 @@ kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_
         return rc;
     }
     s_ble.rsp_set = true;
+    s_ble.name[0] = '\0';
+    if ( NULL != name )
+    {
+        (void)snprintf(s_ble.name, sizeof(s_ble.name), "%s", name);
+    }
+    if ( s_ble.up )
+    {
+        /* What a central reads once it has connected, and lists the board
+         * under from then on: the same name the scan response shows. */
+        (void)ble_svc_gap_device_name_set(kdrv_ble_name());
+    }
     if ( s_ble.synced && !s_ble.adv_hidden )
     {
         /* Legal while advertising: the next scan request is answered with it.
@@ -2960,6 +2972,17 @@ kode_status_t kdrv_ble_set_scan_rsp(const char *name, const uint8_t *data, size_
     KLOG_N(TAG, "scan response: %u of %u bytes", (unsigned)s_ble.rsp_len,
            (unsigned)KDRV_BLE_ADV_MAX);
     return KODE_OK;
+}
+
+const char *kdrv_ble_name(void)
+{
+    const char *name = s_ble.name;
+
+    if ( '\0' == s_ble.name[0] )
+    {
+        name = kdrv_ble_serial_name();
+    }
+    return name;
 }
 
 bool kdrv_ble_link_secure(void)
@@ -3128,7 +3151,7 @@ kode_status_t kdrv_ble_advertise(bool on)
     }
     else
     {
-        KLOG_I(TAG, "advertising as '%s'", kdrv_ble_serial_name());
+        KLOG_I(TAG, "advertising as '%s'", kdrv_ble_name());
     }
     return KODE_OK;
 }

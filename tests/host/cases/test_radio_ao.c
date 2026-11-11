@@ -5710,6 +5710,62 @@ TEST_CASE("the scan response an app asks for goes to the radio as one job, the a
     ble_case_end();
 }
 
+/** @brief The name the next BLE state in the spy says; fails the case if none. */
+static void take_ble_name(char out[KQP_BLE_NAME_MAX])
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "no BLE state was published");
+        if ( (QSignal)BLE_STATE_SIG == e->sig )
+        {
+            (void)snprintf(out, KQP_BLE_NAME_MAX, "%s", ((const BleStateEvt *)e)->name);
+            return;
+        }
+    }
+}
+
+TEST_CASE("the BLE state says the name the board goes by: the serial, then the one that was set",
+          "[radio_ao][ble_ask]")
+{
+    char          name[KQP_BLE_NAME_MAX];
+    kode_status_t rc;
+
+    ble_on_up();
+    ao_spy_subscribe(BLE_STATE_SIG);
+    ao_spy_drain();
+
+    dispatch(BLE_STATE_REQ_SIG);
+    take_ble_name(name);
+    TEST_ASSERT_EQUAL_STRING(kdrv_ble_serial_name(), name);
+    ao_spy_drain();
+
+    ble_rsp_ask("KODE zz", NULL, 0U);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_RSP, running_job());
+    /* The worker is writing the name: a state asked now says the one it had. */
+    rc = kdrv_ble_set_scan_rsp(held_req()->ssid, held_req()->data, held_req()->len);
+    dispatch(BLE_STATE_REQ_SIG);
+    take_ble_name(name);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(kdrv_ble_serial_name(), name,
+                                     "the name was read under the worker");
+    ao_spy_drain();
+
+    finish(KDRV_RADIO_JOB_BLE_RSP, rc);
+    dispatch(BLE_STATE_REQ_SIG);
+    take_ble_name(name);
+    TEST_ASSERT_EQUAL_STRING("KODE zz", name);
+    ao_spy_drain();
+
+    /* Back to the serial. */
+    ble_rsp_ask(NULL, NULL, 0U);
+    finish(KDRV_RADIO_JOB_BLE_RSP, kdrv_ble_set_scan_rsp(NULL, NULL, 0U));
+    dispatch(BLE_STATE_REQ_SIG);
+    take_ble_name(name);
+    TEST_ASSERT_EQUAL_STRING(kdrv_ble_serial_name(), name);
+    ao_spy_drain();
+    ble_case_end();
+}
+
 TEST_CASE("a scan response asked while the radio is busy waits, and goes once the job ends",
           "[radio_ao][ble_ask]")
 {
