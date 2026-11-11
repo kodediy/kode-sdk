@@ -3383,6 +3383,252 @@ TEST_CASE("two AOs asking a file's status are both accepted and both answered",
     ao_spy_drain();
 }
 
+/** @brief The internal volume's size as the host fake reports it, in kilobytes. */
+#define SPACE_FS_TOTAL_KB  (12U * 1024U)
+
+/** @brief What is free of it, in kilobytes. */
+#define SPACE_FS_FREE_KB   (8U * 1024U)
+
+TEST_CASE("kode_sys_file_space answers the asking AO once, publishes nothing, and its door opens again",
+          "[storage_ao][ask]")
+{
+    const FileRspEvt *a;
+
+    sys_fresh();
+    /* Subscribed, so a published info would arrive as well as the answer. */
+    ao_spy_subscribe(STORAGE_INFO_SIG);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kode_sys_file_space(ao_spy(), "/storage"),
+                                  "a second request of the kind waits for the first's answer");
+    settle_card();
+    a = sys_take(FILE_SPACE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_TOTAL_KB, a->space.total_kb);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_FREE_KB, a->space.free_kb);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "posted once, not published as well");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"),
+                                  "the answer opens the door again");
+    settle_card();
+    a = sys_take(FILE_SPACE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    QActive_unsubscribe(ao_spy(), STORAGE_INFO_SIG);
+    ao_spy_drain();
+}
+
+TEST_CASE("two AOs asking a volume's space are both accepted and both answered",
+          "[storage_ao][ask]")
+{
+    const QEvt *o;
+
+    sys_fresh();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy_other(), "/storage"),
+                                  "the door is the asker's, not the kind's");
+    settle_card();
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
+    o = ao_spy_other_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(o, "the second asker is answered too");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)FILE_SPACE_RSP_SIG, (uint32_t)o->sig);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_TOTAL_KB, ((const FileRspEvt *)(const void *)o)->space.total_kb);
+    QF_gc(o);
+    TEST_ASSERT_NULL(ao_spy_other_take());
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    ao_spy_drain();
+}
+
+TEST_CASE("the card's space is asked as the volume's root and is no more than the card",
+          "[storage_ao][ask]")
+{
+    const FileRspEvt *a;
+
+    sys_fresh();
+    fake_media_set_sd_present(true);
+    (void)kdrv_storage_mount(KDRV_MEDIUM_SD);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/sdcard"));
+    settle_card();
+    a = sys_take(FILE_SPACE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_TRUE(0U < a->space.total_kb);
+    TEST_ASSERT_TRUE(a->space.free_kb <= a->space.total_kb);
+    ao_spy_drain();
+}
+
+TEST_CASE("a volume that will not mount answers KODE_ERROR with nothing counted",
+          "[storage_ao][ask][worker]")
+{
+    const FileRspEvt *a;
+
+    sys_fresh();
+    fake_media_set_sd_present(false);
+    storage_request(KDRV_MEDIUM_SD, STORAGE_OP_UNMOUNT);
+    settle_card();
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/sdcard"));
+    settle_card();
+    a = sys_take(FILE_SPACE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_ERROR, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->space.total_kb);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->space.free_kb);
+    ao_spy_drain();
+    fake_media_set_sd_present(true);
+}
+
+TEST_CASE("a name that is not a volume's own root is answered KODE_DENIED with nothing counted",
+          "[storage_ao][ask]")
+{
+    static const char *const bad[] = { "/", "/elsewhere", "/storagex", "/storage/", "/storage/sub",
+                                       "/sdcard/x", "/storage/.." };
+    const FileRspEvt        *a;
+
+    sys_fresh();
+    for ( size_t i = 0U; i < (sizeof(bad) / sizeof(bad[0])); i++ )
+    {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), bad[i]), bad[i]);
+        settle_card();
+        a = sys_take(FILE_SPACE_RSP_SIG);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE((uint32_t)KODE_DENIED, a->rc, bad[i]);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, a->space.total_kb, bad[i]);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, a->space.free_kb, bad[i]);
+        ao_spy_drain();
+    }
+}
+
+TEST_CASE("a space ask of the card waits for a call to the card, and the internal volume's does not",
+          "[storage_ao][ask][worker]")
+{
+    sys_fresh();
+    fake_media_set_sd_present(true);
+    ask_mount_job();
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/sdcard"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy_other(), "/storage"));
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the card's was served while a call to it was out");
+    {
+        const QEvt *o = ao_spy_other_take();
+
+        TEST_ASSERT_NOT_NULL_MESSAGE(o, "the internal volume's waited for the card");
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)FILE_SPACE_RSP_SIG, (uint32_t)o->sig);
+        QF_gc(o);
+    }
+
+    TEST_ASSERT_TRUE(run_sd_job());
+    settle_card();
+    take_cmd_rsp();
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the held ask was answered or published twice");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_other_take(), "the other asker was answered again");
+    ao_spy_drain();
+}
+
+TEST_CASE("a space ask refused for want of hold room is answered KODE_DENIED once, with no sizes",
+          "[storage_ao][ask][worker]")
+{
+    const QEvt *o;
+
+    sys_fresh();
+    fake_media_set_sd_present(true);
+    ask_mount_job();
+    for ( unsigned i = 0U; KODE_STORAGE_DEFER_DEPTH > i; ++i )
+    {
+        storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_STAT, "/sdcard/x");
+    }
+    (void)qf_support_pump(AO_Storage, 16U);
+    ao_spy_drain();
+    ao_spy_other_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy_other(), "/sdcard"));
+    (void)qf_support_pump(AO_Storage, 4U);
+    o = ao_spy_other_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(o, "a refused space ask would wait for the console's watchdog");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)FILE_SPACE_RSP_SIG, (uint32_t)o->sig);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, ((const FileRspEvt *)(const void *)o)->rc);
+    TEST_ASSERT_EQUAL_UINT32(0U, ((const FileRspEvt *)(const void *)o)->space.total_kb);
+    TEST_ASSERT_EQUAL_UINT32(0U, ((const FileRspEvt *)(const void *)o)->space.free_kb);
+    QF_gc(o);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_other_take(), "answered twice");
+
+    TEST_ASSERT_TRUE(run_sd_job());
+    settle_card();
+    ao_spy_drain();
+    ao_spy_other_drain();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy_other(), "/sdcard"),
+                                  "the refusal left the door shut");
+    settle_card();
+    o = ao_spy_other_take();
+    TEST_ASSERT_NOT_NULL(o);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, ((const FileRspEvt *)(const void *)o)->rc);
+    QF_gc(o);
+    ao_spy_drain();
+}
+
+TEST_CASE("a status asked after a space is answered with its own stat, from the same blocks",
+          "[storage_ao][ask]")
+{
+    const FileRspEvt *a;
+
+    sys_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"));
+    settle_card();
+    (void)sys_take(FILE_SPACE_RSP_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_file_status(ao_spy(), "/storage/none.bin"));
+    settle_card();
+    a = sys_take(FILE_STATUS_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_FALSE(a->stat.exists);
+    TEST_ASSERT_FALSE(a->stat.is_dir);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->stat.size);
+    ao_spy_drain();
+}
+
+TEST_CASE("a volume's info is still published for the console, with the same sizes",
+          "[storage_ao][ask]")
+{
+    const QEvt           *e;
+    StorageInfoEvt const *i;
+
+    sys_fresh();
+    ao_spy_subscribe(STORAGE_INFO_SIG);
+
+    storage_request(KDRV_MEDIUM_FS, STORAGE_OP_INFO);
+    settle_card();
+    e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_INT(STORAGE_INFO_SIG, (int)e->sig);
+    i = (StorageInfoEvt const *)(const void *)e;
+    TEST_ASSERT_TRUE(i->mounted);
+    TEST_ASSERT_TRUE(i->usage_known);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_TOTAL_KB, i->total_kb);
+    TEST_ASSERT_EQUAL_UINT32(SPACE_FS_FREE_KB, i->free_kb);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    QActive_unsubscribe(ao_spy(), STORAGE_INFO_SIG);
+    ao_spy_drain();
+}
+
+TEST_CASE("a space request that names no asker and no waiter is refused, not dropped",
+          "[storage_ao][ask]")
+{
+    const QEvt *e;
+
+    sys_fresh();
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_SPACE, "/storage");
+    settle_card();
+    e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "every request is answered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, ((const StoragePathRspEvt *)(const void *)e)->rc);
+    ao_spy_drain();
+}
+
 TEST_CASE("a listing arrives as entries then its end, posted to the asker and published nowhere",
           "[storage_ao][ask]")
 {
@@ -3761,6 +4007,9 @@ TEST_CASE("a plain task's or a badly asked file request is refused at once and p
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_status(NULL, "/storage/x"));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_status(ao_spy(), NULL));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_status(ao_spy(), longpath));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_space(NULL, "/storage"));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_space(ao_spy(), NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_space(ao_spy(), longpath));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_list(NULL, "/storage", 0U));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_create_folder(ao_spy(), ""));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_file_delete(NULL, "/storage/x"));
@@ -3790,6 +4039,7 @@ TEST_CASE("a full AO_Storage queue refuses kode_sys's file requests with no reso
     TEST_ASSERT_TRUE_MESSAGE(qf_support_queue_stuff(AO_Storage, &s_sys_filler), "the queue never filled");
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_status(ao_spy(), "/storage/x"));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_list(ao_spy(), "/storage", 0U));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_space(ao_spy(), "/storage"));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_rename(ao_spy(), "/storage/x", "/storage/y"));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_read(ao_spy(), "/storage/x", 0U, buf, SYS_BUF));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_write(ao_spy(), "/storage/x", buf, 1U, false));
@@ -3797,8 +4047,11 @@ TEST_CASE("a full AO_Storage queue refuses kode_sys's file requests with no reso
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_status(ao_spy(), "/storage/x"),
                                   "nothing was posted, so the door is open");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"),
+                                  "the refused space ask left its door shut");
     settle_card();
     (void)sys_take(FILE_STATUS_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
     ao_spy_drain();
 }
 
@@ -3820,6 +4073,7 @@ TEST_CASE("a dry pool refuses kode_sys's file request with no resources and post
     }
     TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(SYS_DRY_MAX, n, "the pool never ran dry");
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_status(ao_spy(), "/storage/x"));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_file_space(ao_spy(), "/storage"));
     TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Storage->eQueue));
     for ( uint32_t i = 0U; i < n; i++ )
     {
@@ -3828,8 +4082,11 @@ TEST_CASE("a dry pool refuses kode_sys's file request with no resources and post
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_status(ao_spy(), "/storage/x"),
                                   "nothing was posted, so the door is open");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), "/storage"),
+                                  "the refused space ask left its door shut");
     settle_card();
     (void)sys_take(FILE_STATUS_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
     ao_spy_drain();
 }
 

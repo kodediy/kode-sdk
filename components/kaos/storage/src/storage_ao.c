@@ -390,6 +390,7 @@ enum {
     STORAGE_ASK_RENAME,    /**< storage_rename_ask() */
     STORAGE_ASK_READ,      /**< storage_read_ask()   */
     STORAGE_ASK_WRITE,     /**< storage_write_ask()  */
+    STORAGE_ASK_SPACE,     /**< storage_space_ask()  */
     STORAGE_ASK_KINDS      /**< How many there are.  */
 };
 
@@ -468,6 +469,10 @@ static uint8_t storage_ask_kind(QSignal sig)
     else if ( (QSignal)FILE_WRITE_RSP_SIG == sig )
     {
         kind = (uint8_t)STORAGE_ASK_WRITE;
+    }
+    else if ( (QSignal)FILE_SPACE_RSP_SIG == sig )
+    {
+        kind = (uint8_t)STORAGE_ASK_SPACE;
     }
     else
     {
@@ -781,6 +786,9 @@ static kode_status_t file_ask_open(QActive const *who, uint8_t kind, enum_t sig,
     a->stat.exists = false;
     a->stat.is_dir = false;
     a->stat.size   = 0U;
+    /* After the stat, so every byte the two views share is zero. */
+    a->space.total_kb = 0U;
+    a->space.free_kb  = 0U;
     *out = a;
     return KODE_OK;
 }
@@ -881,6 +889,12 @@ kode_status_t storage_rename_ask(QActive *who, const char *from, const char *to)
     e->rsp  = a;
     return kaos_ask_post(&s_storage_doors[STORAGE_ASK_RENAME], who, AO_Storage, &e->super,
                          &a->super, KQP_STORAGE_CMD_MARGIN);
+}
+
+kode_status_t storage_space_ask(QActive *who, const char *path)
+{
+    return path_ask(who, (uint8_t)STORAGE_ASK_SPACE, FILE_SPACE_RSP_SIG,
+                    (uint8_t)STORAGE_PATH_SPACE, path, 0U, NULL, 0U);
 }
 
 kode_status_t storage_write_ask(QActive *who, const char *path, const void *data, uint32_t len,
@@ -2523,6 +2537,100 @@ static void post_path_rsp(QActive *who, uint8_t op, kode_status_t rc,
     QACTIVE_POST(who, &ev->super, NULL);
 }
 
+/** @brief Bytes in the kilobyte StorageInfoEvt and FileSpace count in. */
+#define STORAGE_KB_BYTES  1024ULL
+
+/**
+ * @brief A byte count in whole kilobytes, cut down: what `sd_info` and `fs_info` print.
+ * @param bytes The count.
+ * @return Its kilobytes.
+ */
+static uint32_t kb_of(uint64_t bytes)
+{
+    return (uint32_t)(bytes / STORAGE_KB_BYTES);
+}
+
+/**
+ * @brief Answer a STORAGE_PATH_SPACE request: the ask's @c space, or a blocked
+ *        task's waiter.
+ *
+ * Nothing else has a shape of answer for it, so a request that names neither
+ * is refused as every path op is.
+ *
+ * @param who      The requester, read only when it is neither.
+ * @param op       storage_path_op_t, for that refusal.
+ * @param rc       kode_status_t for the round.
+ * @param total_kb The volume's kilobytes; 0 unless @p rc is KODE_OK.
+ * @param free_kb  What is left of them; 0 unless @p rc is KODE_OK.
+ */
+static void post_space_rsp(QActive *who, uint8_t op, kode_status_t rc, uint32_t total_kb,
+                           uint32_t free_kb)
+{
+    if ( NULL != s_ask_rsp )
+    {
+        s_ask_rsp->space.total_kb = total_kb;
+        s_ask_rsp->space.free_kb  = free_kb;
+        file_ask_answer(rc, NULL);
+        return;
+    }
+    if ( NULL != s_waiter )
+    {
+        s_waiter->total_kb = total_kb;
+        s_waiter->free_kb  = free_kb;
+        wake_waiter(s_waiter, s_waiter_gen, rc, false, false, 0U);
+        return;
+    }
+    post_path_rsp(who, op, KODE_DENIED, false, false, 0U);
+}
+
+/**
+ * @brief Whether @p path is a volume's own root: "/sdcard" or "/storage", and nothing after it.
+ *
+ * Both roots are one path part, so a further '/' makes a path inside a volume.
+ *
+ * @param path A virtual path, not NULL.
+ * @return true for a root.
+ */
+static bool path_is_volume_root(const char *path)
+{
+    return (KDRV_MEDIUM_COUNT != kdrv_storage_medium_of(path)) && (NULL == strchr(&path[1], '/'));
+}
+
+/**
+ * @brief Answer a STORAGE_PATH_SPACE request.
+ *
+ * The count is the one `sd_info` and `fs_info` print, taken in this step; the
+ * volume is probed as a path call probes it. KODE_DENIED is a @p path that is
+ * not a volume's root, KODE_ERROR a volume that will not mount or be counted.
+ *
+ * @param who  The requester, for the refusal of a request with no asker.
+ * @param op   storage_path_op_t, for that refusal.
+ * @param path The virtual path asked about.
+ */
+static void answer_path_space(QActive *who, uint8_t op, const char *path)
+{
+    kdrv_medium_t const medium = kdrv_storage_medium_of(path);
+    uint64_t            total  = 0U;
+    uint64_t            freeb  = 0U;
+    kode_status_t       rc     = KODE_DENIED;
+
+    if ( path_is_volume_root(path) )
+    {
+        rc = KODE_ERROR;
+        if ( (NULL != kdrv_storage_probe(medium))
+            && (KODE_OK == kdrv_storage_usage(medium, &total, &freeb)) )
+        {
+            rc = KODE_OK;
+        }
+        else
+        {
+            total = 0U;
+            freeb = 0U;
+        }
+    }
+    post_space_rsp(who, op, rc, kb_of(total), kb_of(freeb));
+}
+
 /**
  * @brief Answer a STORAGE_PATH_STAT request.
  *
@@ -3507,6 +3615,10 @@ static void handle_path_req(Storage * const me, const StoragePathEvt *q)
         }
         case STORAGE_PATH_DELETE: {
             answer_path_delete(me, q->who, q->op, q->path);
+            break;
+        }
+        case STORAGE_PATH_SPACE: {
+            answer_path_space(q->who, q->op, q->path);
             break;
         }
         default: {
@@ -5632,8 +5744,8 @@ static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
                 ev->mounted     = kdrv_storage_mounted(medium);
                 ev->usage_known = (kdrv_storage_usage(medium, &total, &freeb)
                                    == KODE_OK);
-                ev->total_kb    = (uint32_t)(total / 1024ULL);
-                ev->free_kb     = (uint32_t)(freeb / 1024ULL);
+                ev->total_kb    = kb_of(total);
+                ev->free_kb     = kb_of(freeb);
                 /* THE CARD, not the volume on it: the two match only when the
                  * card is formatted end to end. */
                 ev->card_mb     = 0U;
