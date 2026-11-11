@@ -8348,6 +8348,20 @@ static QState console_own(Console * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#if CONFIG_KODEOS_WIFI
+        case WIFI_FRAMES_TICK_SIG: {
+            /* Ticks are posted to the asker alone, and no `wifi_frames` run
+             * reads this one: a run ended while AO_Radio still held the
+             * console as its asker (its stop never got in). The stream has
+             * nobody now, so it is stopped; AO_Radio takes a stop that comes
+             * again while one waits as the same one, and a refused post is
+             * asked again by the next tick. Its answer comes here and is
+             * nobody's. */
+            (void)wifi_frames_request(&me->super, false, 0U);
+            status = Q_HANDLED();
+            break;
+        }
+#endif
 #if CONFIG_KODE_LOWPOWER
         case LOWPOWER_ROUND_SIG: {
             bool const moving = ((uint8_t)KCLI_RECV == me->inflight)

@@ -1350,6 +1350,48 @@ typedef ScanRspEvt kode_sys_wifi_scan_answer_t;
  */
 kode_status_t kode_sys_wifi_scan(QActive *me);
 
+/* ---- Wi-Fi frames, AO_Radio: hearing them on one channel ----
+ * The C5 can listen on one channel and say what it hears: for each period in
+ * which it heard a frame, a count and the strongest level, and a summary of
+ * each frame (kind, levels, addresses and the first bytes after the header).
+ * Receive only: nothing is sent, and the station is never moved: joined, it
+ * listens on the network's own channel or refuses. One AO listens at a time.
+ * AO_Radio posts the answers to @p me, never publishes them, and keeps
+ * KQP_FRAMES_MARGIN slots of its queue free: what does not fit is counted in
+ * the next tick's @c dropped. That count is this chip's alone: a frame the
+ * C5 could not queue or fit in a batch is in @c heard and in no drop count,
+ * and a tick this chip could not post is counted nowhere. A tick's
+ * @c channel is the radio's when the batch was sent, so frames heard while a
+ * scan visited other channels carry the channel at the period's end. The
+ * board's rest, Wi-Fi stopped, a join and a C5 update end a stream, and @p me
+ * is told why. Without CONFIG_KODEOS_WIFI the request is refused at once
+ * with KODE_DENIED.
+ */
+
+/* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
+/** @brief Answers every request (WIFI_FRAMES_STATE_SIG): @c on, @c channel, @c joined and @c why (kwifi_frames_why_t). */
+typedef WifiFramesStateEvt kode_sys_wifi_frames_state_t;
+
+/* cppcheck-suppress misra-c2012-2.3 ; a tick's name for the apps that read it, never used inside the SDK */
+/** @brief One period's counts (WIFI_FRAMES_TICK_SIG): @c heard since the start, @c mgmt and @c data in the period, @c rssi_max, @c dropped. */
+typedef WifiFramesTickEvt kode_sys_wifi_frames_tick_t;
+
+/* cppcheck-suppress misra-c2012-2.3 ; a frame's name for the apps that read it, never used inside the SDK */
+/** @brief One frame heard (WIFI_FRAME_SIG): @c channel, @c rssi, @c fc, @c addr1, @c addr2, @c len and @c head. */
+typedef WifiFrameEvt kode_sys_wifi_frame_t;
+
+/**
+ * @brief Start or stop hearing Wi-Fi frames on one channel. Receive only.
+ * @param me      The asking AO; the three signals above come to it, the
+ *                answer always, in every state of the link.
+ * @param on      true to listen, false to stop.
+ * @param channel 1..177, or 0 to stay where the radio is. Ignored for a stop.
+ * @return As the requests' rules of this header: KODE_DENIED without
+ *         CONFIG_KODEOS_WIFI or for a NULL @p me, KODE_NO_RESOURCES when the
+ *         request could not be posted.
+ */
+kode_status_t kode_sys_wifi_frames(QActive *me, bool on, uint8_t channel);
+
 /* ---- Bluetooth, AO_Radio: one kind, a scan ----
  * The listen the console's `ble_scan` runs, for @p ms. A device that
  * advertises repeatedly is listed once, at its strongest. The devices are a
