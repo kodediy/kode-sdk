@@ -79,6 +79,19 @@ kode_status_t kode_config_add(QActive *owner, uint16_t margin,
  */
 bool kode_config_post(KodeConfigReqEvt *req, void const *sender);
 
+/**
+ * @brief The row of the setting named @p key.
+ *
+ * An interface reads a setting's type here, and for an ENUM its words in the
+ * order a set's index `e` counts, so it keeps no copy of them. The row is the
+ * owner's own `static const` one: read it, never write it.
+ *
+ * @param key The setting's name; may be NULL.
+ * @return The row, or NULL for a NULL key or a key no table holds; always
+ *         NULL without CONFIG_KODEOS_CONSOLE.
+ */
+const kode_config_t *kode_config_find(const char *key);
+
 /* ---- A setting's owner ---------------------------------------------------
  * The owner of a setting answers every request for one of its keys, a read
  * or a set, once. The requests are posted to it: it subscribes to nothing.
