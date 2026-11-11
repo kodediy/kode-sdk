@@ -25,7 +25,7 @@ static struct {
     bool               exp_fails;   /**< A CONNECT does not switch J3's supply. */
     bool               exp_switched; /**< What kdrv_radio_exp_switched() answers. */
     bool               exp_pin;     /**< The level J3's supply enable holds.    */
-    unsigned           exp_offs;    /**< Times the pin was driven low.          */
+    uint32_t           exp_offs;    /**< Times the pin was driven low.          */
     bool               read_done;   /**< The CONNECT worker has read the wish.  */
     bool               read_on;     /**< What it read.                          */
     bool               exp_level;   /**< What kdrv_radio_exp_level() answers.   */
@@ -178,7 +178,7 @@ bool fake_radio_exp_pin(void)
     return s_r.exp_pin;
 }
 
-unsigned fake_radio_exp_off_drives(void)
+uint32_t fake_radio_exp_off_drives(void)
 {
     return s_r.exp_offs;
 }

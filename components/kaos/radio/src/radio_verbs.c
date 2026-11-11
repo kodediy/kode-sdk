@@ -716,7 +716,7 @@ static void frames_tick(WifiFramesTickEvt const * const t)
  */
 static void frames_slice(void)
 {
-    bool const over = s_frames_run.ms <= (khal_time_ms() - s_frames_run.start_ms);
+    bool const over = (khal_time_ms() - s_frames_run.start_ms) >= s_frames_run.ms;
 
     if ( !over && ((uint8_t)FRAMES_LISTENING == s_frames_run.phase) )
     {

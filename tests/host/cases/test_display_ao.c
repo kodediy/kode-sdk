@@ -226,7 +226,7 @@ static kode_status_t s_sleep_in_rc;
 static kode_status_t s_reset_low_rc;
 
 /** @brief Requests AO_IoExp's queue held when the reset line went low. */
-static unsigned s_posts_at_reset;
+static uint32_t s_posts_at_reset;
 
 /** @brief Answers AO_LowPower already held when the link went down / the
  *         minute was written: the order of "rest, then answer". */
@@ -1106,7 +1106,7 @@ TEST_CASE("STATE(OFF) after the sleep-in drives the reset line low, then asks fo
 TEST_CASE("STATE(OFF) asks for the supply off even when the reset line is refused",
           "[display_ao][lowpower]")
 {
-    unsigned asked;
+    uint32_t asked;
 
     Mockkdrv_display_Init();
     display_up_once(0U);

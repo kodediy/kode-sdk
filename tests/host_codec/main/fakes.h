@@ -49,9 +49,9 @@ extern bool g_fail_dev_new;    /**< The codec device cannot be made.            
 extern bool g_fail_vol_curve;  /**< The codec layer refuses the volume curve.       */
 
 /** @brief Calls that let go of the clock pad, or set it as an input, while a channel was enabled. */
-extern unsigned g_viol_pad;
+extern uint32_t g_viol_pad;
 /** @brief Control interface accesses while a channel was enabled and the clock pad was not routed. */
-extern unsigned g_viol_ctrl;
+extern uint32_t g_viol_ctrl;
 
 /**
  * @brief Make one write through the codec's control interface, as the component does.
@@ -66,7 +66,7 @@ void fake_ctrl_poke(void);
  * @brief How many violations the witnesses recorded.
  * @return g_viol_pad plus g_viol_ctrl.
  */
-unsigned fake_violations(void);
+uint32_t fake_violations(void);
 
 /** @brief Forget everything and put the fakes back to a board with a codec fitted. */
 void fake_reset(void);

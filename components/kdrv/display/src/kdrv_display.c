@@ -984,7 +984,7 @@ static bool panel_answers(void)
     uint8_t id = 0U;
     for ( uint32_t i = 0U; 3U > i; ++i )
     {
-        if ( i > 0U ) { khal_delay_ms(20U); }
+        if ( 0U < i ) { khal_delay_ms(20U); }
         if ( panel_read1(0x04U, &id) == KODE_OK ) { return true; }
     }
     return false;

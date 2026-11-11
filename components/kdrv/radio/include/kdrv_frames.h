@@ -20,13 +20,19 @@ extern "C" {
 /** @brief Records waiting for the owner. */
 #define KDRV_FRAMES_RING_LEN  64U
 
+/** @brief Bytes of a frame's frame control (kode_sniff_rec_t's fc). */
+#define KDRV_FRAME_FC_LEN     2U
+
+/** @brief Bytes of a frame's address (kode_sniff_rec_t's addr1 and addr2). */
+#define KDRV_FRAME_ADDR_LEN   6U
+
 /** @brief One frame, as the C5 summarised it. */
 typedef struct {
     uint8_t  channel;                    /**< The radio's primary channel when it was heard. */
     int8_t   rssi;                       /**< dBm.                                           */
-    uint8_t  fc[2];                      /**< Frame control, as on the air.                  */
-    uint8_t  addr1[6];                   /**< Address 1, as on the air.                      */
-    uint8_t  addr2[6];                   /**< Address 2; zeros when the frame has none.      */
+    uint8_t  fc[KDRV_FRAME_FC_LEN];      /**< Frame control, as on the air.                  */
+    uint8_t  addr1[KDRV_FRAME_ADDR_LEN]; /**< Address 1, as on the air.                      */
+    uint8_t  addr2[KDRV_FRAME_ADDR_LEN]; /**< Address 2; zeros when the frame has none.      */
     uint16_t len;                        /**< The frame's length on the air.                 */
     uint8_t  head[KODE_SNIFF_HEAD_LEN];  /**< After the MAC header; zeros past the end.      */
 } kdrv_frame_t;
@@ -100,7 +106,10 @@ bool kdrv_frames_tick_take(kdrv_frames_tick_t *out);
  */
 bool kdrv_frames_next(kdrv_frame_t *out);
 
-/** @brief Records the ring refused since the last kdrv_frames_forget(). */
+/**
+ * @brief Records the ring refused since the last kdrv_frames_forget().
+ * @return The count; 0 before the ring exists.
+ */
 uint32_t kdrv_frames_dropped(void);
 
 /** @brief Empty the ring, the tick and the count. */

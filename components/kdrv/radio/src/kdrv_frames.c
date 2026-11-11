@@ -34,6 +34,10 @@ static struct {
 } s_frames;
 
 _Static_assert(KDRV_FRAMES_RING_LEN <= 255U, "the ring's indexes are uint8_t");
+_Static_assert(sizeof(((kode_sniff_rec_t *)NULL)->fc) == KDRV_FRAME_FC_LEN,
+               "a record keeps the frame control the wire carries");
+_Static_assert(sizeof(((kode_sniff_rec_t *)NULL)->addr1) == KDRV_FRAME_ADDR_LEN,
+               "a record keeps the addresses the wire carries");
 
 /**
  * @brief Copy one wire record into the ring, or count it as dropped.
@@ -97,7 +101,7 @@ bool kdrv_frames_feed(const uint8_t *payload, size_t len)
     /* cppcheck-suppress misra-c2012-21.15 ; the wire is bytes; kode_sniff_batch_t is packed and its size asserted */
     (void)memcpy(&h, payload, sizeof(h));
     if ( (KODE_SNIFF_BATCH_MAX < h.count)
-        || (len < (sizeof(h) + ((size_t)h.count * sizeof(kode_sniff_rec_t)))) )
+        || ((sizeof(h) + ((size_t)h.count * sizeof(kode_sniff_rec_t))) > len) )
     {
         return false;
     }

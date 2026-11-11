@@ -661,7 +661,7 @@ void kscreen_test_dot_event(kscreen_t *s, QEvt const *e)
     }
     if ( auto_again )
     {
-        for ( uint8_t i = 0U; (i < (uint8_t)KUI_TD_GRID_CELLS) && (i < r->len); i++ )
+        for ( uint8_t i = 0U; ((uint8_t)KUI_TD_GRID_CELLS > i) && (i < r->len); i++ )
         {
             if ( s_td_grid[i] != r->arg[i] )
             {
@@ -696,7 +696,7 @@ void kscreen_test_dot_event(kscreen_t *s, QEvt const *e)
         {
             uint8_t const pattern = r->kind & (uint8_t)~TEST_DOT_PAT_FLAG;
             uint8_t arg = 0U;
-            if ( r->len > 0U )
+            if ( 0U < r->len )
             {
                 arg = r->arg[0];
             }
@@ -710,7 +710,7 @@ void kscreen_test_dot_event(kscreen_t *s, QEvt const *e)
         (void)memset(s_td_grid, (int)KUI_TD_ST_PENDING, sizeof(s_td_grid));
         if ( TEST_DOT_SCR_AUTO == r->kind )
         {
-            for ( uint8_t i = 0U; (i < (uint8_t)KUI_TD_GRID_CELLS) && (i < r->len); i++ )
+            for ( uint8_t i = 0U; ((uint8_t)KUI_TD_GRID_CELLS > i) && (i < r->len); i++ )
             {
                 s_td_grid[i] = r->arg[i];
             }

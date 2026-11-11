@@ -46,9 +46,9 @@ static void frames_fresh(void)
 }
 
 /** @brief How many requests wait for AO_Radio. */
-static unsigned radio_pending(void)
+static uint32_t radio_pending(void)
 {
-    return (unsigned)uxQueueMessagesWaiting(AO_Radio->eQueue);
+    return (uint32_t)uxQueueMessagesWaiting(AO_Radio->eQueue);
 }
 
 TEST_CASE("a frames request from no AO is refused and posts nothing", "[kode_sys_wifi_frames]")

@@ -33,6 +33,7 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 
 #define STORAGE_BUFS   2U
 #define STORAGE_CHUNK  (32U * 1024U)
+#define STORAGE_PSRAM_ALIGN  64U  /**< Alignment of every PSRAM block this AO takes. */
 
 /* The app data folder's two path lengths, spelled out so the compiler can see
  * that neither snprintf below can truncate. The folder is
@@ -2007,7 +2008,7 @@ static void wipe_begin(Storage * const me, AppDataReqEvt const * const req)
         return;
     }
     /* cppcheck-suppress misra-c2012-11.5 ; a struct from a void * allocator */
-    me->x = (WipeScratch *)khal_alloc_psram(64U, sizeof(WipeScratch));
+    me->x = (WipeScratch *)khal_alloc_psram(STORAGE_PSRAM_ALIGN, sizeof(WipeScratch));
     if ( NULL == me->x )
     {
         KLOG_W(TAG, "no memory for the list of images; the files of '%s' stay",
@@ -2328,7 +2329,7 @@ static bool appdata_room(const char *folder)
         /* A replacement. */
     }
     else if ( (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK)
-             && (freeb < (uint64_t)least) )
+             && ((uint64_t)least > freeb) )
     {
         room = false;
     }
@@ -5664,7 +5665,7 @@ static QState Storage_initial(Storage * const me, void const * const par)
      * of the time. */
     for ( uint8_t i = 0U; STORAGE_BUFS > i; ++i )
     {
-        me->buf[i]  = khal_alloc_psram(64U, STORAGE_CHUNK);
+        me->buf[i]  = khal_alloc_psram(STORAGE_PSRAM_ALIGN, STORAGE_CHUNK);
         me->lent[i] = false;
         if ( NULL == me->buf[i] )
         {
@@ -6072,7 +6073,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
              * comes and goes is a fragmentation source for no gain. */
             if ( NULL == me->icon )
             {
-                me->icon = (uint8_t *)khal_alloc_psram(64U, KAPP_ICON_BYTES);
+                me->icon = (uint8_t *)khal_alloc_psram(STORAGE_PSRAM_ALIGN, KAPP_ICON_BYTES);
                 if ( (NULL == me->icon) && !me->icon_warned )
                 {
                     me->icon_warned = true;

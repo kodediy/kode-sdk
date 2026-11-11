@@ -17,6 +17,10 @@
 
 _Static_assert(KWIFI_FRAME_HEAD_LEN == KODE_SNIFF_HEAD_LEN,
                "the frame event keeps the bytes the wire carries");
+_Static_assert(KWIFI_FRAME_FC_LEN == KDRV_FRAME_FC_LEN,
+               "the frame event keeps the frame control the wire carries");
+_Static_assert(KWIFI_FRAME_ADDR_LEN == KDRV_FRAME_ADDR_LEN,
+               "the frame event keeps the addresses the wire carries");
 _Static_assert(KWIFI_FRAMES_CHANNEL_MAX == KODE_SNIFF_CHANNEL_MAX,
                "the door refuses the channels the C5 refuses");
 

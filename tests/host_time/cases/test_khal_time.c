@@ -121,7 +121,7 @@ TEST_CASE("milliseconds wrap at 32 bits, as the log format assumes",
 TEST_CASE("a timer is created with the caller's callback and argument",
           "[khal_time]")
 {
-    static int    marker;
+    static uint8_t marker;
 
     Mockesp_timer_Init();
     fresh();
@@ -149,7 +149,7 @@ TEST_CASE("a timer is created with the caller's callback and argument",
 TEST_CASE("a late periodic timer is called once, not once for every period it owes",
           "[khal_time]")
 {
-    static int    marker;
+    static uint8_t marker;
 
     Mockesp_timer_Init();
     fresh();

@@ -242,7 +242,7 @@ void qf_support_time_passes(uint32_t ticks);
  * @param sig The signal to count.
  * @return How many of the events that waited carried it.
  */
-unsigned qf_support_waiting_of(QActive *ao, QSignal sig);
+uint32_t qf_support_waiting_of(QActive *ao, QSignal sig);
 
 /** @brief Most blocks qf_support_pool_dry_second() takes out of a pool. */
 #define QF_SUPPORT_DRY_MAX  128U

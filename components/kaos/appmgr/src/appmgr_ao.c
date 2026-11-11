@@ -60,7 +60,7 @@
  * region: the same 32 KB the writes use, so a step stays short (rule 5). */
 #define APPMGR_KEEP_CHUNK      (32U * 1024U)
 /* Re-publish the percent this often while the card writes a copy. AO_Power
- * takes the LED's blue pulse back after three seconds without a report, and
+ * takes the LED's orange pulse back after three seconds without a report, and
  * a multi-MB write has none of its own. */
 #define APPMGR_KEEP_BEAT_TICKS KQP_TICKS_PER_MS(1000U)
 /* How long the card may take over one copy before it is given up on: a base
@@ -2296,7 +2296,7 @@ static unsigned progress_pct(const AppMgr * const me)
  *        percent, in the log every APPMGR_PROGRESS.
  *
  * A medium's chunks and the console's both come through here. The bus needs
- * the percent step: the Opening pill moves by it, and AO_Power drops its blue
+ * the percent step: the Opening pill moves by it, and AO_Power drops its orange
  * pulse after POWER_LED_WRITE_MS without a report.
  *
  * @param me The AO.

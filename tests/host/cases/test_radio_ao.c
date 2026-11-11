@@ -5102,7 +5102,7 @@ TEST_CASE("an on asked while the link comes up is said once the connect has driv
 TEST_CASE("an on asked during the card's remount waits for it, then one job drives it and says it",
           "[radio_ao][exp_power]")
 {
-    unsigned submits;
+    uint32_t submits;
 
     radio_fresh();
     exp_ask(false);
@@ -6018,7 +6018,7 @@ TEST_CASE("a scan response asked before a boot's link is up goes out when the br
     kode_answer(KODE_ST_OK, &none, (uint16_t)sizeof(none));
 
     /* Every job of the bring-up, in whatever order the AO runs them. */
-    for ( unsigned guard = 0U; job_held() && (12U > guard); ++guard )
+    for ( uint32_t guard = 0U; job_held() && (12U > guard); ++guard )
     {
         int const job = running_job();
 
@@ -8439,7 +8439,7 @@ TEST_CASE("a network that goes away is said at once, and tried again with "
 
     static const uint32_t WAITS_MS[] = { 5000U, 30000U, 120000U, 600000U, 600000U };
 
-    for ( size_t i = 0U; i < (sizeof(WAITS_MS) / sizeof(WAITS_MS[0])); ++i )
+    for ( size_t i = 0U; (sizeof(WAITS_MS) / sizeof(WAITS_MS[0])) > i; ++i )
     {
         retry_wait(WAITS_MS[i] - 1000U);
         TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "tried before its wait");
@@ -10029,7 +10029,7 @@ TEST_CASE("a stopped scan publishes what it heard and an end that says cut",
           "[radio_ao][scan_stop]")
 {
     const WifiScanEndEvt *end;
-    unsigned              entries = 0U;
+    uint32_t              entries = 0U;
 
     radio_fresh();
     go_up();
@@ -10084,7 +10084,7 @@ TEST_CASE("a stop with no scan running sets nothing, and the next sweep runs who
 {
     radio_fresh();
     go_up();
-    unsigned const before = job_submits();
+    uint32_t const before = job_submits();
 
     ask_stop();
     TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
@@ -10099,7 +10099,7 @@ TEST_CASE("a stop with no scan running sets nothing, and the next sweep runs who
 TEST_CASE("a stop with no link sets nothing", "[radio_ao][scan_stop]")
 {
     radio_fresh();
-    unsigned const before = job_submits();
+    uint32_t const before = job_submits();
 
     ask_stop();
     TEST_ASSERT_TRUE(logged("wifi_scan_stop: no scan to stop"));
@@ -10280,13 +10280,13 @@ TEST_CASE("a stop asked on a full radio queue is refused and posts nothing",
 #define EVENT_POOLS  2U
 
 /** @brief How many blocks are free in all the event pools. */
-static unsigned event_blocks_free(void)
+static uint32_t event_blocks_free(void)
 {
-    unsigned n = 0U;
+    uint32_t n = 0U;
 
     for ( uint8_t pool = 1U; EVENT_POOLS >= pool; ++pool )
     {
-        n += (unsigned)QF_getPoolFree(pool);
+        n += (uint32_t)QF_getPoolFree(pool);
     }
     return n;
 }
@@ -10321,7 +10321,7 @@ static void kode_answer_nopump(kode_hdr_t const *req, uint8_t st)
 /** @brief Child body: a scan knock meets a queue with @p arg slots free; the sweep still lists every network. */
 static void scan_refused_body(void *arg)
 {
-    unsigned const left = *(unsigned const *)arg;
+    uint32_t const left = *(uint32_t const *)arg;
 
     radio_fresh();
     go_up();
@@ -10333,11 +10333,11 @@ static void scan_refused_body(void *arg)
     ao_spy_drain();
 
     run_scan();
-    CHILD_CHECK(left == uxQueueSpacesAvailable(AO_Radio->eQueue),
+    CHILD_CHECK(uxQueueSpacesAvailable(AO_Radio->eQueue) == left,
                 "the knock took one of the last slots");
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
 
-    unsigned entries = 0U;
+    uint32_t entries = 0U;
     bool     closed  = false;
     for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
     {
@@ -10358,8 +10358,8 @@ static void scan_refused_body(void *arg)
 TEST_CASE("a scan knock refused by a full queue loses no network from the listing",
           "[radio_ao][overflow]")
 {
-    unsigned none = 0U;
-    unsigned last = KQP_RADIO_DROP_MARGIN;
+    uint32_t none = 0U;
+    uint32_t last = KQP_RADIO_DROP_MARGIN;
 
     TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
                                      (uint32_t)ask_support_fork_run(&scan_refused_body, &none),
@@ -10372,7 +10372,7 @@ TEST_CASE("a scan knock refused by a full queue loses no network from the listin
 /** @brief Child body: the C5's answer meets a queue with @p arg slots free; it is logged, and the asker is told on the deadline. */
 static void svc_refused_body(void *arg)
 {
-    unsigned const left = *(unsigned const *)arg;
+    uint32_t const left = *(uint32_t const *)arg;
 
     radio_fresh();
     fake_peer_reset();
@@ -10386,11 +10386,11 @@ static void svc_refused_body(void *arg)
     board_queue();
     radio_queue_fill_to(left);
     fake_klog_reset();
-    unsigned const blocks = event_blocks_free();
+    uint32_t const blocks = event_blocks_free();
 
     kode_answer_nopump(&sign, KODE_ST_OK);
-    CHILD_CHECK(left == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused answer took a slot");
-    CHILD_CHECK(blocks == event_blocks_free(), "the refused answer was not recycled");
+    CHILD_CHECK(uxQueueSpacesAvailable(AO_Radio->eQueue) == left, "the refused answer took a slot");
+    CHILD_CHECK(event_blocks_free() == blocks, "the refused answer was not recycled");
     CHILD_CHECK(logged("no room for a KODE answer"), "the refusal was not said");
     pump();
     pump();
@@ -10408,8 +10408,8 @@ static void svc_refused_body(void *arg)
 TEST_CASE("a KODE answer refused by a full queue is logged and its wait ends on the deadline",
           "[radio_ao][overflow]")
 {
-    unsigned none = 0U;
-    unsigned last = KQP_RADIO_DROP_MARGIN;
+    uint32_t none = 0U;
+    uint32_t last = KQP_RADIO_DROP_MARGIN;
 
     TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
                                      (uint32_t)ask_support_fork_run(&svc_refused_body, &none),

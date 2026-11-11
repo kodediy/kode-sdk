@@ -2718,7 +2718,7 @@ static uint32_t begin_install(uint8_t medium, const char *project)
  * @param[out] fail     How many APP_FLASH_FAIL_SIG.
  * @param[out] last     Overwritten by every done collected.
  */
-static void spy_write_ends(unsigned *progress, unsigned *done, unsigned *fail,
+static void spy_write_ends(uint32_t *progress, uint32_t *done, uint32_t *fail,
                            AppFlashDoneEvt *last)
 {
     *progress = 0U;
@@ -2785,9 +2785,9 @@ TEST_CASE("a park from the terminal that lands ends in a done, so the card "
 {
     AppFlashDoneEvt done;
     uint32_t        len;
-    unsigned        progress;
-    unsigned        dones;
-    unsigned        fails;
+    uint32_t        progress;
+    uint32_t        dones;
+    uint32_t        fails;
 
     len = image_named("parked");
     recv_fresh();
@@ -2818,9 +2818,9 @@ TEST_CASE("a park from the terminal whose bytes do not add up ends in a "
 {
     AppFlashDoneEvt done;
     uint32_t        len;
-    unsigned        progress;
-    unsigned        dones;
-    unsigned        fails;
+    uint32_t        progress;
+    uint32_t        dones;
+    uint32_t        fails;
 
     len = image_named("parked");
     recv_fresh();
@@ -2845,9 +2845,9 @@ TEST_CASE("a park from a medium that lands ends in a done, so the card that "
 {
     AppFlashDoneEvt done;
     uint32_t        len;
-    unsigned        progress;
-    unsigned        dones;
-    unsigned        fails;
+    uint32_t        progress;
+    uint32_t        dones;
+    uint32_t        fails;
 
     Mockkdrv_slot_Init();
     len = image_named("parked");
@@ -2884,9 +2884,9 @@ TEST_CASE("a park from a medium that cannot be read ends in a failure and no "
     AppFlashDoneEvt done;
     StorageDataEvt  d;
     uint32_t        len;
-    unsigned        progress;
-    unsigned        dones;
-    unsigned        fails;
+    uint32_t        progress;
+    uint32_t        dones;
+    uint32_t        fails;
 
     Mockkdrv_slot_Init();
     len = image_named("parked");
@@ -5795,7 +5795,7 @@ static void wipe_rsp(const char *project, kode_status_t st, uint8_t fs_files,
  */
 static bool erase_done(AppEraseDoneEvt *out)
 {
-    unsigned n = 0U;
+    uint32_t n = 0U;
 
     for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
     {
@@ -7389,9 +7389,9 @@ typedef struct {
 } report_t;
 
 /** @brief The write reports the spy holds, in order, emptying it. */
-static unsigned reports_take(report_t *out, unsigned max)
+static uint32_t reports_take(report_t *out, uint32_t max)
 {
-    unsigned n = 0U;
+    uint32_t n = 0U;
 
     for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
     {
@@ -7420,7 +7420,7 @@ TEST_CASE("a terminal install that names its project says it from 0 %",
 
     ask_recv_named(len, 0xDEADBEEFU, false, "snake");
     raw_armed(true);
-    unsigned n = reports_take(r, Q_DIM(r));
+    uint32_t n = reports_take(r, Q_DIM(r));
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n, "the ready's 0 % and nothing else yet");
     TEST_ASSERT_EQUAL_UINT(0U, r[0].percent);
     TEST_ASSERT_EQUAL_STRING_MESSAGE("snake", r[0].project,
@@ -7451,7 +7451,7 @@ TEST_CASE("a terminal install with no name says its project at the first chunk",
 
     ask_recv(len, 0xDEADBEEFU, false);
     raw_armed(true);
-    unsigned n = reports_take(r, Q_DIM(r));
+    uint32_t n = reports_take(r, Q_DIM(r));
     TEST_ASSERT_EQUAL_UINT(1U, n);
     TEST_ASSERT_EQUAL_STRING_MESSAGE("", r[0].project,
         "nobody has said what this is yet");
@@ -7485,7 +7485,7 @@ TEST_CASE("the name the image carries wins over the one the host gave",
     ask_recv_named(len, 0xDEADBEEFU, false, "ladder");
     raw_armed(true);
     feed(s_named_img, (uint16_t)len);
-    unsigned const n = reports_take(r, Q_DIM(r));
+    uint32_t const n = reports_take(r, Q_DIM(r));
     TEST_ASSERT_EQUAL_UINT(3U, n);
     TEST_ASSERT_EQUAL_STRING("ladder", r[0].project);
     TEST_ASSERT_EQUAL_STRING_MESSAGE("snake", r[1].project,
@@ -7515,7 +7515,7 @@ TEST_CASE("an install from a medium says its project once the first chunk is rea
     ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
-    unsigned n = reports_take(r, Q_DIM(r));
+    uint32_t n = reports_take(r, Q_DIM(r));
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n, "the announce, before any byte");
     TEST_ASSERT_EQUAL_STRING_MESSAGE("", r[0].project,
         "a file's name is not its project: nothing to say until it is read");
@@ -7552,7 +7552,7 @@ TEST_CASE("the project of one write does not leak into the next",
 
     ask_recv(len, 0xDEADBEEFU, false);      /* and one nobody has named */
     raw_armed(true);
-    unsigned const n = reports_take(r, Q_DIM(r));
+    uint32_t const n = reports_take(r, Q_DIM(r));
     TEST_ASSERT_EQUAL_UINT(1U, n);
     TEST_ASSERT_EQUAL_STRING_MESSAGE("", r[0].project,
         "the last write's project named a stranger");
@@ -7583,9 +7583,9 @@ TEST_CASE("a kodeOS write names no project", "[appmgr_ao][project]")
     ask_recv_os(len, 0xDEADBEEFU);
     raw_armed(true);
     feed(s_named_img, (uint16_t)len);
-    unsigned const n = reports_take(r, Q_DIM(r));
+    uint32_t const n = reports_take(r, Q_DIM(r));
     TEST_ASSERT_GREATER_OR_EQUAL_UINT(2U, n);
-    for ( unsigned i = 0U; i < n; ++i )
+    for ( uint32_t i = 0U; i < n; ++i )
     {
         TEST_ASSERT_EQUAL_STRING_MESSAGE("", r[i].project,
             "kodeOS is no app: there is no data folder to look for");
@@ -7621,9 +7621,9 @@ static void ask_get(const char *project, const char *url)
 
 /** @brief What AO_Net's queue holds: the opens and closes, and the last URL opened. */
 typedef struct {
-    unsigned opens;
-    unsigned closes;
-    unsigned reads;
+    uint32_t opens;
+    uint32_t closes;
+    uint32_t reads;
     char     url[KODE_FLASH_SRC_MAX];
 } net_seen_t;
 
@@ -7676,7 +7676,7 @@ static void fetch_opened(uint8_t status, uint32_t size)
 static appdata_get_why_t fetch_answer(const char *project)
 {
     appdata_get_why_t why     = APPDATA_GET_OK;
-    unsigned          answers = 0U;
+    uint32_t          answers = 0U;
 
     for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
     {

@@ -640,7 +640,7 @@ TEST_CASE("appdata_get says why no folder was made", "[console_appdata]")
     };
     AppDataGetReqEvt req;
 
-    for ( size_t i = 0U; i < (sizeof(CASES) / sizeof(CASES[0])); ++i )
+    for ( size_t i = 0U; (sizeof(CASES) / sizeof(CASES[0])) > i; ++i )
     {
         console_up_once();
         type_line("appdata_get name=\"snake\" url=\"http://example.invalid/s/\"");

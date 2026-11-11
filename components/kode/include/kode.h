@@ -1044,8 +1044,8 @@ int kode_wifi_scan(kode_wifi_network_t *out, size_t cap);
  *
  * Not stored: every boot starts from the board's serial. The console's own
  * service stays in the advert whatever the name. The device's GAP name (the
- * Device Name characteristic, 0x2A00) stays the serial, so a phone that has
- * connected shows the serial, not this name.
+ * Device Name characteristic, 0x2A00) takes the same name, so a phone that
+ * has connected shows it too.
  *
  * @param name Up to KODE_BLE_NAME_MAX - 1 bytes; NULL or "" for the serial.
  * @return true when the radio has the name; false with kode_error() saying why:

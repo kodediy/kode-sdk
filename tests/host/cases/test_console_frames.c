@@ -107,7 +107,7 @@ static void type_line(const char *text)
 /** @brief The first console line holding @p needle, or NULL. */
 static const char *line_with(const char *needle)
 {
-    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    for ( uint32_t i = 0U; fake_klog_count() > i; ++i )
     {
         const char * const l = fake_klog_line(i);
         if ( (NULL != l) && (strstr(l, needle) != NULL) )
@@ -120,9 +120,9 @@ static const char *line_with(const char *needle)
 
 /** @brief What the console posted to AO_Radio: the last frames request, and how many. */
 typedef struct {
-    unsigned  starts;   /**< Starts seen.                            */
-    unsigned  stops;    /**< Stops seen.                             */
-    unsigned  count;    /**< Requests of WIFI_FRAMES_REQ_SIG seen.   */
+    uint32_t  starts;   /**< Starts seen.                            */
+    uint32_t  stops;    /**< Stops seen.                             */
+    uint32_t  count;    /**< Requests of WIFI_FRAMES_REQ_SIG seen.   */
     bool      on;       /**< The last one's wish.                    */
     uint8_t   channel;  /**< Its channel.                            */
     QActive  *who;      /**< Its asker.                              */
@@ -305,7 +305,7 @@ TEST_CASE("wifi_frames names each reason AO_Radio refuses with", "[console_frame
         { KWIFI_FRAMES_BUSY,       ">err code=4 msg=busy"       },
     };
 
-    for ( unsigned i = 0U; (sizeof(REFUSALS) / sizeof(REFUSALS[0])) > i; ++i )
+    for ( uint32_t i = 0U; (sizeof(REFUSALS) / sizeof(REFUSALS[0])) > i; ++i )
     {
         console_up();
         type_line("wifi_frames ch=6 ms=200");
@@ -430,7 +430,7 @@ TEST_CASE("a stop AO_Radio has no room for is asked again, and the run ends with
     type_line("wifi_frames ch=6 ms=200");
     (void)posted_requests();
     radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
-    for ( unsigned guard = 0U;
+    for ( uint32_t guard = 0U;
          (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_CMD_MARGIN);
          ++guard )
     {
@@ -464,7 +464,7 @@ TEST_CASE("a stop AO_Radio never has room for ends the run saying so", "[console
     type_line("wifi_frames ch=6 ms=200");
     (void)posted_requests();
     radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
-    for ( unsigned guard = 0U;
+    for ( uint32_t guard = 0U;
          (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_CMD_MARGIN);
          ++guard )
     {
@@ -492,11 +492,11 @@ TEST_CASE("a stop AO_Radio never has room for ends the run saying so", "[console
 }
 
 /** @brief How many console lines hold @p needle. */
-static unsigned lines_with(const char *needle)
+static uint32_t lines_with(const char *needle)
 {
-    unsigned n = 0U;
+    uint32_t n = 0U;
 
-    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    for ( uint32_t i = 0U; fake_klog_count() > i; ++i )
     {
         const char * const l = fake_klog_line(i);
 
@@ -565,8 +565,8 @@ TEST_CASE("a stop AO_Radio never answers frees the console by itself, after the 
 TEST_CASE("a stop's answer after the watchdog is never taken by the next run",
           "[console_frames]")
 {
-    unsigned starts = 0U;
-    unsigned stops  = 0U;
+    uint32_t starts = 0U;
+    uint32_t stops  = 0U;
     posted_t p;
 
     console_up();
@@ -613,7 +613,7 @@ TEST_CASE("a tick that reaches the console after a run whose stop never reached 
     type_line("wifi_frames ch=6 ms=200");
     (void)posted_requests();
     radio_says(true, FRAMES_CH, false, KWIFI_FRAMES_OK);
-    for ( unsigned guard = 0U;
+    for ( uint32_t guard = 0U;
          (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_CMD_MARGIN);
          ++guard )
     {

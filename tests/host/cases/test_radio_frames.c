@@ -123,12 +123,12 @@ static void c5_batch(uint8_t count)
 /** @brief Events the second asker's queue gave up, held until the case ends: the caller of ao_spy_other_take() recycles them. */
 #define FR_OTHER_HELD_MAX  16U
 static const QEvt *s_other_held[FR_OTHER_HELD_MAX];
-static unsigned    s_other_held_n;
+static uint32_t    s_other_held_n;
 
 /** @brief Recycle what the second asker's reads kept. */
 static void other_release(void)
 {
-    for ( unsigned i = 0U; s_other_held_n > i; ++i )
+    for ( uint32_t i = 0U; s_other_held_n > i; ++i )
     {
         QF_gc(s_other_held[i]);
     }
@@ -174,7 +174,7 @@ static const QEvt *spy_next(QActive *who)
 {
     const QEvt *e;
 
-    if ( who == ao_spy() )
+    if ( ao_spy() == who )
     {
         return ao_spy_take();
     }
@@ -389,7 +389,7 @@ TEST_CASE("each reason the C5 refuses with reaches the asker as its own", "[radi
     };
 
     frames_up();
-    for ( unsigned i = 0U; (sizeof(CASES) / sizeof(CASES[0])) > i; ++i )
+    for ( uint32_t i = 0U; (sizeof(CASES) / sizeof(CASES[0])) > i; ++i )
     {
         ask(ao_spy(), true, FR_CH);
         c5_answers(KODE_ST_REFUSED, 0U, CASES[i].channel, CASES[i].joined, CASES[i].wire);
@@ -482,7 +482,7 @@ TEST_CASE("an asker with no room for them is not asserted at, and the next tick 
     frames_up();
     start_listening(ao_spy_other(), FR_CH);
 
-    for ( unsigned guard = 0U;
+    for ( uint32_t guard = 0U;
          (FR_FULL < uxQueueSpacesAvailable(ao_spy_other()->eQueue)) && (64U > guard);
          ++guard )
     {
@@ -492,7 +492,7 @@ TEST_CASE("an asker with no room for them is not asserted at, and the next tick 
     pump();
 
     /* The queue is as it was left: full of the filler, nothing of the batch. */
-    unsigned fillers = 0U;
+    uint32_t fillers = 0U;
     for ( const QEvt *e = ao_spy_other_take(); NULL != e; e = ao_spy_other_take() )
     {
         TEST_ASSERT_EQUAL_INT((int)WIFI_STATE_REQ_SIG, (int)e->sig);   /* static: nothing to recycle */
@@ -597,9 +597,9 @@ TEST_CASE("a lost link tells the asker, empties the ring and frees the door", "[
 /* ---- The board's rest, Wi-Fi and the radio's other work ---------------------- */
 
 /** @brief How many knocks wait in AO_Radio's queue; the queue is left as it was. */
-static unsigned knocks_queued(void)
+static uint32_t knocks_queued(void)
 {
-    unsigned    knocks = 0U;
+    uint32_t    knocks = 0U;
     UBaseType_t n      = uxQueueMessagesWaiting(AO_Radio->eQueue);
 
     for ( UBaseType_t i = 0U; i < n; ++i )
@@ -621,7 +621,7 @@ static void radio_queue_to_margin(void)
 {
     static const QEvt filler = QEVT_INITIALIZER(RADIO_STATE_REQ_SIG);
 
-    for ( unsigned guard = 0U;
+    for ( uint32_t guard = 0U;
          (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_POST_MARGIN);
          ++guard )
     {
@@ -767,7 +767,7 @@ TEST_CASE("batches that land before AO_Radio runs knock once, and all their fram
 
     pump();
     (void)take_tick(ao_spy());
-    for ( unsigned i = 0U; (3U * FR_TWO) > i; ++i )
+    for ( uint32_t i = 0U; (3U * FR_TWO) > i; ++i )
     {
         (void)take_frame(ao_spy());
     }
@@ -798,7 +798,7 @@ TEST_CASE("a knock AO_Radio has no room for is not left pending: the next batch 
     TEST_ASSERT_EQUAL_UINT(1U, knocks_queued());
     pump();
     (void)take_tick(ao_spy());
-    for ( unsigned i = 0U; (2U * FR_TWO) > i; ++i )
+    for ( uint32_t i = 0U; (2U * FR_TWO) > i; ++i )
     {
         (void)take_frame(ao_spy());
     }

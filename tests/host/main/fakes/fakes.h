@@ -806,7 +806,7 @@ unsigned fake_ble_app_kicks(void);
 void fake_ble_battery_declare(bool on);
 
 /** @brief The last level kdrv_ble_battery_set() was given; -1 for none since the declare. */
-int fake_ble_battery_pct(void);
+int16_t fake_ble_battery_pct(void);
 
 /** @brief How many scans have been run since the reset. */
 unsigned fake_ble_scans(void);
@@ -932,7 +932,7 @@ void fake_radio_fail_exp_switch(bool fails);
 bool fake_radio_exp_pin(void);
 
 /** @brief How many times the enable was driven low since fake_radio_reset(). */
-unsigned fake_radio_exp_off_drives(void);
+uint32_t fake_radio_exp_off_drives(void);
 
 /** @brief The running CONNECT reads the wish now, as its worker does just
  *         before it drives the pin: a wish asked after this is not the one
