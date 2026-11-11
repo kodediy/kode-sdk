@@ -5989,10 +5989,11 @@ typedef struct {
     uint16_t n;          /**< Witness samples this record rests on.        */
 } HapticTestEvt;
 
-/* What one DISPLAY_TEST_SIG record is about. The row paints a field over the
- * whole glass and asks the operator whether the glass took it - every pixel,
- * the colour that was named, nothing dark and nothing stuck. The pad is the
- * answer: BUTTON_TOP says yes, BUTTON_BOT says no. */
+/* What one DISPLAY_TEST_SIG record is about. The row opens with the glass
+ * still the renderer's, for whoever draws it to say what is coming; then it
+ * paints a field over the whole glass and asks the operator whether the glass
+ * took it - every pixel, the colour that was named, nothing dark and nothing
+ * stuck. The pad is the answer: BUTTON_TOP says yes, BUTTON_BOT says no. */
 #define DISPLAY_TEST_ASK     0U  /**< `field` is on the glass: answer now.   */
 #define DISPLAY_TEST_PASS    1U  /**< The operator said yes.                 */
 #define DISPLAY_TEST_FAIL    2U  /**< The operator said no.                  */
@@ -6001,6 +6002,10 @@ typedef struct {
 #define DISPLAY_TEST_DONE    4U  /**< The row is over; the verdict follows.  */
 #define DISPLAY_TEST_ABSENT  5U  /**< No panel on this board: the row answers
                                   *   at once and asks nobody anything.      */
+#define DISPLAY_TEST_INTRO   6U  /**< The row has started and the glass is
+                                  *   still the renderer's: say what the pad
+                                  *   will mean. BUTTON_TOP starts the fields,
+                                  *   or KODE_DISPLAY_TEST_INTRO_MS does.    */
 
 /* Which field DisplayTestEvt.field is about. */
 #define DISPLAY_FIELD_WHITE 0U  /**< All three channels.                    */
@@ -6015,7 +6020,8 @@ typedef struct {
  *
  * ButtonsTestEvt's shape: a question and its outcome share a step number, so
  * the console prints them as a pair and whoever draws the glass knows from
- * the first ASK that the pad is not navigation until DONE.
+ * the INTRO that the pad is not navigation until DONE, and from the first ASK
+ * that the glass is the row's.
  */
 typedef struct {
     QEvt     super;

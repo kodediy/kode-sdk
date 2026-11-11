@@ -1569,11 +1569,14 @@ void display_mirror_info_request(void);
 /**
  * @brief Ask AO_Display to self-test the panel - `test component=display`.
  *
- * Verdict: a published TEST_RESULT_SIG "display". White, red, green, blue, black
- * are painted as DISPLAY_TEST_SIG questions: BUTTON_TOP confirms, BUTTON_BOT
- * denies, KODE_DISPLAY_TEST_STEP_MS fails; no panel answers `panel=absent` at once.
- * Flushes meanwhile are completed but not painted, so it ends with
- * DISPLAY_REPAINT_SIG. Presses are answers until DISPLAY_TEST_DONE: do not act on them.
+ * Verdict: a published TEST_RESULT_SIG "display". It opens with
+ * DISPLAY_TEST_INTRO, the glass still the renderer's to say what is coming,
+ * until BUTTON_TOP or KODE_DISPLAY_TEST_INTRO_MS. Then white, red, green, blue,
+ * black are painted as DISPLAY_TEST_SIG questions: BUTTON_TOP confirms,
+ * BUTTON_BOT denies, KODE_DISPLAY_TEST_STEP_MS fails; no panel answers
+ * `panel=absent` at once. Flushes after the opening are completed but not
+ * painted, so it ends with DISPLAY_REPAINT_SIG. Presses are answers until
+ * DISPLAY_TEST_DONE: do not act on them.
  */
 void display_test_request(void);
 

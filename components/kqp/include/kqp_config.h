@@ -1466,15 +1466,25 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         The guided button test's figure, for its reason: long enough to
  *         look, short enough that an empty bench ends the row. */
 #define KODE_DISPLAY_TEST_STEP_MS  10000U
+/** @brief How long the display row's opening screen stays up before the first
+ *         field, unless BUTTON_TOP starts the fields sooner: time to read
+ *         what the pad will mean. */
+#define KODE_DISPLAY_TEST_INTRO_MS  8000U
+/** @brief How long the renderer is given, once the opening screen is done
+ *         with, to finish a frame it may have started on it before the first
+ *         field goes up. Two of its longest frames. */
+#define KODE_DISPLAY_TEST_SETTLE_MS  200U
 /** @brief The level the `led` row drives each sink at, of 255: bright enough
  *         to name the colour under a bench lamp, and well short of a sink
  *         somebody has to stare into. */
 #define KODE_LED_TEST_LEVEL           96U
 /** @brief How long the operator has to answer one colour of the LED row. */
 #define KODE_LED_TEST_STEP_MS      10000U
-/** @brief The panel's row: five fields each waited out in full, the paints
- *         between them, margin. */
-#define KODE_DISPLAY_TEST_BUDGET_MS  ((5U * KODE_DISPLAY_TEST_STEP_MS) + 3000U)
+/** @brief The panel's row: the opening screen, five fields each waited out
+ *         in full, the paints between them, margin. */
+#define KODE_DISPLAY_TEST_BUDGET_MS  (KODE_DISPLAY_TEST_INTRO_MS \
+                                      + KODE_DISPLAY_TEST_SETTLE_MS \
+                                      + (5U * KODE_DISPLAY_TEST_STEP_MS) + 3000U)
 /** @brief The LED's row: three colours each waited out in full, margin. */
 #define KODE_LED_TEST_BUDGET_MS      ((3U * KODE_LED_TEST_STEP_MS) + 2000U)
 
