@@ -3196,6 +3196,8 @@ static write_seen_t write_seen(void)
             {
                 w.no_name = false;
             }
+            TEST_ASSERT_EQUAL_STRING_MESSAGE("", p->project,
+                "the radio's image is no app: its reports name no project");
         }
         else if ( (int)e->sig == APP_FLASH_DONE_SIG )
         {

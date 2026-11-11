@@ -760,6 +760,22 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 #define KODE_APP_PROJECT_MAX    32U   /**< == KDRV_SLOT_PROJECT_MAX: a
                                        *   project name, terminator
                                        *   included.                        */
+/* An app's data folder (app.json and icon.k64) may reach the internal
+ * partition before its app does, so nothing bounds how many there are but the
+ * partition itself. A new one is refused when it would leave less than the
+ * floor free: Kody's pack is staged beside the one in use when it updates. */
+#define KODE_APPDATA_FOLDER_BYTES   (20U * 1024U)  /**< What one data folder
+                                       *   takes: five 4 KB clusters, one for
+                                       *   the directory, one for app.json,
+                                       *   three for the icon.              */
+#define KODE_APPDATA_FREE_MIN_BYTES (128U * 1024U) /**< What a new data folder
+                                       *   must leave free on the internal
+                                       *   partition.                       */
+#define KODE_APPDATA_URL_MAX    200U  /**< The base URL an app's data folder is
+                                       *   fetched from (`appdata_get`),
+                                       *   terminator included: what a console
+                                       *   line has room for beside the verb
+                                       *   and a project name.              */
 #define KODE_APP_DATE_MAX       16U   /**< == KAPP_IDF_DATE_MAX: a build date,
                                        *   "Oct 24 2026".                   */
 #define KODE_APP_TIME_MAX       16U   /**< == KAPP_IDF_TIME_MAX: a build

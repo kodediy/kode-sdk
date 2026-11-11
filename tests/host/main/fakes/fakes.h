@@ -521,6 +521,10 @@ const char *fake_media_sd_dir(void);
 /** @brief The directory standing in for the internal FAT mount point. */
 const char *fake_media_fs_dir(void);
 
+/** @brief What the internal partition reports as free from now on;
+ *         fake_media_reset() puts back its 8 MB. */
+void fake_media_set_fs_free(uint64_t free_bytes);
+
 /**
  * @brief Does @p name exist under @p dir?
  * @param dir  One of the two directories above.

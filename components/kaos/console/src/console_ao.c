@@ -72,6 +72,8 @@ KAOS_WEAK void kaos_display_start(void);
 KAOS_WEAK void kaos_net_start(void);
 KAOS_WEAK void appdata_request(const char *project, QActive *who);
 KAOS_WEAK kode_status_t appdata_rm_request(const char *project, QActive *who);
+KAOS_WEAK kode_status_t appmgr_appdata_get_request(const char *project,
+                                                   const char *url, QActive *who);
 KAOS_WEAK const uint8_t *storage_buf(uint8_t idx);
 KAOS_WEAK void storage_close_request(void);
 KAOS_WEAK void storage_desc_request(const char *name, QActive *who);
@@ -283,6 +285,7 @@ typedef enum {
                        *   one project asked about, closed by
                        *   APPDATA_END_SIG.                               */
     KCLI_APPDATA_RM,  /**< appdata_rm: closed by APPDATA_RM_RSP_SIG.      */
+    KCLI_APPDATA_GET, /**< appdata_get: closed by APPDATA_GET_RSP_SIG.    */
     KCLI_OWNER,     /**< A registered verb: its owner's answer hook sees
                      *   the events, and console_end() closes it.        */
 } kcli_inflight_t;
@@ -2176,6 +2179,64 @@ static void h_appdata_rm(Console *me, const kcmd_t *c, const karg_val_t *v)
         console_reply_err(KCLI_ERR_REJECT, console_status_word((uint32_t)rc));
         console_end();
     }
+}
+
+/** How long `appdata_get` may take: two files, each with the deadline
+ *  AO_AppMgr gives a transfer's answer, then AO_Storage's write. AO_AppMgr
+ *  answers every fetch, so this only bounds a lost answer. */
+#define KCLI_APPDATA_GET_MS  ((2U * KODE_APPMGR_OPEN_MS) + APPMGR_TIDY_MS + KCLI_CMD_TIMEOUT_MS)
+
+/** @brief appdata_get name=<project> url=<base>: fetch the app's data folder
+ *        from `<base>app.json` and `<base>icon.k64`; closed by
+ *        APPDATA_GET_RSP_SIG, or at once when the request is refused. */
+static void h_appdata_get(Console *me, const kcmd_t *c, const karg_val_t *v)
+{
+    if ( console_owner_absent(&kaos_storage_start) )
+    {
+        return;
+    }
+    if ( console_owner_absent(&kaos_appmgr_start) )
+    {
+        return;
+    }
+    if ( strlen(v[1].s) >= (size_t)KODE_APPDATA_URL_MAX )
+    {
+        console_reply_err(KCLI_ERR_VALUE, "url");
+        return;
+    }
+    cmd_begin(me, KCLI_APPDATA_GET, c->verb);
+    kode_status_t const rc = appmgr_appdata_get_request(v[0].s, v[1].s, &me->super);
+    if ( KODE_OK != rc )
+    {
+        /* Nothing was posted, so nobody will answer. */
+        console_reply_err(KCLI_ERR_REJECT, console_status_word((uint32_t)rc));
+        console_end();
+        return;
+    }
+    console_extend(KCLI_APPDATA_GET_MS);
+}
+
+/**
+ * @brief The word an `appdata_get` that made no folder ends with.
+ *
+ * @param why How the fetch ended (appdata_get_why_t).
+ * @return The word after `msg=`.
+ */
+static const char *ad_get_word(uint8_t why)
+{
+    /* In appdata_get_why_t's order. */
+    static const char *const WORDS[] = { "ok", "busy", "name", "fetch",
+                                         "json", "icon", "full", "store" };
+    _Static_assert((sizeof(WORDS) / sizeof(WORDS[0]))
+                       == ((size_t)APPDATA_GET_STORE + 1U),
+                   "one word for each way a fetch ends");
+    const char *word = "store";
+
+    if ( why < (uint8_t)(sizeof(WORDS) / sizeof(WORDS[0])) )
+    {
+        word = WORDS[why];
+    }
+    return word;
 }
 
 /**
@@ -6109,6 +6170,10 @@ _Static_assert((sizeof(A_EXP) / sizeof(A_EXP[0])) <= (size_t)KCLI_MAX_KEYS,
 static const karg_spec_t A_NAME[] = {
     { .key = "name", .required = true, .type = KARG_STRING },
 };
+static const karg_spec_t A_APPDATA_GET[] = {
+    { .key = "name", .required = true, .type = KARG_STRING },
+    { .key = "url",  .required = true, .type = KARG_STRING },
+};
 /* `ls` may be typed bare (the cwd). `cd` and `stat` need a path, so a
  * mistyped key is not taken as the cwd. */
 static const karg_spec_t A_PATH_OPT[] = {
@@ -6297,6 +6362,7 @@ static const kcmd_t CMDS[] = {
     { "appdata_ls",   NULL,      0U, h_appdata_ls   },
     { "appdata_info", A_NAME,    1U, h_appdata_info },
     { "appdata_rm",   A_NAME,    1U, h_appdata_rm   },
+    { "appdata_get",  A_APPDATA_GET, 2U, h_appdata_get },
     { "variable",      A_VARIABLE, 2U, h_variable      },
     { "variable_list", NULL,       0U, h_variable_list },
     { "function",        A_FUNCTION,   2U, h_function        },
@@ -8010,6 +8076,33 @@ static QState console_own(Console * const me, QEvt const * const e)
             else
             {
                 /* Not ours. */
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APPDATA_GET_RSP_SIG: {
+            if ( (uint8_t)KCLI_APPDATA_GET == me->inflight )
+            {
+                AppDataGetRspEvt const * const g = Q_EVT_CAST(AppDataGetRspEvt);
+
+                if ( (uint8_t)APPDATA_GET_OK == g->why )
+                {
+                    char        q[CONSOLE_QUOTED_MAX(sizeof(g->project))];
+                    const char *icon = "none";
+
+                    if ( g->icon )
+                    {
+                        icon = "ok";
+                    }
+                    console_reply(">|appdata project=%s json=ok icon=%s",
+                                  console_quote(q, sizeof(q), g->project), icon);
+                    console_reply(">ok");
+                }
+                else
+                {
+                    console_reply_err(KCLI_ERR_REJECT, ad_get_word(g->why));
+                }
+                console_end();
             }
             status = Q_HANDLED();
             break;
