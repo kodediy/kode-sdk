@@ -136,6 +136,7 @@ static const kode_known_t s_known[] = {
     { KODE_EVENT_BLE_CONNECTED_NAME,    &kaos_radio_start, "KODE_EVENT_BLE_CONNECTED",    &ble_listen },
     { KODE_EVENT_BLE_DISCONNECTED_NAME, &kaos_radio_start, "KODE_EVENT_BLE_DISCONNECTED", &ble_listen },
     { KODE_EVENT_BLE_WRITTEN_NAME,      &kaos_radio_start, "KODE_EVENT_BLE_WRITTEN",      &ble_listen },
+    { KODE_EVENT_BLE_TAKEN_NAME,        &kaos_radio_start, "KODE_EVENT_BLE_TAKEN",        &ble_listen },
     { NULL,                      NULL,              NULL,                        NULL             }
 };
 

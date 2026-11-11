@@ -43,6 +43,9 @@
 /** @brief The event for a write to the app's service: kode.h's KODE_EVENT_BLE_WRITTEN. */
 #define KODE_EVENT_BLE_WRITTEN_NAME "ble_written"
 
+/** @brief The event for a read that took a queued value: kode.h's KODE_EVENT_BLE_TAKEN. */
+#define KODE_EVENT_BLE_TAKEN_NAME "ble_taken"
+
 /* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
 /** @brief How long asking for the finger keeps trying while the Active Object's queue is full, in ms. */
 #define KODE_TOUCH_LISTEN_BOUND_MS 100U
@@ -181,7 +184,8 @@ kode_status_t kode_standard_ao_power_await(uint32_t ms);
  * ble_app_subscribe() is what links AO_Radio, so @p subscribe is passed in
  * rather than named here. Call it once kode_standard_ao_ensure() has answered
  * true. The Active Object turns BLE_APP_LINK_SIG into ble_connected and
- * ble_disconnected, and BLE_APP_WRITE_SIG into ble_written
+ * ble_disconnected, BLE_APP_TAKEN_SIG into ble_taken, and BLE_APP_WRITE_SIG
+ * into ble_written
  * (kode_event_push_bytes()).
  *
  * @param subscribe The owner's subscribe; never NULL.

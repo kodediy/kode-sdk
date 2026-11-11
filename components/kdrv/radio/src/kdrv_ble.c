@@ -1209,6 +1209,9 @@ kode_status_t kdrv_ble_mirror_write(const uint8_t *data, size_t len)
 /** @brief Bytes a notification spends on its ATT header: an opcode and a handle. */
 #define BLE_ATT_NOTIFY_HDR  3U
 
+/** @brief Bytes a read's answer spends on its ATT header: an opcode. */
+#define BLE_ATT_READ_HDR    1U
+
 /** @brief Services in a table with the app's: the console's, the app's and the terminator. */
 #define BLE_APP_TABLE_SVCS  3U
 
@@ -1283,7 +1286,12 @@ static uint8_t app_index(uint16_t attr)
 
 /**
  * @brief A read or a write of one of the app's characteristics. Host task.
- * @param conn_handle Unused.
+ *
+ * A read appends the whole value and NimBLE sends the part from the read's
+ * offset that fits the answer; a queued value is taken once the part sent
+ * reaches its end (kdrv_ble_app_read()).
+ *
+ * @param conn_handle The link, for its MTU.
  * @param attr_handle The value's handle.
  * @param ctxt        NimBLE's access context.
  * @param arg         Unused.
@@ -1292,7 +1300,6 @@ static uint8_t app_index(uint16_t attr)
 static int app_access(uint16_t conn_handle, uint16_t attr_handle,
                       struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn_handle;
     (void)arg;
 
     uint8_t const  i   = app_index(attr_handle);
@@ -1305,7 +1312,15 @@ static int app_access(uint16_t conn_handle, uint16_t attr_handle,
     }
     else if ( BLE_GATT_ACCESS_OP_READ_CHR == ctxt->op )
     {
-        uint16_t const n = kdrv_ble_app_read(i, buf, (uint16_t)KDRV_BLE_APP_VALUE_MAX);
+        uint16_t const mtu  = ble_att_mtu(conn_handle);
+        uint16_t       span = 0U;
+
+        if ( BLE_ATT_READ_HDR < mtu )
+        {
+            span = (uint16_t)(mtu - BLE_ATT_READ_HDR);
+        }
+        uint16_t const n = kdrv_ble_app_read(i, ctxt->offset, span, buf,
+                                             (uint16_t)KDRV_BLE_APP_VALUE_MAX);
 
         rc = BLE_ATT_ERR_INSUFFICIENT_RES;
         if ( os_mbuf_append(ctxt->om, buf, n) == 0 )

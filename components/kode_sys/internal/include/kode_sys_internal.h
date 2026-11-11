@@ -654,29 +654,32 @@ kode_status_t kode_block_ble_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t
                                   uint32_t wait_ms);
 
 /**
- * @brief Set, or set and notify, one value of the app's service, and wait for
+ * @brief Set, or set and notify, one value of the app's service, or push a
+ *        value on a queued characteristic or empty it, and wait for
  *        AO_Radio's answer.
  *
- * kode_sys_ble_set_value()'s or kode_sys_ble_notify()'s request, one call at
- * a time: a call from another task waits for the claim, and every request
+ * kode_sys_ble_set_value()'s, kode_sys_ble_notify()'s,
+ * kode_sys_ble_queue_push()'s or kode_sys_ble_queue_clear()'s request, one
+ * call at a time: a call from another task waits for the claim, and every request
  * carries a generation, so the late answer to a call that gave up is dropped
  * by kode_sys_answer_await(). The claim, a full queue and the answer share
  * KODE_SYS_BLE_VALUE_WAIT_MS in all. Nothing is allocated past the first
  * call's semaphore and lock.
  *
  * @note Blocks; never from an AO.
- * @param chr    The characteristic's name.
- * @param notify true to notify a subscribed central too.
- * @param data   The bytes; NULL when @p len is 0.
- * @param len    0 to KODE_SYS_BLE_VALUE_MAX.
- * @return KODE_OK, set and, for a notify, queued or nobody subscribed;
- *         KODE_DENIED as the commands refuse; KODE_NO_RESOURCES when the
- *         ring is full: the value is set, the notification is not queued;
+ * @param chr  The characteristic's name.
+ * @param op   KQP_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR.
+ * @param data The bytes; NULL when @p len is 0.
+ * @param len  0 to KODE_SYS_BLE_VALUE_MAX; 1 or more for a push, 0 for a clear.
+ * @return KODE_OK, set and, for a notify, queued or nobody subscribed, or
+ *         pushed, or emptied; KODE_DENIED as the commands refuse;
+ *         KODE_NO_RESOURCES when the ring is full (the value is set, the
+ *         notification is not queued) or, for a push, the queue is;
  *         KODE_ERROR when PSRAM refused the values, or the first call could
  *         not make the door's semaphore and lock; KODE_TIMEOUT when the
  *         claim, room in AO_Radio's queue or the answer did not come in time.
  */
-kode_status_t kode_block_ble_value(const char *chr, bool notify, const void *data, size_t len);
+kode_status_t kode_block_ble_value(const char *chr, uint8_t op, const void *data, size_t len);
 
 #ifdef __cplusplus
 }

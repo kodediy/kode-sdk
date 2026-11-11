@@ -244,6 +244,9 @@ enum KodeSignals {
                                  *   the bytes).                             */
     BLE_APP_LINK_SIG,           /**< AO_Radio: a central connected or left
                                  *   (BleAppLinkEvt), one edge each.         */
+    BLE_APP_TAKEN_SIG,          /**< AO_Radio: a read took the oldest value
+                                 *   of a queued characteristic
+                                 *   (BleAppTakenEvt: what is left).         */
     NET_PING_ENTRY_SIG,         /**< AO_Net: one ICMP echo's outcome
                                  *   (NetPingEntryEvt). One event per echo,
                                  *   a timeout included - a row missing is a
@@ -4656,6 +4659,11 @@ typedef struct {
 /** @brief Bytes of a value of the app's service. */
 #define KQP_BLE_APP_VALUE_MAX  244U
 
+#define KQP_BLE_APP_OP_SET     0U   /**< BleAppValueReqEvt.op: set the value.             */
+#define KQP_BLE_APP_OP_NOTIFY  1U   /**< BleAppValueReqEvt.op: set it and notify.         */
+#define KQP_BLE_APP_OP_PUSH    2U   /**< BleAppValueReqEvt.op: push it on the queue.      */
+#define KQP_BLE_APP_OP_CLEAR   3U   /**< BleAppValueReqEvt.op: empty the queue; no bytes. */
+
 /** @brief A central wrote to the app's own service (BLE_APP_WRITE_SIG). */
 typedef struct {
     QEvt     super;
@@ -4677,12 +4685,12 @@ typedef struct {
     khal_sem_t done;   /**< Signalled once the answer is written.               */
     uint32_t   ack;    /**< The request's generation, stamped (release) just
                         *   before @c done.                                     */
-    uint8_t    rc;     /**< kode_status_t: kdrv_ble_app_set_value()'s or
-                        *   kdrv_ble_app_notify()'s answer.                     */
+    uint8_t    rc;     /**< kode_status_t: the driver's answer to the request.  */
 } BleValueWaiter;
 
 /**
- * @brief Set or notify one value of the app's own service (BLE_APP_VALUE_REQ_SIG).
+ * @brief Set or notify one value of the app's own service, or push a value
+ *        on a queued characteristic or empty it (BLE_APP_VALUE_REQ_SIG).
  *
  * Posted to AO_Radio, the service's owner, with a copy of the bytes. A
  * command carries no waiter; a blocked task's request carries its own.
@@ -4691,7 +4699,7 @@ typedef struct {
     QEvt            super;
     BleValueWaiter *wait;                          /**< The task's waiter; NULL for a command. */
     uint32_t        gen;                           /**< The task's tag for this request.        */
-    bool            notify;                        /**< true: notify; false: set the value.     */
+    uint8_t         op;                            /**< KQP_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR. */
     char            name[KQP_BLE_APP_NAME_MAX];    /**< The characteristic's name.              */
     uint16_t        len;                           /**< Bytes in @c data.                       */
     uint8_t         data[KQP_BLE_APP_VALUE_MAX];   /**< The value, NULs included.               */
@@ -4702,6 +4710,14 @@ typedef struct {
     QEvt super;
     bool connected;   /**< true: a link began; false: it ended. */
 } BleAppLinkEvt;
+
+/** @brief A read took the oldest value of a queued characteristic (BLE_APP_TAKEN_SIG). */
+typedef struct {
+    QEvt    super;
+    uint8_t chr;                         /**< The characteristic's place in the table. */
+    uint8_t left;                        /**< Values still in its queue.               */
+    char    name[KQP_BLE_APP_NAME_MAX];  /**< Its name.                                */
+} BleAppTakenEvt;
 
 /** @brief One remembered network (WIFI_SAVED_ENTRY_SIG). Name only. */
 typedef struct {

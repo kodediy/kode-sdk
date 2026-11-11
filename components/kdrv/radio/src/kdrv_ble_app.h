@@ -75,7 +75,7 @@ void *kdrv_ble_app_host(void);
 /** @brief Whether the ring holds a notification. @return true when it does. */
 bool kdrv_ble_app_queued(void);
 
-/** @brief Forget the subscriptions and empty the ring: a link that began or ended. */
+/** @brief Forget the subscriptions and empty the ring and the queues: a link that began or ended. */
 void kdrv_ble_app_link_reset(void);
 
 /**
@@ -96,13 +96,23 @@ void kdrv_ble_app_subscribed(uint8_t chr, bool on);
 bool kdrv_ble_app_written(uint8_t chr, const uint8_t *data, uint16_t len);
 
 /**
- * @brief Copy characteristic @p chr's value out, for a read.
- * @param chr Its place in the table.
- * @param out Where it goes.
- * @param cap Bytes @p out holds.
- * @return Its bytes; 0 for none.
+ * @brief Copy characteristic @p chr's value out, for a read or a read blob.
+ *
+ * A queued characteristic gives the oldest value in its queue, or 0 bytes
+ * for an empty one, and the read that reaches the value's last byte takes
+ * it out and calls the taken callback: one that starts at @p offset and
+ * carries @p span bytes. A value longer than one read is read in parts, so
+ * each part gets the same value until the last.
+ *
+ * @param chr    Its place in the table.
+ * @param offset Where the read starts in the value: 0, or a read blob's.
+ * @param span   Bytes the read's answer carries: the link's MTU less 1.
+ * @param out    Where it goes.
+ * @param cap    Bytes @p out holds.
+ * @return Its bytes, the whole value; 0 for none.
  */
-uint16_t kdrv_ble_app_read(uint8_t chr, uint8_t *out, uint16_t cap);
+uint16_t kdrv_ble_app_read(uint8_t chr, uint16_t offset, uint16_t span, uint8_t *out,
+                           uint16_t cap);
 
 /**
  * @brief The host task's buffer for one write or one read, KDRV_BLE_APP_VALUE_MAX bytes.

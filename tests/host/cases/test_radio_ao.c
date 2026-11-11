@@ -8054,6 +8054,7 @@ TEST_CASE("a central's write to the app's service is published as a copy, and th
     /* Leave the flags and the subscriptions as this file found them. */
     QActive_unsubscribe(ao_spy(), BLE_APP_WRITE_SIG);
     QActive_unsubscribe(ao_spy(), BLE_APP_LINK_SIG);
+    QActive_unsubscribe(ao_spy(), BLE_APP_TAKEN_SIG);
     fake_ble_app_service_set(NULL);
     dispatch(BLE_STOP_REQ_SIG);
     pump();
@@ -8097,6 +8098,7 @@ TEST_CASE("a reconnect folded into one read of the state is told as an end and a
 
     QActive_unsubscribe(ao_spy(), BLE_APP_WRITE_SIG);
     QActive_unsubscribe(ao_spy(), BLE_APP_LINK_SIG);
+    QActive_unsubscribe(ao_spy(), BLE_APP_TAKEN_SIG);
     fake_ble_central(false);
     pump();
     ao_spy_drain();
@@ -8111,14 +8113,26 @@ TEST_CASE("a reconnect folded into one read of the state is told as an end and a
 /** @brief The generation the value cases stamp their waiter with. */
 #define VALUE_TEST_GEN 7U
 
-/** @brief Post an app's value or notification to AO_Radio, as kode_sys_ble.c builds it. */
-static void post_value(const char *chr, bool notify, const char *text, BleValueWaiter *wait)
+/** @brief Post one of the app's value operations to AO_Radio, as kode_sys_ble.c builds it. */
+static void post_op(const char *chr, uint8_t op, const char *text, BleValueWaiter *wait)
 {
-    QEvt const *const e = ble_value_evt(chr, notify, text, strlen(text), wait, VALUE_TEST_GEN);
+    QEvt const *const e = ble_value_evt(chr, op, text, strlen(text), wait, VALUE_TEST_GEN);
 
     TEST_ASSERT_NOT_NULL(e);
     QACTIVE_POST(AO_Radio, e, NULL);
     pump();
+}
+
+/** @brief Post an app's value or notification to AO_Radio. */
+static void post_value(const char *chr, bool notify, const char *text, BleValueWaiter *wait)
+{
+    uint8_t op = KQP_BLE_APP_OP_SET;
+
+    if ( notify )
+    {
+        op = KQP_BLE_APP_OP_NOTIFY;
+    }
+    post_op(chr, op, text, wait);
 }
 
 TEST_CASE("AO_Radio sets the app's values and queues its notifications, answers a full ring "
@@ -8135,7 +8149,7 @@ TEST_CASE("AO_Radio sets the app's values and queues its notifications, answers 
 
     /* A command sets the value and answers nobody. */
     post_value("temp", false, "a", NULL);
-    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, got, (uint16_t)sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got, (uint16_t)sizeof(got)));
     TEST_ASSERT_EQUAL_HEX8('a', got[0]);
     TEST_ASSERT_FALSE(kdrv_ble_app_queued());
     TEST_ASSERT_EQUAL_UINT(kicks, fake_ble_app_kicks());
@@ -8158,7 +8172,7 @@ TEST_CASE("AO_Radio sets the app's values and queues its notifications, answers 
     TEST_ASSERT_EQUAL_UINT32(VALUE_TEST_GEN, __atomic_load_n(&w.ack, __ATOMIC_ACQUIRE));
     TEST_ASSERT_EQUAL_UINT(1U, fake_sem_signals());
     TEST_ASSERT_EQUAL_UINT(kicks + KDRV_BLE_APP_RING_SLOTS, fake_ble_app_kicks());
-    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, got, (uint16_t)sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got, (uint16_t)sizeof(got)));
     TEST_ASSERT_EQUAL_HEX8('c', got[0]);
 
     /* A characteristic the table refuses is answered DENIED, nothing queued. */
@@ -8205,6 +8219,96 @@ TEST_CASE("a notification queued while a job runs wakes the host when the job en
     }
 }
 
+
+/** @brief A service with one queued characteristic, the log a central drains. */
+static const kdrv_ble_app_char_t s_queue_chars[] = {
+    { "log", "6e400005-b5a3-f393-e0a9-e50e24dcca9e", KDRV_BLE_APP_READ | KDRV_BLE_APP_QUEUED },
+    { "temp", "6e400006-b5a3-f393-e0a9-e50e24dcca9e", KDRV_BLE_APP_READ },
+};
+
+/** @brief The service of the two. */
+static const kdrv_ble_app_service_t s_queue_svc = {
+    "6e400004-b5a3-f393-e0a9-e50e24dcca9e", s_queue_chars, 2U };
+
+/** @brief A fresh waiter, its answer not yet given. */
+static void waiter_arm(BleValueWaiter *w)
+{
+    w->ack = 0U;
+    w->rc  = (uint8_t)KODE_ERROR;
+}
+
+TEST_CASE("AO_Radio pushes and clears a queued characteristic, and publishes each value a "
+          "central takes with how many are left", "[radio_ao][ble_app]")
+{
+    BleValueWaiter w;
+    uint8_t        got[KDRV_BLE_APP_VALUE_MAX];
+
+    radio_fresh();
+    fake_sem_reset();
+    w.done = khal_sem_create();
+    fake_ble_app_service_set(&s_queue_svc);
+    kdrv_ble_app_link_reset();
+    ble_app_subscribe(ao_spy());
+    ao_spy_drain();
+
+    /* Two pushes, each answered into the waiter. */
+    waiter_arm(&w);
+    post_op("log", KQP_BLE_APP_OP_PUSH, "x", &w);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)w.rc);
+    TEST_ASSERT_EQUAL_UINT32(VALUE_TEST_GEN, __atomic_load_n(&w.ack, __ATOMIC_ACQUIRE));
+    waiter_arm(&w);
+    post_op("log", KQP_BLE_APP_OP_PUSH, "yz", &w);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)w.rc);
+
+    /* The central reads the first: it is taken, one left, and that is published. */
+    TEST_ASSERT_EQUAL_UINT16(1U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+    TEST_ASSERT_EQUAL_HEX8('x', got[0]);
+    pump();
+    const BleAppTakenEvt *t = (const BleAppTakenEvt *)spy_take_sig(BLE_APP_TAKEN_SIG);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT8(0U, t->chr);
+    TEST_ASSERT_EQUAL_STRING("log", t->name);
+    TEST_ASSERT_EQUAL_UINT8(1U, t->left);
+    ao_spy_drain();
+
+    /* The second, and then nothing: a read of the empty queue publishes nothing. */
+    TEST_ASSERT_EQUAL_UINT16(2U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+    pump();
+    t = (const BleAppTakenEvt *)spy_take_sig(BLE_APP_TAKEN_SIG);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT8(0U, t->left);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+    pump();
+    TEST_ASSERT_NULL(spy_take_sig(BLE_APP_TAKEN_SIG));
+
+    /* A clear empties what a push left. */
+    post_op("log", KQP_BLE_APP_OP_PUSH, "a", NULL);
+    waiter_arm(&w);
+    post_op("log", KQP_BLE_APP_OP_CLEAR, "", &w);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)w.rc);
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(0U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+
+    /* A push to a characteristic that is not queued is refused, nothing set. */
+    post_op("temp", KQP_BLE_APP_OP_SET, "", NULL);
+    waiter_arm(&w);
+    post_op("temp", KQP_BLE_APP_OP_PUSH, "b", &w);
+    TEST_ASSERT_EQUAL_INT((int)KODE_DENIED, (int)w.rc);
+    TEST_ASSERT_EQUAL_UINT16(0U, kdrv_ble_app_read(1U, 0U, (uint16_t)sizeof(got), got,
+                                                   (uint16_t)sizeof(got)));
+
+    khal_sem_delete(w.done);
+    QActive_unsubscribe(ao_spy(), BLE_APP_WRITE_SIG);
+    QActive_unsubscribe(ao_spy(), BLE_APP_LINK_SIG);
+    QActive_unsubscribe(ao_spy(), BLE_APP_TAKEN_SIG);
+    ao_spy_drain();
+    kdrv_ble_app_link_reset();
+    fake_ble_app_service_set(NULL);
+}
 
 /* ---- The board's rest ------------------------------------------------------- */
 

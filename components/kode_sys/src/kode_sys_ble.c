@@ -183,6 +183,8 @@ _Static_assert(KODE_SYS_BLE_FAULT_MAX == KDRV_BLE_APP_WHY_MAX, "the reason is th
 _Static_assert(KODE_SYS_BLE_READ == KDRV_BLE_APP_READ, "READ is the driver's");
 _Static_assert(KODE_SYS_BLE_WRITE == KDRV_BLE_APP_WRITE, "WRITE is the driver's");
 _Static_assert(KODE_SYS_BLE_NOTIFY == KDRV_BLE_APP_NOTIFY, "NOTIFY is the driver's");
+_Static_assert(KODE_SYS_BLE_QUEUED == KDRV_BLE_APP_QUEUED, "QUEUED is the driver's");
+_Static_assert(KODE_SYS_BLE_QUEUE_SLOTS == KDRV_BLE_APP_QUEUE_SLOTS, "a queue is the driver's");
 _Static_assert(KODE_SYS_BLE_VALUE_MAX == KQP_BLE_APP_VALUE_MAX, "a write's event carries a whole value");
 _Static_assert(KODE_SYS_BLE_CHAR_NAME_MAX == KQP_BLE_APP_NAME_MAX, "a write's event carries a whole name");
 
@@ -200,20 +202,20 @@ _Static_assert(offsetof(kode_sys_ble_service_t, chars) == offsetof(kdrv_ble_app_
 _Static_assert(offsetof(kode_sys_ble_service_t, count) == offsetof(kdrv_ble_app_service_t, count), "count");
 
 /**
- * @brief Check a value against the declared table and post it to AO_Radio as a command.
- * @param chr    The characteristic's name.
- * @param notify true to notify too.
- * @param data   The bytes.
- * @param len    Their count.
+ * @brief Check a request against the declared table and post it to AO_Radio as a command.
+ * @param chr  The characteristic's name.
+ * @param op   KQP_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR.
+ * @param data The bytes.
+ * @param len  Their count.
  * @return As kode_sys_ble_set_value().
  */
-static kode_status_t value_command(const char *chr, bool notify, const void *data, size_t len)
+static kode_status_t value_command(const char *chr, uint8_t op, const void *data, size_t len)
 {
-    kode_status_t rc = kdrv_ble_app_check(chr, notify, data, len);
+    kode_status_t rc = kdrv_ble_app_check(chr, op, data, len);
 
     if ( KODE_OK == rc )
     {
-        rc = kode_sys_cmd_post(AO_Radio, ble_value_evt(chr, notify, data, len, NULL, 0U),
+        rc = kode_sys_cmd_post(AO_Radio, ble_value_evt(chr, op, data, len, NULL, 0U),
                                KQP_RADIO_CMD_MARGIN);
     }
     return rc;
@@ -222,13 +224,31 @@ static kode_status_t value_command(const char *chr, bool notify, const void *dat
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 kode_status_t kode_sys_ble_set_value(const char *chr, const void *data, size_t len)
 {
-    return value_command(chr, false, data, len);
+    return value_command(chr, KQP_BLE_APP_OP_SET, data, len);
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 kode_status_t kode_sys_ble_notify(const char *chr, const void *data, size_t len)
 {
-    return value_command(chr, true, data, len);
+    return value_command(chr, KQP_BLE_APP_OP_NOTIFY, data, len);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_queue_push(const char *chr, const void *data, size_t len)
+{
+    return value_command(chr, KQP_BLE_APP_OP_PUSH, data, len);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_queue_clear(const char *chr)
+{
+    return value_command(chr, KQP_BLE_APP_OP_CLEAR, NULL, 0U);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_queue_room(const char *chr, size_t *room)
+{
+    return kdrv_ble_app_queue_room(chr, room);
 }
 
 /* ---- The blocking value: one call at a time, as the other blocking doors ---- */
@@ -315,14 +335,14 @@ static bool value_enter(uint32_t start, uint32_t *gen)
  * @brief Post one blocking value tagged @p gen, trying a full queue again
  *        while there is time.
  * @param chr    As kode_block_ble_value().
- * @param notify As kode_block_ble_value().
+ * @param op     As kode_block_ble_value().
  * @param data   As kode_block_ble_value().
  * @param len    As kode_block_ble_value().
  * @param gen    This request's generation.
  * @param start  When the call began.
  * @return true when AO_Radio's queue took it.
  */
-static bool value_post(const char *chr, bool notify, const void *data, size_t len,
+static bool value_post(const char *chr, uint8_t op, const void *data, size_t len,
                        uint32_t gen, uint32_t start)
 {
     bool posted = false;
@@ -331,7 +351,7 @@ static bool value_post(const char *chr, bool notify, const void *data, size_t le
     while ( more )
     {
         posted = (kode_sys_cmd_post(AO_Radio,
-                                    ble_value_evt(chr, notify, data, len, &s_value_wait, gen),
+                                    ble_value_evt(chr, op, data, len, &s_value_wait, gen),
                                     KQP_RADIO_CMD_MARGIN) == KODE_OK);
         more = !posted && value_time_left(start);
         if ( more )
@@ -365,11 +385,11 @@ static kode_status_t value_await(uint32_t gen, uint32_t start)
     return rc;
 }
 
-kode_status_t kode_block_ble_value(const char *chr, bool notify, const void *data, size_t len)
+kode_status_t kode_block_ble_value(const char *chr, uint8_t op, const void *data, size_t len)
 {
     static khal_once_t made;   /* the one-shot the semaphore and the lock are made by */
     uint32_t const     start = kode_sys_time_ms();
-    kode_status_t      rc    = kdrv_ble_app_check(chr, notify, data, len);
+    kode_status_t      rc    = kdrv_ble_app_check(chr, op, data, len);
     uint32_t           gen   = 0U;
 
     if ( (KODE_OK == rc) && !khal_once_try(&made, &value_make) )
@@ -383,7 +403,7 @@ kode_status_t kode_block_ble_value(const char *chr, bool notify, const void *dat
         {
             /* A request a timed-out call left is answered first, AO_Radio
              * taking its queue in order, and dropped by its generation. */
-            if ( value_post(chr, notify, data, len, gen, start) )
+            if ( value_post(chr, op, data, len, gen, start) )
             {
                 rc = value_await(gen, start);
             }
@@ -535,9 +555,27 @@ kode_status_t kode_sys_ble_notify(const char *chr, const void *data, size_t len)
     return KODE_DENIED;
 }
 
-kode_status_t kode_block_ble_value(const char *chr, bool notify, const void *data, size_t len)
+kode_status_t kode_sys_ble_queue_push(const char *chr, const void *data, size_t len)
 {
-    (void)chr; (void)notify; (void)data; (void)len;
+    (void)chr; (void)data; (void)len;
+    return KODE_DENIED;
+}
+
+kode_status_t kode_sys_ble_queue_clear(const char *chr)
+{
+    (void)chr;
+    return KODE_DENIED;
+}
+
+kode_status_t kode_sys_ble_queue_room(const char *chr, size_t *room)
+{
+    (void)chr; (void)room;
+    return KODE_DENIED;
+}
+
+kode_status_t kode_block_ble_value(const char *chr, uint8_t op, const void *data, size_t len)
+{
+    (void)chr; (void)op; (void)data; (void)len;
     return KODE_DENIED;
 }
 

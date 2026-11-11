@@ -2276,22 +2276,23 @@ QEvt const *ble_rsp_evt(const char *name, const uint8_t *data, size_t len);
 
 /**
  * @brief The request that sets, or sets and notifies, one value of the app's
- *        own service: AO_Radio, its owner, hands the copy to the driver.
+ *        own service, or pushes a value on a queued characteristic or empties
+ *        it: AO_Radio, its owner, hands the copy to the driver.
  *
  * A command carries no waiter and has no answer; a blocked task passes its
- * waiter and its tag, and AO_Radio writes kdrv_ble_app_set_value()'s or
- * kdrv_ble_app_notify()'s status into it in the step that receives it.
+ * waiter and its tag, and AO_Radio writes the driver's status into it in the
+ * step that receives it.
  *
- * @param chr    The characteristic's name, shorter than KQP_BLE_APP_NAME_MAX.
- * @param notify true to notify a subscribed central too.
- * @param data   The bytes; NULL when @p len is 0.
- * @param len    Their count, 0 to KQP_BLE_APP_VALUE_MAX.
- * @param wait   A blocked task's waiter; NULL for a command.
- * @param gen    The task's tag; 0 for a command.
+ * @param chr  The characteristic's name, shorter than KQP_BLE_APP_NAME_MAX.
+ * @param op   KQP_BLE_APP_OP_SET, _NOTIFY, _PUSH or _CLEAR.
+ * @param data The bytes; NULL when @p len is 0.
+ * @param len  Their count, 0 to KQP_BLE_APP_VALUE_MAX.
+ * @param wait A blocked task's waiter; NULL for a command.
+ * @param gen  The task's tag; 0 for a command.
  * @return The event, for kode_sys_cmd_post(); NULL when the pool is dry or an
  *         argument does not fit the event.
  */
-QEvt const *ble_value_evt(const char *chr, bool notify, const void *data, size_t len,
+QEvt const *ble_value_evt(const char *chr, uint8_t op, const void *data, size_t len,
                           BleValueWaiter *wait, uint32_t gen);
 
 /**
@@ -2535,8 +2536,8 @@ void radio_amp_request(bool on);
 
 /**
  * @brief Subscribe @p who to the app's own Bluetooth service: BLE_APP_WRITE_SIG,
- *        a copy of each write a central makes, and BLE_APP_LINK_SIG, each edge
- *        of the link.
+ *        a copy of each write a central makes, BLE_APP_LINK_SIG, each edge of
+ *        the link, and BLE_APP_TAKEN_SIG, each value a read takes from a queue.
  *
  * Beside AO_Radio's start, so the call links AO_Radio (tools/check_starts.sh).
  * The service itself is the app's KODE_SYS_BLE_SERVICE() or KODE_BLE_SERVICE().

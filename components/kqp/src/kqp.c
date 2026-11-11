@@ -79,6 +79,8 @@ _Static_assert(sizeof(BleAppValueReqEvt) <= KQP_BLOCK_LARGE,
                "BleAppValueReqEvt must fit the large pool");
 _Static_assert(sizeof(BleAppLinkEvt) <= KQP_BLOCK_SMALL,
                "BleAppLinkEvt must fit the small pool");
+_Static_assert(sizeof(BleAppTakenEvt) <= KQP_BLOCK_MEDIUM,
+               "BleAppTakenEvt must fit the medium pool");
 _Static_assert(sizeof(KodeConfigReqEvt) <= KQP_BLOCK_MEDIUM,
                "KodeConfigReqEvt must fit the medium pool");
 _Static_assert(sizeof(KodeConfigAnsEvt) <= KQP_BLOCK_MEDIUM,
