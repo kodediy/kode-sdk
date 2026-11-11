@@ -2232,7 +2232,7 @@ static const char *ad_get_word(uint8_t why)
                    "one word for each way a fetch ends");
     const char *word = "store";
 
-    if ( why < (uint8_t)(sizeof(WORDS) / sizeof(WORDS[0])) )
+    if ( (uint8_t)(sizeof(WORDS) / sizeof(WORDS[0])) > why )
     {
         word = WORDS[why];
     }

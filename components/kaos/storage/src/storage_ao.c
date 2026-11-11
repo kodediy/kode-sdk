@@ -2328,7 +2328,7 @@ static bool appdata_room(const char *folder)
         /* A replacement. */
     }
     else if ( (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK)
-             && (freeb < (uint64_t)least) )
+             && ((uint64_t)least > freeb) )
     {
         room = false;
     }

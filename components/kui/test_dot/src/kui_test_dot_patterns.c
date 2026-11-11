@@ -73,7 +73,7 @@ static void paint_icon(const kui_td_px_t *g, bool ok)
 static void paint_lines(const kui_td_px_t *g, uint32_t rgb)
 {
     kui_td_fill(g, KUI_TD_RGB_BLACK);
-    for ( int32_t y = 0; y < KUI_TD_H_PX; y++ )
+    for ( int32_t y = 0; KUI_TD_H_PX > y; y++ )
     {
         if ( (y % KUI_TD_LINES_PERIOD_PX) < KUI_TD_LINES_ON_PX )
         {
@@ -90,9 +90,9 @@ static void paint_lines(const kui_td_px_t *g, uint32_t rgb)
 static void paint_dots(const kui_td_px_t *g, uint32_t rgb)
 {
     kui_td_fill(g, KUI_TD_RGB_BLACK);
-    for ( int32_t y = 0; y < KUI_TD_H_PX; y += KUI_TD_DOTS_PITCH_PX )
+    for ( int32_t y = 0; KUI_TD_H_PX > y; y += KUI_TD_DOTS_PITCH_PX )
     {
-        for ( int32_t x = 0; x < KUI_TD_W_PX; x += KUI_TD_DOTS_PITCH_PX )
+        for ( int32_t x = 0; KUI_TD_W_PX > x; x += KUI_TD_DOTS_PITCH_PX )
         {
             kui_td_rect(g, x, y, KUI_TD_DOTS_SIZE_PX, KUI_TD_DOTS_SIZE_PX, rgb);
         }

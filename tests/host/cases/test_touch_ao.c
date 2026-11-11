@@ -562,7 +562,7 @@ TEST_CASE("a poll nobody took is not followed by another; the one taken arms the
     finger(true, 40, 50);
 
     /* Fifteen periods go by and AO_Touch never runs. */
-    for ( uint32_t i = 0U; i < (15U * KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS)); ++i )
+    for ( uint32_t i = 0U; (15U * KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS)) > i; ++i )
     {
         QTIMEEVT_TICK_X(0U, (void *)0);
     }
@@ -1586,7 +1586,7 @@ TEST_CASE("a held contact's look nobody took is not followed by another",
     TEST_ASSERT_EQUAL_UINT(2U, hold_for(STILL_POLLS, 200, 250, 0));
 
     /* Two of its periods go by and AO_Touch never runs. */
-    for ( uint32_t i = 0U; i < ((2U * KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS)) + 1U); ++i )
+    for ( uint32_t i = 0U; ((2U * KQP_TICKS_PER_MS(KODE_TOUCH_HELD_POLL_MS)) + 1U) > i; ++i )
     {
         QTIMEEVT_TICK_X(0U, (void *)0);
     }

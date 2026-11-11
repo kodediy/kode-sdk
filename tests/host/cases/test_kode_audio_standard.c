@@ -1713,7 +1713,7 @@ static int16_t s_samples[TEST_SAMPLES_FRAMES];
 /** @brief Fill the caller's buffer with the sentinel. */
 static void samples_clear(void)
 {
-    for ( uint32_t i = 0U; i < TEST_SAMPLES_FRAMES; i++ )
+    for ( uint32_t i = 0U; TEST_SAMPLES_FRAMES > i; i++ )
     {
         s_samples[i] = TEST_SAMPLES_SENTINEL;
     }
@@ -1724,11 +1724,11 @@ static bool samples_are_recording(uint32_t frames)
 {
     bool same = true;
 
-    for ( uint32_t i = 0U; same && (i < TEST_SAMPLES_FRAMES); i++ )
+    for ( uint32_t i = 0U; same && (TEST_SAMPLES_FRAMES > i); i++ )
     {
         if ( i < frames )
         {
-            same = (s_samples[i] == smp(TEST_SEED_REC, i));
+            same = (smp(TEST_SEED_REC, i) == s_samples[i]);
         }
         else
         {

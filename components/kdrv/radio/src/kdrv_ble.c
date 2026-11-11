@@ -2928,7 +2928,7 @@ kode_status_t kdrv_ble_start(void)
         want_mtu = (uint16_t)BLE_APP_MTU_MAX;
     }
 
-    if ( (want_mtu > ble_att_preferred_mtu()) && (ble_att_set_preferred_mtu(want_mtu) != 0) )
+    if ( (ble_att_preferred_mtu() < want_mtu) && (ble_att_set_preferred_mtu(want_mtu) != 0) )
     {
         KLOG_W(TAG, "the host refused a preferred MTU of %u", (unsigned)want_mtu);
     }

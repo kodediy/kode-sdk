@@ -3540,7 +3540,7 @@ TEST_CASE("a name that is not a volume's own root is answered KODE_DENIED with n
     const FileRspEvt        *a;
 
     sys_fresh();
-    for ( size_t i = 0U; i < (sizeof(bad) / sizeof(bad[0])); i++ )
+    for ( size_t i = 0U; (sizeof(bad) / sizeof(bad[0])) > i; i++ )
     {
         TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_file_space(ao_spy(), bad[i]), bad[i]);
         settle_card();

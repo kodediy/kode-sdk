@@ -97,7 +97,7 @@ bool kdrv_frames_feed(const uint8_t *payload, size_t len)
     /* cppcheck-suppress misra-c2012-21.15 ; the wire is bytes; kode_sniff_batch_t is packed and its size asserted */
     (void)memcpy(&h, payload, sizeof(h));
     if ( (KODE_SNIFF_BATCH_MAX < h.count)
-        || (len < (sizeof(h) + ((size_t)h.count * sizeof(kode_sniff_rec_t)))) )
+        || ((sizeof(h) + ((size_t)h.count * sizeof(kode_sniff_rec_t))) > len) )
     {
         return false;
     }

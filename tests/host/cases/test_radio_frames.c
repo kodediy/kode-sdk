@@ -174,7 +174,7 @@ static const QEvt *spy_next(QActive *who)
 {
     const QEvt *e;
 
-    if ( who == ao_spy() )
+    if ( ao_spy() == who )
     {
         return ao_spy_take();
     }

@@ -8439,7 +8439,7 @@ TEST_CASE("a network that goes away is said at once, and tried again with "
 
     static const uint32_t WAITS_MS[] = { 5000U, 30000U, 120000U, 600000U, 600000U };
 
-    for ( size_t i = 0U; i < (sizeof(WAITS_MS) / sizeof(WAITS_MS[0])); ++i )
+    for ( size_t i = 0U; (sizeof(WAITS_MS) / sizeof(WAITS_MS[0])) > i; ++i )
     {
         retry_wait(WAITS_MS[i] - 1000U);
         TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "tried before its wait");
@@ -10333,7 +10333,7 @@ static void scan_refused_body(void *arg)
     ao_spy_drain();
 
     run_scan();
-    CHILD_CHECK(left == uxQueueSpacesAvailable(AO_Radio->eQueue),
+    CHILD_CHECK(uxQueueSpacesAvailable(AO_Radio->eQueue) == left,
                 "the knock took one of the last slots");
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
 
@@ -10389,8 +10389,8 @@ static void svc_refused_body(void *arg)
     unsigned const blocks = event_blocks_free();
 
     kode_answer_nopump(&sign, KODE_ST_OK);
-    CHILD_CHECK(left == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused answer took a slot");
-    CHILD_CHECK(blocks == event_blocks_free(), "the refused answer was not recycled");
+    CHILD_CHECK(uxQueueSpacesAvailable(AO_Radio->eQueue) == left, "the refused answer took a slot");
+    CHILD_CHECK(event_blocks_free() == blocks, "the refused answer was not recycled");
     CHILD_CHECK(logged("no room for a KODE answer"), "the refusal was not said");
     pump();
     pump();
