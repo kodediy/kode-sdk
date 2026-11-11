@@ -2088,8 +2088,9 @@ typedef struct {
     char name[32];   /**< The installed app's project name
                       *   (esp_app_desc_t.project_name is 32 bytes), the
                       *   identity appmgr_find_idx() compares. "" for
-                      *   AO_Radio's C5 image, for an image whose descriptor
-                      *   could not be read, and from a dry pool.            */
+                      *   AO_Radio's C5 image, for a park in the mailbox
+                      *   (no app is installed), for an image whose
+                      *   descriptor could not be read, and from a dry pool. */
 } AppFlashDoneEvt;
 
 /** @brief Why a write failed, as far as the glass needs to know. */

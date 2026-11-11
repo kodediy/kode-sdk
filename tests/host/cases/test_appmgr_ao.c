@@ -2704,6 +2704,214 @@ static uint32_t begin_install(uint8_t medium, const char *project)
     return len;
 }
 
+/* ---- A park ends on the same events as an install --------------------------
+ * The glass and the LED follow APP_FLASH_* alone: the 0 % that raises the
+ * Opening card goes out for a park as for any write, so the end has to go out
+ * with it. A park installs no app, so its done names none.
+ */
+
+/**
+ * @brief Count the write events the spy collected, draining it.
+ *
+ * @param[out] progress How many APP_FLASH_PROGRESS_SIG.
+ * @param[out] done     How many APP_FLASH_DONE_SIG.
+ * @param[out] fail     How many APP_FLASH_FAIL_SIG.
+ * @param[out] last     Overwritten by every done collected.
+ */
+static void spy_write_ends(unsigned *progress, unsigned *done, unsigned *fail,
+                           AppFlashDoneEvt *last)
+{
+    *progress = 0U;
+    *done     = 0U;
+    *fail     = 0U;
+    for ( ;; )
+    {
+        const QEvt * const got = ao_spy_take();
+        if ( NULL == got )
+        {
+            break;
+        }
+        if ( (enum_t)got->sig == APP_FLASH_PROGRESS_SIG )
+        {
+            ++*progress;
+        }
+        if ( (enum_t)got->sig == APP_FLASH_DONE_SIG )
+        {
+            *last = *(AppFlashDoneEvt const *)got;
+            ++*done;
+        }
+        if ( (enum_t)got->sig == APP_FLASH_FAIL_SIG )
+        {
+            ++*fail;
+        }
+    }
+}
+
+/** @brief Listen for the write events a park publishes. */
+static void spy_write_listen(void)
+{
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+    ao_spy_subscribe(APP_FLASH_DONE_SIG);
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+}
+
+/** @brief Stop listening for the write events and empty the spy. */
+static void spy_write_unlisten(void)
+{
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    QActive_unsubscribe(ao_spy(), APP_FLASH_DONE_SIG);
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+}
+
+/** @brief Ask AO_AppMgr to receive @p len bytes into the mailbox, as the console does. */
+static void ask_recv_pending(uint32_t len, uint32_t crc32_val)
+{
+    AppRecvReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(APP_RECV_REQ_SIG);
+    e.dst    = (uint8_t)KODE_FLASH_DST_PENDING;
+    e.size   = len;
+    e.crc32  = crc32_val;
+    e.launch = false;
+    e.src    = (uint8_t)KODE_CONSOLE_SRC_SERIAL;
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+TEST_CASE("a park from the terminal that lands ends in a done, so the card "
+          "that rose for it closes", "[appmgr_ao]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        len;
+    unsigned        progress;
+    unsigned        dones;
+    unsigned        fails;
+
+    len = image_named("parked");
+    recv_fresh();
+    kdrv_apps_pending_write_abort();
+    (void)kdrv_apps_pending_consume();
+    spy_write_listen();
+
+    (void)memset(&done, 0xA5, sizeof(done));
+    ask_recv_pending(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len));
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    (void)kdrv_apps_pending_consume();
+
+    TEST_ASSERT_GREATER_THAN_UINT_MESSAGE(0U, progress,
+        "the park is on the glass: it announced its 0 %");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, dones,
+        "a card the park raised is closed by a done, and only by one");
+    TEST_ASSERT_EQUAL_UINT(0U, fails);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", done.name,
+        "a park installs no app: its done names none");
+}
+
+TEST_CASE("a park from the terminal whose bytes do not add up ends in a "
+          "failure and no done", "[appmgr_ao]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        len;
+    unsigned        progress;
+    unsigned        dones;
+    unsigned        fails;
+
+    len = image_named("parked");
+    recv_fresh();
+    kdrv_apps_pending_write_abort();
+    (void)kdrv_apps_pending_consume();
+    spy_write_listen();
+
+    ask_recv_pending(len, 0xDEADBEEFU);                       /* wrong CRC */
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    (void)kdrv_apps_pending_consume();
+
+    TEST_ASSERT_EQUAL_UINT(0U, dones);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "the card is owed its failure");
+}
+
+TEST_CASE("a park from a medium that lands ends in a done, so the card that "
+          "rose for it closes", "[appmgr_ao]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        len;
+    unsigned        progress;
+    unsigned        dones;
+    unsigned        fails;
+
+    Mockkdrv_slot_Init();
+    len = image_named("parked");
+    keep_fresh();
+    kdrv_apps_pending_write_abort();
+    (void)kdrv_apps_pending_consume();
+    spy_write_listen();
+
+    (void)memset(&done, 0xA5, sizeof(done));
+    ask_flash_dst("parked.bin", (uint8_t)KODE_FLASH_DST_PENDING);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the park never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    answer_eof();
+
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    (void)kdrv_apps_pending_consume();
+    keep_end();
+
+    TEST_ASSERT_GREATER_THAN_UINT_MESSAGE(0U, progress,
+        "the park is on the glass: it announced its 0 %");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, dones,
+        "a card the park raised is closed by a done, and only by one");
+    TEST_ASSERT_EQUAL_UINT(0U, fails);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", done.name,
+        "a park installs no app: its done names none");
+}
+
+TEST_CASE("a park from a medium that cannot be read ends in a failure and no "
+          "done", "[appmgr_ao]")
+{
+    AppFlashDoneEvt done;
+    StorageDataEvt  d;
+    uint32_t        len;
+    unsigned        progress;
+    unsigned        dones;
+    unsigned        fails;
+
+    Mockkdrv_slot_Init();
+    len = image_named("parked");
+    keep_fresh();
+    kdrv_apps_pending_write_abort();
+    (void)kdrv_apps_pending_consume();
+    spy_write_listen();
+
+    ask_flash_dst("parked.bin", (uint8_t)KODE_FLASH_DST_PENDING);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the park never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DATA_SIG);
+    d.status = (uint8_t)KODE_ERROR;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    (void)kdrv_apps_pending_consume();
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT(0U, dones);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "the card is owed its failure");
+}
+
 /** @brief The bytes "old" fills: the whole data area. */
 static uint32_t old_bytes(void)
 {

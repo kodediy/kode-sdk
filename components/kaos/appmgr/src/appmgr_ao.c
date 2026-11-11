@@ -2116,6 +2116,9 @@ static void flash_finish(AppMgr * const me)
         KLOG_N(TAG, "parked %u bytes in the mailbox; `install src=\"pending\" "
                     "dst=...` installs it", (unsigned)me->written);
         me->bypass = false;
+        /* The card that rose for the write ends on the done, which names no
+         * app: none was installed. */
+        QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);
         return;
     }
 
@@ -4775,6 +4778,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
         KLOG_N(TAG, "parked %u bytes in the mailbox; `install src=\"pending\" "
                     "dst=...` installs it", (unsigned)me->written);
         me->bypass = false;
+        QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);   /* names no app */
         QACTIVE_PUBLISH(&s_recv_done_evt, &me->super);
         return Q_TRAN(&AppMgr_idle);
     }
