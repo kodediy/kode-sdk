@@ -7237,7 +7237,8 @@ static QState console_own(Console * const me, QEvt const * const e)
                 }
                 else
                 {
-                    /* DISPLAY_TEST_DONE: the verdict follows as TEST_RESULT_SIG. */
+                    /* DISPLAY_TEST_INTRO: the glass's to say, and the log's.
+                     * DISPLAY_TEST_DONE: the verdict follows as TEST_RESULT_SIG. */
                 }
             }
             status = Q_HANDLED();
