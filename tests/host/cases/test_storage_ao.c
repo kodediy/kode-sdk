@@ -23,6 +23,7 @@
 #include "kaos.h"
 #include "kapp_data.h"
 #include "khal_system.h"
+#include "kbsp.h"
 #include "kbsp_owners.h"
 #include "kdrv_sd.h"
 #include "kdrv_storage.h"
@@ -2138,13 +2139,14 @@ TEST_CASE("a card field is read, written and dumped for whoever asks",
     ask_field(FIELD_OP_GET, KDRV_SD_BUS_WIDTH, 0);
     const StorageFieldEvt *a = take_field();
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)a->rc);
-    TEST_ASSERT_EQUAL_INT32(4, a->value);
+    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, a->value);
 
-    /* A write comes back with what the driver kept, not with what was asked. */
-    ask_field(FIELD_OP_SET, KDRV_SD_WIDTH_REQ, 1);
+    /* A write comes back with what the driver kept, not with what was asked.
+     * Four lines, so the answer cannot be the default it started from. */
+    ask_field(FIELD_OP_SET, KDRV_SD_WIDTH_REQ, (int32_t)KBSP_SD_WIDTH);
     a = take_field();
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)a->rc);
-    TEST_ASSERT_EQUAL_INT32(1, a->value);
+    TEST_ASSERT_EQUAL_INT32((int32_t)KBSP_SD_WIDTH, a->value);
 
     ask_field(FIELD_OP_DUMP, KDRV_SD_MOUNTED, 0);
     a = take_field();
@@ -2339,10 +2341,11 @@ TEST_CASE("the card row leaves nothing of its own behind and does not format",
         "the row wiped a card it was only supposed to read");
 }
 
-/* It puts the slot back on the board's own width, whatever the middle of the
- * run did with it: leaving a unit at one data line after a production test
- * would be a slow board that nothing explains. */
-TEST_CASE("the card row hands the slot back at four data lines",
+/* It puts the slot back on the width an everyday mount asks for, whatever the
+ * middle of the run did with it: leaving a unit on four data lines after a
+ * production test would leave a counterfeit card one failed write away from a
+ * controller that only a reset brings back. */
+TEST_CASE("the card row hands the slot back at one data line",
           "[storage_ao]")
 {
     bool    ok[SD_TEST_STEPS];
@@ -2355,7 +2358,7 @@ TEST_CASE("the card row hands the slot back at four data lines",
     take_all_phases(ok);
     TEST_ASSERT_TRUE(take_verdict("sd"));
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width));
-    TEST_ASSERT_EQUAL_INT32(4, width);
+    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
 }
 
 /* Three of the four data lines not reaching the slot is a defect of the unit,
@@ -3023,7 +3026,9 @@ TEST_CASE("a done event that is not the call's is dropped by its sequence",
  * create() may place it on the internal partition and a PSRAM stack must not
  * touch that flash. So the count of calls the worker makes is the audit: a
  * remount to start, the four-line chunks, a remount onto one line and its
- * chunks, and a remount back before the file - and no call for the file. */
+ * chunks - and no call for the file. The file is written on that one line,
+ * the width the slot is handed back at, so no remount comes before it or
+ * after the verdict. */
 TEST_CASE("the card row's remounts and raw reads are jobs; its file is not",
           "[storage_ao][worker]")
 {
@@ -3033,7 +3038,7 @@ TEST_CASE("the card row's remounts and raw reads are jobs; its file is not",
     ask_sd_test();
     run_sd_script();
 
-    TEST_ASSERT_EQUAL_UINT((2U * chunks) + 3U, sd_jobs_run);
+    TEST_ASSERT_EQUAL_UINT((2U * chunks) + 2U, sd_jobs_run);
     TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
     TEST_ASSERT_TRUE(take_phase(SD_TEST_IDENTIFY)->ok);
 }
@@ -3120,10 +3125,44 @@ TEST_CASE("a call that overruns inside the card row ends the run with a false "
                              "the AO stayed wedged after the late return");
 }
 
-/* An overrun in the one-line read leaves the slot on one data line: the width
- * is put back when the call returns, not skipped. */
-TEST_CASE("a call that overruns on one data line gives the board's width back "
+/* An overrun in the four-line read leaves the slot on four data lines: it is
+ * put back on one when the call returns, not skipped. */
+TEST_CASE("a call that overruns on four data lines puts the slot back on one "
           "when it returns", "[storage_ao][worker]")
+{
+    unsigned const steps =
+        QF_SUPPORT_STEPS(KDRV_SD_SECTORS_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS);
+    int32_t        width = 0;
+
+    sd_script_fresh();
+    ask_sd_test();
+    TEST_ASSERT_TRUE(run_sd_job());     /* the remount onto four lines... */
+    /* ...and the first four-line chunk is out. */
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(SD_WORKER));
+    (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
+    TEST_ASSERT_EQUAL_INT32((int32_t)KBSP_SD_WIDTH, width);
+    ao_spy_drain();
+
+    (void)qf_support_tick(AO_Storage, steps);
+    TEST_ASSERT_FALSE(take_phase(SD_TEST_READ4)->ok);
+    TEST_ASSERT_FALSE_MESSAGE(take_verdict("sd"),
+                              "an overrun is the slot's, not a pass");
+
+    TEST_ASSERT_TRUE(run_sd_job());     /* the late chunk comes back... */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
+                                   "the width was not asked for back");
+    TEST_ASSERT_TRUE(run_sd_job());     /* ...and the remount puts it right. */
+    (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
+    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+}
+
+/* An overrun in the one-line read leaves the slot on the width it is handed
+ * back at already: the late return owes nothing, and asking the card for a
+ * remount anyway would be a call for no reason. */
+TEST_CASE("a call that overruns on one data line owes no remount when it "
+          "returns", "[storage_ao][worker]")
 {
     unsigned const steps =
         QF_SUPPORT_STEPS(KDRV_SD_SECTORS_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS);
@@ -3146,7 +3185,7 @@ TEST_CASE("a call that overruns on one data line gives the board's width back "
     (void)qf_support_pump(AO_Storage, 8U);
     TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(SD_WORKER));
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
-    TEST_ASSERT_EQUAL_INT32(1, width);
+    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
     ao_spy_drain();
 
     (void)qf_support_tick(AO_Storage, steps);
@@ -3154,12 +3193,12 @@ TEST_CASE("a call that overruns on one data line gives the board's width back "
     TEST_ASSERT_FALSE_MESSAGE(take_verdict("sd"),
                               "an overrun is the slot's, not a pass");
 
-    TEST_ASSERT_TRUE(run_sd_job());     /* the late chunk comes back... */
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
-                                   "the width was not asked for back");
-    TEST_ASSERT_TRUE(run_sd_job());     /* ...and the remount puts it right. */
+    TEST_ASSERT_TRUE(run_sd_job());     /* the late chunk comes back */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(SD_WORKER),
+                                   "a remount was asked for a slot already "
+                                   "on one data line");
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
-    TEST_ASSERT_EQUAL_INT32(4, width);
+    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 }
 
@@ -3229,15 +3268,23 @@ TEST_CASE("an unmount the worker cannot take is answered and leaves the card "
 /* The remount that hands the width back at the end of a run overruns: every
  * phase has been judged, so no second record is made for a phase that passed
  * (here the identify's, already published), and the width stays owed - also
- * when the call that pays it overruns in turn. */
+ * when the call that pays it overruns in turn. The identify ends the run on
+ * four lines (the card is smaller than the test), so the slot has a line to
+ * be put back on; the controller then goes away, as it does while the C5's
+ * link is down, so no remount reaches one line until it is back. */
 TEST_CASE("an overrun of the final width restore adds no record and keeps the "
           "width owed", "[storage_ao][worker]")
 {
     unsigned const steps =
         QF_SUPPORT_STEPS(KDRV_SD_MOUNT_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS);
+    khal_sdmmc_card_t card;
+    int32_t           width = 0;
 
     sd_script_fresh();
-    fake_sdmmc_set_max_width(1U);       /* the identify fails; the width is 1 */
+    fake_sdmmc_default_card(&card);
+    card.sectors = 2U * ((KODE_SD_TEST_KB * 1024U)
+                         / (uint32_t)card.sector_size);
+    fake_sdmmc_set_card(&card);         /* the identify fails on four lines */
     ask_sd_test();
 
     TEST_ASSERT_TRUE(run_sd_job());     /* the script's remount */
@@ -3246,6 +3293,7 @@ TEST_CASE("an overrun of the final width restore adds no record and keeps the "
     TEST_ASSERT_FALSE(take_phase(SD_TEST_IDENTIFY)->ok);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 
+    fake_sdmmc_set_deny(true);
     (void)qf_support_tick(AO_Storage, steps);   /* the restore overruns */
     TEST_ASSERT_FALSE(take_verdict("sd"));
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
@@ -3260,7 +3308,12 @@ TEST_CASE("an overrun of the final width restore adds no record and keeps the "
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
                                    "the width was forgotten after an overrun "
                                    "of its own restore");
+
+    /* The controller is back, and the remount that pays the width lands. */
+    fake_sdmmc_set_deny(false);
     TEST_ASSERT_TRUE(run_sd_job());
+    (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
+    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 }
 

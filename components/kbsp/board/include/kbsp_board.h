@@ -31,7 +31,7 @@
 
 /* ---- microSD ------------------------------------------------------------- */
 #define KBSP_SD_LDO_CHAN        4     /**< P4 LDO channel of the SDMMC IO domain. */
-#define KBSP_SD_WIDTH           4U    /**< Default bus width; kdrv_sd can change it. */
+#define KBSP_SD_WIDTH           4U    /**< Data lines the slot wires.  */
 #define KBSP_SD_FREQ_KHZ        40000U /**< Default clock, validated on this PCB. */
 
 /* ---- The ESP32-C5 link (esp-hosted over SDIO) ---------------------------- */
