@@ -394,6 +394,20 @@ kode_status_t kode_block_nvs_set(const char *key, const char *value);
 kode_status_t kode_block_file_status(const char *path, kode_sys_file_status_t *out);
 
 /**
+ * @brief How big the volume at @p path is and how much of it is free.
+ * @note Blocks (an AO uses kode_sys_file_space()). One file call at a time.
+ *       On a large card the first count can take hundreds of milliseconds.
+ * @param path A volume's root, absolute and virtual: "/sdcard" or "/storage".
+ * @param out  Out: written only on KODE_OK.
+ * @return KODE_OK when counted. KODE_DENIED for a @p path that is not a
+ *         volume's own root, or another file call waiting. KODE_ERROR when the
+ *         volume will not mount or cannot be counted, or for a NULL @p path or
+ *         @p out. KODE_NO_RESOURCES when no PSRAM was left for the staging
+ *         buffer (first call). KODE_TIMEOUT when AO_Storage did not answer.
+ */
+kode_status_t kode_block_file_space(const char *path, kode_sys_file_space_t *out);
+
+/**
  * @brief Called once per entry of a directory listing.
  * @param name   The entry's name, one path segment.
  * @param is_dir Whether it is a directory.

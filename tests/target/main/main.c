@@ -35,6 +35,8 @@ static void link_standard_layer(void)
 {
     kode_event_t ev;
     kode_buttons_t pad;
+    uint64_t space_total = 0U;
+    uint64_t space_free = 0U;
 
     (void)kode_error();
 
@@ -89,6 +91,7 @@ static void link_standard_layer(void)
     (void)kode_file_write_bytes("flash/x", NULL, 0U);
     (void)kode_file_append_bytes("flash/x", NULL, 0U);
     (void)kode_file_status("flash/x");
+    (void)kode_file_space("flash", &space_total, &space_free);
     (void)kode_file_exists("flash/x");
     (void)kode_file_list("flash");
     (void)kode_file_delete("flash/x");
@@ -254,6 +257,7 @@ static void link_file_net_requests(void)
     static uint8_t buf[1];
 
     (void)kode_sys_file_status(&s_link_ao, "/storage/x");
+    (void)kode_sys_file_space(&s_link_ao, "/storage");
     (void)kode_sys_file_list(&s_link_ao, "/storage", 0U);
     (void)kode_sys_file_create_folder(&s_link_ao, "/storage/d");
     (void)kode_sys_file_delete(&s_link_ao, "/storage/x");

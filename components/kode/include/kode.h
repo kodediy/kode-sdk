@@ -536,6 +536,24 @@ bool kode_file_append_bytes(const char *path, const void *data, uint32_t len);
 kode_file_status_t kode_file_status(const char *path);
 
 /**
+ * @brief How big a volume is and how much of it is free.
+ *
+ * Blocks. On a large card the first count can take hundreds of milliseconds.
+ * An Active Object asks with kode_sys_file_space().
+ *
+ * @param volume       "sd" or "flash", with or without a "/" after it; a path
+ *                     inside a volume is refused.
+ * @param total_bytes  Out: what the volume's filesystem spans; 0 on failure.
+ *                     NULL is refused. A whole number of kilobytes.
+ * @param free_bytes   Out: what is left of it; 0 on failure. NULL is refused.
+ *                     A whole number of kilobytes.
+ * @return true when the volume was counted; false otherwise, with
+ *         kode_error() saying why (a bad volume, no card, storage busy or
+ *         silent).
+ */
+bool kode_file_space(const char *volume, uint64_t *total_bytes, uint64_t *free_bytes);
+
+/**
  * @brief Whether anything is at a path.
  *
  * Blocks.

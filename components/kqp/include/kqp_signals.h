@@ -686,6 +686,8 @@ enum KodeSignals {
                                  *   asking AO (FileRspEvt).                   */
     FILE_WRITE_RSP_SIG,         /**< Answers kode_sys_file_write(), to the
                                  *   asking AO (FileRspEvt).                   */
+    FILE_SPACE_RSP_SIG,         /**< Answers kode_sys_file_space(), to the
+                                 *   asking AO (FileRspEvt).                   */
     STORAGE_RECV_REQ_SIG,       /**< AO_Storage: a file is about to arrive on
                                  *   the console (StorageRecvEvt). Open the
                                  *   destination, then ask AO_Log for raw mode
@@ -6081,9 +6083,18 @@ typedef struct {
 } FileStat;
 
 /**
+ * @brief How big a volume is and how much of it is free: kode_sys_file_space_t,
+ *        field for field. Whole kilobytes, as StorageInfoEvt counts them.
+ */
+typedef struct {
+    uint32_t total_kb;  /**< What the volume's filesystem spans.  */
+    uint32_t free_kb;   /**< What is left of it.                  */
+} FileSpace;
+
+/**
  * @brief Answers kode_sys's file requests: FILE_STATUS_RSP_SIG, FILE_LIST_END_SIG,
  *        FILE_FOLDER_RSP_SIG, FILE_DELETE_RSP_SIG, FILE_RENAME_RSP_SIG,
- *        FILE_READ_RSP_SIG and FILE_WRITE_RSP_SIG.
+ *        FILE_READ_RSP_SIG, FILE_WRITE_RSP_SIG and FILE_SPACE_RSP_SIG.
  */
 typedef struct {
     QEvt     super;
@@ -6093,7 +6104,11 @@ typedef struct {
     bool     more;    /**< The end of a listing: entries remain past it.    */
     uint16_t count;   /**< The end of a listing: entries this page posted.  */
     uint32_t got;     /**< A read: bytes written to the lent buffer.        */
-    FileStat stat;    /**< A status: what is at the path.                   */
+    union {
+        FileStat  stat;   /**< A status: what is at the path.                   */
+        FileSpace space;  /**< A space: how big the volume is and what is free. */
+    };                    /**< One answer is one kind, so the two share a place:
+                           *   every file answer keeps the room it had.          */
 } FileRspEvt;
 
 /**
@@ -6154,6 +6169,8 @@ typedef struct {
     bool        exists;  /**< STAT only, as StoragePathRspEvt.exists.      */
     bool        is_dir;  /**< STAT only.                                    */
     uint32_t    size;    /**< STAT: the file's bytes.                       */
+    uint32_t    total_kb;  /**< SPACE: the volume's kilobytes.              */
+    uint32_t    free_kb;   /**< SPACE: what is left of them.                */
     StorageRow *rows;    /**< LIST only: at least @c cap entries, filled in
                            *   the order the walk found them.               */
     char       *text;    /**< CAT only: at least @c cap bytes, filled with

@@ -719,6 +719,69 @@ TEST_CASE("a missing path is KODE_OK with exists false, not a refusal",
     TEST_ASSERT_FALSE(st.exists);
 }
 
+/* ---- A volume's space -------------------------------------------------------
+ * The host's internal volume reports 12 MiB, 8 MiB of them free.
+ */
+
+/** @brief The internal volume's size as the host fake reports it, in kilobytes. */
+#define SPACE_FS_TOTAL_KB  (12U * 1024U)
+
+/** @brief What is free of it, in kilobytes. */
+#define SPACE_FS_FREE_KB   (8U * 1024U)
+
+TEST_CASE("the facade answers how big a volume is and how much is free", "[kode_fs]")
+{
+    kode_sys_file_space_t sp = { 1U, 1U };
+
+    fs_fresh();
+
+    fs_will_settle();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_file_space(FS_VOL, &sp));
+    TEST_ASSERT_TRUE(SPACE_FS_TOTAL_KB == sp.total_kb);
+    TEST_ASSERT_TRUE(SPACE_FS_FREE_KB == sp.free_kb);
+}
+
+TEST_CASE("kode_block_file_space refuses a NULL path or a NULL out, posting nothing", "[kode_fs]")
+{
+    kode_sys_file_space_t sp;
+
+    fs_fresh();
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_file_space(NULL, &sp));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_file_space(FS_VOL, NULL));
+    TEST_ASSERT_EQUAL_UINT(0U, fs_pending());
+}
+
+TEST_CASE("a name that is not a volume's root is KODE_DENIED and writes nothing out", "[kode_fs]")
+{
+    kode_sys_file_space_t sp = { 7U, 7U };
+
+    fs_fresh();
+
+    fs_will_settle();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_file_space(FS_VOL "/sub", &sp));
+    TEST_ASSERT_TRUE(7U == sp.total_kb);
+    TEST_ASSERT_TRUE(7U == sp.free_kb);
+    fs_will_settle();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_file_space("/", &sp));
+}
+
+TEST_CASE("a volume that will not mount is KODE_ERROR and writes nothing out", "[kode_fs]")
+{
+    kode_sys_file_space_t sp = { 7U, 7U };
+
+    fs_fresh();
+    fake_media_set_sd_present(false);
+    storage_request(KDRV_MEDIUM_SD, STORAGE_OP_UNMOUNT);
+    fs_settle_once();
+    drain(AO_Storage);
+
+    fs_will_settle();
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_file_space("/sdcard", &sp));
+    TEST_ASSERT_TRUE(7U == sp.total_kb);
+    TEST_ASSERT_TRUE(7U == sp.free_kb);
+}
+
 /* ---- What is refused before anything is posted ---------------------------- */
 
 TEST_CASE("kode_block_file_status refuses a NULL path or a NULL out, posting nothing",
@@ -1244,7 +1307,7 @@ TEST_CASE("a facade call mid-cat does not steal the console's terminator",
 /* ---- The shared claim, across every call ------------------------------------ */
 
 /** @brief How many calls the overlap case tries, one slot each below. */
-#define OVERLAP_CALLS  8U
+#define OVERLAP_CALLS  9U
 
 /** @brief What each call answered a second, overlapping caller. */
 static kode_status_t s_call_rc[OVERLAP_CALLS];
@@ -1261,6 +1324,7 @@ static uint32_t s_call_list_calls;
 static void every_call_again_then_settle(void)
 {
     static kode_sys_file_status_t st;
+    static kode_sys_file_space_t  sp;
     static char           buf[16];
 
     s_call_rc[0] = kode_block_file_status(FS_VOL "/f.txt", &st);
@@ -1272,6 +1336,7 @@ static void every_call_again_then_settle(void)
     s_call_rc[5] = kode_block_file_read_part(FS_VOL "/f.txt", 0U, buf, sizeof(buf), NULL);
     s_call_rc[6] = kode_block_file_write_buffer(FS_VOL "/f.txt", "x", 1U, false);
     s_call_rc[7] = kode_block_file_read_part(FS_VOL "/f.txt", 0U, buf, sizeof(buf), NULL);
+    s_call_rc[8] = kode_block_file_space(FS_VOL, &sp);
 
     s_second_pending = fs_pending();
     (void)qf_support_pump(AO_Storage, 8U);
@@ -1339,6 +1404,23 @@ TEST_CASE("kode_block_file_status reports a timeout when AO_Storage never answer
      * the other half, where the answer never comes. */
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_file_status(FS_VOL "/f.txt", &st));
+}
+
+TEST_CASE("kode_block_file_space reports a timeout when AO_Storage never answers", "[kode_fs]")
+{
+    kode_sys_file_space_t sp = { 7U, 7U };
+
+    fs_fresh();
+
+    fs_no_settle();
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_file_space(FS_VOL, &sp));
+    TEST_ASSERT_EQUAL_UINT(1U, fs_pending());
+    TEST_ASSERT_TRUE(7U == sp.total_kb);
+
+    /* The abandoned request is waited out, and the claim was given back. */
+    fs_will_settle();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_file_space(FS_VOL, &sp));
+    TEST_ASSERT_TRUE(SPACE_FS_TOTAL_KB == sp.total_kb);
 }
 
 /* The abandoned answer, which is the whole reason a request carries a

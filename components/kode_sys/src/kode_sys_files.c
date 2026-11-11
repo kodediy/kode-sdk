@@ -216,6 +216,32 @@ kode_status_t kode_block_file_status(const char *path, kode_sys_file_status_t *o
     return rc;
 }
 
+kode_status_t kode_block_file_space(const char *path, kode_sys_file_space_t *out)
+{
+    if ( (NULL == path) || (NULL == out) )
+    {
+        return KODE_ERROR;
+    }
+    kode_status_t const claimed = fs_enter();
+    if ( KODE_OK != claimed )
+    {
+        return claimed;
+    }
+
+    uint32_t const gen = fs_next_gen();
+
+    storage_path_request_wait(&s_fs_wait, gen, (uint8_t)STORAGE_PATH_SPACE, path);
+
+    kode_status_t const rc = fs_await(gen);
+    if ( KODE_OK == rc )
+    {
+        out->total_kb = s_fs_wait.total_kb;
+        out->free_kb  = s_fs_wait.free_kb;
+    }
+    fs_release();
+    return rc;
+}
+
 kode_status_t kode_block_file_list_each(const char *path, kode_sys_file_entry_cb cb, void *ctx)
 {
     kode_sys_file_status_t st;
@@ -446,6 +472,16 @@ kode_status_t kode_sys_file_status(QActive *me, const char *path)
         return KODE_DENIED;
     }
     return storage_stat_ask(me, path);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_file_space(QActive *me, const char *volume)
+{
+    if ( !kode_sys_text_fits(volume, KODE_SYS_FILE_PATH_MAX) )
+    {
+        return KODE_DENIED;
+    }
+    return storage_space_ask(me, volume);
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
