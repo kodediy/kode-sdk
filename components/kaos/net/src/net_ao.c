@@ -219,12 +219,6 @@ typedef struct {
  */
 #define CHAN_LP_SETTLE_MS   2000U
 
-/** @brief Microseconds in a second, for the wall clock's whole seconds. */
-#define NET_CHK_US_PER_S    1000000ULL
-
-/** @brief The scheduler's check has no time. */
-#define NET_CHK_NONE        (-1LL)
-
 #ifndef CONFIG_KODEOS_CHANNEL_RENEW_S
 #define CONFIG_KODEOS_CHANNEL_RENEW_S 82800
 #endif
@@ -382,6 +376,14 @@ typedef struct {
 #endif
 } ChanWork;
 #endif /* CONFIG_KODEOS_CHANNEL */
+
+#if CONFIG_KODE_LOWPOWER
+/** @brief Microseconds in a second, for the wall clock's whole seconds. */
+#define NET_CHK_US_PER_S    1000000ULL
+
+/** @brief The scheduler's check has no time. */
+#define NET_CHK_NONE        (-1LL)
+#endif /* CONFIG_KODE_LOWPOWER */
 
 typedef struct {
     QActive  super;
