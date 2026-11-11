@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.1.1"
 description: "Kode Dot SDK: LVGL on the screen, driven from an app's Active Object"
 url: "https://docs.kode.diy/sdk/kscreen"
 repository: "https://github.com/kodediy/kode-sdk.git"
@@ -13,8 +13,8 @@ targets:
 ## the same release (see khal's manifest for the mechanism).
 dependencies:
   idf: ">=6.1"
-  kodediy/kode_sys: {version: "==0.1.0", override_path: "../kode_sys"}
-  kodediy/kui:      {version: "==0.1.0", override_path: "../kui"}
-  kodediy/kdrv:     {version: "==0.1.0", override_path: "../kdrv"}
-  kodediy/khal:     {version: "==0.1.0", override_path: "../khal"}
-  kodediy/kbsp:     {version: "==0.1.0", override_path: "../kbsp"}
+  kodediy/kode_sys: {version: "==0.1.1", override_path: "../kode_sys"}
+  kodediy/kui:      {version: "==0.1.1", override_path: "../kui"}
+  kodediy/kdrv:     {version: "==0.1.1", override_path: "../kdrv"}
+  kodediy/khal:     {version: "==0.1.1", override_path: "../khal"}
+  kodediy/kbsp:     {version: "==0.1.1", override_path: "../kbsp"}

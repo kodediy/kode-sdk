@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.1.1"
 description: "Kode Dot SDK: kode_status_t and the board-wide options"
 url: "https://docs.kode.diy/sdk/kdefs"
 repository: "https://github.com/kodediy/kode-sdk.git"
