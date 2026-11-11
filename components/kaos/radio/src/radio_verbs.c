@@ -599,6 +599,41 @@ static void h_ble_down(const kverb_t *c, const karg_val_t *v)
     ble_stop_request();
 }
 
+/**
+ * @brief The word after `pair=`: the board shows itself to a new device,
+ *        will once the connected one leaves, or was not asked to.
+ *
+ * `on` only with the link free: with a device on it nothing is on the air,
+ * whether the time to pair has started or waits. A board switched off shows
+ * itself to nobody.
+ *
+ * @param b The state.
+ * @return `on`, `wait` or `off`.
+ */
+static const char *ble_pair_word(BleStateEvt const * const b)
+{
+    bool const  linked = ((uint8_t)KDRV_BLE_CONNECTED == b->state);
+    const char *word   = "off";
+
+    if ( (uint8_t)KDRV_BLE_OFF == b->state )
+    {
+        /* off, whatever was asked before the switch */
+    }
+    else if ( b->pair_wait || (b->pair_open && linked) )
+    {
+        word = "wait";
+    }
+    else if ( b->pair_open )
+    {
+        word = "on";
+    }
+    else
+    {
+        /* off */
+    }
+    return word;
+}
+
 /** @brief ble_info: closed by BLE_STATE_SIG. */
 static void h_ble_info(const kverb_t *c, const karg_val_t *v)
 {
@@ -1059,7 +1094,7 @@ static bool radio_answer(QEvt const *e)
                           console_on_off(b->console),
                           (uint32_t)b->tx_drop, (uint32_t)b->bonds,
                           (uint32_t)b->backlog, (uint32_t)b->retry,
-                          console_on_off(b->hidden), console_on_off(b->pair_open),
+                          console_on_off(b->hidden), ble_pair_word(b),
                           console_kv_text(name, sizeof(name), b->name));
                 }
                 else
@@ -1069,7 +1104,7 @@ static bool radio_answer(QEvt const *e)
                           state, console_on_off(b->console),
                           (uint32_t)b->tx_drop, (uint32_t)b->bonds,
                           (uint32_t)b->backlog, (uint32_t)b->retry,
-                          console_on_off(b->hidden), console_on_off(b->pair_open),
+                          console_on_off(b->hidden), ble_pair_word(b),
                           console_kv_text(name, sizeof(name), b->name));
                 }
                 console_reply(">ok");
