@@ -3739,15 +3739,53 @@ static void radio_vault_lost(Radio * const me)
 }
 
 /**
+ * @brief The channel of the strongest access point the last sweep heard
+ *        under a network's name.
+ *
+ * The join of a saved network is aimed at the band of that access point
+ * (kdrv_wifi_prepare()); a name the last sweep did not list has no channel
+ * to aim at.
+ *
+ * @param ssid The network's name.
+ * @return The channel, or KDRV_WIFI_CHANNEL_ANY when the last sweep did not
+ *         list the name.
+ */
+static uint8_t radio_scan_channel(const char *ssid)
+{
+    uint8_t const n       = kdrv_wifi_scan_count();
+    uint8_t       channel = KDRV_WIFI_CHANNEL_ANY;
+    int8_t        best    = 0;
+    bool          heard   = false;
+
+    for ( uint8_t i = 0U; i < n; ++i )
+    {
+        kdrv_wifi_ap_t ap;
+
+        if ( kdrv_wifi_scan_get(i, &ap)
+            && (strncmp(ap.ssid, ssid, sizeof(ap.ssid)) == 0)
+            && ( (!heard) || (ap.rssi > best) ) )
+        {
+            heard   = true;
+            best    = ap.rssi;
+            channel = ap.channel;
+        }
+    }
+    return channel;
+}
+
+/**
  * @brief Pick the strongest network in the last scan that the vault keeps.
  *
  * The strongest, because signal is what predicts a join; and only networks the
  * scan saw. Entries already tried this round are skipped, so a network that
- * refuses us is not offered again.
+ * refuses us is not offered again. A network on both bands is two entries,
+ * one per access point, so the second try is the other band.
  *
+ * @param me      The AO.
+ * @param channel Receives the channel of the access point picked.
  * @return false when nothing is left to try.
  */
-static bool auto_pick(Radio * const me)
+static bool auto_pick(Radio * const me, uint8_t * const channel)
 {
     uint8_t const n = kdrv_wifi_scan_count();
     int           best = -1;
@@ -3784,7 +3822,9 @@ static bool auto_pick(Radio * const me)
     (void)kdrv_wifi_scan_get((uint8_t)best, &ap);
     me->tried |= (1UL << (uint8_t)best);
     (void)snprintf(me->ssid, sizeof(me->ssid), "%s", ap.ssid);
-    KLOG_I(TAG, "trying '%s' (%ddBm)", me->ssid, (int)ap.rssi);
+    *channel = ap.channel;
+    KLOG_I(TAG, "trying '%s' (%ddBm) on channel %u", me->ssid, (int)ap.rssi,
+           (unsigned)ap.channel);
     return true;
 }
 #endif /* CONFIG_KODEOS_WIFI */
@@ -11695,7 +11735,8 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 {
                     /* A saved network: the C5 joins it from its vault, and
                      * this side only readies its netif and waits. */
-                    req.type = KDRV_RADIO_JOB_WIFI_PREPARE;
+                    req.type    = KDRV_RADIO_JOB_WIFI_PREPARE;
+                    req.channel = radio_scan_channel(j->ssid);
                     me->pass[0]  = '\0';
                     me->remember = false;
                 }
@@ -12301,7 +12342,9 @@ static QState auto_try(Radio * const me)
         }
         return auto_finish(me);
     }
-    if ( !auto_pick(me) )
+    uint8_t channel = KDRV_WIFI_CHANNEL_ANY;
+
+    if ( !auto_pick(me, &channel) )
     {
         KLOG_N(TAG, "none of the %u remembered networks in range would let "
                     "us on", (unsigned)me->vlist.count);
@@ -12309,7 +12352,8 @@ static QState auto_try(Radio * const me)
     }
     kdrv_radio_req_t req;
     (void)memset(&req, 0, sizeof(req));
-    req.type = KDRV_RADIO_JOB_WIFI_PREPARE;
+    req.type    = KDRV_RADIO_JOB_WIFI_PREPARE;
+    req.channel = channel;
     (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->ssid);
     if ( !radio_submit_req(me, &req) )
     {
@@ -12466,7 +12510,8 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                                me->ssid, (int)heard.net[0].rssi,
                                (unsigned)heard.net[0].channel);
                         (void)memset(&req, 0, sizeof(req));
-                        req.type = KDRV_RADIO_JOB_WIFI_PREPARE;
+                        req.type    = KDRV_RADIO_JOB_WIFI_PREPARE;
+                        req.channel = heard.net[0].channel;
                         (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->ssid);
                         if ( radio_submit_req(me, &req) )
                         {

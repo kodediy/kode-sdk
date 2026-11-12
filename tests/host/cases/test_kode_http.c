@@ -93,7 +93,8 @@ static void world_up(void)
     esp_wifi_start_IgnoreAndReturn(ESP_OK);
     esp_wifi_disconnect_IgnoreAndReturn(ESP_OK);
     esp_wifi_sta_get_ap_info_IgnoreAndReturn(ESP_FAIL);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("net"));
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("net", KDRV_WIFI_CHANNEL_ANY));
     Mockkdrv_net_Init();
 }
 

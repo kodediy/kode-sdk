@@ -299,6 +299,14 @@ uint16_t kdrv_wifi_scan_dropped(void);
 kode_status_t kdrv_wifi_connect(const char *ssid, const char *pass,
                                 uint32_t timeout_ms);
 
+/** @brief The last channel of the lower band: 1 to 14 are 2.4 GHz and every
+ *         channel above is 5 GHz. */
+#define KDRV_WIFI_LAST_24_CHANNEL  14U
+
+/** @brief The channel of a join whose access point is not known: the radio
+ *         may use both bands. */
+#define KDRV_WIFI_CHANNEL_ANY      0U
+
 /**
  * @brief Ready this side for a join somebody else makes: the C5, from its
  *        vault. Blocks briefly; the worker's.
@@ -308,10 +316,21 @@ kode_status_t kdrv_wifi_connect(const char *ssid, const char *pass,
  * left. The state stays IDLE: the join may still be refused, and then
  * nothing has to be undone. kdrv_wifi_await() then waits for the outcome.
  *
- * @param ssid The network the join is for.
+ * The C5 joins the first access point of the name its own scan finds, which
+ * is the 2.4 GHz one when the network is on both bands. So the radio is held
+ * to the band of the access point that was chosen: the lower band for a
+ * channel up to KDRV_WIFI_LAST_24_CHANNEL, the upper band above it, both
+ * bands for KDRV_WIFI_CHANNEL_ANY. kdrv_wifi_await() gives both back, and so
+ * does every scan. A C5 that refuses the band does not fail the join: it
+ * goes on as it would without the aim, and the first refusal of a boot is
+ * logged.
+ *
+ * @param ssid    The network the join is for.
+ * @param channel The channel of the access point the join is aimed at, or
+ *                KDRV_WIFI_CHANNEL_ANY when it is not known.
  * @return KODE_OK; KODE_ERROR for no name or a stack that would not start.
  */
-kode_status_t kdrv_wifi_prepare(const char *ssid);
+kode_status_t kdrv_wifi_prepare(const char *ssid, uint8_t channel);
 
 /**
  * @brief Wait for the join kdrv_wifi_prepare() readied. Blocks up to
@@ -319,6 +338,8 @@ kode_status_t kdrv_wifi_prepare(const char *ssid);
  *
  * The state is CONNECTING with @p ssid named from here, GOT_IP on success,
  * and back to IDLE (or DISCONNECTED, as the network said) on a failure.
+ * Whatever the outcome, the radio is given both bands back before this
+ * returns.
  *
  * @param ssid       The network, named in the state and in the log.
  * @param timeout_ms How long the lease may take.

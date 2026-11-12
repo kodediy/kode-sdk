@@ -228,6 +228,7 @@ static void run_scan_rc(kode_status_t want)
         esp_wifi_start_ExpectAndReturn(ESP_OK);
     }
     s_starts = 0U;
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
     esp_wifi_get_country_Stub(&country_now);
     esp_wifi_scan_start_Stub(&scan_start_now);
     esp_wifi_scan_get_ap_num_Stub(&ap_num_now);
@@ -3814,16 +3815,22 @@ static void boot_with_hint(const char *ssid, uint8_t channel)
     radio_reboot();
 }
 
-/** @brief What the probe "heard" of its network. */
-static void hint_heard(bool seen)
+/** @brief What the probe "heard" of its network, and on which channel. */
+static void hint_heard_on(bool seen, uint8_t channel)
 {
     kdrv_radio_probe_result_t res;
 
     (void)memset(&res, 0, sizeof(res));
     res.net[0].seen    = seen;
     res.net[0].rssi    = -50;
-    res.net[0].channel = 6U;
+    res.net[0].channel = channel;
     fake_radio_set_probe_result(&res);
+}
+
+/** @brief What the probe "heard" of its network, on channel 6. */
+static void hint_heard(bool seen)
+{
+    hint_heard_on(seen, 6U);
 }
 
 /** @brief Leave nothing of a hint case behind. */
@@ -3886,6 +3893,137 @@ TEST_CASE("a hint the vault no longer holds is not looked for", "[radio][vault]"
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
     hint_case_end();
+}
+
+/** @brief The channel of the weak, lower-band access point of one network. */
+#define BAND_CH_24       6U
+/** @brief The channel of the strong, upper-band access point of the same one. */
+#define BAND_CH_5G       48U
+/** @brief The weak access point's reading, dBm. */
+#define BAND_RSSI_WEAK   (-80)
+/** @brief The strong access point's reading, dBm. */
+#define BAND_RSSI_STRONG (-67)
+
+/** @brief Put one network in the air twice: weak on 2.4 GHz, strong on 5 GHz. */
+static void seed_two_bands(const char *ssid)
+{
+    (void)memset(s_recs, 0, sizeof(s_recs));
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        (void)snprintf((char *)s_recs[i].ssid, sizeof(s_recs[i].ssid), "%s", ssid);
+    }
+    s_recs[0].rssi    = (int8_t)BAND_RSSI_WEAK;
+    s_recs[0].primary = (uint8_t)BAND_CH_24;
+    s_recs[1].rssi    = (int8_t)BAND_RSSI_STRONG;
+    s_recs[1].primary = (uint8_t)BAND_CH_5G;
+    s_next  = 0U;
+    s_found = 2U;
+}
+
+TEST_CASE("the try on a network's remembered channel is readied for that channel",
+          "[radio][vault]")
+{
+    radio_fresh();
+    boot_with_hint("home", BAND_CH_5G);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    hint_heard_on(true, BAND_CH_5G);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    TEST_ASSERT_EQUAL_UINT8(BAND_CH_5G, held_req()->channel);
+    TEST_ASSERT_TRUE(logged("on channel 48, where it was"));
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_JOIN, kode_sent()->op);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    hint_case_end();
+}
+
+TEST_CASE("a sweep that hears a network on two bands tries the strong one first, "
+          "each readied for its own channel", "[radio][vault]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    seed_two_bands("home");
+    run_scan();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+
+    /* The strong one, on 5 GHz. */
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    TEST_ASSERT_EQUAL_UINT8(BAND_CH_5G, held_req()->channel);
+    TEST_ASSERT_TRUE(logged("trying 'home' (-67dBm) on channel 48"));
+    vault_joins("home");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_DENIED);
+
+    /* It would not have us: the weak one, on 2.4 GHz. */
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    TEST_ASSERT_EQUAL_UINT8(BAND_CH_24, held_req()->channel);
+    TEST_ASSERT_TRUE(logged("trying 'home' (-80dBm) on channel 6"));
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_JOIN, kode_sent()->op);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
+
+TEST_CASE("a saved network asked by name is readied for the band its last "
+          "sweep heard it on", "[radio][vault]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("home");
+    seed_two_bands("home");
+    run_scan();
+    wifi_join_request("home", "", true);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_UINT8(BAND_CH_5G, held_req()->channel);
+    vault_joins("home");
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
+
+TEST_CASE("a saved network asked by name that the last sweep did not list is "
+          "readied for both bands", "[radio][vault]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("home");
+    seed_two_bands("elsewhere");
+    run_scan();
+    wifi_join_request("home", "", true);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_UINT8(KDRV_WIFI_CHANNEL_ANY, held_req()->channel);
+    vault_joins("home");
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
 }
 
 TEST_CASE("wifi_forget asks the vault to forget", "[radio][vault]")

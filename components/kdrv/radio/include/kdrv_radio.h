@@ -41,7 +41,9 @@ typedef enum {
     KDRV_RADIO_JOB_WIFI_PREPARE, /**< Ready this side for a join the C5
                                   *   makes from its vault: station and
                                   *   netif up, the old network left, the
-                                  *   bits cleared (kdrv_wifi_prepare()). */
+                                  *   radio held to the band of req.channel,
+                                  *   the bits cleared
+                                  *   (kdrv_wifi_prepare()).               */
     KDRV_RADIO_JOB_WIFI_AWAIT,   /**< Wait for that join's lease
                                   *   (kdrv_wifi_await()); ends as
                                   *   a join this side made does, with the
@@ -146,7 +148,10 @@ typedef struct {
                               *   BLE_FIND: the name. BLE_RSP, BLE_START:
                               *   the board's name, "" for the serial.       */
     char             ssid2[KDRV_RADIO_SSID_BYTES]; /**< WIFI_PROBE: the second network, "" for none. */
-    uint8_t          channel;  /**< WIFI_PROBE: the channel to listen on.       */
+    uint8_t          channel;  /**< WIFI_PROBE: the channel to listen on.
+                              *   WIFI_PREPARE: the channel of the access
+                              *   point the join is aimed at, 0 for none
+                              *   (KDRV_WIFI_CHANNEL_ANY).                   */
     uint16_t         dwell_ms; /**< WIFI_PROBE: the time on it.                 */
     char             pass[65];
     const uint8_t   *data;   /**< C5_WRITE, BLE_RSP, BLE_START: borrowed until the
