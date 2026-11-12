@@ -10249,8 +10249,30 @@ TEST_CASE("a station that left keeps no channel: an address that comes with no r
     pump();
 }
 
-TEST_CASE("the slow advert a fast one becomes at rest is pulsed on 5 GHz, and stays as planned",
-          "[radio_ao][pulse][lowpower]")
+/** @brief The board goes to rest: the sentinel's start runs and is answered. */
+static void pulse_to_rest(void)
+{
+    lp_radio_round(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_SLEEP, running_job());
+    finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the advert the rest left was planned again");
+    lp_expect_answer(false, NULL);
+}
+
+/** @brief The board wakes: the advert comes off, and the one planned for the
+ *         awake board goes on, pulsed or not. */
+static void pulse_wakes_to(bool pulsed)
+{
+    lp_radio_awake();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "waking left the advert as the rest had it");
+    TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the advert stayed on the air");
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(pulsed);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a second re-plan followed");
+}
+
+TEST_CASE("the calm advert of a rest on 5 GHz is continuous", "[radio_ao][pulse][lowpower]")
 {
     radio_fresh();
     fake_ble_reset();
@@ -10261,24 +10283,82 @@ TEST_CASE("the slow advert a fast one becomes at rest is pulsed on 5 GHz, and st
     finish_ble_start();
     expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
 
-    lp_radio_round(KODE_LP_ASLEEP);
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_SLEEP, running_job());
-    TEST_ASSERT_TRUE_MESSAGE(fake_ble_calm_pulsed(), "the rest's slow advert would be continuous");
-    finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
-    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the advert the rest planned was planned again");
-    lp_expect_answer(false, NULL);
+    pulse_to_rest();
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)KDRV_BLE_ITVL_SLOW, fake_ble_adv_itvl());
+    TEST_ASSERT_FALSE_MESSAGE(fake_ble_adv_pulsed(), "the rest's slow advert is pulsed");
 
-    /* The advert the rest planned is known for what it is: the station
-     * leaving the 5 GHz network takes the pulsed one off. */
-    wifi_station_gone();
+    /* Nothing at rest asks for pulses: any job's end sweeps the invariant. */
+    wifi_rssi_request();
     pump();
-    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "the pulsed advert stayed");
-    TEST_ASSERT_FALSE(held_req()->on);
-    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the rest's advert was planned again with nothing changed");
+
+    lp_radio_awake();
+    finish_whatever_runs();
+    pulse_case_end();
+}
+
+TEST_CASE("waking from a rest on 5 GHz puts the advert back pulsed, with one off job and one on job",
+          "[radio_ao][pulse][lowpower]")
+{
+    unsigned submits;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    pulse_to_rest();
+
+    submits = job_submits();
+    pulse_wakes_to(true);
+    /* The stop of the sentinel is a job too: the re-plan is the off and the on. */
+    TEST_ASSERT_EQUAL_UINT(submits + 3U, job_submits());
+    pulse_case_end();
+}
+
+TEST_CASE("going to rest from a pulsed advert ends in the continuous calm one", "[radio_ao][pulse][lowpower]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+
+    pulse_to_rest();
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)KDRV_BLE_ITVL_SLOW, fake_ble_adv_itvl());
+    TEST_ASSERT_FALSE_MESSAGE(fake_ble_adv_pulsed(), "the pulsed advert went into the rest");
+
+    lp_radio_awake();
+    finish_whatever_runs();
+    pulse_case_end();
+}
+
+TEST_CASE("an advert planned at rest on 5 GHz is continuous", "[radio_ao][pulse][lowpower]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    pulse_to_rest();
+
+    /* A phone connects and leaves: the invariant plans the advert afresh. */
+    fake_ble_central(true);
+    pump();
+    fake_ble_central(false);
+    pump();
     expect_pulsed(false);
     expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
 
     lp_radio_awake();
+    finish_whatever_runs();
     pulse_case_end();
 }
 

@@ -299,14 +299,15 @@ bool kdrv_ble_link_secure(void);
 kode_status_t kdrv_ble_advertise(bool on);
 
 /**
- * @brief A fast advert on the air goes on at the slow interval; anything else
- *        is left as it is. A board that goes to rest must not pay for a fast one.
+ * @brief A fast or a pulsed advert on the air goes on at the slow interval,
+ *        continuous; anything else is left as it is. A board that goes to rest
+ *        must not pay for a fast advert, nor for pulses: their commands wake
+ *        the link several times a second.
  *
- * @param ms     The time the slow one stays on the air, in ms; 0 for no end.
- * @param pulsed Whether the slow one is pulsed (kdrv_ble_adv_plan()).
+ * @param ms The time the slow one stays on the air, in ms; 0 for no end.
  * @return KODE_OK, or what kdrv_ble_advertise() answered.
  */
-kode_status_t kdrv_ble_adv_calm(uint32_t ms, bool pulsed);
+kode_status_t kdrv_ble_adv_calm(uint32_t ms);
 
 /** @brief A connection's parameters, in the units BLE gives them. */
 typedef struct {

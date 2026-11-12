@@ -161,9 +161,7 @@ typedef struct {
                               *   BLE_ADV: the time on the air in ms, 0 for no end. */
     uint16_t         itvl;   /**< BLE_ADV: the interval (KDRV_BLE_ITVL_*); 0 for slow. */
     bool             hidden; /**< BLE_ADV: hide the board (kdrv_ble_adv_plan()). */
-    bool             pulsed; /**< BLE_ADV: send the advert in pulses (kdrv_ble_adv_plan()).
-                              *   SLEEP: the same, for the slow advert a fast one
-                              *   becomes (kdrv_ble_adv_calm()).             */
+    bool             pulsed; /**< BLE_ADV: send the advert in pulses (kdrv_ble_adv_plan()). */
     bool             on;     /**< BLE_ADV: start or stop. WIFI_PS: modem save
                               *   (true) or none (false). EXP_POWER:
                               *   J3's supply on (true) or off.

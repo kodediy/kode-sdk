@@ -3776,15 +3776,16 @@ kode_status_t kdrv_ble_advertise(bool on)
     return KODE_OK;
 }
 
-kode_status_t kdrv_ble_adv_calm(uint32_t ms, bool pulsed)
+kode_status_t kdrv_ble_adv_calm(uint32_t ms)
 {
     kode_status_t rc = KODE_OK;
 
     if ( s_ble.up && (KDRV_BLE_ADVERTISING == s_ble.state)
-        && (0U != s_ble.adv_itvl) && ((uint16_t)KDRV_BLE_ITVL_SLOW > s_ble.adv_itvl) )
+        && (s_ble.adv_pulsed
+            || ((0U != s_ble.adv_itvl) && ((uint16_t)KDRV_BLE_ITVL_SLOW > s_ble.adv_itvl))) )
     {
         ble_adv_halt();
-        kdrv_ble_adv_plan((uint16_t)KDRV_BLE_ITVL_SLOW, ms, s_ble.adv_hidden, pulsed);
+        kdrv_ble_adv_plan((uint16_t)KDRV_BLE_ITVL_SLOW, ms, s_ble.adv_hidden, false);
         rc = kdrv_ble_advertise(true);
     }
     return rc;

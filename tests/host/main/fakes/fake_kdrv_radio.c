@@ -8,6 +8,10 @@
 #include "fakes.h"
 #include "kapp_desc.h"
 #include "kdrv_radio.h"
+#include "sdkconfig.h"
+#if CONFIG_KODEOS_BLE
+#include "kdrv_ble.h"
+#endif
 
 static struct {
     kdrv_radio_lost_cb_t lost_cb;
@@ -309,6 +313,13 @@ kode_status_t kdrv_radio_run(const kdrv_radio_req_t *req)
     }
     s_r.ran = *req;
     ++s_r.runs;
+#if CONFIG_KODEOS_BLE
+    if ( (KDRV_RADIO_JOB_BLE_ADV == req->type) && req->on )
+    {
+        /* What the real driver does before it advertises. */
+        kdrv_ble_adv_plan(req->itvl, req->len, req->hidden, req->pulsed);
+    }
+#endif
     if ( KDRV_RADIO_JOB_CONNECT == req->type )
     {
         /* What the real driver does first: esp-hosted takes the reset line

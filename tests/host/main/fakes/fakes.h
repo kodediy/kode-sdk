@@ -784,9 +784,6 @@ bool fake_ble_adv_hidden(void);
 /** @brief Whether the last advert planned goes on the air in pulses. */
 bool fake_ble_adv_pulsed(void);
 
-/** @brief Whether the last kdrv_ble_adv_calm() was asked for a pulsed advert. */
-bool fake_ble_calm_pulsed(void);
-
 /** @brief Set the count of bonded peers kdrv_ble_bonds() reports. */
 void fake_ble_set_bonds(uint8_t n);
 

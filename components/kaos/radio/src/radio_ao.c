@@ -4656,7 +4656,7 @@ static kode_status_t radio_job_run(void *arg, uint32_t *value)
 #if CONFIG_KODEOS_BLE
             /* While the bus still works. The rest never pays for a fast
              * advert, nor for a central polled every 15 ms. */
-            (void)kdrv_ble_adv_calm(req->len, req->pulsed);
+            (void)kdrv_ble_adv_calm(req->len);
             (void)kdrv_ble_conn_calm(true);
 #endif
             kode_status_t const down = kdrv_radio_sleep(true, &radio_sleep_note, &l_radio);
@@ -7279,21 +7279,25 @@ static bool radio_station_on_5g(void)
 
 /**
  * @brief Whether an advert at interval @p itvl goes on the air in pulses: the
- *        slow one, while the station is on 5 GHz.
+ *        slow one, while the station is on 5 GHz and the board is not at rest.
  *
  * With the advert enabled, the C5's station on a 5 GHz channel does not fetch
  * the frames its access point holds for it; with the advert enabled only for
  * the event, it does. So the driver enables the slow advert for its event and
  * disables it until the interval is over (kdrv_ble_adv_plan()). The fast
  * advert is never pulsed: its interval leaves no pause worth having, and it
- * lasts 30 s at most.
+ * lasts 30 s at most. At rest the advert stays continuous: the pulses'
+ * commands wake the link several times a second, and a late inbound frame
+ * costs less than that.
  *
+ * @param me   The AO.
  * @param itvl The advert's interval, KDRV_BLE_ITVL_FAST or KDRV_BLE_ITVL_SLOW.
  * @return true when the advert is pulsed.
  */
-static bool radio_ble_pulsed(uint16_t itvl)
+static bool radio_ble_pulsed(Radio const * const me, uint16_t itvl)
 {
-    return ((uint16_t)KDRV_BLE_ITVL_SLOW == itvl) && radio_station_on_5g();
+    return ((uint16_t)KDRV_BLE_ITVL_SLOW == itvl) && radio_station_on_5g()
+           && (!radio_ble_resting(me));
 }
 
 /**
@@ -7304,9 +7308,9 @@ static bool radio_ble_pulsed(uint16_t itvl)
  * device's time lasts, hidden but to its bonds otherwise. The advert runs in
  * legs, each one's end coming back here: fast for 30 s after somebody may be
  * looking, then slow, and the slow one in pulses while the station is on
- * 5 GHz. An advert showing the board the wrong way, or pulsed the wrong way
- * for the station's band, comes off, and the one that follows is planned
- * afresh.
+ * 5 GHz and the board is awake. An advert showing the board the wrong way, or
+ * pulsed the wrong way for the station's band or the board's rest, comes off,
+ * and the one that follows is planned afresh.
  * OFF is not acted on: a stack that is down is the start debt's.
  *
  * @param me The AO.
@@ -7331,7 +7335,7 @@ static bool radio_ble_adv_reconcile(Radio * const me)
         req.type = KDRV_RADIO_JOB_BLE_ADV;
         if ( (KDRV_BLE_ADVERTISING == state)
             && ((hidden != me->ble_adv_hidden)
-                || (radio_ble_pulsed(me->ble_adv_itvl) != me->ble_adv_pulsed)) )
+                || (radio_ble_pulsed(me, me->ble_adv_itvl) != me->ble_adv_pulsed)) )
         {
             req.on    = false;
             submitted = radio_submit_req(me, &req);
@@ -7366,7 +7370,7 @@ static bool radio_ble_adv_reconcile(Radio * const me)
                     req.len = fast;
                 }
             }
-            req.pulsed         = radio_ble_pulsed(req.itvl);
+            req.pulsed         = radio_ble_pulsed(me, req.itvl);
             me->ble_adv_hidden = hidden;
             me->ble_adv_itvl   = req.itvl;
             me->ble_adv_pulsed = req.pulsed;
@@ -9129,11 +9133,10 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
         uint32_t const now = khal_time_ms();
 
         me->ble_fast_until = now;
-        req.len    = radio_ble_leg_ms(me, now);
-        /* A fast advert goes on at the slow interval (kdrv_ble_adv_calm()),
-         * in pulses when the station's band asks for them. */
-        req.pulsed = radio_ble_pulsed((uint16_t)KDRV_BLE_ITVL_SLOW);
-        calms      = ((uint16_t)KDRV_BLE_ITVL_FAST == me->ble_adv_itvl);
+        req.len = radio_ble_leg_ms(me, now);
+        /* A fast or a pulsed advert goes on at the slow interval, continuous
+         * (kdrv_ble_adv_calm()). */
+        calms   = (((uint16_t)KDRV_BLE_ITVL_FAST == me->ble_adv_itvl) || me->ble_adv_pulsed);
     }
 #endif
     me->lp_job = job;
@@ -9145,7 +9148,7 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
     else if ( calms )
     {
         me->ble_adv_itvl   = (uint16_t)KDRV_BLE_ITVL_SLOW;
-        me->ble_adv_pulsed = req.pulsed;
+        me->ble_adv_pulsed = false;
     }
     else
     {

@@ -30,7 +30,6 @@ static struct {
     uint32_t         adv_ms;
     bool             adv_hidden;
     bool             adv_pulsed;
-    bool             calm_pulsed; /**< What the last kdrv_ble_adv_calm() was asked for. */
     bool             secure;
     char             name[KDRV_BLE_ADV_MAX];  /**< What set_scan_rsp() named. */
     unsigned         conn_rest;   /**< kdrv_ble_conn_calm(true) calls.  */
@@ -270,11 +269,6 @@ bool fake_ble_adv_pulsed(void)
     return s_b.adv_pulsed;
 }
 
-bool fake_ble_calm_pulsed(void)
-{
-    return s_b.calm_pulsed;
-}
-
 void fake_ble_set_bonds(uint8_t n)
 {
     s_b.bonds = n;
@@ -290,13 +284,13 @@ uint32_t fake_ble_adv_ms(void)
     return s_b.adv_ms;
 }
 
-kode_status_t kdrv_ble_adv_calm(uint32_t ms, bool pulsed)
+kode_status_t kdrv_ble_adv_calm(uint32_t ms)
 {
-    s_b.calm_pulsed = pulsed;
-    if ( (KDRV_BLE_ADVERTISING == s_b.state) && (0U != s_b.adv_itvl)
-        && ((uint16_t)KDRV_BLE_ITVL_SLOW > s_b.adv_itvl) )
+    if ( (KDRV_BLE_ADVERTISING == s_b.state)
+        && (s_b.adv_pulsed
+            || ((0U != s_b.adv_itvl) && ((uint16_t)KDRV_BLE_ITVL_SLOW > s_b.adv_itvl))) )
     {
-        kdrv_ble_adv_plan((uint16_t)KDRV_BLE_ITVL_SLOW, ms, s_b.adv_hidden, pulsed);
+        kdrv_ble_adv_plan((uint16_t)KDRV_BLE_ITVL_SLOW, ms, s_b.adv_hidden, false);
     }
     return KODE_OK;
 }
