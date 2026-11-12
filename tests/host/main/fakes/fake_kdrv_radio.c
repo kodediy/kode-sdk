@@ -44,6 +44,10 @@ static struct {
 /** The wish AO_Radio last set: kept across fake_radio_reset(), as the AO's own is. */
 static bool s_exp_wish;
 
+/** What kdrv_radio_note_update_waits() answers: kept across a power cycle, as
+ *  the register is across a software reset; a case clears it itself. */
+static bool s_update_waits;
+
 void kdrv_radio_exp_wish(bool on)
 {
     s_exp_wish = on;
@@ -147,6 +151,11 @@ uint32_t fake_radio_note_last(void)
 void fake_radio_set_adopted(bool adopted)
 {
     s_r.adopted = adopted;
+}
+
+void fake_radio_set_update_waits(bool waits)
+{
+    s_update_waits = waits;
 }
 
 void fake_radio_fail_exp_switch(bool fails)
@@ -368,6 +377,11 @@ void kdrv_radio_gate(bool closed)
 void kdrv_radio_note_leave(kdrv_radio_note_t target)
 {
     s_r.note = (uint32_t)target;
+}
+
+bool kdrv_radio_note_update_waits(void)
+{
+    return s_update_waits;
 }
 
 bool kdrv_radio_adopted(void)

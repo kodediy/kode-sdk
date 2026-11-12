@@ -548,6 +548,10 @@ typedef struct {
     QTimeEvt c5_boot;         /**< C5_BOOT_SIG: the C5 just let go has booted. */
     bool     c5_booting;      /**< That one-shot is running.                  */
 #endif
+    QTimeEvt updated;         /**< RADIO_UPDATED_SIG: the C5 runs its update. */
+    bool     c5_updated;      /**< An update ended this boot: the C5 runs an
+                               *   image only a link can confirm, so nothing
+                               *   resets it before the restart.              */
     uint8_t  inst;            /**< inst_phase_t                               */
     bool     inst_pending;    /**< Verified and owed the channel (a debt).    */
     uint32_t inst_size;       /**< Bytes the host promised to put on the wire.*/
@@ -889,6 +893,11 @@ QActive * const AO_Radio = &l_radio.super;
 /** How long the C5 is held in reset to switch the header's supply on with no
  *  link: the pulse esp-hosted itself gives the chip's enable line. */
 #define RADIO_EXP_PULSE_MS  10U
+
+/** How long after an update's teardown the board restarts: the C5 restarts
+ *  into the new image that long after answering the activate, and boots it.
+ *  A restart before that would link to the old image on its way out. */
+#define RADIO_UPDATE_RESTART_MS  (KDRV_RADIO_C5_ACTIVATE_MS + KDRV_RADIO_C5_BOOT_MS)
 
 /* The receive protocol's answers, static and immutable: they cannot fail to
  * allocate, and the console has given up its own watchdog for this command,
@@ -8225,8 +8234,22 @@ static void c5_update_done(Radio * const me)
         KLOG_N(TAG, "C5 update done: the new image is written and activated; "
                     "the C5 is booting it");
     }
-    KLOG_N(TAG, "`radio_up` brings the link back, and `c5` will then name "
-                "what the C5 now runs");
+    KLOG_N(TAG, "the board restarts by itself in %u ms, and `c5` will then "
+                "name what the C5 now runs", RADIO_UPDATE_RESTART_MS);
+}
+
+/**
+ * @brief The C5 has had time to boot its update (RADIO_UPDATED_SIG): ask
+ *        AO_Boot to restart the board.
+ *
+ * Asked in either top state, so an update always ends in a restart, whatever
+ * brought the link back meanwhile.
+ */
+static void radio_update_restart(void)
+{
+    KLOG_N(TAG, "the C5 runs its update: the board restarts so a link "
+                "reaches it");
+    QACTIVE_POST(AO_Boot, boot_exit_evt(), AO_Radio);
 }
 
 /**
@@ -8344,6 +8367,8 @@ void Radio_ctor(void)
     me->c5_booting = false;
     me->amp_asked  = false;
 #endif
+    QTimeEvt_ctorX(&me->updated, &me->super, RADIO_UPDATED_SIG, 0U);
+    me->c5_updated = false;
     for ( uint8_t svc = 0U; KODE_SVC_COUNT > svc; svc++ )
     {
         QTimeEvt_ctorX(&me->svc_tmo[svc], &me->super, KODE_SVC_TMO_SIG, 0U);
@@ -9631,9 +9656,21 @@ static QState Radio_initial(Radio * const me, void const * const par)
 
     KLOG_D(TAG, "boot: wifi_want=%d ble_want=%d",
            (int)me->wifi_want, (int)me->ble_want);
-    if ( (me->wifi_want || me->ble_want) && radio_begin_connect(me) )
     {
-        return Q_TRAN(&Radio_starting);
+        /* The C5 runs an update that only a request over the link confirms:
+         * the link comes up even with neither service wanted. */
+        bool const update_waits = kdrv_radio_note_update_waits();
+
+        if ( update_waits && !me->wifi_want && !me->ble_want )
+        {
+            KLOG_N(TAG, "the C5 runs an update to confirm: the link comes up "
+                        "for it");
+        }
+        if ( (me->wifi_want || me->ble_want || update_waits)
+             && radio_begin_connect(me) )
+        {
+            return Q_TRAN(&Radio_starting);
+        }
     }
     return Q_TRAN(&Radio_off);
 }
@@ -9720,10 +9757,26 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
         }
 #endif
         case RADIO_PARK_REQ_SIG: {
-            /* No link, so no station of ours to keep: the jump goes on and
-             * the next firmware resets the C5. */
-            KLOG_I(TAG, "no link to the C5: nothing to park");
+            if ( me->c5_updated )
+            {
+                /* Whoever runs next must not reset the C5 before its link
+                 * has reached the new image. */
+                kdrv_radio_note_leave(KDRV_RADIO_NOTE_UPDATE);
+                KLOG_N(TAG, "C5 left running its update: the next boot's "
+                            "link confirms it");
+            }
+            else
+            {
+                /* No link, so no station of ours to keep: the jump goes on
+                 * and the next firmware resets the C5. */
+                KLOG_I(TAG, "no link to the C5: nothing to park");
+            }
             boot_radio_parked();
+            status = Q_HANDLED();
+            break;
+        }
+        case RADIO_UPDATED_SIG: {
+            radio_update_restart();
             status = Q_HANDLED();
             break;
         }
@@ -10168,8 +10221,10 @@ static QState Radio_off(Radio * const me, QEvt const * const e)
              * draws nothing and its amplifier is shut down: the first thing a
              * boot with no radio does (C5_EN is pulled up, so the C5 started
              * with the board). The bring-up and C5_RUN_REQ_SIG let it go;
-             * refused, harmlessly, while esp-hosted has the reset line. */
-            if ( !me->wifi_want && !me->ble_want && !me->amp_asked )
+             * refused, harmlessly, while esp-hosted has the reset line. Never
+             * after an update: the hold would roll the new image back. */
+            if ( !me->wifi_want && !me->ble_want && !me->amp_asked
+                 && !me->c5_updated )
             {
                 (void)radio_hold_c5(me);
             }
@@ -11186,6 +11241,11 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
     QState status;
     switch ( e->sig )
     {
+        case RADIO_UPDATED_SIG: {
+            radio_update_restart();
+            status = Q_HANDLED();
+            break;
+        }
         case Q_ENTRY_SIG: {
             if ( (uint8_t)INST_LINKING == me->inst )
             {
@@ -13051,6 +13111,15 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
                         /* The C5 restarted into the new image: what IO5
                          * holds is that image's, not known here. */
                         me->exp_known = false;
+                        /* A closed C5 rolls the image back at its next reset
+                         * unless a request has reached it first, and this boot
+                         * has no link left to send one. The board restarts
+                         * and the next boot's link sends it; until then
+                         * nothing resets the C5. */
+                        me->c5_updated = true;
+                        QTimeEvt_armX(&me->updated,
+                                      KQP_TICKS_PER_MS(RADIO_UPDATE_RESTART_MS),
+                                      0U);
                         status = Q_TRAN(&Radio_off);
                     }
                     break;

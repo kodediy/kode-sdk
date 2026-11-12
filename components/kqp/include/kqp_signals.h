@@ -1439,6 +1439,12 @@ enum KodeSignals {
     C5_BOOT_SIG,                /**< AO_Radio private one-shot QTimeEvt: the
                                  *   C5 it just let go has had its boot
                                  *   time.                                  */
+    RADIO_UPDATED_SIG,          /**< AO_Radio private one-shot QTimeEvt: the
+                                 *   C5 has restarted into the update it was
+                                 *   given and booted it; AO_Boot is asked to
+                                 *   reset the board, so the next link
+                                 *   reaches the new image before any reset
+                                 *   of the C5.                             */
     EXP_PULSE_SIG,              /**< AO_Radio private one-shot QTimeEvt: the
                                  *   C5 reset that switches the expansion
                                  *   header's supply on has lasted long
