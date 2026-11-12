@@ -426,6 +426,12 @@ typedef struct {
     undo_t       *undo;            /**< The evicted entries; NULL when none are held. */
     uint32_t      undo_count;      /**< Entries noted in undo[].                */
 
+    /* ---- A verdict still owed (FlashReqEvt.who) ----------------------------
+     * An install off a medium is taken once the medium has opened its file, so
+     * the asker is remembered from the request to that answer. NULL between
+     * installs, and for a request that asked for none. */
+    QActive      *req_who;
+
     /* ---- The erase in hand (APP_ERASE_REQ_SIG) ----------------------------
      * What its end says (AppEraseDoneEvt), kept from the idle step that took
      * the image to the answer of AO_Storage's wipe; the name is tidy_name. */
@@ -532,16 +538,24 @@ void appmgr_cancel_request(void)
     QACTIVE_POST(AO_AppMgr, &cancel, NULL);
 }
 
-void appmgr_run_request(const char *name)
+bool appmgr_run_ask(const char *name, QActive *who)
 {
     AppFlashEvt *e = Q_NEW_X(AppFlashEvt, 0U, APP_RUN_REQ_SIG);
     if ( NULL == e )
     {
         KLOG_E(TAG, "out of events; run request dropped");
-        return;
+        return false;
     }
     (void)snprintf(e->file, sizeof(e->file), "%s", name);
+    e->launch = false;
+    e->who    = who;
     QACTIVE_POST(AO_AppMgr, &e->super, NULL);
+    return true;
+}
+
+void appmgr_run_request(const char *name)
+{
+    (void)appmgr_run_ask(name, NULL);
 }
 
 void appmgr_erase_request(const char *name)
@@ -553,6 +567,8 @@ void appmgr_erase_request(const char *name)
         return;
     }
     (void)snprintf(e->file, sizeof(e->file), "%s", name);
+    e->launch = false;
+    e->who    = NULL;
     QACTIVE_POST(AO_AppMgr, &e->super, NULL);
 }
 
@@ -657,6 +673,37 @@ static void app_cat_deny(AppMgr * const me)
 }
 
 /**
+ * @brief Build the request for one transfer: where the bytes come from, where
+ *        they go.
+ *
+ * @param src_kind kfw_src_t as a plain integer.
+ * @param src      File name for fs/sd, URL for http; NULL for none.
+ * @param dst_kind kfw_target_t as a plain integer.
+ * @param launch   Boot the image once it is written and verified.
+ * @param who      Where AO_AppMgr's verdict is posted, or NULL for none.
+ * @return The event, or NULL when the pool is dry.
+ */
+static FlashReqEvt *flash_req_new(uint8_t src_kind, const char *src,
+                                  uint8_t dst_kind, bool launch, QActive *who)
+{
+    FlashReqEvt *e = Q_NEW_X(FlashReqEvt, 0U, FLASH_REQ_SIG);
+
+    if ( NULL != e )
+    {
+        e->src_kind = src_kind;
+        e->dst_kind = dst_kind;
+        e->launch   = launch;
+        e->who      = who;
+        e->src[0]   = '\0';
+        if ( NULL != src )
+        {
+            (void)snprintf(e->src, sizeof(e->src), "%s", src);
+        }
+    }
+    return e;
+}
+
+/**
  * @brief One transfer: where the bytes come from, where they go.
  *
  * The only way to ask AO_AppMgr to write an image. appmgr_flash_request() is
@@ -665,35 +712,34 @@ static void app_cat_deny(AppMgr * const me)
 QEvt const *appmgr_image_evt(uint8_t src_kind, const char *src,
                              uint8_t dst_kind, bool launch)
 {
-    FlashReqEvt *e   = Q_NEW_X(FlashReqEvt, 0U, FLASH_REQ_SIG);
-    QEvt const  *evt = NULL;
+    FlashReqEvt * const e   = flash_req_new(src_kind, src, dst_kind, launch, NULL);
+    QEvt const         *evt = NULL;
 
     if ( NULL != e )
     {
-        e->src_kind = src_kind;
-        e->dst_kind = dst_kind;
-        e->launch   = launch;
-        e->src[0]   = '\0';
-        if ( NULL != src )
-        {
-            (void)snprintf(e->src, sizeof(e->src), "%s", src);
-        }
-        evt         = &e->super;
+        evt = &e->super;
     }
     return evt;
+}
+
+bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
+                      bool launch, QActive *who)
+{
+    FlashReqEvt * const e = flash_req_new(src_kind, src, dst_kind, launch, who);
+
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "out of events; flash request dropped");
+        return false;
+    }
+    QACTIVE_POST(AO_AppMgr, &e->super, NULL);
+    return true;
 }
 
 void appmgr_image_request(uint8_t src_kind, const char *src,
                           uint8_t dst_kind, bool launch)
 {
-    QEvt const *e = appmgr_image_evt(src_kind, src, dst_kind, launch);
-
-    if ( NULL == e )
-    {
-        KLOG_E(TAG, "out of events; flash request dropped");
-        return;
-    }
-    QACTIVE_POST(AO_AppMgr, e, NULL);
+    (void)appmgr_image_ask(src_kind, src, dst_kind, launch, NULL);
 }
 
 /* A reader that keeps KODE_APP_LIST_MAX rows of the installed list holds
@@ -1495,6 +1541,50 @@ static void xfer_reset(AppMgr * const me)
     me->launch     = false;
 }
 
+/**
+ * @brief Post the verdict on a request to the asker that named itself.
+ *
+ * A request that named nobody asked for none. An answer that cannot be posted
+ * is lost, and the asker's own watchdog says so.
+ *
+ * @param who     The asker; NULL for none.
+ * @param verdict What AO_AppMgr made of the request.
+ */
+static void req_verdict(QActive * const who, app_req_verdict_t verdict)
+{
+    if ( NULL == who )
+    {
+        return;
+    }
+    AppReqRspEvt * const ev = Q_NEW_X(AppReqRspEvt, 0U, APP_REQ_RSP_SIG);
+
+    if ( NULL == ev )
+    {
+        KLOG_W(TAG, "out of events; the verdict on a request is lost");
+        return;
+    }
+    ev->verdict = (uint8_t)verdict;
+    if ( !QACTIVE_POST_X(who, &ev->super, 0U, AO_AppMgr) )
+    {
+        KLOG_W(TAG, "the asker's queue is full; the verdict on a request is "
+                    "lost");
+    }
+}
+
+/**
+ * @brief Give the verdict still owed for the install in hand, once.
+ *
+ * @param me      The AO.
+ * @param verdict What AO_AppMgr made of the request.
+ */
+static void req_settle(AppMgr * const me, app_req_verdict_t verdict)
+{
+    QActive * const who = me->req_who;
+
+    me->req_who = NULL;
+    req_verdict(who, verdict);
+}
+
 /** Release everything an in-flight copy owns. Safe to call twice. */
 static void flash_cleanup(AppMgr * const me)
 {
@@ -1530,6 +1620,7 @@ static void flash_fail(AppMgr * const me, const char *why, kfail_t reason)
     };
     KLOG_E(TAG, "install failed: %s", why);
     flash_cleanup(me);
+    req_settle(me, APP_REQ_REFUSED);   /* an install that never began: its asker is owed an answer */
     undo_restore(me);        /* the apps its write never reached come back */
     keep_clear(me);          /* the install ends here; so does its round */
     if ( KFAIL_KEEP == reason )
@@ -1718,17 +1809,39 @@ static void erase_publish(const char *name, kode_status_t st, bool image,
 }
 
 /**
- * @brief Answer an erase that arrives while the AO is busy: KODE_DENIED,
- *        published, so nobody waits on an erase that will not run.
+ * @brief Answer a request that arrives while the AO is busy, so nobody waits
+ *        on one that will not run.
+ *
+ * An erase is answered KODE_DENIED, published; an install or a run that asked
+ * for a verdict is told busy; a terminal install is failed on the bus, which
+ * is what its console waits for.
  *
  * @param e  The request refused; any other signal is left alone.
  */
-static void erase_deny(QEvt const * const e)
+static void busy_deny(QEvt const * const e)
 {
-    if ( (QSignal)APP_ERASE_REQ_SIG == e->sig )
+    switch ( e->sig )
     {
-        erase_publish(Q_EVT_CAST(AppFlashEvt)->file, KODE_DENIED, false,
-                      NULL, NULL);
+        case APP_ERASE_REQ_SIG: {
+            erase_publish(Q_EVT_CAST(AppFlashEvt)->file, KODE_DENIED, false,
+                          NULL, NULL);
+            break;
+        }
+        case FLASH_REQ_SIG: {
+            req_verdict(Q_EVT_CAST(FlashReqEvt)->who, APP_REQ_BUSY);
+            break;
+        }
+        case APP_RUN_REQ_SIG: {
+            req_verdict(Q_EVT_CAST(AppFlashEvt)->who, APP_REQ_BUSY);
+            break;
+        }
+        case APP_RECV_REQ_SIG: {
+            QACTIVE_PUBLISH(&s_recv_fail_evt, AO_AppMgr);
+            break;
+        }
+        default: {
+            break;
+        }
     }
 }
 
@@ -2791,6 +2904,7 @@ void AppMgr_ctor(void)
     me->victims          = NULL;     /* a used AO's table is the heap's now */
     me->undo             = NULL;     /* and so is the one an install gives back from */
     me->undo_count       = 0U;
+    me->req_who          = NULL;
     keep_clear(me);   /* no round: a constructor over a used AO frees its buffer */
     me->origin    = (uint8_t)APPMGR_ORIGIN_FILE;
 #if CONFIG_KODE_LOWPOWER
@@ -3132,6 +3246,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 keep_clear(me);
                 me->keep_req = *req;   /* what a restart would send again */
             }
+            me->req_who = req->who;    /* owed a verdict, settled below or in AppMgr_opening */
             me->origin = (uint8_t)APPMGR_ORIGIN_FILE;
             if ( (uint8_t)KFW_SRC_HTTP == req->src_kind )
             {
@@ -3147,6 +3262,16 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 if ( (uint8_t)KFW_TARGET_C5 == req->dst_kind )
                 {
                     KLOG_E(TAG, "dst=c5 belongs to AO_Radio; the console routes it there");
+                    req_settle(me, APP_REQ_REFUSED);
+                    status = Q_HANDLED();
+                    break;
+                }
+                if ( !kdrv_apps_pending_present(NULL, NULL) )
+                {
+                    /* Said here, where the asker can be told: the adoption
+                     * would find the same and could only log it. */
+                    KLOG_W(TAG, "the mailbox is empty: nothing to install");
+                    req_settle(me, APP_REQ_EMPTY);
                     status = Q_HANDLED();
                     break;
                 }
@@ -3155,6 +3280,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 me->adopt_run  = req->launch;
                 static const QEvt adopt = QEVT_INITIALIZER(APP_ADOPT_SIG);
                 QACTIVE_POST(&me->super, &adopt, &me->super);
+                req_settle(me, APP_REQ_TAKEN);
                 status = Q_HANDLED();
                 break;
             }
@@ -3165,6 +3291,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 && ((uint8_t)KFW_SRC_SD != req->src_kind) )
             {
                 KLOG_E(TAG, "that source is not wired up yet");
+                req_settle(me, APP_REQ_REFUSED);
                 status = Q_HANDLED();
                 break;
             }
@@ -3172,6 +3299,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             if ( me->from_net )
             {
                 KLOG_E(TAG, "this firmware has no network services");
+                req_settle(me, APP_REQ_REFUSED);
                 status = Q_HANDLED();
                 break;
             }
@@ -3215,6 +3343,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 /* Only reachable from kode_sys_flash() or a stale caller: the
                  * console routes dst=c5 straight to AO_Radio. */
                 KLOG_E(TAG, "the coprocessor is AO_Radio's, not this AO's");
+                req_settle(me, APP_REQ_REFUSED);
                 status = Q_HANDLED();
                 break;
             }
@@ -3234,6 +3363,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             {
                 KLOG_E(TAG, "'%s' is longer than a file name may be (%u)",
                        req->src, (unsigned)(sizeof(me->file) - 1U));
+                req_settle(me, APP_REQ_REFUSED);
                 status = Q_HANDLED();
                 break;
             }
@@ -3252,6 +3382,9 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             if ( me->from_net )
             {
                 net_stream_open_request(req->src, &me->super);
+                /* The download's own failures are asynchronous: the verdict
+                 * is that it has begun, not that it will end well. */
+                req_settle(me, APP_REQ_TAKEN);
             }
             else
             {
@@ -3279,9 +3412,11 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             {
                 KLOG_E(TAG, "'%s' is not installed - `app list` knows what is",
                        req->file);
+                req_verdict(req->who, APP_REQ_MISSING);
             }
             else
             {
+                req_verdict(req->who, APP_REQ_TAKEN);   /* before the board resets */
                 boot_app_run_request(d->e[idx].offset, d->e[idx].size,
                                      KBOOT_RUN_ONCE);
             }                                          /* AO_Boot resets */
@@ -3567,6 +3702,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
                                 ? "'%s' did not come back from the server"
                                 : "'%s' is not on the SD card nor in the "
                                   "internal storage", me->file);
+                    req_settle(me, APP_REQ_MISSING);   /* a URL's was settled when it opened */
                     flash_fail(me, me->from_net ? "the server said no"
                                                 : "file not found",
                                KFAIL_WRITE);
@@ -3603,6 +3739,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
                 status = Q_TRAN(&AppMgr_idle);
                 break;
             }
+            req_settle(me, APP_REQ_TAKEN);   /* the file is open and the write has begun */
 
             me->writing     = true;
             me->pacing      = false;
@@ -3641,9 +3778,10 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
         case FLASH_REQ_SIG:
         case APP_RUN_REQ_SIG:
         case APP_ERASE_REQ_SIG:
-        case APP_LIST_REQ_SIG: {
+        case APP_LIST_REQ_SIG:
+        case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy opening '%s'; request ignored", me->file);
-            erase_deny(e);
+            busy_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -3708,6 +3846,7 @@ static void keep_restart(AppMgr * const me)
     r->src_kind = me->keep_req.src_kind;
     r->dst_kind = me->keep_req.dst_kind;
     r->launch   = me->keep_req.launch;
+    r->who      = NULL;               /* the verdict was given with the first open */
     (void)snprintf(r->src, sizeof(r->src), "%s", me->keep_req.src);
     /* LIFO: a request already queued must not run between the copies and
      * the install they were made for. */
@@ -4126,7 +4265,7 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy keeping apps on the card; request ignored");
-            erase_deny(e);
+            busy_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -4349,7 +4488,7 @@ static bool busy_refused(AppMgr * const me, QEvt const * const e,
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy %s; request ignored", doing);
-            erase_deny(e);
+            busy_deny(e);
             break;
         }
         case APP_CAT_REQ_SIG: {
@@ -5028,6 +5167,31 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
 #endif /* CONFIG_KODEOS_NET */
 
 /**
+ * @brief What a request that asks for an install or a run is called in the log.
+ *
+ * @param sig FLASH_REQ_SIG, APP_RUN_REQ_SIG or APP_RECV_REQ_SIG.
+ * @return "install", "run" or "terminal install".
+ */
+static const char *request_name(QSignal sig)
+{
+    const char *name = "terminal install";
+
+    if ( (QSignal)FLASH_REQ_SIG == sig )
+    {
+        name = "install";
+    }
+    else if ( (QSignal)APP_RUN_REQ_SIG == sig )
+    {
+        name = "run";
+    }
+    else
+    {
+        /* APP_RECV_REQ_SIG. */
+    }
+    return name;
+}
+
+/**
  * @brief The parent of every state with work in hand.
  *
  * Answers a question about the next install with `busy`, and settles the late
@@ -5049,7 +5213,16 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
             /* A state under this one that names no refusal of its own. */
             KLOG_W(TAG, "busy; the erase of '%s' is refused",
                    Q_EVT_CAST(AppFlashEvt)->file);
-            erase_deny(e);
+            busy_deny(e);
+            status = Q_HANDLED();
+            break;
+        }
+        case FLASH_REQ_SIG:
+        case APP_RUN_REQ_SIG:
+        case APP_RECV_REQ_SIG: {
+            /* Likewise: an install or a run is told it was not taken. */
+            KLOG_W(TAG, "busy; the %s request is refused", request_name(e->sig));
+            busy_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -5396,7 +5569,7 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy tidying the data folder of '%s'; request ignored",
                    me->tidy_name);
-            erase_deny(e);
+            busy_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -5503,11 +5676,12 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
         case FLASH_REQ_SIG:
         case APP_RUN_REQ_SIG:
         case APP_ERASE_REQ_SIG:
-        case APP_LIST_REQ_SIG: {
+        case APP_LIST_REQ_SIG:
+        case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "busy writing %s (%u%%); request ignored",
                    me->os_target ? "the kodeOS slot" : "the region",
                    (unsigned)((me->written * 100U) / me->total));
-            erase_deny(e);
+            busy_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -5601,7 +5775,7 @@ static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e)
         case APP_LIST_REQ_SIG:
         case APP_RECV_REQ_SIG: {
             KLOG_W(TAG, "adopting the mailbox app; request ignored");
-            erase_deny(e);
+            busy_deny(e);
             status = Q_HANDLED();
             break;
         }
@@ -5903,12 +6077,17 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
             status = recv_close(me, false, true);
             break;
         }
-        /* Unlike AppMgr_opening/flashing/adopting, this state does not
-         * enumerate the other fire-and-forget requests (FLASH_REQ_SIG and
-         * friends already fall silently to Q_SUPER here, pre-existing and
-         * out of scope for this fix) - but app_cat is the one request a
-         * console command waits synchronously on, so it still must not be
-         * dropped without an answer while an image is streaming in. */
+        case FLASH_REQ_SIG:
+        case APP_RUN_REQ_SIG:
+        case APP_RECV_REQ_SIG: {
+            KLOG_W(TAG, "busy receiving an installed image; request ignored");
+            busy_deny(e);
+            status = Q_HANDLED();
+            break;
+        }
+        /* app_cat is a request a console command waits synchronously on, so
+         * it must not be dropped without an answer while an image is
+         * streaming in. */
         case APP_CAT_REQ_SIG: {
             KLOG_W(TAG, "busy receiving an installed image; "
                         "app_cat request denied");
@@ -5955,6 +6134,14 @@ static QState AppMgr_launching(AppMgr * const me, QEvt const * const e)
                 region_launch(me->file);   /* resets on success */
             }
             status = Q_TRAN(&AppMgr_idle); /* only reached if it could not */
+            break;
+        }
+        case FLASH_REQ_SIG:
+        case APP_RUN_REQ_SIG:
+        case APP_RECV_REQ_SIG: {
+            KLOG_W(TAG, "busy launching an installed app; request ignored");
+            busy_deny(e);
+            status = Q_HANDLED();
             break;
         }
         default: {

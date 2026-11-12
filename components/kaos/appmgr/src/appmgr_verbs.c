@@ -9,6 +9,7 @@
 
 #include "kaos.h"
 #include "kapp_cat.h"
+#include "kdrv_kfw.h"
 #include "kode_log.h"
 #include "kqp.h"
 
@@ -21,13 +22,15 @@
 #define APPMGR_V_BYTES_PER_KB 1024U  /**< `size_kb=`'s unit. */
 #define APPMGR_V_ERASE_MARGIN_MS 5000U  /**< What `app_erase` waits past AO_AppMgr's own bound on AO_Storage. */
 #define APPMGR_V_ERASE_MS     (APPMGR_WIPE_MS + APPMGR_V_ERASE_MARGIN_MS) /**< `app_erase`'s deadline. */
+#define APPMGR_V_RUN_MS       (KODE_APPMGR_OPEN_MS + APPMGR_V_ERASE_MARGIN_MS) /**< `app_run`'s: AO_AppMgr's bound on a medium's open, and the margin. */
 
 /** @brief Which app verb holds the console. */
 typedef enum {
     APPMGR_V_NONE = 0,  /**< None of them.                                  */
     APPMGR_V_LIST,      /**< app_list: APP_ENTRY_SIG pages until the end.   */
     APPMGR_V_CAT,       /**< app_cat set/clear: closed by APP_CAT_RSP_SIG.  */
-    APPMGR_V_ERASE      /**< app_erase: closed by APP_ERASE_DONE_SIG.       */
+    APPMGR_V_ERASE,     /**< app_erase: closed by APP_ERASE_DONE_SIG.       */
+    APPMGR_V_RUN        /**< app_run: closed by APP_REQ_RSP_SIG.            */
 } appmgr_verb_kind_t;
 
 static appmgr_verb_kind_t s_appmgr_kind;
@@ -55,19 +58,36 @@ static void h_app_list(const kverb_t *c, const karg_val_t *v)
     appmgr_list_request(AO_Console);
 }
 
-/** @brief app_run name=<name|file>: a .bin is flashed then booted. */
+/**
+ * @brief app_run name=<name|file>: a .bin is flashed then booted.
+ *
+ * The line stays open until AO_AppMgr says whether it took the request: `>ok`
+ * when the app is on its way to boot, `missing` for a name nobody installed or
+ * a file that is not on a medium, `busy` when AO_AppMgr has work in hand.
+ */
 static void h_app_run(const kverb_t *c, const karg_val_t *v)
 {
-    (void)c;
+    bool posted;
+
+    console_begin(c->verb);
+    console_extend(APPMGR_V_RUN_MS);
+    s_appmgr_kind = APPMGR_V_RUN;
     if ( console_is_bin(v[0].s) )
     {
-        appmgr_flash_request(v[0].s, true);   /* flash, then boot it */
+        /* Flash, then boot it. */
+        posted = appmgr_image_ask((uint8_t)KFW_SRC_FS, v[0].s,
+                                  (uint8_t)KFW_TARGET_APP, true, AO_Console);
     }
     else
     {
-        appmgr_run_request(v[0].s);
+        posted = appmgr_run_ask(v[0].s, AO_Console);
     }
-    console_reply(">ok");
+    if ( !posted )
+    {
+        /* Nothing was posted, so nobody will answer. */
+        console_reply_err(KCLI_ERR_REJECT, c->verb);
+        console_end();
+    }
 }
 
 /**
@@ -363,6 +383,19 @@ static bool appmgr_erase_answer(QEvt const *e)
     return true;
 }
 
+/** @brief app_run's answer: AO_AppMgr's verdict on the request. */
+static bool appmgr_run_answer(QEvt const *e)
+{
+    bool handled = false;
+
+    if ( (QSignal)APP_REQ_RSP_SIG == e->sig )
+    {
+        console_reply_app_verdict(Q_EVT_CAST(AppReqRspEvt)->verdict);
+        handled = true;
+    }
+    return handled;
+}
+
 /** @brief AO_AppMgr's answers to the verb in flight. */
 static bool appmgr_answer(QEvt const *e)
 {
@@ -379,6 +412,10 @@ static bool appmgr_answer(QEvt const *e)
     else if ( APPMGR_V_ERASE == s_appmgr_kind )
     {
         handled = appmgr_erase_answer(e);
+    }
+    else if ( APPMGR_V_RUN == s_appmgr_kind )
+    {
+        handled = appmgr_run_answer(e);
     }
     else
     {

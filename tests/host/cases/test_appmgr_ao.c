@@ -3632,6 +3632,258 @@ TEST_CASE("a second failed install in a row gives back what it did not reach too
     keep_end();
 }
 
+/* ---- A request that asked for a verdict gets one ---------------------------
+ * `install` and `app_run` wait for AO_AppMgr: `>ok` is "taken, and under way",
+ * never "posted". The asker is the AO the request names, and the verdict is
+ * posted to it alone.
+ */
+
+/** @brief Ask for an install of @p src, naming the spy as the asker. */
+static void ask_install_from(uint8_t src_kind, const char *src, uint8_t dst_kind)
+{
+    FlashReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super    = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    e.src_kind = src_kind;
+    e.dst_kind = dst_kind;
+    e.launch   = false;
+    e.who      = ao_spy();
+    (void)snprintf(e.src, sizeof(e.src), "%s", src);
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/** @brief Ask to run the installed app @p name, naming the spy as the asker. */
+static void ask_run_from(const char *name)
+{
+    AppFlashEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(APP_RUN_REQ_SIG);
+    e.who   = ao_spy();
+    (void)snprintf(e.file, sizeof(e.file), "%s", name);
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/** @brief The verdicts the spy was posted, oldest first; the spy is drained. */
+typedef struct {
+    unsigned count;                  /**< How many APP_REQ_RSP_SIG came.    */
+    uint8_t  first;                  /**< The first one's verdict.          */
+} verdicts_t;
+
+/** @brief Count the verdicts the spy holds, and keep the first. */
+static verdicts_t spy_verdicts(void)
+{
+    verdicts_t v = { 0U, 0xFFU };
+
+    for ( ;; )
+    {
+        const QEvt * const got = ao_spy_take();
+
+        if ( NULL == got )
+        {
+            break;
+        }
+        if ( (enum_t)got->sig == APP_REQ_RSP_SIG )
+        {
+            if ( 0U == v.count )
+            {
+                v.first = ((AppReqRspEvt const *)got)->verdict;
+            }
+            ++v.count;
+        }
+    }
+    ao_spy_drain();
+    return v;
+}
+
+TEST_CASE("an https install is taken the moment it starts opening, before the server answers",
+          "[appmgr_ao][verdict]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    (void)net_requests(NET_STREAM_OPEN_REQ_SIG);
+
+    ask_install_from((uint8_t)KFW_SRC_HTTP, "https://example.invalid/a.bin",
+                     (uint8_t)KFW_TARGET_APP);
+
+    verdicts_t const v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, v.count, "an https install owes one verdict");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_TAKEN, v.first);
+
+    let_the_open_expire();
+    (void)net_requests(NET_STREAM_CLOSE_REQ_SIG);
+    keep_end();
+}
+
+TEST_CASE("an install from a medium is taken once the medium has opened the file",
+          "[appmgr_ao][verdict]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+
+    ask_install_from((uint8_t)KFW_SRC_SD, "a.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_verdicts().count,
+        "the verdict came before the medium said the file is there");
+
+    answer_open(512U, (uint8_t)KDRV_MEDIUM_SD);
+    verdicts_t const v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_TAKEN, v.first);
+
+    answer_eof();
+    run_ticks(4U);
+    keep_end();
+}
+
+TEST_CASE("an install of a file that is not on the medium is missing",
+          "[appmgr_ao][verdict]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+
+    ask_install_from((uint8_t)KFW_SRC_SD, "nope.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open_with(0U, (uint8_t)KDRV_MEDIUM_SD, (uint8_t)KODE_ERROR);
+
+    verdicts_t const v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, v.count, "a missing file owes one verdict");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_MISSING, v.first);
+    keep_end();
+}
+
+TEST_CASE("an install from an empty mailbox is empty, from a full one taken",
+          "[appmgr_ao][verdict]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    (void)kdrv_apps_pending_consume();
+
+    ask_install_from((uint8_t)KFW_SRC_PENDING, "", (uint8_t)KFW_TARGET_APP);
+    verdicts_t v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_EMPTY, v.first,
+        "an empty mailbox was taken for an install");
+
+    (void)park_pending("new");
+    ask_install_from((uint8_t)KFW_SRC_PENDING, "", (uint8_t)KFW_TARGET_APP);
+    v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_TAKEN, v.first);
+
+    (void)qf_support_pump(AO_AppMgr, 64U);
+    (void)kdrv_apps_pending_consume();
+    kfw_abort();
+    keep_end();
+}
+
+TEST_CASE("an install or a run that arrives while an install is open is busy, and said",
+          "[appmgr_ao][verdict]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+
+    ask_install_from((uint8_t)KFW_SRC_SD, "a.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    (void)spy_verdicts();
+
+    fake_klog_reset();
+    ask_install_from((uint8_t)KFW_SRC_SD, "b.bin", (uint8_t)KFW_TARGET_APP);
+    verdicts_t v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_BUSY, v.first,
+        "an install that was not taken was not refused as busy");
+    TEST_ASSERT_TRUE(klog_has("busy opening"));
+
+    ask_run_from("anything");
+    v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_BUSY, v.first);
+
+    let_the_open_expire();
+    keep_end();
+}
+
+TEST_CASE("an install or a run that arrives while an image streams in is busy, and said",
+          "[appmgr_ao][verdict]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    undo_image("new");
+
+    ask_recv_named(UNDO_IMG_LEN, 0U, false, "new");
+    raw_armed(true);
+    fake_klog_reset();
+
+    ask_install_from((uint8_t)KFW_SRC_SD, "b.bin", (uint8_t)KFW_TARGET_APP);
+    verdicts_t v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, v.count, "a request dropped with no answer");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_BUSY, v.first);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("busy receiving"),
+        "the request was dropped without a word");
+
+    ask_run_from("anything");
+    v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_BUSY, v.first);
+
+    run_ticks(APPMGR_RECV_IDLE_DEADLINE_TICKS + 50U);
+    (void)log_saw(CONSOLE_RAW_END_SIG);
+    keep_end();
+}
+
+TEST_CASE("a terminal install that arrives while another transfer is open is refused, and said",
+          "[appmgr_ao][verdict]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    ao_spy_subscribe(RECV_FAIL_SIG);
+
+    ask_install_from((uint8_t)KFW_SRC_SD, "a.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    (void)spy_verdicts();
+
+    fake_klog_reset();
+    ask_recv(4096U, 0U, false);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("busy opening"),
+        "a terminal install met a busy AO and nobody was told");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, spy_count(RECV_FAIL_SIG),
+        "the console waiting for the install was left to its watchdog");
+
+    QActive_unsubscribe(ao_spy(), RECV_FAIL_SIG);
+    let_the_open_expire();
+    keep_end();
+}
+
+TEST_CASE("running an app is taken when it is installed and missing when it is not",
+          "[appmgr_ao][verdict]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    put_old(KAPPS_ALIGN);
+    (void)boot_run_request(&off, &size, &mode);
+
+    ask_run_from("nothing-here");
+    verdicts_t v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_MISSING, v.first,
+        "an app that is not installed was taken for a run");
+    TEST_ASSERT_FALSE(boot_run_request(&off, &size, &mode));
+
+    ask_run_from("old");
+    v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_TAKEN, v.first);
+    TEST_ASSERT_TRUE(boot_run_request(&off, &size, &mode));
+    keep_end();
+}
+
 /* Erase takes the entry out of the directory and the image's first sector
  * off the flash - the descriptor with it - so nothing bootable or nameable is
  * left at that offset. */

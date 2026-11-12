@@ -545,6 +545,10 @@ enum KodeSignals {
     FLASH_REQ_SIG,              /**< AO_AppMgr: one source-to-sink transfer
                                  *   (FlashReqEvt). The only way to ask for
                                  *   an image to be written.                 */
+    APP_REQ_RSP_SIG,            /**< To the asker: whether AO_AppMgr took an
+                                 *   install (FLASH_REQ_SIG) or run
+                                 *   (APP_RUN_REQ_SIG) request that named one
+                                 *   (AppReqRspEvt). Posted, not published.   */
     STORAGE_CMD_SIG,            /**< AO_Storage: do StorageCmdEvt.op.         */
     STORAGE_LIST_PAGE_SIG,      /**< AO_Storage: post a page of the bootable
                                  *   images on every medium to the asker
@@ -2011,6 +2015,8 @@ typedef struct {
     QEvt super;
     char file[KODE_APP_FILE_MAX];
     bool launch;   /**< Boot the slot as soon as the write succeeds. */
+    QActive *who;  /**< APP_RUN_REQ_SIG only: where the verdict is posted
+                    *   (AppReqRspEvt), or NULL for none.              */
 } AppFlashEvt;
 
 /**
@@ -2187,12 +2193,35 @@ typedef struct {
  * time AO_AppMgr reads this.
  */
 typedef struct {
-    QEvt    super;
-    uint8_t src_kind;                  /**< kfw_src_t, as a plain integer.  */
-    uint8_t dst_kind;                  /**< kfw_target_t, likewise.         */
-    bool    launch;                    /**< Boot it once written.           */
-    char    src[KODE_FLASH_SRC_MAX];   /**< File name, or a URL.            */
+    QEvt     super;
+    uint8_t  src_kind;                 /**< kfw_src_t, as a plain integer.  */
+    uint8_t  dst_kind;                 /**< kfw_target_t, likewise.         */
+    bool     launch;                   /**< Boot it once written.           */
+    QActive *who;                      /**< Where AO_AppMgr's verdict is
+                                        *   posted (AppReqRspEvt), or NULL
+                                        *   for none.                       */
+    char     src[KODE_FLASH_SRC_MAX];  /**< File name, or a URL.            */
 } FlashReqEvt;
+
+/** @brief What AO_AppMgr made of a request that asked for a verdict (AppReqRspEvt.verdict). */
+typedef enum {
+    APP_REQ_TAKEN = 0,   /**< Taken: the install is under way, or the app is on its way to boot. */
+    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand: ask again.                           */
+    APP_REQ_MISSING,     /**< The file is not on the medium, or the app is not installed.      */
+    APP_REQ_EMPTY,       /**< The mailbox holds nothing to install.                            */
+    APP_REQ_REFUSED      /**< Refused for another reason, which the log gives.                 */
+} app_req_verdict_t;
+
+/**
+ * @brief AO_AppMgr's verdict on an install or run request (APP_REQ_RSP_SIG).
+ *
+ * Posted to the asker alone, once, never published: only the asker waits for
+ * it.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t verdict;   /**< app_req_verdict_t. */
+} AppReqRspEvt;
 
 /**
  * @brief One installed app, in answer to APP_LIST_REQ_SIG (APP_ENTRY_SIG).

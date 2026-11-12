@@ -85,8 +85,8 @@ KAOS_WEAK void storage_path_request(QActive *who, uint8_t op, const char *path);
 KAOS_WEAK void storage_read_request(void);
 KAOS_WEAK void storage_write_all_request(const char *name, const void *data,
                                          uint32_t len, QActive *who);
-KAOS_WEAK void appmgr_image_request(uint8_t src_kind, const char *src,
-                                    uint8_t dst_kind, bool launch);
+KAOS_WEAK bool appmgr_image_ask(uint8_t src_kind, const char *src,
+                                uint8_t dst_kind, bool launch, QActive *who);
 KAOS_WEAK void appmgr_list_page(uint16_t skip, QActive *who);
 KAOS_WEAK void appmgr_list_request(QActive *who);
 KAOS_WEAK bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
@@ -286,6 +286,8 @@ typedef enum {
                        *   APPDATA_END_SIG.                               */
     KCLI_APPDATA_RM,  /**< appdata_rm: closed by APPDATA_RM_RSP_SIG.      */
     KCLI_APPDATA_GET, /**< appdata_get: closed by APPDATA_GET_RSP_SIG.    */
+    KCLI_INSTALL,   /**< install off a medium or the mailbox: closed by
+                     *   AO_AppMgr's verdict, APP_REQ_RSP_SIG.           */
     KCLI_OWNER,     /**< A registered verb: its owner's answer hook sees
                      *   the events, and console_end() closes it.        */
 } kcli_inflight_t;
@@ -1778,6 +1780,49 @@ static void install_from_wire(Console *me, const kcmd_t *c, uint8_t dst,
     }
 }
 
+/** How long `install` waits for AO_AppMgr's verdict: the deadline AO_AppMgr gives a
+ *  medium to open a file, then the console's own. AO_AppMgr answers every
+ *  request it takes, so this only bounds a lost answer. */
+#define KCLI_INSTALL_MS  (KODE_APPMGR_OPEN_MS + KCLI_CMD_TIMEOUT_MS)
+
+/**
+ * @brief Close the command in flight with AO_AppMgr's verdict on its request.
+ *
+ * `>ok` for a request taken; code 4 `busy` when AO_AppMgr had work in hand;
+ * code 5 `missing` for a file that is not on the medium or an app that is not
+ * installed, `empty` for a mailbox with nothing in it, `refused` for anything
+ * else AO_AppMgr turned down.
+ *
+ * @param verdict app_req_verdict_t.
+ */
+void console_reply_app_verdict(uint8_t verdict)
+{
+    switch ( (app_req_verdict_t)verdict )
+    {
+        case APP_REQ_TAKEN: {
+            console_reply(">ok");
+            break;
+        }
+        case APP_REQ_BUSY: {
+            console_reply_err(KCLI_ERR_BUSY, "busy");
+            break;
+        }
+        case APP_REQ_MISSING: {
+            console_reply_err(KCLI_ERR_REJECT, "missing");
+            break;
+        }
+        case APP_REQ_EMPTY: {
+            console_reply_err(KCLI_ERR_REJECT, "empty");
+            break;
+        }
+        default: {
+            console_reply_err(KCLI_ERR_REJECT, "refused");
+            break;
+        }
+    }
+    console_end();
+}
+
 /**
  * @brief install src=<where from> dst=<where to> [run=on|off]
  *        [size=<n> crc32=<n>].
@@ -1785,7 +1830,9 @@ static void install_from_wire(Console *me, const kcmd_t *c, uint8_t dst,
  * `dst=` is `os`, `c5`, `pending` (the mailbox) or `app`, which boots once
  * only on `run=on`; `run` is refused for any other `dst`. `src=` is
  * `fs:name`, `sd:name`, `http(s)://...`, `"pending"` or `"terminal"`. Only
- * `"terminal"` takes `size` and `crc32`, and only there is `>ok` a result.
+ * `"terminal"` takes `size` and `crc32`, and only there is `>ok` a result: off
+ * a medium or the mailbox it says AO_AppMgr took the install, and the
+ * verdict decides (console_reply_app_verdict()).
  */
 static void h_install(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
@@ -1904,8 +1951,14 @@ static void h_install(Console *me, const kcmd_t *c, const karg_val_t *v)
         console_reply(">ok");
         return;
     }
-    appmgr_image_request(kind, spec, dst, run);
-    console_reply(">ok");
+    cmd_begin(me, KCLI_INSTALL, c->verb);
+    console_extend(KCLI_INSTALL_MS);
+    if ( !appmgr_image_ask(kind, spec, dst, run, &me->super) )
+    {
+        /* Nothing was posted, so nobody will answer. */
+        console_reply_err(KCLI_ERR_REJECT, c->verb);
+        console_end();
+    }
 }
 
 /* ---- Handlers: the app data folder ---------------------------------------
@@ -7921,6 +7974,16 @@ static QState console_own(Console * const me, QEvt const * const e)
             {
                 console_reply(">ok");
                 console_end();
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_REQ_RSP_SIG: {
+            /* Only the install in flight hears it: a verdict that arrives
+             * after the watchdog closed the command belongs to nobody. */
+            if ( (uint8_t)KCLI_INSTALL == me->inflight )
+            {
+                console_reply_app_verdict(Q_EVT_CAST(AppReqRspEvt)->verdict);
             }
             status = Q_HANDLED();
             break;

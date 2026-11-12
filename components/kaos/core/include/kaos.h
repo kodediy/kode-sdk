@@ -3702,6 +3702,41 @@ void appmgr_image_request(uint8_t src_kind, const char *src,
                           uint8_t dst_kind, bool launch);
 
 /**
+ * @brief appmgr_image_request(), asking AO_AppMgr for its verdict.
+ *
+ * AO_AppMgr posts @p who one APP_REQ_RSP_SIG (AppReqRspEvt) once it has
+ * decided: taken (an `https` source as soon as it starts opening, a file on a
+ * medium once the medium has opened it, the mailbox at once), busy, missing (no
+ * such file on the medium), empty (nothing in the mailbox) or refused. What
+ * goes wrong after that, a download that fails, is published as
+ * APP_FLASH_FAIL_SIG and says nothing here.
+ *
+ * @param src_kind kfw_src_t as a plain integer.
+ * @param src      File name for fs/sd, URL for http, ignored otherwise.
+ * @param dst_kind kfw_target_t as a plain integer.
+ * @param launch   Boot the image once it is written and verified.
+ * @param who      Where the verdict is posted.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
+                      bool launch, QActive *who);
+
+/**
+ * @brief appmgr_run_request(), asking AO_AppMgr for its verdict.
+ *
+ * AO_AppMgr posts @p who one APP_REQ_RSP_SIG: taken when an installed app has
+ * that name (the boot request is on its way to AO_Boot), missing when none
+ * does, busy when it has work in hand.
+ *
+ * @param name The installed app's project name.
+ * @param who  Where the verdict is posted.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_run_ask(const char *name, QActive *who);
+
+/**
  * @brief The event appmgr_image_request() posts, built for a caller that posts it itself.
  * @param src_kind kfw_src_t as a plain integer.
  * @param src      File name for fs/sd, URL for http; NULL for none.
