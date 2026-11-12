@@ -277,34 +277,57 @@ bool kdrv_radio_c5_held(void);
 /** How long the C5 is given to boot after its reset line is released:
  * esp-hosted's own wait (CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS), asserted
  * against it in kdrv_radio.c. */
-/* cppcheck-suppress misra-c2012-2.5 ; read by kdrv_radio.c alone, no twin */
 #define KDRV_RADIO_C5_BOOT_MS   1500U
 
+/** How long the C5 waits after answering an activate before it restarts into
+ * the new image: esp-hosted's slave arms a one-shot of this length
+ * (RESTART_TIMEOUT, slave_control.c) and then calls esp_restart(). */
+#define KDRV_RADIO_C5_ACTIVATE_MS 2000U
+
 /**
- * @brief The role of the firmware a deliberate restart goes to.
+ * @brief What a deliberate restart tells the next firmware about the C5.
  *
- * A note names it, and a firmware keeps a parked C5 only when the note names
- * its own role: the only firmware that can read a note meant for another is
- * one built before the note existed, which ignores it.
+ * A jump names the role of the firmware it goes to, and a firmware keeps a
+ * parked C5 only when the note names its own role: the only firmware that can
+ * read a note meant for another is one built before the note existed, which
+ * ignores it. An update names no role.
  */
 typedef enum {
-    KDRV_RADIO_NOTE_OS  = 1,    /**< A jump home: kodeOS.                     */
-    KDRV_RADIO_NOTE_APP = 2,    /**< A jump to an app.                        */
+    KDRV_RADIO_NOTE_OS     = 1, /**< A jump home: kodeOS.                     */
+    KDRV_RADIO_NOTE_APP    = 2, /**< A jump to an app.                        */
+    KDRV_RADIO_NOTE_UPDATE = 3, /**< The C5 runs an update it has not
+                                 *   confirmed: a closed C5 confirms it at the
+                                 *   first KODE request, and its bootloader
+                                 *   goes back to the old image if a reset
+                                 *   comes first.                            */
 } kdrv_radio_note_t;
 
 /**
  * @brief Leave the handover note for the next firmware.
  *
- * Call it only after the C5 has answered the park with OK, right before the
- * restart. The note is one word in a register of the chip's
+ * Call it right before the restart: for a jump, only after the C5 has
+ * answered the park with OK; for an update, once the C5 has restarted into
+ * the new image. The note is one word in a register of the chip's
  * low-power domain: it survives esp_restart() and every reset but a power-on,
  * whichever firmware runs next. The next firmware's first link reads it and erases it,
  * and keeps the C5 running only when every condition of the rule holds;
  * otherwise it resets the C5 as it always did.
  *
- * @param target The role of the firmware the restart goes to.
+ * @param target What the restart leaves the C5 doing.
  */
 void kdrv_radio_note_leave(kdrv_radio_note_t target);
+
+/**
+ * @brief Whether this boot found an update note its first link has not read
+ *        yet.
+ *
+ * Reads the note without erasing it, so a boot that wants neither Wi-Fi nor
+ * BLE can still bring the link up once, and the new image is confirmed
+ * instead of held in reset and given up.
+ *
+ * @return true for a KDRV_RADIO_NOTE_UPDATE note after a software reset.
+ */
+bool kdrv_radio_note_update_waits(void);
 
 /**
  * @brief Make the lock that gives synchronous RPCs to the C5 their turns

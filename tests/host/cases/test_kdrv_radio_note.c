@@ -77,13 +77,51 @@ TEST_CASE("a boot that does not want Wi-Fi resets the C5", "[radio_note]")
 
 TEST_CASE("an unknown target resets the C5", "[radio_note]")
 {
-    kradio_note_t zero  = note_for(0U);
-    kradio_note_t three = note_for(3U);
+    kradio_note_t zero = note_for(0U);
+    kradio_note_t four = note_for(4U);
 
     TEST_ASSERT_FALSE(kradio_note_keeps_c5(&zero, true, true, true));
     TEST_ASSERT_FALSE(kradio_note_keeps_c5(&zero, true, false, true));
-    TEST_ASSERT_FALSE(kradio_note_keeps_c5(&three, true, true, true));
-    TEST_ASSERT_FALSE(kradio_note_keeps_c5(&three, true, false, true));
+    TEST_ASSERT_FALSE(kradio_note_keeps_c5(&four, true, true, true));
+    TEST_ASSERT_FALSE(kradio_note_keeps_c5(&four, true, false, true));
+}
+
+TEST_CASE("an update's note after a software reset keeps the C5 whatever the "
+          "role and the wish", "[radio_note]")
+{
+    kradio_note_t upd = note_for((uint32_t)KDRV_RADIO_NOTE_UPDATE);
+
+    TEST_ASSERT_TRUE(kradio_note_keeps_c5(&upd, true, true, true));
+    TEST_ASSERT_TRUE(kradio_note_keeps_c5(&upd, true, false, true));
+    TEST_ASSERT_TRUE_MESSAGE(kradio_note_keeps_c5(&upd, true, true, false),
+        "a boot with no Wi-Fi wanted still owes the new image its first request");
+    TEST_ASSERT_TRUE(kradio_note_keeps_c5(&upd, true, false, false));
+}
+
+TEST_CASE("an update's note after any other reset resets the C5",
+          "[radio_note]")
+{
+    kradio_note_t upd = note_for((uint32_t)KDRV_RADIO_NOTE_UPDATE);
+
+    TEST_ASSERT_FALSE(kradio_note_keeps_c5(&upd, false, true, true));
+    TEST_ASSERT_FALSE(kradio_note_keeps_c5(&upd, false, false, false));
+    TEST_ASSERT_FALSE(kradio_note_is_update(&upd, false));
+}
+
+TEST_CASE("only an update's note with its magic is an update", "[radio_note]")
+{
+    kradio_note_t upd   = note_for((uint32_t)KDRV_RADIO_NOTE_UPDATE);
+    kradio_note_t os    = note_for((uint32_t)KDRV_RADIO_NOTE_OS);
+    kradio_note_t app   = note_for((uint32_t)KDRV_RADIO_NOTE_APP);
+    kradio_note_t wrong = kradio_note_unpack(0x4B510003UL);
+
+    TEST_ASSERT_TRUE(kradio_note_is_update(&upd, true));
+    TEST_ASSERT_FALSE(kradio_note_is_update(&os, true));
+    TEST_ASSERT_FALSE(kradio_note_is_update(&app, true));
+    TEST_ASSERT_FALSE(kradio_note_is_update(&wrong, true));
+    TEST_ASSERT_FALSE(kradio_note_is_update(NULL, true));
+    TEST_ASSERT_EQUAL_HEX32(0x4B500003UL,
+                            kradio_note_pack((uint32_t)KDRV_RADIO_NOTE_UPDATE));
 }
 
 TEST_CASE("a note is one word: the magic above, the target below",
