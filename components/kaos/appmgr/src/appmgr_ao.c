@@ -116,6 +116,7 @@ _Static_assert((KAPPS_MAX_ENTRIES + 1U) <= UINT8_MAX,
 #define APPMGR_TIDY_TICKS   KQP_TICKS_PER_MS(APPMGR_TIDY_MS)   /**< APPMGR_TIDY_MS (kaos.h) in ticks. */
 #define APPMGR_WIPE_TICKS   KQP_TICKS_PER_MS(APPMGR_WIPE_MS)   /**< APPMGR_WIPE_MS (kaos.h) in ticks. */
 #define APPMGR_PUT_RETRY_TICKS KQP_TICKS_PER_MS(KODE_APPMGR_PUT_RETRY_MS) /**< The pause before a fetched folder's put is asked again, in ticks. */
+#define APPMGR_TIDY_LATE_TICKS KQP_TICKS_PER_MS(APPMGR_TIDY_LATE_MS) /**< APPMGR_TIDY_LATE_MS (kaos.h) in ticks. */
 
 /* An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG): its two
  * files, by the names the folder gives them. */
@@ -396,6 +397,8 @@ typedef struct {
      * which frees it on every path, and an answer is taken only when it names
      * the request in flight (tidy_step and tidy_who()). */
     bool          tidy_swallow;    /**< A deadline already queued is stale: swallow it. */
+    bool          tidy_late;       /**< The last request went unanswered and the install ends in a
+                                    *   boot: its answer gets APPMGR_TIDY_LATE_MS more. */
     /* The evicted apps whose folders go, by project name: they are read off
      * the images before the install overwrites them. PSRAM, taken when the
      * first one is recorded (rule 8: KAPPS_MAX_ENTRIES names would be 2 KB of
@@ -1575,7 +1578,9 @@ static void erase_take_wipe(AppMgr * const me, StorageAppWipeRspEvt const * cons
  * After region_install() commits, the app's metadata folder is made to match
  * the container, and the folders of evicted apps with no copy on the card are
  * deleted, one request at a time. The install ends (done, launch, `>ok`, boot)
- * only when AO_Storage has answered each one or its deadline ran out.
+ * only when AO_Storage has answered each one or its deadline ran out; an
+ * install that ends in a boot waits once more, for APPMGR_TIDY_LATE_MS, for
+ * the last request it gave, so the reset does not cut a write under way.
  */
 
 /** @brief The project the request in flight is about, for the log. */
@@ -1604,6 +1609,14 @@ static bool tidy_ask_own(AppMgr * const me)
 
     if ( KFW_AD_RAW == me->tidy_ad.kind )
     {
+        return false;
+    }
+    if ( KFW_AD_DROPPED == me->tidy_ad.kind )
+    {
+        /* The container carried a block that could not be read: it said
+         * nothing of the folder, which is left as a bare image leaves it. */
+        KLOG_I(TAG, "the data block of '%s' was dropped; its data folder is "
+                    "left as it is", me->tidy_name);
         return false;
     }
     if ( '\0' == me->tidy_name[0] )
@@ -1720,6 +1733,7 @@ static void tidy_finish(AppMgr * const me)
     (void)QTimeEvt_disarm(&me->tidy);
     me->tidy_on      = false;
     me->tidy_swallow = false;
+    me->tidy_late    = false;
     me->tidy_step    = (uint8_t)TIDY_STEP_NONE;
     kfw_appdata_release(&me->tidy_ad);
 
@@ -1791,6 +1805,34 @@ static void tidy_finish(AppMgr * const me)
 }
 
 /**
+ * @brief Whether the install ends in a reset: a launch, or an adoption's boot request.
+ *
+ * @param me The AO, in its tidy step.
+ * @return true when finishing the tidy step is followed by the board resetting.
+ */
+static bool tidy_boots(const AppMgr * const me)
+{
+    bool boots = false;
+
+    switch ( me->tidy_after )
+    {
+        case TIDY_AFTER_FLASH:
+        case TIDY_AFTER_RECV: {
+            boots = me->launch;
+            break;
+        }
+        case TIDY_AFTER_ADOPT: {
+            boots = (!me->keep_forced) || me->adopt_run;
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    return boots;
+}
+
+/**
  * @brief Start the tidy step of an install that has just committed.
  *
  * Takes the block the decoder kept, and sends the first request or ends the
@@ -1807,6 +1849,7 @@ static void tidy_begin(AppMgr * const me, const char *name, uint8_t after)
     me->tidy_launch    = false;
     me->tidy_own_asked = false;
     me->tidy_swallow   = false;
+    me->tidy_late      = false;
     me->victim_next    = 0U;
     (void)snprintf(me->tidy_name, sizeof(me->tidy_name), "%.*s", (int)(sizeof(me->tidy_name) - 1U), name);
     if ( (uint8_t)TIDY_AFTER_ERASE == after )
@@ -5097,14 +5140,35 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
                 me->tidy_swallow = false;   /* the deadline of an answered request */
                 break;
             }
+            if ( me->tidy_late )
+            {
+                KLOG_W(TAG, "AO_Storage still has not answered for the data "
+                            "folder of '%s'; the install goes on", tidy_who(me));
+                tidy_finish(me);
+                status = tidy_state(me);
+                break;
+            }
             KLOG_W(TAG, "AO_Storage did not answer for the data folder of "
                         "'%s'; the rest goes on", tidy_who(me));
             /* Nothing to free: a put's buffer is AO_Storage's. */
-            if ( !tidy_advance(me) )
+            uint8_t const owed = me->tidy_step;
+            if ( tidy_advance(me) )
             {
-                tidy_finish(me);
-                status = tidy_state(me);
+                break;
             }
+            if ( tidy_boots(me) )
+            {
+                /* Nothing more is asked, and the board resets right after:
+                 * the request that went unanswered may still be a write, and
+                 * AO_Storage answers in order, so its answer is the last
+                 * word. Awaited once more, under its own bound. */
+                me->tidy_step = owed;
+                me->tidy_late = true;
+                (void)QTimeEvt_rearm(&me->tidy, APPMGR_TIDY_LATE_TICKS);
+                break;
+            }
+            tidy_finish(me);
+            status = tidy_state(me);
             break;
         }
         case FLASH_REQ_SIG:

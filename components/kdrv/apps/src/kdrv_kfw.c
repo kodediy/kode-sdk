@@ -390,6 +390,7 @@ static struct {
     kfw_ad_hdr_t            ad_hdr;     /**< The block's header, once read.        */
     uint32_t                ad_fill;    /**< Block header or body bytes seen so far. */
     bool                    ad_skip;    /**< The block's bytes are stepped over, not kept. */
+    bool                    ad_dropped; /**< A block was there and was not believed: not the same as none. */
 } s_kfw;
 
 bool kfw_busy(void)
@@ -730,6 +731,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                 {
                     KLOG_W(TAG, "app data dropped: %s",
                            kfw_ad_status_name(KFW_AD_BAD_SIZE));
+                    s_kfw.ad_dropped = true;
                 }
                 else
                 {
@@ -741,6 +743,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                     if ( NULL == s_ad.buf )
                     {
                         KLOG_W(TAG, "app data dropped: no PSRAM for it");
+                        s_kfw.ad_dropped = true;
                     }
                     else
                     {
@@ -782,6 +785,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                         KLOG_W(TAG, "app data dropped: %s",
                                kfw_ad_status_name(ast));
                         ad_drop();
+                        s_kfw.ad_dropped = true;
                     }
                     else
                     {
@@ -888,8 +892,10 @@ kode_status_t kfw_end(void)
     }
 
     /* What the owner may take: only from an image that went in whole. A raw
-     * image says so, so the folder is left alone; a container says block or
-     * none by whether a checked block survived. Anything else frees it. */
+     * image says so, so the folder is left alone; a container says block, none
+     * or dropped by whether a checked block survived and, when none did,
+     * whether one was there to be believed: a block that could not be read
+     * says nothing about the folder. Anything else frees it. */
     if ( KODE_OK != rc )
     {
         ad_drop();
@@ -902,6 +908,10 @@ kode_status_t kfw_end(void)
     else if ( NULL != s_ad.buf )
     {
         s_ad.kind = KFW_AD_BLOCK;
+    }
+    else if ( s_kfw.ad_dropped )
+    {
+        s_ad.kind = KFW_AD_DROPPED;
     }
     else
     {
@@ -1178,7 +1188,7 @@ kode_status_t kfw_selftest(void)
 
     if ( selftest_inflate()
         && selftest_block(false, KFW_AD_BLOCK)
-        && selftest_block(true, KFW_AD_NONE) )
+        && selftest_block(true, KFW_AD_DROPPED) )
     {
         rc = KODE_OK;
     }

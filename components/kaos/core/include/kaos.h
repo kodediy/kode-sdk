@@ -3507,6 +3507,12 @@ kode_status_t appdata_put_request(const char *project, uint8_t *buf,
  *         recursive delete. */
 #define APPMGR_TIDY_MS      (5000U)
 
+/** @brief How much longer an install that ends in a boot waits, in ms, for the
+ *         answer to the last data-folder request that went unanswered for
+ *         APPMGR_TIDY_MS: the board resets right after, and a write AO_Storage
+ *         is still making would be cut. */
+#define APPMGR_TIDY_LATE_MS (5000U)
+
 /**
  * @brief The folder's path on @p m, or false when the name cannot be a folder.
  *

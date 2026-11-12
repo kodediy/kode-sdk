@@ -6076,6 +6076,43 @@ TEST_CASE("a container without a block removes the folder before it is done",
     tidy_end_case();
 }
 
+/**
+ * @brief Build in s_cont a container for an app whose block cannot be believed.
+ *
+ * The block's CRC is wrong, so the decoder drops it and installs the image:
+ * the container did not say the folder should go, it said nothing that could
+ * be read.
+ *
+ * @param project The project the image carries.
+ * @return The container's length.
+ */
+static uint32_t container_dropped(const char *project)
+{
+    uint32_t const len = container_named(project, true, false);
+
+    s_cont[KFW_HDR_LEN + KFW_AD_OFS_CRC] ^= 1U;
+    return len;
+}
+
+TEST_CASE("a container whose block was dropped leaves the folder alone, as a bare image does",
+          "[appmgr_ao][tidy]")
+{
+    tidy_begin_case();
+    uint32_t const len = container_dropped("damaged");
+
+    install_container(len, false);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_folder_requests(),
+        "a block that could not be read deleted or wrote the app's folder");
+    ends_seen_t const seen = spy_ends();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.flash_done,
+        "the install waited for a folder nobody asked about");
+    TEST_ASSERT_EQUAL_STRING("damaged", seen.name);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("left as it is"),
+        "the folder was left without a word");
+    tidy_end_case();
+}
+
 TEST_CASE("a raw image leaves the folder alone", "[appmgr_ao][tidy]")
 {
     tidy_begin_case();
@@ -6114,6 +6151,84 @@ TEST_CASE("launch waits for the folder", "[appmgr_ao][tidy]")
     TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
         "the app was never launched once its folder was written");
     TEST_ASSERT_EQUAL_INT(KBOOT_RUN_ONCE, mode);
+    tidy_end_case();
+}
+
+/** @brief APPMGR_TIDY_MS in QP ticks, as appmgr_ao.c has it. */
+#define APPMGR_TIDY_TEST_TICKS       (APPMGR_TIDY_MS / 10U)
+
+/** @brief APPMGR_TIDY_LATE_MS in QP ticks. */
+#define APPMGR_TIDY_LATE_TEST_TICKS  (APPMGR_TIDY_LATE_MS / 10U)
+
+/* A folder AO_Storage has not answered for may still be being written: the
+ * reset that follows a launch would cut it. The install that ends in a boot
+ * gives the last request a little longer, once. */
+TEST_CASE("an install that boots does not reset over a folder write still under way",
+          "[appmgr_ao][tidy]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    tidy_begin_case();
+    (void)boot_run_request(&off, &size, &mode);
+    uint32_t const len = container_named("slowfolder", true, false);
+
+    install_container(len, true);
+    TEST_ASSERT_TRUE(storage_has_for(APPDATA_PUT_REQ_SIG, "slowfolder"));
+
+    run_ticks(APPMGR_TIDY_TEST_TICKS + 5U);
+    TEST_ASSERT_TRUE(klog_has("did not answer for the data folder"));
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 20U);
+    TEST_ASSERT_FALSE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "the board reset over a folder AO_Storage was still writing");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_ends().flash_done,
+        "the install ended with its folder still out");
+
+    put_rsp("slowfolder", KODE_OK);                      /* the late answer */
+    TEST_ASSERT_EQUAL_UINT(1U, spy_ends().flash_done);
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 20U);
+    TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "the launch did not follow the folder's late answer");
+    tidy_end_case();
+}
+
+TEST_CASE("an install that boots waits for a late folder answer once, and no longer",
+          "[appmgr_ao][tidy]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    tidy_begin_case();
+    (void)boot_run_request(&off, &size, &mode);
+    uint32_t const len = container_named("lostfolder", true, false);
+
+    install_container(len, true);
+    TEST_ASSERT_TRUE(storage_has_for(APPDATA_PUT_REQ_SIG, "lostfolder"));
+
+    run_ticks(APPMGR_TIDY_TEST_TICKS + APPMGR_TIDY_LATE_TEST_TICKS - 10U);
+    TEST_ASSERT_FALSE(boot_run_request(&off, &size, &mode));
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 30U);
+    TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "a folder AO_Storage never answered held the launch for ever");
+    TEST_ASSERT_TRUE(klog_has("still has not answered"));
+    tidy_end_case();
+}
+
+TEST_CASE("an install that does not boot ends at the first deadline, as it did",
+          "[appmgr_ao][tidy]")
+{
+    tidy_begin_case();
+    uint32_t const len = container_named("quietfolder", true, false);
+
+    install_container(len, false);
+    TEST_ASSERT_TRUE(storage_has_for(APPDATA_PUT_REQ_SIG, "quietfolder"));
+
+    run_ticks(APPMGR_TIDY_TEST_TICKS + 5U);
+    ends_seen_t const seen = spy_ends();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.flash_done,
+        "an install with no reset ahead waited for a folder it can do without");
     tidy_end_case();
 }
 
