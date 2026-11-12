@@ -1694,6 +1694,9 @@ enum KodeSignals {
     NET_CHECK_TMO_SIG,          /**< AO_Net private QTimeEvt, one-shot: the
                                  *   dwell of a radio wake for that check has
                                  *   run out.                                 */
+    NET_JOB_FAST_SIG,           /**< AO_Net private QTimeEvt, one-shot: no job
+                                 *   with either worker for NET_FAST_JOB_HOLD_MS,
+                                 *   so the jobs' hold of the fast mode ends. */
 
     DISPLAY_TEST_REQ_SIG,       /**< AO_Display: `test component=display`;
                                  *   answers a published TEST_RESULT_SIG. No

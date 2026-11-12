@@ -2188,7 +2188,9 @@ void wifi_rssi_request(void);
  *
  * On: no power save, every frame answered at once, about 27 mA more. Off (default)
  * is modem save. Applied while connected; a (re)connect or stop resets it. No
- * answer: a missed fast mode is only a slow reply. AO_Net is the one caller.
+ * answer: a missed fast mode is only a slow reply. AO_Net is the one caller: it
+ * asks while the Kode channel receives command lines and while a job is with one
+ * of its workers, and gives the default back when the last of them ends.
  *
  * @param on true for fast, false for the default.
  */

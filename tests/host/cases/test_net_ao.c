@@ -4393,6 +4393,21 @@ static fast_posts_t radio_fast_posts(void)
     return f;
 }
 
+/** @brief AO_Net's NET_FAST_JOB_HOLD_MS: how long the fast mode outlives the last job. */
+#define JOB_FAST_HOLD_MS  5000U
+
+/**
+ * @brief Let the tail of the join's last job run out, and empty AO_Radio's mailbox.
+ *
+ * What a join's jobs ask for is not what the cases that follow are about: they
+ * look at the channel's own hold.
+ */
+static void fast_idle(void)
+{
+    secs((JOB_FAST_HOLD_MS / 1000U) + 1U);
+    radio_drain();
+}
+
 TEST_CASE("the first cmd/in line asks for the fast mode once, and later lines "
           "only hold it", "[net_ao][fast]")
 {
@@ -4403,7 +4418,7 @@ TEST_CASE("the first cmd/in line asks for the fast mode once, and later lines "
     unsigned        notices;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
     before = chan_now();
 
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
@@ -4436,7 +4451,7 @@ TEST_CASE("the fast mode ends 60 s after the last line, and every line moves "
     unsigned        notices;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
 
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     radio_drain();
@@ -4465,7 +4480,7 @@ TEST_CASE("a line after the fast mode ended turns it on again", "[net_ao][fast]"
     fast_posts_t again;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
 
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     secs(61U);
@@ -4483,7 +4498,7 @@ TEST_CASE("lines the channel refuses do not turn the fast mode on",
     fast_posts_t f;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
 
     rx_mqtt_flags(CHAN_T_IN, "ping", 4U, false, true);   /* retained */
     rx_mqtt(CHAN_T_IN, "", 0U, false);                   /* empty */
@@ -4500,7 +4515,7 @@ TEST_CASE("losing the address ends the fast mode at once", "[net_ao][fast]")
     fast_posts_t f;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
 
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     radio_drain();
@@ -4512,14 +4527,16 @@ TEST_CASE("losing the address ends the fast mode at once", "[net_ao][fast]")
     TEST_ASSERT_EQUAL_UINT(1U, f.off);
 }
 
-TEST_CASE("a refusal by the api ends the fast mode at once", "[net_ao][fast]")
+TEST_CASE("a refusal by the api ends the channel's hold at once, and the fast "
+          "mode when the jobs' tail does", "[net_ao][fast]")
 {
     IdSignReqEvt    sq;
     fast_posts_t    f;
+    fast_posts_t    tail;
     ChannelStateEvt st;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
     secs(100U);
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     radio_drain();
@@ -4528,22 +4545,28 @@ TEST_CASE("a refusal by the api ends the fast mode at once", "[net_ao][fast]")
     TEST_ASSERT_EQUAL_INT(ID_SIGN_REQ_SIG, (int)radio_take(&sq, sizeof(sq)));
     answer_sign((uint8_t)KODE_ST_OK, 70U);
     http_reply(401U, "{\"error\":\"untrusted_cert\"}");
-    f  = radio_fast_posts();
+    f  = radio_fast_posts();              /* the client's stop is with the worker */
     st = last_chan();
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    secs(6U);                             /* the jobs' tail runs out */
+    tail = radio_fast_posts();
     net_done();
 
     TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_REFUSED, st.state);
-    TEST_ASSERT_EQUAL_UINT(1U, f.off);
     TEST_ASSERT_FALSE(st.fast);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+    TEST_ASSERT_EQUAL_UINT(1U, tail.off);
 }
 
-TEST_CASE("losing the certificate ends the fast mode at once", "[net_ao][fast]")
+TEST_CASE("losing the certificate ends the channel's hold at once, and the fast "
+          "mode when the jobs' tail does", "[net_ao][fast]")
 {
     IdSignReqEvt sq;
     fast_posts_t f;
+    fast_posts_t tail;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
     secs(100U);
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     radio_drain();
@@ -4551,10 +4574,14 @@ TEST_CASE("losing the certificate ends the fast mode at once", "[net_ao][fast]")
     http_reply(200U, "{\"nonce\":\"v1.connect.second\"}");
     TEST_ASSERT_EQUAL_INT(ID_SIGN_REQ_SIG, (int)radio_take(&sq, sizeof(sq)));
     answer_sign((uint8_t)KODE_ST_NOT_FOUND, 0U);
-    f = radio_fast_posts();
+    f = radio_fast_posts();               /* the client's stop is with the worker */
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    secs(6U);                             /* the jobs' tail runs out */
+    tail = radio_fast_posts();
     net_done();
 
-    TEST_ASSERT_EQUAL_UINT(1U, f.off);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+    TEST_ASSERT_EQUAL_UINT(1U, tail.off);
 }
 
 /* ---- M1: a lost DISCONNECTED must not leave the channel deaf ---------------- */
@@ -7409,6 +7436,7 @@ TEST_CASE("the stream holds the fast mode and lets it go when it ends",
     fast_posts_t f;
 
     stream_fresh();
+    fast_idle();
     stream_ask(1U, 50U);
     (void)spied();
     f = radio_fast_posts();
@@ -7423,6 +7451,7 @@ TEST_CASE("the stream holds the fast mode and lets it go when it ends",
         ms(1000U);
     }
     TEST_ASSERT_EQUAL_UINT(1U, logged_count("shot: stream ended (time)"));
+    job_done_http(KODE_OK);   /* the stream's close */
     f = radio_fast_posts();
     TEST_ASSERT_EQUAL_UINT(0U, f.on);
     TEST_ASSERT_EQUAL_UINT(0U, f.off);
@@ -7514,6 +7543,7 @@ TEST_CASE("a display that cannot encode ends the stream with display, closes "
     unsigned     from;
 
     stream_fresh();
+    fast_idle();
     from = s_nreq;
     stream_ask(2U, 300U);
     (void)spied();
@@ -7528,6 +7558,7 @@ TEST_CASE("a display that cannot encode ends the stream with display, closes "
     TEST_ASSERT_EQUAL_UINT(0U, jobs_of(KDRV_NET_JOB_HTTP_PUT, from));
     ms(1000U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, display_asks(), "the ended stream asked again");
+    job_done_http(KODE_OK);   /* the stream's close */
 
     /* The fast mode is the hold's to end, 60 s after the frame that asked. */
     ms(57000U);
@@ -8589,6 +8620,304 @@ TEST_CASE("an AWAKE that comes while the client is still stopping rejoins when t
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)ID_REQ_SIG, (int)radio_take(&q, sizeof(q)),
                                   "the channel must not stay closed for the rest of the boot");
     net_done();
+}
+
+/* ---- The fast mode and the jobs ----------------------------------------------
+ * A job with either worker holds the fast mode, and for NET_FAST_JOB_HOLD_MS
+ * after the last one comes back. AO_Radio is asked once for each edge of the
+ * channel's hold and the jobs' together: on when the first begins, off when
+ * the last ends. Nothing of the jobs' hold outlives the address or the rest.
+ */
+
+/** @brief A download's address, any. */
+#define JOB_FAST_URL      "http://example.invalid/app.bin"
+
+TEST_CASE("a job handed to the worker asks AO_Radio for the fast mode once",
+          "[net_ao][fast]")
+{
+    fast_posts_t f;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    f = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, f.on);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+}
+
+TEST_CASE("a job handed to the download's worker asks for the fast mode too",
+          "[net_ao][fast]")
+{
+    fast_posts_t f;
+
+    worker_fresh();
+    ask_stream_open(JOB_FAST_URL);
+    f = radio_fast_posts();
+    deliver_stream(KODE_OK);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, f.on);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+}
+
+TEST_CASE("two jobs back to back ask for the fast mode once, not twice",
+          "[net_ao][fast]")
+{
+    fast_posts_t first;
+    fast_posts_t second;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    first = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    ask_ping("192.168.0.2", 1U);
+    second = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, first.on);
+    TEST_ASSERT_EQUAL_UINT(0U, second.on);
+    TEST_ASSERT_EQUAL_UINT(0U, second.off);
+}
+
+TEST_CASE("the fast mode is given back NET_FAST_JOB_HOLD_MS after the last "
+          "job ends, and not before", "[net_ao][fast]")
+{
+    fast_posts_t before;
+    fast_posts_t at;
+    fast_posts_t later;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    radio_drain();
+
+    ms(JOB_FAST_HOLD_MS - 100U);
+    before = radio_fast_posts();
+    ms(200U);
+    at = radio_fast_posts();
+    ms(2U * JOB_FAST_HOLD_MS);
+    later = radio_fast_posts();
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, before.off);
+    TEST_ASSERT_EQUAL_UINT(1U, at.off);
+    TEST_ASSERT_EQUAL_UINT(0U, at.on);
+    TEST_ASSERT_EQUAL_UINT(0U, later.off);
+    TEST_ASSERT_EQUAL_UINT(0U, later.on);
+}
+
+TEST_CASE("a job that starts during the tail keeps the fast mode and sends "
+          "no new request", "[net_ao][fast]")
+{
+    fast_posts_t restart;
+    fast_posts_t held;
+    fast_posts_t end;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    radio_drain();
+
+    ms(3000U);
+    ask_ping("192.168.0.2", 1U);
+    restart = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    ms(3000U);                /* 6 s after the first end: its tail is gone */
+    held = radio_fast_posts();
+    ms(2100U);                /* 5.1 s after the second */
+    end = radio_fast_posts();
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, restart.on);
+    TEST_ASSERT_EQUAL_UINT(0U, restart.off);
+    TEST_ASSERT_EQUAL_UINT(0U, held.off);
+    TEST_ASSERT_EQUAL_UINT(1U, end.off);
+}
+
+TEST_CASE("the tail starts only when neither worker holds a job",
+          "[net_ao][fast]")
+{
+    fast_posts_t first;
+    fast_posts_t second;
+    fast_posts_t inside;
+    fast_posts_t before;
+    fast_posts_t at;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    first = radio_fast_posts();
+    ask_stream_open(JOB_FAST_URL);
+    second = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    ms(2U * JOB_FAST_HOLD_MS);            /* the download's job is still inside */
+    inside = radio_fast_posts();
+
+    deliver_stream(KODE_OK);
+    ms(JOB_FAST_HOLD_MS - 100U);
+    before = radio_fast_posts();
+    ms(200U);
+    at = radio_fast_posts();
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, first.on);
+    TEST_ASSERT_EQUAL_UINT(0U, second.on);
+    TEST_ASSERT_EQUAL_UINT(0U, inside.off);
+    TEST_ASSERT_EQUAL_UINT(0U, before.off);
+    TEST_ASSERT_EQUAL_UINT(1U, at.off);
+}
+
+TEST_CASE("the channel's hold running when the jobs' tail ends keeps the "
+          "fast mode", "[net_ao][fast]")
+{
+    fast_posts_t    joined;
+    fast_posts_t    mid;
+    fast_posts_t    end;
+    ChannelStateEvt held;
+
+    cmd_fresh();                          /* the join's last job ended just now */
+    radio_drain();
+
+    rx_mqtt(CHAN_T_IN, "ping", 4U, false);
+    joined = radio_fast_posts();
+    ms(JOB_FAST_HOLD_MS + 500U);          /* the jobs' tail ends here */
+    mid  = radio_fast_posts();
+    held = chan_now();
+    secs(60U);                            /* the channel's own hold ends */
+    end = radio_fast_posts();
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, joined.on);
+    TEST_ASSERT_EQUAL_UINT(0U, joined.off);
+    TEST_ASSERT_EQUAL_UINT(0U, mid.off);
+    TEST_ASSERT_TRUE(held.fast);
+    TEST_ASSERT_EQUAL_UINT(1U, end.off);
+    TEST_ASSERT_EQUAL_UINT(0U, end.on);
+}
+
+TEST_CASE("losing the network ends the jobs' hold without a request, and a "
+          "job after it asks again", "[net_ao][fast]")
+{
+    fast_posts_t gone;
+    fast_posts_t late;
+    fast_posts_t again;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    radio_drain();
+
+    go_offline();                         /* the job is still with the worker */
+    gone = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK); /* it comes back with no address */
+    ms(2U * JOB_FAST_HOLD_MS);
+    late = radio_fast_posts();
+
+    go_online();
+    ask_ping("192.168.0.2", 1U);
+    again = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, gone.on);
+    TEST_ASSERT_EQUAL_UINT(0U, gone.off);
+    TEST_ASSERT_EQUAL_UINT(0U, late.on);
+    TEST_ASSERT_EQUAL_UINT(0U, late.off);
+    TEST_ASSERT_EQUAL_UINT(1U, again.on);
+}
+
+TEST_CASE("the stop of a lost network does not ask for the fast mode",
+          "[net_ao][fast]")
+{
+    fast_posts_t gone;
+    fast_posts_t late;
+
+    lp_channel_up();
+    ms(2U * JOB_FAST_HOLD_MS);            /* the join's tail is over */
+    radio_drain();
+
+    go_offline();                         /* the client is stopped: a job */
+    TEST_ASSERT_EQUAL_INT((int)KDRV_NET_JOB_MQTT_STOP, s_ran_job);
+    gone = radio_fast_posts();
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    ms(2U * JOB_FAST_HOLD_MS);
+    late = radio_fast_posts();
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, gone.on);
+    TEST_ASSERT_EQUAL_UINT(0U, gone.off);
+    TEST_ASSERT_EQUAL_UINT(0U, late.on);
+    TEST_ASSERT_EQUAL_UINT(0U, late.off);
+}
+
+TEST_CASE("an ASLEEP round drops the jobs' tail at once", "[net_ao][fast]")
+{
+    fast_posts_t rest;
+    fast_posts_t late;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    radio_drain();
+
+    lp_round(AO_Net, KODE_LP_ASLEEP);
+    rest = radio_fast_posts();
+    lp_expect_answer(false, NULL);
+    ms(2U * JOB_FAST_HOLD_MS);            /* nothing is left to fire */
+    late = radio_fast_posts();
+    lp_awake(AO_Net);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, rest.off);
+    TEST_ASSERT_EQUAL_UINT(0U, rest.on);
+    TEST_ASSERT_EQUAL_UINT(0U, late.off);
+    TEST_ASSERT_EQUAL_UINT(0U, late.on);
+}
+
+TEST_CASE("an OFF round drops the jobs' tail at once", "[net_ao][fast]")
+{
+    fast_posts_t rest;
+    fast_posts_t late;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    radio_drain();
+
+    lp_round(AO_Net, KODE_LP_OFF);
+    rest = radio_fast_posts();
+    lp_expect_answer(false, NULL);
+    ms(2U * JOB_FAST_HOLD_MS);
+    late = radio_fast_posts();
+    lp_awake(AO_Net);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, rest.off);
+    TEST_ASSERT_EQUAL_UINT(0U, rest.on);
+    TEST_ASSERT_EQUAL_UINT(0U, late.off);
+    TEST_ASSERT_EQUAL_UINT(0U, late.on);
+}
+
+TEST_CASE("the stop of an OFF round does not ask for the fast mode",
+          "[net_ao][fast]")
+{
+    fast_posts_t f;
+
+    lp_channel_up();
+    ms(2U * JOB_FAST_HOLD_MS);            /* the join's tail is over */
+    radio_drain();
+
+    lp_round(AO_Net, KODE_LP_OFF);        /* the client is stopped: a job */
+    pull_jobs();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_NET_JOB_MQTT_STOP, s_ran_job);
+    f = radio_fast_posts();
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    lp_awake(AO_Net);
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, f.on);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
 }
 
 /* ---- Real time across the rest ----------------------------------------------

@@ -90,6 +90,9 @@ typedef enum {
  *         because this AO submits only while no job is in flight. */
 #define NET_WORKER_DEPTH       1U
 
+/** @brief The fast mode outlives the last job that held it by this long (5 s). */
+#define NET_FAST_JOB_HOLD_MS   5000U
+
 /** @brief The network worker's task name. */
 #define NET_WORKER_NAME        "net_worker"
 
@@ -413,6 +416,14 @@ typedef struct {
     uint16_t sseq;     /**< Sequence number of that job.                    */
     KqpWorker sworker; /**< Runs the download's jobs, on a PSRAM stack.     */
     NetGuard  sguard;  /**< NET_STREAM_GUARD_SIG.                           */
+    QTimeEvt jtmo;     /**< One-shot: the jobs' hold, which outlives the last
+                        *   job by NET_FAST_JOB_HOLD_MS. Delivers
+                        *   NET_JOB_FAST_SIG.                                */
+    bool     jfast;    /**< The jobs hold the fast mode: a worker has a job,
+                        *   or the tail of the last one is running.          */
+    bool     fast_asked; /**< AO_Radio was last asked for the fast mode, and
+                          *   is believed to hold that wish: on while the
+                          *   channel or the jobs hold it.                    */
     bool     leaving;  /**< A leave was asked: no channel session starts
                         *   again this boot.                                 */
     bool     leave_owed; /**< BOOT_NET_LEFT_SIG is owed to AO_Boot.          */
@@ -485,8 +496,10 @@ typedef struct {
     bool      cup_set;       /**< cup_us means something.                    */
     bool      stop_pending;  /**< The client must be stopped when the worker
                               *   is free.                                   */
-    bool      cfast;         /**< The fast mode is on: AO_Radio was asked for
-                              *   no power save.                             */
+    bool      cfast;         /**< The channel holds the fast mode: a cmd/in
+                              *   line, or a frame of a stream, came within
+                              *   CHAN_FAST_HOLD_MS. What `channel_info`
+                              *   reports; the jobs' hold is @c jfast.       */
     bool      chan_on;       /**< `chan`: join whenever there is Wi-Fi.      */
     uint32_t  keep_s;        /**< `chan_keep`, in seconds: the session age the
                               *   next connect asks for.                     */
@@ -1431,6 +1444,127 @@ static kode_status_t net_stream_run(void *arg, uint32_t *value)
     return st;
 }
 
+/* ---- The fast mode ---------------------------------------------------------
+ * AO_Radio lifts Wi-Fi's power save while something waits for an answer that
+ * the board did not just ask for: a command line of the channel
+ * (chan_fast_set()) and a job with either worker. AO_Radio is asked once for
+ * each edge of the two holds together.
+ */
+
+/**
+ * @brief Make what AO_Radio was asked match the holds, once for each change.
+ *
+ * The fast mode is wanted while the channel holds it (@c cfast) or the jobs
+ * do (@c jfast). Asking for what was asked already does nothing, so the first
+ * hold to begin is one request and the last to end is one.
+ *
+ * @param me The AO.
+ */
+static void net_fast_eval(Net * const me)
+{
+    bool want = me->jfast;
+
+#if CONFIG_KODEOS_CHANNEL
+    want = want || me->cfast;
+#endif
+    if ( want != me->fast_asked )
+    {
+        me->fast_asked = want;
+        wifi_fast_request(want);
+    }
+}
+
+/**
+ * @brief A job went to a worker: the jobs hold the fast mode, and the tail of
+ *        the last one is off.
+ *
+ * Nothing begins without an address or in the rest: a client's stop on the
+ * way out of either is a job, and has nobody to speed up.
+ *
+ * @param me The AO.
+ */
+static void net_fast_job_begin(Net * const me)
+{
+    bool allowed = me->online;
+
+#if CONFIG_KODE_LOWPOWER
+    allowed = allowed && (!me->lp_rest);
+#endif
+    if ( allowed )
+    {
+        (void)QTimeEvt_disarm(&me->jtmo);
+        if ( !me->jfast )
+        {
+            me->jfast = true;
+            KLOG_D(TAG, "jobs: fast mode held");
+        }
+        net_fast_eval(me);
+    }
+}
+
+/**
+ * @brief A job came back: when neither worker has one, the tail begins.
+ *
+ * Called after the steps the answer leads to, which may have handed a worker
+ * the next job.
+ *
+ * @param me The AO.
+ */
+static void net_fast_job_end(Net * const me)
+{
+    if ( me->jfast && (!me->busy) && (!me->sbusy) )
+    {
+        (void)QTimeEvt_disarm(&me->jtmo);
+        QTimeEvt_armX(&me->jtmo, KQP_TICKS_PER_MS(NET_FAST_JOB_HOLD_MS), 0U);
+    }
+}
+
+/**
+ * @brief The jobs' hold ends now, tail and all; AO_Radio is asked for the
+ *        default when nothing else holds the fast mode.
+ *
+ * @param me The AO.
+ */
+static void net_fast_job_drop(Net * const me)
+{
+    (void)QTimeEvt_disarm(&me->jtmo);
+    if ( me->jfast )
+    {
+        me->jfast = false;
+        KLOG_D(TAG, "jobs: fast mode released");
+        net_fast_eval(me);
+    }
+}
+
+/**
+ * @brief The tail ran out: the jobs' hold ends, unless a worker has a job.
+ *
+ * @param me The AO.
+ */
+static void net_fast_job_tail(Net * const me)
+{
+    if ( (!me->busy) && (!me->sbusy) )
+    {
+        net_fast_job_drop(me);
+    }
+}
+
+/**
+ * @brief The address is gone: the jobs hold nothing, and AO_Radio is not asked.
+ *
+ * AO_Radio drops its own wish when the association ends, so a request now
+ * would only leave one behind for the next. What was asked is forgotten, which
+ * makes the first hold after the address returns ask again.
+ *
+ * @param me The AO.
+ */
+static void net_fast_gone(Net * const me)
+{
+    (void)QTimeEvt_disarm(&me->jtmo);
+    me->jfast      = false;
+    me->fast_asked = false;
+}
+
 /**
  * @brief Hand the first worker @p fn over @p arg and start its guard, marking
  *        this AO busy.
@@ -1457,6 +1591,7 @@ static bool net_worker_give(Net * const me, KqpJobFn fn, void *arg)
     me->wreplied = false;
     me->busy     = true;
     net_guard_start(&me->wguard, KODE_NET_GUARD_MS);
+    net_fast_job_begin(me);
     return true;
 }
 
@@ -1514,6 +1649,7 @@ static bool stream_job_start(Net * const me, net_stream_kind_t kind,
     me->sreplied = false;
     me->sbusy    = true;
     net_guard_start(&me->sguard, guard_ms);
+    net_fast_job_begin(me);
     return true;
 }
 
@@ -2007,17 +2143,18 @@ static void chan_wait(Net * const me, uint32_t ms)
 }
 
 /**
- * @brief Turn the fast mode on or off, once: AO_Radio is asked, a NOTICE says so.
+ * @brief Begin or end the channel's hold of the fast mode, once: a NOTICE says so.
  *
- * Off also ends the hold. Asking for what already is does nothing, so a
- * burst of lines is one request and one line in the log.
+ * AO_Radio is asked by net_fast_eval(), and only on the edge of the channel's
+ * hold and the jobs' together, so a burst of lines is one request and one
+ * line in the log. Off also ends the hold's timer.
  */
 static void chan_fast_set(Net * const me, bool on)
 {
     if ( me->cfast != on )
     {
         me->cfast = on;
-        wifi_fast_request(on);
+        net_fast_eval(me);
         if ( on )
         {
             KLOG_N(TAG, "channel: fast mode on (no Wi-Fi power save)");
@@ -5033,6 +5170,7 @@ static void net_lp_round(Net * const me, const LowPowerRoundEvt * const r)
         me->lp_rest   = true;
         me->lp_rejoin = true;
         me->lp_owed   = true;
+        net_fast_job_drop(me);
         net_lp_close(me);
         net_lp_settle(me);
     }
@@ -5049,6 +5187,7 @@ static void net_lp_round(Net * const me, const LowPowerRoundEvt * const r)
     else
     {
         me->lp_rest = true;
+        net_fast_job_drop(me);
 #if CONFIG_KODEOS_CHANNEL
         if ( chan_due_pending(me) )
         {
@@ -5297,6 +5436,9 @@ void Net_ctor(void)
     QTimeEvt_ctorX(&me->tmo, &me->super, NET_TMO_SIG, 0U);
     QTimeEvt_ctorX(&me->wguard.te, &me->super, NET_JOB_GUARD_SIG, 0U);
     QTimeEvt_ctorX(&me->sguard.te, &me->super, NET_STREAM_GUARD_SIG, 0U);
+    QTimeEvt_ctorX(&me->jtmo, &me->super, NET_JOB_FAST_SIG, 0U);
+    me->jfast      = false;
+    me->fast_asked = false;
     me->phase = (uint8_t)MQTT_IDLE;
     me->err   = (uint8_t)KDRV_MQTT_ERR_NONE;
     me->sntp_asked = false;
@@ -6153,6 +6295,7 @@ static void net_job_done(Net * const me, KqpWorkerDoneEvt const * const j)
     net_lp_rejoin(me);   /* an AWAKE that came while the stop was out */
     net_lp_radio_check(me);
 #endif
+    net_fast_job_end(me);
 }
 
 /**
@@ -6205,6 +6348,7 @@ static void stream_job_done(Net * const me, KqpWorkerDoneEvt const * const j)
         }
     }
     stream_pump(me);
+    net_fast_job_end(me);
 }
 
 /**
@@ -6412,6 +6556,11 @@ static QState Net_root(Net * const me, QEvt const * const e)
         }
         case NET_JOB_GUARD_SIG: {
             net_job_guard(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_JOB_FAST_SIG: {
+            net_fast_job_tail(me);
             status = Q_HANDLED();
             break;
         }
@@ -7004,6 +7153,10 @@ static QState Net_online(Net * const me, QEvt const * const e)
 #if CONFIG_KODEOS_CHANNEL
             chan_leave(me, "");
 #endif
+            /* Before the client's stop below, which is a job like any other
+             * and must not hold the fast mode: Net_offline says it again. */
+            me->online = false;
+            net_fast_gone(me);
             if ( ((uint8_t)MQTT_IDLE != me->phase)
                 && ((uint8_t)MQTT_STOPPING != me->phase) )
             {
