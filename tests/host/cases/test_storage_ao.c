@@ -609,6 +609,53 @@ TEST_CASE("mv is refused while a transfer is in flight, and the source "
         "mv ran anyway");
 }
 
+/** @brief Whether a captured log line holds @p words. */
+static bool log_says(const char *words)
+{
+    bool found = false;
+
+    for ( unsigned i = 0U; (!found) && (fake_klog_count() > i); ++i )
+    {
+        found = (strstr(fake_klog_line(i), words) != NULL);
+    }
+    return found;
+}
+
+/* `appdata_ls` lists .kode/appsdata on both volumes without asking first
+ * whether the folder is there, and a board with no app data has none. */
+TEST_CASE("a listing of a folder that is not there ends without a warning",
+          "[storage_ao]")
+{
+    storage_fresh();
+    ao_spy_subscribe(STORAGE_LIST_END_SIG);
+    fake_klog_reset();
+
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_LIST, "/storage/.kode/appsdata");
+    (void)qf_support_pump(AO_Storage, 8U);
+
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the listing did not end");
+    TEST_ASSERT_EQUAL_INT(STORAGE_LIST_END_SIG, (int)e->sig);
+    TEST_ASSERT_FALSE_MESSAGE(log_says("cannot list"), "a folder that is not there was a warning");
+}
+
+TEST_CASE("a listing of a path that is a file ends and warns",
+          "[storage_ao]")
+{
+    storage_fresh();
+    make_file("plain.bin", 16U);
+    ao_spy_subscribe(STORAGE_LIST_END_SIG);
+    fake_klog_reset();
+
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_LIST, "/storage/plain.bin");
+    (void)qf_support_pump(AO_Storage, 8U);
+
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the listing did not end");
+    TEST_ASSERT_EQUAL_INT(STORAGE_LIST_END_SIG, (int)e->sig);
+    TEST_ASSERT_TRUE_MESSAGE(log_says("cannot list '/storage/plain.bin'"), "a listing that failed said nothing");
+}
+
 /* A rescan is the case this exists for: storage_list_request()'s own
  * unmount+mount pair is fire-and-forget, and nothing answers it - so the
  * refusal can only be seen in the log, and the thing that must NOT happen is

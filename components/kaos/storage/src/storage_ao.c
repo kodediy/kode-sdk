@@ -1610,7 +1610,22 @@ static void do_path_list(const char *path, uint32_t skip)
     }
     else if ( KODE_OK != rc )
     {
-        KLOG_W(TAG, "cannot list '%s'", path);
+        /* A folder that is not there is an answer, not a fault: `appdata_ls`
+         * lists two that a board with no app data never made. */
+        kdrv_stat_t st = { .exists = false, .is_dir = false, .size = 0U };
+
+        if ( (kdrv_storage_stat(path, &st) == KODE_OK) && !st.exists )
+        {
+            KLOG_D(TAG, "nothing at '%s' to list", path);
+        }
+        else
+        {
+            KLOG_W(TAG, "cannot list '%s'", path);
+        }
+    }
+    else
+    {
+        /* Listed whole. */
     }
 
     if ( NULL != s_waiter )
