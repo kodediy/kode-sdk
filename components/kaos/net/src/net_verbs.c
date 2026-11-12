@@ -313,7 +313,9 @@ static void h_mqtt_up(const kverb_t *c, const karg_val_t *v)
     }
 }
 
-/** @brief mqtt_down: stop the client. Closed by MQTT_STATE_SIG. */
+/** @brief mqtt_down: stop the client. Closed by MQTT_STATE_SIG: the state it
+ *         left, or `>err code=4 msg=busy` when the Kode channel holds the
+ *         client or another network job holds the worker. */
 static void h_mqtt_down(const kverb_t *c, const karg_val_t *v)
 {
     (void)v;

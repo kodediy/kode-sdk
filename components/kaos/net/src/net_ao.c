@@ -7198,8 +7198,11 @@ static QState Net_online(Net * const me, QEvt const * const e)
             }
             else if ( me->busy )
             {
+                /* Answered busy, as the channel's refusal is: the console
+                 * closes `mqtt_down` on the answer, and the client's own
+                 * state would read as a stop that worked. */
                 net_say_busy("mqtt_down");
-                mqtt_publish_state(me);
+                mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
             }
             else
             {

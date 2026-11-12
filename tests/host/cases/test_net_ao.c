@@ -4823,6 +4823,38 @@ TEST_CASE("mqtt_up hands the driver no session", "[net_ao]")
     net_done();
 }
 
+/* The console closes `mqtt_down` on the answer: a refusal that is published
+ * as the client's state reads as a stop that worked. */
+TEST_CASE("mqtt_down while a network job runs is refused as busy, not answered with a state",
+          "[net_ao][answers]")
+{
+    uint8_t       err = 0U;
+    uint8_t const off = 0U;
+
+    fake_nvs_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_set_u8(KSET_NAMESPACE, KSET_KEY_CHAN, off));
+    chan_fresh();
+    go_online();
+
+    mqtt_up_request("mqtt://broker.example:1883", "", "");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(1U, s_nreq);                  /* the start is in flight */
+    uint32_t const before = mqtt_answers(NULL);
+    fake_klog_reset();
+
+    TEST_ASSERT_TRUE(mqtt_down_request());
+    (void)net_settle();
+
+    TEST_ASSERT_TRUE(logged("a network job is already running"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_nreq, "a stop went out over the running job");
+    TEST_ASSERT_EQUAL_UINT32(before + 1U, mqtt_answers(&err));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KDRV_MQTT_ERR_BUSY, err,
+        "the refusal was answered as the state of a client that is fine");
+
+    fake_nvs_reset();
+    net_done();
+}
+
 /* The CONNACK's session_present is what tells a Kode that its commands were
  * kept: channel_info says it, and one NOTICE per connect writes it down. */
 TEST_CASE("a connect the broker resumed says session resumed", "[net_ao]")
