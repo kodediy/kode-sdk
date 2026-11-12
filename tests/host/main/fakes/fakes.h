@@ -128,6 +128,12 @@ void fake_mutex_real(bool on);
  */
 void fake_env_release_hook(void (*hook)(void));
 
+/** @brief Set the priority khal_task_priority_set() reports the calling task had. */
+void fake_task_priority_set(uint32_t priority);
+
+/** @brief The priority khal_task_priority_set() last left the calling task at. */
+uint32_t fake_task_priority(void);
+
 /** @brief Forget every captured line and re-install the capture sink. */
 void fake_klog_reset(void);
 

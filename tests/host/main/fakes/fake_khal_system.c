@@ -327,6 +327,27 @@ const char *khal_task_name(void)
     return "host";
 }
 
+/** @brief The priority the calling task is at, as the cases set and read it. */
+static uint32_t s_task_priority = 1U;
+
+uint32_t khal_task_priority_set(uint32_t priority)
+{
+    uint32_t const was = s_task_priority;
+
+    s_task_priority = priority;
+    return was;
+}
+
+void fake_task_priority_set(uint32_t priority)
+{
+    s_task_priority = priority;
+}
+
+uint32_t fake_task_priority(void)
+{
+    return s_task_priority;
+}
+
 /* The task helpers call the same FreeRTOS functions the board does, on the
  * linux port: a started task is a real thread, and the slot is a real
  * thread-local pointer. Only the stack's home differs - the port allocates it. */

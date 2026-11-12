@@ -196,6 +196,14 @@ size_t khal_task_list(khal_task_info_t *out, size_t max, size_t *total)
 #endif
 }
 
+uint32_t khal_task_priority_set(uint32_t priority)
+{
+    uint32_t const was = (uint32_t)uxTaskPriorityGet(NULL);
+
+    vTaskPrioritySet(NULL, (UBaseType_t)priority);
+    return was;
+}
+
 uint32_t khal_task_stack_free(void)
 {
     /* StackType_t is a byte here, so the mark is already in bytes. */

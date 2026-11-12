@@ -118,6 +118,46 @@ TEST_CASE("every row linked: each starts in order and nothing is parked",
     TEST_ASSERT_EQUAL_STRING("start c", s_log[2]);
 }
 
+/** @brief The boot task's own priority before kode_init(): FreeRTOS's main task's. */
+#define ROWS_MAIN_PRIO  1U
+
+/** @brief The boot task's priority while a row started, and while one parked. */
+static uint32_t s_prio_at_start;
+static uint32_t s_prio_at_park;
+
+static void start_notes_prio(void)
+{
+    s_prio_at_start = fake_task_priority();
+}
+
+static void park_notes_prio(void)
+{
+    s_prio_at_park = fake_task_priority();
+}
+
+/* The interface starts in the early row and draws without a pause from then
+ * on. On the boot task's core it holds every row below it back, so the walk
+ * outranks it and hands the boot task its own priority back at the end. */
+TEST_CASE("the rows start and park above the renderer, and the boot task gets "
+          "its priority back", "[kode_init]")
+{
+    static const kode_sys_row_t rows[] = {
+        { .start = &start_notes_prio, .park = NULL },
+        { .start = NULL,              .park = &park_notes_prio },
+    };
+
+    fake_task_priority_set(ROWS_MAIN_PRIO);
+    s_prio_at_start = 0U;
+    s_prio_at_park  = 0U;
+
+    kode_sys_rows_walk(rows, sizeof(rows) / sizeof(rows[0]));
+
+    TEST_ASSERT_EQUAL_UINT32(KODE_PRIO_BOOT_WALK, s_prio_at_start);
+    TEST_ASSERT_EQUAL_UINT32(KODE_PRIO_BOOT_WALK, s_prio_at_park);
+    TEST_ASSERT_TRUE(KODE_PRIO_BOOT_WALK > KODE_PRIO_USER_GUI);
+    TEST_ASSERT_EQUAL_UINT32(ROWS_MAIN_PRIO, fake_task_priority());
+}
+
 TEST_CASE("an absent row is not started, and its park runs after every start",
           "[kode_init]")
 {

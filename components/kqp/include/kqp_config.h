@@ -111,6 +111,12 @@
 /* 3 is the renderer's - a consumer level, defined with its family below as
  * KODE_PRIO_USER_GUI. */
 #define KODE_PRIO_READER        4U    /**< Console reader task (blocking).  */
+/* The boot task is FreeRTOS's main task, at priority 1, and it runs every
+ * owner's initial transition. The renderer starts in the early row and draws
+ * without a pause; where the port puts it on the boot task's core, a walk at
+ * priority 1 gets only the gaps between its passes, and the rows below the
+ * early one come up seconds late. One level above the renderer is enough. */
+#define KODE_PRIO_BOOT_WALK     (KODE_PRIO_USER_GUI + 1U) /**< The boot task while kode_init() starts and parks the rows. */
 #define KODE_PRIO_RADIO         4U    /**< AO_Radio + its worker task.      */
 #define KODE_PRIO_STORAGE       5U    /**< AO_Storage + its storage_sd worker task. */
 #define KODE_PRIO_LOG           6U    /**< AO_Log (the console device).     */
