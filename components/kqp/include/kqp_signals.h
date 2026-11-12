@@ -750,6 +750,14 @@ enum KodeSignals {
                                  *   that waits for the transfer in flight to
                                  *   end has waited KODE_STORAGE_TURN_MS, so
                                  *   it is refused as busy.                   */
+    STORAGE_READ_TO_SIG,        /**< AO_Storage private QTimeEvt: the reads of
+                                 *   a data folder that wait for the transfer
+                                 *   in flight have waited KODE_STORAGE_TURN_MS
+                                 *   from the first, so they are answered as
+                                 *   they are during one.                     */
+    STORAGE_READ_RETRY_SIG,     /**< AO_Storage private QTimeEvt: the pause
+                                 *   after a folder read found no event block
+                                 *   for its icon is over; try again.         */
 
     BOOT_OS_SWITCH_SIG,         /**< AO_Boot: point otadata at the inactive
                                  *   kodeOS slot, reset.                      */

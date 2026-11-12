@@ -3387,10 +3387,16 @@ void storage_desc_request(const char *name, QActive *who);
  * size the file has), APPDATA_END_SIG once. No reader slot taken. The folder
  * is on the first medium, the internal one before the card, that holds its
  * app.json: a folder with no app.json is no data, and does not hide a folder
- * on the other medium that has one. Refused during a transfer (medium=none,
- * json_status=none); unallocatable gives icon_status=busy and an empty
- * project. Fields and end always arrive. See
- * https://docs.kode.diy/sdk/kdrv/apps.
+ * on the other medium that has one.
+ * A read that meets a transfer in flight waits for it, with up to
+ * KODE_STORAGE_READ_WAIT_DEPTH others and in arrival order, behind a write or
+ * delete that waits; it is answered when the transfer ends. One that waits
+ * KODE_STORAGE_TURN_MS from the first, or finds the wait full, is refused
+ * (medium=none, json_status=none). An icon whose event blocks are not all
+ * free is tried again every KODE_STORAGE_ICON_RETRY_MS within the same bound,
+ * and then answered icon_status=busy; no event at all gives icon_status=busy
+ * and an empty project.
+ * Fields and end always arrive. See https://docs.kode.diy/sdk/kdrv/apps.
  *
  * @param project The app's project name, as the binary declares it.
  * @param who     Where the three signals are posted. Never NULL.

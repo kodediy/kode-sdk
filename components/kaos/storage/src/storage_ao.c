@@ -52,6 +52,7 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 #define APPDATA_ICON_TMP    APPDATA_ICON_NAME APPDATA_TMP_SUFFIX   /**< The icon while a put writes it. */
 _Static_assert(sizeof(APPDATA_ICON_TMP) <= KAPP_DATA_ICON_MAX,
                "a temporary's name fits where an icon's path does");
+#define STORAGE_ICON_TRIES  (KODE_STORAGE_TURN_MS / KODE_STORAGE_ICON_RETRY_MS) /**< Pauses a folder read waits for an icon block: what fits in the bound. */
 #define APPDATA_WHY_MAX     80U   /**< The words saying why a put was refused, terminator included. */
 #define APPDATA_WHY_WRITE   "a file would not write"   /**< Why a put failed while writing a file. */
 #define APPDATA_WHY_PLACE   "the new files would not go in place"   /**< Why a put failed putting them in place. */
@@ -158,6 +159,117 @@ typedef struct {
     QActive       *who;     /**< A command's asker; NULL for none.           */
 } SdJob;
 
+/**
+ * @brief Requests that wait for the transfer in flight to end, and the bound
+ *        of their wait.
+ *
+ * The bound is counted from the first request that waits; when it passes,
+ * everything that still waits is served where it stands, which answers it as a
+ * request is answered during a transfer.
+ */
+typedef struct {
+    QEQueue  q;      /**< The requests, oldest first.                         */
+    QTimeEvt to;     /**< The bound.                                          */
+    bool     live;   /**< `to` is armed and has not been seen to expire.      */
+    uint8_t  stale;  /**< Expired bounds still queued.                        */
+} StorageWait;
+
+/**
+ * @brief Make a wait: an empty queue and a bound that is not armed.
+ *
+ * @param w     The wait.
+ * @param ao    The AO whose queue the bound posts to.
+ * @param ring  The queue's ring; NULL for none, which holds one request.
+ * @param depth The ring's length: the queue holds one request more.
+ * @param sig   The bound's signal.
+ */
+static void wait_init(StorageWait * const w, QActive * const ao,
+                      QEvtPtr * const ring, uint_fast16_t const depth,
+                      enum_t const sig)
+{
+    QEQueue_init(&w->q, ring, depth);
+    w->live  = false;
+    w->stale = 0U;
+    QTimeEvt_ctorX(&w->to, ao, sig, 0U);
+}
+
+/**
+ * @brief Start the bound, unless a request that waits has started it.
+ * @param w The wait.
+ */
+static void wait_arm(StorageWait * const w)
+{
+    if ( !w->live )
+    {
+        (void)QTimeEvt_rearm(&w->to, KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS));
+        w->live = true;
+    }
+}
+
+/**
+ * @brief Keep a request until the transfer in flight ends, and bound the wait.
+ *
+ * @param ao The AO.
+ * @param w  The wait.
+ * @param e  The request.
+ * @return true when it was kept; false when the wait is full.
+ */
+static bool wait_hold(QActive * const ao, StorageWait * const w,
+                      QEvt const * const e)
+{
+    bool const held = QActive_defer(ao, &w->q, e);
+
+    if ( held )
+    {
+        wait_arm(w);
+    }
+    return held;
+}
+
+/**
+ * @brief End the bound, because nothing that waited is left.
+ * @param w The wait.
+ */
+static void wait_stop(StorageWait * const w)
+{
+    if ( w->live )
+    {
+        if ( kqp_timer_stale(&w->to, true) )
+        {
+            w->stale += 1U;
+        }
+        w->live = false;
+    }
+}
+
+/**
+ * @brief Whether the bound's event that arrived is the live one.
+ *
+ * One that belongs to a wait that ended first is counted off and dropped.
+ *
+ * @param w The wait.
+ * @return true when the bound has passed for what waits now.
+ */
+static bool wait_due(StorageWait * const w)
+{
+    bool due = false;
+
+    if ( 0U < w->stale )
+    {
+        w->stale -= 1U;
+    }
+    else if ( w->live )
+    {
+        w->live = false;
+        due     = true;
+    }
+    else
+    {
+        /* What it bounded was served first. */
+    }
+    return due;
+}
+
 typedef struct {
     QActive  super;
     KqpWorker worker;                   /**< storage_sd.                       */
@@ -171,13 +283,22 @@ typedef struct {
     QEQueue   deferq;                   /**< Requests held while a call is out. */
     QEvtPtr   defer_sto[KODE_STORAGE_DEFER_DEPTH - 1U]; /**< Its ring; the queue
                                          *   keeps the front event aside.     */
-    QEQueue   turnq;                    /**< The one request that waits for the
-                                         *   transfer in flight to end; no ring,
-                                         *   only the queue's front slot.     */
-    QTimeEvt  turn_to;                  /**< The bound of that wait.           */
-    bool      turn_live;                /**< turn_to is armed for the request
-                                         *   held, and has not been seen to expire. */
-    uint8_t   turn_stale;               /**< Expired waits still queued.       */
+    StorageWait turn;                   /**< The one write or delete that waits
+                                         *   for the transfer in flight; no
+                                         *   ring, only the queue's front slot. */
+    StorageWait reads;                  /**< The reads of a data folder that
+                                         *   wait for it, or for an icon block. */
+    QEvtPtr   read_sto[KODE_STORAGE_READ_WAIT_DEPTH - 1U]; /**< Their ring.   */
+    QTimeEvt  read_retry;               /**< The pause before a read whose icon
+                                         *   found no block tries again.      */
+    bool      read_pause;               /**< The read at the head of `reads`
+                                         *   waits for that pause: no read is
+                                         *   served before it.                */
+    bool      read_final;               /**< The bound has passed: a read that
+                                         *   still finds no block is answered
+                                         *   busy, not held again.            */
+    uint8_t   read_tries;               /**< Pauses the read at the head has
+                                         *   waited for an icon block.        */
     QActive *reader;                    /**< Who has the file open, if anyone. */
     uint8_t *buf[STORAGE_BUFS];         /**< PSRAM, allocated once at startup. */
     bool     lent[STORAGE_BUFS];        /**< Out on loan; do not touch.        */
@@ -5868,10 +5989,13 @@ void Storage_ctor(void)
     (void)memset(&me->worker, 0, sizeof(me->worker));
     (void)memset(&me->sdj, 0, sizeof(me->sdj));
     QEQueue_init(&me->deferq, me->defer_sto, Q_DIM(me->defer_sto));
-    QEQueue_init(&me->turnq, NULL, 0U);
-    me->turn_live  = false;
-    me->turn_stale = 0U;
-    QTimeEvt_ctorX(&me->turn_to, &me->super, STORAGE_TURN_TO_SIG, 0U);
+    wait_init(&me->turn, &me->super, NULL, 0U, STORAGE_TURN_TO_SIG);
+    wait_init(&me->reads, &me->super, me->read_sto, Q_DIM(me->read_sto),
+              STORAGE_READ_TO_SIG);
+    QTimeEvt_ctorX(&me->read_retry, &me->super, STORAGE_READ_RETRY_SIG, 0U);
+    me->read_pause = false;
+    me->read_final = false;
+    me->read_tries = 0U;
     QTimeEvt_ctorX(&me->sdj_dl, &me->super, STORAGE_SDJOB_TO_SIG, 0U);
     QTimeEvt_ctorX(&me->w_pacer, &me->super, STORAGE_WRITE_NEXT_SIG, 0U);
     QTimeEvt_ctorX(&me->t_pacer, &me->super, STORAGE_TEST_NEXT_SIG, 0U);
@@ -6065,11 +6189,21 @@ static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
         case STORAGE_OP_UNMOUNT: {
             if ( busy(me) )
             {
-                /* Usually a rescan's unmount+mount, which is fire-and-forget:
-                 * refusing it stalls nothing, and keeps the card mounted under
-                 * the transfer already touching it. */
-                KLOG_W(TAG, "a transfer is in flight; %s unmount is refused",
-                       what);
+                /* Usually a rescan's unmount+mount, which is fire-and-forget
+                 * and names nobody: refusing it stalls nothing, keeps the card
+                 * mounted under the transfer already touching it, and is what
+                 * the rescan of an install's own aftermath meets. An unmount
+                 * somebody asked for is refused out loud. */
+                if ( NULL == c->who )
+                {
+                    KLOG_D(TAG, "a transfer is in flight; %s unmount is "
+                                "refused", what);
+                }
+                else
+                {
+                    KLOG_W(TAG, "a transfer is in flight; %s unmount is "
+                                "refused", what);
+                }
                 break;
             }
             if ( KDRV_MEDIUM_SD == medium )
@@ -6184,6 +6318,37 @@ static void storage_round(Storage const * const me, const LowPowerRoundEvt * con
     }
 }
 #endif /* CONFIG_KODE_LOWPOWER */
+
+/**
+ * @brief Keep the folder read being served to try again, at the head of the
+ *        reads that wait, because no event block was free for its icon.
+ *
+ * It goes back to the front so the reads behind it keep their order, and the
+ * reads wait with it until the pause is over. The pool may fill again, so it
+ * tries again after each pause, as many times as fit in KODE_STORAGE_TURN_MS;
+ * the reads that wait behind it have the bound of their own.
+ *
+ * @param me The AO.
+ * @param e  The request being served.
+ * @return true when it is kept; false when the tries are used up, the bound
+ *         has passed or the wait has no room, and it has to be answered busy.
+ */
+static bool read_retry_hold(Storage * const me, QEvt const * const e)
+{
+    bool kept = false;
+
+    if ( !me->read_final && (STORAGE_ICON_TRIES > me->read_tries)
+        && (0U < QEQueue_getFree(&me->reads.q)) )
+    {
+        QEQueue_postLIFO(&me->reads.q, e, (uint_fast8_t)me->super.prio);
+        (void)QTimeEvt_rearm(&me->read_retry,
+                             KQP_TICKS_PER_MS(KODE_STORAGE_ICON_RETRY_MS));
+        me->read_tries += 1U;
+        me->read_pause  = true;
+        kept            = true;
+    }
+    return kept;
+}
 
 /** @brief Serve one event. */
 static QState Storage_serve(Storage * const me, QEvt const * const e)
@@ -6391,8 +6556,9 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
 
             if ( busy(me) )
             {
-                /* A folder is never worth displacing a transfer; the asker
-                 * retries on its next scan. */
+                /* A folder is never worth displacing a transfer: a read
+                 * waits for it (Storage_active), and is answered like this
+                 * only when the wait is full or has run out. */
                 KLOG_D(TAG, "busy; the folder of '%s' is refused", req->project);
                 f->icon_status = (uint8_t)APPDATA_ICON_BUSY;
             }
@@ -6505,6 +6671,15 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                             ic[s] = NULL;
                         }
                     }
+                    /* A block that goes back to the pool says nothing, so
+                     * the read waits for a pause and tries again, within the
+                     * bound; the fields event was not posted and goes back. */
+                    if ( read_retry_hold(me, e) )
+                    {
+                        QF_gc(&f->super);
+                        status = Q_HANDLED();
+                        break;
+                    }
                     f->icon_status = (uint8_t)APPDATA_ICON_BUSY;
                 }
             }
@@ -6526,6 +6701,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 static const QEvt end = QEVT_INITIALIZER(APPDATA_END_SIG);
                 QACTIVE_POST(req->who, &end, &me->super);
             }
+            me->read_tries = 0U;
             status = Q_HANDLED();
             break;
         }
@@ -7052,13 +7228,16 @@ static void card_pump(Storage * const me)
     }
 }
 
-/* ---- A request that writes or deletes waits for the transfer in flight ------
+/* ---- A request that writes, deletes or reads a folder waits for the transfer ---
  * A host that makes a folder, puts two files and removes a third sends each
  * request the moment the one before it is answered, and the launcher saves its
  * own list a moment after any change: a request that meets that transfer is
- * served when it ends, not lost to it. One request waits at a time, for at
- * most KODE_STORAGE_TURN_MS; a second, or one whose wait runs out, is refused
- * by its own handler, as busy() makes every handler do.
+ * served when it ends, not lost to it. One write or delete waits at a time,
+ * for at most KODE_STORAGE_TURN_MS; a second, or one whose wait runs out, is
+ * refused by its own handler, as busy() makes every handler do. Reads of an
+ * app's data folder wait the same way, up to KODE_STORAGE_READ_WAIT_DEPTH of
+ * them, in arrival order and bounded from the first; one over that, or past
+ * the bound, is answered "nothing read", as a read is during a transfer.
  */
 
 /**
@@ -7105,7 +7284,7 @@ static bool turn_wanted(QEvt const * const e)
 }
 
 /**
- * @brief Keep a request until the transfer in flight ends, and bound the wait.
+ * @brief Keep a write or a delete until the transfer in flight ends.
  *
  * @param me The AO.
  * @param e  The request.
@@ -7114,55 +7293,74 @@ static bool turn_wanted(QEvt const * const e)
  */
 static bool turn_hold(Storage * const me, QEvt const * const e)
 {
-    bool const held = QActive_defer(&me->super, &me->turnq, e);
+    bool const held = wait_hold(&me->super, &me->turn, e);
 
     if ( held )
     {
         KLOG_D(TAG, "a transfer is in flight; a request waits for it");
-        if ( !me->turn_live )
-        {
-            (void)QTimeEvt_rearm(&me->turn_to,
-                                 KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS));
-            me->turn_live = true;
-        }
     }
     return held;
 }
 
 /**
- * @brief End the wait's bound, because the request it bounded is gone.
+ * @brief Keep a read of a data folder until the transfer in flight ends.
+ *
+ * @param me The AO.
+ * @param e  The request.
+ * @return true when it was kept; false when KODE_STORAGE_READ_WAIT_DEPTH
+ *         reads wait already and this one has to be served, which answers it
+ *         as a read is answered during a transfer.
+ */
+static bool read_hold(Storage * const me, QEvt const * const e)
+{
+    bool const held = wait_hold(&me->super, &me->reads, e);
+
+    if ( held )
+    {
+        KLOG_D(TAG, "a transfer is in flight; a folder read waits for it");
+    }
+    return held;
+}
+
+/**
+ * @brief Take up what waits once no transfer is in flight.
+ *
+ * Run at the end of every event; what is taken up goes to the front of the
+ * queue, so nothing that arrived later is served before it. A write or delete
+ * that waits goes first, and then the reads, one at a time in arrival order:
+ * a read costs nothing and changes nothing, so it can wait a moment for a
+ * write, and a write served after the read that arrived beside it would leave
+ * that read describing the folder the write is about to replace. Reads cannot
+ * starve a write, which is taken up before any of them, and a read that waits
+ * is answered when its bound passes, whatever the writes do.
+ *
  * @param me The AO.
  */
-static void turn_stop(Storage * const me)
+static void wait_pump(Storage * const me)
 {
-    if ( me->turn_live )
+    if ( busy(me) )
     {
-        if ( kqp_timer_stale(&me->turn_to, true) )
+        return;
+    }
+    if ( QActive_recall(&me->super, &me->turn.q) )
+    {
+        wait_stop(&me->turn);
+    }
+    else if ( !me->read_pause && QActive_recall(&me->super, &me->reads.q) )
+    {
+        if ( QEQueue_isEmpty(&me->reads.q) )
         {
-            me->turn_stale += 1U;
+            wait_stop(&me->reads);
         }
-        me->turn_live = false;
     }
-}
-
-/**
- * @brief Take up the request that waits once no transfer is in flight.
- *
- * Run at the end of every event; the request goes to the front of the queue,
- * so nothing that arrived later is served before it.
- *
- * @param me The AO.
- */
-static void turn_pump(Storage * const me)
-{
-    if ( !busy(me) && QActive_recall(&me->super, &me->turnq) )
+    else
     {
-        turn_stop(me);
+        /* Nothing waits, or the read at the head waits for its pause. */
     }
 }
 
 /**
- * @brief The bound has passed: serve the request that waits, which refuses it.
+ * @brief The bound has passed: serve the write that waits, which refuses it.
  *
  * It is served where it stands, so the refusal is its handler's own - the
  * answer it gave before it could wait - and the only trace of the wait is the
@@ -7172,31 +7370,52 @@ static void turn_pump(Storage * const me)
  */
 static void turn_expired(Storage * const me)
 {
-    if ( 0U < me->turn_stale )
+    if ( wait_due(&me->turn) )
     {
-        me->turn_stale -= 1U;
-    }
-    else if ( me->turn_live )
-    {
-        QEvt const * const held = QEQueue_get(&me->turnq,
+        QEvt const * const held = QEQueue_get(&me->turn.q,
                                               (uint_fast8_t)me->super.prio);
 
-        me->turn_live = false;
         if ( NULL != held )
         {
             (void)Storage_serve(me, held);
             QF_gc(held);
         }
     }
-    else
+}
+
+/**
+ * @brief The bound has passed: answer every read that waits as it is answered
+ *        during a transfer, or with what it found when nothing is in flight.
+ *
+ * Each is served where it stands, in arrival order; `read_final` keeps a read
+ * that still finds no block for its icon from waiting again.
+ *
+ * @param me The AO.
+ */
+static void read_expired(Storage * const me)
+{
+    if ( wait_due(&me->reads) )
     {
-        /* The request it bounded was served first. */
+        QEvt const *held = QEQueue_get(&me->reads.q,
+                                       (uint_fast8_t)me->super.prio);
+
+        me->read_final = true;
+        while ( NULL != held )
+        {
+            (void)Storage_serve(me, held);
+            QF_gc(held);
+            held = QEQueue_get(&me->reads.q, (uint_fast8_t)me->super.prio);
+        }
+        me->read_final = false;
+        me->read_pause = false;
+        me->read_tries = 0U;
     }
 }
 
 /**
  * @brief The only state: hold what needs the card while a call to it is out,
- *        hold what writes while a transfer is in flight, serve the rest.
+ *        hold what writes or reads a data folder while a transfer is in
+ *        flight, serve the rest.
  *
  * @param me The AO.
  * @param e  The event.
@@ -7211,11 +7430,27 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
         turn_expired(me);
         status = Q_HANDLED();
     }
+    else if ( (QSignal)STORAGE_READ_TO_SIG == e->sig )
+    {
+        read_expired(me);
+        status = Q_HANDLED();
+    }
+    else if ( (QSignal)STORAGE_READ_RETRY_SIG == e->sig )
+    {
+        me->read_pause = false;
+        wait_pump(me);
+        status = Q_HANDLED();
+    }
     else if ( me->sdj.busy && needs_card(me, e) && card_hold(me, e) )
     {
         status = Q_HANDLED();
     }
     else if ( turn_wanted(e) && busy(me) && turn_hold(me, e) )
+    {
+        status = Q_HANDLED();
+    }
+    else if ( ((QSignal)APPDATA_REQ_SIG == e->sig)
+             && (busy(me) || me->read_pause) && read_hold(me, e) )
     {
         status = Q_HANDLED();
     }
@@ -7225,7 +7460,7 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
         if ( Q_HANDLED() == status )
         {
             card_pump(me);
-            turn_pump(me);
+            wait_pump(me);
         }
     }
     return status;

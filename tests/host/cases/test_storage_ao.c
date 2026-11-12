@@ -232,7 +232,7 @@ static void hold_reader(void)
 static void release_reader(void)
 {
     storage_close_request();
-    (void)qf_support_pump(AO_Storage, 8U);
+    (void)qf_support_pump(AO_Storage, 32U);
 }
 
 /** @brief 10 ms steps in the bound a request waits for its turn. */
@@ -1475,7 +1475,7 @@ TEST_CASE("a card folder alone is found with medium=sd", "[storage_ao][appdata]"
     TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_SD, take_fields(0U)->medium);
 }
 
-TEST_CASE("a folder is not read while a transfer is in flight",
+TEST_CASE("a folder is not read over a transfer that outlasts its wait",
           "[storage_ao][appdata]")
 {
     storage_fresh();
@@ -1487,6 +1487,7 @@ TEST_CASE("a folder is not read while a transfer is in flight",
     (void)take_open_status();
 
     ask_appdata("scope");
+    wait_out_turn();
 
     const AppDataFieldsEvt *f = take_fields(0U);
     TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_NONE, f->medium);
@@ -1601,6 +1602,7 @@ TEST_CASE("an icon does not wait for the jumbo pool", "[storage_ao][appdata]")
     }
 
     ask_appdata("scope");
+    wait_out_turn();
 
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK,
                             take_fields(KODE_APP_ICON_PIECES)->icon_status);
@@ -2893,6 +2895,234 @@ TEST_CASE("put answers after two steps", "[storage_ao][appdata]")
     assert_put_bufs_freed();
     TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
                           (int)fs_size(".kode/appsdata/demo/icon.k64"));
+}
+
+/* ---- A folder read during a transfer waits for it ---------------------------
+ * The launcher saves its list to the card right after an install, and the
+ * console and the launcher ask for folders in that same moment: a read that
+ * answered "nothing there" drew a row without its name or its icon. */
+
+static uint8_t s_scope_icon[KAPP_ICON_BYTES];
+
+/** @brief Put "scope"'s folder, json and icon, on the internal partition. */
+static void put_scope_folder(void)
+{
+    fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", s_scope_icon,
+                           sizeof(s_scope_icon));
+}
+
+/** @brief Ask for @p project's folder as the AO's own loop would deliver it. */
+static void post_read(const char *project)
+{
+    appdata_request(project, ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+}
+
+TEST_CASE("a folder read during a transfer waits for it and is answered with "
+          "the real fields", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    hold_reader();
+
+    post_read("scope");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the read was answered during the "
+                                            "transfer");
+
+    release_reader();
+    const AppDataFieldsEvt *f = take_fields(3U);
+    TEST_ASSERT_EQUAL_STRING("scope", f->project);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_STRING("Scope", f->name);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+}
+
+TEST_CASE("two folder reads during a transfer are both answered, in order",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    hold_reader();
+
+    post_read("other");
+    post_read("scope");
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    TEST_ASSERT_EQUAL_STRING("other", take_fields(0U)->project);
+    const AppDataFieldsEvt *f = take_fields(3U);
+    TEST_ASSERT_EQUAL_STRING("scope", f->project);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
+}
+
+TEST_CASE("a folder read that waits past the bound is answered as it is "
+          "during a transfer", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    hold_reader();
+
+    post_read("scope");
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered before the bound");
+
+    wait_out_turn();
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_NONE, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_NONE, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, f->icon_status);
+
+    release_reader();
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
+}
+
+TEST_CASE("a read over the room for waiting reads is answered at once, and the "
+          "rest in order", "[storage_ao][appdata][read]")
+{
+    char project[8];
+
+    storage_fresh();
+    hold_reader();
+
+    for ( unsigned i = 0U; (KODE_STORAGE_READ_WAIT_DEPTH + 1U) > i; ++i )
+    {
+        (void)snprintf(project, sizeof(project), "p%u", i);
+        post_read(project);
+    }
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("p8", f->project,
+        "the read over the room was not the one answered at once");
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_NONE, f->medium);
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    for ( unsigned i = 0U; KODE_STORAGE_READ_WAIT_DEPTH > i; ++i )
+    {
+        (void)snprintf(project, sizeof(project), "p%u", i);
+        TEST_ASSERT_EQUAL_STRING(project, take_fields(0U)->project);
+    }
+    TEST_ASSERT_NULL(ao_spy_take());
+}
+
+/* The icon's three blocks come from a pool other Active Objects draw on too,
+ * and a block that goes back to it says nothing: the read tries again after
+ * a pause, inside the same bound, and answers `busy` only when that runs out. */
+TEST_CASE("a folder read whose icon finds no block free is answered with the "
+          "icon once one is", "[storage_ao][appdata][read]")
+{
+    RecvDataEvt *held[2];
+
+    storage_fresh();
+    put_scope_folder();
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        held[i] = Q_NEW_X(RecvDataEvt, 0U, RECV_DATA_SIG);
+        TEST_ASSERT_NOT_NULL_MESSAGE(held[i], "the jumbo pool is smaller than "
+                                              "the board's");
+    }
+
+    post_read("scope");
+    (void)qf_support_tick(AO_Storage, 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
+        "the read was answered with no icon at once");
+
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        QF_gc(&held[i]->super);
+    }
+    (void)qf_support_tick(AO_Storage, 5U);
+
+    const AppDataFieldsEvt *f = take_fields(3U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+}
+
+TEST_CASE("a folder read whose icon never finds a block is answered busy after "
+          "the bound", "[storage_ao][appdata][read]")
+{
+    RecvDataEvt *held[2];
+
+    storage_fresh();
+    put_scope_folder();
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        held[i] = Q_NEW_X(RecvDataEvt, 0U, RECV_DATA_SIG);
+        TEST_ASSERT_NOT_NULL(held[i]);
+    }
+
+    post_read("scope");
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered before the bound");
+
+    wait_out_turn();
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, f->icon_status);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
+
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        QF_gc(&held[i]->super);
+    }
+}
+
+TEST_CASE("a read that waits for an icon block keeps the reads behind it in "
+          "order", "[storage_ao][appdata][read]")
+{
+    RecvDataEvt *held[2];
+
+    storage_fresh();
+    put_scope_folder();
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        held[i] = Q_NEW_X(RecvDataEvt, 0U, RECV_DATA_SIG);
+        TEST_ASSERT_NOT_NULL(held[i]);
+    }
+
+    post_read("scope");
+    post_read("other");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read went ahead of the one "
+                                            "that waits for its icon");
+
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        QF_gc(&held[i]->super);
+    }
+    (void)qf_support_tick(AO_Storage, 5U);
+    TEST_ASSERT_EQUAL_STRING("scope", take_fields(3U)->project);
+    TEST_ASSERT_EQUAL_STRING("other", take_fields(0U)->project);
+}
+
+/* A write that waits and a read that waits: the write goes first. A read costs
+ * nothing and changes nothing, so it can wait for a write a moment; a write
+ * served after the read that arrived beside it would leave that read describing
+ * the folder the write is about to replace. Reads never starve a write, which
+ * is taken up before any of them. */
+TEST_CASE("a waiting write is served before a waiting read, which then sees it",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+
+    post_read("demo");                 /* the read arrives first */
+    ask_appdata_put("demo", 0U);
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    drain_write();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "the read was answered before the write");
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_STRING("demo", f->project);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPDATA_MEDIUM_FS, f->medium,
+        "the read did not see the folder the write made");
 }
 
 /* ---- The card's fields ------------------------------------------------------ */
@@ -4242,6 +4472,62 @@ TEST_CASE("a page of the image listing waits behind a card call",
     TEST_ASSERT_EQUAL_INT(STORAGE_LIST_END_SIG, (int)end->super.sig);
     TEST_ASSERT_FALSE(end->more);
     ao_spy_drain();
+}
+
+/* The rescan's unmount is refused while a transfer holds the card, which is
+ * what keeps the card mounted under it - and the listing behind it walks the
+ * card as it is mounted. Expected in that window, so it is no warning. */
+TEST_CASE("a rescan during a transfer lists the mounted card, and the refused "
+          "unmount is no warning", "[storage_ao][worker][pages]")
+{
+    unsigned entries = 0U;
+    unsigned ends    = 0U;
+    bool     said    = false;
+
+    storage_fresh();
+    make_sd_file("a.bin");
+    make_sd_file("held.bin");
+    ask_mount_job();
+    (void)run_sd_job();
+    ao_spy_drain();
+    ask_open("/sdcard/held.bin");        /* a transfer on the card */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+
+    storage_list_request(ao_spy());
+    settle_card();
+    ao_spy_drain();
+    fake_klog_reset();
+    storage_list_request(ao_spy());      /* a rescan: it unmounts first */
+    settle_card();
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_storage_mounted(KDRV_MEDIUM_SD),
+        "the refused unmount left the card unmounted");
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( STORAGE_ENTRY_SIG == (int)e->sig )
+        {
+            ++entries;
+        }
+        if ( STORAGE_LIST_END_SIG == (int)e->sig )
+        {
+            ++ends;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, entries, "the listing did not find the "
+                                                "card's two images");
+    TEST_ASSERT_EQUAL_UINT(1U, ends);
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const line = fake_klog_line(i);
+
+        if ( (NULL != line) && (strstr(line, "unmount is refused") != NULL) )
+        {
+            said = true;
+            TEST_ASSERT_NULL_MESSAGE(strstr(line, "!W"),
+                "the refused unmount was a warning");
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(said, "the refused unmount was not logged at all");
 }
 
 TEST_CASE("a page over the hold queue's room is answered with its end",

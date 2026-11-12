@@ -1131,6 +1131,15 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         AO_Storage has in flight to end. It is served when the transfer
  *         does; past this it is refused as busy. */
 #define KODE_STORAGE_TURN_MS         2000U
+/** @brief Reads of an app's data folder AO_Storage holds, in arrival order,
+ *         while a transfer is in flight; each is answered when it ends, or
+ *         after KODE_STORAGE_TURN_MS from the first one held. One over this
+ *         many is answered at once, as a read is during a transfer. */
+#define KODE_STORAGE_READ_WAIT_DEPTH  8U
+/** @brief The pause before a folder read whose icon found no event block free
+ *         tries again, within the same bound: a block that goes back to the
+ *         pool has no event of its own to say so. */
+#define KODE_STORAGE_ICON_RETRY_MS    20U
 
 /* ---- The NFC row ----------------------------------------------------------
  * ASYNC, and it does what no other row does: it WRITES. The board's own
