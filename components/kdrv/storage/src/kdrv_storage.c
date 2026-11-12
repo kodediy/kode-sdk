@@ -685,6 +685,20 @@ kode_status_t kdrv_storage_rename(const char *from, const char *to)
         return rc;
     }
 
+    /* FatFs refuses a rename onto a name that is there (FR_EXIST) and the
+     * VFS passes it on, where POSIX's rename() replaces the target. Said
+     * here, so a caller that forgot to remove the target fails on the host as
+     * it does on the board. The same object under a name that only differs in
+     * case is no other object: FatFs renames it. */
+    struct stat taken;
+    struct stat moving;
+    if ( (0 == stat(real_to, &taken))
+        && !((0 == stat(real_from, &moving)) && (taken.st_dev == moving.st_dev)
+             && (taken.st_ino == moving.st_ino)) )
+    {
+        return KODE_ERROR;
+    }
+
     if ( rename(real_from, real_to) != 0 )
     {
         return KODE_ERROR;

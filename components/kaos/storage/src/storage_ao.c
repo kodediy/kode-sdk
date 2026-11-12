@@ -47,6 +47,11 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 #define APPDATA_KB          1024U   /**< Bytes in the kilobyte a log line counts in. */
 #define APPDATA_JSON_NAME   KAPP_DATA_JSON_NAME   /**< The folder's app.json. */
 #define APPDATA_ICON_NAME   KAPP_DATA_ICON_NAME   /**< The icon's default file name. */
+#define APPDATA_TMP_SUFFIX  ".tmp"   /**< What a put appends to a file's name while it writes it. */
+#define APPDATA_JSON_TMP    APPDATA_JSON_NAME APPDATA_TMP_SUFFIX   /**< app.json while a put writes it. */
+#define APPDATA_ICON_TMP    APPDATA_ICON_NAME APPDATA_TMP_SUFFIX   /**< The icon while a put writes it. */
+_Static_assert(sizeof(APPDATA_ICON_TMP) <= KAPP_DATA_ICON_MAX,
+               "a temporary's name fits where an icon's path does");
 #define APPDATA_TOP_DIR     "/storage/.kode"  /**< The tree's first level, internal. */
 #define APPDATA_TREE_DIR    APPDATA_TOP_DIR "/appsdata" /**< Holds one folder per app. */
 
@@ -277,6 +282,8 @@ typedef struct {
     uint8_t       *g_buf;          /**< app.json then icon.k64; this AO's.    */
     uint16_t       g_json_len;     /**< Bytes of app.json at the head of g_buf. */
     uint16_t       g_icon_len;     /**< 0 when there is no icon step.         */
+    bool           g_fresh;        /**< The folder was not there when the put
+                                    *   began: a failed put takes it away.     */
 
     /* The wipe of one app's files in progress: the images kept by the walk of
      * each root, read and deleted one a step, then the folders. x_who is the
@@ -1775,7 +1782,11 @@ typedef struct {
     bool    is_dir[APPDATA_RM_MAX];
     uint8_t n;
     bool    cut;   /**< More entries than a pass holds, or a name too long. */
+    bool    keep_pair; /**< Leave app.json and icon.k64 out of the pass. */
 } AppDataRmList;
+
+/** @brief The one pass's scratch: a delete or a put's sweep runs one at a time. */
+static AppDataRmList l_appdata_list;
 
 /** @brief kdrv_path_entry_cb: remember one entry, delete nothing. */
 static bool appdata_rm_entry(const char *name, bool is_dir, uint32_t size,
@@ -1784,6 +1795,11 @@ static bool appdata_rm_entry(const char *name, bool is_dir, uint32_t size,
     AppDataRmList * const l = (AppDataRmList *)ctx;
     (void)size;
 
+    if ( l->keep_pair && ((strcmp(name, APPDATA_JSON_NAME) == 0)
+                          || (strcmp(name, APPDATA_ICON_NAME) == 0)) )
+    {
+        return true;
+    }
     if ( (APPDATA_RM_MAX <= l->n) || (strlen(name) >= sizeof(l->name[0])) )
     {
         l->cut = true;
@@ -1804,15 +1820,18 @@ static bool appdata_rm_entry(const char *name, bool is_dir, uint32_t size,
  * @param[out] sub  The first subdirectory found, or "" - only the top level
  *              wants it. NULL when subdirectories are of no interest, which
  *              is the case one level down, where they are simply left.
+ * @param keep_pair Leave app.json and icon.k64 where they are: what a put
+ *              has just put in place.
  * @return true when everything the directory held is gone.
  */
 static bool appdata_rm_files(const char *dir, AppDataRmList *l, char *sub,
-                             size_t sub_cap)
+                             size_t sub_cap, bool keep_pair)
 {
     char path[APPDATA_PATH_MAX];
     bool all = true;
 
     (void)memset(l, 0, sizeof(*l));
+    l->keep_pair = keep_pair;
     if ( NULL != sub )
     {
         sub[0] = '\0';
@@ -1862,7 +1881,7 @@ static bool appdata_rm_files(const char *dir, AppDataRmList *l, char *sub,
  */
 static kode_status_t appdata_rm_tree(const char *folder)
 {
-    static AppDataRmList list;   /* one delete at a time, by design */
+    AppDataRmList * const list = &l_appdata_list;
     char        sub[KAPP_DATA_ICON_MAX];
     char        path[APPDATA_PATH_MAX];
     kdrv_stat_t st;
@@ -1872,13 +1891,13 @@ static kode_status_t appdata_rm_tree(const char *folder)
         return KODE_ERROR;
     }
 
-    bool all = appdata_rm_files(folder, &list, sub, sizeof(sub));
+    bool all = appdata_rm_files(folder, list, sub, sizeof(sub), false);
     if ( '\0' != sub[0] )
     {
         if ( snprintf(path, sizeof(path), "%s/%s", folder, sub)
             < (int)sizeof(path) )
         {
-            all = appdata_rm_files(path, &list, NULL, 0U) && all;
+            all = appdata_rm_files(path, list, NULL, 0U, false) && all;
             all = (kdrv_storage_rmdir(path) == KODE_OK) && all;
         }
         else
@@ -2247,7 +2266,10 @@ static void wipe_step(Storage * const me)
  * The install of a container that carries metadata. Two steps of this AO, one
  * file each, with a self-post between so 13 KB of FAT never holds the AO in
  * one go; the request's fields and bytes are kept in g_* for the second step,
- * and appdata_put_finish() frees g_buf. Internal partition only.
+ * and appdata_put_finish() frees g_buf. Each file is written under a temporary
+ * name beside the old one, and the second step, with both down, puts them in
+ * the old files' place: a folder is replaced whole or not at all. Internal
+ * partition only.
  */
 
 /**
@@ -2325,18 +2347,156 @@ static kode_status_t appdata_put_mkdir(const char *path)
 }
 
 /**
+ * @brief The path of one file of a data folder, or of its temporary.
+ *
+ * @param out    Where it goes: APPDATA_PATH_MAX bytes.
+ * @param folder The folder's path.
+ * @param name   The file's name: APPDATA_JSON_NAME, APPDATA_JSON_TMP...
+ * @return false when it would not fit.
+ */
+static bool appdata_file_path(char *out, const char *folder, const char *name)
+{
+    return snprintf(out, APPDATA_PATH_MAX, "%s/%s", folder, name)
+        < (int)APPDATA_PATH_MAX;
+}
+
+/**
+ * @brief Remove the temporaries a put writes, wherever they are left.
+ *
+ * A put that fails, or never finishes because the board reset, leaves them;
+ * a put removes them when it begins, and when it fails.
+ *
+ * @param folder The data folder's path.
+ */
+static void appdata_put_drop_tmps(const char *folder)
+{
+    static const char *const TMP[] = { APPDATA_JSON_TMP, APPDATA_ICON_TMP };
+    char                     path[APPDATA_PATH_MAX];
+
+    for ( uint8_t i = 0U; Q_DIM(TMP) > i; ++i )
+    {
+        if ( appdata_file_path(path, folder, TMP[i]) )
+        {
+            (void)kdrv_storage_unlink(path);   /* not there is as good as gone */
+        }
+    }
+}
+
+/**
+ * @brief Put a finished temporary in place of the file it replaces.
+ *
+ * FAT never renames onto a name that is there, so the old file goes first.
+ * That is the one moment the folder is neither the old pair nor the new:
+ * without its app.json it reads as no data.
+ *
+ * @param folder The data folder's path.
+ * @param name   The file's final name: APPDATA_JSON_NAME or APPDATA_ICON_NAME.
+ * @return KODE_OK, or what the medium said.
+ */
+static kode_status_t appdata_put_swap(const char *folder, const char *name)
+{
+    char path[APPDATA_PATH_MAX];
+    char tmp[APPDATA_PATH_MAX];
+
+    if ( !appdata_file_path(path, folder, name)
+        || (snprintf(tmp, sizeof(tmp), "%s" APPDATA_TMP_SUFFIX, path)
+            >= (int)sizeof(tmp)) )
+    {
+        return KODE_ERROR;
+    }
+    (void)kdrv_storage_unlink(path);
+    return kdrv_storage_rename(tmp, path);
+}
+
+/**
+ * @brief Put the new pair in place of the old, once both files are written.
+ *
+ * The icon first and app.json last: a reset in between leaves the old
+ * description beside the new icon, never a description of something else.
+ * A put with no icon removes the old one.
+ *
+ * @param me     The AO, with its put under way.
+ * @param folder The data folder's path.
+ * @return KODE_OK, or what the medium said.
+ */
+static kode_status_t appdata_put_commit(const Storage * const me,
+                                        const char *folder)
+{
+    kode_status_t rc = KODE_OK;
+    char          path[APPDATA_PATH_MAX];
+
+    if ( 0U != me->g_icon_len )
+    {
+        rc = appdata_put_swap(folder, APPDATA_ICON_NAME);
+    }
+    else if ( appdata_file_path(path, folder, APPDATA_ICON_NAME) )
+    {
+        (void)kdrv_storage_unlink(path);
+    }
+    else
+    {
+        rc = KODE_ERROR;
+    }
+    if ( KODE_OK == rc )
+    {
+        rc = appdata_put_swap(folder, APPDATA_JSON_NAME);
+    }
+    return rc;
+}
+
+/**
+ * @brief Remove what else the folder held, once the new pair is in place.
+ *
+ * The folder is replaced whole: a file or a subfolder an older folder carried
+ * goes with it. A sweep that leaves something is said and is no failure of
+ * the put.
+ *
+ * @param folder The data folder's path.
+ */
+static void appdata_put_sweep(const char *folder)
+{
+    AppDataRmList * const list = &l_appdata_list;
+    char                  sub[KAPP_DATA_ICON_MAX];
+    char                  path[APPDATA_PATH_MAX];
+    bool                  all = appdata_rm_files(folder, list, sub, sizeof(sub),
+                                                 true);
+
+    if ( '\0' != sub[0] )
+    {
+        if ( appdata_file_path(path, folder, sub) )
+        {
+            all = appdata_rm_files(path, list, NULL, 0U, false) && all;
+            all = (kdrv_storage_rmdir(path) == KODE_OK) && all;
+        }
+        else
+        {
+            all = false;
+        }
+    }
+    if ( !all )
+    {
+        KLOG_W(TAG, "the old files of '%s' did not all go", folder);
+    }
+}
+
+/**
  * @brief End a put: forget it, remove what a failure left, answer.
  *
  * The state goes first because appdata_rm() refuses while busy() is true and
  * g_who is part of busy().
  *
+ * A failed put leaves the folder that was there as it was, less the
+ * temporaries; a folder the put made is taken away again.
+ *
  * @param me The AO.
- * @param rc How it ended; anything but KODE_OK takes the folder away again.
+ * @param rc How it ended.
  */
 static void appdata_put_finish(Storage * const me, kode_status_t rc)
 {
-    QActive * const who = me->g_who;
+    QActive * const who   = me->g_who;
+    bool const      fresh = me->g_fresh;
     char            project[KDRV_SLOT_PROJECT_MAX];
+    char            folder[APPDATA_FOLDER_MAX];
 
     (void)snprintf(project, sizeof(project), "%s", me->g_project);
     me->g_who      = NULL;
@@ -2345,7 +2505,15 @@ static void appdata_put_finish(Storage * const me, kode_status_t rc)
     {
         KLOG_W(TAG, "the data folder of '%s' was not written (%d)", project,
                (int)rc);
-        (void)appdata_rm(me, project);
+        if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
+                                 project) )
+        {
+            appdata_put_drop_tmps(folder);
+        }
+        if ( fresh )
+        {
+            (void)appdata_rm(me, project);
+        }
     }
     else
     {
@@ -2360,42 +2528,43 @@ static void appdata_put_finish(Storage * const me, kode_status_t rc)
 /**
  * @brief Whether the internal partition has room for the folder at @p folder.
  *
- * A folder that is there already is replaced and takes the room it gives
- * back. A new one must leave KODE_APPDATA_FREE_MIN_BYTES free: a data folder
+ * The new files are written beside the old ones and put in their place, so a
+ * folder that is there needs the room of one more, KODE_APPDATA_FOLDER_BYTES.
+ * A new one must leave KODE_APPDATA_FREE_MIN_BYTES free besides: a data folder
  * may arrive before its app, and nothing else bounds how many do.
  *
  * @param folder The folder's path on the internal partition, mounted.
- * @return false when a new folder would leave the partition under its floor.
+ * @param[out] there Whether the folder is there already.
+ * @return false when the partition cannot take the put.
  */
-static bool appdata_room(const char *folder)
+static bool appdata_room(const char *folder, bool *there)
 {
     kdrv_stat_t    st;
     uint64_t       total = 0U;
     uint64_t       freeb = 0U;
-    uint32_t const least = KODE_APPDATA_FREE_MIN_BYTES + KODE_APPDATA_FOLDER_BYTES;
+    uint32_t       least = KODE_APPDATA_FOLDER_BYTES;
     bool           room  = true;
 
-    if ( (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists )
+    *there = (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists;
+    if ( !*there )
     {
-        /* A replacement. */
+        least += KODE_APPDATA_FREE_MIN_BYTES;
     }
-    else if ( (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK)
-             && ((uint64_t)least > freeb) )
+    if ( (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK)
+        && ((uint64_t)least > freeb) )
     {
         room = false;
-    }
-    else
-    {
-        /* Room enough, or a partition that cannot say: the write decides. */
     }
     return room;
 }
 
 /**
- * @brief Step one of a put: refuse, clear, make the path, write app.json.
+ * @brief Step one of a put: refuse, make the path, write the new app.json.
  *
- * The request's buffer is this AO's from the post: a refusal frees it here,
- * and a put that begins keeps it in g_buf for appdata_put_finish().
+ * The files are written under temporary names beside the old ones: nothing
+ * that was there is touched until step two has both. The request's buffer is
+ * this AO's from the post: a refusal frees it here, and a put that begins
+ * keeps it in g_buf for appdata_put_finish().
  *
  * @param me  The AO.
  * @param req The request; its fields are copied before this returns.
@@ -2405,6 +2574,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     char          folder[APPDATA_FOLDER_MAX];
     kode_status_t rc = KODE_DENIED;
     bool          no_turn = false;
+    bool          there   = false;
 
     if ( busy(me) )
     {
@@ -2424,12 +2594,23 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     {
         rc = KODE_ERROR;
     }
-    else if ( !appdata_room(folder) )
+    else if ( !appdata_room(folder, &there) )
     {
         uint32_t const floor_kb = KODE_APPDATA_FREE_MIN_BYTES / APPDATA_KB;
+        uint32_t const folder_kb = KODE_APPDATA_FOLDER_BYTES / APPDATA_KB;
 
-        KLOG_W(TAG, "no room for the data folder of '%s': a new one must "
-                    "leave %lu KB free", req->project, (unsigned long)floor_kb);
+        if ( there )
+        {
+            KLOG_W(TAG, "no room for the new data folder of '%s' beside the "
+                        "old one: it takes %lu KB", req->project,
+                   (unsigned long)folder_kb);
+        }
+        else
+        {
+            KLOG_W(TAG, "no room for the data folder of '%s': a new one must "
+                        "leave %lu KB free", req->project,
+                   (unsigned long)floor_kb);
+        }
         rc = KODE_NO_RESOURCES;
     }
     else
@@ -2446,23 +2627,15 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         return;
     }
 
-    /* From here the put owns the AO. The old folder goes first and "there was
-     * none" is no failure; appdata_rm() reads busy(), so g_who is set after. */
-    rc = appdata_rm(me, req->project);
-    if ( KODE_ERROR == rc )
-    {
-        rc = KODE_OK;
-    }
+    /* From here the put owns the AO. */
     me->g_who      = req->who;
     (void)snprintf(me->g_project, sizeof(me->g_project), "%s", req->project);
     me->g_buf      = req->buf;
     me->g_json_len = req->json_len;
     me->g_icon_len = req->icon_len;
+    me->g_fresh    = !there;
 
-    if ( KODE_OK == rc )
-    {
-        rc = appdata_put_mkdir(APPDATA_TOP_DIR);
-    }
+    rc = appdata_put_mkdir(APPDATA_TOP_DIR);
     if ( KODE_OK == rc )
     {
         rc = appdata_put_mkdir(APPDATA_TREE_DIR);
@@ -2475,8 +2648,8 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     {
         char path[APPDATA_PATH_MAX];
 
-        if ( snprintf(path, sizeof(path), "%s/" APPDATA_JSON_NAME, folder)
-            >= (int)sizeof(path) )
+        appdata_put_drop_tmps(folder);
+        if ( !appdata_file_path(path, folder, APPDATA_JSON_TMP) )
         {
             rc = KODE_ERROR;
         }
@@ -2496,31 +2669,48 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     }
 }
 
-/** @brief Step two of a put: the icon when there is one, then the answer. */
+/**
+ * @brief Step two of a put: the new icon when there is one, then both files
+ *        in place of the old pair, then the answer.
+ *
+ * @param me The AO.
+ */
 static void appdata_put_icon(Storage * const me)
 {
     kode_status_t rc = KODE_OK;
+    char          folder[APPDATA_FOLDER_MAX];
+    char          path[APPDATA_PATH_MAX];
 
     if ( NULL == me->g_who )
     {
         return;   /* a stale tick: no put is under way */
     }
-    if ( 0U != me->g_icon_len )
+    if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
+                              me->g_project) )
     {
-        char folder[APPDATA_FOLDER_MAX];
-        char path[APPDATA_PATH_MAX];
-
-        if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
-                                 me->g_project)
-            || (snprintf(path, sizeof(path), "%s/" APPDATA_ICON_NAME, folder)
-                >= (int)sizeof(path)) )
+        rc = KODE_ERROR;
+    }
+    else
+    {
+        if ( 0U != me->g_icon_len )
         {
-            rc = KODE_ERROR;
+            if ( appdata_file_path(path, folder, APPDATA_ICON_TMP) )
+            {
+                rc = appdata_put_file(path, &me->g_buf[me->g_json_len],
+                                      me->g_icon_len);
+            }
+            else
+            {
+                rc = KODE_ERROR;
+            }
         }
-        else
+        if ( KODE_OK == rc )
         {
-            rc = appdata_put_file(path, &me->g_buf[me->g_json_len],
-                                  me->g_icon_len);
+            rc = appdata_put_commit(me, folder);
+        }
+        if ( KODE_OK == rc )
+        {
+            appdata_put_sweep(folder);
         }
     }
     appdata_put_finish(me, rc);
@@ -5638,6 +5828,7 @@ void Storage_ctor(void)
     me->g_buf      = NULL;     /* a constructor over a used AO: the heap's now */
     me->g_json_len = 0U;
     me->g_icon_len = 0U;
+    me->g_fresh    = false;
     me->x_who      = NULL;
     me->x          = NULL;     /* as g_buf: the heap's now */
     me->worker_up  = false;

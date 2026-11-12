@@ -621,6 +621,27 @@ TEST_CASE("rename moves within a volume and refuses to cross one",
                                               "/sdcard/after.txt"));
 }
 
+/* FatFs refuses a rename onto a name that is there, and POSIX replaces it:
+ * the driver says no on both, so a caller that forgot to remove the target
+ * fails in this suite and not only on the board. */
+TEST_CASE("rename onto a name that is there is refused, and both files stay",
+          "[kdrv_storage_path]")
+{
+    storage_fresh();
+    fake_media_put_fs_file("from.txt", "new");
+    fake_media_put_fs_file("to.txt", "old");
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+                          kdrv_storage_rename("/storage/from.txt",
+                                              "/storage/to.txt"));
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_fs_dir(), "from.txt"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_unlink("/storage/to.txt"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+                          kdrv_storage_rename("/storage/from.txt",
+                                              "/storage/to.txt"));
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "from.txt"));
+}
+
 /* ---- Two handles, and the copy they exist for -----------------------------
  * kdrv_storage kept a single FILE * for the whole system until copying
  * existed, and copying is exactly the pair a single handle cannot hold: a

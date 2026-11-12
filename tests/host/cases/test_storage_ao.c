@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -134,6 +135,27 @@ static long fs_size(const char *rel)
     n = ftell(f);
     (void)fclose(f);
     return n;
+}
+
+/**
+ * @brief Read @p rel under the internal fake into @p out.
+ * @return The bytes read, or -1 when the file is not there.
+ */
+static long fs_read(const char *rel, char *out, size_t cap)
+{
+    char   path[512];
+    FILE  *f;
+    size_t n;
+
+    (void)snprintf(path, sizeof(path), "%s/%s", fake_media_fs_dir(), rel);
+    f = fopen(path, "rb");
+    if ( NULL == f )
+    {
+        return -1L;
+    }
+    n = fread(out, 1U, cap, f);
+    (void)fclose(f);
+    return (long)n;
 }
 
 /** @brief Dispatch an open request for @p name, from the spy. */
@@ -2135,22 +2157,41 @@ TEST_CASE("put takes a new folder that leaves the partition at its floor",
     assert_put_bufs_freed();
 }
 
-TEST_CASE("put replaces a folder that is there however full the partition is",
+/* The new files are written beside the old ones, so a replacement needs the
+ * room of one more folder - but not the floor a new folder must leave. */
+TEST_CASE("put replaces a folder that is there when the new files fit beside the old",
           "[storage_ao][appdata]")
 {
     storage_fresh();
     fake_psram_reset();
     fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
-    fake_media_set_fs_free(0U);
+    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FOLDER_BYTES);
 
     ask_appdata_put("demo", 0U);
     drain_write();
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
-        "a replacement takes the room it gives back");
+        "a replacement needs no more than the room of a folder");
     assert_put_bufs_freed();
     TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
                           (int)fs_size(".kode/appsdata/demo/app.json"));
+}
+
+TEST_CASE("put refuses a replacement that does not fit beside the old files, "
+          "and leaves them", "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
+    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FOLDER_BYTES - 1U);
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, (int)fs_size(".kode/appsdata/demo/app.json"),
+        "a refused replacement touched the old app.json");
 }
 
 TEST_CASE("put without an icon writes app.json only and removes an old icon",
@@ -2440,6 +2481,159 @@ TEST_CASE("a second put during the first waits for it and lands after",
     TEST_ASSERT_TRUE(fs_size(".kode/appsdata/other/app.json") > 0L);
 }
 
+/* ---- A folder is replaced whole or not at all ------------------------------
+ * The new app.json and icon.k64 are written under temporary names in the
+ * folder and put in place only when both are down. A put that fails or never
+ * finishes leaves the pair that was there. */
+
+static const char OLD_JSON[] = "{\"kode\":\"1\",\"name\":\"Old\"}";
+static uint8_t    s_old_icon[KAPP_ICON_BYTES];
+
+/** @brief Put a pair in demo's folder: OLD_JSON and an icon of 0x11s. */
+static void put_old_pair(void)
+{
+    (void)memset(s_old_icon, 0x11, sizeof(s_old_icon));
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", OLD_JSON,
+                           sizeof(OLD_JSON) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/demo/icon.k64", s_old_icon,
+                           sizeof(s_old_icon));
+}
+
+/** @brief Assert demo's folder still holds put_old_pair()'s pair, whole. */
+static void assert_old_pair(void)
+{
+    char got[sizeof(OLD_JSON) + 8U];
+    long n = fs_read(".kode/appsdata/demo/app.json", got, sizeof(got));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)(sizeof(OLD_JSON) - 1U), (int)n,
+        "the old app.json is gone or was cut");
+    TEST_ASSERT_EQUAL_MEMORY(OLD_JSON, got, sizeof(OLD_JSON) - 1U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(12288,
+        (int)fs_size(".kode/appsdata/demo/icon.k64"),
+        "the old icon is gone or was cut");
+    n = fs_read(".kode/appsdata/demo/icon.k64", (char *)s_put_icon,
+                sizeof(s_put_icon));
+    TEST_ASSERT_EQUAL_HEX8(0x11, s_put_icon[0]);
+}
+
+/** @brief Assert no temporary of demo's folder is left. */
+static void assert_no_temporaries(void)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/demo/app.json.tmp"),
+        "app.json.tmp was left behind");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/demo/icon.k64.tmp"),
+        "icon.k64.tmp was left behind");
+}
+
+TEST_CASE("a put that fails while writing leaves the old json and icon",
+          "[storage_ao][appdata][whole]")
+{
+    char dir[512];
+
+    storage_fresh();
+    fake_psram_reset();
+    put_old_pair();
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);   /* the new app.json is down */
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/demo/icon.k64.tmp",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0755));
+    drain_write();
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    assert_old_pair();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/demo/app.json.tmp"),
+        "the failed put left its app.json.tmp");
+    TEST_ASSERT_EQUAL_INT(0, rmdir(dir));
+}
+
+TEST_CASE("a put that never finishes leaves the old pair, and the next put "
+          "cleans the temporaries", "[storage_ao][appdata][whole]")
+{
+    char got[sizeof(PUT_JSON)];
+
+    storage_fresh();
+    fake_psram_reset();
+    put_old_pair();
+    fake_media_put_fs_path(".kode/appsdata/demo/icon.k64.tmp", "half", 4U);
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);   /* the new app.json is down */
+    TEST_ASSERT_TRUE_MESSAGE(fs_size(".kode/appsdata/demo/app.json.tmp") > 0L,
+        "the new app.json was not written under its temporary name");
+
+    /* The board resets here: the AO starts again and nothing finishes the put. */
+    storage_fresh();
+    fake_psram_reset();
+    assert_old_pair();
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    assert_no_temporaries();
+    (void)memset(got, 0, sizeof(got));
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+        (int)fs_read(".kode/appsdata/demo/app.json", got, sizeof(got)));
+    TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/demo/icon.k64"),
+        "a put without an icon left the old icon");
+}
+
+TEST_CASE("a put over a folder that is there shows the new pair and no "
+          "temporaries", "[storage_ao][appdata][whole]")
+{
+    char got[sizeof(PUT_JSON)];
+
+    storage_fresh();
+    fake_psram_reset();
+    put_old_pair();
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    assert_no_temporaries();
+    (void)memset(got, 0, sizeof(got));
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+        (int)fs_read(".kode/appsdata/demo/app.json", got, sizeof(got)));
+    TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
+    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    (void)fs_read(".kode/appsdata/demo/icon.k64", (char *)s_old_icon,
+                  sizeof(s_old_icon));
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x5A, s_old_icon[0],
+        "the folder still shows the old icon");
+}
+
+TEST_CASE("a put that fails writing a new folder leaves no folder",
+          "[storage_ao][appdata][whole]")
+{
+    char dir[512];
+
+    storage_fresh();
+    fake_psram_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/demo/icon.k64.tmp",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0755));
+    drain_write();
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
+                                             ".kode/appsdata/demo"));
+}
+
 /* A name that is a directory cannot be created as a file, which is how the
  * second write is made to fail here - and a permission trick would not do:
  * CI runs as root. */
@@ -2469,9 +2663,12 @@ TEST_CASE("put answers after two steps", "[storage_ao][appdata]")
 
     ask_appdata_put("demo", KAPP_ICON_BYTES);
 
-    /* The json is down, the icon is not, and nobody has been told. */
+    /* The json is down under its temporary name, the icon is not, nothing is
+     * in place, and nobody has been told. */
     TEST_ASSERT_NULL(ao_spy_take());
-    TEST_ASSERT_TRUE(fs_size(".kode/appsdata/demo/app.json") > 0L);
+    TEST_ASSERT_TRUE(fs_size(".kode/appsdata/demo/app.json.tmp") > 0L);
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size(".kode/appsdata/demo/app.json"));
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size(".kode/appsdata/demo/icon.k64.tmp"));
     TEST_ASSERT_EQUAL_INT(-1, (int)fs_size(".kode/appsdata/demo/icon.k64"));
 
     TEST_ASSERT_EQUAL_UINT(1U, qf_support_pump(AO_Storage, 1U));

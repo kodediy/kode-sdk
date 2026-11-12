@@ -3448,7 +3448,7 @@ typedef struct {
     QEvt          super;
     char          project[KDRV_SLOT_PROJECT_MAX]; /**< Echoed: answers can cross. */
     kode_status_t rc;      /**< KODE_OK, KODE_DENIED, KODE_ERROR, KODE_IO_ERROR,
-                            *   or KODE_NO_RESOURCES: no room for a new folder. */
+                            *   or KODE_NO_RESOURCES: no room for the put.     */
     bool          busy;    /**< With KODE_DENIED: the put was good but AO_Storage
                             *   had no turn for it within KODE_STORAGE_TURN_MS,
                             *   so nothing was written and the same put may be
@@ -3457,17 +3457,20 @@ typedef struct {
 
 /**
  * @brief Write @p project's data folder on the internal partition, replacing
- *        whatever folder was there.
+ *        whatever folder was there whole, or not at all.
  *
- * Clears the folder (as appdata_rm_request()), makes missing parents, then writes
- * `app.json` and, if @p icon_len, `icon.k64` in two steps. Never the card. Once
- * posted, AO_Storage owns @p buf and frees it on every path. A put that meets a
- * transfer in flight waits for it (KODE_STORAGE_TURN_MS). Always answered with an
- * AppDataPutRspEvt: KODE_OK; KODE_DENIED bad name, length, NULL buffer or busy
- * (AppDataPutRspEvt.busy tells the last apart);
- * KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when a new folder
- * would leave the partition under KODE_APPDATA_FREE_MIN_BYTES (a folder that is
- * there is always replaced). A failed put leaves no folder.
+ * Makes missing parents, writes `app.json` and, if @p icon_len, `icon.k64` in two
+ * steps under temporary names beside the old files, and only when both are down
+ * puts them in the old files' place and removes whatever else the folder held. A
+ * put that fails, or never finishes, leaves the folder that was there as it was;
+ * one it made is removed. Never the card. Once posted, AO_Storage owns @p buf and
+ * frees it on every path. A put that meets a transfer in flight waits for it
+ * (KODE_STORAGE_TURN_MS). Always answered with an AppDataPutRspEvt: KODE_OK;
+ * KODE_DENIED bad name, length, NULL buffer or busy (AppDataPutRspEvt.busy tells
+ * the last apart); KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when
+ * a new folder would leave the partition under KODE_APPDATA_FREE_MIN_BYTES, or a
+ * folder that is there has not KODE_APPDATA_FOLDER_BYTES free for the new files
+ * beside the old.
  *
  * @param project  The app's project name, as the binary declares it.
  * @param buf      app.json then icon.k64, one allocation from khal_alloc_psram()
