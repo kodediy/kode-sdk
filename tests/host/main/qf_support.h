@@ -223,6 +223,20 @@ void qf_support_tick_escaped(void);
 void qf_support_reap_timers(void);
 
 /**
+ * @brief Disarm every time event @p ao owns, so a case that ended with one
+ *        armed cannot break the next.
+ *
+ * A case that fails stops where it is, and an Active Object it left with a
+ * time event armed is constructed again by the next case: QF's list of armed
+ * time events then runs in a cycle, and the next tick never returns. A case
+ * that rebuilds an AO calls this before qf_support_reap_timers(), which then
+ * takes the disarmed events out of the list.
+ *
+ * @param ao The Active Object whose time events are disarmed.
+ */
+void qf_support_disarm_timers(QActive *ao);
+
+/**
  * @brief Let @p ticks of QP time pass and dispatch nothing.
  *
  * Every armed time event counts down and posts to its owner's queue, and no

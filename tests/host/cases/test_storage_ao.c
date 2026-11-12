@@ -53,6 +53,7 @@ static void storage_fresh(void)
     /* The case before may have ended on a call's return, which disarms its
      * deadline and leaves the node linked until a tick; the constructor below
      * would cut QF's timer list there. */
+    qf_support_disarm_timers(AO_Storage);
     qf_support_reap_timers();
     Storage_ctor();
     qf_support_give_queue(AO_Storage);
@@ -233,6 +234,19 @@ static void release_reader(void)
 {
     storage_close_request();
     (void)qf_support_pump(AO_Storage, 32U);
+}
+
+/**
+ * @brief Take one block of the icon pool, as an icon still on its way to its
+ *        reader holds them. The pool has KODE_APP_ICON_PIECES, which is one
+ *        icon: with one taken the next icon cannot start.
+ */
+static AppDataIconEvt *hold_icon_block(void)
+{
+    AppDataIconEvt *b = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(b, "the icon pool is empty at the start");
+    return b;
 }
 
 /** @brief 10 ms steps in the bound a request waits for its turn. */
@@ -1563,8 +1577,8 @@ TEST_CASE("a folder question the pool cannot carry is answered busy at once",
 /* All the pieces or none: an icon that arrived in pieces would be drawn
  * wrong rather than not drawn, so a short pool is a refusal and not a
  * partial send. Another icon's pieces still held is the same shortage. */
-TEST_CASE("an icon is not started when the icon pool is short",
-          "[storage_ao][appdata]")
+TEST_CASE("an icon is not started when the icon pool is short: the read waits "
+          "and is answered busy only after the bound", "[storage_ao][appdata]")
 {
     static uint8_t icon[KAPP_ICON_BYTES];
 
@@ -1573,18 +1587,24 @@ TEST_CASE("an icon is not started when the icon pool is short",
                            sizeof(JSON_OK) - 1U);
     fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, sizeof(icon));
 
-    AppDataIconEvt *held = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
-    TEST_ASSERT_NOT_NULL_MESSAGE(held, "the icon pool is empty at the start");
+    AppDataIconEvt *held = hold_icon_block();
 
     ask_appdata("scope");
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered before the bound");
 
-    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, take_fields(0U)->icon_status);
+    wait_out_turn();
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, f->icon_status);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
 
     QF_gc(&held->super);
 }
 
 /* The terminal install's blocks are not the icon's: a transfer holding every
- * jumbo block leaves a folder its icon. */
+ * jumbo block does not delay a folder's icon at all. */
 TEST_CASE("an icon does not wait for the jumbo pool", "[storage_ao][appdata]")
 {
     static uint8_t icon[KAPP_ICON_BYTES];
@@ -1602,7 +1622,6 @@ TEST_CASE("an icon does not wait for the jumbo pool", "[storage_ao][appdata]")
     }
 
     ask_appdata("scope");
-    wait_out_turn();
 
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK,
                             take_fields(KODE_APP_ICON_PIECES)->icon_status);
@@ -2932,7 +2951,7 @@ TEST_CASE("a folder read during a transfer waits for it and is answered with "
                                             "transfer");
 
     release_reader();
-    const AppDataFieldsEvt *f = take_fields(3U);
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
     TEST_ASSERT_EQUAL_STRING("scope", f->project);
     TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
     TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
@@ -2953,7 +2972,7 @@ TEST_CASE("two folder reads during a transfer are both answered, in order",
 
     release_reader();
     TEST_ASSERT_EQUAL_STRING("other", take_fields(0U)->project);
-    const AppDataFieldsEvt *f = take_fields(3U);
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
     TEST_ASSERT_EQUAL_STRING("scope", f->project);
     TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
     TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
@@ -3008,95 +3027,184 @@ TEST_CASE("a read over the room for waiting reads is answered at once, and the "
     TEST_ASSERT_NULL(ao_spy_take());
 }
 
-/* The icon's three blocks come from a pool other Active Objects draw on too,
- * and a block that goes back to it says nothing: the read tries again after
- * a pause, inside the same bound, and answers `busy` only when that runs out. */
-TEST_CASE("a folder read whose icon finds no block free is answered with the "
-          "icon once one is", "[storage_ao][appdata][read]")
+/* An icon travels as KODE_APP_ICON_PIECES events from a pool that holds one
+ * icon's worth, so the next icon cannot start while the last is still with its
+ * reader, and a block that goes back to the pool says nothing: the read tries
+ * again after a pause, inside the same bound, and answers `busy` only when that
+ * runs out. */
+TEST_CASE("a folder read whose icon finds the icon pool short is answered with "
+          "the icon once the blocks are free", "[storage_ao][appdata][read]")
 {
-    RecvDataEvt *held[2];
-
     storage_fresh();
     put_scope_folder();
-    for ( unsigned i = 0U; 2U > i; ++i )
-    {
-        held[i] = Q_NEW_X(RecvDataEvt, 0U, RECV_DATA_SIG);
-        TEST_ASSERT_NOT_NULL_MESSAGE(held[i], "the jumbo pool is smaller than "
-                                              "the board's");
-    }
+    AppDataIconEvt *held = hold_icon_block();
 
     post_read("scope");
     (void)qf_support_tick(AO_Storage, 5U);
     TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
         "the read was answered with no icon at once");
 
-    for ( unsigned i = 0U; 2U > i; ++i )
-    {
-        QF_gc(&held[i]->super);
-    }
+    QF_gc(&held->super);
     (void)qf_support_tick(AO_Storage, 5U);
 
-    const AppDataFieldsEvt *f = take_fields(3U);
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
     TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
     TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
 }
 
-TEST_CASE("a folder read whose icon never finds a block is answered busy after "
-          "the bound", "[storage_ao][appdata][read]")
+/* A retry that finds the pool still short is a look at the pool and nothing
+ * more: a pause that read the icon file again would keep this AO, which ranks
+ * above the reader that must hand the blocks back, busy for the whole wait. The
+ * event pool is emptied here, so a retry that took the fields event first would
+ * find none and answer at once. */
+TEST_CASE("a read that waits for icon blocks takes nothing while they are short",
+          "[storage_ao][appdata][read]")
 {
-    RecvDataEvt *held[2];
+    AppDataFieldsEvt *fill[KQP_MEDIUM_POOL_COUNT];
+    unsigned          n = 0U;
 
     storage_fresh();
     put_scope_folder();
-    for ( unsigned i = 0U; 2U > i; ++i )
-    {
-        held[i] = Q_NEW_X(RecvDataEvt, 0U, RECV_DATA_SIG);
-        TEST_ASSERT_NOT_NULL(held[i]);
-    }
+    AppDataIconEvt *held = hold_icon_block();
 
     post_read("scope");
-    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
-    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered before the bound");
-
-    wait_out_turn();
-    const AppDataFieldsEvt *f = take_fields(0U);
-    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
-    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
-    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, f->icon_status);
-    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
-
-    for ( unsigned i = 0U; 2U > i; ++i )
+    while ( KQP_MEDIUM_POOL_COUNT > n )
     {
-        QF_gc(&held[i]->super);
+        fill[n] = Q_NEW_X(AppDataFieldsEvt, 0U, APPDATA_FIELDS_SIG);
+        if ( NULL == fill[n] )
+        {
+            break;
+        }
+        ++n;
     }
+    (void)qf_support_tick(AO_Storage, 10U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
+        "a retry took what it needs from the event pool before the blocks "
+        "were free");
+
+    for ( unsigned i = 0U; n > i; ++i )
+    {
+        QF_gc(&fill[i]->super);
+    }
+    QF_gc(&held->super);
+    (void)qf_support_tick(AO_Storage, 5U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK,
+                            take_fields(KODE_APP_ICON_PIECES)->icon_status);
 }
 
 TEST_CASE("a read that waits for an icon block keeps the reads behind it in "
           "order", "[storage_ao][appdata][read]")
 {
-    RecvDataEvt *held[2];
-
     storage_fresh();
     put_scope_folder();
-    for ( unsigned i = 0U; 2U > i; ++i )
-    {
-        held[i] = Q_NEW_X(RecvDataEvt, 0U, RECV_DATA_SIG);
-        TEST_ASSERT_NOT_NULL(held[i]);
-    }
+    AppDataIconEvt *held = hold_icon_block();
 
     post_read("scope");
     post_read("other");
     TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read went ahead of the one "
                                             "that waits for its icon");
 
-    for ( unsigned i = 0U; 2U > i; ++i )
-    {
-        QF_gc(&held[i]->super);
-    }
+    QF_gc(&held->super);
     (void)qf_support_tick(AO_Storage, 5U);
-    TEST_ASSERT_EQUAL_STRING("scope", take_fields(3U)->project);
+    TEST_ASSERT_EQUAL_STRING("scope", take_fields(KODE_APP_ICON_PIECES)->project);
     TEST_ASSERT_EQUAL_STRING("other", take_fields(0U)->project);
+}
+
+/* A manifest read is the same read seen from the listing: a project dropped
+ * from `appdata_ls` because its .bin was read during a transfer is the fault a
+ * folder read answered "nothing there" is. It waits in the same line. */
+
+/** @brief Take the next answer and assert it is a manifest answer. */
+static const StorageDescRspEvt *take_desc(void)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the manifest read went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_DESC_RSP_SIG, (int)e->sig);
+    return (const StorageDescRspEvt *)e;
+}
+
+TEST_CASE("a manifest read during a transfer waits for it and is answered with "
+          "the project", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    hold_reader();
+
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the manifest was answered during "
+                                            "the transfer");
+
+    release_reader();
+    const StorageDescRspEvt *r = take_desc();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_STRING("demo", r->project);
+    TEST_ASSERT_EQUAL_STRING("demo.bin", r->name);
+}
+
+TEST_CASE("a manifest read that waits past the bound is refused as it is during "
+          "a transfer", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    hold_reader();
+
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "refused before the bound");
+
+    wait_out_turn();
+    const StorageDescRspEvt *r = take_desc();
+    TEST_ASSERT_NOT_EQUAL((uint8_t)KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_STRING("", r->project);
+
+    release_reader();
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a manifest was answered twice");
+}
+
+TEST_CASE("a manifest read and a folder read wait in one line, in order",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    put_scope_folder();
+    hold_reader();
+
+    post_read("scope");
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    TEST_ASSERT_EQUAL_STRING("scope", take_fields(KODE_APP_ICON_PIECES)->project);
+    TEST_ASSERT_EQUAL_STRING("demo", take_desc()->project);
+    TEST_ASSERT_EQUAL_STRING("demo", take_desc()->project);
+    TEST_ASSERT_NULL(ao_spy_take());
+}
+
+/* A case that stops where it is, with a read waiting under its bound, leaves
+ * that time event armed, and the next case builds the AO again over it: QF's
+ * list of armed time events can then run in a cycle that the next tick walks
+ * for ever. storage_fresh() disarms the AO's time events first. */
+TEST_CASE("disarming the AO's time events leaves none to fire",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    hold_reader();
+    post_read("scope");              /* its bound is armed */
+
+    qf_support_disarm_timers(AO_Storage);
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS) + 10U);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U,
+        qf_support_waiting_of(AO_Storage, STORAGE_READ_TO_SIG),
+        "the bound fired after it was disarmed");
+    qf_support_reap_timers();
 }
 
 /* A write that waits and a read that waits: the write goes first. A read costs

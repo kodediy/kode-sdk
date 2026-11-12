@@ -3374,6 +3374,10 @@ void storage_open_request(const char *name, QActive *who);
  * Open, read the first KAPP_PREFIX_LEN bytes, parse and close within one step.
  * It does not take the reader slot, so it can never strand the one open file.
  *
+ * A read that meets a transfer in flight waits for it, in the same line as the
+ * reads of appdata_request() and by the same rules, and is answered with a
+ * failed status only when that wait is full or has run out.
+ *
  * @param name The file, as a listing named it.
  * @param who  Where STORAGE_DESC_RSP_SIG is posted. Never NULL.
  */
@@ -3392,10 +3396,11 @@ void storage_desc_request(const char *name, QActive *who);
  * KODE_STORAGE_READ_WAIT_DEPTH others and in arrival order, behind a write or
  * delete that waits; it is answered when the transfer ends. One that waits
  * KODE_STORAGE_TURN_MS from the first, or finds the wait full, is refused
- * (medium=none, json_status=none). An icon whose event blocks are not all
- * free is tried again every KODE_STORAGE_ICON_RETRY_MS within the same bound,
- * and then answered icon_status=busy; no event at all gives icon_status=busy
- * and an empty project.
+ * (medium=none, json_status=none). An icon whose pieces the icon pool cannot
+ * all take, because the last icon is still with its reader, is tried again every
+ * KODE_STORAGE_ICON_RETRY_MS within the same bound, and then answered
+ * icon_status=busy with the medium and the json it found; no event at all gives
+ * icon_status=busy and an empty project.
  * Fields and end always arrive. See https://docs.kode.diy/sdk/kdrv/apps.
  *
  * @param project The app's project name, as the binary declares it.

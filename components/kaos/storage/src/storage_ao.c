@@ -52,7 +52,7 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 #define APPDATA_ICON_TMP    APPDATA_ICON_NAME APPDATA_TMP_SUFFIX   /**< The icon while a put writes it. */
 _Static_assert(sizeof(APPDATA_ICON_TMP) <= KAPP_DATA_ICON_MAX,
                "a temporary's name fits where an icon's path does");
-#define STORAGE_ICON_TRIES  (KODE_STORAGE_TURN_MS / KODE_STORAGE_ICON_RETRY_MS) /**< Pauses a folder read waits for an icon block: what fits in the bound. */
+#define STORAGE_ICON_TRIES  (KODE_STORAGE_TURN_MS / KODE_STORAGE_ICON_RETRY_MS) /**< Pauses a folder read waits for the icon pool: what fits in the bound. */
 #define APPDATA_WHY_MAX     80U   /**< The words saying why a put was refused, terminator included. */
 #define APPDATA_WHY_WRITE   "a file would not write"   /**< Why a put failed while writing a file. */
 #define APPDATA_WHY_PLACE   "the new files would not go in place"   /**< Why a put failed putting them in place. */
@@ -6320,13 +6320,59 @@ static void storage_round(Storage const * const me, const LowPowerRoundEvt * con
 #endif /* CONFIG_KODE_LOWPOWER */
 
 /**
+ * @brief Give back the pieces of an icon that were taken, and forget them.
+ * @param ic The pieces: KODE_APP_ICON_PIECES slots, NULL where none is held.
+ */
+static void icon_pieces_give(AppDataIconEvt **ic)
+{
+    for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
+    {
+        if ( NULL != ic[s] )
+        {
+            QF_gc(&ic[s]->super);
+            ic[s] = NULL;
+        }
+    }
+}
+
+/**
+ * @brief Take every piece of an icon from the icon pool, or none.
+ *
+ * Half an icon would be drawn wrong rather than not drawn. The pool holds one
+ * icon's pieces, so they are short whenever the last icon is still with its
+ * reader.
+ *
+ * @param ic The pieces: KODE_APP_ICON_PIECES slots; every one is NULL on a
+ *           failure.
+ * @return true when all were taken.
+ */
+static bool icon_pieces_take(AppDataIconEvt **ic)
+{
+    bool all = true;
+
+    for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
+    {
+        ic[s] = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
+        all   = all && (NULL != ic[s]);
+    }
+    if ( !all )
+    {
+        icon_pieces_give(ic);
+    }
+    return all;
+}
+
+/**
  * @brief Keep the folder read being served to try again, at the head of the
- *        reads that wait, because no event block was free for its icon.
+ *        reads that wait, because the icon pool had no room for its icon.
  *
  * It goes back to the front so the reads behind it keep their order, and the
- * reads wait with it until the pause is over. The pool may fill again, so it
- * tries again after each pause, as many times as fit in KODE_STORAGE_TURN_MS;
- * the reads that wait behind it have the bound of their own.
+ * reads wait with it until the pause is over. The reader of the last icon
+ * hands the pieces back without a word, so it tries again after each pause, as
+ * many times as fit in KODE_STORAGE_TURN_MS; a try that finds the pieces still
+ * short looks at the pool and nothing else, so it does not keep this AO from
+ * the reader that has to free them. The reads that wait behind it have the
+ * bound of their own.
  *
  * @param me The AO.
  * @param e  The request being served.
@@ -6460,8 +6506,9 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             kdrv_medium_t  medium = KDRV_MEDIUM_FS;
             size_t         got = 0U;
 
-            /* A manifest is never worth displacing a transfer in flight,
-             * in either direction. */
+            /* A manifest is never worth displacing a transfer in flight, in
+             * either direction: it waits for it (Storage_active), and is
+             * refused like this only when the wait is full or has run out. */
             if ( busy(me) )
             {
                 KLOG_D(TAG, "busy; manifest of '%s' refused", req->name);
@@ -6510,8 +6557,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
         }
         case APPDATA_REQ_SIG: {
             AppDataReqEvt const * const req = Q_EVT_CAST(AppDataReqEvt);
-            AppDataFieldsEvt *f = Q_NEW_X(AppDataFieldsEvt, 0U,
-                                          APPDATA_FIELDS_SIG);
+            AppDataFieldsEvt *f = NULL;
             /* A static: 1 KB the parser walks wants internal RAM. The
              * 48 KB icon is only copied out of, so it is in PSRAM. */
             static char     json[KAPP_DATA_JSON_MAX + 1U];
@@ -6520,8 +6566,19 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             char            path[APPDATA_PATH_MAX];
             kapp_data_t     d;
 
+            /* A read that waited for the pieces of an icon looks at the pool
+             * before it does anything else: nothing is read, and no event is
+             * taken, until the pieces are there. They are kept from here. */
+            if ( (0U < me->read_tries) && !me->read_final
+                && !icon_pieces_take(ic) && read_retry_hold(me, e) )
+            {
+                status = Q_HANDLED();
+                break;
+            }
+            f = Q_NEW_X(AppDataFieldsEvt, 0U, APPDATA_FIELDS_SIG);
             if ( NULL == f )
             {
+                icon_pieces_give(ic);
                 KLOG_E(TAG, "out of events; the folder of '%s' is answered busy",
                        req->project);
                 appdata_answer_busy(req->who);
@@ -6652,36 +6709,30 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
 
             /* All the pieces or none, and taken BEFORE the fields event
              * goes out: half an icon would be drawn wrong rather than not
-             * drawn, and the status has to be true when the asker reads it. */
-            if ( (uint8_t)APPDATA_ICON_OK == f->icon_status )
+             * drawn, and the status has to be true when the asker reads it.
+             * Pieces taken at the top of a retry are used, or given back when
+             * there turned out to be no icon. */
+            if ( (uint8_t)APPDATA_ICON_OK != f->icon_status )
             {
-                bool all = true;
-                for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
+                icon_pieces_give(ic);
+            }
+            else if ( (NULL == ic[0]) && !icon_pieces_take(ic) )
+            {
+                /* The last icon is still with its reader and its pieces go
+                 * back without a word, so the read waits for a pause and
+                 * tries again, within the bound; the fields event was not
+                 * posted and goes back. */
+                if ( read_retry_hold(me, e) )
                 {
-                    ic[s] = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
-                    all   = all && (NULL != ic[s]);
+                    QF_gc(&f->super);
+                    status = Q_HANDLED();
+                    break;
                 }
-                if ( !all )
-                {
-                    for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
-                    {
-                        if ( NULL != ic[s] )
-                        {
-                            QF_gc(&ic[s]->super);
-                            ic[s] = NULL;
-                        }
-                    }
-                    /* A block that goes back to the pool says nothing, so
-                     * the read waits for a pause and tries again, within the
-                     * bound; the fields event was not posted and goes back. */
-                    if ( read_retry_hold(me, e) )
-                    {
-                        QF_gc(&f->super);
-                        status = Q_HANDLED();
-                        break;
-                    }
-                    f->icon_status = (uint8_t)APPDATA_ICON_BUSY;
-                }
+                f->icon_status = (uint8_t)APPDATA_ICON_BUSY;
+            }
+            else
+            {
+                /* The icon has its pieces. */
             }
 
             QACTIVE_POST(req->who, &f->super, &me->super);
@@ -7235,9 +7286,10 @@ static void card_pump(Storage * const me)
  * served when it ends, not lost to it. One write or delete waits at a time,
  * for at most KODE_STORAGE_TURN_MS; a second, or one whose wait runs out, is
  * refused by its own handler, as busy() makes every handler do. Reads of an
- * app's data folder wait the same way, up to KODE_STORAGE_READ_WAIT_DEPTH of
- * them, in arrival order and bounded from the first; one over that, or past
- * the bound, is answered "nothing read", as a read is during a transfer.
+ * app's data folder and of a manifest wait the same way, up to
+ * KODE_STORAGE_READ_WAIT_DEPTH of them in one line, in arrival order and
+ * bounded from the first; one over that, or past the bound, is answered
+ * "nothing read", as a read is during a transfer.
  */
 
 /**
@@ -7303,7 +7355,8 @@ static bool turn_hold(Storage * const me, QEvt const * const e)
 }
 
 /**
- * @brief Keep a read of a data folder until the transfer in flight ends.
+ * @brief Keep a read of a data folder, or of a manifest, until the transfer
+ *        in flight ends.
  *
  * @param me The AO.
  * @param e  The request.
@@ -7317,7 +7370,7 @@ static bool read_hold(Storage * const me, QEvt const * const e)
 
     if ( held )
     {
-        KLOG_D(TAG, "a transfer is in flight; a folder read waits for it");
+        KLOG_D(TAG, "a transfer is in flight; a read waits for it");
     }
     return held;
 }
@@ -7449,7 +7502,8 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
     {
         status = Q_HANDLED();
     }
-    else if ( ((QSignal)APPDATA_REQ_SIG == e->sig)
+    else if ( (((QSignal)APPDATA_REQ_SIG == e->sig)
+               || ((QSignal)STORAGE_DESC_REQ_SIG == e->sig))
              && (busy(me) || me->read_pause) && read_hold(me, e) )
     {
         status = Q_HANDLED();

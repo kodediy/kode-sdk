@@ -354,6 +354,65 @@ static portMUX_TYPE s_tick_mux = portMUX_INITIALIZER_UNLOCKED;
  * tick (a request queued ahead of a window's expiry) depend on it. */
 #define QF_SUPPORT_STEP_TICKS  KQP_TICKS_PER_MS(10U)   /* QF_SUPPORT_STEPS(10) */
 
+/* QF's two lists of time events, as qf_time.c defines them: the armed ones
+ * from .next and the ones armed since the last tick from .act. The header that
+ * declares it is QP's own and is not for callers, so it is declared here as
+ * the definition has it. */
+extern QTimeEvt QTimeEvt_timeEvtHead_[QF_MAX_TICK_RATE];
+
+/** @brief Most links of a list this follows: a longer one is a cycle. */
+#define TIMER_LIST_MAX  4096U
+
+/**
+ * @brief Whether either of QF's lists of time events runs in a cycle.
+ *
+ * An Active Object built again while one of its time events is armed leaves
+ * the list in a cycle, and the next tick walks it for ever. The walk is cut
+ * at TIMER_LIST_MAX links.
+ *
+ * @return true for a cycle.
+ */
+static bool timer_lists_cycle(void)
+{
+    QTimeEvt *list[2];
+    bool      cycle = false;
+
+    list[0] = QTimeEvt_timeEvtHead_[0U].next;
+    list[1] = (QTimeEvt *)QTimeEvt_timeEvtHead_[0U].act;
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        unsigned n = 0U;
+
+        for ( QTimeEvt *t = list[i]; NULL != t; t = t->next )
+        {
+            ++n;
+            if ( TIMER_LIST_MAX < n )
+            {
+                cycle = true;
+                break;
+            }
+        }
+    }
+    return cycle;
+}
+
+/**
+ * @brief Fail the case that is about to tick a list in a cycle, instead of
+ *        walking it for ever, and drop the list so the cases after it run.
+ */
+static void timers_sound(void)
+{
+    if ( timer_lists_cycle() )
+    {
+        QTimeEvt_timeEvtHead_[0U].next = NULL;
+        QTimeEvt_timeEvtHead_[0U].act  = NULL;
+        TEST_FAIL_MESSAGE("QF's list of armed time events runs in a cycle: an "
+                          "Active Object was built again with a time event "
+                          "armed (qf_support_disarm_timers() before the "
+                          "constructor)");
+    }
+}
+
 unsigned qf_support_tick(QActive *ao, unsigned ticks)
 {
     unsigned n = 0U;
@@ -362,6 +421,7 @@ unsigned qf_support_tick(QActive *ao, unsigned ticks)
     {
         return 0U;
     }
+    timers_sound();
 
     portENTER_CRITICAL(&s_tick_mux);
 
@@ -390,6 +450,7 @@ unsigned qf_support_pump(QActive *ao, unsigned max)
     {
         return 0U;
     }
+    timers_sound();
 
     portENTER_CRITICAL(&s_tick_mux);   /* see the note above qf_support_tick */
 
@@ -434,8 +495,33 @@ void qf_support_tick_escaped(void)
 
 void qf_support_reap_timers(void)
 {
+    timers_sound();
     portENTER_CRITICAL(&s_tick_mux);   /* see the note above qf_support_tick */
     QTIMEEVT_TICK_X(0U, (void *)0);
+    portEXIT_CRITICAL(&s_tick_mux);
+}
+
+void qf_support_disarm_timers(QActive *ao)
+{
+    QTimeEvt *list[2];
+
+    portENTER_CRITICAL(&s_tick_mux);
+    list[0] = QTimeEvt_timeEvtHead_[0U].next;
+    list[1] = (QTimeEvt *)QTimeEvt_timeEvtHead_[0U].act;
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        unsigned n = 0U;
+
+        for ( QTimeEvt *t = list[i]; (NULL != t) && (TIMER_LIST_MAX > n);
+              t = t->next )
+        {
+            if ( t->act == (void *)ao )
+            {
+                (void)QTimeEvt_disarm(t);
+            }
+            ++n;
+        }
+    }
     portEXIT_CRITICAL(&s_tick_mux);
 }
 
@@ -496,6 +582,7 @@ void qf_support_pool_give_back(qf_support_dry_t *dry)
 
 void qf_support_time_passes(uint32_t ticks)
 {
+    timers_sound();
     for ( uint32_t i = 0U; i < ticks; ++i )
     {
         QTIMEEVT_TICK_X(0U, (void *)0);
