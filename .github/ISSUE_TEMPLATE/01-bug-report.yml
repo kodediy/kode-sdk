@@ -25,7 +25,7 @@ body:
     attributes:
       label: SDK version
       description: The tag or commit your project pins - the `kodediy/kode` entry of `idf_component.yml`, or `git -C sdk describe --tags --always` inside KodeOS.
-      placeholder: v0.1.0
+      placeholder: v0.1.1
     validations:
       required: true
 
