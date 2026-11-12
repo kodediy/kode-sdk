@@ -6368,7 +6368,9 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             else
             {
                 /* Internal first, card second, the first folder found used
-                 * whole (https://docs.kode.diy/sdk/kdrv/apps). */
+                 * whole (https://docs.kode.diy/sdk/kdrv/apps). A folder is
+                 * found when it has its app.json: an empty or icon-only one
+                 * is no data, and hides nothing. */
                 static const AppDataMedium ORDER[2] = { APPDATA_MEDIUM_FS,
                                                         APPDATA_MEDIUM_SD };
                 for ( uint8_t i = 0U;
@@ -6384,8 +6386,9 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                     {
                         continue;
                     }
-                    if ( (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists
-                        && st.is_dir )
+                    if ( appdata_file_path(path, folder, APPDATA_JSON_NAME)
+                        && (kdrv_storage_stat(path, &st) == KODE_OK)
+                        && st.exists && !st.is_dir )
                     {
                         f->medium = (uint8_t)ORDER[i];
                     }

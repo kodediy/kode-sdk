@@ -3384,9 +3384,12 @@ void storage_desc_request(const char *name, QActive *who);
  *
  * Posted to @p who: APPDATA_FIELDS_SIG once, APPDATA_ICON_SIG zero or
  * KODE_APP_ICON_PIECES times (the icon, always the 128x128 block, whichever
- * size the file has), APPDATA_END_SIG once. No reader slot taken. Refused
- * during a transfer (medium=none, json_status=none); unallocatable gives
- * icon_status=busy and an empty project. Fields and end always arrive. See
+ * size the file has), APPDATA_END_SIG once. No reader slot taken. The folder
+ * is on the first medium, the internal one before the card, that holds its
+ * app.json: a folder with no app.json is no data, and does not hide a folder
+ * on the other medium that has one. Refused during a transfer (medium=none,
+ * json_status=none); unallocatable gives icon_status=busy and an empty
+ * project. Fields and end always arrive. See
  * https://docs.kode.diy/sdk/kdrv/apps.
  *
  * @param project The app's project name, as the binary declares it.

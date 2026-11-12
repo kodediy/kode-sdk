@@ -1386,6 +1386,66 @@ TEST_CASE("the internal folder wins over the card's, whole",
     TEST_ASSERT_EQUAL_STRING("", f->version);   /* not merged from the card */
 }
 
+/* A folder is there only when it has its app.json: an empty or icon-only one,
+ * which a failed put or a copy cut short can leave, is no data, and does not
+ * hide a complete folder on the other medium. */
+static const uint8_t ICON_STUB[16] = { 0x5AU };
+
+TEST_CASE("an icon-only internal folder does not hide a complete one on the card",
+          "[storage_ao][appdata]")
+{
+    static const char card[] = "{\"kode\":\"1\",\"name\":\"Card\"}";
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", ICON_STUB, sizeof(ICON_STUB));
+    fake_media_put_sd_path(".kode/appsdata/scope/app.json", card,
+                           sizeof(card) - 1U);
+
+    ask_appdata("scope");
+
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_SD, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_STRING("Card", f->name);
+}
+
+TEST_CASE("an empty internal folder does not hide a complete one on the card",
+          "[storage_ao][appdata]")
+{
+    static const char card[] = "{\"kode\":\"1\",\"name\":\"Card\"}";
+    char              dir[512];
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_fs_path(".kode/appsdata/scope/gone", "x", 1U);
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/scope/gone",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, unlink(dir));
+    fake_media_put_sd_path(".kode/appsdata/scope/app.json", card,
+                           sizeof(card) - 1U);
+
+    ask_appdata("scope");
+
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_SD, take_fields(0U)->medium);
+}
+
+TEST_CASE("a folder with no app.json on any medium reads as no data, icon and all",
+          "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", ICON_STUB, sizeof(ICON_STUB));
+    fake_media_put_sd_path(".kode/appsdata/scope/icon.k64", ICON_STUB, sizeof(ICON_STUB));
+
+    ask_appdata("scope");
+
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_NONE, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_NONE, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_NONE, f->icon_status);
+}
+
 TEST_CASE("a card folder alone is found with medium=sd", "[storage_ao][appdata]")
 {
     static const char card[] = "{\"kode\":\"1\",\"name\":\"Card\"}";
