@@ -20,6 +20,7 @@
 #include "kcli_proto.h"
 #include "kdrv_c5.h"
 #include "kdrv_c5svc.h"
+#include "khal_identity.h"
 #include "kode_wire.h"
 #include "kqp.h"
 #include "qf_support.h"
@@ -120,6 +121,42 @@ static void expect_coredump(kdrv_coredump_t *cd, bool present, bool mine,
     cd->pc = pc;
     kdrv_slot_coredump_ExpectAnyArgsAndReturn(KODE_OK);
     kdrv_slot_coredump_ReturnThruPtr_out(cd);
+}
+
+/* ---- The two MACs: the P4's own, and the C5's that the serial encodes ----- */
+
+/** @brief A C5's MAC, as AO_Radio hands it over when the link comes up. */
+static const uint8_t INFO_C5_MAC[6] = { 0x38U, 0x44U, 0xBEU, 0x07U, 0xE6U, 0x54U };
+
+TEST_CASE("info names the P4's own MAC as mac_p4 and the C5's beside it", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    fake_nvs_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_identity_set_mac(INFO_C5_MAC));
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE_MESSAGE(replied(">|mac_p4=e8:f6:0a:00:00:01 mac_c5=38:44:be:07:e6:54"),
+        "mac_p4 is the chip's own MAC, not the C5's");
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("info names the P4's MAC on a board that has never seen its C5", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    fake_nvs_reset();
+    (void)khal_identity_init();
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|mac_p4=e8:f6:0a:00:00:01 mac_c5=-"));
+    Mockkdrv_slot_Destroy();
 }
 
 TEST_CASE("info prints one record per kodeOS partition after the identity, "

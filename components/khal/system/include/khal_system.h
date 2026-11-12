@@ -221,17 +221,23 @@ kode_status_t khal_watch_start(void (*pass)(void), uint32_t period_ms);
  */
 void khal_watch_rest(bool rest);
 
-/** @brief What the chip says about itself, for the boot banner. */
+#define KHAL_CHIP_MAC_LEN  6U  /**< Bytes of the chip's own MAC. */
+
+/** @brief What the chip says about itself, for the boot banner and `info`. */
 typedef struct {
     char const *model;       /**< The chip's name, such as "ESP32-P4"; static. */
     uint8_t     rev_major;   /**< Silicon revision, major.                     */
     uint8_t     rev_minor;   /**< Silicon revision, minor.                     */
     uint32_t    flash_bytes; /**< The flash chip's size, as the chip reports it. */
     uint32_t    psram_bytes; /**< The PSRAM's size; 0 when there is none.      */
+    uint8_t     mac[KHAL_CHIP_MAC_LEN]; /**< The chip's own MAC, most significant
+                              *   first: the one its USB port gives as its
+                              *   serial number. All zero when it cannot be
+                              *   read.                                        */
 } khal_chip_info_t;
 
 /**
- * @brief Read the chip's model, revision, flash size and PSRAM size.
+ * @brief Read the chip's model, revision, flash size, PSRAM size and MAC.
  * @param out Filled on KODE_OK.
  * @return KODE_OK; KODE_DENIED for a NULL @p out; KODE_ERROR when the flash
  *         size cannot be read (the other fields are still filled).

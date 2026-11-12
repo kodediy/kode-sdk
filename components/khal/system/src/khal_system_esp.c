@@ -16,6 +16,7 @@
 #include "esp_cpu.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
+#include "esp_mac.h"
 #include "esp_memory_utils.h"
 #include "esp_psram.h"
 #include "esp_random.h"
@@ -520,6 +521,10 @@ kode_status_t khal_chip_info(khal_chip_info_t *out)
     out->rev_major = (uint8_t)((uint32_t)chip.revision / SYS_CHIP_REV_DIVISOR);
     out->rev_minor = (uint8_t)((uint32_t)chip.revision % SYS_CHIP_REV_DIVISOR);
     out->psram_bytes = (uint32_t)esp_psram_get_size();
+    if ( esp_efuse_mac_get_default(out->mac) != ESP_OK )
+    {
+        (void)memset(out->mac, 0, sizeof(out->mac));
+    }
 
     uint32_t flash = 0U;
     if ( esp_flash_get_size(NULL, &flash) != ESP_OK )

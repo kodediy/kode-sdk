@@ -3773,34 +3773,71 @@ static kode_status_t reply_temp(void)
     return KODE_OK;
 }
 
+/** @brief Bytes of a MAC as `info` prints it, "xx:xx:xx:xx:xx:xx" and its NUL. */
+#define INFO_MAC_TEXT  18U
+
+/**
+ * @brief Write a MAC as `info` prints it, or "-" for one that is all zero.
+ * @param mac KHAL_ID_MAC_LEN bytes, most significant first.
+ * @param out Where the text goes.
+ * @param cap Bytes of @p out, at least INFO_MAC_TEXT.
+ */
+static void info_mac_text(const uint8_t mac[KHAL_ID_MAC_LEN], char *out, size_t cap)
+{
+    bool any = false;
+
+    for ( size_t i = 0U; i < (size_t)KHAL_ID_MAC_LEN; i++ )
+    {
+        if ( 0U != mac[i] )
+        {
+            any = true;
+        }
+    }
+    if ( any )
+    {
+        (void)snprintf(out, cap, "%02x:%02x:%02x:%02x:%02x:%02x",
+                       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    else
+    {
+        (void)snprintf(out, cap, "-");
+    }
+}
+
 /**
  * @brief info: what this board is.
  *
- * Synchronous: the identity is decoded at startup, so no owner is asked. The
- * MAC is printed beside the serial it encodes. A board with no identity is
- * not a refusal: its record carries `-` placeholders and closes with `>ok`.
+ * Synchronous: the identity is decoded at startup, so no owner is asked.
+ * `mac_p4` is the P4's own MAC, the one its USB port gives as its serial
+ * number; `mac_c5` is the C5's, which the serial encodes. A board with no
+ * identity is not a refusal: its record carries `-` placeholders and closes
+ * with `>ok`.
  */
 static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     (void)me; (void)c; (void)v;
 
-    uint8_t mac[6];
+    uint8_t          mac[KHAL_ID_MAC_LEN];
+    khal_chip_info_t chip;
+    char             p4[INFO_MAC_TEXT];
+    char             c5[INFO_MAC_TEXT];
+
+    /* A board with no identity leaves the C5's MAC at zero, which prints as "-". */
+    (void)memset(mac, 0, sizeof(mac));
     bool const known = (khal_identity_mac(mac) == KODE_OK);
+
+    /* Only the flash size can fail; khal_chip_info() fills the MAC first. */
+    (void)memset(&chip, 0, sizeof(chip));
+    (void)khal_chip_info(&chip);
+    info_mac_text(chip.mac, p4, sizeof(p4));
+    info_mac_text(mac, c5, sizeof(c5));
 
     /* The product is a firmware fact, so it answers even when the silicon
      * would not: a board that cannot read its own MAC still knows what it is. */
     console_reply(">|serial=%s product=\"%s\" board=\"%s\"",
           known ? khal_identity_serial() : "-", KBSP_ID_PRODUCT,
           KBSP_BOARD_REV);
-    if ( known )
-    {
-        console_reply(">|mac_p4=%02x:%02x:%02x:%02x:%02x:%02x",
-              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    }
-    else
-    {
-        console_reply(">|mac_p4=-");
-    }
+    console_reply(">|mac_p4=%s mac_c5=%s", p4, c5);
 
     /* Then what is programmed where: a descriptor is one 256-byte flash read,
      * so this answers in every state. An empty partition is an answer. */
