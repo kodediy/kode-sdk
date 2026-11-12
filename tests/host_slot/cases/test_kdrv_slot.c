@@ -733,6 +733,65 @@ static void expect_desc(esp_app_desc_t *desc, const char *project)
     esp_ota_get_partition_description_ReturnThruPtr_app_desc(desc);
 }
 
+/* The slot is where this firmware's own update goes, and the next boot hands
+ * the board to whatever it holds. What esp_ota_end() accepts is any image
+ * built for the chip, an app's included, so the project's name is what tells
+ * an update from something else. */
+TEST_CASE("an image of the running project ends well", "[kdrv_slot]")
+{
+    esp_app_desc_t   desc;
+    kdrv_slot_desc_t running;
+
+    slot_fresh(ESP_PARTITION_SUBTYPE_APP_OTA_0);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_running_desc(&running));
+
+    expect_begin_ok();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
+
+    esp_ota_end_ExpectAnyArgsAndReturn(ESP_OK);
+    expect_desc(&desc, running.project);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_end());
+
+    slot_done();
+}
+
+TEST_CASE("an image of another project is refused at the end", "[kdrv_slot]")
+{
+    esp_app_desc_t desc;
+
+    slot_fresh(ESP_PARTITION_SUBTYPE_APP_OTA_0);
+
+    expect_begin_ok();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
+
+    esp_ota_end_ExpectAnyArgsAndReturn(ESP_OK);
+    expect_desc(&desc, "buttons_led");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR, kdrv_slot_end(),
+        "an app's image in the slot would boot in the OS's place");
+
+    /* The session is over all the same, and a new one opens. */
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_slot_end());
+    expect_begin_ok();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
+
+    slot_done();
+}
+
+TEST_CASE("an image with no description to read is refused at the end",
+          "[kdrv_slot]")
+{
+    slot_fresh(ESP_PARTITION_SUBTYPE_APP_OTA_0);
+
+    expect_begin_ok();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
+
+    esp_ota_end_ExpectAnyArgsAndReturn(ESP_OK);
+    esp_ota_get_partition_description_ExpectAnyArgsAndReturn(ESP_ERR_NOT_FOUND);
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_slot_end());
+
+    slot_done();
+}
+
 TEST_CASE("every app partition can be described by id, and only the running "
           "one says so", "[kdrv_slot]")
 {
