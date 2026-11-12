@@ -4431,7 +4431,7 @@ static QState get_file_done(AppMgr * const me)
  * @brief The open of the file in hand was answered.
  *
  * The length is judged before a byte is read: app.json may be anything up to
- * the reader's limit, an icon is one size.
+ * the reader's limit, an icon is one of two sizes.
  *
  * @param me  The AO.
  * @param rsp The answer.
@@ -4457,16 +4457,16 @@ static QState get_opened(AppMgr * const me, StorageOpenRspEvt const * const rsp)
             return get_fail(me, APPDATA_GET_JSON);
         }
     }
-    else if ( KAPP_ICON_BYTES != rsp->size )
+    else if ( !kapp_icon_len_ok(rsp->size) )
     {
-        KLOG_W(TAG, "the icon fetched for '%s' is %lu bytes, not %lu",
+        KLOG_W(TAG, "the icon fetched for '%s' is %lu bytes, not %lu or %lu",
                me->get_project, (unsigned long)rsp->size,
-               (unsigned long)KAPP_ICON_BYTES);
+               (unsigned long)KAPP_ICON_HALF_BYTES, (unsigned long)KAPP_ICON_BYTES);
         return get_fail(me, APPDATA_GET_ICON);
     }
     else
     {
-        /* An icon of the one size there is. */
+        /* An icon of a size the folder's reader takes. */
     }
     me->get_want = rsp->size;
     (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);

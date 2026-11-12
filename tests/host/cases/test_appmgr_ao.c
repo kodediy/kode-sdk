@@ -2649,20 +2649,38 @@ static void answer_open(uint32_t size, uint8_t medium)
     answer_open_with(size, medium, (uint8_t)KODE_OK);
 }
 
-/** @brief Hand AppMgr @p len bytes of @p src as one chunk. */
+/** @brief The most a medium's read hands over in one chunk: AO_Storage's
+ *         STORAGE_CHUNK, which is the size of the buffer a chunk lies in. */
+#define MEDIUM_CHUNK_MAX  (32U * 1024U)
+
+/**
+ * @brief Hand AppMgr @p len bytes of @p src, as chunks of a medium's size.
+ *
+ * Each chunk lies in AO_Storage's buffer 0 and is answered at once, the way a
+ * read hands them over: a longer run is as many chunks as it takes.
+ */
 static void answer_data_bytes(const uint8_t *src, uint32_t len)
 {
-    StorageDataEvt d;
     uint8_t * const buf = (uint8_t *)storage_buf(0U);
 
     TEST_ASSERT_NOT_NULL(buf);
-    (void)memcpy(buf, src, len);
-    (void)memset(&d, 0, sizeof(d));
-    d.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DATA_SIG);
-    d.len    = (uint16_t)len;
-    d.idx    = 0U;
-    d.status = (uint8_t)KODE_OK;
-    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    for ( uint32_t off = 0U; off < len; off += MEDIUM_CHUNK_MAX )
+    {
+        StorageDataEvt d;
+        uint32_t       n = len - off;
+
+        if ( n > MEDIUM_CHUNK_MAX )
+        {
+            n = MEDIUM_CHUNK_MAX;
+        }
+        (void)memcpy(buf, &src[off], n);
+        (void)memset(&d, 0, sizeof(d));
+        d.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DATA_SIG);
+        d.len    = (uint16_t)n;
+        d.idx    = 0U;
+        d.status = (uint8_t)KODE_OK;
+        QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    }
 }
 
 /** @brief Hand AppMgr the whole of image_named()'s image as one chunk. */
@@ -5579,6 +5597,10 @@ TEST_CASE("an idle AppMgr is ready for the round and a writing one is busy",
 /** @brief The most answer rounds tidy_settle() plays before giving up. */
 #define TIDY_SETTLE_ROUNDS 100U
 
+/** @brief The steps run_ticks() turns for an adoption to read a container
+ *         with a 128x128 icon out of the mailbox, a piece at a time. */
+#define TIDY_ADOPT_TICKS   40U
+
 /** @brief The size of a short RECV_DATA event of the streaming cases. */
 #define TIDY_SHORT_PIECE   100U
 
@@ -5590,27 +5612,22 @@ static uint8_t s_cont[KFW_HDR_LEN + KFW_AD_HDR_LEN + KFW_AD_JSON_MAX
  * @brief Build a container for an app named @p project in s_cont.
  *
  * The header, then - when @p with_block - the app-data block (TIDY_JSON, and
- * a 12 KB icon when @p with_icon), then image_named()'s image uncompressed.
+ * an icon of @p clen bytes), then image_named()'s image uncompressed.
  *
  * @param project    The project name the image's descriptor carries.
  * @param with_block Set KFW_FLAG_APPDATA and lay the block out.
- * @param with_icon  Give the block an icon.
+ * @param clen       The icon's length: 0 for none, else what the block claims.
  * @return The container's length.
  */
-static uint32_t container_named(const char *project, bool with_block,
-                                bool with_icon)
+static uint32_t container_icon(const char *project, bool with_block,
+                               uint16_t clen)
 {
     uint32_t const ilen  = image_named(project);
     uint16_t const jlen  = (uint16_t)(sizeof(TIDY_JSON) - 1U);
-    uint16_t       clen  = 0U;
     uint32_t       at    = (uint32_t)KFW_HDR_LEN;
     kfw_hdr_t      h;
     kfw_ad_hdr_t   ad;
 
-    if ( with_icon )
-    {
-        clen = (uint16_t)KFW_AD_ICON_LEN;
-    }
     (void)memset(s_cont, 0, sizeof(s_cont));
     if ( with_block )
     {
@@ -5645,6 +5662,26 @@ static uint32_t container_named(const char *project, bool with_block,
     h.crc = kfw_crc32(&h, offsetof(kfw_hdr_t, crc));
     (void)memcpy(s_cont, &h, sizeof(h));
     return at + ilen;
+}
+
+/**
+ * @brief container_icon() with the icon the board holds, or none.
+ *
+ * @param project    The project name the image's descriptor carries.
+ * @param with_block Set KFW_FLAG_APPDATA and lay the block out.
+ * @param with_icon  Give the block a 128x128 icon, KFW_AD_ICON_LEN bytes.
+ * @return The container's length.
+ */
+static uint32_t container_named(const char *project, bool with_block,
+                                bool with_icon)
+{
+    uint16_t clen = 0U;
+
+    if ( with_icon )
+    {
+        clen = (uint16_t)KFW_AD_ICON_LEN;
+    }
+    return container_icon(project, with_block, clen);
 }
 
 /**
@@ -5985,7 +6022,7 @@ TEST_CASE("an install with a block puts the folder before it is done",
     tidy_begin_case();
     uint32_t const len = container_named("blockapp", true, true);
 
-    /* From a file: one 32 KB chunk takes the 12 KB icon whole. */
+    /* From a file: two chunks of a medium's size carry the 48 KB icon. */
     ask_flash_dst("blockapp.bin", (uint8_t)KFW_TARGET_APP);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
@@ -6112,7 +6149,7 @@ TEST_CASE("adoption at boot waits for the folder", "[appmgr_ao][tidy]")
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_pending_write_end());
 
     QASM_DISPATCH(AO_AppMgr, &adopt, 0U);
-    run_ticks(4U);
+    run_ticks(TIDY_ADOPT_TICKS);
     TEST_ASSERT_FALSE_MESSAGE(boot_run_request(&off, &size, &mode),
         "the adopted app booted before its folder was written");
     const QEvt * const put = storage_take(APPDATA_PUT_REQ_SIG);
@@ -6859,6 +6896,29 @@ TEST_CASE("a name that cannot be a folder skips the put", "[appmgr_ao][tidy]")
     TEST_ASSERT_EQUAL_UINT_MESSAGE(fake_psram_alloc_count(),
                                    fake_psram_free_count(),
         "the block's buffer was not given back");
+    tidy_end_case();
+}
+
+TEST_CASE("an install whose block holds a 64 px icon puts the folder with it as it is",
+          "[appmgr_ao][tidy]")
+{
+    tidy_begin_case();
+    uint32_t const len = container_icon("halfapp", true,
+                                        (uint16_t)KFW_AD_ICON_LEN_HALF);
+
+    ask_flash_dst("halfapp.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data_bytes(s_cont, len);
+    answer_eof();
+
+    const QEvt * const put = storage_take(APPDATA_PUT_REQ_SIG);
+    TEST_ASSERT_NOT_NULL_MESSAGE(put, "the folder was never asked for");
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)KFW_AD_ICON_LEN_HALF,
+                             ((AppDataPutEvt const *)put)->icon_len);
+    put_done(put);
+    put_rsp("halfapp", KODE_OK);
+    TEST_ASSERT_EQUAL_UINT(1U, spy_ends().flash_done);
     tidy_end_case();
 }
 

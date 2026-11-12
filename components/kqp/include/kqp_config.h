@@ -770,10 +770,13 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  * partition before its app does, so nothing bounds how many there are but the
  * partition itself. A new one is refused when it would leave less than the
  * floor free: Kody's pack is staged beside the one in use when it updates. */
-#define KODE_APPDATA_FOLDER_BYTES   (20U * 1024U)  /**< What one data folder
-                                       *   takes: five 4 KB clusters, one for
-                                       *   the directory, one for app.json,
-                                       *   three for the icon.              */
+#define KODE_APPDATA_CLUSTER_BYTES  4096U          /**< The internal FAT's allocation unit. */
+#define KODE_APPDATA_FOLDER_BYTES   ((2U + (KODE_APP_ICON_BYTES / KODE_APPDATA_CLUSTER_BYTES)) \
+                                     * KODE_APPDATA_CLUSTER_BYTES)
+                                      /**< What one data folder takes at most: the
+                                       *   directory's cluster, app.json's, and
+                                       *   the clusters of a 128x128 icon (a
+                                       *   64x64 one takes a quarter of them). */
 #define KODE_APPDATA_FREE_MIN_BYTES (128U * 1024U) /**< What a new data folder
                                        *   must leave free on the internal
                                        *   partition.                       */
@@ -1708,17 +1711,25 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
  * Eight: a central's writes waiting for the app, and the app's own values on
  * their way to AO_Radio, which takes each in one step. */
 #define KQP_WIDE_POOL_COUNT     8U
-/* The jumbo tier holds two things: a piece of an image arriving on the
- * console (a terminal install), and a third of an app icon leaving a medium
- * (`app_data`). Four blocks cover everything one 4 KB protocol chunk can
- * fragment into, and one icon is three of them taken in one step or not at
- * all, section E of the app data spec. For an install, that is
- * everything a chunk can fragment into on its way off the wire (the reader
- * drains the RX ring in whatever pieces it finds) with room to spare; the
- * transfer's actual flow control is the `>|ack` protocol, not this pool -
- * the wire itself has none (the USB-Serial/JTAG ISR drops silently once its
- * RX ring is full). */
+/* The jumbo tier holds one thing: a piece of an image arriving on the console
+ * (a terminal install). Four blocks cover everything one 4 KB protocol chunk
+ * can fragment into on its way off the wire (the reader drains the RX ring in
+ * whatever pieces it finds) with room to spare; the transfer's actual flow
+ * control is the `>|ack` protocol, not this pool - the wire itself has none
+ * (the USB-Serial/JTAG ISR drops silently once its RX ring is full). */
 #define KQP_JUMBO_POOL_COUNT    4U
+/* The icon tier holds one thing: a piece of an app's icon leaving a medium
+ * (`app_data`). An icon is KODE_APP_ICON_BYTES, 48 KB, and travels as
+ * KODE_APP_ICON_PIECES events taken in one step or not at all, section E of
+ * the app data spec; one icon is in flight at a time, so the tier is one
+ * icon's pieces. Its blocks come from PSRAM when kqp_init() runs: the same
+ * pieces in the internal pool would be 48 KB of the 640 KB, taken for the
+ * life of every firmware whether or not it ever shows an icon. */
+#define KODE_APP_ICON_BYTES     49152U  /**< == KAPP_ICON_BYTES: the 128x128 RGB565 + A8 block. */
+#define KODE_APP_ICON_PIECES    3U      /**< The events one icon travels in.                    */
+#define KODE_APP_ICON_PIECE     (KODE_APP_ICON_BYTES / KODE_APP_ICON_PIECES)
+                                        /**< What each carries: 16 KB.                          */
+#define KQP_ICON_POOL_COUNT     KODE_APP_ICON_PIECES  /**< One icon's pieces.                   */
 
 /* ---- System AO housekeeping --------------------------------------------- */
 #define KQP_AO_QUEUE_LEN        16U   /**< Events buffered per system AO.     */

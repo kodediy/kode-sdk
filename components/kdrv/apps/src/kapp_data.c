@@ -274,3 +274,101 @@ kapp_fetch_t kapp_data_fetched(const char *text, size_t len, kapp_json_status_t 
     }
     return ask;
 }
+
+/* ---- The icon: the 128x128 block the board holds, and the 64x64 file ---------- */
+
+#define ICON_COLOUR_BYTES       2U   /**< One RGB565 pixel, little-endian.                  */
+#define ICON_HALF_ALPHA_OFFSET  (KAPP_ICON_HALF_W * KAPP_ICON_HALF_H * ICON_COLOUR_BYTES)
+                                     /**< Where a 64x64 file's A8 plane begins.             */
+#define ICON_ALPHA_OFFSET       (KAPP_ICON_W * KAPP_ICON_H * ICON_COLOUR_BYTES)
+                                     /**< Where a 128x128 block's A8 plane begins.          */
+#define ICON_DOUBLE             2U   /**< Pixels each of a 64x64 file's pixels covers across and down. */
+
+bool kapp_icon_len_ok(size_t len)
+{
+    return (KAPP_ICON_BYTES == len) || (KAPP_ICON_HALF_BYTES == len);
+}
+
+/**
+ * @brief Double the A8 plane of a 64x64 file into the tail of the block.
+ *
+ * Walked from the last pixel back: a pixel's source lies before its
+ * destination, so what is still to be read is never written over.
+ *
+ * @param block The block, the 64x64 file at its head.
+ */
+static void icon_widen_alpha(uint8_t *block)
+{
+    uint8_t const *const from = &block[ICON_HALF_ALPHA_OFFSET];
+    uint8_t *const       to   = &block[ICON_ALPHA_OFFSET];
+    uint32_t             y    = KAPP_ICON_H;
+
+    while ( 0U < y )
+    {
+        uint32_t x = KAPP_ICON_W;
+
+        --y;
+        while ( 0U < x )
+        {
+            --x;
+            to[(y * KAPP_ICON_W) + x] =
+                from[((y / ICON_DOUBLE) * KAPP_ICON_HALF_W) + (x / ICON_DOUBLE)];
+        }
+    }
+}
+
+/**
+ * @brief Double the RGB565 plane of a 64x64 file into the head of the block.
+ *
+ * Walked from the last pixel back, like icon_widen_alpha(): a pixel's source
+ * lies at or before its destination, and the plane grows over the file's own
+ * A8 plane, which must have been moved out already.
+ *
+ * @param block The block, the 64x64 file at its head.
+ */
+static void icon_widen_colour(uint8_t *block)
+{
+    uint32_t y = KAPP_ICON_H;
+
+    while ( 0U < y )
+    {
+        uint32_t x = KAPP_ICON_W;
+
+        --y;
+        while ( 0U < x )
+        {
+            --x;
+            uint32_t const to   = ((y * KAPP_ICON_W) + x) * ICON_COLOUR_BYTES;
+            uint32_t const from = (((y / ICON_DOUBLE) * KAPP_ICON_HALF_W)
+                                   + (x / ICON_DOUBLE)) * ICON_COLOUR_BYTES;
+
+            block[to]      = block[from];
+            block[to + 1U] = block[from + 1U];
+        }
+    }
+}
+
+bool kapp_icon_widen(uint8_t *block, size_t len)
+{
+    bool ok = false;
+
+    if ( NULL == block )
+    {
+        /* Nothing to widen. */
+    }
+    else if ( KAPP_ICON_BYTES == len )
+    {
+        ok = true;
+    }
+    else if ( KAPP_ICON_HALF_BYTES == len )
+    {
+        icon_widen_alpha(block);   /* first: the colour plane grows over its source */
+        icon_widen_colour(block);
+        ok = true;
+    }
+    else
+    {
+        /* Neither size: the block is left as the read left it. */
+    }
+    return ok;
+}

@@ -1029,8 +1029,9 @@ TEST_CASE("reading a manifest does not take the reader slot", "[storage_ao]")
 
 /* ---- The app data folder ----------------------------------------------------- */
 
-/* https://docs.kode.diy/sdk/kdrv/apps: one fields event, then zero or three
- * icon events, then the end marker - to whoever asked, never on the bus. The
+/* https://docs.kode.diy/sdk/kdrv/apps: one fields event, then zero or
+ * KODE_APP_ICON_PIECES icon events, then the end marker - to whoever asked,
+ * never on the bus. The
  * statuses are the whole point of the reply: every case below reads one, and
  * the conversation has to close even when there is nothing to say. */
 
@@ -1047,9 +1048,13 @@ static void ask_appdata(const char *project)
     QASM_DISPATCH(AO_Storage, &e.super, 0U);
 }
 
+/** @brief The icon as the asker received it: the pieces, laid end to end. */
+static uint8_t s_got_icon[KAPP_ICON_BYTES];
+
 /**
  * @brief Take the fields event and assert the conversation closes.
- * @param icons_expected How many icon events must arrive before the end.
+ * @param icons_expected How many icon events must arrive before the end; the
+ *        pieces are kept in s_got_icon.
  * @return The fields event, still owned by the spy.
  */
 static const AppDataFieldsEvt *take_fields(uint8_t icons_expected)
@@ -1058,12 +1063,15 @@ static const AppDataFieldsEvt *take_fields(uint8_t icons_expected)
     TEST_ASSERT_NOT_NULL_MESSAGE(ev, "no fields event");
     TEST_ASSERT_EQUAL_INT(APPDATA_FIELDS_SIG, (int)ev->sig);
     const AppDataFieldsEvt *f = (const AppDataFieldsEvt *)ev;
+    (void)memset(s_got_icon, 0, sizeof(s_got_icon));
     for ( uint8_t i = 0U; i < icons_expected; ++i )
     {
         const QEvt *ic = ao_spy_take();
         TEST_ASSERT_NOT_NULL(ic);
         TEST_ASSERT_EQUAL_INT(APPDATA_ICON_SIG, (int)ic->sig);
         TEST_ASSERT_EQUAL_UINT8(i, ((const AppDataIconEvt *)ic)->seq);
+        (void)memcpy(&s_got_icon[(size_t)i * KODE_APP_ICON_PIECE],
+                     ((const AppDataIconEvt *)ic)->data, KODE_APP_ICON_PIECE);
     }
     const QEvt *end = ao_spy_take();
     TEST_ASSERT_NOT_NULL(end);
@@ -1102,7 +1110,7 @@ TEST_CASE("a folder with app.json and no icon", "[storage_ao][appdata]")
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_NONE, f->icon_status);
 }
 
-TEST_CASE("a folder with a right-sized icon streams three thirds",
+TEST_CASE("a folder with a 128 px icon streams it in pieces, byte for byte",
           "[storage_ao][appdata]")
 {
     static uint8_t icon[KAPP_ICON_BYTES];
@@ -1110,7 +1118,7 @@ TEST_CASE("a folder with a right-sized icon streams three thirds",
     storage_fresh();
     for ( size_t i = 0U; sizeof(icon) > i; ++i )
     {
-        icon[i] = (uint8_t)i;
+        icon[i] = (uint8_t)((i * 31U) + (i >> 8));
     }
     fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
                            sizeof(JSON_OK) - 1U);
@@ -1118,23 +1126,79 @@ TEST_CASE("a folder with a right-sized icon streams three thirds",
 
     ask_appdata("scope");
 
-    const AppDataFieldsEvt *f = take_fields(3U);
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+    TEST_ASSERT_EQUAL_MEMORY(icon, s_got_icon, sizeof(icon));
 }
 
-TEST_CASE("an icon of the wrong size is refused with size",
+TEST_CASE("a folder with a 64 px icon answers the 128 px icon it doubles to",
           "[storage_ao][appdata]")
 {
-    static uint8_t icon[KAPP_ICON_BYTES - 1U];
+    static uint8_t icon[KAPP_ICON_HALF_BYTES];
+    uint32_t const colour_bytes = (uint32_t)KAPP_ICON_HALF_W * KAPP_ICON_HALF_H * 2U;
 
     storage_fresh();
+    for ( uint32_t y = 0U; KAPP_ICON_HALF_H > y; ++y )
+    {
+        for ( uint32_t x = 0U; KAPP_ICON_HALF_W > x; ++x )
+        {
+            uint32_t const at = (y * KAPP_ICON_HALF_W) + x;
+            uint16_t const c  = (uint16_t)(0x1234U + (y * 251U) + (x * 7U));
+
+            icon[at * 2U]          = (uint8_t)(c & 0xFFU);
+            icon[(at * 2U) + 1U]   = (uint8_t)(c >> 8);
+            icon[colour_bytes + at] = (uint8_t)(0x5AU ^ ((y * 13U) + x));
+        }
+    }
     fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
                            sizeof(JSON_OK) - 1U);
     fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, sizeof(icon));
 
     ask_appdata("scope");
 
-    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_SIZE, take_fields(0U)->icon_status);
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+    for ( uint32_t y = 0U; KAPP_ICON_H > y; ++y )
+    {
+        for ( uint32_t x = 0U; KAPP_ICON_W > x; ++x )
+        {
+            uint32_t const at   = (y * KAPP_ICON_W) + x;
+            uint32_t const from = ((y / 2U) * KAPP_ICON_HALF_W) + (x / 2U);
+
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(icon[from * 2U], s_got_icon[at * 2U],
+                                           "colour, low byte");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(icon[(from * 2U) + 1U],
+                                           s_got_icon[(at * 2U) + 1U],
+                                           "colour, high byte");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(icon[colour_bytes + from],
+                                           s_got_icon[((uint32_t)KAPP_ICON_W * KAPP_ICON_H * 2U) + at],
+                                           "alpha");
+        }
+    }
+}
+
+TEST_CASE("an icon of a size that is neither is refused with size",
+          "[storage_ao][appdata]")
+{
+    static uint8_t icon[KAPP_ICON_BYTES + 1U];
+    static const size_t BAD[] = { 1U, KAPP_ICON_HALF_BYTES - 1U,
+                                  KAPP_ICON_HALF_BYTES + 1U,
+                                  (KAPP_ICON_HALF_BYTES + KAPP_ICON_BYTES) / 2U,
+                                  KAPP_ICON_BYTES - 1U, KAPP_ICON_BYTES + 1U };
+
+    for ( size_t i = 0U; (sizeof(BAD) / sizeof(BAD[0])) > i; ++i )
+    {
+        storage_fresh();
+        fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
+                               sizeof(JSON_OK) - 1U);
+        fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, BAD[i]);
+
+        ask_appdata("scope");
+
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPDATA_ICON_SIZE,
+                                        take_fields(0U)->icon_status,
+                                        "a length that is neither size was taken");
+    }
 }
 
 TEST_CASE("the icon key names a file that is not there",
@@ -1292,11 +1356,10 @@ TEST_CASE("a folder question the pool cannot carry is answered busy at once",
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, f->icon_status);
 }
 
-/* All three blocks or none: an icon that arrived in pieces would be drawn
+/* All the pieces or none: an icon that arrived in pieces would be drawn
  * wrong rather than not drawn, so a short pool is a refusal and not a
- * partial send. The console's own upload is what takes the blocks in the
- * field; two of them here is the same shortage. */
-TEST_CASE("an icon is not started when the jumbo pool is short",
+ * partial send. Another icon's pieces still held is the same shortage. */
+TEST_CASE("an icon is not started when the icon pool is short",
           "[storage_ao][appdata]")
 {
     static uint8_t icon[KAPP_ICON_BYTES];
@@ -1306,8 +1369,28 @@ TEST_CASE("an icon is not started when the jumbo pool is short",
                            sizeof(JSON_OK) - 1U);
     fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, sizeof(icon));
 
-    RecvDataEvt *held[2];
-    for ( unsigned i = 0U; 2U > i; ++i )
+    AppDataIconEvt *held = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
+    TEST_ASSERT_NOT_NULL_MESSAGE(held, "the icon pool is empty at the start");
+
+    ask_appdata("scope");
+
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, take_fields(0U)->icon_status);
+
+    QF_gc(&held->super);
+}
+
+/* The terminal install's blocks are not the icon's: a transfer holding every
+ * jumbo block leaves a folder its icon. */
+TEST_CASE("an icon does not wait for the jumbo pool", "[storage_ao][appdata]")
+{
+    static uint8_t icon[KAPP_ICON_BYTES];
+    RecvDataEvt   *held[KQP_JUMBO_POOL_COUNT];
+
+    storage_fresh();
+    fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, sizeof(icon));
+    for ( unsigned i = 0U; KQP_JUMBO_POOL_COUNT > i; ++i )
     {
         held[i] = Q_NEW_X(RecvDataEvt, 0U, RECV_DATA_SIG);
         TEST_ASSERT_NOT_NULL_MESSAGE(held[i], "the jumbo pool is smaller than "
@@ -1316,9 +1399,10 @@ TEST_CASE("an icon is not started when the jumbo pool is short",
 
     ask_appdata("scope");
 
-    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, take_fields(0U)->icon_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK,
+                            take_fields(KODE_APP_ICON_PIECES)->icon_status);
 
-    for ( unsigned i = 0U; 2U > i; ++i )
+    for ( unsigned i = 0U; KQP_JUMBO_POOL_COUNT > i; ++i )
     {
         QF_gc(&held[i]->super);
     }
@@ -1889,7 +1973,8 @@ TEST_CASE("put writes app.json and icon.k64 into the internal folder",
                            fread(got, 1U, sizeof(got), f));
     (void)fclose(f);
     TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
                                              ".kode/appsdata/demo/app.json"));
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
@@ -1986,7 +2071,8 @@ TEST_CASE("put replaces a folder that had other files", "[storage_ao][appdata]")
                                              ".kode/appsdata/demo/logo.k64"));
     TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
                           (int)fs_size(".kode/appsdata/demo/app.json"));
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
 }
 
 TEST_CASE("put creates .kode and appsdata when missing", "[storage_ao][appdata]")
@@ -2053,18 +2139,41 @@ TEST_CASE("put refuses a name that cannot be a folder", "[storage_ao][appdata]")
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), ".kode"));
 }
 
-TEST_CASE("put with an icon length the format does not have is refused",
+TEST_CASE("put stores a 64 px icon as it is, and does not widen it on the medium",
           "[storage_ao][appdata]")
 {
     storage_fresh();
     fake_psram_reset();
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
 
-    ask_appdata_put("demo", 100U);
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
     drain_write();
 
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     assert_put_bufs_freed();
-    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), ".kode"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_HALF_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
+}
+
+TEST_CASE("put with an icon length the format does not have is refused",
+          "[storage_ao][appdata]")
+{
+    static const uint16_t BAD[] = { 1U, 100U, (uint16_t)(KAPP_ICON_HALF_BYTES - 1U),
+                                    (uint16_t)(KAPP_ICON_HALF_BYTES + 1U),
+                                    (uint16_t)(KAPP_ICON_BYTES - 1U) };
+
+    for ( size_t i = 0U; (sizeof(BAD) / sizeof(BAD[0])) > i; ++i )
+    {
+        storage_fresh();
+        fake_psram_reset();
+
+        ask_appdata_put("demo", BAD[i]);
+        drain_write();
+
+        TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
+        assert_put_bufs_freed();
+        TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), ".kode"));
+    }
 }
 
 TEST_CASE("put while a transfer runs answers busy", "[storage_ao][appdata]")
@@ -2103,7 +2212,8 @@ TEST_CASE("a second put during the first answers busy", "[storage_ao][appdata]")
     drain_write();
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     assert_put_bufs_freed();
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
 }
 
 /* A name that is a directory cannot be created as a file, which is how the
@@ -2144,7 +2254,8 @@ TEST_CASE("put answers after two steps", "[storage_ao][appdata]")
 
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     assert_put_bufs_freed();
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
 }
 
 /* ---- The card's fields ------------------------------------------------------ */

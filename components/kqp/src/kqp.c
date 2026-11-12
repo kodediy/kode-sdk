@@ -7,12 +7,14 @@
 #include "kqp_bsp.h"
 #include "kqp_worker.h"
 #include "sdkconfig.h"
-#if KQP_BLE_APP_WIDE
 #include "khal_system.h"
-#endif
 #if CONFIG_KQP_AO_WATCH
 #include "kqp_watch_judge.h"
 #endif
+
+/* cppcheck-suppress misra-c2012-5.9 ; QP's module name for Q_ASSERT: one static of that name per file is QP's design */
+/* cppcheck-suppress misra-c2012-8.9 ; the same static, read by the assertion in kqp_init() alone */
+Q_DEFINE_THIS_MODULE("kqp")
 
 /** Subscriber storage: one QSubscrList per published signal. */
 static QSubscrList s_subscr_sto[MAX_PUB_SIG];
@@ -25,9 +27,11 @@ static QSubscrList s_subscr_sto[MAX_PUB_SIG];
  *              file being written) and the end of a write (it names the app
  *              installed), app-install requests and entries
  *   - large  : log lines - a whole formatted console line each
- *   - jumbo  : RecvDataEvt and AppDataIconEvt, the two things 4 KB wide
- * and a fifth, wide, between large and jumbo, only in an app whose Bluetooth
- * values are longer than the large tier carries (KQP_BLE_APP_WIDE).
+ *   - jumbo  : RecvDataEvt, the one thing 4 KB wide
+ * and two more where they fall in the order: a wide tier between large and
+ * jumbo, only in an app whose Bluetooth values are longer than the large tier
+ * carries (KQP_BLE_APP_WIDE), and the icon tier above jumbo, AppDataIconEvt,
+ * a piece of an app's icon 16 KB wide, whose blocks come from PSRAM.
  *
  * A block is a WIDTH, not a container. Declaring one in C needs a type, so
  * each tier is typedef'd from the widest event that has to fit in it: the
@@ -48,16 +52,20 @@ typedef SchedEntryEvt  KqpLargeBlock;
 #else
 typedef MqttMsgEvt     KqpLargeBlock;
 #endif
-/* AppDataIconEvt carries project[32] on top of the same 4096-byte payload
- * RecvDataEvt has, so it is wider - the jumbo tier is typedef'd from it now,
- * and RecvDataEvt gets the explicit fit check below that it used to be
- * exempt from by definition. */
-typedef AppDataIconEvt KqpJumboBlock;
+typedef RecvDataEvt    KqpJumboBlock;
+/* The icon tier is as wide as AppDataIconEvt, a piece of an icon, which is
+ * wider than any other event and so is the only one it serves. */
+typedef AppDataIconEvt KqpIconBlock;
 
 #define KQP_BLOCK_SMALL   sizeof(KqpSmallBlock)
 #define KQP_BLOCK_MEDIUM  sizeof(KqpMediumBlock)
 #define KQP_BLOCK_LARGE   sizeof(KqpLargeBlock)
 #define KQP_BLOCK_JUMBO   sizeof(KqpJumboBlock)
+#define KQP_BLOCK_ICON    sizeof(KqpIconBlock)
+/* What QMPool_init() rounds the icon block up to: the pool's storage is that
+ * many bytes per block and not one fewer, or the last block would not fit. */
+#define KQP_ICON_STRIDE   (((((KQP_BLOCK_ICON) + sizeof(void *)) - 1U) / sizeof(void *)) \
+                           * sizeof(void *))
 
 static KqpSmallBlock   s_small_pool[KQP_SMALL_POOL_COUNT];
 static KqpMediumBlock  s_medium_pool[KQP_MEDIUM_POOL_COUNT];
@@ -73,8 +81,6 @@ static KqpJumboBlock   s_jumbo_pool[KQP_JUMBO_POOL_COUNT];
  * smaller header, so it fits too. */
 typedef BleAppValueReqEvt KqpWideBlock;
 #define KQP_BLOCK_WIDE    sizeof(KqpWideBlock)
-
-Q_DEFINE_THIS_MODULE("kqp")
 
 _Static_assert(KQP_BLOCK_LARGE < KQP_BLOCK_WIDE,
                "QP pools must have strictly increasing block sizes");
@@ -97,6 +103,8 @@ _Static_assert(KQP_BLOCK_MEDIUM < KQP_BLOCK_LARGE,
 _Static_assert(sizeof(LogEvt) <= KQP_BLOCK_LARGE,
                "LogEvt must fit the large pool");
 _Static_assert(KQP_BLOCK_LARGE < KQP_BLOCK_JUMBO,
+               "QP pools must have strictly increasing block sizes");
+_Static_assert(KQP_BLOCK_JUMBO < KQP_BLOCK_ICON,
                "QP pools must have strictly increasing block sizes");
 #if !KQP_BLE_APP_WIDE
 _Static_assert(sizeof(BleAppWriteEvt) <= KQP_BLOCK_LARGE,
@@ -281,8 +289,15 @@ _Static_assert(sizeof(AppDataReqEvt) <= KQP_BLOCK_MEDIUM,
                "AppDataReqEvt must fit the medium pool");
 _Static_assert(sizeof(AppDataFieldsEvt) <= KQP_BLOCK_MEDIUM,
                "AppDataFieldsEvt must fit the medium pool");
-_Static_assert(sizeof(AppDataIconEvt) <= KQP_BLOCK_JUMBO,
-               "AppDataIconEvt must fit the jumbo pool");
+/* An icon event is served by the smallest pool that holds it, so it must be
+ * wider than the jumbo block to reach the icon tier, and the tier must hold
+ * every piece of one icon. */
+_Static_assert(sizeof(AppDataIconEvt) > KQP_BLOCK_JUMBO,
+               "AppDataIconEvt must be served by the icon pool, not the jumbo one");
+_Static_assert(KQP_ICON_POOL_COUNT >= KODE_APP_ICON_PIECES,
+               "the icon pool must hold every piece of one icon");
+_Static_assert((KODE_APP_ICON_PIECE * KODE_APP_ICON_PIECES) == KODE_APP_ICON_BYTES,
+               "an icon is a whole number of pieces");
 _Static_assert(sizeof(AppDataRmRspEvt) <= KQP_BLOCK_MEDIUM,
                "AppDataRmRspEvt must fit the medium pool");
 _Static_assert(sizeof(RecvDataEvt) <= KQP_BLOCK_JUMBO,
@@ -335,12 +350,11 @@ _Static_assert(sizeof(MirrorAckEvt) <= KQP_BLOCK_SMALL,
                "MirrorAckEvt must fit the small pool");
 
 /* AO_Net's events, checked as a block for one property: none of them may
- * reach the jumbo pool. That pool has four blocks and exists for two things:
- * a piece of an arriving firmware image, and a third of an app icon leaving
- * a medium; nothing else may reach it - so an event that quietly grew past
- * the large tier would starve a terminal install (or `app_data`) and be
- * discovered during a transfer. Which tier below that they land in does not
- * matter; QF serves from the smallest that fits. */
+ * reach the jumbo pool. That pool has four blocks and exists for one thing:
+ * a piece of an arriving firmware image; nothing else may reach it - so an
+ * event that quietly grew past the large tier would starve a terminal install
+ * and be discovered during a transfer. Which tier below that they land in
+ * does not matter; QF serves from the smallest that fits. */
 _Static_assert(sizeof(NetPingReqEvt) <= KQP_BLOCK_LARGE,
                "NetPingReqEvt must not reach the jumbo pool");
 _Static_assert(sizeof(NetPingEntryEvt) <= KQP_BLOCK_MEDIUM,
@@ -376,8 +390,8 @@ _Static_assert(sizeof(MqttMsgEvt) <= KQP_BLOCK_LARGE,
 
 /* Everything else that is allocated from a pool, checked for the one property
  * the block above states for AO_Net: the jumbo pool has four blocks and exists
- * for two things, a piece of an arriving firmware image and a third of an app
- * icon leaving a medium, so nothing else may reach it. Which tier below that
+ * for one thing, a piece of an arriving firmware image, so nothing else may
+ * reach it. Which tier below that
  * an event lands in does not matter - QF serves from the smallest that fits.
  *
  * These eighteen had no guard at all until now, which is why they are worth
@@ -582,6 +596,15 @@ void kqp_init(void)
     }
 #endif
     QF_poolInit(s_jumbo_pool,  sizeof(s_jumbo_pool),  sizeof(s_jumbo_pool[0]));
+    {
+        size_t const bytes = (size_t)KQP_ICON_POOL_COUNT * KQP_ICON_STRIDE;
+        void *const  icon  = khal_alloc_psram(sizeof(void *), bytes);
+
+        /* Before any Active Object exists, like the wide tier: a board with
+         * no PSRAM for one icon stops here, not at the first folder. */
+        Q_ASSERT_ID(11, NULL != icon);
+        QF_poolInit(icon, bytes, KQP_BLOCK_ICON);
+    }
 
     /* Last: a framework with a clock but no pools would hand a QTimeEvt to an
      * AO that cannot allocate. */

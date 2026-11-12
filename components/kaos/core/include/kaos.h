@@ -3373,10 +3373,12 @@ void storage_desc_request(const char *name, QActive *who);
 /**
  * @brief Ask AO_Storage what the app data folder says about @p project.
  *
- * Posted to @p who: APPDATA_FIELDS_SIG once, APPDATA_ICON_SIG zero or three times,
- * APPDATA_END_SIG once. No reader slot taken. Refused during a transfer (medium=none,
- * json_status=none); unallocatable gives icon_status=busy and an empty project.
- * Fields and end always arrive. See https://docs.kode.diy/sdk/kdrv/apps.
+ * Posted to @p who: APPDATA_FIELDS_SIG once, APPDATA_ICON_SIG zero or
+ * KODE_APP_ICON_PIECES times (the icon, always the 128x128 block, whichever
+ * size the file has), APPDATA_END_SIG once. No reader slot taken. Refused
+ * during a transfer (medium=none, json_status=none); unallocatable gives
+ * icon_status=busy and an empty project. Fields and end always arrive. See
+ * https://docs.kode.diy/sdk/kdrv/apps.
  *
  * @param project The app's project name, as the binary declares it.
  * @param who     Where the three signals are posted. Never NULL.
@@ -3425,7 +3427,8 @@ typedef struct {
                                 *   icon.k64. AO_Storage owns it from the post
                                 *   and khal_free()s it on every path.          */
     uint16_t        json_len;  /**< Bytes of app.json, 1..KAPP_DATA_JSON_MAX.     */
-    uint16_t        icon_len;  /**< Bytes of icon.k64 after it: 0 or KAPP_ICON_BYTES. */
+    uint16_t        icon_len;  /**< Bytes of icon.k64 after it: 0, KAPP_ICON_BYTES or
+                                *   KAPP_ICON_HALF_BYTES.                           */
     QActive        *who;       /**< Where APPDATA_PUT_RSP_SIG is posted.          */
 } AppDataPutEvt;
 
@@ -3453,7 +3456,8 @@ typedef struct {
  * @param buf      app.json then icon.k64, one allocation from khal_alloc_psram()
  *                 or khal_realloc_psram() (what kfw_appdata_take() gives).
  * @param json_len Bytes of app.json, 1 to KAPP_DATA_JSON_MAX.
- * @param icon_len Bytes of icon.k64 after it: 0 for none, else KAPP_ICON_BYTES.
+ * @param icon_len Bytes of icon.k64 after it: 0 for none, else KAPP_ICON_BYTES or
+ *                 KAPP_ICON_HALF_BYTES; the file is written as it is.
  * @param who      Where APPDATA_PUT_RSP_SIG is posted. Never NULL.
  * @return KODE_OK when the request is posted: @p buf is AO_Storage's and an
  *         answer is owed. KODE_NO_RESOURCES when the event pool is dry:
@@ -3734,7 +3738,8 @@ typedef enum {
     APPDATA_GET_JSON,     /**< app.json is longer than KAPP_DATA_JSON_MAX, is
                            *   not what the board reads, or names an icon
                            *   other than icon.k64.                             */
-    APPDATA_GET_ICON,     /**< icon.k64 is not KAPP_ICON_BYTES long.            */
+    APPDATA_GET_ICON,     /**< icon.k64 is neither KAPP_ICON_BYTES nor
+                           *   KAPP_ICON_HALF_BYTES long.                       */
     APPDATA_GET_FULL,     /**< The internal partition has no room for it.       */
     APPDATA_GET_STORE     /**< The folder could not be written.                 */
 } appdata_get_why_t;
