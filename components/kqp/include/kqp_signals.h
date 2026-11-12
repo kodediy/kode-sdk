@@ -2184,7 +2184,8 @@ typedef struct {
                             *   directory entry's own number, and the one
                             *   boot_app_offset() answers with.            */
     /* From the app's own manifest; both empty when it carries none, which
-     * every app built before manifests existed does. */
+     * every app built before manifests existed does, and the category empty
+     * when the manifest names none. */
     char     display[KODE_APP_DISPLAY_MAX];
     char     category[KODE_APP_CATEGORY_MAX];
     /* From IDF's descriptor in the image: when it was built, as the compiler
@@ -2504,7 +2505,7 @@ typedef struct {
     char    name[KODE_APP_FILE_MAX];             /**< Echoed: answers can cross. */
     char    project[32];                         /**< esp_app_desc_t.project_name. */
     char    display[KODE_APP_DISPLAY_MAX];       /**< Empty when unmanifested.   */
-    char    category[KODE_APP_CATEGORY_MAX];     /**< Empty when unmanifested.   */
+    char    category[KODE_APP_CATEGORY_MAX];     /**< Empty when none is named.  */
     uint8_t status;                              /**< kode_status_t of the read. */
 } StorageDescRspEvt;
 
