@@ -57,8 +57,8 @@ enum ExpansionIoSignals {
 /** @brief The AO's own state, private to this file. */
 typedef struct {
     QActive  super;
-    QTimeEvt blink;      /**< Periodic while the positions are held.          */
-    QTimeEvt sample;     /**< Periodic while the positions are held.          */
+    QTimeEvt blink;      /**< One-shot that each blink arms again.            */
+    QTimeEvt sample;     /**< One-shot that each sample arms again.           */
     QTimeEvt settle;     /**< One-shot: armed by an edge, read on expiry.     */
     bool     blinking;   /**< Whether the blink timer is running.             */
     bool     led;        /**< The level last driven on the LED's position.    */
@@ -408,10 +408,8 @@ static QState ExpansionIo_holding(ExpansionIo * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
-            /* Both are one-shots that each tick arms again, NOT periodic
-             * timers. QP posts a time event with no margin, so a periodic one goes on posting
-             * whether or not this AO has run, and a queue it fills is a reset.
-             * A one-shot armed again by the tick it sent keeps one waiting at most. */
+            /* One-shots each tick arms again: a periodic one keeps posting
+             * while this AO does not run, and a full queue is a reset. */
             me->blinking = true;
             QTimeEvt_armX(&me->blink, KQP_TICKS_PER_MS(EXPIO_BLINK_MS), 0U);
             QTimeEvt_armX(&me->sample, KQP_TICKS_PER_MS(EXPIO_SAMPLE_MS), 0U);

@@ -338,10 +338,8 @@ static QState ImuDemo_streaming(ImuDemo * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
-            /* A one-shot that each tick arms again, NOT a periodic timer.
-             * QP posts a time event with no margin, so a periodic one goes on posting
-             * whether or not this AO has run, and a queue it fills is a reset.
-             * A one-shot armed again by the tick it sent keeps one waiting at most. */
+            /* A one-shot each tick arms again: a periodic one keeps posting
+             * while this AO does not run, and a full queue is a reset. */
             QTimeEvt_armX(&me->tick, KQP_TICKS_PER_MS(IS_PERIOD_MS), 0U);
             KLOG_I(TAG, "streaming, every %ums", (unsigned)IS_PERIOD_MS);
             status = Q_HANDLED();
