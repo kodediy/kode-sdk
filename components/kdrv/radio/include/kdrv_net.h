@@ -457,7 +457,9 @@ typedef enum {
 typedef enum {
     KDRV_MQTT_ERR_NONE = 0,
     KDRV_MQTT_ERR_NO_NET,   /**< This board has no address.                 */
-    KDRV_MQTT_ERR_REFUSED,  /**< The broker or the transport said no.       */
+    KDRV_MQTT_ERR_REFUSED,  /**< The broker or the transport said no; for a
+                             *   publish, subscribe or unsubscribe, no
+                             *   client was up to take it.               */
     KDRV_MQTT_ERR_TIMEOUT,  /**< Nothing answered in time.                  */
     KDRV_MQTT_ERR_BUSY,     /**< The request was refused because the Kode
                              *   channel holds the client. Reported once to

@@ -1631,7 +1631,7 @@ bool kode_sys_mqtt_is_connected(void);
 
 #define KODE_SYS_MQTT_ERR_NONE     0U  /**< No failure.                                  */
 #define KODE_SYS_MQTT_ERR_NO_NET   1U  /**< The board has no address.                    */
-#define KODE_SYS_MQTT_ERR_REFUSED  2U  /**< The broker or the transport said no.         */
+#define KODE_SYS_MQTT_ERR_REFUSED  2U  /**< The broker or the transport said no, or no client was up to take a publish, subscribe or unsubscribe. */
 #define KODE_SYS_MQTT_ERR_TIMEOUT  3U  /**< Nothing answered in time.                    */
 #define KODE_SYS_MQTT_ERR_BUSY     4U  /**< The Kode channel holds the client.           */
 

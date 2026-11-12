@@ -610,6 +610,11 @@ static bool net_answer(QEvt const *e)
                 {
                     console_reply_err(KCLI_ERR_REJECT, "no_net");
                 }
+                else if ( (uint8_t)KDRV_MQTT_ERR_REFUSED == m->err )
+                {
+                    /* Online, and no client is up to take it. */
+                    console_reply_err(KCLI_ERR_REJECT, "no_broker");
+                }
                 else
                 {
                     console_reply(">ok");

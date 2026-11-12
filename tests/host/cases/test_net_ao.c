@@ -894,6 +894,9 @@ static kode_status_t stub_publish(const char *topic, const void *data,
     return s_publish_rc;
 }
 
+/** @brief What the subscribe and unsubscribe stubs answer; KODE_OK unless a case says otherwise. */
+static kode_status_t s_topic_rc = KODE_OK;
+
 static kode_status_t stub_subscribe(const char *topic, int n)
 {
     (void)n;
@@ -902,7 +905,7 @@ static kode_status_t stub_subscribe(const char *topic, int n)
         (void)snprintf(s_subs[s_nsub], sizeof(s_subs[s_nsub]), "%s", topic);
     }
     s_nsub++;
-    return KODE_OK;
+    return s_topic_rc;
 }
 
 static kode_status_t stub_unsubscribe(const char *topic, int n)
@@ -910,7 +913,7 @@ static kode_status_t stub_unsubscribe(const char *topic, int n)
     (void)topic;
     (void)n;
     s_nunsub++;
-    return KODE_OK;
+    return s_topic_rc;
 }
 
 static void stub_http_result(kdrv_net_http_result_t *out, int n)
@@ -1198,6 +1201,7 @@ static void chan_fresh(void)
 
     s_nreq = 0U; s_nbody = 0U; s_nsess = 0U; s_npub = 0U; s_nsub = 0U;
     s_nunsub = 0U;
+    s_topic_rc = KODE_OK;
     s_nout = 0U;
     s_publish_rc = KODE_OK;
     s_http_status = 0U;
@@ -2103,6 +2107,37 @@ TEST_CASE("mqtt_pub, mqtt_sub and mqtt_unsub with no network are answered no_net
     (void)net_settle();
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_NO_NET, next_state_err());
 
+    net_done();
+}
+
+/* Online and with no client up, the driver takes none of the three. The
+ * answer says so, or the console would close a publish that went nowhere
+ * with `>ok`. */
+TEST_CASE("mqtt_pub, mqtt_sub and mqtt_unsub with no broker are answered refused",
+          "[net_ao]")
+{
+    IdReqEvt q;
+
+    chan_fresh();
+
+    go_online();
+    TEST_ASSERT_EQUAL_INT(ID_REQ_SIG, (int)radio_take(&q, sizeof(q)));
+    answer_end((uint8_t)KODE_ST_NOT_FOUND, 0U, 0U);   /* no identity: the client is free */
+    ao_spy_drain();
+    s_publish_rc = KODE_ERROR;
+    s_topic_rc   = KODE_ERROR;
+
+    mqtt_pub_request("some/topic", "x", 1U);
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_REFUSED, next_state_err());
+    mqtt_sub_request("some/topic");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_REFUSED, next_state_err());
+    mqtt_unsub_request("some/topic");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_REFUSED, next_state_err());
+
+    s_publish_rc = KODE_OK;
     net_done();
 }
 
