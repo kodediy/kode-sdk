@@ -10362,6 +10362,295 @@ TEST_CASE("an advert planned at rest on 5 GHz is continuous", "[radio_ao][pulse]
     pulse_case_end();
 }
 
+/* ---- A remembered channel yields to a clearly stronger access point -------------- */
+
+/** @brief The channel of the weak access point, where the hint is. */
+#define YIELD_CH_WEAK     6U
+/** @brief The channel of the other access point of the same network. */
+#define YIELD_CH_OTHER    48U
+/** @brief The hint's own reading, dBm. */
+#define YIELD_RSSI_WEAK   (-80)
+/** @brief How much stronger the other access point has to be, dB. */
+#define YIELD_MARGIN_DB   10
+
+/** @brief One remembered network as the AO keeps it in the store. */
+typedef struct {
+    char    ssid[33];
+    uint8_t channel;
+    uint8_t alt;
+} YieldHint;
+
+/** @brief Boot with one network remembered on @p channel and, as @p alt, the
+ *         other channel it was heard on (0 for none). */
+static void boot_with_alt(const char *ssid, uint8_t channel, uint8_t alt)
+{
+    YieldHint hints[4];
+
+    (void)memset(hints, 0, sizeof(hints));
+    (void)snprintf(hints[0].ssid, sizeof(hints[0].ssid), "%s", ssid);
+    hints[0].channel = channel;
+    hints[0].alt     = alt;
+    fake_nvs_seed(KSET_NAMESPACE, "wifi_hints", hints, sizeof(hints));
+    radio_reboot();
+}
+
+/** @brief The first network the AO has kept, as it stands in the store. */
+static YieldHint stored_hint(void)
+{
+    YieldHint hints[4];
+    size_t    n = sizeof(hints);
+
+    (void)memset(hints, 0, sizeof(hints));
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)khal_nvs_get_blob(KSET_NAMESPACE, "wifi_hints", hints, &n));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(sizeof(hints), n, "the store holds another layout");
+    return hints[0];
+}
+
+/** @brief What the probe heard of the network on @p channel, and how strongly. */
+static void probe_heard(bool seen, uint8_t channel, int8_t rssi)
+{
+    kdrv_radio_probe_result_t res;
+
+    (void)memset(&res, 0, sizeof(res));
+    res.net[0].seen    = seen;
+    res.net[0].rssi    = rssi;
+    res.net[0].channel = channel;
+    fake_radio_set_probe_result(&res);
+}
+
+/** @brief The round has begun on a hint with an alternate, and the look at the
+ *         hint's channel is answered with @p rssi. */
+static void yield_first_look(int8_t rssi)
+{
+    radio_fresh();
+    boot_with_alt("home", YIELD_CH_WEAK, YIELD_CH_OTHER);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, held_req()->channel);
+    probe_heard(true, YIELD_CH_WEAK, rssi);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+}
+
+/** @brief The look at the alternate is the next job, and it is answered. */
+static void yield_second_look(bool seen, int8_t rssi, kode_status_t rc)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job(), "the alternate was not looked at");
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_OTHER, held_req()->channel);
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    probe_heard(seen, YIELD_CH_OTHER, rssi);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, rc);
+}
+
+/** @brief The join is readied for @p channel. */
+static void yield_joins_on(uint8_t channel)
+{
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    TEST_ASSERT_EQUAL_UINT8(channel, held_req()->channel);
+}
+
+/** @brief End a case whose join is readied and waits on the vault. */
+static void yield_case_end(void)
+{
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    if ( KDRV_RADIO_JOB_WIFI_PREPARE == running_job() )
+    {
+        /* The vault said nothing: the join goes back to the hint, and that is
+         * readied and waits as well. */
+        finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+        tick(QF_SUPPORT_STEPS(3000U) + 2U);
+        pump();
+    }
+    hint_case_end();
+}
+
+TEST_CASE("a hint with no alternate joins as it does, after one look", "[radio][vault][yield]")
+{
+    radio_fresh();
+    boot_with_alt("home", YIELD_CH_WEAK, 0U);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    probe_heard(true, YIELD_CH_WEAK, (int8_t)YIELD_RSSI_WEAK);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    yield_joins_on(YIELD_CH_WEAK);
+    TEST_ASSERT_TRUE(logged("on channel 6, where it was"));
+    yield_case_end();
+}
+
+TEST_CASE("an alternate 10 dB stronger than the hint is joined", "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_OK);
+    yield_joins_on(YIELD_CH_OTHER);
+    TEST_ASSERT_TRUE(logged("trying 'home' (-70dBm) on channel 48, stronger than channel 6 where it was"));
+    yield_case_end();
+}
+
+TEST_CASE("an alternate 9 dB stronger than the hint is not", "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB - 1), KODE_OK);
+    yield_joins_on(YIELD_CH_WEAK);
+    TEST_ASSERT_TRUE(logged("on channel 6, where it was"));
+    yield_case_end();
+}
+
+TEST_CASE("an alternate the look did not hear is not joined", "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(false, 0, KODE_OK);
+    yield_joins_on(YIELD_CH_WEAK);
+    yield_case_end();
+}
+
+TEST_CASE("a look at the alternate that is refused joins the hint", "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_DENIED);
+    yield_joins_on(YIELD_CH_WEAK);
+    yield_case_end();
+}
+
+TEST_CASE("a hint not heard is left to the sweep, alternate or not", "[radio][vault][yield]")
+{
+    radio_fresh();
+    boot_with_alt("home", YIELD_CH_WEAK, YIELD_CH_OTHER);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    probe_heard(false, YIELD_CH_WEAK, 0);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+    hint_case_end();
+}
+
+TEST_CASE("an alternate that will not have the board gives the join back to the hint",
+          "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_OK);
+    yield_joins_on(YIELD_CH_OTHER);
+    vault_joins("home");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_DENIED);
+
+    yield_joins_on(YIELD_CH_WEAK);
+    TEST_ASSERT_TRUE(logged("(-80dBm) on channel 6, where it was"));
+    yield_case_end();
+}
+
+/** @brief The station holds an address from @p ssid on @p channel, read as a join reads it. */
+static void station_joined(const char *ssid, uint8_t channel)
+{
+    station_on_channel(channel);
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)kdrv_wifi_await(ssid, 50U));
+}
+
+TEST_CASE("a join that works on the alternate makes it the hint and the old channel the alternate",
+          "[radio][vault][yield]")
+{
+    YieldHint kept;
+
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_OK);
+    yield_joins_on(YIELD_CH_OTHER);
+    vault_joins("home");
+    station_joined("home", YIELD_CH_OTHER);
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
+
+    kept = stored_hint();
+    TEST_ASSERT_EQUAL_STRING("home", kept.ssid);
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_OTHER, kept.channel);
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, kept.alt);
+    wifi_station_gone();
+    pump();
+    hint_case_end();
+}
+
+/** @brief Put one network in the air on one channel only. */
+static void seed_one_band(const char *ssid, uint8_t channel, int8_t rssi)
+{
+    (void)memset(s_recs, 0, sizeof(s_recs));
+    (void)snprintf((char *)s_recs[0].ssid, sizeof(s_recs[0].ssid), "%s", ssid);
+    s_recs[0].rssi    = rssi;
+    s_recs[0].primary = channel;
+    s_next  = 0U;
+    s_found = 1U;
+}
+
+/** @brief A sweep a person asked for, run over what @c seed_* put in the air. */
+static void yield_sweeps(void)
+{
+    dispatch(WIFI_SCAN_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    run_scan();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+}
+
+TEST_CASE("the alternate is learnt from a sweep that heard the network on two channels, and "
+          "forgotten when a sweep hears it on one", "[radio][vault][yield]")
+{
+    radio_fresh();
+    boot_with_alt("home", YIELD_CH_WEAK, 0U);
+    go_up();
+    vault_has("home");
+
+    seed_two_bands("home");
+    yield_sweeps();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(YIELD_CH_OTHER, stored_hint().alt, "the other channel was not learnt");
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, stored_hint().channel);
+
+    seed_two_bands("elsewhere");
+    yield_sweeps();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(YIELD_CH_OTHER, stored_hint().alt, "a sweep that did not hear the network forgot it");
+
+    seed_one_band("home", YIELD_CH_WEAK, (int8_t)YIELD_RSSI_WEAK);
+    yield_sweeps();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, stored_hint().alt, "the other channel was kept");
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, stored_hint().channel);
+    hint_case_end();
+}
+
+TEST_CASE("a hint stored with no alternate is read, and kept with one once a sweep hears it",
+          "[radio][vault][yield]")
+{
+    radio_fresh();
+    boot_with_hint("home", YIELD_CH_WEAK);   /* the store as it was before alternates */
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job(), "the hint was not read");
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, held_req()->channel);
+    probe_heard(false, YIELD_CH_WEAK, 0);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    seed_two_bands("home");
+    run_scan();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_OTHER, stored_hint().alt);
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, stored_hint().channel);
+    TEST_ASSERT_EQUAL_STRING("home", stored_hint().ssid);
+
+    /* The round goes on to try both access points; neither is readied. */
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_ERROR);
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_ERROR);
+    hint_case_end();
+}
+
 /** @brief The next BLE state in the spy, copied; fails the case if none. */
 static BleStateEvt take_ble_state(void)
 {
