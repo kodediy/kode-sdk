@@ -444,6 +444,15 @@ void fake_sdmmc_set_card(const khal_sdmmc_card_t *card);
 void fake_sdmmc_default_card(khal_sdmmc_card_t *out);
 
 /**
+ * @brief Make the card in the slot one nobody has judged: the same card, with
+ *        a serial no earlier card of the run had.
+ *
+ * Every reset does this, so a verdict the driver kept on one case's card is
+ * about a card no later case has.
+ */
+void fake_sdmmc_fresh_card(void);
+
+/**
  * @brief The widest mount that succeeds.
  * @param width 1 makes a 4-bit mount fail, which is the counterfeit card's
  *        signature and what the driver's fallback exists for.

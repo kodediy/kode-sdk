@@ -72,11 +72,15 @@ typedef enum {
     KDRV_SD_TOTAL_MB,       /**< How big the filesystem is.                 */
     KDRV_SD_FREE_MB,        /**< How much of it is unused.                  */
 
-    /* What the next mount will ask for. Writable; neither touches the card. */
+    /* What the next mount will ask for. Writable; none touches the card. */
     KDRV_SD_WIDTH_REQ,      /**< Data lines to ask for: 1 or 4, nothing
                              *   between. Default KDRV_SD_WIDTH_USE.        */
     KDRV_SD_FREQ_REQ_KHZ,   /**< Clock ceiling to ask for. Default
                              *   KBSP_SD_FREQ_KHZ.                          */
+    KDRV_SD_CHECK_REQ,      /**< Whether a mount on four lines proves the
+                             *   card takes a write before it is kept: 1 or
+                             *   0. Default 1. 0 mounts on the lines asked
+                             *   for, with no check and no memory of cards. */
 
     KDRV_SD_FIELD_MAX
 } kdrv_sd_field_t;
@@ -90,7 +94,7 @@ typedef struct {
     int32_t     min;      /**< Smallest value the field can hold.           */
     int32_t     max;      /**< Largest.                                     */
     uint16_t    step;     /**< Resolution; always 1 here.                   */
-    bool        writable; /**< True for the two knobs and nothing else.     */
+    bool        writable; /**< True for the next-mount knobs and nothing else. */
 } kdrv_sd_field_info_t;
 
 /** @brief Data lines an everyday mount asks for: the slot's four. A card that
@@ -123,12 +127,13 @@ typedef struct {
  *         on one, each after a cycle of its supply, before it is reported as a
  *         card that would not come up. */
 #define KDRV_SD_ONE_LINE_TRIES    2U
-/** @brief A mount: the rail, a try on four data lines and the write check
- *         behind it, and, when the card takes no write on four lines, two
- *         cycles of its supply, each followed by a try on one. A card that
- *         does not come up on four lines at all takes two tries, which is
- *         less. */
-#define KDRV_SD_MOUNT_MAX_MS      (KDRV_SD_POWER_SETTLE_MS + KDRV_SD_TRY_MAX_MS \
+/** @brief A mount: the rail, a try on one line for a card remembered as one
+ *         that takes no write on four, which another card in the slot then
+ *         repeats on four, the write check behind that, and, when the card
+ *         takes no write on four lines, cycles of its supply, each followed
+ *         by a try on one. A card that does not come up on four lines at all
+ *         takes two tries, which is less. */
+#define KDRV_SD_MOUNT_MAX_MS      (KDRV_SD_POWER_SETTLE_MS + (2U * KDRV_SD_TRY_MAX_MS) \
                                    + KDRV_SD_CHECK_MAX_MS \
                                    + (KDRV_SD_ONE_LINE_TRIES \
                                       * (KDRV_SD_CYCLE_MS + KDRV_SD_TRY_MAX_MS)))
@@ -153,9 +158,18 @@ typedef struct {
  * its supply is cycled and it is mounted on one line, up to
  * KDRV_SD_ONE_LINE_TRIES times with a cycle before each, and the outcome is
  * told at NOTICE. A card that comes up on none of them is reported as one that
- * would not come up. A mount that
- * does not come up on four lines at all falls to one line without that check,
- * and a mount asked on one line never writes. What a 1-bit mount MEANS is the
+ * would not come up. A mount that does not come up on four lines at all falls
+ * to one line without that check, and a mount asked on one line never writes.
+ *
+ * What a card took is remembered for the boot, in RAM, for the last card
+ * judged: it is known by what its CID says of it. A card that took the write is
+ * not checked again, and a card that took none is mounted on one line from the
+ * start, with no failed write and no cycle of its supply; if the card that
+ * answers there is another, it is judged as a card nobody judged. A different
+ * card is judged afresh, and a check that could not be made is no verdict.
+ * With `check_req` at 0 the card is mounted on the lines asked for, with no
+ * check and without consulting or changing what is remembered: the production
+ * test, which judges the slot, mounts that way. What a 1-bit mount MEANS is the
  * caller's to judge - the production test fails on it, because on a healthy
  * board all four lines reach the slot.
  *
@@ -196,6 +210,18 @@ kode_status_t kdrv_sd_park(void);
 /** @brief Whether a card is currently mounted. */
 bool kdrv_sd_mounted(void);
 
+/**
+ * @brief Whether the mounted card sits where an everyday mount puts it.
+ *
+ * True for a card mounted with `width_req` at KDRV_SD_WIDTH_USE and the write
+ * check on, whatever width that came to: four lines for a card that took a
+ * write there, one for a card that took none or would not come up on four.
+ * False with nothing mounted, and for a mount asked on other terms: one line
+ * by request, or four lines with the check off. A caller that wants the
+ * everyday width back asks for it and remounts only when this says false.
+ */
+bool kdrv_sd_mounted_everyday(void);
+
 /** @brief The card's mount point string, mounted or not. */
 const char *kdrv_sd_mount_point(void);
 
@@ -219,9 +245,10 @@ kode_status_t kdrv_sd_get(kdrv_sd_field_t f, int32_t *value);
 /**
  * @brief Write one field.
  *
- * Only the two next-mount knobs can be written, and neither reaches the card:
- * they are read by the next kdrv_sd_mount(). `width_req` takes 1 or 4 and
- * nothing between, because those are the only widths an SD slot has.
+ * Only the next-mount knobs can be written, and none reaches the card: they
+ * are read by the next kdrv_sd_mount(). `width_req` takes 1 or 4 and nothing
+ * between, because those are the only widths an SD slot has; `check_req` takes
+ * 1 or 0.
  *
  * @param[in] f     Which field.
  * @param[in] value Its new value, in the field's unit.

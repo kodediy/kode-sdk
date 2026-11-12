@@ -2392,7 +2392,7 @@ TEST_CASE("the card row leaves nothing of its own behind and does not format",
  * middle of the run did with it: leaving a unit on four data lines after a
  * production test would leave a counterfeit card one failed write away from a
  * controller that only a reset brings back. */
-TEST_CASE("the card row hands the slot back at one data line",
+TEST_CASE("the card row hands the slot back on the everyday width",
           "[storage_ao]")
 {
     bool    ok[SD_TEST_STEPS];
@@ -2406,6 +2406,90 @@ TEST_CASE("the card row hands the slot back at one data line",
     TEST_ASSERT_TRUE(take_verdict("sd"));
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width));
     TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
+}
+
+/** @brief How many calls the card seam traced whose text starts with @p what. */
+static unsigned traced(const char *what)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_sdmmc_trace_count() > i; ++i )
+    {
+        const char * const line = fake_sdmmc_trace_line(i);
+
+        if ( (NULL != line) && (strncmp(line, what, strlen(what)) == 0) )
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/* The row judges the slot, so its four lines are mounted as asked. The check
+ * that keeps a counterfeit card off four lines would narrow the card before
+ * the row looked, and a bad card would fail a good board. */
+TEST_CASE("the card row's four-line mount does no write check", "[storage_ao]")
+{
+    sd_script_fresh();
+    fake_sdmmc_fail_wide_writes(true);   /* reads on four lines, takes no write */
+    fake_sdmmc_fresh_card();
+    fake_sdmmc_trace_reset();
+
+    ask_sd_test();
+    TEST_ASSERT_TRUE(run_sd_job());      /* the script's remount */
+
+    TEST_ASSERT_EQUAL_UINT(2U, fake_sdmmc_trace_count());
+    TEST_ASSERT_EQUAL_STRING("unmount", fake_sdmmc_trace_line(0U));
+    TEST_ASSERT_EQUAL_STRING("mount 4", fake_sdmmc_trace_line(1U));
+
+    run_sd_script();
+    const StorageTestEvt * const t = take_phase(SD_TEST_IDENTIFY);
+    TEST_ASSERT_TRUE_MESSAGE(t->ok, "the card was narrowed before the row looked");
+    TEST_ASSERT_EQUAL_UINT8(4U, t->width);
+}
+
+/* A card that takes no write on four lines is the card's fault, not the
+ * slot's: the row passes it, and the mount that follows the row - the slot
+ * handed back on the everyday width - is the checked one, which leaves the
+ * card on one line. The row asks for nothing more after that: a card on the
+ * line it was judged to need is where an everyday mount puts it. */
+TEST_CASE("the card row on a card that takes no write on four lines passes the "
+          "slot and hands the card back on one line", "[storage_ao]")
+{
+    unsigned const chunks = (KODE_SD_TEST_KB * 1024U) / (32U * 1024U);
+    int32_t        width  = 0;
+
+    sd_script_fresh();
+    fake_sdmmc_fail_wide_writes(true);
+    fake_sdmmc_fresh_card();
+    fake_sdmmc_trace_reset();
+
+    ask_sd_test();
+    run_sd_script();
+
+    const StorageTestEvt *t = take_phase(SD_TEST_IDENTIFY);
+    TEST_ASSERT_TRUE(t->ok);
+    TEST_ASSERT_EQUAL_UINT8(4U, t->width);
+    t = take_phase(SD_TEST_READ4);
+    TEST_ASSERT_TRUE(t->ok);
+    TEST_ASSERT_EQUAL_UINT8(4U, t->width);
+    t = take_phase(SD_TEST_READ1);
+    TEST_ASSERT_TRUE(t->ok);
+    TEST_ASSERT_EQUAL_UINT8(1U, t->width);
+    TEST_ASSERT_TRUE(take_phase(SD_TEST_WRITE)->ok);
+    TEST_ASSERT_TRUE(take_phase(SD_TEST_VERIFY)->ok);
+    TEST_ASSERT_TRUE_MESSAGE(take_verdict("sd"), "a bad card condemned a good slot");
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, traced("write"),
+                                   "one failed write: the checked mount after "
+                                   "the row");
+    TEST_ASSERT_EQUAL_UINT(2U, traced("mount 4"));    /* the row's, the restore's */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((2U * chunks) + 3U, sd_jobs_run,
+                                   "a card on one line was remounted for it");
+    TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width));
+    TEST_ASSERT_EQUAL_INT32(1, width);
+    TEST_ASSERT_TRUE(kdrv_sd_mounted_everyday());
 }
 
 /* Three of the four data lines not reaching the slot is a defect of the unit,
@@ -3107,6 +3191,23 @@ TEST_CASE("sd_verify's probe and format are jobs", "[storage_ao][worker]")
     TEST_ASSERT_TRUE(take_verdict("sd_verify"));
 }
 
+/* sd_verify judges the card on the width it is used at: through the checked
+ * mount, whatever an earlier run or a bench session left in the knob. */
+TEST_CASE("sd_verify mounts the card the everyday way", "[storage_ao]")
+{
+    sd_script_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_set(KDRV_SD_CHECK_REQ, 0));
+    fake_sdmmc_fresh_card();
+    fake_sdmmc_trace_reset();
+
+    ask_sd_verify();
+    TEST_ASSERT_TRUE(run_sd_job());      /* the script's remount */
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, traced("write"), "the card was not checked");
+    TEST_ASSERT_TRUE(kdrv_sd_mounted_everyday());
+    run_sd_script();
+}
+
 TEST_CASE("a card row with no room for a call is refused and answered",
           "[storage_ao][worker]")
 {
@@ -3173,11 +3274,11 @@ TEST_CASE("a call that overruns inside the card row ends the run with a false "
                              "the AO stayed wedged after the late return");
 }
 
-/* An overrun in the four-line read leaves the slot on the width it is handed
- * back at already: the late return owes nothing, and asking the card for a
- * remount anyway would be a call for no reason. */
-TEST_CASE("a call that overruns on four data lines owes no remount when it "
-          "returns", "[storage_ao][worker]")
+/* An overrun in the four-line read leaves the slot on four lines the row asked
+ * for without the write check: it is put back through the checked mount when
+ * the call returns, not skipped. */
+TEST_CASE("a call that overruns on four data lines puts the slot back through "
+          "the checked mount when it returns", "[storage_ao][worker]")
 {
     unsigned const steps =
         QF_SUPPORT_STEPS(KDRV_SD_SECTORS_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS);
@@ -3191,6 +3292,7 @@ TEST_CASE("a call that overruns on four data lines owes no remount when it "
     TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(SD_WORKER));
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
     TEST_ASSERT_EQUAL_INT32((int32_t)KBSP_SD_WIDTH, width);
+    TEST_ASSERT_FALSE(kdrv_sd_mounted_everyday());
     ao_spy_drain();
 
     (void)qf_support_tick(AO_Storage, steps);
@@ -3198,10 +3300,11 @@ TEST_CASE("a call that overruns on four data lines owes no remount when it "
     TEST_ASSERT_FALSE_MESSAGE(take_verdict("sd"),
                               "an overrun is the slot's, not a pass");
 
-    TEST_ASSERT_TRUE(run_sd_job());     /* the late chunk comes back */
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(SD_WORKER),
-                                   "a remount was asked for a slot already "
-                                   "on four data lines");
+    TEST_ASSERT_TRUE(run_sd_job());     /* the late chunk comes back... */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
+                                   "the card was left without its check");
+    TEST_ASSERT_TRUE(run_sd_job());     /* ...and the remount puts it right. */
+    TEST_ASSERT_TRUE(kdrv_sd_mounted_everyday());
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
     TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());

@@ -48,6 +48,11 @@ static unsigned s_fail_mount_left;  /**< How many more mounts of it fail.       
 static bool s_fail_format;
 static uint32_t s_read_ms;    /**< What one raw read is made to cost.        */
 
+/** @brief The serial the first card of the run carries; each later one has the next. */
+#define SD_SERIAL_FIRST  0xDEAD0000U
+
+static uint32_t s_serial_next = SD_SERIAL_FIRST;   /**< Not reset: no two cards of a run share one. */
+
 static khal_sdmmc_card_t s_card;      /**< What the next mount reports.      */
 static khal_sdmmc_card_t s_live;      /**< What the current mount reported.  */
 static uint8_t  s_max_width = 4U;     /**< The widest mount that succeeds.   */
@@ -61,7 +66,7 @@ static uint32_t s_last_khz;
 static unsigned s_raw_writes;
 
 /** @brief Calls the trace keeps. */
-#define SD_TRACE_MAX  32U
+#define SD_TRACE_MAX  256U
 /** @brief Characters of one traced call, the terminator included. */
 #define SD_TRACE_LEN  40U
 
@@ -222,6 +227,7 @@ void fake_sdmmc_reset(void)
 
     (void)memset(s_store, 0, sizeof(s_store));
     default_card(&s_card);
+    fake_sdmmc_fresh_card();
     (void)memset(&s_live, 0, sizeof(s_live));
 
     s_mounted     = false;
@@ -277,6 +283,12 @@ void fake_sdmmc_set_card(const khal_sdmmc_card_t *card)
 void fake_sdmmc_default_card(khal_sdmmc_card_t *out)
 {
     default_card(out);
+}
+
+void fake_sdmmc_fresh_card(void)
+{
+    s_card.serial = s_serial_next;
+    ++s_serial_next;
 }
 
 void fake_sdmmc_set_max_width(uint8_t width)

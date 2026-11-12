@@ -4626,8 +4626,10 @@ static void sd_test_publish(Storage * const me, uint32_t kb_s)
 /**
  * @brief Put the slot back on the everyday width, whatever the run did.
  *
- * Asking costs nothing. A card that is on another width is remounted, and
- * that is a call to the card.
+ * Asking costs nothing. A card that is not mounted the way an everyday mount
+ * mounts it - on one line by request, or on four without the write check - is
+ * remounted, and that is a call to the card. A card the driver keeps on one
+ * line, because it took no write on four, is where an everyday mount puts it.
  *
  * @param me   The AO.
  * @param then What to go on with when the remount returns.
@@ -4637,11 +4639,9 @@ static void sd_test_publish(Storage * const me, uint32_t kb_s)
  */
 static bool sd_test_restore_width(Storage * const me, SdThen then)
 {
-    int32_t width = 0;
-
     (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KDRV_SD_WIDTH_USE);
-    (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
-    if ( (int32_t)KDRV_SD_WIDTH_USE == width )
+    (void)kdrv_sd_set(KDRV_SD_CHECK_REQ, 1);
+    if ( kdrv_sd_mounted_everyday() )
     {
         return false;
     }
@@ -5473,16 +5473,20 @@ static void sd_script_start(Storage * const me, bool verify)
     me->t_capacity_mb  = 0U;
     me->t_seed         = (uint32_t)khal_time_us();
 
-    /* Whatever an earlier run or a bench session left in the knob: the row
-     * judges the slot's four lines, sd_verify the card on the width it is
-     * used at. */
+    /* Whatever an earlier run or a bench session left in the knobs: the row
+     * judges the slot's four lines, mounted as asked with no write check -
+     * a card that takes no write there would otherwise be narrowed before the
+     * row looked, and the slot failed for the card's fault - and sd_verify the
+     * card on the width it is used at, checked as every everyday mount is. */
     if ( verify )
     {
         (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KDRV_SD_WIDTH_USE);
+        (void)kdrv_sd_set(KDRV_SD_CHECK_REQ, 1);
     }
     else
     {
         (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KBSP_SD_WIDTH);
+        (void)kdrv_sd_set(KDRV_SD_CHECK_REQ, 0);
     }
 
     /* Mount semantics rather than the probe's: somebody just asked for this

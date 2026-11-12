@@ -81,6 +81,7 @@ static bool sd_field_row(uint16_t field, console_field_t *out)
         [KDRV_SD_FREE_MB]         = "How much of that filesystem is unused.",
         [KDRV_SD_WIDTH_REQ]       = "Data lines the NEXT mount asks for: 1 or 4, nothing between. Does not touch the card, and lasts until the board resets.",
         [KDRV_SD_FREQ_REQ_KHZ]    = "Clock ceiling the NEXT mount asks for. 40000 is what this board is validated at; higher is a bench experiment.",
+        [KDRV_SD_CHECK_REQ]       = "Whether the NEXT mount on four lines proves the card takes a write before keeping it: 1, the default, or 0 for none. Does not touch the card, and lasts until the board resets.",
     };
     _Static_assert((sizeof(SD_FIELD_DESC) / sizeof(SD_FIELD_DESC[0]))
                    == (size_t)KDRV_SD_FIELD_MAX,
