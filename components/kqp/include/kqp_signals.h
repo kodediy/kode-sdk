@@ -701,6 +701,12 @@ enum KodeSignals {
                                  *   StorageRecvEvt.who rather than published;
                                  *   see RECV_READY_SIG for why the two
                                  *   receivers differ there.                   */
+    RECV_BUSY_SIG,              /**< AO_Storage -> whoever asked for a file:
+                                 *   the transfer in flight did not end within
+                                 *   KODE_STORAGE_TURN_MS, so this one never
+                                 *   started - kcli error 4. POSTED, never
+                                 *   published, and bare and static like the
+                                 *   three endings of the receive protocol.   */
     STORAGE_TEST_NEXT_SIG,      /**< AO_Storage private QTimeEvt: the next
                                  *   step of the card test. One chunk per
                                  *   step, for the reason STORAGE_WRITE_NEXT_
@@ -740,6 +746,10 @@ enum KodeSignals {
                                  *   whoever waits for it is told it failed.
                                  *   The guard stays up until the call does
                                  *   return.                                  */
+    STORAGE_TURN_TO_SIG,        /**< AO_Storage private QTimeEvt: a request
+                                 *   that waits for the transfer in flight to
+                                 *   end has waited KODE_STORAGE_TURN_MS, so
+                                 *   it is refused as busy.                   */
 
     BOOT_OS_SWITCH_SIG,         /**< AO_Boot: point otadata at the inactive
                                  *   kodeOS slot, reset.                      */

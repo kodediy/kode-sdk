@@ -1127,6 +1127,10 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         request over this many is refused the way it is when the AO has no
  *         room to run it. */
 #define KODE_STORAGE_DEFER_DEPTH      8U
+/** @brief The longest a request that writes or deletes waits for the transfer
+ *         AO_Storage has in flight to end. It is served when the transfer
+ *         does; past this it is refused as busy. */
+#define KODE_STORAGE_TURN_MS         2000U
 
 /* ---- The NFC row ----------------------------------------------------------
  * ASYNC, and it does what no other row does: it WRITES. The board's own
@@ -1603,6 +1607,11 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief The longest AO_AppMgr waits for AO_Storage or AO_Net to answer an
  *         open or a STAT of the card; then it gives that wait up. */
 #define KODE_APPMGR_OPEN_MS     30000U
+/** @brief How many times AO_AppMgr asks again for a fetched data folder's put
+ *         that AO_Storage refused as busy, before the fetch fails busy. */
+#define KODE_APPMGR_PUT_TRIES   3U
+/** @brief The pause before each of those tries, in ms. */
+#define KODE_APPMGR_PUT_RETRY_MS 500U
 
 /* ---- The factory reset's budgets ----------------------------------------
  * AO_Boot walks the reset one step at a time and arms one timer per step; a

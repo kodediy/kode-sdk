@@ -443,6 +443,14 @@ set_source_files_properties(
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_app.c"
     PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_BLE_CONSOLE=1")
 
+# AO_AppMgr reads a fetched file out of AO_Net's stream buffers, which exist
+# only once a real AO_Net has opened a transfer. Its one call that reads them
+# is renamed here, for this source alone, to a function test_appmgr_ao.c
+# defines over a buffer of its own.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/appmgr/src/appmgr_ao.c"
+    PROPERTIES COMPILE_DEFINITIONS "net_stream_buf=host_net_stream_buf")
+
 # The standard layer's Active Object is built for the APP role only, and the
 # project-wide role above is the OS one. This source is the app build, so the
 # cases can start the real Active Object and the dispatch task; the OS build,

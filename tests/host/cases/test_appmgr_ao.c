@@ -7753,6 +7753,81 @@ static appdata_get_why_t fetch_answer(const char *project)
     return why;
 }
 
+/* AO_Net's stream buffers do not exist here, so the tests CMake renames
+ * AppMgr's one call that reads them to this function: a fetched file's bytes
+ * are in s_net_chunk, as buffer 0. Every other index is a buffer AO_Net has
+ * not got. */
+static uint8_t s_net_chunk[KAPP_DATA_JSON_MAX];
+
+const uint8_t *host_net_stream_buf(uint8_t idx);
+
+const uint8_t *host_net_stream_buf(uint8_t idx)
+{
+    const uint8_t *buf = NULL;
+
+    if ( 0U == idx )
+    {
+        buf = s_net_chunk;
+    }
+    return buf;
+}
+
+/** @brief The app.json every fetch below brings: it names no icon. */
+#define GET_JSON_BODY  "{\"kode\":\"1\",\"name\":\"Snake\",\"category\":\"games\"}"
+
+/**
+ * @brief Run a fetch of "snake" up to the put it asks AO_Storage for: app.json
+ *        arrives whole in one chunk and names no icon.
+ */
+static void fetch_to_the_put(void)
+{
+    StorageDataEvt d;
+    uint32_t const len = (uint32_t)(sizeof(GET_JSON_BODY) - 1U);
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_OK, len);
+
+    (void)memcpy(s_net_chunk, GET_JSON_BODY, len);
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.len    = (uint16_t)len;
+    d.idx    = 0U;
+    d.status = (uint8_t)KODE_OK;
+    d.eof    = true;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+}
+
+/**
+ * @brief AO_Storage reads the put AO_AppMgr asked for: it must name "snake"
+ *        and carry app.json whole, and it gives the buffer back.
+ */
+static void fetch_put_is_whole(void)
+{
+    const QEvt * const e = storage_take(APPDATA_PUT_REQ_SIG);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the folder was not asked for");
+    AppDataPutEvt const * const put = (AppDataPutEvt const *)e;
+    TEST_ASSERT_EQUAL_STRING("snake", put->project);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)(sizeof(GET_JSON_BODY) - 1U), put->json_len);
+    TEST_ASSERT_EQUAL_UINT16(0U, put->icon_len);
+    TEST_ASSERT_EQUAL_MEMORY(GET_JSON_BODY, put->buf, put->json_len);
+    put_done(e);
+}
+
+/** @brief AO_Storage answers "snake"'s put: refused for want of a turn. */
+static void put_rsp_busy(void)
+{
+    AppDataPutRspEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.super = (QEvt)QEVT_INITIALIZER(APPDATA_PUT_RSP_SIG);
+    (void)snprintf(r.project, sizeof(r.project), "%s", "snake");
+    r.rc   = KODE_DENIED;
+    r.busy = true;
+    QASM_DISPATCH(AO_AppMgr, &r.super, 0U);
+}
+
 /** @brief The start of a fetch case: an idle AppMgr, empty mailboxes, a clean heap. */
 static void fetch_fresh(void)
 {
@@ -7921,6 +7996,65 @@ TEST_CASE("a chunk that says the read failed ends the fetch",
     QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
     TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
     TEST_ASSERT_EQUAL_UINT(1U, net_seen().closes);
+    fetch_end();
+}
+
+TEST_CASE("a fetch whose put is refused as busy asks again after a pause, and "
+          "lands on the second try", "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    fetch_to_the_put();
+    fetch_put_is_whole();
+    put_rsp_busy();
+
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a busy put ended the fetch");
+    run_ticks((KODE_APPMGR_PUT_RETRY_MS / 10U) - 5U);
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(APPDATA_PUT_REQ_SIG, "snake"),
+        "asked again before the pause was over");
+
+    run_ticks(10U);
+    fetch_put_is_whole();                 /* the same folder, whole, again */
+    put_rsp("snake", KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_OK, fetch_answer("snake"));
+    fetch_end();
+}
+
+TEST_CASE("a fetch whose put stays refused as busy tells busy after its tries",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    fetch_to_the_put();
+    for ( uint32_t i = 0U; KODE_APPMGR_PUT_TRIES > i; ++i )
+    {
+        fetch_put_is_whole();
+        put_rsp_busy();
+        TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "gave up before its last try");
+        run_ticks((KODE_APPMGR_PUT_RETRY_MS / 10U) + 2U);
+    }
+    fetch_put_is_whole();                 /* the last try */
+    put_rsp_busy();
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_BUSY, fetch_answer("snake"));
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(APPDATA_PUT_REQ_SIG, "snake"),
+        "asked once more than it may");
+    fetch_end();
+}
+
+TEST_CASE("a put refused for another reason is not asked again",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    fetch_to_the_put();
+    fetch_put_is_whole();
+    put_rsp("snake", KODE_DENIED);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_BUSY, fetch_answer("snake"));
+    run_ticks((KODE_APPMGR_PUT_RETRY_MS / 10U) + 2U);
+    TEST_ASSERT_FALSE(storage_has_for(APPDATA_PUT_REQ_SIG, "snake"));
     fetch_end();
 }
 

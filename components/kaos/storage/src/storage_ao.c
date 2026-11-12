@@ -163,6 +163,13 @@ typedef struct {
     QEQueue   deferq;                   /**< Requests held while a call is out. */
     QEvtPtr   defer_sto[KODE_STORAGE_DEFER_DEPTH - 1U]; /**< Its ring; the queue
                                          *   keeps the front event aside.     */
+    QEQueue   turnq;                    /**< The one request that waits for the
+                                         *   transfer in flight to end; no ring,
+                                         *   only the queue's front slot.     */
+    QTimeEvt  turn_to;                  /**< The bound of that wait.           */
+    bool      turn_live;                /**< turn_to is armed for the request
+                                         *   held, and has not been seen to expire. */
+    uint8_t   turn_stale;               /**< Expired waits still queued.       */
     QActive *reader;                    /**< Who has the file open, if anyone. */
     uint8_t *buf[STORAGE_BUFS];         /**< PSRAM, allocated once at startup. */
     bool     lent[STORAGE_BUFS];        /**< Out on loan; do not touch.        */
@@ -2248,9 +2255,11 @@ static void wipe_step(Storage * const me)
  * @param who     The asker.
  * @param project The project the put was for.
  * @param rc      The outcome.
+ * @param busy    The put got no turn within KODE_STORAGE_TURN_MS: the answer
+ *                is KODE_DENIED and the same put may be asked again.
  */
 static void appdata_put_answer(QActive *who, const char *project,
-                               kode_status_t rc)
+                               kode_status_t rc, bool busy)
 {
     AppDataPutRspEvt *rsp = Q_NEW_X(AppDataPutRspEvt, 0U, APPDATA_PUT_RSP_SIG);
     if ( NULL == rsp )
@@ -2259,7 +2268,8 @@ static void appdata_put_answer(QActive *who, const char *project,
         return;
     }
     (void)snprintf(rsp->project, sizeof(rsp->project), "%s", project);
-    rsp->rc = rc;
+    rsp->rc   = rc;
+    rsp->busy = busy;
     QACTIVE_POST(who, &rsp->super, NULL);
 }
 
@@ -2343,7 +2353,7 @@ static void appdata_put_finish(Storage * const me, kode_status_t rc)
     }
     if ( NULL != who )
     {
-        appdata_put_answer(who, project, rc);
+        appdata_put_answer(who, project, rc, false);
     }
 }
 
@@ -2394,11 +2404,13 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
 {
     char          folder[APPDATA_FOLDER_MAX];
     kode_status_t rc = KODE_DENIED;
+    bool          no_turn = false;
 
     if ( busy(me) )
     {
         KLOG_W(TAG, "a transfer is already in flight; the folder of '%s' is "
                     "not written", req->project);
+        no_turn = true;
     }
     else if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
                                   req->project)
@@ -2430,7 +2442,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         {
             khal_free(req->buf);
         }
-        appdata_put_answer(req->who, req->project, rc);
+        appdata_put_answer(req->who, req->project, rc, no_turn);
         return;
     }
 
@@ -3770,6 +3782,7 @@ static const QEvt s_recv_ack_evt   = QEVT_INITIALIZER(RECV_ACK_SIG);
 static const QEvt s_recv_done_evt  = QEVT_INITIALIZER(RECV_DONE_SIG);
 static const QEvt s_recv_fail_evt  = QEVT_INITIALIZER(RECV_FAIL_SIG);
 static const QEvt s_recv_stall_evt = QEVT_INITIALIZER(RECV_STALL_SIG);
+static const QEvt s_recv_busy_evt  = QEVT_INITIALIZER(RECV_BUSY_SIG);
 
 /* Posted to AO_Log, and only ever an abort: a transfer that reached its
  * byte count has left raw mode already. */
@@ -3868,6 +3881,20 @@ static void recv_deny(QActive *who)
 }
 
 /**
+ * @brief Refuse a transfer because the one in flight outlasted its wait,
+ *        answering @p who anyway.
+ *
+ * Its own signal, so the host is told `busy` and not that the bytes failed.
+ */
+static void recv_busy(QActive *who)
+{
+    if ( NULL != who )
+    {
+        QACTIVE_POST(who, &s_recv_busy_evt, NULL);
+    }
+}
+
+/**
  * @brief Start a transfer: arm the wire, then wait to be told it is armed.
  *
  * Nothing is opened before the arming: an arming that lands after slow work
@@ -3887,7 +3914,7 @@ static void recv_begin(Storage * const me, const StorageRecvEvt *q)
     {
         KLOG_W(TAG, "a transfer is already in flight; file_put of '%s' refused",
                q->path);
-        recv_deny(q->who);
+        recv_busy(q->who);
         return;
     }
     if ( 0U == q->size )
@@ -5619,6 +5646,10 @@ void Storage_ctor(void)
     (void)memset(&me->worker, 0, sizeof(me->worker));
     (void)memset(&me->sdj, 0, sizeof(me->sdj));
     QEQueue_init(&me->deferq, me->defer_sto, Q_DIM(me->defer_sto));
+    QEQueue_init(&me->turnq, NULL, 0U);
+    me->turn_live  = false;
+    me->turn_stale = 0U;
+    QTimeEvt_ctorX(&me->turn_to, &me->super, STORAGE_TURN_TO_SIG, 0U);
     QTimeEvt_ctorX(&me->sdj_dl, &me->super, STORAGE_SDJOB_TO_SIG, 0U);
     QTimeEvt_ctorX(&me->w_pacer, &me->super, STORAGE_WRITE_NEXT_SIG, 0U);
     QTimeEvt_ctorX(&me->t_pacer, &me->super, STORAGE_TEST_NEXT_SIG, 0U);
@@ -6796,8 +6827,151 @@ static void card_pump(Storage * const me)
     }
 }
 
+/* ---- A request that writes or deletes waits for the transfer in flight ------
+ * A host that makes a folder, puts two files and removes a third sends each
+ * request the moment the one before it is answered, and the launcher saves its
+ * own list a moment after any change: a request that meets that transfer is
+ * served when it ends, not lost to it. One request waits at a time, for at
+ * most KODE_STORAGE_TURN_MS; a second, or one whose wait runs out, is refused
+ * by its own handler, as busy() makes every handler do.
+ */
+
 /**
- * @brief The only state: hold what needs the card while a call to it is out, serve the rest.
+ * @brief Whether @p e writes or deletes, and its handler refuses while
+ *        busy() is true.
+ *
+ * Opens, reads, listings and a copy are not here: they are not metadata, and
+ * their askers retry on their own.
+ *
+ * @param e The event.
+ * @return true when it is held for the transfer in flight.
+ */
+static bool turn_wanted(QEvt const * const e)
+{
+    bool wanted = false;
+
+    switch ( e->sig )
+    {
+        case STORAGE_RECV_REQ_SIG:
+        case APPDATA_PUT_REQ_SIG:
+        case APPDATA_RM_REQ_SIG:
+        case STORAGE_TEXT_REQ_SIG: {
+            wanted = true;
+            break;
+        }
+        case STORAGE_PATH_REQ_SIG: {
+            storage_path_op_t const op =
+                (storage_path_op_t)Q_EVT_CAST(StoragePathEvt)->op;
+
+            wanted = (STORAGE_PATH_UNLINK == op) || (STORAGE_PATH_RMDIR == op)
+                  || (STORAGE_PATH_DELETE == op);
+            break;
+        }
+        case STORAGE_PAIR_REQ_SIG: {
+            wanted = ((storage_pair_op_t)Q_EVT_CAST(StoragePairEvt)->op
+                      == STORAGE_PAIR_MOVE);
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    return wanted;
+}
+
+/**
+ * @brief Keep a request until the transfer in flight ends, and bound the wait.
+ *
+ * @param me The AO.
+ * @param e  The request.
+ * @return true when it was kept; false when one waits already and this one
+ *         has to be served, which refuses it.
+ */
+static bool turn_hold(Storage * const me, QEvt const * const e)
+{
+    bool const held = QActive_defer(&me->super, &me->turnq, e);
+
+    if ( held )
+    {
+        KLOG_D(TAG, "a transfer is in flight; a request waits for it");
+        if ( !me->turn_live )
+        {
+            (void)QTimeEvt_rearm(&me->turn_to,
+                                 KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS));
+            me->turn_live = true;
+        }
+    }
+    return held;
+}
+
+/**
+ * @brief End the wait's bound, because the request it bounded is gone.
+ * @param me The AO.
+ */
+static void turn_stop(Storage * const me)
+{
+    if ( me->turn_live )
+    {
+        if ( kqp_timer_stale(&me->turn_to, true) )
+        {
+            me->turn_stale += 1U;
+        }
+        me->turn_live = false;
+    }
+}
+
+/**
+ * @brief Take up the request that waits once no transfer is in flight.
+ *
+ * Run at the end of every event; the request goes to the front of the queue,
+ * so nothing that arrived later is served before it.
+ *
+ * @param me The AO.
+ */
+static void turn_pump(Storage * const me)
+{
+    if ( !busy(me) && QActive_recall(&me->super, &me->turnq) )
+    {
+        turn_stop(me);
+    }
+}
+
+/**
+ * @brief The bound has passed: serve the request that waits, which refuses it.
+ *
+ * It is served where it stands, so the refusal is its handler's own - the
+ * answer it gave before it could wait - and the only trace of the wait is the
+ * time it took.
+ *
+ * @param me The AO.
+ */
+static void turn_expired(Storage * const me)
+{
+    if ( 0U < me->turn_stale )
+    {
+        me->turn_stale -= 1U;
+    }
+    else if ( me->turn_live )
+    {
+        QEvt const * const held = QEQueue_get(&me->turnq,
+                                              (uint_fast8_t)me->super.prio);
+
+        me->turn_live = false;
+        if ( NULL != held )
+        {
+            (void)Storage_serve(me, held);
+            QF_gc(held);
+        }
+    }
+    else
+    {
+        /* The request it bounded was served first. */
+    }
+}
+
+/**
+ * @brief The only state: hold what needs the card while a call to it is out,
+ *        hold what writes while a transfer is in flight, serve the rest.
  *
  * @param me The AO.
  * @param e  The event.
@@ -6807,7 +6981,16 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
 {
     QState status;
 
-    if ( me->sdj.busy && needs_card(me, e) && card_hold(me, e) )
+    if ( (QSignal)STORAGE_TURN_TO_SIG == e->sig )
+    {
+        turn_expired(me);
+        status = Q_HANDLED();
+    }
+    else if ( me->sdj.busy && needs_card(me, e) && card_hold(me, e) )
+    {
+        status = Q_HANDLED();
+    }
+    else if ( turn_wanted(e) && busy(me) && turn_hold(me, e) )
     {
         status = Q_HANDLED();
     }
@@ -6817,6 +7000,7 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
         if ( Q_HANDLED() == status )
         {
             card_pump(me);
+            turn_pump(me);
         }
     }
     return status;

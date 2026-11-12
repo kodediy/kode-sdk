@@ -117,6 +117,25 @@ static void make_file(const char *name, size_t bytes)
     (void)fclose(f);
 }
 
+/** @brief The size of @p rel under the internal fake, or -1 when absent. */
+static long fs_size(const char *rel)
+{
+    char  path[512];
+    FILE *f;
+    long  n;
+
+    (void)snprintf(path, sizeof(path), "%s/%s", fake_media_fs_dir(), rel);
+    f = fopen(path, "rb");
+    if ( NULL == f )
+    {
+        return -1L;
+    }
+    (void)fseek(f, 0L, SEEK_END);
+    n = ftell(f);
+    (void)fclose(f);
+    return n;
+}
+
 /** @brief Dispatch an open request for @p name, from the spy. */
 static void ask_open(const char *name)
 {
@@ -174,6 +193,33 @@ static kode_status_t take_open_status(void)
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the request went unanswered");
     TEST_ASSERT_EQUAL_INT(STORAGE_OPEN_RSP_SIG, (int)e->sig);
     return (kode_status_t)((const StorageOpenRspEvt *)e)->status;
+}
+
+/* ---- A request that writes or deletes waits for the transfer in flight ------
+ * A file held open for reading is a transfer in flight; closing it ends it. */
+
+/** @brief Hold the reader slot the way a transfer does. */
+static void hold_reader(void)
+{
+    make_file("held.bin", 512U);
+    ask_open("held.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+}
+
+/** @brief End the transfer hold_reader() started, and let what waited run. */
+static void release_reader(void)
+{
+    storage_close_request();
+    (void)qf_support_pump(AO_Storage, 8U);
+}
+
+/** @brief 10 ms steps in the bound a request waits for its turn. */
+#define TURN_STEPS  QF_SUPPORT_STEPS(KODE_STORAGE_TURN_MS)
+
+/** @brief Let the whole bound pass, and a step more. */
+static void wait_out_turn(void)
+{
+    (void)qf_support_tick(AO_Storage, TURN_STEPS + 1U);
 }
 
 /* ---- Bring-up -------------------------------------------------------------- */
@@ -444,42 +490,30 @@ TEST_CASE("a write while a file is open for reading is refused",
  * handle split removed that refusal along with the accident it was, and this
  * was the one opener in the file that never asked busy() for itself, because
  * it never had to. A console `write` arriving while AO_AppMgr holds a read
- * open across many dispatch steps - a GUI-driven `app install`, say - must
- * still be refused, and the install's own read must still be exactly as
- * usable afterwards as if the write had never arrived. */
-TEST_CASE("a text write while a file is open for reading is refused, and "
-          "the read still answers", "[storage_ao]")
+ * open across many dispatch steps - a GUI-driven `app install`, say - waits
+ * for it, is refused when the read outlasts the wait, and the install's own
+ * read must still be exactly as usable throughout as if the write had never
+ * arrived. */
+TEST_CASE("a text write while a file is open for reading never touches it, "
+          "and is refused when the read outlasts its wait", "[storage_ao]")
 {
-    StorageTextEvt e;
-
     storage_fresh();
     make_file("held.bin", 16U);
 
     ask_open("held.bin");
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
 
-    (void)memset(&e, 0, sizeof(e));
-    e.super = (QEvt)QEVT_INITIALIZER(STORAGE_TEXT_REQ_SIG);
-    (void)snprintf(e.path, sizeof(e.path), "%s", "/storage/outgoing.txt");
-    (void)snprintf(e.text, sizeof(e.text), "%s", "hi");
-    e.len    = 2U;
-    e.append = false;
-    e.who    = ao_spy();
-    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+    storage_text_request(ao_spy(), "/storage/outgoing.txt", "hi", false, 0U);
+    (void)qf_support_pump(AO_Storage, 8U);
 
-    const QEvt * const wrsp = ao_spy_take();
-    TEST_ASSERT_NOT_NULL_MESSAGE(wrsp, "the write went unanswered");
-    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)wrsp->sig);
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
-        (int)((const StoragePathRspEvt *)wrsp)->rc);
-
-    /* Refused before kdrv was ever asked, so nothing was created at all -
-     * not even the stub a failed create would otherwise leave. */
+    /* Waiting, and nothing created: not even the stub a failed create would
+     * otherwise leave. */
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the write was answered early");
     TEST_ASSERT_FALSE(
         fake_media_file_exists(fake_media_fs_dir(), "outgoing.txt"));
 
-    /* And the read the write did not touch still works, exactly as it would
-     * have if the write had never arrived. */
+    /* The read the write waits for still works, exactly as it would have if
+     * the write had never arrived. */
     static const QEvt read_evt = QEVT_INITIALIZER(STORAGE_READ_REQ_SIG);
     QASM_DISPATCH(AO_Storage, &read_evt, 0U);
 
@@ -490,6 +524,15 @@ TEST_CASE("a text write while a file is open for reading is refused, and "
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)d->status);
     TEST_ASSERT_FALSE(d->eof);
     TEST_ASSERT_EQUAL_UINT16(16U, d->len);
+
+    wait_out_turn();
+    const QEvt * const wrsp = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(wrsp, "the write went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)wrsp->sig);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+        (int)((const StoragePathRspEvt *)wrsp)->rc);
+    TEST_ASSERT_FALSE(
+        fake_media_file_exists(fake_media_fs_dir(), "outgoing.txt"));
 }
 
 /* ---- The audit's fourth fix: a copy with nobody to answer ------------------ */
@@ -542,8 +585,8 @@ TEST_CASE("a copy with nobody to answer is refused before it opens anything",
  * a directory mid-walk, or selftesting a partition a write is still landing
  * on. Same guard, the sites it had not reached yet. */
 
-TEST_CASE("rm is refused while a transfer is in flight, and the file "
-          "survives", "[storage_ao]")
+TEST_CASE("rm is refused when the transfer in flight outlasts its wait, and "
+          "the file survives", "[storage_ao]")
 {
     storage_fresh();
     make_file("held.bin", 16U);
@@ -554,7 +597,7 @@ TEST_CASE("rm is refused while a transfer is in flight, and the file "
 
     storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_UNLINK,
                          "/storage/target.bin");
-    (void)qf_support_pump(AO_Storage, 8U);
+    wait_out_turn();
 
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the rm went unanswered");
@@ -566,7 +609,8 @@ TEST_CASE("rm is refused while a transfer is in flight, and the file "
         "rm ran anyway");
 }
 
-TEST_CASE("rmdir is refused while a transfer is in flight", "[storage_ao]")
+TEST_CASE("rmdir is refused when the transfer in flight outlasts its wait",
+          "[storage_ao]")
 {
     storage_fresh();
     make_file("held.bin", 16U);
@@ -576,7 +620,7 @@ TEST_CASE("rmdir is refused while a transfer is in flight", "[storage_ao]")
 
     storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_RMDIR,
                          "/storage/somedir");
-    (void)qf_support_pump(AO_Storage, 8U);
+    wait_out_turn();
 
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the rmdir went unanswered");
@@ -585,8 +629,8 @@ TEST_CASE("rmdir is refused while a transfer is in flight", "[storage_ao]")
         (int)((const StoragePathRspEvt *)e)->rc);
 }
 
-TEST_CASE("mv is refused while a transfer is in flight, and the source "
-          "stays put", "[storage_ao]")
+TEST_CASE("mv is refused when the transfer in flight outlasts its wait, and "
+          "the source stays put", "[storage_ao]")
 {
     storage_fresh();
     make_file("held.bin", 16U);
@@ -597,7 +641,7 @@ TEST_CASE("mv is refused while a transfer is in flight, and the source "
 
     storage_pair_request(ao_spy(), (uint8_t)STORAGE_PAIR_MOVE,
                          "/storage/src.bin", "/storage/dst.bin");
-    (void)qf_support_pump(AO_Storage, 8U);
+    wait_out_turn();
 
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the mv went unanswered");
@@ -607,6 +651,68 @@ TEST_CASE("mv is refused while a transfer is in flight, and the source "
     TEST_ASSERT_TRUE_MESSAGE(
         fake_media_file_exists(fake_media_fs_dir(), "src.bin"),
         "mv ran anyway");
+}
+
+TEST_CASE("rm that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][turn]")
+{
+    storage_fresh();
+    hold_reader();
+    make_file("target.bin", 8U);
+
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_UNLINK,
+                         "/storage/target.bin");
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the rm was answered while the "
+                                            "transfer still ran");
+    TEST_ASSERT_TRUE_MESSAGE(
+        fake_media_file_exists(fake_media_fs_dir(), "target.bin"),
+        "the rm ran over the transfer");
+
+    release_reader();
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the rm never ran");
+    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "target.bin"));
+}
+
+TEST_CASE("mv that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][turn]")
+{
+    storage_fresh();
+    hold_reader();
+    make_file("src.bin", 8U);
+
+    storage_pair_request(ao_spy(), (uint8_t)STORAGE_PAIR_MOVE,
+                         "/storage/src.bin", "/storage/dst.bin");
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the mv never ran");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_fs_dir(), "dst.bin"));
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "src.bin"));
+}
+
+TEST_CASE("a text write that meets a transfer waits for it and lands when it ends",
+          "[storage_ao][turn]")
+{
+    storage_fresh();
+    hold_reader();
+
+    storage_text_request(ao_spy(), "/storage/note.txt", "hi", false, 0U);
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL(ao_spy_take());
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "note.txt"));
+
+    release_reader();
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the write never ran");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_EQUAL_INT(2, (int)fs_size("note.txt"));
 }
 
 /** @brief Whether a captured log line holds @p words. */
@@ -1543,7 +1649,7 @@ TEST_CASE("a delete of a folder that is not there is refused, and answered",
 /* A folder is never worth displacing a transfer, and the delete says which of
  * the two refusals it is - an operator whose `appdata_rm` was refused while a
  * file streamed needs to know to type it again. */
-TEST_CASE("a delete is refused while a transfer is in flight",
+TEST_CASE("a delete is refused when the transfer in flight outlasts its wait",
           "[storage_ao][appdata]")
 {
     storage_fresh();
@@ -1555,10 +1661,31 @@ TEST_CASE("a delete is refused while a transfer is in flight",
     (void)take_open_status();
 
     ask_appdata_rm("scope");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "refused before it had waited");
+    wait_out_turn();
 
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_rm_status());
     TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_fs_dir(),
                                             ".kode/appsdata/scope/app.json"));
+}
+
+TEST_CASE("a delete that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][appdata][turn]")
+{
+    storage_fresh();
+    fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    hold_reader();
+
+    ask_appdata_rm("scope");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered while the transfer ran");
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_fs_dir(),
+                                            ".kode/appsdata/scope/app.json"));
+
+    release_reader();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_rm_status());
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
+                                             ".kode/appsdata/scope"));
 }
 
 /* An asker with a delete in flight takes only the answer that names it. */
@@ -1887,28 +2014,33 @@ static const char PUT_JSON[] = "{\"name\":\"Demo\",\"category\":\"tools\"}";
 static uint8_t    s_put_icon[KAPP_ICON_BYTES];
 
 /** @brief Dispatch APPDATA_PUT_REQ_SIG for @p project, from the spy, with a
- *         fresh buffer that is AO_Storage's from here. */
+ *         fresh buffer that is AO_Storage's from here.
+ *
+ * A pool event, put at the front of the queue and taken from it the way the
+ * AO's own loop does, so the reference count a wait relies on is the real one:
+ * the request is served before whatever else is queued, and one that waits
+ * for its turn is held by the pool, not by this frame. */
 static void ask_appdata_put(const char *project, uint16_t icon_len)
 {
-    static AppDataPutEvt e;
-    uint16_t const       jlen = (uint16_t)(sizeof(PUT_JSON) - 1U);
+    AppDataPutEvt *e = Q_NEW_X(AppDataPutEvt, 0U, APPDATA_PUT_REQ_SIG);
+    uint16_t const jlen = (uint16_t)(sizeof(PUT_JSON) - 1U);
 
-    (void)memset(&e, 0, sizeof(e));
-    e.super = (QEvt)QEVT_INITIALIZER(APPDATA_PUT_REQ_SIG);
-    (void)snprintf(e.project, sizeof(e.project), "%s", project);
+    TEST_ASSERT_NOT_NULL(e);
+    (void)snprintf(e->project, sizeof(e->project), "%s", project);
     /* cppcheck-suppress misra-c2012-11.5 ; a byte buffer from a void * allocator */
-    e.buf = (uint8_t *)khal_realloc_psram(NULL, (size_t)jlen + (size_t)icon_len);
-    TEST_ASSERT_NOT_NULL(e.buf);
-    (void)memcpy(e.buf, PUT_JSON, jlen);
+    e->buf = (uint8_t *)khal_realloc_psram(NULL, (size_t)jlen + (size_t)icon_len);
+    TEST_ASSERT_NOT_NULL(e->buf);
+    (void)memcpy(e->buf, PUT_JSON, jlen);
     if ( 0U != icon_len )
     {
-        (void)memcpy(&e.buf[jlen], s_put_icon, icon_len);
+        (void)memcpy(&e->buf[jlen], s_put_icon, icon_len);
     }
-    e.json_len = jlen;
-    e.icon_len = icon_len;
-    e.who      = ao_spy();
+    e->json_len = jlen;
+    e->icon_len = icon_len;
+    e->who      = ao_spy();
 
-    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+    QACTIVE_POST_LIFO(AO_Storage, &e->super);
+    (void)qf_support_pump(AO_Storage, 1U);
 }
 
 /** @brief Every buffer a put was handed has been given back. */
@@ -1920,31 +2052,18 @@ static void assert_put_bufs_freed(void)
 }
 
 /** @brief Take the put's answer; every request is answered. */
-static kode_status_t take_put_status(void)
+static const AppDataPutRspEvt *take_put_rsp(void)
 {
     const QEvt *ev = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(ev, "the put went unanswered");
     TEST_ASSERT_EQUAL_INT(APPDATA_PUT_RSP_SIG, (int)ev->sig);
-    return ((const AppDataPutRspEvt *)ev)->rc;
+    return (const AppDataPutRspEvt *)ev;
 }
 
-/** @brief The size of @p rel under the internal fake, or -1 when absent. */
-static long fs_size(const char *rel)
+/** @brief Take the put's answer and say how it ended. */
+static kode_status_t take_put_status(void)
 {
-    char  path[512];
-    FILE *f;
-    long  n;
-
-    (void)snprintf(path, sizeof(path), "%s/%s", fake_media_fs_dir(), rel);
-    f = fopen(path, "rb");
-    if ( NULL == f )
-    {
-        return -1L;
-    }
-    (void)fseek(f, 0L, SEEK_END);
-    n = ftell(f);
-    (void)fclose(f);
-    return n;
+    return take_put_rsp()->rc;
 }
 
 TEST_CASE("put writes app.json and icon.k64 into the internal folder",
@@ -2176,26 +2295,130 @@ TEST_CASE("put with an icon length the format does not have is refused",
     }
 }
 
-TEST_CASE("put while a transfer runs answers busy", "[storage_ao][appdata]")
+TEST_CASE("a put that meets a transfer waits for it and lands when it ends",
+          "[storage_ao][appdata][turn]")
 {
     storage_fresh();
     fake_psram_reset();
-    make_file("app.bin", 512U);
-
-    ask_open("app.bin");                 /* takes the reader slot */
-    (void)take_open_status();
+    hold_reader();
 
     ask_appdata_put("demo", 0U);
     drain_write();
 
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
+        "the put was answered while the transfer still ran");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size(".kode/appsdata/demo/app.json"),
+        "the put ran over the transfer");
+
+    release_reader();
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+                          (int)fs_size(".kode/appsdata/demo/app.json"));
+}
+
+TEST_CASE("a put that waits past the bound is refused as busy, and frees its buffer",
+          "[storage_ao][appdata][turn]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+
+    ask_appdata_put("demo", 0U);
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "refused before the bound");
+
+    wait_out_turn();
+    const AppDataPutRspEvt *rsp = take_put_rsp();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, rsp->rc);
+    TEST_ASSERT_TRUE_MESSAGE(rsp->busy, "a busy refusal is told apart");
     assert_put_bufs_freed();
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), ".kode"));
+
+    release_reader();
+    drain_write();
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a refused put was answered twice");
+}
+
+TEST_CASE("a put refused for another reason is not told as busy",
+          "[storage_ao][appdata][turn]")
+{
+    storage_fresh();
+    fake_psram_reset();
+
+    ask_appdata_put("bad/name", 0U);
+    drain_write();
+
+    const AppDataPutRspEvt *rsp = take_put_rsp();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, rsp->rc);
+    TEST_ASSERT_FALSE(rsp->busy);
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("a second put while one waits is refused at once",
+          "[storage_ao][appdata][turn]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+
+    ask_appdata_put("demo", 0U);
+    ask_appdata_put("other", 0U);
+
+    const AppDataPutRspEvt *rsp = take_put_rsp();
+    TEST_ASSERT_EQUAL_STRING("other", rsp->project);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, rsp->rc);
+    TEST_ASSERT_TRUE(rsp->busy);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_psram_free_count(),
+        "the refused put's buffer was not given back, or the waiting one's was");
+
+    release_reader();
+    drain_write();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_TRUE(fs_size(".kode/appsdata/demo/app.json") > 0L);
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size(".kode/appsdata/other/app.json"));
+}
+
+/* The bound's timer can fire and queue its event, and the transfer then end
+ * before that event is dispatched. The request that waited is taken up and
+ * meets another transfer, so it waits again under a new bound; the old
+ * timer's event, arriving behind it, must not end that one early. */
+TEST_CASE("a wait that ended before its timer was heard does not cut the next "
+          "wait short", "[storage_ao][appdata][turn]")
+{
+    static const QEvt close_evt = QEVT_INITIALIZER(STORAGE_CLOSE_REQ_SIG);
+
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+
+    ask_appdata_put("demo", 0U);
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS) + 10U);
+
+    /* The transfer ends with the bound's event queued; another begins before
+     * the put is served again. */
+    QASM_DISPATCH(AO_Storage, &close_evt, 0U);
+    ask_open("held.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+    (void)qf_support_pump(AO_Storage, 8U);
+
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
+        "the old timer's event refused a put that had begun a new wait");
+
+    wait_out_turn();
+    const AppDataPutRspEvt *rsp = take_put_rsp();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, rsp->rc);
+    TEST_ASSERT_TRUE(rsp->busy);
+    assert_put_bufs_freed();
 }
 
 /* Between the two steps the put owns the AO: busy() reads it, so a second put
- * is refused and the first one still lands whole. */
-TEST_CASE("a second put during the first answers busy", "[storage_ao][appdata]")
+ * waits for the first to land, and then lands whole itself. */
+TEST_CASE("a second put during the first waits for it and lands after",
+          "[storage_ao][appdata][turn]")
 {
     storage_fresh();
     fake_psram_reset();
@@ -2203,17 +2426,18 @@ TEST_CASE("a second put during the first answers busy", "[storage_ao][appdata]")
     ask_appdata_put("demo", KAPP_ICON_BYTES);   /* step one done, icon pending */
     ask_appdata_put("other", 0U);
 
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_psram_free_count(),
-        "the refused put's buffer was not given back, or the running one's was");
-    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
-                                             ".kode/appsdata/other"));
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the second put was answered early");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/other/app.json"),
+        "the second put ran inside the first");
 
     drain_write();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     assert_put_bufs_freed();
     TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
                           (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_TRUE(fs_size(".kode/appsdata/other/app.json") > 0L);
 }
 
 /* A name that is a directory cannot be created as a file, which is how the

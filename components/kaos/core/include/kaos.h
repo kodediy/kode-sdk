@@ -3048,6 +3048,10 @@ typedef enum {
  * @brief Ask AO_Storage about one path: STAT, LIST, MKDIR, UNLINK or RMDIR it.
  *
  * Every request is answered, refusals included: the console closes on it.
+ * UNLINK and RMDIR, and the delete that tries either, wait for the transfer
+ * AO_Storage has in flight to end, KODE_STORAGE_TURN_MS at most, and are refused
+ * with KODE_DENIED after it; one request waits at a time, and a second is refused
+ * at once.
  *
  * @param who  Where the response is posted. NULL is served and not answered.
  * @param op   storage_path_op_t, any but STORAGE_PATH_CAT (storage_cat_request()).
@@ -3060,8 +3064,9 @@ void storage_path_request(QActive *who, uint8_t op, const char *path);
  *
  * Answered once with StoragePathRspEvt; `rc` says how it went. On KODE_ERROR,
  * `exists` true means the source was checked afterwards and is missing.
- * MOVE: KODE_DENIED malformed, no volume, or two volumes; KODE_ERROR no mount or
- * rename failed. COPY: KODE_DENIED malformed, no volume, same file, or a transfer in
+ * MOVE waits for a transfer in flight like storage_path_request()'s deletes.
+ * MOVE: KODE_DENIED malformed, no volume, two volumes, or a transfer that outlasted
+ * the wait; KODE_ERROR no mount or rename failed. COPY: KODE_DENIED malformed, no volume, same file, or a transfer in
  * flight; KODE_ERROR otherwise. COPY answers at its end: size deadlines for it.
  *
  * @param who Where the response is posted. NULL is served and not answered for
@@ -3081,7 +3086,8 @@ void storage_pair_request(QActive *who, uint8_t op, const char *src,
  * StoragePathRspEvt tagged STORAGE_PATH_WRITE. @p line n: replaces line n (1-based)
  * via a temporary renamed over the original, so a failure leaves it untouched; the
  * file must fit a 32 KB buffer (else KODE_NO_RESOURCES); tagged
- * STORAGE_PATH_WRITE_LINE so path_answer() can tell the failures apart.
+ * STORAGE_PATH_WRITE_LINE so path_answer() can tell the failures apart. Either waits
+ * for a transfer in flight like storage_path_request()'s deletes.
  *
  * @param who    Where the response is posted. NULL is served and not
  *               answered.
@@ -3293,8 +3299,11 @@ kode_status_t storage_space_ask(QActive *who, const char *path);
  * `file_put`: AO_Log hands over exactly @p size raw bytes, written to @p path
  * (truncating). Answered by RECV_READY_SIG, RECV_ACK_SIG per KODE_RECV_CHUNK, then
  * one of RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG, POSTED to @p who; no
- * APP_FLASH_* reporting. Any failure removes the file, so `app_run` never boots a
- * stub. Designed and verified on the cable; over BLE it is untried, not refused.
+ * APP_FLASH_* reporting. A transfer already in flight is waited for,
+ * KODE_STORAGE_TURN_MS at most; past it, and for a second request while one
+ * waits, the answer is RECV_BUSY_SIG and nothing was armed. Any failure removes
+ * the file, so `app_run` never boots a stub. Designed and verified on the cable;
+ * over BLE it is untried, not refused.
  *
  * @param who   Where the RECV_* conversation is posted. NULL is refused: it is
  *              AO_Storage's only sign the transfer is alive.
@@ -3391,7 +3400,9 @@ void appdata_request(const char *project, QActive *who);
  * The one recursive delete, bounded to `/storage/.kode/appsdata/<project>` and one
  * subfolder level (https://docs.kode.diy/sdk/kdrv/apps). The card is never touched;
  * a card folder of that name is logged. Always answered once posted, refusals
- * included, with an AppDataRmRspEvt naming @p project.
+ * included, with an AppDataRmRspEvt naming @p project. It waits for a transfer in
+ * flight like storage_path_request()'s deletes; a transfer that outlasts the wait
+ * is KODE_DENIED.
  *
  * @param project The app's project name, as the binary declares it.
  * @param who     Where APPDATA_RM_RSP_SIG is posted. Never NULL.
@@ -3438,6 +3449,10 @@ typedef struct {
     char          project[KDRV_SLOT_PROJECT_MAX]; /**< Echoed: answers can cross. */
     kode_status_t rc;      /**< KODE_OK, KODE_DENIED, KODE_ERROR, KODE_IO_ERROR,
                             *   or KODE_NO_RESOURCES: no room for a new folder. */
+    bool          busy;    /**< With KODE_DENIED: the put was good but AO_Storage
+                            *   had no turn for it within KODE_STORAGE_TURN_MS,
+                            *   so nothing was written and the same put may be
+                            *   asked again. False for every other answer.   */
 } AppDataPutRspEvt;
 
 /**
@@ -3446,8 +3461,10 @@ typedef struct {
  *
  * Clears the folder (as appdata_rm_request()), makes missing parents, then writes
  * `app.json` and, if @p icon_len, `icon.k64` in two steps. Never the card. Once
- * posted, AO_Storage owns @p buf and frees it on every path. Always answered with an
- * AppDataPutRspEvt: KODE_OK; KODE_DENIED bad name, length, NULL buffer or busy;
+ * posted, AO_Storage owns @p buf and frees it on every path. A put that meets a
+ * transfer in flight waits for it (KODE_STORAGE_TURN_MS). Always answered with an
+ * AppDataPutRspEvt: KODE_OK; KODE_DENIED bad name, length, NULL buffer or busy
+ * (AppDataPutRspEvt.busy tells the last apart);
  * KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when a new folder
  * would leave the partition under KODE_APPDATA_FREE_MIN_BYTES (a folder that is
  * there is always replaced). A failed put leaves no folder.
