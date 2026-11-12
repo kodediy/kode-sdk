@@ -2344,6 +2344,28 @@ uint32_t kdrv_ble_activity(void)
 #endif
 
 /**
+ * @brief Whether the link @p conn is encrypted already.
+ *
+ * NimBLE hands a peripheral its connect event only after it has read the
+ * central's version and features. A bonded central that encrypts at once is
+ * encrypted by then, and its ENC_CHANGE has been handled.
+ *
+ * @param conn The connection.
+ * @return true when the link exists and is encrypted.
+ */
+static bool ble_link_encrypted(uint16_t conn)
+{
+    struct ble_gap_conn_desc link;
+    bool encrypted = false;
+
+    if ( ble_gap_conn_find(conn, &link) == 0 )
+    {
+        encrypted = (0U != link.sec_state.encrypted);
+    }
+    return encrypted;
+}
+
+/**
  * @brief Ask the central of @p conn for the awake set or the rest set.
  * @param conn The connection.
  * @param rest true for the rest set (kdrv_ble_conn_params()).
@@ -2397,10 +2419,17 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_CONNECT:
             if ( 0 == event->connect.status )
             {
+                bool const encrypted = ble_link_encrypted(event->connect.conn_handle);
+
                 KLOG_N(TAG, "connected");
                 s_ble.conn = event->connect.conn_handle;
                 ++s_ble.links;
-                s_ble.secure = false;
+                /* An encrypted link had its ENC_CHANGE already, and that
+                 * said whether it is secure. */
+                if ( !encrypted )
+                {
+                    s_ble.secure = false;
+                }
 #if CONFIG_KODEOS_BLE_CONSOLE
                 kdrv_ble_app_link_reset();
 #endif
@@ -2433,11 +2462,10 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  * in four - a security-manager timeout on this already
                  * bonded peer, the link stalling mid-transfer rather than
                  * finishing slow - and are not in this file; see the commit
-                 * history for why. That same timeout still turns up
-                 * occasionally with only this change in place; it is not
-                 * fully explained and is not new here - AO_Log and the
-                 * security manager were already sharing this link before
-                 * this call existed. */
+                 * history for why. That timeout is most likely the security
+                 * request below asked of a link the bonded central had
+                 * encrypted already, a request the board does not make
+                 * (ble_link_encrypted()). */
                 if ( ble_conn_ask(event->connect.conn_handle, false) != 0 )
                 {
                     /* Not fatal, and not worth a warning either: a central
@@ -2454,19 +2482,13 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  * client whose send() is write-without-response would wait
                  * forever for a pairing nobody started. With Just Works this
                  * completes in a few hundred milliseconds and asks the human
-                 * nothing. */
+                 * nothing. A link that is encrypted already is not asked: the
+                 * central has no need to answer, and the request would end
+                 * 30 s later as a failed encryption that hangs up a link in
+                 * use. */
+                if ( !encrypted )
                 {
-                    /* A bonded central that reconnects encrypts by itself, and
-                     * often before this event is handled. Asking it again then
-                     * starts a procedure it never answers, which ends 30 s later
-                     * as a failure on a link that is encrypted and in use. */
-                    struct ble_gap_conn_desc d;
-
-                    if ( (ble_gap_conn_find(event->connect.conn_handle, &d) != 0)
-                         || (0U == d.sec_state.encrypted) )
-                    {
-                        (void)ble_gap_security_initiate(event->connect.conn_handle);
-                    }
+                    (void)ble_gap_security_initiate(event->connect.conn_handle);
                 }
 #endif
             }
