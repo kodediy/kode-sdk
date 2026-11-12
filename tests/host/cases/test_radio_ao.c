@@ -2800,6 +2800,64 @@ static void inst_complete(void)
         "an update ends with the link off, as radio_down does - not failed");
 }
 
+static void radio_reboot(void);
+static void c5_case_end(void);
+
+/** @brief Ticks from an update's end to the restart it asks for. */
+#define INST_RESTART_STEPS \
+    QF_SUPPORT_STEPS(KDRV_RADIO_C5_ACTIVATE_MS + KDRV_RADIO_C5_BOOT_MS)
+
+/** @brief How many BOOT_EXIT_REQ_SIG AO_Boot holds; drains its queue. */
+static unsigned boot_exits_taken(void)
+{
+    const QEvt *e;
+    unsigned n = 0U;
+
+    while ( xQueueReceive(AO_Boot->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)BOOT_EXIT_REQ_SIG == e->sig )
+        {
+            n += 1U;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/**
+ * @brief Let @p steps 10 ms steps go by and count the restarts asked meanwhile.
+ *
+ * One pump at a time, the queue read after each: AO_Boot is a background AO
+ * once its own cases have run, and a tick takes a background AO's mail away
+ * before the next step, where a pump leaves it for the case to read.
+ */
+static unsigned boot_exits_within(unsigned steps)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; steps > i; ++i )
+    {
+        pump();
+        n += boot_exits_taken();
+    }
+    return n;
+}
+
+/**
+ * @brief What follows an update on the board: the one-shot asks AO_Boot for
+ *        exactly one restart, and the AO boots again.
+ *
+ * Every case that ends an update ends with this: the AO outlives the case,
+ * and one left waiting to restart is what every later case would inherit.
+ */
+static void inst_restart(void)
+{
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, boot_exits_within(INST_RESTART_STEPS + 2U),
+        "an update ends in exactly one restart");
+    radio_reboot();
+    c5_case_end();
+}
+
 TEST_CASE("install dst=c5 on a link that is up arms the console, says ready "
           "once, and answers once the C5 has activated the verified image",
           "[radio_ao]")
@@ -2825,12 +2883,13 @@ TEST_CASE("install dst=c5 on a link that is up arms the console, says ready "
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, done, "the activate is the `>ok`");
     TEST_ASSERT_EQUAL_UINT(0U, fail);
     TEST_ASSERT_TRUE(logged("is written and activated"));
-    TEST_ASSERT_TRUE_MESSAGE(logged("`radio_up` brings the link back"),
-        "the log says how to see what the C5 now runs");
+    TEST_ASSERT_TRUE_MESSAGE(logged("the board restarts by itself"),
+        "the log says the board restarts to see what the C5 now runs");
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)STORAGE_OP_MOUNT, next_storage_op(),
         "the card goes back on the plain path, as after radio_down");
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KRADIO_OFF, link_now(),
         "an update ends with the link off, as radio_down does - not failed");
+    inst_restart();
 }
 
 /* AO_AppMgr's done names the app it installed. A C5 image installs none, so
@@ -2874,6 +2933,7 @@ TEST_CASE("a C5 update's done arrives naming no app", "[radio_ao]")
         "activated: the card closes and the LED lets go");
     TEST_ASSERT_FALSE_MESSAGE(named,
         "a C5 image installs no app, so its done names none");
+    inst_restart();
 }
 
 TEST_CASE("a C5 that refuses to activate the image fails the install, and "
@@ -2924,6 +2984,7 @@ TEST_CASE("install dst=c5 on a link that is off brings the link up once the "
     TEST_ASSERT_EQUAL_UINT(1U, ready);
     TEST_ASSERT_EQUAL_UINT(0U, fail);
     inst_complete();
+    inst_restart();
 }
 
 TEST_CASE("an image built for another chip is refused before the C5 is touched",
@@ -3002,6 +3063,7 @@ TEST_CASE("install dst=c5 while a job holds the channel waits, and pushes the "
     TEST_ASSERT_EQUAL_UINT(1U, ready);
     TEST_ASSERT_EQUAL_UINT(0U, fail);
     inst_complete();
+    inst_restart();
 }
 
 TEST_CASE("a host that goes quiet mid-install is a stall, and raw mode comes "
@@ -3062,6 +3124,7 @@ TEST_CASE("install dst=c5 off a medium while one is receiving is refused",
     /* Let the install finish, so the next case starts clean. */
     inst_feed(s_img, (uint16_t)sizeof(s_img));
     inst_complete();
+    inst_restart();
 }
 
 TEST_CASE("install dst=c5 while the link is being torn down is refused with an "
@@ -3127,6 +3190,7 @@ TEST_CASE("the acks count one per whole chunk and none for the remainder",
     inst_answers(&ready, &ack, &done, &fail, &stall);
     TEST_ASSERT_EQUAL_UINT(1U, done);
     TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    inst_restart();
 }
 
 /* ---- What the glass and the LED see of a C5 update ---------------------------
@@ -3245,6 +3309,7 @@ TEST_CASE("install dst=c5 reports 0 % with its ready, half the bar staged, the "
     TEST_ASSERT_EQUAL_UINT(0U, w.fail);
 
     write_unspy();
+    inst_restart();
 }
 
 TEST_CASE("a C5 that refuses to activate ends the card as a failure, once",
@@ -5337,8 +5402,7 @@ TEST_CASE("a C5 update leaves J3's rail unknown: an off then brings the link up,
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
     exp_heard_one(false, KODE_OK);
     exp_listen_end();
-    radio_reboot();
-    c5_case_end();
+    inst_restart();
 }
 
 TEST_CASE("a link-up whose switch of J3's supply failed leaves the rail unknown: "
@@ -6878,6 +6942,7 @@ TEST_CASE("a C5 update opens its session only after the card's unmount is answer
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_C5_BEGIN, running_job());
     s_gate_auto = true;
     inst_push_to_end();
+    inst_restart();
 }
 
 TEST_CASE("a C5 update is refused while the card is still mounted, after a "
@@ -6940,6 +7005,7 @@ TEST_CASE("a C5 update waits out a refused unmount and opens its session when "
     TEST_ASSERT_FALSE(logged("stayed busy"));
     s_gate_auto = true;
     inst_push_to_end();
+    inst_restart();
 }
 
 /* The C5's update has no rollback, so a link that drops under it is the case
@@ -7073,6 +7139,95 @@ static void boot_wanting_no_ble(void)
     fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_BLE, &off, sizeof(off));
     boot_wanting_nothing();
     fake_nvs_reset();
+}
+
+/* ---- After an update: the restart, and the boot that confirms it -----------
+ * A closed C5 rolls an update back at its next reset unless a request has
+ * reached the new image first. The update's teardown leaves no link this
+ * boot, so the board restarts once the C5 has booted the image, and nothing
+ * resets the C5 until the next boot's link has reached it.
+ */
+
+TEST_CASE("an update ends in one restart, once the C5 has had time to boot "
+          "the new image", "[radio_ao][park]")
+{
+    radio_fresh();
+    go_up();
+    inst_deliver();
+    inst_push_to_end();
+    ao_spy_drain();
+    (void)boot_exits_taken();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, boot_exits_within(INST_RESTART_STEPS - 2U),
+        "a restart before the C5 has booted the new image links to the old one");
+    TEST_ASSERT_EQUAL_UINT(1U, boot_exits_within(4U));
+    TEST_ASSERT_TRUE(logged("the board restarts so a link reaches it"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, boot_exits_within(INST_RESTART_STEPS + 2U),
+                                   "asked once");
+
+    radio_reboot();
+    c5_case_end();
+}
+
+TEST_CASE("the park before that restart leaves the update's note, whatever "
+          "the jump's target", "[radio_ao][park]")
+{
+    radio_fresh();
+    go_up();
+    inst_deliver();
+    inst_push_to_end();
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT(1U, boot_exits_within(INST_RESTART_STEPS + 2U));
+
+    park_ask(KDRV_RADIO_NOTE_OS);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KDRV_RADIO_NOTE_UPDATE,
+                             fake_radio_note_last());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, boot_parked_taken(),
+        "AO_Boot is answered once, as for any park");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(),
+        "the C5 is asked nothing: there is no link");
+    TEST_ASSERT_TRUE(logged("C5 left running its update"));
+
+    radio_reboot();
+    c5_case_end();
+}
+
+TEST_CASE("after an update the C5 is not held, even with nothing wanted",
+          "[radio_ao][park]")
+{
+    radio_fresh();
+    radio_reboot();
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_radio_c5_held(),
+                             "the case starts on a boot that wants nothing");
+    go_up();
+    inst_deliver();
+    inst_push_to_end();
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_radio_c5_held(),
+        "a hold before the next link would roll the new image back");
+
+    inst_restart();
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_radio_c5_held(),
+        "the next boot that wants nothing holds the C5 again");
+}
+
+TEST_CASE("a boot whose C5 runs an update to confirm brings the link up with "
+          "nothing wanted", "[radio_ao][park]")
+{
+    radio_fresh();
+    fake_radio_set_update_waits(true);
+    radio_reboot();
+    fake_radio_set_update_waits(false);
+
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_radio_c5_held(),
+                              "the C5 is held under the link it needs");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    TEST_ASSERT_TRUE(logged("the link comes up for it"));
+
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    c5_case_end();
 }
 
 /** @brief IDF's STA netif registers this at creation; esp_restart() runs it. */
@@ -7882,6 +8037,7 @@ TEST_CASE("an amplifier owed during a C5 update is answered when the update ends
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, running_said(), "a sound with no link coming waited");
     TEST_ASSERT_FALSE(job_held());
     amp_case_end();
+    inst_restart();
 }
 
 TEST_CASE("an amplifier owed while the link comes up is answered when the bring-up "

@@ -923,6 +923,9 @@ uint32_t fake_radio_note_last(void);
 /** @brief What kdrv_radio_adopted() answers. */
 void fake_radio_set_adopted(bool adopted);
 
+/** @brief What kdrv_radio_note_update_waits() answers; a power cycle keeps it. */
+void fake_radio_set_update_waits(bool waits);
+
 /** @brief Whether a CONNECT that succeeds leaves J3's supply unswitched
  *         (kdrv_radio_exp_switched() false); fake_radio_reset() clears it. */
 void fake_radio_fail_exp_switch(bool fails);
