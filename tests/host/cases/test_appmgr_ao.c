@@ -4062,6 +4062,38 @@ TEST_CASE("install src=pending boots the adopted app only on run, and once",
         "a console install boots once: any reset must come home");
 }
 
+/* An install asked for with nothing parked does nothing, and a host that
+ * reads the log has to be told. The boot's own look at an empty mailbox stays
+ * quiet: that is every boot. */
+TEST_CASE("an install from an empty mailbox says there is nothing to install",
+          "[appmgr_ao]")
+{
+    static const QEvt adopt = QEVT_INITIALIZER(APP_ADOPT_SIG);
+    FlashReqEvt       req;
+
+    Mockkdrv_slot_Init();
+    appmgr_fresh();
+    (void)kdrv_apps_pending_consume();
+    TEST_ASSERT_FALSE(kdrv_apps_pending_present(NULL, NULL));
+
+    fake_klog_reset();
+    QASM_DISPATCH(AO_AppMgr, &adopt, 0U);
+    run_ticks(2U);
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("the mailbox is empty"),
+        "the boot's own look at an empty mailbox said so");
+
+    (void)memset(&req, 0, sizeof(req));
+    req.super    = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    req.src_kind = (uint8_t)KFW_SRC_PENDING;
+    req.dst_kind = (uint8_t)KFW_TARGET_APP;
+    (void)snprintf(req.src, sizeof(req.src), "%s", "pending");
+    fake_klog_reset();
+    QASM_DISPATCH(AO_AppMgr, &req.super, 0U);
+    run_ticks(4U);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("the mailbox is empty"),
+        "an install of nothing said nothing");
+}
+
 /* The first plan evicts "old", so the round runs before anything is evicted:
  * the STAT, the copy, the write's answer, and only then the second pass. */
 TEST_CASE("adoption over a full region keeps the victim first",

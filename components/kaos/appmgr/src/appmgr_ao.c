@@ -3140,8 +3140,17 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             uint32_t decoded_len = 0U;
             if ( !kdrv_apps_pending_present(&img_len, &decoded_len) )
             {
-                /* Gone, or the driver just found it broken and consumed it -
-                 * either way it already said why. */
+                /* Gone, or the driver just found it broken and consumed it,
+                 * and then it said why. An empty one says nothing by itself:
+                 * every boot looks, so only an install that was asked for is
+                 * told there was nothing to install. What the request set is
+                 * dropped with it, or the next adoption would take it. */
+                if ( me->dst_forced )
+                {
+                    KLOG_W(TAG, "the mailbox is empty: nothing to install");
+                }
+                me->dst_forced = false;
+                me->adopt_run  = false;
                 keep_clear(me);
                 status = Q_HANDLED();
                 break;
