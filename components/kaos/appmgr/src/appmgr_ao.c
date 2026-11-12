@@ -442,7 +442,9 @@ static QState AppMgr_asking(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_finding(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_scrubbing(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e);
+#if CONFIG_KODEOS_NET
 static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e);
+#endif
 
 /* The four transfer wrappers are used by flash_cleanup(), which is declared
  * ahead of them because it is what every failure path calls. */
@@ -4582,6 +4584,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
 #endif
 }
 
+#if CONFIG_KODEOS_NET
 /**
  * @brief Reading an app's data folder from a URL, then waiting for AO_Storage
  *        to write it.
@@ -4596,7 +4599,6 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
     QState status;
     switch ( e->sig )
     {
-#if CONFIG_KODEOS_NET
         case Q_ENTRY_SIG: {
             QTimeEvt_armX(&me->idle, APPMGR_OPEN_TICKS, 0U);
             status = Q_HANDLED();
@@ -4662,7 +4664,6 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-#endif /* CONFIG_KODEOS_NET */
         default: {
             if ( busy_refused(me, e, "fetching an app's data folder") )
             {
@@ -4677,6 +4678,7 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
     }
     return status;
 }
+#endif /* CONFIG_KODEOS_NET */
 
 /**
  * @brief The parent of every state with work in hand.

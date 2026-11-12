@@ -45,3 +45,24 @@ set(KODE_TARGET_VARIANT_BUILT "$ENV{KODE_TARGET_VARIANT}"
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(kode_target)
+
+# In this tree's own components, a function nothing calls fails the build.
+# ESP-IDF builds with -Werror but leaves this one a warning
+# (-Wno-error=unused-function), and that warning was the only sign of #94:
+# AO_Display armed its look at the glass in every build but handled it only
+# with low power. Each variant compiles other #if branches, so each can hide
+# one. The vendored QP/C, the managed components and ST's sources in kdrv
+# (demoted file by file) keep ESP-IDF's default.
+get_filename_component(kode_sdk_components "${CMAKE_CURRENT_LIST_DIR}/../../components" REALPATH)
+idf_build_get_property(kode_build_components BUILD_COMPONENTS)
+foreach(kode_component ${kode_build_components})
+    idf_component_get_property(kode_dir ${kode_component} COMPONENT_DIR)
+    idf_component_get_property(kode_lib ${kode_component} COMPONENT_LIB)
+    get_filename_component(kode_dir "${kode_dir}" REALPATH)
+    get_target_property(kode_type ${kode_lib} TYPE)
+    if(kode_dir MATCHES "^${kode_sdk_components}/"
+       AND NOT kode_dir STREQUAL "${kode_sdk_components}/qpc"
+       AND NOT kode_type STREQUAL "INTERFACE_LIBRARY")
+        target_compile_options(${kode_lib} PRIVATE "-Werror=unused-function")
+    endif()
+endforeach()
