@@ -173,7 +173,8 @@ kode_status_t kapp_image_chip(const uint8_t *prefix, size_t len,
  *
  * @param display_  String literal: what a user reads on the pill.
  * @param category_ String literal: a free-form group, e.g. "game", "audio" -
- *                   up to four, comma-separated, e.g. "game,demo".
+ *                   up to four, comma-separated, e.g. "game,demo". "" names
+ *                   none: the name still shows, in no group of its own.
  */
 #define KODE_APP_MANIFEST(display_, category_)                                \
     _Static_assert(sizeof(display_) <= KAPP_NAME_MAX,                         \

@@ -92,11 +92,8 @@ kode_status_t kapp_desc_parse(const uint8_t *prefix, size_t len,
         return KODE_ERROR;              /* from the future: do not guess */
     }
 
-    if ( '\0' == cat[0] )
-    {
-        return KODE_ERROR;   /* an empty category is not a category */
-    }
-
+    /* An empty cat[] is a manifest that names no category: the name still
+     * holds, and the reader files the app as it files an unmanifested one. */
     out->magic   = d.magic;
     out->version = d.version;
     (void)memcpy(out->name, d.name, sizeof(out->name));
