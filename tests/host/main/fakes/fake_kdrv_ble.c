@@ -485,9 +485,16 @@ bool kdrv_ble_console_attached(void)
     return s_attached;
 }
 
+static uint16_t s_console_backlog;
+
+void fake_ble_console_set_backlog(uint16_t bytes)
+{
+    s_console_backlog = bytes;
+}
+
 uint16_t kdrv_ble_console_backlog(void)
 {
-    return 0U;
+    return s_console_backlog;
 }
 
 uint16_t kdrv_ble_console_retry(void)

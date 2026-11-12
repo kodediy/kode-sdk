@@ -563,6 +563,16 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  * over a slow link must not time out, but a host that dies mid-image must not
  * leave the console waiting forever. AO_AppMgr rearms it on every chunk. */
 #define KODE_RECV_IDLE_MS       5000U
+/* The same watchdog for a transfer that rides BLE. A link that stalls for a
+ * few seconds under interference is slow, not dead, and the phone app waits
+ * 10 s for each ack before it sends the chunk again: the bound has to outlast
+ * that wait, or the board gives up on a transfer the host is still retrying. */
+#define KODE_RECV_IDLE_BLE_MS  15000U
+/* How long a launch after a terminal install waits for the BLE console's
+ * outbound bytes to leave - the `>ok` the host is waiting for - before it
+ * resets the board anyway. A notification still queued when the board resets
+ * is lost, and the phone retries against a running app. */
+#define KODE_RECV_DRAIN_BLE_MS  2000U
 
 /* How long a BLE scan listens. Long enough to catch a phone's slow
  * advertising interval (up to ~1.3 s) several times over, short enough that

@@ -4087,6 +4087,133 @@ TEST_CASE("a percent the pool had no room for is said again, not counted as said
     keep_end();
 }
 
+/* ---- A slow link is not a dead one -----------------------------------------
+ * The phone app waits 10 s for an ack before it sends a chunk again, so a
+ * board that gave up after 5 s of silence lost installs the host was still
+ * retrying; and a `>ok` still queued for the link when the board reset into
+ * the new app never arrived, so the phone retried against a running app.
+ */
+
+/** @brief ask_recv_named(), from the port @p src (KODE_CONSOLE_SRC_*). */
+static void ask_recv_from(uint8_t src, uint32_t size, uint32_t crc32_val,
+                          bool launch, const char *name)
+{
+    AppRecvReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(APP_RECV_REQ_SIG);
+    e.dst    = (uint8_t)KFW_TARGET_APP;
+    e.size   = size;
+    e.crc32  = crc32_val;
+    e.launch = launch;
+    e.src    = src;
+    (void)snprintf(e.name, sizeof(e.name), "%s", name);
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+TEST_CASE("a terminal install over BLE is given 15 s of silence, not the cable's 5",
+          "[appmgr_ao][ble]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    ask_recv_from((uint8_t)KODE_CONSOLE_SRC_BLE, 4096U, 0U, false, "");
+    raw_armed(true);
+
+    run_ticks(APPMGR_RECV_IDLE_DEADLINE_TICKS + 50U);          /* past the cable's bound */
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("the host is presumed gone"),
+        "a BLE transfer was given up on after the cable's 5 s");
+
+    run_ticks(((KODE_RECV_IDLE_BLE_MS - KODE_RECV_IDLE_MS) / 10U) + 50U);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("no data for 15000 ms"),
+        "a BLE transfer that went silent was never given up on");
+    (void)log_saw(CONSOLE_RAW_END_SIG);
+    keep_end();
+}
+
+/** @brief A terminal install of "new" with run=on, from @p src, landed: the AO is launching. */
+static void landed_over(uint8_t src)
+{
+    uint32_t const len = image_named("new");
+
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    fake_ble_console_set_backlog(0U);
+    ask_recv_from(src, len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len), true,
+                  "new");
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+    tidy_settle();
+}
+
+TEST_CASE("a launch over BLE waits for the console's bytes to leave, up to 2 s",
+          "[appmgr_ao][ble]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    Mockkdrv_slot_Init();
+    landed_over((uint8_t)KODE_CONSOLE_SRC_BLE);
+    (void)boot_run_request(&off, &size, &mode);
+    fake_ble_console_set_backlog(40U);                        /* the `>ok`, still queued */
+
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    TEST_ASSERT_FALSE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "the board reset with the `>ok` still queued for the link");
+    run_ticks(100U);
+    TEST_ASSERT_FALSE(boot_run_request(&off, &size, &mode));
+
+    fake_ble_console_set_backlog(0U);                         /* the link took it */
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "the launch did not follow the answer once the link had it");
+    keep_end();
+}
+
+TEST_CASE("a launch over BLE is not held for ever by a link that never drains",
+          "[appmgr_ao][ble]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    Mockkdrv_slot_Init();
+    landed_over((uint8_t)KODE_CONSOLE_SRC_BLE);
+    (void)boot_run_request(&off, &size, &mode);
+    fake_ble_console_set_backlog(40U);
+
+    run_ticks((KODE_RECV_DRAIN_BLE_MS / 10U) - 10U);
+    TEST_ASSERT_FALSE(boot_run_request(&off, &size, &mode));
+    run_ticks(30U);
+    TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "a link that never drained held the launch past its bound");
+    TEST_ASSERT_TRUE(klog_has("launching anyway"));
+    fake_ble_console_set_backlog(0U);
+    keep_end();
+}
+
+TEST_CASE("a launch over the cable does not wait for the BLE link",
+          "[appmgr_ao][ble]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    Mockkdrv_slot_Init();
+    landed_over((uint8_t)KODE_CONSOLE_SRC_SERIAL);
+    (void)boot_run_request(&off, &size, &mode);
+    fake_ble_console_set_backlog(40U);                        /* somebody else's bytes */
+
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "a cable install waited on a BLE link it does not use");
+    fake_ble_console_set_backlog(0U);
+    keep_end();
+}
+
 /* Erase takes the entry out of the directory and the image's first sector
  * off the flash - the descriptor with it - so nothing bootable or nameable is
  * left at that offset. */

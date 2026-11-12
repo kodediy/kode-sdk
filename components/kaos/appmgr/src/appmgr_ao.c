@@ -16,6 +16,9 @@
 #include "kdrv_apps.h"
 #include "kdrv_kfw.h"
 #include "kapp_data.h"
+#if CONFIG_KODEOS_BLE_CONSOLE
+#include "kdrv_ble.h"      /* the console's second port: its backlog, before a launch */
+#endif
 #include "sdkconfig.h"
 #include "kode_log.h"
 #include "khal_crc32.h"
@@ -30,12 +33,16 @@
  * costs ~1.6s over a 5MB image - cheap for a UI that stays alive. */
 #define APPMGR_CHUNK_GAP_TICKS KQP_TICKS_PER_MS(10U)
 /* No chunk for this long during an install and the host is presumed gone -
- * KODE_RECV_IDLE_MS (kqp_config.h) in ticks, this AO's own watchdog on the
+ * KODE_RECV_IDLE_MS (kqp_config.h) in ticks - KODE_RECV_IDLE_BLE_MS when the
+ * payload rides BLE - this AO's own watchdog on the
  * command (README.md "The console": AO_Console disarms its 5 s one for the
  * length of this command and trusts this one instead - a 5 MB image over a
  * slow link runs for far longer than 5 s, and only the AO watching the
  * stream can tell "slow" from "dead"). */
 #define APPMGR_RECV_IDLE_TICKS  KQP_TICKS_PER_MS(KODE_RECV_IDLE_MS)
+/* The same watchdog for a transfer that rides BLE: a link that stalls for a
+ * few seconds is slow, and the phone app waits 10 s for an ack. */
+#define APPMGR_RECV_IDLE_BLE_TICKS  KQP_TICKS_PER_MS(KODE_RECV_IDLE_BLE_MS)
 /* Insurance on the arming handshake itself, armed at the moment this AO
  * enters AppMgr_receiving: if the console's yes never arrives (its answer
  * event could not be allocated - the one path with nobody left to speak),
@@ -56,6 +63,9 @@
 /* Between "the image is installed" and the reset that boots it: long enough
  * for AO_Log's lower-priority task to put `>ok` on the wire first. */
 #define APPMGR_ANSWER_DRAIN_TICKS KQP_TICKS_PER_MS(50U)
+/* Over BLE the answer may still be queued for the link after that wait: the
+ * launch looks again every APPMGR_ANSWER_DRAIN_TICKS, up to this long. */
+#define APPMGR_ANSWER_BLE_TICKS   KQP_TICKS_PER_MS(KODE_RECV_DRAIN_BLE_MS)
 /* Region bytes read per step while an evicted app is copied out of the
  * region: the same 32 KB the writes use, so a step stays short (rule 5). */
 #define APPMGR_KEEP_CHUNK      (32U * 1024U)
@@ -276,6 +286,11 @@ typedef struct {
     QTimeEvt answer;         /**< Lets the `>ok` reach the wire before the
                               *   board resets into the new app; see
                               *   AppMgr_launching.                          */
+    uint8_t  recv_src;       /**< KODE_CONSOLE_SRC_*: the port the payload
+                              *   rides, which sets the idle bound and
+                              *   whether the launch waits for the link.      */
+    uint32_t answer_polls;   /**< Times the launch has looked at the BLE
+                              *   console's backlog and found it not empty.   */
     uint32_t recv_crc;       /**< Running CRC over what has arrived.         */
     char     recv_name[KODE_APP_PROJECT_MAX]; /**< The project the host says
                               *   the image is, or "": the app it replaces. */
@@ -3204,7 +3219,8 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
 
             xfer_reset(me);   /* a leaked bypass from a failed park must not
                                * make this install skip the decoder */
-            me->origin = (uint8_t)APPMGR_ORIGIN_CONSOLE;
+            me->origin   = (uint8_t)APPMGR_ORIGIN_CONSOLE;
+            me->recv_src = req->src;
             keep_clear(me);
             me->os_target  = to_os;
             me->total      = req->size;
@@ -5888,6 +5904,78 @@ static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e)
 }
 
 /**
+ * @brief The silence a terminal transfer may keep, in QP ticks, by the port it rides.
+ *
+ * @param me The AO, with the request's port noted.
+ * @return APPMGR_RECV_IDLE_BLE_TICKS over BLE, APPMGR_RECV_IDLE_TICKS otherwise.
+ */
+static uint32_t recv_idle_ticks(const AppMgr * const me)
+{
+    uint32_t ticks = APPMGR_RECV_IDLE_TICKS;
+
+    if ( (uint8_t)KODE_CONSOLE_SRC_BLE == me->recv_src )
+    {
+        ticks = APPMGR_RECV_IDLE_BLE_TICKS;
+    }
+    return ticks;
+}
+
+/**
+ * @brief The same bound in milliseconds, for the log.
+ *
+ * @param me The AO, with the request's port noted.
+ * @return KODE_RECV_IDLE_BLE_MS over BLE, KODE_RECV_IDLE_MS otherwise.
+ */
+static uint32_t recv_idle_ms(const AppMgr * const me)
+{
+    uint32_t ms = KODE_RECV_IDLE_MS;
+
+    if ( (uint8_t)KODE_CONSOLE_SRC_BLE == me->recv_src )
+    {
+        ms = KODE_RECV_IDLE_BLE_MS;
+    }
+    return ms;
+}
+
+/**
+ * @brief Whether the launch must wait, because the answer to a BLE install is
+ *        still queued for the link.
+ *
+ * The `>ok` the host waits for goes out before the board resets into the new
+ * app; one still queued then is lost, and the phone retries against a running
+ * app. The wait is bounded: a link that never drains does not hold the board.
+ *
+ * @param me The AO.
+ * @return true to look again after another APPMGR_ANSWER_DRAIN_TICKS.
+ */
+static bool launch_waits(AppMgr * const me)
+{
+    bool waits = false;
+
+#if CONFIG_KODEOS_BLE_CONSOLE
+    if ( ((uint8_t)KODE_CONSOLE_SRC_BLE == me->recv_src)
+        && (0U < kdrv_ble_console_backlog()) )
+    {
+        if ( me->answer_polls < (APPMGR_ANSWER_BLE_TICKS / APPMGR_ANSWER_DRAIN_TICKS) )
+        {
+            ++me->answer_polls;
+            waits = true;
+        }
+        else
+        {
+            KLOG_W(TAG, "the BLE console still holds %u bytes after %u ms; "
+                        "launching anyway",
+                   (unsigned)kdrv_ble_console_backlog(),
+                   (unsigned)KODE_RECV_DRAIN_BLE_MS);
+        }
+    }
+#else
+    (void)me;
+#endif
+    return waits;
+}
+
+/**
  * @brief Close an install: verify or abort the write session, publish the
  *        outcome, and say what to do next.
  *
@@ -6036,7 +6124,7 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                     break;
                 }
                 me->writing = true;
-                (void)QTimeEvt_rearm(&me->idle, APPMGR_RECV_IDLE_TICKS);
+                (void)QTimeEvt_rearm(&me->idle, recv_idle_ticks(me));
                 QACTIVE_PUBLISH(&s_recv_ready_evt, &me->super);
                 progress_publish(me, 0U);
                 status = Q_HANDLED();
@@ -6082,7 +6170,7 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
              * from the start it would have been counting through the erases
              * above, and a big extent erases for longer than the whole
              * deadline. */
-            (void)QTimeEvt_rearm(&me->idle, APPMGR_RECV_IDLE_TICKS);
+            (void)QTimeEvt_rearm(&me->idle, recv_idle_ticks(me));
             /* The host may start streaming. This is `>|ready`, and the 0 %
              * that raises the Opening sheet and the LED's pulse - the write
              * is announced with the wire, never before it. */
@@ -6096,7 +6184,7 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
             /* Still hearing from the host: push the deadline out. rearm, not
              * armX - armX asserts on a timer that is already ticking
              * (Q_REQUIRE 450 in qf_time.c), and this one always is here. */
-            (void)QTimeEvt_rearm(&me->idle, APPMGR_RECV_IDLE_TICKS);
+            (void)QTimeEvt_rearm(&me->idle, recv_idle_ticks(me));
 
             me->recv_crc = khal_crc32(me->recv_crc, d->data, d->len);
 
@@ -6161,7 +6249,7 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
         case APP_RECV_IDLE_SIG: {
             KLOG_E(TAG, "install failed: no data for %u ms at %u/%u bytes; "
                         "the host is presumed gone",
-                   (unsigned)KODE_RECV_IDLE_MS,
+                   (unsigned)recv_idle_ms(me),
                    (unsigned)me->recv_wire, (unsigned)me->recv_size);
             /* The reader task may still be mid-transfer; tell AO_Log to
              * abandon raw mode rather than leave it waiting for bytes that
@@ -6210,11 +6298,18 @@ static QState AppMgr_launching(AppMgr * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
+            me->answer_polls = 0U;
             QTimeEvt_armX(&me->answer, APPMGR_ANSWER_DRAIN_TICKS, 0U);
             status = Q_HANDLED();
             break;
         }
         case APP_RECV_LAUNCH_SIG: {
+            if ( launch_waits(me) )
+            {
+                (void)QTimeEvt_rearm(&me->answer, APPMGR_ANSWER_DRAIN_TICKS);
+                status = Q_HANDLED();
+                break;
+            }
             if ( me->os_target )
             {
                 /* `dst=os`: the launch is AO_Boot's switch. Back to
