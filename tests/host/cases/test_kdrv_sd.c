@@ -93,7 +93,7 @@ TEST_CASE("with no card the driver's own state still answers", "[kdrv_sd]")
     kdrv_sd_unmount();
 
     TEST_ASSERT_EQUAL_INT32(0, field(KDRV_SD_MOUNTED));
-    TEST_ASSERT_EQUAL_INT32((int32_t)KBSP_SD_WIDTH, field(KDRV_SD_WIDTH_REQ));
+    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, field(KDRV_SD_WIDTH_REQ));
     TEST_ASSERT_EQUAL_INT32((int32_t)KBSP_SD_FREQ_KHZ, field(KDRV_SD_FREQ_REQ_KHZ));
 
     kdrv_sd_set_hosted(true);
@@ -154,7 +154,9 @@ TEST_CASE("a mount takes the card's identity, and every field reads it back",
     TEST_ASSERT_EQUAL_INT32(0, field(KDRV_SD_FULE));
 
     TEST_ASSERT_EQUAL_INT32(1, field(KDRV_SD_HIGH_CAPACITY));
-    TEST_ASSERT_EQUAL_INT32(4, field(KDRV_SD_BUS_WIDTH));
+    /* What was negotiated, not what the card offers: an everyday mount asks
+     * for one data line, whatever the card's SCR says it can do. */
+    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, field(KDRV_SD_BUS_WIDTH));
     TEST_ASSERT_EQUAL_INT32(40000, field(KDRV_SD_FREQ_KHZ));
     TEST_ASSERT_EQUAL_INT32(50000, field(KDRV_SD_CARD_MAX_KHZ));
     TEST_ASSERT_EQUAL_INT32(0xAAAA, field(KDRV_SD_RCA));
@@ -199,15 +201,19 @@ TEST_CASE("the two volume fields come from the filesystem, not the card",
 
 /* ---- The bring-up retry ---------------------------------------------------- */
 
-/* Four lines first, then one. The counterfeit cards advertise 4-bit in their
- * SCR and do not honour it, and a card that reads on one line is still worth
- * having - what a 1-bit mount MEANS is judged higher up. */
+/* Asked for four lines, the driver tries four first, then one. The
+ * counterfeit cards advertise 4-bit in their SCR and do not honour it, and a
+ * card that reads on one line is still worth having - what a 1-bit mount
+ * MEANS is judged higher up. Only the card row asks for four now, so the case
+ * asks for them itself. */
 TEST_CASE("a card that will not come up on four lines is mounted on one",
           "[kdrv_sd]")
 {
     unsigned const before = fake_sdmmc_mounts();
 
     kdrv_sd_unmount();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_set(KDRV_SD_WIDTH_REQ,
+                                                    (int32_t)KBSP_SD_WIDTH));
     fake_sdmmc_set_max_width(1U);
 
     TEST_ASSERT_NOT_NULL(kdrv_sd_mount());

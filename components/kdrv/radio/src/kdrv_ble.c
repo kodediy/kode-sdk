@@ -290,7 +290,7 @@ uint32_t kdrv_ble_links(void)
  * equal, field by field, which is what the reads below rely on. */
 extern const kdrv_ble_app_service_t kode_ble_app_service __attribute__((weak));
 
-const kdrv_ble_app_service_t *kdrv_ble_app_service(void)
+const kdrv_ble_app_service_t *kdrv_ble_app_declared(void)
 {
     return &kode_ble_app_service;
 }
@@ -1455,7 +1455,7 @@ static const struct ble_gatt_svc_def *app_build_table(void)
         .write  = BLE_GATT_CHR_F_WRITE | CHR_WRITE_ENC,
         .notify = BLE_GATT_CHR_F_NOTIFY | CHR_NOTIFY_ENC,
     };
-    bool const    served = kdrv_ble_app_build(kdrv_ble_app_service(), &perm, &t);
+    bool const    served = kdrv_ble_app_build(kdrv_ble_app_fix(), &perm, &t);
     app_host_t *const a  = app_host();
 
     if ( NULL != a )

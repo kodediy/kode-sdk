@@ -113,7 +113,7 @@ typedef enum {
     SD_THEN_READ4,         /**< One chunk of the four-line read.              */
     SD_THEN_READ1_MOUNT,   /**< The remount onto one data line.               */
     SD_THEN_READ1,         /**< One chunk of the one-line read.               */
-    SD_THEN_WRITE_MOUNT,   /**< The remount back onto the board's width.      */
+    SD_THEN_WRITE_MOUNT,   /**< The remount back onto the everyday width.   */
     SD_THEN_VERDICT,       /**< The remount that hands the slot back.         */
     SD_THEN_PROBE_WRITE,   /**< One chunk written to the card's far end.      */
     SD_THEN_PROBE_READ,    /**< One chunk of the far end read back.           */
@@ -153,7 +153,7 @@ typedef struct {
     bool      worker_up;                /**< The worker started.               */
     bool      width_owed;               /**< A script ended on a call that
                                          *   overran: the slot goes back onto
-                                         *   the board's width when it returns. */
+                                         *   the everyday width when it returns. */
     QEQueue   deferq;                   /**< Requests held while a call is out. */
     QEvtPtr   defer_sto[KODE_STORAGE_DEFER_DEPTH - 1U]; /**< Its ring; the queue
                                          *   keeps the front event aside.     */
@@ -4448,12 +4448,12 @@ static void sd_job_done(Storage * const me, KqpWorkerDoneEvt const * const e)
         if ( me->width_owed )
         {
             /* The script that was running when it overran could not put the
-             * slot back on the board's width with the call still out; it can
+             * slot back on the everyday width with the call still out; it can
              * now. Asked directly, so a later script starts from it. */
             me->width_owed = false;
             if ( !sd_test_restore_width(me, SD_THEN_NONE) )
             {
-                KLOG_D(TAG, "the slot is on the board's width already");
+                KLOG_D(TAG, "the slot is on the everyday width already");
             }
         }
         return;
@@ -4589,7 +4589,7 @@ static void sd_test_publish(Storage * const me, uint32_t kb_s)
 }
 
 /**
- * @brief Put the slot back on the board's own width, whatever the run did.
+ * @brief Put the slot back on the everyday width, whatever the run did.
  *
  * Asking costs nothing. A card that is on another width is remounted, and
  * that is a call to the card.
@@ -4597,16 +4597,16 @@ static void sd_test_publish(Storage * const me, uint32_t kb_s)
  * @param me   The AO.
  * @param then What to go on with when the remount returns.
  * @return true when a remount is out and @p then runs when it returns; false
- *         when the slot was already on the board's width or the call could not
+ *         when the slot was already on the everyday width or the call could not
  *         be made, and the caller goes on at once.
  */
 static bool sd_test_restore_width(Storage * const me, SdThen then)
 {
     int32_t width = 0;
 
-    (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KBSP_SD_WIDTH);
+    (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KDRV_SD_WIDTH_USE);
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
-    if ( (int32_t)KBSP_SD_WIDTH == width )
+    if ( (int32_t)KDRV_SD_WIDTH_USE == width )
     {
         return false;
     }
@@ -4614,7 +4614,7 @@ static bool sd_test_restore_width(Storage * const me, SdThen then)
     {
         return true;
     }
-    KLOG_W(TAG, "test sd: the slot could not be put back on the board's "
+    KLOG_W(TAG, "test sd: the slot could not be put back on the everyday "
                 "width (no call to the card could be made)");
     if ( me->sdj.busy )
     {
@@ -4720,7 +4720,7 @@ static void sd_script_overrun(Storage * const me)
 }
 
 /**
- * @brief End the run: hand the slot back on the board's own width, then say
+ * @brief End the run: hand the slot back on the everyday width, then say
  *        what it is worth.
  *
  * The run stays open - and so does everything that checks it - until a remount
@@ -5027,8 +5027,9 @@ static void sd_test_write_step(Storage * const me)
 {
     if ( 0U == me->t_step )
     {
-        /* Back on the board's own width first: the file is timed, and timing
-         * it on one data line would measure the previous phase's setting. */
+        /* Back on the everyday width first: the file is written the way the
+         * product writes it, which keeps a counterfeit card off a 4-bit
+         * write. */
         if ( sd_test_restore_width(me, SD_THEN_WRITE_MOUNT) )
         {
             return;
@@ -5041,12 +5042,12 @@ static void sd_test_write_step(Storage * const me)
     sd_test_write_chunk(me);
 }
 
-/** @brief The card is back on the board's width; the file can be made. */
+/** @brief The card is back on the everyday width; the file can be made. */
 static void sd_test_write_mounted(Storage * const me, kode_status_t rc)
 {
     if ( KODE_OK != rc )
     {
-        sd_test_fail(me, "the card would not come back on the board's width");
+        sd_test_fail(me, "the card would not come back on the everyday width");
         return;
     }
     if ( sd_test_write_open(me) )
@@ -5437,9 +5438,17 @@ static void sd_script_start(Storage * const me, bool verify)
     me->t_capacity_mb  = 0U;
     me->t_seed         = (uint32_t)khal_time_us();
 
-    /* On the board's own width, whatever an earlier run or a bench session
-     * left in the knob: this row judges the slot as the product uses it. */
-    (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KBSP_SD_WIDTH);
+    /* Whatever an earlier run or a bench session left in the knob: the row
+     * judges the slot's four lines, sd_verify the card on the width it is
+     * used at. */
+    if ( verify )
+    {
+        (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KDRV_SD_WIDTH_USE);
+    }
+    else
+    {
+        (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KBSP_SD_WIDTH);
+    }
 
     /* Mount semantics rather than the probe's: somebody just asked for this
      * test, and on this board asking usually means a card has just gone in. */

@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.1.1"
 description: "Kode Dot SDK: the log macros, levels and per-tag filter"
 url: "https://docs.kode.diy/sdk/klog"
 repository: "https://github.com/kodediy/kode-sdk.git"

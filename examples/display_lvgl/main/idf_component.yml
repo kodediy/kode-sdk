@@ -11,8 +11,8 @@ dependencies:
   kodediy/kode:
     git: https://github.com/kodediy/kode-sdk.git
     path: components/kode
-    version: v0.1.0
+    version: v0.1.1
   kodediy/kscreen:
     git: https://github.com/kodediy/kode-sdk.git
     path: components/kscreen
-    version: v0.1.0
+    version: v0.1.1

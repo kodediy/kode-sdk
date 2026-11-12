@@ -43,7 +43,7 @@ void fake_ble_app_service_set(const kdrv_ble_app_service_t *svc)
     s_app_svc = svc;
 }
 
-const kdrv_ble_app_service_t *kdrv_ble_app_service(void)
+const kdrv_ble_app_service_t *kdrv_ble_app_declared(void)
 {
     return s_app_svc;
 }

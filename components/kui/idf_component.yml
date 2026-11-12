@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.1.1"
 description: "Kode Dot SDK: the UI kit on LVGL 9.6: tokens, styles, fonts, components, Kody"
 url: "https://docs.kode.diy/sdk/kui"
 repository: "https://github.com/kodediy/kode-sdk.git"
@@ -24,7 +24,7 @@ files:
 dependencies:
   idf: ">=6.1"
   lvgl/lvgl: "9.6.0~1"
-  kodediy/kbsp: {version: "==0.1.0", override_path: "../kbsp"}
-  kodediy/khal: {version: "==0.1.0", override_path: "../khal"}
-  kodediy/klog: {version: "==0.1.0", override_path: "../klog"}
+  kodediy/kbsp: {version: "==0.1.1", override_path: "../kbsp"}
+  kodediy/khal: {version: "==0.1.1", override_path: "../khal"}
+  kodediy/klog: {version: "==0.1.1", override_path: "../klog"}
   espressif/cjson: "^1.7.19"

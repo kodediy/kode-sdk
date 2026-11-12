@@ -5,6 +5,7 @@
  */
 #include "kdrv_ble_app.h"
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -86,6 +87,100 @@ static kdrv_ble_app_write_cb_t s_write_cb;
 
 /** @brief What a take from a queue is told to; NULL tells nobody. */
 static kdrv_ble_app_taken_cb_t s_taken_cb;
+
+/* ---- The app's choice of service -------------------------------------------
+ *
+ * One pointer, s_pick, shared by the app's task that chooses and the radio's
+ * worker that builds the table, with no lock: each side changes it only by a
+ * compare-and-swap, so a choice either lands before the build reads it (and
+ * the table is built from it) or finds the build's mark and is refused. Two
+ * marks stand in for the two answers that are not a service the app gave:
+ * the declared one, still unchosen, and the table already built. */
+
+/** @brief s_pick's mark for "nothing chosen": the declared service serves. */
+static const kdrv_ble_app_service_t s_mark_declared = { NULL, NULL, 0U };
+
+/** @brief s_pick's mark for "the table is built": s_served is what it holds. */
+static const kdrv_ble_app_service_t s_mark_built = { NULL, NULL, 0U };
+
+/** @brief The choice: a service, NULL for none, or one of the two marks. */
+static _Atomic(const kdrv_ble_app_service_t *) s_pick = &s_mark_declared;
+
+/** @brief The service the table was built from; written before s_pick takes s_mark_built. */
+static _Atomic(const kdrv_ble_app_service_t *) s_served;
+
+/** @brief The refusal has been logged once. */
+static atomic_bool s_refusal_said;
+
+/**
+ * @brief What a choice means: the declared service for s_mark_declared.
+ * @param pick A choice, never s_mark_built.
+ * @return The service; NULL for none.
+ */
+static const kdrv_ble_app_service_t *pick_service(const kdrv_ble_app_service_t *pick)
+{
+    const kdrv_ble_app_service_t *svc = pick;
+
+    if ( &s_mark_declared == pick )
+    {
+        svc = kdrv_ble_app_declared();
+    }
+    return svc;
+}
+
+const kdrv_ble_app_service_t *kdrv_ble_app_service(void)
+{
+    const kdrv_ble_app_service_t *pick = atomic_load(&s_pick);
+
+    if ( &s_mark_built == pick )
+    {
+        pick = atomic_load(&s_served);
+    }
+    return pick_service(pick);
+}
+
+bool kdrv_ble_app_select(const kdrv_ble_app_service_t *svc)
+{
+    const kdrv_ble_app_service_t *was  = atomic_load(&s_pick);
+    bool                          took = false;
+
+    while ( (&s_mark_built != was) && !took )
+    {
+        took = atomic_compare_exchange_weak(&s_pick, &was, svc);
+    }
+    if ( !took && !atomic_exchange(&s_refusal_said, true) )
+    {
+        KLOG_W(TAG, "app service: the GATT table is registered already; the choice "
+                    "takes effect at the next boot that chooses before Bluetooth starts");
+    }
+    return took;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; kdrv_ble.c builds the GATT table from it */
+const kdrv_ble_app_service_t *kdrv_ble_app_fix(void)
+{
+    const kdrv_ble_app_service_t *was = atomic_load(&s_pick);
+
+    while ( &s_mark_built != was )
+    {
+        /* s_served first: a reader that sees the mark finds it filled. A
+         * swap that fails reloads @c was with the choice that beat it. */
+        atomic_store(&s_served, pick_service(was));
+        if ( atomic_compare_exchange_weak(&s_pick, &was, &s_mark_built) )
+        {
+            was = &s_mark_built;
+        }
+    }
+    return atomic_load(&s_served);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; the host suite starts each case from no choice with it */
+void kdrv_ble_app_select_forget(void)
+{
+    atomic_store(&s_served, NULL);
+    atomic_store(&s_pick, &s_mark_declared);
+    atomic_store(&s_refusal_said, false);
+}
 
 /** @brief Take the block and its lock. @return true when both exist. */
 static bool app_mem_make(void)

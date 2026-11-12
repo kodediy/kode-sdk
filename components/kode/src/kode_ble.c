@@ -400,6 +400,25 @@ static void ble_value_fail(const char *api, const char *chr, kode_status_t rc, u
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_service_select(const kode_ble_service_t *service)
+{
+    bool ok = false;
+
+    /* kode_enter() alone: Bluetooth off in Settings keeps the choice too. */
+    if ( kode_enter("kode_ble_service_select") )
+    {
+        /* cppcheck-suppress misra-c2012-11.3 ; layout-compatible types, asserted above */
+        ok = (KODE_OK == kode_sys_ble_service_select((const kode_sys_ble_service_t *)service));
+        if ( !ok )
+        {
+            kode_err_set("kode_ble_service_select: Bluetooth has registered its table "
+                         "already; the choice is made before it starts");
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 bool kode_ble_set_value(const char *chr, const void *data, size_t len)
 {
     static const char api[] = "kode_ble_set_value";

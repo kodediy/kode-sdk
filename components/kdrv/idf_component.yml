@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.1.1"
 description: "Kode Dot SDK: the chip drivers, with STMicroelectronics' RFAL vendored"
 url: "https://docs.kode.diy/sdk/kdrv/overview"
 repository: "https://github.com/kodediy/kode-sdk.git"
@@ -61,7 +61,7 @@ dependencies:
       - if: "$CONFIG{KODE_TEST_DOT} == True"
 
   ## The first-party siblings (see khal's manifest for how they resolve).
-  kodediy/kdefs: {version: "==0.1.0", override_path: "../kdefs"}
-  kodediy/klog:  {version: "==0.1.0", override_path: "../klog"}
-  kodediy/khal:  {version: "==0.1.0", override_path: "../khal"}
-  kodediy/kbsp:  {version: "==0.1.0", override_path: "../kbsp"}
+  kodediy/kdefs: {version: "==0.1.1", override_path: "../kdefs"}
+  kodediy/klog:  {version: "==0.1.1", override_path: "../klog"}
+  kodediy/khal:  {version: "==0.1.1", override_path: "../khal"}
+  kodediy/kbsp:  {version: "==0.1.1", override_path: "../kbsp"}

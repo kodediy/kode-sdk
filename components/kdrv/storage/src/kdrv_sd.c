@@ -27,7 +27,7 @@ static bool s_powered;
 
 /* What the next mount asks for. Not the card's, ours. */
 
-static uint8_t  s_width_req = (uint8_t)KBSP_SD_WIDTH;
+static uint8_t  s_width_req = (uint8_t)KDRV_SD_WIDTH_USE;
 static uint32_t s_freq_req  = (uint32_t)KBSP_SD_FREQ_KHZ;
 
 /* ESP-IDF tells an empty slot in five lines a mount: the card's protocol, the

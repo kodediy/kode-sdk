@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.1.1"
 description: "Kode Dot SDK: the hardware services the drivers share"
 url: "https://docs.kode.diy/sdk/khal"
 repository: "https://github.com/kodediy/kode-sdk.git"
@@ -13,9 +13,9 @@ targets:
 ## (tools/set_version.sh).
 dependencies:
   idf: ">=6.1"
-  kodediy/kdefs: {version: "==0.1.0", override_path: "../kdefs"}
-  kodediy/klog:  {version: "==0.1.0", override_path: "../klog"}
-  kodediy/kbsp:  {version: "==0.1.0", override_path: "../kbsp"}
+  kodediy/kdefs: {version: "==0.1.1", override_path: "../kdefs"}
+  kodediy/klog:  {version: "==0.1.1", override_path: "../klog"}
+  kodediy/kbsp:  {version: "==0.1.1", override_path: "../kbsp"}
 
 ## The dock console's TinyUSB CDC, fetched only with KHAL_CONSOLE_DOCK, pinned exactly. (esp_tinyusb)
   espressif/esp_tinyusb:

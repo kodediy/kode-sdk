@@ -97,7 +97,7 @@ void fake_media_reset(void)
 
     /* The two next-mount knobs are statics in a driver that is real here, so
      * they outlive a case unless somebody puts them back. */
-    (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KBSP_SD_WIDTH);
+    (void)kdrv_sd_set(KDRV_SD_WIDTH_REQ, (int32_t)KDRV_SD_WIDTH_USE);
     (void)kdrv_sd_set(KDRV_SD_FREQ_REQ_KHZ, (int32_t)KBSP_SD_FREQ_KHZ);
 
     /* Both media come back MOUNTED, which models a board that probed them at

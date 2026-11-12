@@ -1767,6 +1767,19 @@ typedef struct {
     const kode_sys_ble_service_t kode_ble_app_service = { \
         (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }
 
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that declare a service, never used inside the SDK */
+/**
+ * @brief Declare one of several services the app may serve: the constant
+ *        @p name_, with @p uuid_ and the array @p chars_ of
+ *        kode_sys_ble_char_t, at file scope, followed by a semicolon.
+ *
+ * Nobody serves it until kode_sys_ble_service_select() names it.
+ */
+/* cppcheck-suppress misra-c2012-20.7 ; name_ is the name of the object declared, which no parenthesis can wrap */
+#define KODE_SYS_BLE_SERVICE_NAMED(name_, uuid_, chars_) \
+    const kode_sys_ble_service_t name_ = { \
+        (uuid_), (chars_), sizeof(chars_) / sizeof((chars_)[0]) }
+
 /* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that serve the battery, never used inside the SDK */
 /**
  * @brief Serve the standard Battery service, at file scope, followed by a semicolon.
@@ -1820,6 +1833,21 @@ kode_status_t kode_sys_ble_subscribe(QActive *me);
  *         and always without CONFIG_KODEOS_BLE.
  */
 bool kode_sys_ble_service_fault(char *why, size_t cap);
+
+/**
+ * @brief Choose the service the app serves, in place of KODE_SYS_BLE_SERVICE()'s, or none.
+ *
+ * Read once, when the radio registers its GATT table at Bluetooth's first
+ * start in the boot: call it before that, at the app's start. Not stored:
+ * the app keeps its own choice and makes this call at each start. Once the
+ * table is registered the choice is fixed until the next boot.
+ *
+ * @param svc A constant KODE_SYS_BLE_SERVICE_NAMED() declared; NULL to serve
+ *            no service of the app's.
+ * @return KODE_OK when the choice is kept; KODE_DENIED when the table is
+ *         registered already (nothing changes, and the log says why once).
+ */
+kode_status_t kode_sys_ble_service_select(const kode_sys_ble_service_t *svc);
 
 /**
  * @brief How many more values queued characteristic @p chr takes now.
