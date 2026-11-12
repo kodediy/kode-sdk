@@ -2583,7 +2583,7 @@ static void assert_old_pair(void)
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)(sizeof(OLD_JSON) - 1U), (int)n,
         "the old app.json is gone or was cut");
     TEST_ASSERT_EQUAL_MEMORY(OLD_JSON, got, sizeof(OLD_JSON) - 1U);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(12288,
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KAPP_ICON_BYTES,
         (int)fs_size(".kode/appsdata/demo/icon.k64"),
         "the old icon is gone or was cut");
     n = fs_read(".kode/appsdata/demo/icon.k64", (char *)s_put_icon,
@@ -2682,7 +2682,7 @@ TEST_CASE("a put over a folder that is there shows the new pair and no "
     TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
         (int)fs_read(".kode/appsdata/demo/app.json", got, sizeof(got)));
     TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES, (int)fs_size(".kode/appsdata/demo/icon.k64"));
     (void)fs_read(".kode/appsdata/demo/icon.k64", (char *)s_old_icon,
                   sizeof(s_old_icon));
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x5A, s_old_icon[0],
