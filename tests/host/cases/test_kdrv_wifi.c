@@ -704,6 +704,26 @@ TEST_CASE("a network that goes away by itself is reported, once", "[kdrv_wifi]")
     kdrv_wifi_on_lost(NULL);
 }
 
+/* "The network is gone" tells nobody why. The stack's reason does: a beacon
+ * timeout is range or the access point, a deauthentication is the network's
+ * own doing. */
+TEST_CASE("a network that goes away says the stack's reason", "[kdrv_wifi]")
+{
+    on_network();
+    fake_klog_reset();
+
+    deliver_disconnect((uint16_t)WIFI_REASON_BEACON_TIMEOUT);
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("the network dropped (reason 200)"), fake_klog_last());
+
+    /* A step off that was asked for is no loss and logs none. */
+    on_network();
+    fake_klog_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_disconnect());
+    deliver_disconnect((uint16_t)WIFI_REASON_ASSOC_LEAVE);
+    TEST_ASSERT_FALSE(wifi_log_says("the network dropped"));
+    kdrv_wifi_on_lost(NULL);
+}
+
 TEST_CASE("a step off the network that was asked for is not a network lost",
           "[kdrv_wifi]")
 {

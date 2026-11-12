@@ -369,9 +369,15 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                 (void)xEventGroupSetBits(s_wifi.bits, WIFI_BIT_DISCONNECTED);
             }
             /* No reconnect here: whether anyone still wants the network is AO_Radio's call. */
-            if ( lost && (NULL != s_wifi.on_lost) )
+            if ( lost )
             {
-                s_wifi.on_lost();
+                /* The stack's own reason: a beacon timeout is range or the
+                 * access point, a deauthentication is the network's doing. */
+                KLOG_W(TAG, "the network dropped (reason %u)", (unsigned)s_wifi.reason);
+                if ( NULL != s_wifi.on_lost )
+                {
+                    s_wifi.on_lost();
+                }
             }
         }
         else if ( WIFI_EVENT_SCAN_DONE == id )
