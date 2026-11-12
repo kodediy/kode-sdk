@@ -48,6 +48,9 @@ static struct {
     uint8_t            channel;      /**< The same read's primary channel;
                                        *   kdrv_wifi_channel_last().          */
     kdrv_wifi_fail_t   fail;         /**< kdrv_wifi_fail_last().              */
+    uint16_t           reason;       /**< The stack's own reason behind `fail`,
+                                       *   for the log; 0 when the disconnect
+                                       *   carried none.                      */
     uint8_t            count;
     /* Both tables are one PSRAM block, taken at the first scan
      * (scan_tables()): KDRV_WIFI_SCAN_MAX entries of `aps`, then
@@ -270,13 +273,15 @@ static void wifi_fail_note(void const *data)
 {
     if ( KDRV_WIFI_FAIL_NONE == s_wifi.fail )
     {
-        s_wifi.fail = KDRV_WIFI_FAIL_OTHER;
+        s_wifi.fail   = KDRV_WIFI_FAIL_OTHER;
+        s_wifi.reason = 0U;
         if ( NULL != data )
         {
             /* cppcheck-suppress misra-c2012-11.5 ; IDF posts the disconnect's payload untyped */
             wifi_event_sta_disconnected_t const * const ev = (wifi_event_sta_disconnected_t const *)data;
 
-            s_wifi.fail = kdrv_wifi_fail_of((uint16_t)ev->reason);
+            s_wifi.reason = (uint16_t)ev->reason;
+            s_wifi.fail   = kdrv_wifi_fail_of(s_wifi.reason);
         }
     }
 }
@@ -1183,7 +1188,11 @@ kode_status_t kdrv_wifi_await(const char *ssid, uint32_t timeout_ms)
     ssid_set(NULL);
     if ( (bits & WIFI_BIT_DISCONNECTED) != 0U )
     {
-        KLOG_W(TAG, "'%s' refused us (%s)", name, wifi_fail_word());
+        /* The word is what a person can act on; the number is the stack's
+         * own reason, which tells a handshake that timed out on a weak
+         * signal from one the network turned down. */
+        KLOG_W(TAG, "'%s' refused us (%s, reason %u)", name, wifi_fail_word(),
+               (unsigned)s_wifi.reason);
         return KODE_DENIED;
     }
     s_wifi.state = KDRV_WIFI_IDLE;   /* no event will say so: nothing happened */

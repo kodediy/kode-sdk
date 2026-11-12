@@ -15,6 +15,7 @@
 #include "Mockesp_event.h"
 
 #include "fake_wifi_events.h"
+#include "fakes.h"
 #include "kdrv_wifi.h"
 
 /** @brief Exactly 32 characters - the longest name 802.11 permits. */
@@ -595,6 +596,50 @@ TEST_CASE("the refusal is what a join reports, not the leave that follows it",
     deliver_disconnect((uint16_t)WIFI_REASON_NO_AP_FOUND);
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_FAIL_NOT_FOUND, (int)kdrv_wifi_fail_last());
+}
+
+/** @brief Whether a captured log line holds @p words. */
+static bool wifi_log_says(const char *words)
+{
+    bool found = false;
+
+    for ( unsigned i = 0U; (!found) && (fake_klog_count() > i); ++i )
+    {
+        found = (strstr(fake_klog_line(i), words) != NULL);
+    }
+    return found;
+}
+
+/* A handshake that times out reads as the password, and so does a signal too
+ * weak to finish it: the stack's own number is what tells an engineer which
+ * of its reasons it was. */
+TEST_CASE("a refusal's log line carries the stack's own reason", "[kdrv_wifi]")
+{
+    wifi_bring_up();
+    join_stubs();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    fake_klog_reset();
+    deliver_disconnect((uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (wrong password, reason 15)"),
+                             fake_klog_last());
+
+    /* The next attempt's line carries its own reason, not the last one's. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    fake_klog_reset();
+    deliver_disconnect((uint16_t)WIFI_REASON_ASSOC_TOOMANY);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (other failure, reason 5)"),
+                             fake_klog_last());
+
+    /* A disconnect that carries nothing has no number to give. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    fake_klog_reset();
+    fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (other failure, reason 0)"),
+                             fake_klog_last());
 }
 
 TEST_CASE("a disconnect that carries nothing is the other failure, and an "
