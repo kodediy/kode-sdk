@@ -3126,6 +3126,21 @@ void storage_path_request_wait(StorageWaiter *wait, uint32_t gen, uint8_t op,
                                const char *path);
 
 /**
+ * @brief A STORAGE_PATH_LIST answered into @p wait, from the @p skip-th entry on.
+ *
+ * storage_path_request_wait() with STORAGE_PATH_LIST is this with a @p skip
+ * of 0. The entries left out are counted as the walk finds them, after the
+ * names it never lists, so a page starts where the one before it ended.
+ *
+ * @param wait See storage_path_request_wait().
+ * @param gen  See storage_path_request_wait().
+ * @param path Absolute, normalised, virtual. Copied into the event.
+ * @param skip Entries to leave out: the ones earlier pages gave.
+ */
+void storage_list_request_wait(StorageWaiter *wait, uint32_t gen, const char *path,
+                               uint32_t skip);
+
+/**
  * @brief storage_cat_request(), answered into @p wait.
  *
  * The bytes land in @p wait->text verbatim: not split on newlines, not cut at

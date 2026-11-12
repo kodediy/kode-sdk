@@ -588,10 +588,31 @@ bool kode_file_exists(const char *path);
  * Blocks. KODE_FILE_LIST_MAX entries at most; `more` says there were others.
  *
  * @param folder "sd", "flash" or "sd/...", "flash/..." naming a folder.
- * @return The listing, valid until this task's next kode_file_list(); never
- *         NULL: empty on failure, with kode_error() saying why.
+ * @return The listing, valid until this task's next kode_file_list() or
+ *         kode_file_list_from(); never NULL: empty on failure, with
+ *         kode_error() saying why.
  */
 const kode_file_list_t *kode_file_list(const char *folder);
+
+/**
+ * @brief List one folder from its @p skip-th entry on.
+ *
+ * Blocks. kode_file_list(folder) is kode_file_list_from(folder, 0). A folder
+ * of more than KODE_FILE_LIST_MAX entries is read a page at a time: while
+ * `more` is set, ask again with the entries read so far. A @p skip at or past
+ * the last entry lists nothing and is not an error. Every page walks the
+ * folder from its first entry, so a page deep into a large folder takes
+ * longer than the first. An entry created or deleted between two pages moves
+ * the ones after it, so a page can then repeat an entry or miss one. An
+ * Active Object lists with kode_sys_file_list().
+ *
+ * @param folder As kode_file_list().
+ * @param skip   The entries to leave out: the ones earlier pages gave.
+ * @return The listing, valid until this task's next kode_file_list() or
+ *         kode_file_list_from(); never NULL: empty on failure, with
+ *         kode_error() saying why.
+ */
+const kode_file_list_t *kode_file_list_from(const char *folder, uint32_t skip);
 
 /**
  * @brief Delete a file, or a folder with nothing in it.

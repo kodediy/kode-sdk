@@ -6347,7 +6347,9 @@ typedef struct {
     uint32_t max;                  /**< CAT only: ceiling on bytes read,
                                      *   already bounded by the console's own
                                      *   key spec. Ignored by every other op. */
-    uint32_t offset;               /**< CAT only: first byte to read. */
+    uint32_t offset;               /**< CAT: first byte to read. An ask's or
+                                     *   a blocked task's LIST: the entries
+                                     *   to skip. Ignored by every other op. */
     StorageWaiter *wait;           /**< A blocked task's own storage, or NULL
                                      *   when `who` is an Active Object.     */
     uint32_t gen;                  /**< This request's tag, echoed into
@@ -6355,8 +6357,7 @@ typedef struct {
                                      *   `wait`.                             */
     FileRspEvt *rsp;               /**< An ask's answer, taken with the
                                      *   request and posted to `who`; NULL
-                                     *   otherwise. An ask's LIST counts
-                                     *   `offset` as the entries to skip.    */
+                                     *   otherwise.                          */
     void    *buf;                  /**< An ask's CAT: the lent buffer, `max`
                                      *   bytes, written before the answer.   */
 } StoragePathEvt;

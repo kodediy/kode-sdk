@@ -419,13 +419,16 @@ typedef bool (*kode_sys_file_entry_cb)(const char *name, bool is_dir, uint32_t s
                                        void *ctx);
 
 /**
- * @brief List one directory's own entries, one level.
+ * @brief List one directory's own entries, one level, from the @p skip-th on.
  *
- * More than KODE_SYS_FILE_LIST_MAX entries: the first ones are all offered to
- * @p cb, then KODE_NO_RESOURCES says that was a page, not the whole.
+ * More than KODE_SYS_FILE_LIST_MAX entries after the ones left out: the first
+ * ones are all offered to @p cb, then KODE_NO_RESOURCES says that was a page,
+ * not the whole. A @p skip at or past the last entry offers nothing and is
+ * KODE_OK.
  * @note Blocks. Two round trips (a STAT, then the list); the claim is held
  *       across the callbacks.
  * @param path Absolute, virtual, and a directory.
+ * @param skip Entries to leave out: the ones earlier pages offered.
  * @param cb   Called once per entry, in AO_Storage's order.
  * @param ctx  Passed to every call of @p cb.
  * @return KODE_OK once every entry has been offered and there were no more.
@@ -434,7 +437,8 @@ typedef bool (*kode_sys_file_entry_cb)(const char *name, bool is_dir, uint32_t s
  *         call waiting. KODE_ERROR when the volume will not mount, or for a NULL
  *         @p path or @p cb. KODE_TIMEOUT when AO_Storage did not answer.
  */
-kode_status_t kode_block_file_list_each(const char *path, kode_sys_file_entry_cb cb, void *ctx);
+kode_status_t kode_block_file_list_each(const char *path, uint32_t skip, kode_sys_file_entry_cb cb,
+                                        void *ctx);
 
 /**
  * @brief Make one directory at @p path.
