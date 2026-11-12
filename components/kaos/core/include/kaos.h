@@ -3864,6 +3864,10 @@ typedef struct {
  * to @p who, refusals included: AO_AppMgr does one thing at a time and answers
  * APPDATA_GET_BUSY while it writes an image. Any task or AO.
  *
+ * A fetch that began shows like a write: APP_FLASH_PROGRESS_SIG at 0 % at once
+ * and again every second while it waits on the network, ended by an unnamed
+ * APP_FLASH_DONE_SIG or by APP_FLASH_FAIL_SIG.
+ *
  * @param project The app's project name, as its image declares it.
  * @param url     The base URL, ending where the file names begin; shorter than
  *                KODE_APPDATA_URL_MAX.

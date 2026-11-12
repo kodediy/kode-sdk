@@ -542,6 +542,10 @@ enum KodeSignals {
     APP_TIDY_TIMEOUT_SIG,       /**< AO_AppMgr private QTimeEvt: AO_Storage
                                  *   did not answer a folder request in
                                  *   APPMGR_TIDY_MS (AppMgr_tidying).         */
+    APP_BEAT_SIG,               /**< AO_AppMgr private QTimeEvt: a second of
+                                 *   waiting on the network has gone by -
+                                 *   report the write's percent again, so the
+                                 *   glass and the LED stay up.               */
     FLASH_REQ_SIG,              /**< AO_AppMgr: one source-to-sink transfer
                                  *   (FlashReqEvt). The only way to ask for
                                  *   an image to be written.                 */

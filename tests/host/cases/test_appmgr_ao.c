@@ -3884,6 +3884,209 @@ TEST_CASE("running an app is taken when it is installed and missing when it is n
     keep_end();
 }
 
+/* ---- Something shows from the first moment, and keeps showing -------------
+ * The write card and the LED follow APP_FLASH_PROGRESS_SIG alone, and AO_Power
+ * takes the LED back three seconds after the last one. A download spends
+ * longer than that in DNS and TLS before its first byte, so the 0 % goes out
+ * the moment the install is accepted and the percent is said again every
+ * second while the network is waited on.
+ */
+
+/** @brief What the progress events the spy holds said, in order. */
+typedef struct {
+    unsigned count;                   /**< How many.                          */
+    unsigned pct[8];                  /**< The first eight percents.          */
+    AppProgressEvt first;             /**< The first, whole.                  */
+} progress_seen_t;
+
+/** @brief Count the APP_FLASH_PROGRESS_SIG the spy holds and keep what they said; drains the spy. */
+static progress_seen_t spy_progress(void)
+{
+    progress_seen_t seen;
+
+    (void)memset(&seen, 0, sizeof(seen));
+    for ( ;; )
+    {
+        const QEvt * const got = ao_spy_take();
+
+        if ( NULL == got )
+        {
+            break;
+        }
+        if ( (enum_t)got->sig == APP_FLASH_PROGRESS_SIG )
+        {
+            AppProgressEvt const * const p = (AppProgressEvt const *)got;
+
+            if ( 0U == seen.count )
+            {
+                seen.first = *p;
+            }
+            if ( Q_DIM(seen.pct) > seen.count )
+            {
+                seen.pct[seen.count] = p->percent;
+            }
+            ++seen.count;
+        }
+    }
+    ao_spy_drain();
+    return seen;
+}
+
+/** @brief The gap AppMgr leaves between two chunks, in QP ticks. */
+#define APPMGR_CHUNK_GAP_TEST_TICKS (10U / 10U)
+
+/** @brief One second of waiting on the network, in QP ticks, as appmgr_ao.c has it. */
+#define APPMGR_WAIT_BEAT_TICKS (1000U / 10U)
+
+/** @brief Answer the open of the download in hand: @p size bytes, status @p st. */
+static void answer_net_open(uint32_t size, uint8_t st)
+{
+    StorageOpenRspEvt o;
+
+    (void)memset(&o, 0, sizeof(o));
+    o.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_OPEN_RSP_SIG);
+    o.size   = size;
+    o.status = st;
+    QASM_DISPATCH(AO_AppMgr, &o.super, 0U);
+}
+
+TEST_CASE("an https install shows its 0 % the moment it is accepted, with its label",
+          "[appmgr_ao][beat]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+    (void)net_requests(NET_STREAM_OPEN_REQ_SIG);
+
+    ask_https("https://example.invalid/app.bin");
+
+    progress_seen_t const seen = spy_progress();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.count,
+        "the card and the LED wait for the server to answer");
+    TEST_ASSERT_EQUAL_UINT(0U, seen.pct[0]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KWRITE_APP, seen.first.what);
+    TEST_ASSERT_TRUE_MESSAGE('\0' != seen.first.file[0],
+        "the 0 % does not say what is being fetched");
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    let_the_open_expire();
+    (void)net_requests(NET_STREAM_CLOSE_REQ_SIG);
+    keep_end();
+}
+
+TEST_CASE("an https install keeps saying its percent every second while it opens, "
+          "and stops when it is over", "[appmgr_ao][beat]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+    (void)net_requests(NET_STREAM_OPEN_REQ_SIG);
+
+    ask_https("https://example.invalid/app.bin");
+    TEST_ASSERT_EQUAL_UINT(1U, spy_progress().count);
+
+    run_ticks(APPMGR_WAIT_BEAT_TICKS - 5U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_progress().count, "a beat came early");
+    run_ticks(10U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, spy_progress().count,
+        "no beat after a second of waiting for the server");
+    run_ticks(APPMGR_WAIT_BEAT_TICKS);
+    TEST_ASSERT_EQUAL_UINT(1U, spy_progress().count);
+
+    answer_net_open(0U, (uint8_t)KODE_ERROR);          /* the server says no */
+    (void)spy_progress();
+    run_ticks(3U * APPMGR_WAIT_BEAT_TICKS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_progress().count,
+        "the beat went on after the install ended");
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    (void)net_requests(NET_STREAM_CLOSE_REQ_SIG);
+    keep_end();
+}
+
+TEST_CASE("a download that stalls keeps its percent on the glass",
+          "[appmgr_ao][beat]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+    (void)net_requests(NET_STREAM_OPEN_REQ_SIG);
+
+    ask_https("https://example.invalid/app.bin");
+    (void)spy_progress();
+    answer_net_open(UNDO_IMG_LEN, (uint8_t)KODE_OK);   /* open, then silence */
+    progress_seen_t seen = spy_progress();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.count, "the write began and said nothing");
+
+    run_ticks((2U * APPMGR_WAIT_BEAT_TICKS) + 10U);
+    seen = spy_progress();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, seen.count,
+        "a download with no bytes coming fell silent");
+    TEST_ASSERT_EQUAL_UINT(0U, seen.pct[0]);
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    let_the_open_expire();
+    (void)net_requests(NET_STREAM_CLOSE_REQ_SIG);
+    keep_end();
+}
+
+TEST_CASE("a percent the pool had no room for is said again, not counted as said",
+          "[appmgr_ao][beat]")
+{
+    static QEvt *hoard[96];
+    unsigned     held = 0U;
+    uint32_t const total = 400000U;
+    uint32_t const one_percent = total / 100U;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    undo_image("new");
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(total, (uint8_t)KDRV_MEDIUM_FS);
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+    (void)spy_progress();
+
+    while ( Q_DIM(hoard) > held )
+    {
+        AppProgressEvt * const e = Q_NEW_X(AppProgressEvt, 0U, Q_USER_SIG);
+
+        if ( NULL == e )
+        {
+            break;
+        }
+        hoard[held] = &e->super;
+        ++held;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(Q_DIM(hoard) > held, "the pool outlasted the hoard");
+    answer_data_bytes(s_undo_img, one_percent + 1U);   /* 1 %: no room to say so */
+    for ( unsigned i = 0U; i < held; ++i )
+    {
+        QF_gc(hoard[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_progress().count, "the pool was not dry");
+
+    run_ticks(APPMGR_CHUNK_GAP_TEST_TICKS + 2U);       /* the chunk's buffer goes back */
+    answer_data_bytes(&s_undo_img[one_percent + 1U], 16U);   /* still 1 % */
+    progress_seen_t const seen = spy_progress();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.count,
+        "a percent that was dropped for want of an event was taken as said");
+    TEST_ASSERT_EQUAL_UINT(1U, seen.pct[0]);
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    let_the_open_expire();
+    keep_end();
+}
+
 /* Erase takes the entry out of the directory and the image's first sector
  * off the flash - the descriptor with it - so nothing bootable or nameable is
  * left at that offset. */
@@ -8824,5 +9027,37 @@ TEST_CASE("the fetch's request refuses what it cannot post",
     TEST_ASSERT_EQUAL_STRING(GET_URL "app.json", n.url);
     fetch_opened((uint8_t)KODE_ERROR, 0U);
     ao_spy_drain();
+    fetch_end();
+}
+
+TEST_CASE("a fetch of an app's data folder shows from its first moment and ends the card",
+          "[appmgr_ao][beat]")
+{
+    fetch_fresh();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    progress_seen_t seen = spy_progress();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.count,
+        "a fetch raises nothing on the glass until it is over");
+    TEST_ASSERT_EQUAL_UINT(0U, seen.pct[0]);
+    TEST_ASSERT_EQUAL_STRING("snake", seen.first.project);
+
+    run_ticks((2U * APPMGR_WAIT_BEAT_TICKS) + 10U);
+    seen = spy_progress();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, seen.count,
+        "a fetch waiting on the server fell silent");
+
+    fetch_opened((uint8_t)KODE_ERROR, 0U);             /* the server says no */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, spy_count(APP_FLASH_FAIL_SIG),
+        "the card the fetch raised is left up");
+    run_ticks(3U * APPMGR_WAIT_BEAT_TICKS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_progress().count,
+        "the beat went on after the fetch ended");
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
     fetch_end();
 }

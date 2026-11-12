@@ -63,6 +63,11 @@
  * takes the LED's orange pulse back after three seconds without a report, and
  * a multi-MB write has none of its own. */
 #define APPMGR_KEEP_BEAT_TICKS KQP_TICKS_PER_MS(1000U)
+/* Re-publish the percent this often while the AO waits on the network: the
+ * open of a download, a file that stops arriving, a data folder being fetched.
+ * AO_Power takes the LED's orange pulse back after three seconds without a
+ * report, and the glass's write card has nothing to follow between two. */
+#define APPMGR_WAIT_BEAT_TICKS KQP_TICKS_PER_MS(1000U)
 /* How long the card may take over one copy before it is given up on: a base
  * that covers mounting and a slow counterfeit card, plus a second for every
  * 128 KB, so a 13 MB extent gets nearly three minutes and a small one a
@@ -266,6 +271,8 @@ typedef struct {
 
     /* ---- An image arriving on the console (APP_RECV_REQ_SIG) ------------ */
     QTimeEvt idle;           /**< No chunk for this long: the host is gone.  */
+    QTimeEvt beat;           /**< Says the percent again once a second while the
+                              *   network is waited on (APP_BEAT_SIG).        */
     QTimeEvt answer;         /**< Lets the `>ok` reach the wire before the
                               *   board resets into the new app; see
                               *   AppMgr_launching.                          */
@@ -2618,8 +2625,13 @@ static void progress_publish(AppMgr * const me, unsigned pct)
             (void)snprintf(ev->project, sizeof(ev->project), "%s", me->project);
         }
         QACTIVE_PUBLISH(&ev->super, &me->super);
+        me->reported = pct;
     }
-    me->reported = pct;
+    else
+    {
+        /* Not counted as said: the next chunk or beat says it again. */
+        KLOG_D(TAG, "out of events; %u%% goes unreported", pct);
+    }
 }
 
 /**
@@ -2688,6 +2700,20 @@ static void progress_report(AppMgr * const me)
                (unsigned)me->written, (unsigned)me->total);
         me->next_report = pct + APPMGR_PROGRESS;
     }
+}
+
+/**
+ * @brief A second of waiting on the network has gone by: say the percent again.
+ *
+ * The write card and the LED follow the reports alone; a download that is
+ * still opening, or has stopped sending, makes none of its own.
+ *
+ * @param me The AO.
+ */
+static void beat_say(AppMgr * const me)
+{
+    progress_publish(me, progress_pct(me));
+    (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
 }
 
 /**
@@ -2871,6 +2897,7 @@ void AppMgr_ctor(void)
     QActive_ctor(&me->super, Q_STATE_CAST(&AppMgr_initial));
     QTimeEvt_ctorX(&me->pacer, &me->super, APP_FLASH_CHUNK_SIG, 0U);
     QTimeEvt_ctorX(&me->idle, &me->super, APP_RECV_IDLE_SIG, 0U);
+    QTimeEvt_ctorX(&me->beat, &me->super, APP_BEAT_SIG, 0U);
     QTimeEvt_ctorX(&me->answer, &me->super, APP_RECV_LAUNCH_SIG, 0U);
     QTimeEvt_ctorX(&me->tidy, &me->super, APP_TIDY_TIMEOUT_SIG, 0U);
     me->writing   = false;
@@ -3381,6 +3408,16 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
 #if CONFIG_KODEOS_NET
             if ( me->from_net )
             {
+                if ( !me->keep_round )
+                {
+                    me->total       = 0U;
+                    me->written     = 0U;
+                    me->reported    = 0U;
+                    me->next_report = APPMGR_PROGRESS;
+                }
+                /* The card and the LED from this moment, not from the first
+                 * byte: DNS, TLS and the headers come before it. */
+                progress_publish(me, progress_pct(me));
                 net_stream_open_request(req->src, &me->super);
                 /* The download's own failures are asynchronous: the verdict
                  * is that it has begun, not that it will end well. */
@@ -3669,6 +3706,18 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             QTimeEvt_armX(&me->idle, APPMGR_OPEN_TICKS, 0U);
+            if ( me->from_net )
+            {
+                (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BEAT_SIG: {
+            if ( me->from_net )
+            {
+                beat_say(me);
+            }
             status = Q_HANDLED();
             break;
         }
@@ -3679,6 +3728,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
         }
         case Q_EXIT_SIG: {
             QTimeEvt_disarm(&me->idle);
+            (void)QTimeEvt_disarm(&me->beat);
             status = Q_HANDLED();
             break;
         }
@@ -4812,6 +4862,7 @@ static QState get_fail(AppMgr * const me, appdata_get_why_t why)
     }
     get_say(me->get_project, why);
     get_reply(me->get_who, me->get_project, why, false);
+    QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);   /* the card the fetch raised ends too */
     return Q_TRAN(&AppMgr_idle);
 }
 
@@ -5039,6 +5090,18 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     (void)snprintf(me->get_project, sizeof(me->get_project), "%s", req->project);
     (void)snprintf(me->get_url, (size_t)KODE_APPDATA_URL_MAX, "%s", req->url);
     KLOG_N(TAG, "fetching the data folder of '%s'", me->get_project);
+    /* The card and the LED from this moment: the first file's open can take
+     * as long as a download's. The reports name the folder's app. */
+    me->origin      = (uint8_t)APPMGR_ORIGIN_NET;
+    me->os_target   = false;
+    me->launch      = false;
+    me->file[0]     = '\0';
+    (void)snprintf(me->project, sizeof(me->project), "%s", me->get_project);
+    me->total       = 0U;
+    me->written     = 0U;
+    me->reported    = 0U;
+    me->next_report = APPMGR_PROGRESS;
+    progress_publish(me, 0U);
     get_open_file(me, GET_JSON_NAME);
     return Q_TRAN(&AppMgr_fetching);
 #else
@@ -5067,6 +5130,12 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             QTimeEvt_armX(&me->idle, APPMGR_OPEN_TICKS, 0U);
+            (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BEAT_SIG: {
+            beat_say(me);
             status = Q_HANDLED();
             break;
         }
@@ -5120,6 +5189,16 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
                     get_reply(me->get_who, me->get_project, why,
                               (APPDATA_GET_OK == why)
                               && (0U != me->get_icon_len));
+                    /* The card the fetch raised ends too; the done names no
+                     * app, as a park's does: nothing was installed. */
+                    if ( APPDATA_GET_OK == why )
+                    {
+                        QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);
+                    }
+                    else
+                    {
+                        QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);
+                    }
                     status = Q_TRAN(&AppMgr_idle);
                 }
             }
@@ -5146,6 +5225,7 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
         }
         case Q_EXIT_SIG: {
             (void)QTimeEvt_disarm(&me->idle);
+            (void)QTimeEvt_disarm(&me->beat);
             get_release(me);
             status = Q_HANDLED();
             break;
@@ -5608,11 +5688,25 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             QTimeEvt_armX(&me->idle, APPMGR_CHUNK_TICKS, 0U);
+            if ( me->from_net )
+            {
+                (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            }
             status = Q_HANDLED();
             break;
         }
         case Q_EXIT_SIG: {
             (void)QTimeEvt_disarm(&me->idle);
+            (void)QTimeEvt_disarm(&me->beat);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BEAT_SIG: {
+            /* A download that stops sending makes no report of its own. */
+            if ( me->from_net )
+            {
+                beat_say(me);
+            }
             status = Q_HANDLED();
             break;
         }
