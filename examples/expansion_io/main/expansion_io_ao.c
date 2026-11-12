@@ -233,8 +233,7 @@ static void toggle_blinking(ExpansionIo * const me)
     }
     else
     {
-        QTimeEvt_armX(&me->blink, KQP_TICKS_PER_MS(EXPIO_BLINK_MS),
-                      KQP_TICKS_PER_MS(EXPIO_BLINK_MS));
+        QTimeEvt_armX(&me->blink, KQP_TICKS_PER_MS(EXPIO_BLINK_MS), 0U);
         me->blinking = true;
         KLOG_I(TAG, "blinking on");
     }
@@ -409,11 +408,13 @@ static QState ExpansionIo_holding(ExpansionIo * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
+            /* Both are one-shots that each tick arms again, NOT periodic
+             * timers. QP posts a time event with no margin, so a periodic one goes on posting
+             * whether or not this AO has run, and a queue it fills is a reset.
+             * A one-shot armed again by the tick it sent keeps one waiting at most. */
             me->blinking = true;
-            QTimeEvt_armX(&me->blink, KQP_TICKS_PER_MS(EXPIO_BLINK_MS),
-                          KQP_TICKS_PER_MS(EXPIO_BLINK_MS));
-            QTimeEvt_armX(&me->sample, KQP_TICKS_PER_MS(EXPIO_SAMPLE_MS),
-                          KQP_TICKS_PER_MS(EXPIO_SAMPLE_MS));
+            QTimeEvt_armX(&me->blink, KQP_TICKS_PER_MS(EXPIO_BLINK_MS), 0U);
+            QTimeEvt_armX(&me->sample, KQP_TICKS_PER_MS(EXPIO_SAMPLE_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -444,9 +445,11 @@ static QState ExpansionIo_holding(ExpansionIo * const me, QEvt const * const e)
         }
         case EXPIO_BLINK_SIG: {
             /* A tick already queued when the blinking was stopped still
-             * arrives, and must not light the LED again. */
+             * arrives, and must neither light the LED again nor arm the
+             * next one. */
             if ( me->blinking )
             {
+                (void)QTimeEvt_rearm(&me->blink, KQP_TICKS_PER_MS(EXPIO_BLINK_MS));
                 me->led = !me->led;
                 (void)kode_sys_exp_write(EXPIO_LED_POS, me->led);
                 if ( me->led )
@@ -462,6 +465,7 @@ static QState ExpansionIo_holding(ExpansionIo * const me, QEvt const * const e)
             break;
         }
         case EXPIO_SAMPLE_SIG: {
+            (void)QTimeEvt_rearm(&me->sample, KQP_TICKS_PER_MS(EXPIO_SAMPLE_MS));
             follow_knob(me);
             status = Q_HANDLED();
             break;

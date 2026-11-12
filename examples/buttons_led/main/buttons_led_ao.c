@@ -134,9 +134,11 @@ static QState ButtonsLed_running(ButtonsLed * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             show_colour(me);
-            QTimeEvt_armX(&me->tick,
-                          KQP_TICKS_PER_MS(BL_TICK_MS),
-                          KQP_TICKS_PER_MS(BL_TICK_MS));
+            /* A one-shot that each tick arms again, NOT a periodic timer.
+             * QP posts a time event with no margin, so a periodic one goes on posting
+             * whether or not this AO has run, and a queue it fills is a reset.
+             * A one-shot armed again by the tick it sent keeps one waiting at most. */
+            QTimeEvt_armX(&me->tick, KQP_TICKS_PER_MS(BL_TICK_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -173,6 +175,7 @@ static QState ButtonsLed_running(ButtonsLed * const me, QEvt const * const e)
             break;
         }
         case BL_TICK_SIG: {
+            (void)QTimeEvt_rearm(&me->tick, KQP_TICKS_PER_MS(BL_TICK_MS));
             KLOG_D(TAG, "still here, %ums in", (unsigned)kode_sys_time_ms());
             status = Q_HANDLED();
             break;
