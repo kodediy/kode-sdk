@@ -7147,10 +7147,11 @@ static QState Net_online(Net * const me, QEvt const * const e)
 #endif
             if ( me->busy )
             {
-                /* Another network job holds the worker: refused. */
+                /* Another network job holds the worker: refused, and answered
+                 * busy as the channel's refusal is. The client's own reason
+                 * is left alone: it did not start, and did not fail. */
                 net_say_busy("mqtt_up");
-                me->err = (uint8_t)KDRV_MQTT_ERR_REFUSED;
-                mqtt_publish_state(me);
+                mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
             }
             else if ( (uint8_t)MQTT_IDLE != me->phase )
             {
