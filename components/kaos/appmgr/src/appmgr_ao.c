@@ -199,6 +199,15 @@ typedef enum {
     KEEP_FAILED              /**< No card, no memory, no name, or the write failed. */
 } keep_res_t;
 
+/** @brief An app an install took out of the directory, as it stood. */
+typedef struct {
+    kapps_entry_t entry;                           /**< Its directory entry.                  */
+    char          project[KDRV_SLOT_PROJECT_MAX];  /**< Its name; where it lay when the image
+                                                    *   would not say.                       */
+    bool          gone;                            /**< The write erased part of its extent.  */
+    bool          back;                            /**< The failure put its entry back.       */
+} undo_t;
+
 /** @brief The apps-region AO, plus the state of one in-flight copy. */
 typedef struct {
     QActive  super;
@@ -406,6 +415,16 @@ typedef struct {
     char        (*victims)[KDRV_SLOT_PROJECT_MAX];
     uint32_t      victim_count;    /**< Names recorded in victims[].            */
     uint32_t      victim_next;     /**< The next one to ask AO_Storage about.   */
+
+    /* ---- What an install evicted, to give back if it fails ---------------
+     * The plan takes its victims out of the directory before the first byte
+     * arrives, but the region erases 64 KB as the data gets there: an install
+     * that stops early has erased only what it reached. Each victim is noted
+     * as the plan takes it, and a failed install puts back every one whose
+     * extent was not reached (undo_restore()); a landed one discards them.
+     * PSRAM, taken with the first victim (rule 8). */
+    undo_t       *undo;            /**< The evicted entries; NULL when none are held. */
+    uint32_t      undo_count;      /**< Entries noted in undo[].                */
 
     /* ---- The erase in hand (APP_ERASE_REQ_SIG) ----------------------------
      * What its end says (AppEraseDoneEvt), kept from the idle step that took
@@ -773,6 +792,17 @@ static void victims_clear(AppMgr * const me)
     me->victim_next  = 0U;
 }
 
+/** @brief Forget the apps the install evicted: it landed, or they were given back. */
+static void undo_clear(AppMgr * const me)
+{
+    if ( NULL != me->undo )
+    {
+        khal_free(me->undo);
+        me->undo = NULL;
+    }
+    me->undo_count = 0U;
+}
+
 /** @brief Forget the round: the install it belonged to has ended. */
 static void keep_clear(AppMgr * const me)
 {
@@ -782,6 +812,7 @@ static void keep_clear(AppMgr * const me)
         me->keep_buf = NULL;
     }
     victims_clear(me);      /* an install that ends owes no folder to anyone */
+    undo_clear(me);         /* nor is anything left to give back */
     me->keep_round   = false;
     me->keep_pending = false;
     me->keep_forced  = false;
@@ -1086,6 +1117,183 @@ static void plan_evict(AppMgr * const me, kapps_dir_t *d,
 }
 
 /**
+ * @brief Note an app the plan is about to take out of the directory.
+ *
+ * Its entry and its name, read before the write that follows, which may erase
+ * the header the name is in. A dry PSRAM costs the way back, never the
+ * install: the app is lost with the failure, as it was before apps were
+ * noted.
+ *
+ * @param me  The AO.
+ * @param d   The working directory copy the plan was made on, not yet edited.
+ * @param idx The victim's entry in @p d.
+ */
+static void undo_note(AppMgr * const me, const kapps_dir_t *d, uint8_t idx)
+{
+    kdrv_slot_desc_t vd;
+
+    if ( NULL == me->undo )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; a table from a void * allocator */
+        me->undo = (undo_t *)khal_realloc_psram(NULL, (size_t)KAPPS_MAX_ENTRIES
+                                                      * sizeof(undo_t));
+        me->undo_count = 0U;
+    }
+    if ( (NULL == me->undo) || (KAPPS_MAX_ENTRIES <= me->undo_count) )
+    {
+        KLOG_W(TAG, "no room to remember an app this install evicts; a failure "
+                    "of the install costs it");
+        return;
+    }
+    undo_t * const u = &me->undo[me->undo_count];
+
+    u->entry = d->e[idx];
+    u->gone  = false;
+    u->back  = false;
+    if ( kdrv_apps_desc(&d->e[idx], &vd, NULL) == KODE_OK )
+    {
+        (void)snprintf(u->project, sizeof(u->project), "%s", vd.project);
+    }
+    else
+    {
+        unnamed_label(u->project, sizeof(u->project), d->e[idx].offset);
+    }
+    ++me->undo_count;
+}
+
+/**
+ * @brief Take a plan's victims out of the working copy and commit it.
+ *
+ * Each victim is noted first (undo_note()), so a failed install can give back
+ * the ones its write never reaches. Nothing is committed when the plan names
+ * none.
+ *
+ * @param me   The AO.
+ * @param d    The working directory copy the plan was made on.
+ * @param plan The plan.
+ * @return true when the directory is as the plan wants it; false when the
+ *         commit failed, with nothing evicted.
+ */
+static bool plan_commit(AppMgr * const me, kapps_dir_t *d,
+                        const kapps_plan_t *plan)
+{
+    for ( uint32_t i = 0U; i < plan->evict_count; ++i )
+    {
+        undo_note(me, d, plan->evict[i]);
+    }
+    plan_evict(me, d, plan);
+    return (0U == plan->evict_count) || (kdrv_apps_dir_commit(d) == KODE_OK);
+}
+
+/**
+ * @brief Whether the directory holds an entry with install number @p seq.
+ *
+ * @param d   The directory.
+ * @param seq The install number: unique to an entry.
+ * @return true when one does.
+ */
+static bool appdir_has_seq(const kapps_dir_t *d, uint32_t seq)
+{
+    for ( uint32_t i = 0U; i < d->count; ++i )
+    {
+        if ( d->e[i].seq == seq )
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Put an entry into the directory where its install number belongs.
+ *
+ * The directory is in install order; the caller has made sure it has room.
+ *
+ * @param d   The working directory copy.
+ * @param ent The entry to add.
+ */
+static void appdir_insert(kapps_dir_t *d, const kapps_entry_t *ent)
+{
+    uint32_t at = d->count;
+
+    for ( uint32_t i = 0U; i < d->count; ++i )
+    {
+        if ( d->e[i].seq > ent->seq )
+        {
+            at = i;
+            break;
+        }
+    }
+    for ( uint32_t j = d->count; j > at; --j )
+    {
+        d->e[j] = d->e[j - 1U];
+    }
+    d->e[at] = *ent;
+    ++d->count;
+}
+
+/**
+ * @brief An install failed: give back the apps its write did not reach.
+ *
+ * An app whose extent the write erased any part of is gone, and the log says
+ * so; every other one has its entry put back in one directory commit, because
+ * its flash is as it was. A victim whose eviction never reached the flash (the
+ * commit failed) is still in the directory and is left alone. The data
+ * folders of the apps given back are not this step's: nothing deletes a
+ * folder for a failed install.
+ *
+ * @param me The AO.
+ */
+static void undo_restore(AppMgr * const me)
+{
+    if ( 0U == me->undo_count )
+    {
+        undo_clear(me);
+        return;
+    }
+
+    kapps_dir_t dir = *kdrv_apps_dir();
+    bool        changed = false;
+
+    for ( uint32_t i = 0U; i < me->undo_count; ++i )
+    {
+        undo_t * const u = &me->undo[i];
+
+        u->gone = kdrv_apps_write_reached(u->entry.offset, u->entry.size);
+        if ( !u->gone && !appdir_has_seq(&dir, u->entry.seq)
+            && (KAPPS_MAX_ENTRIES > dir.count) )
+        {
+            appdir_insert(&dir, &u->entry);
+            u->back = true;
+            changed = true;
+        }
+    }
+    if ( changed && (kdrv_apps_dir_commit(&dir) != KODE_OK) )
+    {
+        KLOG_E(TAG, "cannot update the directory; the apps the failed install "
+                    "evicted stay out");
+    }
+    for ( uint32_t i = 0U; i < me->undo_count; ++i )
+    {
+        undo_t const * const u = &me->undo[i];
+
+        if ( u->gone )
+        {
+            KLOG_N(TAG, "'%s' was overwritten and is gone", u->project);
+        }
+        else if ( u->back && appdir_has_seq(kdrv_apps_dir(), u->entry.seq) )
+        {
+            KLOG_N(TAG, "kept '%s' after the failed install", u->project);
+        }
+        else
+        {
+            /* Never left the directory, or could not be put back (said above). */
+        }
+    }
+    undo_clear(me);
+}
+
+/**
  * @brief Free one directory slot by evicting the oldest app (FIFO by seq).
  *
  * The same FIFO kdrv_apps_plan() uses when the region is full. The evicted
@@ -1322,6 +1530,7 @@ static void flash_fail(AppMgr * const me, const char *why, kfail_t reason)
     };
     KLOG_E(TAG, "install failed: %s", why);
     flash_cleanup(me);
+    undo_restore(me);        /* the apps its write never reached come back */
     keep_clear(me);          /* the install ends here; so does its round */
     if ( KFAIL_KEEP == reason )
     {
@@ -1428,6 +1637,7 @@ static const char *region_install(AppMgr * const me, uint32_t len,
     {
         return "cannot update the directory";
     }
+    undo_clear(me);          /* the install landed: its victims are gone for good */
 
     name[0] = '\0';
     if ( KODE_OK == dst )
@@ -2024,8 +2234,7 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
     }
     /* Evictions, loudly and before any flash is touched; the copy is
      * persisted BEFORE anything the victims occupied is erased. */
-    plan_evict(me, &dir, &plan);
-    if ( (0U < plan.evict_count) && (kdrv_apps_dir_commit(&dir) != KODE_OK) )
+    if ( !plan_commit(me, &dir, &plan) )
     {
         KLOG_E(TAG, "cannot update the directory");
         return KODE_ERROR;
@@ -2526,6 +2735,7 @@ static void adopt_finish(AppMgr * const me)
         block_discard();
         return;
     }
+    undo_clear(me);          /* adopted: the apps it evicted are gone for good */
     (void)kdrv_apps_pending_consume();               /* only after the commit */
     KLOG_N(TAG, "dev app '%s' v%s adopted from the mailbox",
            desc.project, desc.version);
@@ -2579,6 +2789,8 @@ void AppMgr_ctor(void)
     me->tidy_ad.icon_len = 0U;
     me->tidy_swallow     = false;
     me->victims          = NULL;     /* a used AO's table is the heap's now */
+    me->undo             = NULL;     /* and so is the one an install gives back from */
+    me->undo_count       = 0U;
     keep_clear(me);   /* no round: a constructor over a used AO frees its buffer */
     me->origin    = (uint8_t)APPMGR_ORIGIN_FILE;
 #if CONFIG_KODE_LOWPOWER
@@ -3268,9 +3480,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                     status = Q_TRAN(&AppMgr_keeping);
                     break;
                 }
-                plan_evict(me, &dir, &plan);
-                if ( (0U < plan.evict_count)
-                    && (kdrv_apps_dir_commit(&dir) != KODE_OK) )
+                if ( !plan_commit(me, &dir, &plan) )
                 {
                     KLOG_E(TAG, "cannot update the directory; mailbox left intact");
                     keep_clear(me);
@@ -5360,6 +5570,7 @@ static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e)
                  * mailbox stays, and the next boot copies it again. */
                 xfer_abort(me);
                 me->os_target = false;
+                undo_restore(me);
                 keep_clear(me);
                 KLOG_E(TAG, "adoption failed mid-copy; mailbox left intact");
                 status = Q_TRAN(&AppMgr_idle);
@@ -5376,6 +5587,7 @@ static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e)
             adopt_finish(me);
             if ( !me->tidy_on )
             {
+                undo_restore(me);  /* a failed adoption gives back what its write never reached */
                 keep_clear(me);    /* every way adoption ends ends its round;
                                     * a tidying one ends it in tidy_finish() */
             }
@@ -5497,6 +5709,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
 
     me->os_target = false;
     me->bypass    = false;
+    undo_restore(me);   /* the apps its write never reached come back */
     keep_clear(me);     /* a failed install owes no folder to the apps it evicted */
     QACTIVE_PUBLISH(stalled ? &s_recv_stall_evt : &s_recv_fail_evt, &me->super);
     if ( announced )
@@ -5575,9 +5788,8 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                 status = recv_close(me, false, false);
                 break;
             }
-            plan_evict(me, &dir, &plan);   /* the stream cannot wait: no copies */
-            if ( (0U < plan.evict_count)
-                && (kdrv_apps_dir_commit(&dir) != KODE_OK) )
+            /* The stream cannot wait: no copies. */
+            if ( !plan_commit(me, &dir, &plan) )
             {
                 KLOG_E(TAG, "install failed: cannot update the directory");
                 QACTIVE_POST(AO_Log, &s_raw_end_evt, &me->super);

@@ -37,6 +37,10 @@ static uint32_t s_wr_off;
 static uint32_t s_wr_size;
 static uint32_t s_wr_written;
 static uint32_t s_wr_erased;   /* region offset erased up to, monotonic */
+/* Region offset up to which the flash from s_wr_off on may have been changed:
+ * s_wr_erased, and the block of an erase that failed. An empty run (nothing at
+ * or past the start) is what a record with nothing in it looks like. */
+static uint32_t s_wr_reach;
 
 /**
  * @brief Find the `app_pending` mailbox partition.
@@ -265,6 +269,8 @@ kode_status_t kdrv_apps_dir_commit(const kapps_dir_t *d)
     }
     s_dir        = next;      /* only adopted once the write above succeeded */
     s_dir_active = target;
+    s_wr_off     = 0U;        /* the new directory is what says which extents hold apps: */
+    s_wr_reach   = 0U;        /* no erase made before it speaks for them */
     return KODE_OK;
 }
 
@@ -464,6 +470,7 @@ kode_status_t kdrv_apps_write_begin(uint32_t offset, uint32_t size)
     s_wr_size    = size;
     s_wr_written = 0U;
     s_wr_erased  = offset;
+    s_wr_reach   = offset;
     s_wr_open    = true;
     return KODE_OK;
 }
@@ -485,6 +492,7 @@ kode_status_t kdrv_apps_write(const void *data, size_t len)
     uint32_t const reach = s_wr_off + s_wr_written + (uint32_t)len;
     while ( s_wr_erased < reach )
     {
+        s_wr_reach = s_wr_erased + KAPPS_ALIGN;   /* before the erase: a failed one may have changed the block */
         esp_err_t const err = esp_partition_erase_range(s_part, s_wr_erased, KAPPS_ALIGN);
         if ( ESP_OK != err )
         {
@@ -519,6 +527,14 @@ kode_status_t kdrv_apps_write_end(void)
 void kdrv_apps_write_abort(void)
 {
     s_wr_open = false;
+}
+
+bool kdrv_apps_write_reached(uint32_t offset, uint32_t size)
+{
+    uint64_t const end = (uint64_t)offset + (uint64_t)size;
+
+    return (0U < size) && (s_wr_off < s_wr_reach)
+        && (offset < s_wr_reach) && ((uint64_t)s_wr_off < end);
 }
 
 /* ---- Reading an image back ------------------------------------------------- */

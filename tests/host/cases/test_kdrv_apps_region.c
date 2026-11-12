@@ -794,6 +794,103 @@ TEST_CASE("erasing follows the write across a block boundary, never behind it",
     TEST_ASSERT_EQUAL_MEMORY(out, in, sizeof(out));
 }
 
+/* What an install may take back after it fails is decided by which blocks the
+ * write got to erase, so the driver says it: an extent is reached when any
+ * block of the session's run has been erased over it, and never before the
+ * data gets there. */
+TEST_CASE("an extent is reached once the write erases a block of it, and not before",
+          "[apps_region]")
+{
+    static uint8_t out[0x40];
+    uint32_t const at = KAPPS_DATA_OFF + (2U * KAPPS_ALIGN);
+
+    apps_ready();
+    kapps_dir_t same = *kdrv_apps_dir();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&same));   /* starts the record over */
+    (void)memset(out, 0x5AU, sizeof(out));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, 3U * KAPPS_ALIGN));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at, KAPPS_ALIGN),
+        "an extent under a session that has written nothing is reached");
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at, KAPPS_ALIGN),
+        "the block the first bytes landed in is not reached");
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at + 0x10U, 1U),
+        "a one-byte extent inside the erased block is not reached");
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at - KAPPS_ALIGN, 2U * KAPPS_ALIGN),
+        "an extent that runs into the erased block is not reached");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at - KAPPS_ALIGN, KAPPS_ALIGN),
+        "the extent just below the session is reached");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at + KAPPS_ALIGN, KAPPS_ALIGN),
+        "a block the write has not got to is reached");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at + (2U * KAPPS_ALIGN), 4U),
+        "the last block of the session is reached before any byte lands in it");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at, 0U),
+        "an extent of no bytes is reached");
+    kdrv_apps_write_abort();
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at, KAPPS_ALIGN),
+        "an abandoned session forgot what it had erased");
+}
+
+TEST_CASE("the erases of the last session are not the next directory's",
+          "[apps_region]")
+{
+    static uint8_t out[0x40];
+    uint32_t const at = KAPPS_DATA_OFF;
+
+    apps_ready();
+    (void)memset(out, 0x5AU, sizeof(out));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, KAPPS_ALIGN));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    kdrv_apps_write_abort();
+    TEST_ASSERT_TRUE(kdrv_apps_write_reached(at, 1U));
+
+    kapps_dir_t same = *kdrv_apps_dir();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&same));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at, 1U),
+        "a committed directory kept the erases made before it");
+
+    /* A commit that fails changes nothing: the record stands. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, KAPPS_ALIGN));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    kdrv_apps_write_abort();
+    esp_partition_fail_after(0U, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, kdrv_apps_dir_commit(&same));
+    cut_off();
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at, 1U),
+        "a commit that failed wiped the record");
+
+    /* A new session starts its own record, and says nothing of the old one. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at + KAPPS_ALIGN, KAPPS_ALIGN));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at, 1U),
+        "a session that has erased nothing inherited the last one's");
+    kdrv_apps_write_abort();
+}
+
+TEST_CASE("an erase that fails counts as reaching its block",
+          "[apps_region]")
+{
+    static uint8_t out[0x40];
+    uint32_t const at = KAPPS_DATA_OFF + KAPPS_ALIGN;
+
+    apps_ready();
+    kapps_dir_t same = *kdrv_apps_dir();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&same));
+    (void)memset(out, 0x5AU, sizeof(out));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, 2U * KAPPS_ALIGN));
+    esp_partition_fail_after(0U, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    cut_off();
+    kdrv_apps_write_abort();
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at, KAPPS_ALIGN),
+        "a block a failed erase touched is called untouched");
+    TEST_ASSERT_FALSE(kdrv_apps_write_reached(at + KAPPS_ALIGN, KAPPS_ALIGN));
+}
+
 /** @brief A lead-in that leaves the next write starting mid-session. */
 #define LEAD_LEN         0x37U
 /** @brief One write two bounces and a part long, crossing every boundary. */

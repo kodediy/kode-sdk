@@ -3592,8 +3592,9 @@ const uint8_t *net_stream_buf(uint8_t idx);
 
 /* ---- AO_AppMgr: owner of the apps region --------------------------------
  * Copies a .bin from a medium into the apps region (evicting the oldest install
- * when short of room), lists, launches and removes apps by name. Which firmware
- * boots is AO_Boot's; the two write different flash regions.
+ * when short of room), lists, launches and removes apps by name. An install that
+ * fails gives back every app it evicted whose flash its write never reached.
+ * Which firmware boots is AO_Boot's; the two write different flash regions.
  */
 extern QActive * const AO_AppMgr;   /**< The apps-region AO. */
 void AppMgr_ctor(void);             /**< Construct it; kaos_appmgr_start() calls it. */

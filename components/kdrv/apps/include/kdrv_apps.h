@@ -116,6 +116,23 @@ kode_status_t kdrv_apps_write_end(void);
 void kdrv_apps_write_abort(void);
 
 /**
+ * @brief Has the write erased any part of an extent?
+ *
+ * Answers for the write session in hand, or the last one that ran, and starts
+ * over with every committed directory: a commit says which extents hold apps,
+ * so an erase made before it speaks for nothing that comes after. An erase that
+ * failed counts as having reached its block, because flash a failed erase
+ * touched is not flash that can be trusted. Only blocks the write got to count:
+ * the region erases 64 KB at a time, as the data arrives.
+ *
+ * @param offset Region-relative start of the extent.
+ * @param size   Its length in bytes.
+ * @return true when some of its bytes may no longer be what they were; false
+ *         when every one of them is, or when @p size is 0.
+ */
+bool kdrv_apps_write_reached(uint32_t offset, uint32_t size);
+
+/**
  * @brief Read @p len bytes of the region at region-relative @p offset.
  *
  * For reading an installed image back out - the copy AO_AppMgr makes on the

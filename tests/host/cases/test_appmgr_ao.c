@@ -3369,12 +3369,10 @@ TEST_CASE("a named reinstall into a full region gives up its own old copy",
 }
 
 
-/* The victims are committed out of the directory before the first byte of
- * the new image arrives, so an install that then fails has cost them: what
- * is left is a directory without the victim and without the image that never
- * came. Pinned here so that the day this changes, it changes on purpose - and
- * so that a failed image can never be left listed, or a boot request armed
- * for it. */
+/* The victim here fills the region, so the image that then fails its CRC was
+ * written over all of it: it is gone, and what is left is a directory without
+ * the victim and without the image that never verified. A failed image can
+ * never be left listed, or a boot request armed for it. */
 TEST_CASE("an install that evicts and then fails its CRC lists nothing new",
           "[appmgr_ao][keep]")
 {
@@ -3390,11 +3388,247 @@ TEST_CASE("an install that evicts and then fails its CRC lists nothing new",
     feed(s_named_img, (uint16_t)len);
     (void)qf_support_pump(AO_AppMgr, 8U);
 
-    TEST_ASSERT_FALSE_MESSAGE(old_installed(), "the victim came back");
+    TEST_ASSERT_FALSE_MESSAGE(old_installed(),
+        "an app the write overwrote came back");
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, live_entries(),
         "an image that failed its CRC is listed");
     TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_req_present(),
         "a failed install left a boot request behind");
+    keep_end();
+}
+
+/* ---- An install that fails gives back what its write never reached --------
+ * The plan takes the victims out of the directory before the first byte
+ * arrives, but the region erases 64 KB as the data gets there: an install that
+ * stops early has erased only the blocks it reached. The victims on blocks it
+ * never touched are whole, and the failure puts their entries back.
+ */
+
+/** @brief The bytes of the image the restore cases stream: two blocks. */
+#define UNDO_IMG_LEN  (2U * KAPPS_ALIGN)
+
+/** @brief The restore cases' image: image_named()'s header, then zeros. */
+static uint8_t s_undo_img[UNDO_IMG_LEN];
+
+/**
+ * @brief Five apps, one block each but the last, in install order.
+ *
+ * "v1" lies at the start of the data area, "k" one block on, then "v2", "v3"
+ * and the filler "f" to the end of the region. Install order is v1, v2, v3,
+ * k, f, so an install that needs two blocks evicts v1, v2 and v3, in that
+ * order, and lands on the blocks of v2 and v3 - which leaves v1, a victim
+ * that is never overwritten.
+ */
+static void region_of_victims(void)
+{
+    static const char *const name[5] = { "v1", "v2", "v3", "k", "f" };
+    static const uint32_t    at[5]   = { 0U, 2U, 3U, 1U, 4U };   /* block of each */
+    kapps_dir_t dir;
+
+    if ( !s_keep_dir_held )
+    {
+        keep_hold_dir();
+    }
+    dir       = s_keep_dir;
+    dir.count = 5U;
+    for ( uint32_t i = 0U; 5U > i; ++i )
+    {
+        dir.e[i].offset = KAPPS_DATA_OFF + (at[i] * KAPPS_ALIGN);
+        dir.e[i].size   = KAPPS_ALIGN;
+        dir.e[i].seq    = i + 1U;
+        dir.e[i].flags  = KAPPS_ENTRY_VALID;
+        plant_app(dir.e[i].offset, name[i]);
+    }
+    dir.e[4].size = kdrv_apps_region_size() - dir.e[4].offset;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&dir));
+}
+
+/**
+ * @brief The start of a restore case: a fresh AO and Storage, and a spy that
+ *        listens to nothing an earlier case asked it to.
+ *
+ * Thirty-two chunks put more on the bus than the spy's queue holds, and the
+ * guarantee QP gives a subscriber is an assertion when it cannot keep it.
+ */
+static void undo_fresh(void)
+{
+    keep_fresh();
+    QActive_unsubscribeAll(ao_spy());
+    ao_spy_drain();
+}
+
+/** @brief Build the image the restore cases stream, named @p project. */
+static void undo_image(const char *project)
+{
+    (void)image_named(project);
+    (void)memset(s_undo_img, 0, sizeof(s_undo_img));
+    (void)memcpy(s_undo_img, s_named_img, sizeof(s_named_img));
+}
+
+/** @brief Stream the first @p bytes of the restore image from the console, a chunk at a time. */
+static void feed_undo_image(uint32_t bytes)
+{
+    for ( uint32_t off = 0U; off < bytes; off += KODE_RECV_CHUNK )
+    {
+        feed(&s_undo_img[off], (uint16_t)KODE_RECV_CHUNK);
+    }
+}
+
+/** @brief Which of the five apps are installed, as a string like "v1 k f". */
+static const char *victims_left(void)
+{
+    static char out[32];
+    static const char *const name[5] = { "v1", "v2", "v3", "k", "f" };
+    size_t n = 0U;
+
+    out[0] = '\0';
+    for ( unsigned i = 0U; 5U > i; ++i )
+    {
+        if ( named_installed(name[i]) )
+        {
+            if ( 0U < n )
+            {
+                out[n++] = ' ';
+            }
+            n += (size_t)snprintf(&out[n], sizeof(out) - n, "%s", name[i]);
+        }
+    }
+    return out;
+}
+
+TEST_CASE("a terminal install that fails its CRC gives back the apps it did not reach",
+          "[appmgr_ao][undo]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN) ^ 1U,
+                   false, "new");
+    raw_armed(true);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("k f", victims_left(),
+        "the plan did not take v1, v2 and v3 out");
+    feed_undo_image(UNDO_IMG_LEN);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 k f", victims_left(),
+        "the install's failure did not give back v1, whose blocks it never "
+        "touched, or gave back what it overwrote");
+    TEST_ASSERT_FALSE(named_installed("new"));
+    TEST_ASSERT_TRUE(klog_has("kept 'v1' after the failed install"));
+    TEST_ASSERT_TRUE(klog_has("'v2' was overwritten and is gone"));
+    TEST_ASSERT_TRUE(klog_has("'v3' was overwritten and is gone"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_folder_requests(),
+        "a failed install deleted or wrote a data folder");
+    keep_end();
+}
+
+TEST_CASE("a terminal install cut by the watchdog gives back every app it did not reach",
+          "[appmgr_ao][undo]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
+                   false, "new");
+    raw_armed(true);
+    feed_undo_image(KODE_RECV_CHUNK);          /* the first block is erased, no more */
+    run_ticks(APPMGR_RECV_IDLE_DEADLINE_TICKS + 50U);
+
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("the host is presumed gone"),
+        "the watchdog did not run");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v3 k f", victims_left(),
+        "a cut install lost an app whose blocks it never reached");
+    TEST_ASSERT_TRUE(klog_has("kept 'v1' after the failed install"));
+    TEST_ASSERT_TRUE(klog_has("kept 'v3' after the failed install"));
+    TEST_ASSERT_TRUE(klog_has("'v2' was overwritten and is gone"));
+    (void)log_saw(CONSOLE_RAW_END_SIG);
+    keep_end();
+}
+
+TEST_CASE("an install from a medium that fails part-way gives back the apps it did not reach",
+          "[appmgr_ao][undo]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(UNDO_IMG_LEN, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data_bytes(s_undo_img, sizeof(s_named_img));
+    for ( unsigned victim = 0U; 3U > victim; ++victim )
+    {
+        storage_expect(STORAGE_PATH_REQ_SIG, "a victim's path was never asked about");
+        answer_stat(false, (uint8_t)KODE_ERROR);     /* no card: nothing to copy */
+        (void)qf_support_pump(AO_AppMgr, 8U);
+    }
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v2 v3 k f", victims_left(),
+        "the round evicted before the restart");
+
+    answer_open(UNDO_IMG_LEN, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data_bytes(s_undo_img, sizeof(s_named_img));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("k f", victims_left(),
+        "the second pass did not take the victims out");
+    answer_eof();                                     /* the file ended early */
+    run_ticks(4U);
+
+    TEST_ASSERT_TRUE(klog_has("the file ended early"));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v3 k f", victims_left(),
+        "the failure did not give back what the write never reached");
+    TEST_ASSERT_TRUE(klog_has("kept 'v1' after the failed install"));
+    TEST_ASSERT_TRUE(klog_has("kept 'v3' after the failed install"));
+    TEST_ASSERT_TRUE(klog_has("'v2' was overwritten and is gone"));
+    keep_end();
+}
+
+TEST_CASE("an install that lands evicts its victims for good", "[appmgr_ao][undo]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
+                   false, "new");
+    raw_armed(true);
+    feed_undo_image(UNDO_IMG_LEN);
+    tidy_settle();
+
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("k f", victims_left(),
+        "an install that landed did not leave its victims evicted");
+    TEST_ASSERT_TRUE(named_installed("new"));
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("after the failed install"),
+        "an install that landed gave something back");
+    keep_end();
+}
+
+TEST_CASE("a second failed install in a row gives back what it did not reach too",
+          "[appmgr_ao][undo]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    undo_image("new");
+
+    for ( unsigned run = 0U; 2U > run; ++run )
+    {
+        fake_klog_reset();
+        region_of_victims();
+        ask_recv_named(UNDO_IMG_LEN,
+                       khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN) ^ 1U,
+                       false, "new");
+        raw_armed(true);
+        feed_undo_image(UNDO_IMG_LEN);
+        (void)qf_support_pump(AO_AppMgr, 8U);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 k f", victims_left(),
+            "a failure in a row gave back the wrong apps");
+        TEST_ASSERT_TRUE(klog_has("kept 'v1' after the failed install"));
+    }
     keep_end();
 }
 
@@ -4302,8 +4536,12 @@ TEST_CASE("a deflated container is planned for its image, so every victim is kep
 
     TEST_ASSERT_TRUE(klog_has("evicting 'first'"));
     TEST_ASSERT_TRUE(klog_has("evicting 'second'"));
-    TEST_ASSERT_FALSE_MESSAGE(seq_installed(1U) || seq_installed(2U),
-        "the second pass did not evict both");
+    /* The fake inflater yields no image, so the adoption fails before its
+     * write erases a block: both victims come back with the failure. */
+    TEST_ASSERT_TRUE_MESSAGE(seq_installed(1U) && seq_installed(2U),
+        "the failed adoption did not give back the apps its write never reached");
+    TEST_ASSERT_TRUE(klog_has("kept 'first' after the failed install"));
+    TEST_ASSERT_TRUE(klog_has("kept 'second' after the failed install"));
     TEST_ASSERT_FALSE_MESSAGE(klog_has("no copy kept"),
         "a victim the card had taken went down with a warning");
     TEST_ASSERT_FALSE_MESSAGE(klog_has("before this install"),
@@ -4353,8 +4591,12 @@ TEST_CASE("a plan that changes under an adoption is deferred from inside it",
 
     answer_stat(true, (uint8_t)KODE_OK);
     run_ticks(8U);
-    TEST_ASSERT_TRUE(klog_has("evicting 'old'"));
-    TEST_ASSERT_FALSE_MESSAGE(seq_installed(1U), "the second pass did not evict");
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("evicting 'old'"), "the second pass did not evict");
+    /* The fake inflater yields no image: the adoption fails before its write
+     * erases a block, and "old" comes back with the failure. */
+    TEST_ASSERT_TRUE_MESSAGE(seq_installed(1U),
+        "the failed adoption did not give back the app its write never reached");
+    TEST_ASSERT_TRUE(klog_has("kept 'old' after the failed install"));
 
     (void)kdrv_apps_pending_consume();   /* the fake inflater yields no image */
     kfw_abort();
