@@ -4279,6 +4279,48 @@ static QState keep_only_ask(AppMgr * const me, QEvt const * const e)
  */
 
 /**
+ * @brief Say that a fetch ended without a folder: the one line about it.
+ *
+ * A fetch that ends in AO_Storage's put is told by AO_Storage, which knows what
+ * it wrote; every other end is told here.
+ *
+ * @param project Whose folder.
+ * @param why     What went wrong.
+ */
+static void get_say(const char *project, appdata_get_why_t why)
+{
+    const char *words = "AO_Storage did not say how it went";
+
+    switch ( why )
+    {
+        case APPDATA_GET_BUSY: {
+            words = "it could not be carried on for want of memory";
+            break;
+        }
+        case APPDATA_GET_NAME: {
+            words = "it is not a name a data folder takes";
+            break;
+        }
+        case APPDATA_GET_FETCH: {
+            words = "its files could not be fetched";
+            break;
+        }
+        case APPDATA_GET_JSON: {
+            words = "its app.json is not one the board reads";
+            break;
+        }
+        case APPDATA_GET_ICON: {
+            words = "its icon is not an icon of the one size";
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    KLOG_N(TAG, "the data folder of '%s' was not written: %s", project, words);
+}
+
+/**
  * @brief Answer a fetch.
  *
  * @param who     The asker.
@@ -4367,6 +4409,7 @@ static QState get_fail(AppMgr * const me, appdata_get_why_t why)
         net_stream_close_request();
         me->get_open = false;
     }
+    get_say(me->get_project, why);
     get_reply(me->get_who, me->get_project, why, false);
     return Q_TRAN(&AppMgr_idle);
 }
@@ -4569,7 +4612,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
                               req->project) )
     {
-        KLOG_W(TAG, "'%s' cannot name a data folder", req->project);
+        get_say(req->project, APPDATA_GET_NAME);
         get_reply(req->who, req->project, APPDATA_GET_NAME, false);
         return Q_HANDLED();
     }
@@ -4581,7 +4624,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     me->get_url = (char *)khal_alloc_psram(1U, (size_t)KODE_APPDATA_URL_MAX);
     if ( (NULL == me->get_buf) || (NULL == me->get_url) )
     {
-        KLOG_W(TAG, "no PSRAM to fetch the data folder of '%s'", req->project);
+        get_say(req->project, APPDATA_GET_BUSY);
         get_release(me);
         get_reply(req->who, req->project, APPDATA_GET_BUSY, false);
         return Q_HANDLED();
@@ -4599,6 +4642,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     return Q_TRAN(&AppMgr_fetching);
 #else
     KLOG_E(TAG, "this firmware has no network services");
+    get_say(req->project, APPDATA_GET_FETCH);
     get_reply(req->who, req->project, APPDATA_GET_FETCH, false);
     return Q_HANDLED();
 #endif

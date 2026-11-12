@@ -52,6 +52,9 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 #define APPDATA_ICON_TMP    APPDATA_ICON_NAME APPDATA_TMP_SUFFIX   /**< The icon while a put writes it. */
 _Static_assert(sizeof(APPDATA_ICON_TMP) <= KAPP_DATA_ICON_MAX,
                "a temporary's name fits where an icon's path does");
+#define APPDATA_WHY_MAX     80U   /**< The words saying why a put was refused, terminator included. */
+#define APPDATA_WHY_WRITE   "a file would not write"   /**< Why a put failed while writing a file. */
+#define APPDATA_WHY_PLACE   "the new files would not go in place"   /**< Why a put failed putting them in place. */
 #define APPDATA_TOP_DIR     "/storage/.kode"  /**< The tree's first level, internal. */
 #define APPDATA_TREE_DIR    APPDATA_TOP_DIR "/appsdata" /**< Holds one folder per app. */
 
@@ -2273,6 +2276,34 @@ static void wipe_step(Storage * const me)
  */
 
 /**
+ * @brief Say how a put ended: the one line about its folder, at NOTICE.
+ *
+ * Every put ends in exactly one of its two places, a refusal in
+ * appdata_put_begin() or the end in appdata_put_finish(), and each says it here.
+ *
+ * @param project The project the put was for.
+ * @param rc      How it ended.
+ * @param icon    The folder has an icon: read only when @p rc is KODE_OK.
+ * @param why     Read only when @p rc is not KODE_OK: why it was not written.
+ */
+static void appdata_put_say(const char *project, kode_status_t rc, bool icon,
+                            const char *why)
+{
+    const char *what = "json, no icon";
+
+    if ( KODE_OK != rc )
+    {
+        KLOG_N(TAG, "the data folder of '%s' was not written: %s", project, why);
+        return;
+    }
+    if ( icon )
+    {
+        what = "json, icon";
+    }
+    KLOG_N(TAG, "the data folder of '%s' is in place (%s)", project, what);
+}
+
+/**
  * @brief Answer a put to its asker. Bounded, never asserts.
  * @param who     The asker.
  * @param project The project the put was for.
@@ -2482,43 +2513,39 @@ static void appdata_put_sweep(const char *folder)
 /**
  * @brief End a put: forget it, remove what a failure left, answer.
  *
- * The state goes first because appdata_rm() refuses while busy() is true and
- * g_who is part of busy().
+ * The state goes first because g_who is part of busy(), and what a failure
+ * removes is removed with the AO free.
  *
  * A failed put leaves the folder that was there as it was, less the
  * temporaries; a folder the put made is taken away again.
  *
- * @param me The AO.
- * @param rc How it ended.
+ * @param me  The AO.
+ * @param rc  How it ended.
+ * @param why Why it failed, in words; read only when @p rc is not KODE_OK.
  */
-static void appdata_put_finish(Storage * const me, kode_status_t rc)
+static void appdata_put_finish(Storage * const me, kode_status_t rc,
+                               const char *why)
 {
     QActive * const who   = me->g_who;
     bool const      fresh = me->g_fresh;
+    bool const      icon  = (0U != me->g_icon_len);
     char            project[KDRV_SLOT_PROJECT_MAX];
     char            folder[APPDATA_FOLDER_MAX];
 
     (void)snprintf(project, sizeof(project), "%s", me->g_project);
     me->g_who      = NULL;
     appdata_put_free(me);
-    if ( KODE_OK != rc )
+    if ( (KODE_OK != rc)
+        && appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
+                               project) )
     {
-        KLOG_W(TAG, "the data folder of '%s' was not written (%d)", project,
-               (int)rc);
-        if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
-                                 project) )
-        {
-            appdata_put_drop_tmps(folder);
-        }
+        appdata_put_drop_tmps(folder);
         if ( fresh )
         {
-            (void)appdata_rm(me, project);
+            (void)appdata_rm_tree(folder);
         }
     }
-    else
-    {
-        KLOG_N(TAG, "the data folder of '%s' is written", project);
-    }
+    appdata_put_say(project, rc, icon, why);
     if ( NULL != who )
     {
         appdata_put_answer(who, project, rc, false);
@@ -2572,14 +2599,15 @@ static bool appdata_room(const char *folder, bool *there)
 static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const req)
 {
     char          folder[APPDATA_FOLDER_MAX];
+    char          room[APPDATA_WHY_MAX];
+    const char   *why = "it is not a name or a size a data folder takes";
     kode_status_t rc = KODE_DENIED;
     bool          no_turn = false;
     bool          there   = false;
 
     if ( busy(me) )
     {
-        KLOG_W(TAG, "a transfer is already in flight; the folder of '%s' is "
-                    "not written", req->project);
+        why     = "a transfer is in flight";
         no_turn = true;
     }
     else if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
@@ -2588,11 +2616,12 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
              || (KAPP_DATA_JSON_MAX < req->json_len)
              || ((0U != req->icon_len) && !kapp_icon_len_ok(req->icon_len)) )
     {
-        KLOG_W(TAG, "'%s' cannot be a data folder as asked", req->project);
+        /* Not a name or a size a folder takes. */
     }
     else if ( kdrv_storage_mount(KDRV_MEDIUM_FS) == NULL )
     {
-        rc = KODE_ERROR;
+        why = "the internal partition would not mount";
+        rc  = KODE_ERROR;
     }
     else if ( !appdata_room(folder, &there) )
     {
@@ -2601,17 +2630,16 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
 
         if ( there )
         {
-            KLOG_W(TAG, "no room for the new data folder of '%s' beside the "
-                        "old one: it takes %lu KB", req->project,
-                   (unsigned long)folder_kb);
+            (void)snprintf(room, sizeof(room), "the new files need %lu KB free "
+                           "beside the old ones", (unsigned long)folder_kb);
         }
         else
         {
-            KLOG_W(TAG, "no room for the data folder of '%s': a new one must "
-                        "leave %lu KB free", req->project,
-                   (unsigned long)floor_kb);
+            (void)snprintf(room, sizeof(room), "a new folder must leave %lu KB "
+                           "free", (unsigned long)floor_kb);
         }
-        rc = KODE_NO_RESOURCES;
+        why = room;
+        rc  = KODE_NO_RESOURCES;
     }
     else
     {
@@ -2623,6 +2651,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         {
             khal_free(req->buf);
         }
+        appdata_put_say(req->project, rc, false, why);
         appdata_put_answer(req->who, req->project, rc, no_turn);
         return;
     }
@@ -2660,7 +2689,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     }
     if ( KODE_OK != rc )
     {
-        appdata_put_finish(me, rc);
+        appdata_put_finish(me, rc, APPDATA_WHY_WRITE);
     }
     else
     {
@@ -2677,7 +2706,8 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
  */
 static void appdata_put_icon(Storage * const me)
 {
-    kode_status_t rc = KODE_OK;
+    kode_status_t rc  = KODE_OK;
+    const char   *why = APPDATA_WHY_WRITE;
     char          folder[APPDATA_FOLDER_MAX];
     char          path[APPDATA_PATH_MAX];
 
@@ -2706,14 +2736,15 @@ static void appdata_put_icon(Storage * const me)
         }
         if ( KODE_OK == rc )
         {
-            rc = appdata_put_commit(me, folder);
+            why = APPDATA_WHY_PLACE;
+            rc  = appdata_put_commit(me, folder);
         }
         if ( KODE_OK == rc )
         {
             appdata_put_sweep(folder);
         }
     }
-    appdata_put_finish(me, rc);
+    appdata_put_finish(me, rc, why);
 }
 
 /* ---- The card's field table ----------------------------------------------- */

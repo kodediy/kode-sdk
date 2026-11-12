@@ -8058,6 +8058,56 @@ TEST_CASE("a put refused for another reason is not asked again",
     fetch_end();
 }
 
+/* A fetch that ends in AO_Storage's put is told by AO_Storage; every other end
+ * is told here, once. */
+TEST_CASE("a fetch that fails before its put says why no folder was written",
+          "[appmgr_ao][appdata_get][say]")
+{
+    fetch_fresh();
+    fake_klog_reset();
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_ERROR, 0U);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT(1U, klog_count("the data folder of 'snake' was not "
+                                          "written"));
+    TEST_ASSERT_TRUE(klog_has("the data folder of 'snake' was not written: "
+                              "its files could not be fetched"));
+    fetch_end();
+}
+
+TEST_CASE("a fetch for a name that cannot be a folder says why too",
+          "[appmgr_ao][appdata_get][say]")
+{
+    fetch_fresh();
+    fake_klog_reset();
+
+    ask_get("../etc", GET_URL);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_NAME, fetch_answer("../etc"));
+    TEST_ASSERT_TRUE(klog_has("the data folder of '../etc' was not written: "
+                              "it is not a name a data folder takes"));
+    fetch_end();
+}
+
+TEST_CASE("a fetch whose put is answered adds no line of its own",
+          "[appmgr_ao][appdata_get][say]")
+{
+    fetch_fresh();
+
+    fetch_to_the_put();
+    fetch_put_is_whole();
+    fake_klog_reset();
+    put_rsp("snake", KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_OK, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, klog_count("the data folder of 'snake' "),
+        "AO_Storage says how its put ended; this AO says nothing more");
+    fetch_end();
+}
+
 TEST_CASE("a second fetch asked while one runs is told busy",
           "[appmgr_ao][appdata_get]")
 {

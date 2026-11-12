@@ -749,6 +749,21 @@ static bool log_says(const char *words)
     return found;
 }
 
+/** @brief How many captured log lines hold @p words. */
+static unsigned log_count(const char *words)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        if ( strstr(fake_klog_line(i), words) != NULL )
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
 /* `appdata_ls` lists .kode/appsdata on both volumes without asking first
  * whether the folder is there, and a board with no app data has none. */
 TEST_CASE("a listing of a folder that is not there ends without a warning",
@@ -2692,6 +2707,147 @@ TEST_CASE("a put that fails writing a new folder leaves no folder",
     assert_put_bufs_freed();
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
                                              ".kode/appsdata/demo"));
+}
+
+/* ---- What a put says --------------------------------------------------------
+ * One NOTICE line per put, whichever way it ends and whoever asked: an
+ * install's tidy step, a fetch or the console. */
+
+/** @brief The one line a put said about @p project, and no other. */
+static void assert_said_once(const char *project, const char *words)
+{
+    char key[64];
+
+    (void)snprintf(key, sizeof(key), "the data folder of '%s'", project);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, log_count(key),
+        "a put says one line about its folder");
+    (void)snprintf(key, sizeof(key), "the data folder of '%s' %s", project, words);
+    TEST_ASSERT_TRUE_MESSAGE(log_says(key), key);
+}
+
+TEST_CASE("a put with an icon says the folder is in place, json and icon",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_said_once("demo", "is in place (json, icon)");
+}
+
+TEST_CASE("a put with no icon says so", "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_klog_reset();
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_said_once("demo", "is in place (json, no icon)");
+}
+
+TEST_CASE("a put that waited past its bound says why it was not written",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+    fake_klog_reset();
+
+    ask_appdata_put("demo", 0U);
+    wait_out_turn();
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_rsp()->rc);
+    assert_said_once("demo", "was not written: a transfer is in flight");
+}
+
+TEST_CASE("a put that is not one a folder takes says so",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_klog_reset();
+
+    ask_appdata_put("bad/name", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
+    assert_said_once("bad/name", "was not written: ");
+}
+
+TEST_CASE("a put for want of room says how much a folder needs",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(0U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_said_once("demo", "was not written: a new folder must leave 128 KB free");
+}
+
+TEST_CASE("a put on a partition that will not mount says so",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    kdrv_storage_unmount(KDRV_MEDIUM_FS);
+    fake_fs_mount_set_fails(true);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, take_put_status());
+    assert_said_once("demo", "was not written: the internal partition would not mount");
+}
+
+TEST_CASE("a put that fails writing says so once, and says nothing of the folder "
+          "it takes away", "[storage_ao][appdata][say]")
+{
+    char dir[512];
+
+    storage_fresh();
+    fake_psram_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/demo/icon.k64.tmp",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0755));
+    fake_klog_reset();
+    drain_write();
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_put_status());
+    assert_said_once("demo", "was not written: a file would not write");
+}
+
+TEST_CASE("a put whose files will not go in place says so",
+          "[storage_ao][appdata][say]")
+{
+    char dir[512];
+
+    storage_fresh();
+    fake_psram_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/demo/icon.k64",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0755));
+    fake_klog_reset();
+    drain_write();
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_put_status());
+    assert_said_once("demo", "was not written: the new files would not go in place");
 }
 
 /* A name that is a directory cannot be created as a file, which is how the
