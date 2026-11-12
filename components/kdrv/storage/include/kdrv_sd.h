@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "kbsp.h"
 #include "kode_defs.h"
 
 #ifdef __cplusplus
@@ -53,7 +54,9 @@ typedef enum {
     KDRV_SD_HIGH_CAPACITY,  /**< OCR CCS: addressed by block, not by byte.  */
     KDRV_SD_BUS_WIDTH,      /**< Data lines in use: 1 or 4. THE one to
                              *   watch - a card that came up on one line
-                             *   has three that did not reach the slot.     */
+                             *   either has three that did not reach the slot
+                             *   or took no write on four; the log says
+                             *   which.                                     */
     KDRV_SD_FREQ_KHZ,       /**< What the host clock ended up at.           */
     KDRV_SD_CARD_MAX_KHZ,   /**< What the card said it could take.          */
     KDRV_SD_RCA,            /**< Relative card address.                     */
@@ -90,13 +93,10 @@ typedef struct {
     bool        writable; /**< True for the two knobs and nothing else.     */
 } kdrv_sd_field_info_t;
 
-/** @brief Data lines an everyday mount asks for: one. The counterfeit cards
- *         shipped with some units read on four lines and fail to write on
- *         them, and a failed write leaves the controller, which the C5's
- *         link shares, unable to bring a card up again until the P4 resets.
- *         Every card reads and writes on one. The slot's four lines
- *         (KBSP_SD_WIDTH) are what `test component=sd` judges. */
-#define KDRV_SD_WIDTH_USE         1U
+/** @brief Data lines an everyday mount asks for: the slot's four. A card that
+ *         takes no write on them is mounted on one (see kdrv_sd_mount()), and
+ *         `width_req` overrides this for the next mount. */
+#define KDRV_SD_WIDTH_USE         KBSP_SD_WIDTH
 
 /* ---- How long a call may take --------------------------------------------
  * The bounds a caller that runs these on a task of its own waits by. They are
@@ -104,16 +104,34 @@ typedef struct {
  * under it.
  */
 
-/** @brief The wait for the card's rail to rise behind Q1, before the first
- *         bring-up of a boot. */
+/** @brief The wait for the card's rail to rise behind Q1, after the supply is
+ *         switched on. */
 #define KDRV_SD_POWER_SETTLE_MS   50U
+/** @brief How long the card's supply stays off when the driver cycles it. */
+#define KDRV_SD_POWER_OFF_MS      100U
+/** @brief One cycle of the card's supply: off for its time, then on and
+ *         settled. */
+#define KDRV_SD_CYCLE_MS          (KDRV_SD_POWER_OFF_MS + KDRV_SD_POWER_SETTLE_MS)
 /** @brief The most one try at the card may take: the identification and the
  *         volume's mount behind it, each command waiting out the host's own
  *         timeout. */
 #define KDRV_SD_TRY_MAX_MS        3000U
-/** @brief A mount: the rail, four data lines and then, when the card does
- *         not take them, one. */
-#define KDRV_SD_MOUNT_MAX_MS      (KDRV_SD_POWER_SETTLE_MS + (2U * KDRV_SD_TRY_MAX_MS))
+/** @brief The most the write check on four lines may take: one sector read and
+ *         the same sector written back, each given as long as a try. */
+#define KDRV_SD_CHECK_MAX_MS      (2U * KDRV_SD_TRY_MAX_MS)
+/** @brief How many times a card that takes no write on four lines is mounted
+ *         on one, each after a cycle of its supply, before it is reported as a
+ *         card that would not come up. */
+#define KDRV_SD_ONE_LINE_TRIES    2U
+/** @brief A mount: the rail, a try on four data lines and the write check
+ *         behind it, and, when the card takes no write on four lines, two
+ *         cycles of its supply, each followed by a try on one. A card that
+ *         does not come up on four lines at all takes two tries, which is
+ *         less. */
+#define KDRV_SD_MOUNT_MAX_MS      (KDRV_SD_POWER_SETTLE_MS + KDRV_SD_TRY_MAX_MS \
+                                   + KDRV_SD_CHECK_MAX_MS \
+                                   + (KDRV_SD_ONE_LINE_TRIES \
+                                      * (KDRV_SD_CYCLE_MS + KDRV_SD_TRY_MAX_MS)))
 /** @brief A transfer of 32 KB of sectors, which is the largest one asked. */
 #define KDRV_SD_SECTORS_MAX_MS    5000U
 /** @brief A format of the largest card the slot takes, with the volume's size
@@ -123,11 +141,21 @@ typedef struct {
 /* ---- Mounting ------------------------------------------------------------ */
 
 /**
- * @brief Mount the card, four data lines first and then one.
+ * @brief Mount the card on the lines `width_req` asks for: four first and then
+ *        one, by default.
  *
- * The retry is not a policy, it is what makes a counterfeit card readable: the
- * cards shipped with some units advertise 4-bit in their SCR and then fail
- * 4-bit writes. Reads work either way. What a 1-bit mount MEANS is the
+ * The fall to one line is not a policy, it is what makes a counterfeit card
+ * usable: the cards shipped with some units advertise 4-bit in their SCR, read
+ * on four lines and fail the first write there. A mount that comes up on four
+ * lines therefore proves the card takes a write: it reads the card's last
+ * sector, where no partition lives, and writes the same bytes back. When that
+ * read or write fails, or there is no memory to try it, the card is unmounted,
+ * its supply is cycled and it is mounted on one line, up to
+ * KDRV_SD_ONE_LINE_TRIES times with a cycle before each, and the outcome is
+ * told at NOTICE. A card that comes up on none of them is reported as one that
+ * would not come up. A mount that
+ * does not come up on four lines at all falls to one line without that check,
+ * and a mount asked on one line never writes. What a 1-bit mount MEANS is the
  * caller's to judge - the production test fails on it, because on a healthy
  * board all four lines reach the slot.
  *

@@ -493,6 +493,58 @@ void fake_sdmmc_set_read_ms(uint32_t ms);
 void fake_sdmmc_fail_format(bool fail);
 
 /**
+ * @brief Let @p ok more raw sector reads succeed, then make every one fail.
+ *
+ * A card whose first read after the mount's own check is the one that does
+ * not complete. Disarmed by fake_sdmmc_reset().
+ *
+ * @param ok How many reads succeed first.
+ */
+void fake_sdmmc_fail_reads_after(unsigned ok);
+
+/**
+ * @brief Make every raw sector write fail while the mount is on more than one
+ *        data line.
+ *
+ * The counterfeit card, exactly: it reads on four lines and fails the first
+ * write there, and takes the same write on one.
+ */
+void fake_sdmmc_fail_wide_writes(bool fail);
+
+/** @brief Make every raw sector read fail while the mount is on more than one
+ *         data line. */
+void fake_sdmmc_fail_wide_reads(bool fail);
+
+/**
+ * @brief Make the next @p n mounts asked on @p width fail with KODE_TIMEOUT,
+ *        as a card that has not recovered from a failed transfer does.
+ * @param width Data lines the failing mounts ask for.
+ * @param n     How many of them fail; the one after answers as the card does.
+ */
+void fake_sdmmc_fail_mounts(uint8_t width, unsigned n);
+
+/** @brief Forget the calls the seam has traced and the writes it has counted. */
+void fake_sdmmc_trace_reset(void);
+
+/** @brief How many calls the seam has traced since the last forget. */
+unsigned fake_sdmmc_trace_count(void);
+
+/**
+ * @brief One traced call, in the order they were made: `mount <width>`,
+ *        `unmount`, `read <sector>`, `write <sector>`, or a note.
+ * @param idx 0-based.
+ * @return The text, or NULL past the last.
+ */
+const char *fake_sdmmc_trace_line(unsigned idx);
+
+/** @brief Put a line of a case's own into the trace, such as the card's supply
+ *         going off, so the order of everything shows in one list. */
+void fake_sdmmc_trace_note(const char *what);
+
+/** @brief Raw sector writes the seam has taken since the trace was last forgotten. */
+unsigned fake_sdmmc_raw_writes(void);
+
+/**
  * @brief Take the controller away, as a hosted mount finds it while the C5's
  *        link is down: khal_sdmmc_ready() says false and a mount is refused
  *        with KODE_DENIED, trying nothing.

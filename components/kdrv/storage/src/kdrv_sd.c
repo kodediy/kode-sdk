@@ -10,6 +10,7 @@
 
 #include "kbsp.h"
 #include "khal_gpio.h"
+#include "khal_system.h"
 #include "khal_time.h"
 #include "khal_sdmmc.h"
 #include "kode_log.h"
@@ -40,6 +41,15 @@ static uint32_t s_freq_req  = (uint32_t)KBSP_SD_FREQ_KHZ;
 
 _Static_assert((SD_PROBE_TAG_COUNT + SD_OTHER_HOLDS) <= KODE_LOG_HOLD_MAX,
                "klog has a slot for each probe tag beside the other holds");
+
+/* A mount that comes up on four lines is proved with one sector: read, then
+ * written back as it was. */
+
+#define SD_WIDTH_NARROW   1U    /**< One data line, the width every card takes. */
+#define SD_CHECK_SECTORS  1U    /**< Sectors the write check reads and writes back. */
+/** @brief Alignment of the check's buffer: a cache line, which a transfer to
+ *         or from external memory needs. */
+#define SD_CHECK_ALIGN    64U
 
 /* ---- The table ----------------------------------------------------------- */
 
@@ -385,6 +395,23 @@ static void card_power(void)
 }
 
 /**
+ * @brief Cut the card's supply for its off time and switch it on again.
+ *
+ * What brings a card back to answering after a failed transfer: the host
+ * cannot be reset for it, because the controller is shared with the C5's link.
+ */
+static void card_cycle(void)
+{
+    if ( kdrv_sd_park() != KODE_OK )
+    {
+        KLOG_W(TAG, "SD_PWR (GPIO%u) could not be driven; the card's supply "
+                    "is not cycled", (unsigned)KBSP_PIN_SD_PWR);
+    }
+    khal_delay_ms(KDRV_SD_POWER_OFF_MS);
+    card_power();
+}
+
+/**
  * @brief Hold ESP-IDF's account of an empty slot quiet, or let it speak again.
  *
  * A tag that cannot be held (klog's table is full) is left to speak.
@@ -412,9 +439,97 @@ static void probe_quiet(bool quiet)
 }
 
 /**
- * @brief Mount four data lines first and then one, quietly after a miss.
+ * @brief Prove the card takes a write on the lines it came up on, leaving what
+ *        it holds as it was.
  *
- * @return What khal_sdmmc_mount() said of the last try.
+ * Reads the card's last sector and writes the same bytes back. No partition
+ * lives that far out, so a write cut short by a power loss costs nothing.
+ *
+ * @return NULL when the read and the write-back both passed; otherwise why the
+ *         card is not trusted on these lines, as a phrase for the log.
+ */
+static const char *card_check_write(void)
+{
+    const char *why = NULL;
+    void       *buf = NULL;
+
+    if ( (0U != s_snap.sectors) && (0U != s_snap.sector_size) )
+    {
+        buf = khal_alloc_psram(SD_CHECK_ALIGN,
+                               (size_t)s_snap.sector_size * SD_CHECK_SECTORS);
+    }
+    if ( NULL == buf )
+    {
+        return "there is no sector or no memory to check a write on four lines";
+    }
+
+    uint32_t const last = s_snap.sectors - SD_CHECK_SECTORS;
+
+    if ( kdrv_sd_read_sectors(last, SD_CHECK_SECTORS, buf) != KODE_OK )
+    {
+        why = "the card's last sector cannot be read on four lines";
+    }
+    else if ( kdrv_sd_write_sectors(last, SD_CHECK_SECTORS, buf) != KODE_OK )
+    {
+        why = "the card takes no write on four lines";
+    }
+    else
+    {
+        /* both transfers passed */
+    }
+    khal_free(buf);
+    return why;
+}
+
+/**
+ * @brief Take a card that was not shown to take a write on four lines down to
+ *        one: unmount it, cycle its supply and mount it on one line, again
+ *        after another cycle if it does not answer.
+ *
+ * Nothing is left describing the four-line mount. The host is not touched
+ * beyond the unmount and the mount: the C5's link shares its controller.
+ *
+ * @param why What the check found, as it is told at NOTICE once the card is up.
+ * @return KODE_OK with s_snap filled in for the one-line mount; KODE_DENIED
+ *         when khal refused a mount without a try; KODE_ERROR with s_snap
+ *         cleared when the card came up on none of the tries.
+ */
+static kode_status_t card_narrow(const char *why)
+{
+    kode_status_t st   = KODE_ERROR;
+    uint8_t       left = (uint8_t)KDRV_SD_ONE_LINE_TRIES;
+
+    khal_sdmmc_unmount();
+    (void)memset(&s_snap, 0, sizeof(s_snap));
+
+    while ( (0U < left) && (KODE_ERROR == st) )
+    {
+        --left;
+        card_cycle();
+        st = khal_sdmmc_mount(SD_WIDTH_NARROW, s_freq_req, &s_snap);
+        if ( (KODE_OK != st) && (KODE_DENIED != st) )
+        {
+            /* A card that answered on four lines is no empty slot, whatever
+             * this try said: the caller reports it as one that would not come
+             * up. */
+            KLOG_D(TAG, "1-bit mount after the supply's cycle failed (%d)",
+                   (int)st);
+            st = KODE_ERROR;
+        }
+    }
+    if ( KODE_OK == st )
+    {
+        KLOG_N(TAG, "%s; it is mounted on one line", why);
+    }
+    return st;
+}
+
+/**
+ * @brief Mount on the lines asked for, quietly after a miss: four first and
+ *        then one, and a four-line mount proved to take a write.
+ *
+ * @return What khal_sdmmc_mount() said of the last try, or card_narrow()'s
+ *         answer when the card took no write on four lines.
  */
 static kode_status_t card_mount(void)
 {
@@ -423,22 +538,35 @@ static kode_status_t card_mount(void)
     probe_quiet(true);
     st = khal_sdmmc_mount(s_width_req, s_freq_req, &s_snap);
     if ( (KODE_OK != st) && (KODE_DENIED != st) && (KODE_TIMEOUT != st)
-        && (4U == s_width_req) )
+        && (SD_WIDTH_NARROW < s_width_req) )
     {
-        /* Four lines first, then one. The fallback is not paranoia: the
-         * custom cards shipped with some units are counterfeit and do not
-         * honour the 4-bit mode they advertise in their SCR. Reads are what
-         * kodeOS needs and those work either way - it is 4-bit *writes* that
-         * fail on those cards. An empty slot is empty at one line too. */
+        /* Four lines first, then one. A card that does not honour the 4-bit
+         * mode it advertises in its SCR is still worth having on one line.
+         * An empty slot is empty at one line too. */
         KLOG_D(TAG, "4-bit bring-up failed; retrying at 1-bit");
-        st = khal_sdmmc_mount(1U, s_freq_req, &s_snap);
+        st = khal_sdmmc_mount(SD_WIDTH_NARROW, s_freq_req, &s_snap);
+    }
+    if ( (KODE_OK == st) && (SD_WIDTH_NARROW < s_snap.bus_width) )
+    {
+        /* Up on four lines. The counterfeit cards shipped with some units
+         * read there and fail the first write, and a failed write leaves the
+         * controller unable to bring a card up until the card's supply is
+         * cycled, so the write is tried here, on the card's last sector, and
+         * not by the first file. */
+        const char * const why = card_check_write();
+
+        if ( NULL != why )
+        {
+            st = card_narrow(why);
+        }
     }
     probe_quiet(false);
     return st;
 }
 
 /**
- * @brief Power the card and mount its volume, four data lines first and then one.
+ * @brief Power the card and mount its volume, four data lines first and then
+ *        one, a four-line mount proved to take a write.
  *
  * @return KODE_OK with s_snap filled in; KODE_DENIED when no mount was tried
  *         (the link holds the controller and is down) or khal refused it
