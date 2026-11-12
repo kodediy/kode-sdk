@@ -2638,29 +2638,15 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  * that waited on a human used to end in; 12 is ECONTROLLER,
                  * which is usually a peer offering a key this side can no
                  * longer match (`ble_unpair` here, forget the board there). */
-                struct ble_gap_conn_desc d;
-
                 KLOG_W(TAG, "encryption failed (status %d)",
                        event->enc_change.status);
-                if ( (ble_gap_conn_find(event->enc_change.conn_handle, &d) == 0)
-                     && (0U != d.sec_state.encrypted) )
-                {
-                    /* A second procedure failed on a link that is encrypted
-                     * already (a request the central had no need to answer):
-                     * the link is good, and it stays. */
-                    KLOG_N(TAG, "the link is encrypted already; it stays");
-                    s_ble.secure = true;
-                }
-                else
-                {
-                    /* Whoever made it fail, the link goes: a peer that refuses
-                     * the pairing and stays connected would hold the one link
-                     * there is, and the board would be off the air for as long
-                     * as it liked. Most failures end the link by themselves, and
-                     * hanging up on one that is gone costs nothing. */
-                    (void)ble_gap_terminate(event->enc_change.conn_handle,
-                                            BLE_ERR_AUTH_FAIL);
-                }
+                /* Whoever made it fail, the link goes: a peer that refuses
+                 * the pairing and stays connected would hold the one link
+                 * there is, and the board would be off the air for as long
+                 * as it liked. Most failures end the link by themselves, and
+                 * hanging up on one that is gone costs nothing. */
+                (void)ble_gap_terminate(event->enc_change.conn_handle,
+                                        BLE_ERR_AUTH_FAIL);
             }
             break;
         }
