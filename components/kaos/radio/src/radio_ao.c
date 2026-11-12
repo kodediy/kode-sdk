@@ -345,6 +345,8 @@ typedef struct {
                                *   ble_pair_until, or until a device pairs.     */
     uint32_t ble_pair_until;  /**< The time to pair ends here.                  */
     bool     ble_adv_hidden;  /**< The last advert planned hides the board.     */
+    uint16_t ble_adv_itvl;    /**< Its interval (KDRV_BLE_ITVL_*).              */
+    bool     ble_adv_pulsed;  /**< It goes on the air in pulses.                */
     uint8_t  ble_refused;     /**< KQP_BLE_REFUSED_*: what the next BLE state
                                *   says of the request it answers.           */
     bool     ble_store_away;  /**< A DISCONNECT job is with the worker, which
@@ -4654,7 +4656,7 @@ static kode_status_t radio_job_run(void *arg, uint32_t *value)
 #if CONFIG_KODEOS_BLE
             /* While the bus still works. The rest never pays for a fast
              * advert, nor for a central polled every 15 ms. */
-            (void)kdrv_ble_adv_calm(req->len);
+            (void)kdrv_ble_adv_calm(req->len, req->pulsed);
             (void)kdrv_ble_conn_calm(true);
 #endif
             kode_status_t const down = kdrv_radio_sleep(true, &radio_sleep_note, &l_radio);
@@ -7256,13 +7258,55 @@ static void radio_ble_link_note(Radio * const me)
 }
 
 /**
+ * @brief Whether the Wi-Fi station holds an address on a 5 GHz channel.
+ *
+ * The channel is the one the driver read from the C5's record of the access
+ * point when the station got its address, not a guess from the last scan; it
+ * reads 0 once the association is gone.
+ *
+ * @return true on the upper band.
+ */
+static bool radio_station_on_5g(void)
+{
+    bool on = false;
+
+#if CONFIG_KODEOS_WIFI
+    on = (KDRV_WIFI_GOT_IP == kdrv_wifi_state(NULL))
+         && (KDRV_WIFI_LAST_24_CHANNEL < kdrv_wifi_channel_last());
+#endif
+    return on;
+}
+
+/**
+ * @brief Whether an advert at interval @p itvl goes on the air in pulses: the
+ *        slow one, while the station is on 5 GHz.
+ *
+ * With the advert enabled, the C5's station on a 5 GHz channel does not fetch
+ * the frames its access point holds for it; with the advert enabled only for
+ * the event, it does. So the driver enables the slow advert for its event and
+ * disables it until the interval is over (kdrv_ble_adv_plan()). The fast
+ * advert is never pulsed: its interval leaves no pause worth having, and it
+ * lasts 30 s at most.
+ *
+ * @param itvl The advert's interval, KDRV_BLE_ITVL_FAST or KDRV_BLE_ITVL_SLOW.
+ * @return true when the advert is pulsed.
+ */
+static bool radio_ble_pulsed(uint16_t itvl)
+{
+    return ((uint16_t)KDRV_BLE_ITVL_SLOW == itvl) && radio_station_on_5g();
+}
+
+/**
  * @brief THE ADVERTISING INVARIANT: BLE on and nobody connected means on air.
  *
  * Reachable is what the `ble` flag means: this restores that state from
  * wherever the board drifted. Visible while it knows nobody or Pair new
  * device's time lasts, hidden but to its bonds otherwise. The advert runs in
  * legs, each one's end coming back here: fast for 30 s after somebody may be
- * looking, then slow. An advert showing the board the wrong way comes off.
+ * looking, then slow, and the slow one in pulses while the station is on
+ * 5 GHz. An advert showing the board the wrong way, or pulsed the wrong way
+ * for the station's band, comes off, and the one that follows is planned
+ * afresh.
  * OFF is not acted on: a stack that is down is the start debt's.
  *
  * @param me The AO.
@@ -7285,7 +7329,9 @@ static bool radio_ble_adv_reconcile(Radio * const me)
 
         (void)memset(&req, 0, sizeof(req));
         req.type = KDRV_RADIO_JOB_BLE_ADV;
-        if ( (KDRV_BLE_ADVERTISING == state) && (hidden != me->ble_adv_hidden) )
+        if ( (KDRV_BLE_ADVERTISING == state)
+            && ((hidden != me->ble_adv_hidden)
+                || (radio_ble_pulsed(me->ble_adv_itvl) != me->ble_adv_pulsed)) )
         {
             req.on    = false;
             submitted = radio_submit_req(me, &req);
@@ -7320,7 +7366,10 @@ static bool radio_ble_adv_reconcile(Radio * const me)
                     req.len = fast;
                 }
             }
+            req.pulsed         = radio_ble_pulsed(req.itvl);
             me->ble_adv_hidden = hidden;
+            me->ble_adv_itvl   = req.itvl;
+            me->ble_adv_pulsed = req.pulsed;
             submitted = radio_submit_req(me, &req);
         }
         else
@@ -9069,6 +9118,7 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
 {
     kdrv_radio_req_t req;
     bool             ok;
+    bool             calms = false;
 
     (void)memset(&req, 0, sizeof(req));
     req.type = KDRV_RADIO_JOB_SLEEP;
@@ -9079,7 +9129,11 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
         uint32_t const now = khal_time_ms();
 
         me->ble_fast_until = now;
-        req.len = radio_ble_leg_ms(me, now);
+        req.len    = radio_ble_leg_ms(me, now);
+        /* A fast advert goes on at the slow interval (kdrv_ble_adv_calm()),
+         * in pulses when the station's band asks for them. */
+        req.pulsed = radio_ble_pulsed((uint16_t)KDRV_BLE_ITVL_SLOW);
+        calms      = ((uint16_t)KDRV_BLE_ITVL_FAST == me->ble_adv_itvl);
     }
 #endif
     me->lp_job = job;
@@ -9087,6 +9141,15 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
     if ( !ok )
     {
         me->lp_job = (uint8_t)RADIO_LPJ_NONE;
+    }
+    else if ( calms )
+    {
+        me->ble_adv_itvl   = (uint16_t)KDRV_BLE_ITVL_SLOW;
+        me->ble_adv_pulsed = req.pulsed;
+    }
+    else
+    {
+        /* the advert on the air, if any, is not the one the rest changes */
     }
     return ok;
 }
@@ -11637,6 +11700,10 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             me->retry_step = 0U;
             wifi_retry_arm(me);
             wifi_publish_state(me);
+#if CONFIG_KODEOS_BLE
+            /* The advert follows the station's band. */
+            (void)radio_ble_adv_reconcile(me);
+#endif
             status = Q_HANDLED();
             break;
         }

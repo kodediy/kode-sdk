@@ -364,6 +364,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             s_wifi.state = KDRV_WIFI_DISCONNECTED;
             s_wifi.ip4   = 0U;
             s_wifi.rssi  = 0;   /* stale strength for a network we just left */
+            s_wifi.channel = 0U;
             if ( NULL != s_wifi.bits )
             {
                 (void)xEventGroupSetBits(s_wifi.bits, WIFI_BIT_DISCONNECTED);
@@ -535,6 +536,7 @@ kode_status_t kdrv_wifi_stop(void)
     s_wifi.ip4      = 0U;
     ssid_set(NULL);
     s_wifi.rssi     = 0;
+    s_wifi.channel  = 0U;
     s_wifi.count    = 0U;
     s_wifi.head     = 0U;
     s_wifi.tail     = 0U;
@@ -552,6 +554,7 @@ void kdrv_wifi_forget(void)
     s_wifi.ip4     = 0U;
     ssid_set(NULL);
     s_wifi.rssi    = 0;
+    s_wifi.channel = 0U;
     s_wifi.count   = 0U;
     s_wifi.head    = 0U;
     s_wifi.tail    = 0U;
@@ -1382,6 +1385,7 @@ kode_status_t kdrv_wifi_disconnect(void)
     s_wifi.ip4     = 0U;
     ssid_set(NULL);
     s_wifi.rssi    = 0;
+    s_wifi.channel = 0U;
     return KODE_OK;
 }
 

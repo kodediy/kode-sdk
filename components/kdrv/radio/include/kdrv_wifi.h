@@ -446,7 +446,7 @@ int8_t kdrv_wifi_rssi_last(void);
 /**
  * @brief The primary channel of the network the station is on, as of the last
  *        kdrv_wifi_rssi(): a join's own success takes that sample. No RPC.
- * @return The channel, or 0 before any sample.
+ * @return The channel, or 0 before any sample and once the association is gone.
  */
 uint8_t kdrv_wifi_channel_last(void);
 

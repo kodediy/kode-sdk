@@ -61,9 +61,10 @@ typedef enum {
                                   *   req.on, first the scan response a
                                   *   BLE_RSP would set, from the same
                                   *   fields.                               */
-    KDRV_RADIO_JOB_BLE_ADV,      /**< Start or stop advertising (req.on).
-                                  *   Carries no duration: an advert lasts
-                                  *   until it is taken or stopped.         */
+    KDRV_RADIO_JOB_BLE_ADV,      /**< Start or stop advertising (req.on), as
+                                  *   req.itvl, req.len, req.hidden and
+                                  *   req.pulsed plan it. With no req.len an
+                                  *   advert lasts until it is taken or stopped. */
     KDRV_RADIO_JOB_BLE_SCAN,     /**< Listen for advertisers for req.len ms. */
     KDRV_RADIO_JOB_BLE_QUIET,    /**< Stop advertising and hang up, leaving
                                   *   the host running. What `ble_down` uses;
@@ -160,6 +161,9 @@ typedef struct {
                               *   BLE_ADV: the time on the air in ms, 0 for no end. */
     uint16_t         itvl;   /**< BLE_ADV: the interval (KDRV_BLE_ITVL_*); 0 for slow. */
     bool             hidden; /**< BLE_ADV: hide the board (kdrv_ble_adv_plan()). */
+    bool             pulsed; /**< BLE_ADV: send the advert in pulses (kdrv_ble_adv_plan()).
+                              *   SLEEP: the same, for the slow advert a fast one
+                              *   becomes (kdrv_ble_adv_calm()).             */
     bool             on;     /**< BLE_ADV: start or stop. WIFI_PS: modem save
                               *   (true) or none (false). EXP_POWER:
                               *   J3's supply on (true) or off.

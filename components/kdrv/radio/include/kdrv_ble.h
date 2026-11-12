@@ -181,6 +181,16 @@ kode_status_t kdrv_ble_stop(void);
  *         for minutes costs little at. */
 #define KDRV_BLE_ITVL_SLOW  1636U
 
+/** @brief One pulse's time enabled, ms: the first event leaves in a few ms; the station is deaf while enabled. */
+/* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_ble.c, which is a file this check does not join to this one, and by the host cases */
+#define KDRV_BLE_PULSE_ON_MS         100U
+
+/** @brief Restarts of a pulsed advert NimBLE may refuse in a row before the state goes to IDLE. */
+#define KDRV_BLE_PULSE_REFUSALS_MAX  3U
+
+/** @brief The shortest wait for the next pulse, ms: a pulse that ended late is followed at once. */
+#define KDRV_BLE_PULSE_WAIT_MIN_MS   1U
+
 /**
  * @brief Say how the next kdrv_ble_advertise(true) goes on the air.
  *
@@ -190,8 +200,65 @@ kode_status_t kdrv_ble_stop(void);
  * @param hidden Hide the board: the advert stays connectable for the devices
  *               bonded to it, with no discoverable flag and no name, and no
  *               new device may pair until an advert is planned visible.
+ * @param pulsed Send the advert in pulses: enabled for KDRV_BLE_PULSE_ON_MS
+ *               at the start of each interval and disabled until the interval
+ *               is over, so the air still sees one advertising event per
+ *               interval. With the advert enabled, the C5's station on a 5 GHz
+ *               channel does not fetch the frames its access point holds for
+ *               it; with the advert enabled only for the event, it does.
+ *               Meant for the slow interval. @p ms counts across the pulses.
  */
-void kdrv_ble_adv_plan(uint16_t itvl, uint32_t ms, bool hidden);
+void kdrv_ble_adv_plan(uint16_t itvl, uint32_t ms, bool hidden, bool pulsed);
+
+/** @brief What the driver does at the end of a pulse, or when a pause is over. */
+typedef enum {
+    KDRV_BLE_PULSE_DONE = 0,  /**< Nothing: a stop or a connection ended the train, and whoever did said so. */
+    KDRV_BLE_PULSE_NEXT,      /**< Another pulse is owed, after the wait kdrv_ble_pulse_next() gives. */
+    KDRV_BLE_PULSE_IDLE       /**< The train is over: the state goes to IDLE, once. */
+} kdrv_ble_pulse_do_t;
+
+/** @brief What kdrv_ble_pulse_next() judges, as the driver knows it. */
+typedef struct {
+    bool     live;          /**< No stop and no connection has ended the train.   */
+    bool     timed_out;     /**< The pulse ended on its own time; false when NimBLE
+                             *   or the controller ended it.                      */
+    uint16_t itvl;          /**< The advert's interval, 0.625 ms units.           */
+    uint32_t leg_ms;        /**< The plan's time on the air, ms; 0 for no end.    */
+    uint32_t leg_run_ms;    /**< Since the first pulse began, ms.                 */
+    uint32_t pulse_run_ms;  /**< Since the last pulse (or its try) began, ms.     */
+    uint8_t  refused;       /**< Restarts NimBLE refused in a row.                */
+} kdrv_ble_pulse_t;
+
+/**
+ * @brief The period of an advert of interval @p itvl, in ms: the time between
+ *        the starts of two pulses of a pulsed one.
+ * @param itvl The interval, 0.625 ms units.
+ * @return The period, ms, rounded down.
+ */
+uint32_t kdrv_ble_pulse_period_ms(uint16_t itvl);
+
+/**
+ * @brief How long to wait for the next pulse after one that has run @p run_ms.
+ * @param itvl   The interval, 0.625 ms units.
+ * @param run_ms Since the pulse began, ms.
+ * @return The period less @p run_ms, and at least KDRV_BLE_PULSE_WAIT_MIN_MS.
+ */
+uint32_t kdrv_ble_pulse_pause_ms(uint16_t itvl, uint32_t run_ms);
+
+/**
+ * @brief Judge what follows a pulse's end, or the end of its pause.
+ *
+ * A train that a stop or a connection ended is DONE. One that NimBLE or the
+ * controller ended, that ran out its leg, or whose restarts were refused
+ * KDRV_BLE_PULSE_REFUSALS_MAX times in a row is IDLE. Any other has a next
+ * pulse after the wait: the rest of the period, or of the leg when that ends
+ * sooner.
+ *
+ * @param in      What the driver knows.
+ * @param wait_ms Receives the wait, ms, for KDRV_BLE_PULSE_NEXT; 0 otherwise.
+ * @return What follows.
+ */
+kdrv_ble_pulse_do_t kdrv_ble_pulse_next(const kdrv_ble_pulse_t *in, uint32_t *wait_ms);
 
 /**
  * @brief Whether the last link got encrypted: somebody this board knows, or who
@@ -208,6 +275,14 @@ bool kdrv_ble_link_secure(void);
  * Connectable, and general-discoverable unless kdrv_ble_adv_plan() hid it, at
  * the interval and for the time that plan said: the advert stays on the air
  * until a central takes it, somebody stops it or its time runs out.
+ *
+ * A pulsed plan goes on the air as a train of pulses: the driver enables the
+ * advert for KDRV_BLE_PULSE_ON_MS, disables it for the rest of the interval
+ * and starts the next pulse by itself, from NimBLE's host task. The state is
+ * ADVERTISING from the first pulse to the end of the train, and the plan's time
+ * counts across the pulses. A stop, a connection, a lost link or a host reset
+ * ends the train and nothing restarts it; a leg that runs out, or restarts
+ * NimBLE keeps refusing, take the state to IDLE once.
  *
  * When the console service is built in, the advert carries its UUID so a
  * client can filter for Kode Dots and nothing else, and the device name
@@ -227,10 +302,11 @@ kode_status_t kdrv_ble_advertise(bool on);
  * @brief A fast advert on the air goes on at the slow interval; anything else
  *        is left as it is. A board that goes to rest must not pay for a fast one.
  *
- * @param ms The time the slow one stays on the air, in ms; 0 for no end.
+ * @param ms     The time the slow one stays on the air, in ms; 0 for no end.
+ * @param pulsed Whether the slow one is pulsed (kdrv_ble_adv_plan()).
  * @return KODE_OK, or what kdrv_ble_advertise() answered.
  */
-kode_status_t kdrv_ble_adv_calm(uint32_t ms);
+kode_status_t kdrv_ble_adv_calm(uint32_t ms, bool pulsed);
 
 /** @brief A connection's parameters, in the units BLE gives them. */
 typedef struct {

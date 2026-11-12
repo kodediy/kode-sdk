@@ -1050,7 +1050,7 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
         case KDRV_RADIO_JOB_BLE_ADV:
             if ( req->on )
             {
-                kdrv_ble_adv_plan(req->itvl, req->len, req->hidden);
+                kdrv_ble_adv_plan(req->itvl, req->len, req->hidden, req->pulsed);
             }
             *rc = radio_answer(kdrv_ble_advertise(req->on));
             break;

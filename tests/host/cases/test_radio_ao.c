@@ -9988,6 +9988,300 @@ TEST_CASE("Pair new device with Bluetooth off puts nothing on the air", "[radio_
     ble_adv_case_end();
 }
 
+/* ---- The advert in pulses, while the station is on 5 GHz ---------------------- */
+
+/** @brief The signal the mocked access point reads, dBm. */
+#define PULSE_AP_RSSI   (-50)
+
+/** @brief A channel of the upper band. */
+#define PULSE_CH_5G     36U
+
+/** @brief Another channel of the upper band. */
+#define PULSE_CH_5G_2   44U
+
+/** @brief The last channel of the lower band. */
+#define PULSE_CH_24G    KDRV_WIFI_LAST_24_CHANNEL
+
+/** @brief The channel the access point the mocked station holds is on. */
+static uint8_t s_ap_channel;
+
+/** @brief The record of the access point the station holds, as the C5 answers it. */
+static esp_err_t ap_on_channel(wifi_ap_record_t *ap, int calls)
+{
+    (void)calls;
+    (void)memset(ap, 0, sizeof(*ap));
+    ap->primary = s_ap_channel;
+    ap->rssi    = PULSE_AP_RSSI;
+    return ESP_OK;
+}
+
+/**
+ * @brief The station holds an address on @p channel: the driver's own event
+ *        says so and its own sample of the access point reads the channel,
+ *        as it does at the end of a join.
+ * @param channel The channel of the access point.
+ */
+static void station_on_channel(uint8_t channel)
+{
+    wifi_station_up();
+    s_ap_channel = channel;
+    esp_wifi_sta_get_ap_info_Stub(&ap_on_channel);
+    (void)kdrv_wifi_rssi();
+    TEST_ASSERT_EQUAL_UINT8(channel, kdrv_wifi_channel_last());
+}
+
+/** @brief The advert the worker holds is, or is not, a pulsed one. */
+static void expect_pulsed(bool pulsed)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "no advert was planned");
+    TEST_ASSERT_TRUE_MESSAGE(held_req()->on, "the advert was taken off the air");
+    TEST_ASSERT_EQUAL_MESSAGE(pulsed, held_req()->pulsed, "the advert was planned the wrong way");
+}
+
+/** @brief Bluetooth on, the fast leg over: the slow advert is the one planned and held. */
+static void pulse_to_slow(void)
+{
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+    fake_time_advance_ms(30000U);
+    fake_ble_adv_end();
+    pump();
+}
+
+/** @brief A case's end: Bluetooth is off, then the station leaves. */
+static void pulse_case_end(void)
+{
+    ble_adv_case_end();
+    wifi_station_gone();
+    pump();
+}
+
+TEST_CASE("the slow advert is pulsed while the station is on a 5 GHz channel, the fast one never",
+          "[radio_ao][pulse]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+
+    fake_time_advance_ms(30000U);
+    fake_ble_adv_end();
+    pump();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    pulse_case_end();
+}
+
+TEST_CASE("the slow advert is continuous on a 2.4 GHz channel, and with no station", "[radio_ao][pulse]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_24G);
+
+    pulse_to_slow();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    pulse_case_end();
+
+    fake_ble_reset();
+    pulse_to_slow();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    ble_adv_case_end();
+}
+
+TEST_CASE("Pair new device is fast and continuous, then pulsed for the rest of its time and after",
+          "[radio_ao][pulse]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_set_bonds(1U);
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, true);
+
+    dispatch(BLE_PAIR_OPEN_REQ_SIG);
+    pump();
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+
+    fake_time_advance_ms(30000U);
+    fake_ble_adv_end();
+    pump();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 270000U, false);
+
+    /* The time runs out: the board hides again, and its advert is pulsed still. */
+    fake_time_advance_ms(270000U);
+    fake_ble_adv_end();
+    pump();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, true);
+    pulse_case_end();
+}
+
+TEST_CASE("joining a 5 GHz network takes the continuous slow advert off and puts a pulsed one back",
+          "[radio_ao][pulse]")
+{
+    unsigned submits;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    pulse_to_slow();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+
+    wifi_join_request("net", "12345678", false);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_JOIN, running_job());
+    station_on_channel(PULSE_CH_5G);
+    submits = job_submits();
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "the advert was left as it was");
+    TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the continuous advert stayed on the air");
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a second re-plan followed");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(submits + 2U, job_submits(), "the re-plan took more than an off and an on");
+    pulse_case_end();
+    /* An accepted join records "wifi wanted"; the next case starts without it. */
+    wifi_stop_request();
+    pump();
+    finish_whatever_runs();
+}
+
+TEST_CASE("the station leaving the 5 GHz network puts a continuous slow advert back",
+          "[radio_ao][pulse]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+
+    wifi_station_gone();
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "the pulsed advert stayed");
+    TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the pulsed advert stayed on the air");
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    ble_adv_case_end();
+}
+
+TEST_CASE("an advert whose plan does not change is not planned again", "[radio_ao][pulse]")
+{
+    unsigned submits;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    submits = job_submits();
+
+    /* Any job's end sweeps the invariant: a signal reading, then the same
+     * access point's other channel of the upper band. */
+    wifi_rssi_request();
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the advert was planned again with nothing changed");
+    s_ap_channel = PULSE_CH_5G_2;
+    (void)kdrv_wifi_rssi();
+    wifi_rssi_request();
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a move inside the upper band planned the advert again");
+    TEST_ASSERT_EQUAL_UINT(submits + 2U, job_submits());
+    pulse_case_end();
+
+    /* The same on the lower band: a continuous advert stays. */
+    fake_ble_reset();
+    station_on_channel(PULSE_CH_24G);
+    pulse_to_slow();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    submits = job_submits();
+    wifi_rssi_request();
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK);
+    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_EQUAL_UINT(submits + 1U, job_submits());
+    pulse_case_end();
+}
+
+TEST_CASE("a station that left keeps no channel: an address that comes with no reading is not 5 GHz",
+          "[radio_ao][pulse]")
+{
+    radio_fresh();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+
+    wifi_station_gone();
+    pump();
+    TEST_ASSERT_EQUAL_UINT8(0U, kdrv_wifi_channel_last());
+
+    wifi_station_up();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, kdrv_wifi_channel_last(), "the last network's band outlived it");
+    wifi_station_gone();
+    pump();
+}
+
+TEST_CASE("the slow advert a fast one becomes at rest is pulsed on 5 GHz, and stays as planned",
+          "[radio_ao][pulse][lowpower]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+
+    lp_radio_round(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_SLEEP, running_job());
+    TEST_ASSERT_TRUE_MESSAGE(fake_ble_calm_pulsed(), "the rest's slow advert would be continuous");
+    finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the advert the rest planned was planned again");
+    lp_expect_answer(false, NULL);
+
+    /* The advert the rest planned is known for what it is: the station
+     * leaving the 5 GHz network takes the pulsed one off. */
+    wifi_station_gone();
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "the pulsed advert stayed");
+    TEST_ASSERT_FALSE(held_req()->on);
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+
+    lp_radio_awake();
+    pulse_case_end();
+}
+
 /** @brief The next BLE state in the spy, copied; fails the case if none. */
 static BleStateEvt take_ble_state(void)
 {
