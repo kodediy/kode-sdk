@@ -21,7 +21,7 @@
 
 /** @brief This AO's private signals. Posted to itself, never published. */
 enum ImuDemoSignals {
-    IS_TICK_SIG = MAX_SIG   /**< The stream's periodic QTimeEvt. */
+    IS_TICK_SIG = MAX_SIG   /**< The stream's QTimeEvt, armed again by each tick. */
 };
 
 /** @brief One sensor's requests: whether one is out, and whether to ask. */
@@ -338,9 +338,9 @@ static QState ImuDemo_streaming(ImuDemo * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
-            QTimeEvt_armX(&me->tick,
-                          KQP_TICKS_PER_MS(IS_PERIOD_MS),
-                          KQP_TICKS_PER_MS(IS_PERIOD_MS));
+            /* A one-shot each tick arms again: a periodic one keeps posting
+             * while this AO does not run, and a full queue is a reset. */
+            QTimeEvt_armX(&me->tick, KQP_TICKS_PER_MS(IS_PERIOD_MS), 0U);
             KLOG_I(TAG, "streaming, every %ums", (unsigned)IS_PERIOD_MS);
             status = Q_HANDLED();
             break;
@@ -351,6 +351,7 @@ static QState ImuDemo_streaming(ImuDemo * const me, QEvt const * const e)
             break;
         }
         case IS_TICK_SIG: {
+            (void)QTimeEvt_rearm(&me->tick, KQP_TICKS_PER_MS(IS_PERIOD_MS));
             stream_step(me);
             status = Q_HANDLED();
             break;
