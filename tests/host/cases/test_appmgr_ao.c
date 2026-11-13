@@ -10033,6 +10033,10 @@ TEST_CASE("the install a fetch announced takes its card over without closing it"
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones,
         "the card closed between the fetch and its install");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.reports, "the install said nothing of its own");
+    /* A URL is not its project: the card's reports name nobody until the
+     * image's first chunk is read, and the glass keeps the fetch's face. */
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", seen.project,
+        "the install named an app before it read its image");
 
     let_the_open_expire();                       /* past the hold's deadline too */
     seen = card_seen();
@@ -10178,6 +10182,95 @@ TEST_CASE("a fetch that announces an install and fails leaves its card to the in
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.dones, "the deadline did not end the card");
 
     QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+/** @brief The held card has just been ended, once, by @p who, and stays ended. */
+static void card_expect_ended(const char *who)
+{
+    card_seen_t seen = card_seen();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.dones, who);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_FLASH_DONE_SIG, seen.first, who);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.fails, who);
+    run_ticks(APPMGR_HOLD_TEST_TICKS + 10U);
+    seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones, "the card was ended twice");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.reports, "an ended card is still being said");
+}
+
+TEST_CASE("an install from a medium refused before it begins ends the card a fetch kept",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    char long_name[KODE_FLASH_SRC_MAX];
+
+    (void)memset(long_name, 'n', sizeof(long_name) - 1U);
+    long_name[sizeof(long_name) - 1U] = '\0';
+
+    card_held();
+
+    /* Longer than a file's name may be: refused in idle, with no failure. */
+    ask_install_from((uint8_t)KFW_SRC_FS, long_name, (uint8_t)KFW_TARGET_APP);
+    card_expect_ended("a refused install left the card waiting for it");
+
+    QActive_unsubscribeAll(ao_spy());
+    ao_spy_drain();
+    fetch_end();
+}
+
+TEST_CASE("a run ends the card a fetch kept", "[appmgr_ao][appdata_get][hold]")
+{
+    card_held();
+
+    ask_run_from("ghost");                       /* not installed: answered in idle */
+    card_expect_ended("a run left the card of an install that is not it");
+
+    QActive_unsubscribeAll(ao_spy());
+    ao_spy_drain();
+    fetch_end();
+}
+
+TEST_CASE("an erase ends the card a fetch kept", "[appmgr_ao][appdata_get][hold]")
+{
+    card_held();
+
+    ask_erase("");                               /* no name: answered in idle */
+    card_expect_ended("an erase left the card of an install that is not it");
+
+    QActive_unsubscribeAll(ao_spy());
+    ao_spy_drain();
+    fetch_end();
+}
+
+TEST_CASE("a keep-only ends the card a fetch kept", "[appmgr_ao][appdata_get][hold]")
+{
+    card_held();
+
+    TEST_ASSERT_TRUE(appmgr_keep_only_request("ghost", ao_spy()));
+    (void)qf_support_pump(AO_AppMgr, 8U);        /* not installed: answered in idle */
+    card_expect_ended("a keep-only left the card of an install that is not it");
+
+    QActive_unsubscribeAll(ao_spy());
+    ao_spy_drain();
+    fetch_end();
+}
+
+TEST_CASE("a held card answers a round busy, and an ended one is ready",
+          "[appmgr_ao][appdata_get][hold][lowpower]")
+{
+    card_held();
+
+    lp_round(AO_AppMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(true, "install announced");
+    lp_expect_no_more();
+
+    run_ticks(APPMGR_HOLD_TEST_TICKS + 10U);     /* the install never came */
+    lp_round(AO_AppMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    lp_expect_no_more();
+
+    QActive_unsubscribeAll(ao_spy());
+    ao_spy_drain();
     fetch_end();
 }
 
