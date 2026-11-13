@@ -3906,11 +3906,14 @@ typedef struct {
  *
  * A fetch asked with @p install is the first step of an install, and its card
  * is the install's: whatever the fetch's end, neither event goes out. The card
- * stays at 0 %, said again every second, until the next install request takes
- * it over - its own reports carry it from there, so the glass never empties
- * between the two - or until AO_AppMgr turns to anything else, a refused
- * install included, or KODE_APPMGR_HOLD_MS goes by; then the unnamed
- * APP_FLASH_DONE_SIG ends it. The answer to the fetch is the same either way.
+ * stays at 0 %, said again every second, until the next install from a medium
+ * or a URL takes it over - its own reports carry it from there, so the glass
+ * never empties between the two - or until AO_AppMgr turns to anything else,
+ * a refused install and a terminal install included, or KODE_APPMGR_HOLD_MS
+ * goes by; then the unnamed APP_FLASH_DONE_SIG ends it. A terminal install
+ * raises its own card at its ready. The reports of the install that took the
+ * card name no project until its image is read. The answer to the fetch is
+ * the same either way.
  *
  * @param project The app's project name, as its image declares it.
  * @param url     The base URL, ending where the file names begin; shorter than

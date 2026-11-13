@@ -543,9 +543,10 @@ typedef struct {
     /* ---- The card a fetch kept up for the install it announced -----------
      * Between `appdata_get install=on` and the install the host sends next,
      * the glass would empty and fill again: the fetch's card stays at 0 %,
-     * said again every second on `beat`, while AppMgr_idle waits. The
-     * install that begins takes the card over (hold_release()); anything
-     * else that idle turns to, or `hold` going off, ends it (hold_end()). */
+     * said again every second on `beat`, while AppMgr_idle waits. An
+     * install from a medium or a URL that begins takes the card over
+     * (hold_release()); anything else that idle turns to, a terminal install
+     * included, or `hold` going off, ends it (hold_end()). */
     QTimeEvt      hold;            /**< How long the card waits (APP_HOLD_SIG). */
     bool          held;            /**< The card is up, waiting for an install. */
 } AppMgr;
@@ -3642,6 +3643,10 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             bool const to_pending =
                 ((uint8_t)KODE_FLASH_DST_PENDING == req->dst);
 
+            /* A terminal install announces itself at its ready, not before:
+             * it raises its own card there, and one it took over would have
+             * nobody to end it if the wire were refused. */
+            hold_end(me);
             if ( NULL == me->chunk )
             {
                 KLOG_E(TAG, "install failed: no chunk buffer (see the boot)");
@@ -4249,11 +4254,10 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             break;
         }
     }
-    /* The card a fetch kept up is the next install's, and only an install
-     * that begins takes it over; one refused before it began ends it here,
-     * where the refusal is known, rather than at the deadline. */
-    if ( me->held && (((QSignal)FLASH_REQ_SIG == e->sig)
-                      || ((QSignal)APP_RECV_REQ_SIG == e->sig)) )
+    /* The card a fetch kept up is the next install's from a medium or a URL,
+     * and only one that begins takes it over; one refused before it began
+     * ends it here, where the refusal is known, rather than at the deadline. */
+    if ( me->held && ((QSignal)FLASH_REQ_SIG == e->sig) )
     {
         if ( Q_RET_TRAN == status )
         {

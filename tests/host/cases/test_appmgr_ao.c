@@ -9903,9 +9903,9 @@ TEST_CASE("a fetch of an app's data folder shows from its first moment and ends 
 /* ---- A fetch that announces an install --------------------------------------
  * `appdata_get install=on`: the host sends the app's install the moment the
  * fetch is answered, and the glass must not empty between the two. The fetch's
- * card stays at 0 % for the install; the install that begins takes it over, and
- * anything else - a refusal, another request, the deadline - ends it with the
- * unnamed done. */
+ * card stays at 0 % for the install; an install from a medium or a URL that
+ * begins takes it over, and anything else - a refusal, a terminal install,
+ * another request, the deadline - ends it with the unnamed done. */
 
 /** @brief KODE_APPMGR_HOLD_MS in QP ticks, as appmgr_ao.c has it. */
 #define APPMGR_HOLD_TEST_TICKS (KODE_APPMGR_HOLD_MS / 10U)
@@ -10045,7 +10045,7 @@ TEST_CASE("the install a fetch announced takes its card over without closing it"
     fetch_end();
 }
 
-TEST_CASE("a terminal install takes the card over too",
+TEST_CASE("a terminal install ends the card a fetch kept and raises its own at its ready",
           "[appmgr_ao][appdata_get][hold]")
 {
     uint32_t const len = image_named("snake");
@@ -10053,19 +10053,50 @@ TEST_CASE("a terminal install takes the card over too",
     card_held();
 
     ask_recv_named(len, 0xDEADBEEFU, false, "snake");
+    card_seen_t seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.dones,
+        "a terminal install took the card a fetch kept, and owes it no end before its ready");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.reports,
+        "a terminal install announced itself before the wire was its");
+
     raw_armed(true);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, card_seen().dones,
-        "the card closed between the fetch and its install");
+    seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.reports,
+        "the install's own card did not rise at its ready");
+    TEST_ASSERT_EQUAL_UINT(0U, seen.dones);
 
     feed(s_named_img, (uint16_t)len);            /* the write ends, CRC refused */
     run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
-    (void)card_seen();
+    seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.fails, "the install did not end its own card");
     run_ticks(APPMGR_HOLD_TEST_TICKS + 10U);
-    card_seen_t const seen = card_seen();
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones,
-        "the hold outlived the install that took it over");
+    seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones, "the card was ended twice");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.reports,
-        "the hold kept saying 0 % after the install took the card");
+        "the hold kept saying 0 % after the install came");
+    QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+TEST_CASE("a terminal install refused the wire leaves no card behind it",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    uint32_t const len = image_named("snake");
+
+    card_held();
+
+    ask_recv_named(len, 0xDEADBEEFU, false, "snake");
+    raw_armed(false);                            /* AO_Log refuses to arm */
+    card_seen_t seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.dones,
+        "the card a fetch kept outlived an install that never took the wire");
+    TEST_ASSERT_EQUAL_UINT(0U, seen.fails);
+
+    run_ticks(APPMGR_HOLD_TEST_TICKS + 10U);
+    seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones, "the card was ended twice");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.reports,
+        "a card nobody will end is still being said");
     QActive_unsubscribeAll(ao_spy());
     fetch_end();
 }
