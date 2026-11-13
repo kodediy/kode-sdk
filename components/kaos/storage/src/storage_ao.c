@@ -47,8 +47,15 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 #define APPDATA_KB          1024U   /**< Bytes in the kilobyte a log line counts in. */
 #define APPDATA_JSON_NAME   KAPP_DATA_JSON_NAME   /**< The folder's app.json. */
 #define APPDATA_ICON_NAME   KAPP_DATA_ICON_NAME   /**< The icon's default file name. */
-#define APPDATA_TOP_DIR     "/storage/.kode"  /**< The tree's first level, internal. */
-#define APPDATA_TREE_DIR    APPDATA_TOP_DIR "/appsdata" /**< Holds one folder per app. */
+#define APPDATA_TMP_SUFFIX  ".tmp"   /**< What a put appends to a file's name while it writes it. */
+#define APPDATA_JSON_TMP    APPDATA_JSON_NAME APPDATA_TMP_SUFFIX   /**< app.json while a put writes it. */
+#define APPDATA_ICON_TMP    APPDATA_ICON_NAME APPDATA_TMP_SUFFIX   /**< The icon while a put writes it. */
+_Static_assert(sizeof(APPDATA_ICON_TMP) <= KAPP_DATA_ICON_MAX,
+               "a temporary's name fits where an icon's path does");
+#define STORAGE_ICON_TRIES  (KODE_STORAGE_TURN_MS / KODE_STORAGE_ICON_RETRY_MS) /**< Pauses a folder read waits for the icon pool: what fits in the bound. */
+#define APPDATA_WHY_MAX     128U   /**< The words saying why a put was refused, terminator included. */
+#define APPDATA_WHY_WRITE   "a file would not write"   /**< Why a put failed while writing a file. */
+#define APPDATA_WHY_PLACE   "the new files would not go in place"   /**< Why a put failed putting them in place. */
 
 #define WIPE_FILES_MAX      KODE_APP_LIST_MAX /**< Images the wipe keeps from one medium's root: as many as the launcher lists. */
 #define WIPE_OS_IMAGE       "kodeos.bin"      /**< kodeOS's own image: never an app's file. */
@@ -150,6 +157,117 @@ typedef struct {
     QActive       *who;     /**< A command's asker; NULL for none.           */
 } SdJob;
 
+/**
+ * @brief Requests that wait for the transfer in flight to end, and the bound
+ *        of their wait.
+ *
+ * The bound is counted from the first request that waits; when it passes,
+ * everything that still waits is served where it stands, which answers it as a
+ * request is answered during a transfer.
+ */
+typedef struct {
+    QEQueue  q;      /**< The requests, oldest first.                         */
+    QTimeEvt to;     /**< The bound.                                          */
+    bool     live;   /**< `to` is armed and has not been seen to expire.      */
+    uint8_t  stale;  /**< Expired bounds still queued.                        */
+} StorageWait;
+
+/**
+ * @brief Make a wait: an empty queue and a bound that is not armed.
+ *
+ * @param w     The wait.
+ * @param ao    The AO whose queue the bound posts to.
+ * @param ring  The queue's ring; NULL for none, which holds one request.
+ * @param depth The ring's length: the queue holds one request more.
+ * @param sig   The bound's signal.
+ */
+static void storage_wait_init(StorageWait * const w, QActive * const ao,
+                              QEvtPtr * const ring, uint_fast16_t const depth,
+                              enum_t const sig)
+{
+    QEQueue_init(&w->q, ring, depth);
+    w->live  = false;
+    w->stale = 0U;
+    QTimeEvt_ctorX(&w->to, ao, sig, 0U);
+}
+
+/**
+ * @brief Start the bound, unless a request that waits has started it.
+ * @param w The wait.
+ */
+static void storage_wait_arm(StorageWait * const w)
+{
+    if ( !w->live )
+    {
+        (void)QTimeEvt_rearm(&w->to, KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS));
+        w->live = true;
+    }
+}
+
+/**
+ * @brief Keep a request until the transfer in flight ends, and bound the wait.
+ *
+ * @param ao The AO.
+ * @param w  The wait.
+ * @param e  The request.
+ * @return true when it was kept; false when the wait is full.
+ */
+static bool storage_wait_hold(QActive const * const ao, StorageWait * const w,
+                              QEvt const * const e)
+{
+    bool const held = QActive_defer(ao, &w->q, e);
+
+    if ( held )
+    {
+        storage_wait_arm(w);
+    }
+    return held;
+}
+
+/**
+ * @brief End the bound, because nothing that waited is left.
+ * @param w The wait.
+ */
+static void storage_wait_stop(StorageWait * const w)
+{
+    if ( w->live )
+    {
+        if ( kqp_timer_stale(&w->to, true) )
+        {
+            w->stale += 1U;
+        }
+        w->live = false;
+    }
+}
+
+/**
+ * @brief Whether the bound's event that arrived is the live one.
+ *
+ * One that belongs to a wait that ended first is counted off and dropped.
+ *
+ * @param w The wait.
+ * @return true when the bound has passed for what waits now.
+ */
+static bool storage_wait_due(StorageWait * const w)
+{
+    bool due = false;
+
+    if ( 0U < w->stale )
+    {
+        w->stale -= 1U;
+    }
+    else if ( w->live )
+    {
+        w->live = false;
+        due     = true;
+    }
+    else
+    {
+        /* What it bounded was served first. */
+    }
+    return due;
+}
+
 typedef struct {
     QActive  super;
     KqpWorker worker;                   /**< storage_sd.                       */
@@ -163,6 +281,22 @@ typedef struct {
     QEQueue   deferq;                   /**< Requests held while a call is out. */
     QEvtPtr   defer_sto[KODE_STORAGE_DEFER_DEPTH - 1U]; /**< Its ring; the queue
                                          *   keeps the front event aside.     */
+    StorageWait turn;                   /**< The one write or delete that waits
+                                         *   for the transfer in flight; no
+                                         *   ring, only the queue's front slot. */
+    StorageWait reads;                  /**< The reads of a data folder that
+                                         *   wait for it, or for an icon block. */
+    QEvtPtr   read_sto[KODE_STORAGE_READ_WAIT_DEPTH - 1U]; /**< Their ring.   */
+    QTimeEvt  read_retry;               /**< The pause before a read whose icon
+                                         *   found no block tries again.      */
+    bool      read_pause;               /**< The read at the head of `reads`
+                                         *   waits for that pause: no read is
+                                         *   served before it.                */
+    bool      read_final;               /**< The bound has passed: a read that
+                                         *   still finds no block is answered
+                                         *   busy, not held again.            */
+    uint8_t   read_tries;               /**< Pauses the read at the head has
+                                         *   waited for an icon block.        */
     QActive *reader;                    /**< Who has the file open, if anyone. */
     uint8_t *buf[STORAGE_BUFS];         /**< PSRAM, allocated once at startup. */
     bool     lent[STORAGE_BUFS];        /**< Out on loan; do not touch.        */
@@ -270,6 +404,16 @@ typedef struct {
     uint8_t       *g_buf;          /**< app.json then icon.k64; this AO's.    */
     uint16_t       g_json_len;     /**< Bytes of app.json at the head of g_buf. */
     uint16_t       g_icon_len;     /**< 0 when there is no icon step.         */
+    AppDataMedium  g_medium;       /**< Where the folder is written: the
+                                    *   internal partition, or the card.      */
+    bool           g_spill;        /**< The internal partition had no room for
+                                    *   this new folder, so it goes to the
+                                    *   card.                                  */
+    char           g_full[APPDATA_WHY_MAX]; /**< Why the internal partition had
+                                    *   no room, for the put that went to the
+                                    *   card and failed there.                 */
+    bool           g_fresh;        /**< The folder was not there when the put
+                                    *   began: a failed put takes it away.     */
 
     /* The wipe of one app's files in progress: the images kept by the walk of
      * each root, read and deleted one a step, then the folders. x_who is the
@@ -1768,7 +1912,11 @@ typedef struct {
     bool    is_dir[APPDATA_RM_MAX];
     uint8_t n;
     bool    cut;   /**< More entries than a pass holds, or a name too long. */
+    bool    keep_pair; /**< Leave app.json and icon.k64 out of the pass. */
 } AppDataRmList;
+
+/** @brief The one pass's scratch: a delete or a put's sweep runs one at a time. */
+static AppDataRmList l_appdata_list;
 
 /** @brief kdrv_path_entry_cb: remember one entry, delete nothing. */
 static bool appdata_rm_entry(const char *name, bool is_dir, uint32_t size,
@@ -1777,6 +1925,11 @@ static bool appdata_rm_entry(const char *name, bool is_dir, uint32_t size,
     AppDataRmList * const l = (AppDataRmList *)ctx;
     (void)size;
 
+    if ( l->keep_pair && ((strcmp(name, APPDATA_JSON_NAME) == 0)
+                          || (strcmp(name, APPDATA_ICON_NAME) == 0)) )
+    {
+        return true;
+    }
     if ( (APPDATA_RM_MAX <= l->n) || (strlen(name) >= sizeof(l->name[0])) )
     {
         l->cut = true;
@@ -1797,15 +1950,18 @@ static bool appdata_rm_entry(const char *name, bool is_dir, uint32_t size,
  * @param[out] sub  The first subdirectory found, or "" - only the top level
  *              wants it. NULL when subdirectories are of no interest, which
  *              is the case one level down, where they are simply left.
+ * @param keep_pair Leave app.json and icon.k64 where they are: what a put
+ *              has just put in place.
  * @return true when everything the directory held is gone.
  */
 static bool appdata_rm_files(const char *dir, AppDataRmList *l, char *sub,
-                             size_t sub_cap)
+                             size_t sub_cap, bool keep_pair)
 {
     char path[APPDATA_PATH_MAX];
     bool all = true;
 
     (void)memset(l, 0, sizeof(*l));
+    l->keep_pair = keep_pair;
     if ( NULL != sub )
     {
         sub[0] = '\0';
@@ -1855,7 +2011,7 @@ static bool appdata_rm_files(const char *dir, AppDataRmList *l, char *sub,
  */
 static kode_status_t appdata_rm_tree(const char *folder)
 {
-    static AppDataRmList list;   /* one delete at a time, by design */
+    AppDataRmList * const list = &l_appdata_list;
     char        sub[KAPP_DATA_ICON_MAX];
     char        path[APPDATA_PATH_MAX];
     kdrv_stat_t st;
@@ -1865,13 +2021,13 @@ static kode_status_t appdata_rm_tree(const char *folder)
         return KODE_ERROR;
     }
 
-    bool all = appdata_rm_files(folder, &list, sub, sizeof(sub));
+    bool all = appdata_rm_files(folder, list, sub, sizeof(sub), false);
     if ( '\0' != sub[0] )
     {
         if ( snprintf(path, sizeof(path), "%s/%s", folder, sub)
             < (int)sizeof(path) )
         {
-            all = appdata_rm_files(path, &list, NULL, 0U) && all;
+            all = appdata_rm_files(path, list, NULL, 0U, false) && all;
             all = (kdrv_storage_rmdir(path) == KODE_OK) && all;
         }
         else
@@ -1887,8 +2043,16 @@ static kode_status_t appdata_rm_tree(const char *folder)
     return KODE_OK;
 }
 
+static void warn_if_card(const char *verb, const char *path);
+
 /**
- * @brief Delete @p project's folder on the internal partition, and say so.
+ * @brief Delete @p project's data folder, from the medium that holds it, and
+ *        say so.
+ *
+ * The internal partition first: a folder there is the one the reader shows,
+ * so it is the one removed, and a card folder of the same name is left where
+ * it is and said so. A folder only on the card, which a put that found no room
+ * inside wrote there, is removed from the card.
  *
  * @param me      The AO, for busy().
  * @param project The app's project name.
@@ -1899,16 +2063,9 @@ static kode_status_t appdata_rm(const Storage * const me, const char *project)
     char        folder[APPDATA_FOLDER_MAX];
     char        card[APPDATA_FOLDER_MAX];
     kdrv_stat_t st;
-
-    /* Said before anything is removed and whatever the outcome: an operator
-     * who copied a folder onto a card and then deletes "it" has to be told
-     * which one this verb can reach. */
-    if ( kdrv_storage_mounted(KDRV_MEDIUM_SD)
+    bool const  on_card = kdrv_storage_mounted(KDRV_MEDIUM_SD)
         && appdata_folder_path(card, sizeof(card), APPDATA_MEDIUM_SD, project)
-        && (kdrv_storage_stat(card, &st) == KODE_OK) && st.exists && st.is_dir )
-    {
-        KLOG_N(TAG, "card folder for '%s' left alone", project);
-    }
+        && (kdrv_storage_stat(card, &st) == KODE_OK) && st.exists && st.is_dir;
 
     if ( busy(me) )
     {
@@ -1931,10 +2088,29 @@ static kode_status_t appdata_rm(const Storage * const me, const char *project)
         return KODE_ERROR;
     }
 
-    kode_status_t const rc = appdata_rm_tree(folder);
+    kode_status_t rc = appdata_rm_tree(folder);
+    if ( (KODE_ERROR == rc) && on_card )
+    {
+        /* Nothing inside: the folder is the card's. */
+        warn_if_card("appdata_rm", card);
+        rc = appdata_rm_tree(card);
+        if ( KODE_OK == rc )
+        {
+            KLOG_N(TAG, "the data folder of '%s' is gone from the card",
+                   project);
+        }
+        return rc;
+    }
     if ( KODE_OK == rc )
     {
         KLOG_N(TAG, "the data folder of '%s' is gone", project);
+    }
+    if ( on_card )
+    {
+        /* Said whatever became of the internal one: an operator who copied a
+         * folder onto a card and then deletes "it" has to be told which one
+         * this verb reached. */
+        KLOG_N(TAG, "card folder for '%s' left alone", project);
     }
     return rc;
 }
@@ -2240,17 +2416,58 @@ static void wipe_step(Storage * const me)
  * The install of a container that carries metadata. Two steps of this AO, one
  * file each, with a self-post between so 13 KB of FAT never holds the AO in
  * one go; the request's fields and bytes are kept in g_* for the second step,
- * and appdata_put_finish() frees g_buf. Internal partition only.
+ * and appdata_put_finish() frees g_buf. Each file is written under a temporary
+ * name beside the old one, and the second step, with both down, puts them in
+ * the old files' place: a folder is replaced whole or not at all. Internal
+ * partition only.
  */
+
+/**
+ * @brief Say how a put ended: the one line about its folder, at NOTICE.
+ *
+ * Every put ends in exactly one of its two places, a refusal in
+ * appdata_put_begin() or the end in appdata_put_finish(), and each says it here.
+ *
+ * @param project The project the put was for.
+ * @param rc      How it ended.
+ * @param icon    The folder has an icon: read only when @p rc is KODE_OK.
+ * @param medium  Where the folder was written: the card is said, the internal
+ *                partition is the default and is not.
+ * @param why     Read only when @p rc is not KODE_OK: why it was not written.
+ */
+static void appdata_put_say(const char *project, kode_status_t rc, bool icon,
+                            AppDataMedium medium, const char *why)
+{
+    const char *what  = "json, no icon";
+    const char *where = "";
+
+    if ( KODE_OK != rc )
+    {
+        KLOG_N(TAG, "the data folder of '%s' was not written: %s", project, why);
+        return;
+    }
+    if ( icon )
+    {
+        what = "json, icon";
+    }
+    if ( APPDATA_MEDIUM_SD == medium )
+    {
+        where = " on the card";
+    }
+    KLOG_N(TAG, "the data folder of '%s' is in place%s (%s)", project, where,
+           what);
+}
 
 /**
  * @brief Answer a put to its asker. Bounded, never asserts.
  * @param who     The asker.
  * @param project The project the put was for.
  * @param rc      The outcome.
+ * @param no_turn The put got no turn within KODE_STORAGE_TURN_MS: the answer
+ *                is KODE_DENIED and the same put may be asked again.
  */
 static void appdata_put_answer(QActive *who, const char *project,
-                               kode_status_t rc)
+                               kode_status_t rc, bool no_turn)
 {
     AppDataPutRspEvt *rsp = Q_NEW_X(AppDataPutRspEvt, 0U, APPDATA_PUT_RSP_SIG);
     if ( NULL == rsp )
@@ -2259,7 +2476,8 @@ static void appdata_put_answer(QActive *who, const char *project,
         return;
     }
     (void)snprintf(rsp->project, sizeof(rsp->project), "%s", project);
-    rsp->rc = rc;
+    rsp->rc   = rc;
+    rsp->busy = no_turn;
     QACTIVE_POST(who, &rsp->super, NULL);
 }
 
@@ -2315,77 +2533,484 @@ static kode_status_t appdata_put_mkdir(const char *path)
 }
 
 /**
- * @brief End a put: forget it, remove what a failure left, answer.
+ * @brief Make the two levels above a data folder, on whichever medium it is
+ *        on: `.kode` and `.kode/appsdata`. One that is there is as good as new.
  *
- * The state goes first because appdata_rm() refuses while busy() is true and
- * g_who is part of busy().
- *
- * @param me The AO.
- * @param rc How it ended; anything but KODE_OK takes the folder away again.
+ * @param folder The data folder's path, `<root>/.kode/appsdata/<project>`.
+ * @return KODE_OK, or what the medium said.
  */
-static void appdata_put_finish(Storage * const me, kode_status_t rc)
+static kode_status_t appdata_put_make_tree(const char *folder)
 {
-    QActive * const who = me->g_who;
-    char            project[KDRV_SLOT_PROJECT_MAX];
+    char          tree[APPDATA_FOLDER_MAX];
+    char          top[APPDATA_FOLDER_MAX];
+    char         *cut;
+    kode_status_t rc = KODE_ERROR;
 
-    (void)snprintf(project, sizeof(project), "%s", me->g_project);
-    me->g_who      = NULL;
-    appdata_put_free(me);
-    if ( KODE_OK != rc )
+    (void)snprintf(tree, sizeof(tree), "%s", folder);
+    cut = strrchr(tree, '/');
+    if ( NULL != cut )
     {
-        KLOG_W(TAG, "the data folder of '%s' was not written (%d)", project,
-               (int)rc);
-        (void)appdata_rm(me, project);
+        *cut = '\0';
+        (void)snprintf(top, sizeof(top), "%s", tree);
+        cut = strrchr(top, '/');
     }
-    else
+    if ( NULL != cut )
     {
-        KLOG_N(TAG, "the data folder of '%s' is written", project);
+        *cut = '\0';
+        rc = appdata_put_mkdir(top);
+        if ( KODE_OK == rc )
+        {
+            rc = appdata_put_mkdir(tree);
+        }
     }
-    if ( NULL != who )
+    return rc;
+}
+
+/**
+ * @brief The path of one file of a data folder, or of its temporary.
+ *
+ * @param out    Where it goes: APPDATA_PATH_MAX bytes.
+ * @param folder The folder's path.
+ * @param name   The file's name: APPDATA_JSON_NAME, APPDATA_JSON_TMP...
+ * @return false when it would not fit.
+ */
+static bool appdata_file_path(char *out, const char *folder, const char *name)
+{
+    size_t const cap = APPDATA_PATH_MAX;
+    int const    n   = snprintf(out, cap, "%s/%s", folder, name);
+
+    return (0 <= n) && ((size_t)n < cap);
+}
+
+/**
+ * @brief Remove the temporaries a put writes, wherever they are left.
+ *
+ * A put that fails, or never finishes because the board reset, leaves them;
+ * a put removes them when it begins, and when it fails.
+ *
+ * @param folder The data folder's path.
+ */
+static void appdata_put_drop_tmps(const char *folder)
+{
+    static const char *const TMP[] = { APPDATA_JSON_TMP, APPDATA_ICON_TMP };
+    char                     path[APPDATA_PATH_MAX];
+
+    for ( uint8_t i = 0U; Q_DIM(TMP) > i; ++i )
     {
-        appdata_put_answer(who, project, rc);
+        if ( appdata_file_path(path, folder, TMP[i]) )
+        {
+            (void)kdrv_storage_unlink(path);   /* not there is as good as gone */
+        }
     }
 }
 
 /**
- * @brief Whether the internal partition has room for the folder at @p folder.
+ * @brief Put a finished temporary in place of the file it replaces.
  *
- * A folder that is there already is replaced and takes the room it gives
- * back. A new one must leave KODE_APPDATA_FREE_MIN_BYTES free: a data folder
- * may arrive before its app, and nothing else bounds how many do.
+ * FAT never renames onto a name that is there, so the old file goes first.
+ * That is the one moment the folder is neither the old pair nor the new:
+ * without its app.json it reads as no data.
  *
- * @param folder The folder's path on the internal partition, mounted.
- * @return false when a new folder would leave the partition under its floor.
+ * @param folder The data folder's path.
+ * @param name   The file's final name: APPDATA_JSON_NAME or APPDATA_ICON_NAME.
+ * @return KODE_OK, or what the medium said.
  */
-static bool appdata_room(const char *folder)
+static kode_status_t appdata_put_swap(const char *folder, const char *name)
 {
-    kdrv_stat_t    st;
-    uint64_t       total = 0U;
-    uint64_t       freeb = 0U;
-    uint32_t const least = KODE_APPDATA_FREE_MIN_BYTES + KODE_APPDATA_FOLDER_BYTES;
-    bool           room  = true;
+    char path[APPDATA_PATH_MAX];
+    char tmp[APPDATA_PATH_MAX];
 
-    if ( (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists )
+    if ( !appdata_file_path(path, folder, name)
+        || (snprintf(tmp, sizeof(tmp), "%s" APPDATA_TMP_SUFFIX, path)
+            >= (int)sizeof(tmp)) )
     {
-        /* A replacement. */
+        return KODE_ERROR;
     }
-    else if ( (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK)
-             && ((uint64_t)least > freeb) )
+    (void)kdrv_storage_unlink(path);
+    return kdrv_storage_rename(tmp, path);
+}
+
+/**
+ * @brief Put the new pair in place of the old, once both files are written.
+ *
+ * The icon first and app.json last: a reset in between leaves the old
+ * description beside the new icon, never a description of something else.
+ * A put with no icon removes the old one.
+ *
+ * @param me     The AO, with its put under way.
+ * @param folder The data folder's path.
+ * @return KODE_OK, or what the medium said.
+ */
+static kode_status_t appdata_put_commit(const Storage * const me,
+                                        const char *folder)
+{
+    kode_status_t rc = KODE_OK;
+    char          path[APPDATA_PATH_MAX];
+
+    if ( 0U != me->g_icon_len )
     {
-        room = false;
+        rc = appdata_put_swap(folder, APPDATA_ICON_NAME);
+    }
+    else if ( appdata_file_path(path, folder, APPDATA_ICON_NAME) )
+    {
+        (void)kdrv_storage_unlink(path);
     }
     else
     {
-        /* Room enough, or a partition that cannot say: the write decides. */
+        rc = KODE_ERROR;
+    }
+    if ( KODE_OK == rc )
+    {
+        rc = appdata_put_swap(folder, APPDATA_JSON_NAME);
+    }
+    return rc;
+}
+
+/**
+ * @brief Remove what else the folder held, once the new pair is in place.
+ *
+ * The folder is replaced whole: a file or a subfolder an older folder carried
+ * goes with it. A sweep that leaves something is said and is no failure of
+ * the put.
+ *
+ * @param folder The data folder's path.
+ */
+static void appdata_put_sweep(const char *folder)
+{
+    AppDataRmList * const list = &l_appdata_list;
+    char                  sub[KAPP_DATA_ICON_MAX];
+    char                  path[APPDATA_PATH_MAX];
+    bool                  gone = appdata_rm_files(folder, list, sub,
+                                                  sizeof(sub), true);
+
+    if ( '\0' != sub[0] )
+    {
+        if ( appdata_file_path(path, folder, sub) )
+        {
+            gone = appdata_rm_files(path, list, NULL, 0U, false) && gone;
+            gone = (kdrv_storage_rmdir(path) == KODE_OK) && gone;
+        }
+        else
+        {
+            gone = false;
+        }
+    }
+    if ( !gone )
+    {
+        KLOG_W(TAG, "the old files of '%s' did not all go", folder);
+    }
+}
+
+/**
+ * @brief End a put: forget it, remove what a failure left, answer.
+ *
+ * The state goes first because g_who is part of busy(), and what a failure
+ * removes is removed with the AO free.
+ *
+ * A failed put leaves the folder that was there as it was, less the
+ * temporaries; a folder the put made is taken away again. A put that went to
+ * the card for want of room inside and failed there is answered
+ * KODE_NO_RESOURCES, as with no card, and says both.
+ *
+ * @param me  The AO.
+ * @param rc  How it ended.
+ * @param why Why it failed, in words; read only when @p rc is not KODE_OK.
+ */
+static void appdata_put_finish(Storage * const me, kode_status_t rc,
+                               const char *why)
+{
+    QActive * const     who    = me->g_who;
+    bool const          fresh  = me->g_fresh;
+    bool const          icon   = (0U != me->g_icon_len);
+    bool const          spill  = me->g_spill;
+    AppDataMedium const medium = me->g_medium;
+    kode_status_t       answer = rc;
+    const char         *reason = why;
+    char                project[KDRV_SLOT_PROJECT_MAX];
+    char                folder[APPDATA_FOLDER_MAX];
+    char                told[APPDATA_WHY_MAX + 64U];
+
+    (void)snprintf(project, sizeof(project), "%s", me->g_project);
+    me->g_who      = NULL;
+    appdata_put_free(me);
+    if ( (KODE_OK != rc)
+        && appdata_folder_path(folder, sizeof(folder), medium, project) )
+    {
+        appdata_put_drop_tmps(folder);
+        if ( fresh )
+        {
+            (void)appdata_rm_tree(folder);
+        }
+    }
+    if ( (KODE_OK != rc) && spill )
+    {
+        /* The folder had no room inside and the card would not take it: that
+         * is `full`, as it is without a card, and says both. */
+        (void)snprintf(told, sizeof(told), "%s; the card would not take it "
+                       "either", me->g_full);
+        reason = told;
+        answer = KODE_NO_RESOURCES;
+    }
+    appdata_put_say(project, answer, icon, medium, reason);
+    if ( NULL != who )
+    {
+        appdata_put_answer(who, project, answer, false);
+    }
+}
+
+/**
+ * @brief The driver's name for a data folder's medium.
+ * @param medium APPDATA_MEDIUM_FS or APPDATA_MEDIUM_SD.
+ * @return KDRV_MEDIUM_SD for the card, KDRV_MEDIUM_FS for anything else.
+ */
+static kdrv_medium_t appdata_kdrv_medium(AppDataMedium medium)
+{
+    kdrv_medium_t km = KDRV_MEDIUM_FS;
+
+    if ( APPDATA_MEDIUM_SD == medium )
+    {
+        km = KDRV_MEDIUM_SD;
+    }
+    return km;
+}
+
+/** @brief What a put weighs on a medium, and what is free for it. */
+typedef struct {
+    bool     there;  /**< The folder is there already: a replacement.          */
+    uint32_t need;   /**< Bytes it takes: its files in whole clusters, and for a
+                      *   new folder the folder's own cluster.                  */
+    uint32_t keep;   /**< Bytes a new folder must leave free: the floor; 0 for a
+                      *   replacement, and on the card.                         */
+    uint64_t avail;  /**< Bytes free on the volume, 0 when it cannot say.       */
+} AppDataRoom;
+
+/** @brief Where a put goes. */
+typedef struct {
+    AppDataMedium medium;  /**< The medium the folder is written on.            */
+    AppDataRoom   weight;  /**< What it weighs there, and what is free.         */
+    bool          spill;   /**< A new folder that had no room inside: the card. */
+} AppDataPlan;
+
+/**
+ * @brief Round a size up to whole clusters: what a file of that size takes.
+ *
+ * @param len     The file's bytes; 0 takes nothing.
+ * @param cluster The volume's allocation unit, not 0.
+ * @return The bytes the file takes.
+ */
+static uint32_t appdata_clusters(uint32_t len, uint32_t cluster)
+{
+    return ((len + (cluster - 1U)) / cluster) * cluster;
+}
+
+/**
+ * @brief Whether the put fits on a medium, and what it weighs.
+ *
+ * A put is charged what it takes on the volume: the bytes of its app.json and
+ * of its icon, each rounded up to the volume's cluster. On the internal
+ * partition a new folder is charged one cluster more, its own, and must leave
+ * KODE_APPDATA_FREE_MIN_BYTES free besides: a data folder may arrive before
+ * its app, and nothing else bounds how many do. A folder that is there is
+ * replaced by writing the new pair beside the old, so it is charged the pair,
+ * which is the room of its temporaries, and no floor. The card is the user's:
+ * it keeps no floor of ours, and a put is refused there only when the card
+ * says it has less free than the charge. A volume that cannot say lets the
+ * write decide.
+ *
+ * @param medium   The medium: the internal partition or the card, mounted.
+ * @param folder   The folder's path on it.
+ * @param json_len Bytes of the app.json the put carries.
+ * @param icon_len Bytes of the icon.k64 it carries: 0 for none.
+ * @param[out] r   What the put weighs and what is free.
+ * @return false when the medium cannot take the put.
+ */
+static bool appdata_room(AppDataMedium medium, const char *folder,
+                         uint32_t json_len, uint32_t icon_len, AppDataRoom *r)
+{
+    kdrv_medium_t const km = appdata_kdrv_medium(medium);
+    kdrv_stat_t    st;
+    uint64_t       total   = 0U;
+    uint64_t       freeb   = 0U;
+    uint32_t       cluster = kdrv_storage_cluster_bytes(km);
+    bool           room    = true;
+
+    if ( 0U == cluster )
+    {
+        cluster = KODE_APPDATA_CLUSTER_BYTES;
+    }
+    r->there = (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists;
+    r->need  = appdata_clusters(json_len, cluster)
+             + appdata_clusters(icon_len, cluster);
+    r->keep  = 0U;
+    if ( !r->there )
+    {
+        r->need += cluster;
+        if ( APPDATA_MEDIUM_FS == medium )
+        {
+            r->keep = KODE_APPDATA_FREE_MIN_BYTES;
+        }
+    }
+    r->avail = 0U;
+    if ( kdrv_storage_usage(km, &total, &freeb) == KODE_OK )
+    {
+        uint64_t const want = (uint64_t)r->need + (uint64_t)r->keep;
+
+        r->avail = freeb;
+        room     = (want <= freeb);
     }
     return room;
 }
 
 /**
- * @brief Step one of a put: refuse, clear, make the path, write app.json.
+ * @brief Which medium holds @p project's data folder, by the rule the reader
+ *        uses: the first, the internal partition before the card, that has
+ *        its app.json.
  *
- * The request's buffer is this AO's from the post: a refusal frees it here,
- * and a put that begins keeps it in g_buf for appdata_put_finish().
+ * A folder on both media is the internal one's: a put replaces it, and the
+ * card's is left as it is.
+ *
+ * @param project The app's project name.
+ * @return APPDATA_MEDIUM_FS, APPDATA_MEDIUM_SD, or APPDATA_MEDIUM_NONE.
+ */
+static AppDataMedium appdata_holder(const char *project)
+{
+    static const AppDataMedium ORDER[2] = { APPDATA_MEDIUM_FS,
+                                            APPDATA_MEDIUM_SD };
+    AppDataMedium              found    = APPDATA_MEDIUM_NONE;
+
+    for ( uint8_t i = 0U; (2U > i) && (APPDATA_MEDIUM_NONE == found); ++i )
+    {
+        kdrv_medium_t const km = appdata_kdrv_medium(ORDER[i]);
+        char                folder[APPDATA_FOLDER_MAX];
+        char                path[APPDATA_PATH_MAX];
+        kdrv_stat_t         st;
+
+        if ( kdrv_storage_mounted(km)
+            && appdata_folder_path(folder, sizeof(folder), ORDER[i], project)
+            && appdata_file_path(path, folder, APPDATA_JSON_NAME)
+            && (kdrv_storage_stat(path, &st) == KODE_OK) && st.exists
+            && !st.is_dir )
+        {
+            found = ORDER[i];
+        }
+    }
+    return found;
+}
+
+/**
+ * @brief Say in words what a put needs and what the medium has.
+ *
+ * @param out    Where the words go.
+ * @param cap    Its size.
+ * @param medium The medium the numbers are of.
+ * @param w      What the put weighs there.
+ */
+static void appdata_room_words(char *out, size_t cap, AppDataMedium medium,
+                               const AppDataRoom *w)
+{
+    uint32_t const need_kb = (w->need + (APPDATA_KB - 1U)) / APPDATA_KB;
+    const char    *name    = "internal volume";
+
+    if ( APPDATA_MEDIUM_SD == medium )
+    {
+        name = "card";
+    }
+    if ( w->there )
+    {
+        (void)snprintf(out, cap, "it needs %lu KB beside the old files and the "
+                       "%s has %lu KB free", (unsigned long)need_kb, name,
+                       (unsigned long)(w->avail / APPDATA_KB));
+    }
+    else
+    {
+        /* What is free beyond what a new folder keeps: the number to set
+         * beside what it needs. */
+        uint64_t spare = 0U;
+
+        if ( w->avail > (uint64_t)w->keep )
+        {
+            spare = w->avail - (uint64_t)w->keep;
+        }
+        (void)snprintf(out, cap, "it needs %lu KB and the %s has %lu KB free "
+                       "beyond the %lu KB it keeps", (unsigned long)need_kb,
+                       name, (unsigned long)(spare / APPDATA_KB),
+                       (unsigned long)(w->keep / APPDATA_KB));
+    }
+}
+
+/**
+ * @brief Decide where a put goes, or say why it goes nowhere.
+ *
+ * A folder that is there is replaced where it is, whichever medium holds its
+ * app.json, and never moved: a replacement that does not fit is refused. A new
+ * folder goes inside; when the internal partition has no room for it and a
+ * card is mounted that has, it goes to the card, which the reader finds. A
+ * folder on the card is not moved inside when room comes back.
+ *
+ * @param project  The app's project name.
+ * @param json_len Bytes of the app.json the put carries.
+ * @param icon_len Bytes of the icon it carries: 0 for none.
+ * @param[out] plan Where it goes, when it goes anywhere.
+ * @param[out] why  Why it goes nowhere; with a spill, why it is not inside.
+ * @param cap       The size of @p why.
+ * @return true when the put has a place.
+ */
+static bool appdata_plan(const char *project, uint32_t json_len,
+                         uint32_t icon_len, AppDataPlan *plan, char *why,
+                         size_t cap)
+{
+    AppDataMedium const holder = appdata_holder(project);
+    char                folder[APPDATA_FOLDER_MAX];
+    bool                fits   = false;
+
+    plan->medium = APPDATA_MEDIUM_FS;
+    plan->spill  = false;
+    (void)memset(&plan->weight, 0, sizeof(plan->weight));
+    if ( APPDATA_MEDIUM_SD == holder )
+    {
+        plan->medium = APPDATA_MEDIUM_SD;
+    }
+    if ( appdata_folder_path(folder, sizeof(folder), plan->medium, project) )
+    {
+        fits = appdata_room(plan->medium, folder, json_len, icon_len,
+                            &plan->weight);
+    }
+    if ( fits )
+    {
+        return true;
+    }
+    appdata_room_words(why, cap, plan->medium, &plan->weight);
+    if ( (APPDATA_MEDIUM_NONE == holder) && kdrv_storage_mounted(KDRV_MEDIUM_SD) )
+    {
+        AppDataRoom card;
+
+        if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_SD,
+                                 project) )
+        {
+            if ( appdata_room(APPDATA_MEDIUM_SD, folder, json_len, icon_len,
+                              &card) )
+            {
+                plan->medium = APPDATA_MEDIUM_SD;
+                plan->weight = card;
+                plan->spill  = true;
+                return true;
+            }
+            /* The card says it has less free than the folder takes. */
+            (void)snprintf(&why[strlen(why)], cap - strlen(why),
+                           "; the card has %lu KB free",
+                           (unsigned long)(card.avail / APPDATA_KB));
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Step one of a put: refuse, make the path, write the new app.json.
+ *
+ * The files are written under temporary names beside the old ones: nothing
+ * that was there is touched until step two has both. The request's buffer is
+ * this AO's from the post: a refusal frees it here, and a put that begins
+ * keeps it in g_buf for appdata_put_finish().
  *
  * @param me  The AO.
  * @param req The request; its fields are copied before this returns.
@@ -2393,12 +3018,16 @@ static bool appdata_room(const char *folder)
 static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const req)
 {
     char          folder[APPDATA_FOLDER_MAX];
+    char          room[APPDATA_WHY_MAX];
+    const char   *why = "it is not a name or a size a data folder takes";
     kode_status_t rc = KODE_DENIED;
+    bool          no_turn = false;
+    AppDataPlan   plan    = { APPDATA_MEDIUM_FS, { false, 0U, 0U, 0U }, false };
 
     if ( busy(me) )
     {
-        KLOG_W(TAG, "a transfer is already in flight; the folder of '%s' is "
-                    "not written", req->project);
+        why     = "a transfer is in flight";
+        no_turn = true;
     }
     else if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
                                   req->project)
@@ -2406,19 +3035,18 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
              || (KAPP_DATA_JSON_MAX < req->json_len)
              || ((0U != req->icon_len) && !kapp_icon_len_ok(req->icon_len)) )
     {
-        KLOG_W(TAG, "'%s' cannot be a data folder as asked", req->project);
+        /* Not a name or a size a folder takes. */
     }
     else if ( kdrv_storage_mount(KDRV_MEDIUM_FS) == NULL )
     {
-        rc = KODE_ERROR;
+        why = "the internal partition would not mount";
+        rc  = KODE_ERROR;
     }
-    else if ( !appdata_room(folder) )
+    else if ( !appdata_plan(req->project, req->json_len, req->icon_len, &plan,
+                            room, sizeof(room)) )
     {
-        uint32_t const floor_kb = KODE_APPDATA_FREE_MIN_BYTES / APPDATA_KB;
-
-        KLOG_W(TAG, "no room for the data folder of '%s': a new one must "
-                    "leave %lu KB free", req->project, (unsigned long)floor_kb);
-        rc = KODE_NO_RESOURCES;
+        why = room;
+        rc  = KODE_NO_RESOURCES;
     }
     else
     {
@@ -2430,31 +3058,33 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         {
             khal_free(req->buf);
         }
-        appdata_put_answer(req->who, req->project, rc);
+        appdata_put_say(req->project, rc, false, APPDATA_MEDIUM_FS, why);
+        appdata_put_answer(req->who, req->project, rc, no_turn);
         return;
     }
 
-    /* From here the put owns the AO. The old folder goes first and "there was
-     * none" is no failure; appdata_rm() reads busy(), so g_who is set after. */
-    rc = appdata_rm(me, req->project);
-    if ( KODE_ERROR == rc )
-    {
-        rc = KODE_OK;
-    }
+    /* From here the put owns the AO. */
+    (void)appdata_folder_path(folder, sizeof(folder), plan.medium,
+                              req->project);
     me->g_who      = req->who;
     (void)snprintf(me->g_project, sizeof(me->g_project), "%s", req->project);
     me->g_buf      = req->buf;
     me->g_json_len = req->json_len;
     me->g_icon_len = req->icon_len;
+    me->g_medium   = plan.medium;
+    me->g_spill    = plan.spill;
+    me->g_fresh    = !plan.weight.there;
+    if ( plan.spill )
+    {
+        (void)snprintf(me->g_full, sizeof(me->g_full), "%s", room);
+    }
+    if ( APPDATA_MEDIUM_SD == plan.medium )
+    {
+        /* One line for the whole put, as the card's other writes say theirs. */
+        warn_if_card("appdata_put", folder);
+    }
 
-    if ( KODE_OK == rc )
-    {
-        rc = appdata_put_mkdir(APPDATA_TOP_DIR);
-    }
-    if ( KODE_OK == rc )
-    {
-        rc = appdata_put_mkdir(APPDATA_TREE_DIR);
-    }
+    rc = appdata_put_make_tree(folder);
     if ( KODE_OK == rc )
     {
         rc = appdata_put_mkdir(folder);
@@ -2463,8 +3093,8 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     {
         char path[APPDATA_PATH_MAX];
 
-        if ( snprintf(path, sizeof(path), "%s/" APPDATA_JSON_NAME, folder)
-            >= (int)sizeof(path) )
+        appdata_put_drop_tmps(folder);
+        if ( !appdata_file_path(path, folder, APPDATA_JSON_TMP) )
         {
             rc = KODE_ERROR;
         }
@@ -2475,7 +3105,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     }
     if ( KODE_OK != rc )
     {
-        appdata_put_finish(me, rc);
+        appdata_put_finish(me, rc, APPDATA_WHY_WRITE);
     }
     else
     {
@@ -2484,34 +3114,53 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     }
 }
 
-/** @brief Step two of a put: the icon when there is one, then the answer. */
+/**
+ * @brief Step two of a put: the new icon when there is one, then both files
+ *        in place of the old pair, then the answer.
+ *
+ * @param me The AO.
+ */
 static void appdata_put_icon(Storage * const me)
 {
-    kode_status_t rc = KODE_OK;
+    kode_status_t rc  = KODE_OK;
+    const char   *why = APPDATA_WHY_WRITE;
+    char          folder[APPDATA_FOLDER_MAX];
+    char          path[APPDATA_PATH_MAX];
 
     if ( NULL == me->g_who )
     {
         return;   /* a stale tick: no put is under way */
     }
-    if ( 0U != me->g_icon_len )
+    if ( !appdata_folder_path(folder, sizeof(folder), me->g_medium,
+                              me->g_project) )
     {
-        char folder[APPDATA_FOLDER_MAX];
-        char path[APPDATA_PATH_MAX];
-
-        if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
-                                 me->g_project)
-            || (snprintf(path, sizeof(path), "%s/" APPDATA_ICON_NAME, folder)
-                >= (int)sizeof(path)) )
+        rc = KODE_ERROR;
+    }
+    else
+    {
+        if ( 0U != me->g_icon_len )
         {
-            rc = KODE_ERROR;
+            if ( appdata_file_path(path, folder, APPDATA_ICON_TMP) )
+            {
+                rc = appdata_put_file(path, &me->g_buf[me->g_json_len],
+                                      me->g_icon_len);
+            }
+            else
+            {
+                rc = KODE_ERROR;
+            }
         }
-        else
+        if ( KODE_OK == rc )
         {
-            rc = appdata_put_file(path, &me->g_buf[me->g_json_len],
-                                  me->g_icon_len);
+            why = APPDATA_WHY_PLACE;
+            rc  = appdata_put_commit(me, folder);
+        }
+        if ( KODE_OK == rc )
+        {
+            appdata_put_sweep(folder);
         }
     }
-    appdata_put_finish(me, rc);
+    appdata_put_finish(me, rc, why);
 }
 
 /* ---- The card's field table ----------------------------------------------- */
@@ -3868,6 +4517,22 @@ static void recv_deny(QActive *who)
 }
 
 /**
+ * @brief Refuse a transfer because the one in flight outlasted its wait,
+ *        answering @p who anyway.
+ *
+ * Its own signal, so the host is told `busy` and not that the bytes failed.
+ */
+static void recv_busy(QActive *who)
+{
+    static const QEvt busy_evt = QEVT_INITIALIZER(RECV_BUSY_SIG);
+
+    if ( NULL != who )
+    {
+        QACTIVE_POST(who, &busy_evt, NULL);
+    }
+}
+
+/**
  * @brief Start a transfer: arm the wire, then wait to be told it is armed.
  *
  * Nothing is opened before the arming: an arming that lands after slow work
@@ -3887,7 +4552,7 @@ static void recv_begin(Storage * const me, const StorageRecvEvt *q)
     {
         KLOG_W(TAG, "a transfer is already in flight; file_put of '%s' refused",
                q->path);
-        recv_deny(q->who);
+        recv_busy(q->who);
         return;
     }
     if ( 0U == q->size )
@@ -5611,6 +6276,10 @@ void Storage_ctor(void)
     me->g_buf      = NULL;     /* a constructor over a used AO: the heap's now */
     me->g_json_len = 0U;
     me->g_icon_len = 0U;
+    me->g_fresh    = false;
+    me->g_medium   = APPDATA_MEDIUM_FS;
+    me->g_spill    = false;
+    me->g_full[0]  = '\0';
     me->x_who      = NULL;
     me->x          = NULL;     /* as g_buf: the heap's now */
     me->worker_up  = false;
@@ -5619,6 +6288,13 @@ void Storage_ctor(void)
     (void)memset(&me->worker, 0, sizeof(me->worker));
     (void)memset(&me->sdj, 0, sizeof(me->sdj));
     QEQueue_init(&me->deferq, me->defer_sto, Q_DIM(me->defer_sto));
+    storage_wait_init(&me->turn, &me->super, NULL, 0U, STORAGE_TURN_TO_SIG);
+    storage_wait_init(&me->reads, &me->super, me->read_sto, Q_DIM(me->read_sto),
+                      STORAGE_READ_TO_SIG);
+    QTimeEvt_ctorX(&me->read_retry, &me->super, STORAGE_READ_RETRY_SIG, 0U);
+    me->read_pause = false;
+    me->read_final = false;
+    me->read_tries = 0U;
     QTimeEvt_ctorX(&me->sdj_dl, &me->super, STORAGE_SDJOB_TO_SIG, 0U);
     QTimeEvt_ctorX(&me->w_pacer, &me->super, STORAGE_WRITE_NEXT_SIG, 0U);
     QTimeEvt_ctorX(&me->t_pacer, &me->super, STORAGE_TEST_NEXT_SIG, 0U);
@@ -5812,11 +6488,21 @@ static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
         case STORAGE_OP_UNMOUNT: {
             if ( busy(me) )
             {
-                /* Usually a rescan's unmount+mount, which is fire-and-forget:
-                 * refusing it stalls nothing, and keeps the card mounted under
-                 * the transfer already touching it. */
-                KLOG_W(TAG, "a transfer is in flight; %s unmount is refused",
-                       what);
+                /* Usually a rescan's unmount+mount, which is fire-and-forget
+                 * and names nobody: refusing it stalls nothing, keeps the card
+                 * mounted under the transfer already touching it, and is what
+                 * the rescan of an install's own aftermath meets. An unmount
+                 * somebody asked for is refused out loud. */
+                if ( NULL == c->who )
+                {
+                    KLOG_D(TAG, "a transfer is in flight; %s unmount is "
+                                "refused", what);
+                }
+                else
+                {
+                    KLOG_W(TAG, "a transfer is in flight; %s unmount is "
+                                "refused", what);
+                }
                 break;
             }
             if ( KDRV_MEDIUM_SD == medium )
@@ -5932,6 +6618,83 @@ static void storage_round(Storage const * const me, const LowPowerRoundEvt * con
 }
 #endif /* CONFIG_KODE_LOWPOWER */
 
+/**
+ * @brief Give back the pieces of an icon that were taken, and forget them.
+ * @param ic The pieces: KODE_APP_ICON_PIECES slots, NULL where none is held.
+ */
+static void icon_pieces_give(AppDataIconEvt **ic)
+{
+    for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
+    {
+        if ( NULL != ic[s] )
+        {
+            QF_gc(&ic[s]->super);
+            ic[s] = NULL;
+        }
+    }
+}
+
+/**
+ * @brief Take every piece of an icon from the icon pool, or none.
+ *
+ * Half an icon would be drawn wrong rather than not drawn. The pool holds one
+ * icon's pieces, so they are short whenever the last icon is still with its
+ * reader.
+ *
+ * @param ic The pieces: KODE_APP_ICON_PIECES slots; every one is NULL on a
+ *           failure.
+ * @return true when all were taken.
+ */
+static bool icon_pieces_take(AppDataIconEvt **ic)
+{
+    bool taken = true;
+
+    for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
+    {
+        ic[s] = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
+        taken = taken && (NULL != ic[s]);
+    }
+    if ( !taken )
+    {
+        icon_pieces_give(ic);
+    }
+    return taken;
+}
+
+/**
+ * @brief Keep the folder read being served to try again, at the head of the
+ *        reads that wait, because the icon pool had no room for its icon.
+ *
+ * It goes back to the front so the reads behind it keep their order, and the
+ * reads wait with it until the pause is over. The reader of the last icon
+ * hands the pieces back without a word, so it tries again after each pause, as
+ * many times as fit in KODE_STORAGE_TURN_MS; a try that finds the pieces still
+ * short looks at the pool and nothing else, so it does not keep this AO from
+ * the reader that has to free them. The reads that wait behind it have the
+ * bound of their own.
+ *
+ * @param me The AO.
+ * @param e  The request being served.
+ * @return true when it is kept; false when the tries are used up, the bound
+ *         has passed or the wait has no room, and it has to be answered busy.
+ */
+static bool read_retry_hold(Storage * const me, QEvt const * const e)
+{
+    bool kept = false;
+
+    if ( !me->read_final && (STORAGE_ICON_TRIES > me->read_tries)
+        && (0U < QEQueue_getFree(&me->reads.q)) )
+    {
+        QEQueue_postLIFO(&me->reads.q, e, (uint_fast8_t)me->super.prio);
+        (void)QTimeEvt_rearm(&me->read_retry,
+                             KQP_TICKS_PER_MS(KODE_STORAGE_ICON_RETRY_MS));
+        me->read_tries += 1U;
+        me->read_pause  = true;
+        kept            = true;
+    }
+    return kept;
+}
+
 /** @brief Serve one event. */
 static QState Storage_serve(Storage * const me, QEvt const * const e)
 {
@@ -6042,8 +6805,9 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             kdrv_medium_t  medium = KDRV_MEDIUM_FS;
             size_t         got = 0U;
 
-            /* A manifest is never worth displacing a transfer in flight,
-             * in either direction. */
+            /* A manifest is never worth displacing a transfer in flight, in
+             * either direction: it waits for it (Storage_active), and is
+             * refused like this only when the wait is full or has run out. */
             if ( busy(me) )
             {
                 KLOG_D(TAG, "busy; manifest of '%s' refused", req->name);
@@ -6092,8 +6856,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
         }
         case APPDATA_REQ_SIG: {
             AppDataReqEvt const * const req = Q_EVT_CAST(AppDataReqEvt);
-            AppDataFieldsEvt *f = Q_NEW_X(AppDataFieldsEvt, 0U,
-                                          APPDATA_FIELDS_SIG);
+            AppDataFieldsEvt *f = NULL;
             /* A static: 1 KB the parser walks wants internal RAM. The
              * 48 KB icon is only copied out of, so it is in PSRAM. */
             static char     json[KAPP_DATA_JSON_MAX + 1U];
@@ -6102,8 +6865,19 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             char            path[APPDATA_PATH_MAX];
             kapp_data_t     d;
 
+            /* A read that waited for the pieces of an icon looks at the pool
+             * before it does anything else: nothing is read, and no event is
+             * taken, until the pieces are there. They are kept from here. */
+            if ( (0U < me->read_tries) && !me->read_final
+                && !icon_pieces_take(ic) && read_retry_hold(me, e) )
+            {
+                status = Q_HANDLED();
+                break;
+            }
+            f = Q_NEW_X(AppDataFieldsEvt, 0U, APPDATA_FIELDS_SIG);
             if ( NULL == f )
             {
+                icon_pieces_give(ic);
                 KLOG_E(TAG, "out of events; the folder of '%s' is answered busy",
                        req->project);
                 appdata_answer_busy(req->who);
@@ -6138,15 +6912,18 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
 
             if ( busy(me) )
             {
-                /* A folder is never worth displacing a transfer; the asker
-                 * retries on its next scan. */
+                /* A folder is never worth displacing a transfer: a read
+                 * waits for it (Storage_active), and is answered like this
+                 * only when the wait is full or has run out. */
                 KLOG_D(TAG, "busy; the folder of '%s' is refused", req->project);
                 f->icon_status = (uint8_t)APPDATA_ICON_BUSY;
             }
             else
             {
                 /* Internal first, card second, the first folder found used
-                 * whole (https://docs.kode.diy/sdk/kdrv/apps). */
+                 * whole (https://docs.kode.diy/sdk/kdrv/apps). A folder is
+                 * found when it has its app.json: an empty or icon-only one
+                 * is no data, and hides nothing. */
                 static const AppDataMedium ORDER[2] = { APPDATA_MEDIUM_FS,
                                                         APPDATA_MEDIUM_SD };
                 for ( uint8_t i = 0U;
@@ -6162,8 +6939,9 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                     {
                         continue;
                     }
-                    if ( (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists
-                        && st.is_dir )
+                    if ( appdata_file_path(path, folder, APPDATA_JSON_NAME)
+                        && (kdrv_storage_stat(path, &st) == KODE_OK)
+                        && st.exists && !st.is_dir )
                     {
                         f->medium = (uint8_t)ORDER[i];
                     }
@@ -6230,27 +7008,30 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
 
             /* All the pieces or none, and taken BEFORE the fields event
              * goes out: half an icon would be drawn wrong rather than not
-             * drawn, and the status has to be true when the asker reads it. */
-            if ( (uint8_t)APPDATA_ICON_OK == f->icon_status )
+             * drawn, and the status has to be true when the asker reads it.
+             * Pieces taken at the top of a retry are used, or given back when
+             * there turned out to be no icon. */
+            if ( (uint8_t)APPDATA_ICON_OK != f->icon_status )
             {
-                bool all = true;
-                for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
+                icon_pieces_give(ic);
+            }
+            else if ( (NULL == ic[0]) && !icon_pieces_take(ic) )
+            {
+                /* The last icon is still with its reader and its pieces go
+                 * back without a word, so the read waits for a pause and
+                 * tries again, within the bound; the fields event was not
+                 * posted and goes back. */
+                if ( read_retry_hold(me, e) )
                 {
-                    ic[s] = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
-                    all   = all && (NULL != ic[s]);
+                    QF_gc(&f->super);
+                    status = Q_HANDLED();
+                    break;
                 }
-                if ( !all )
-                {
-                    for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
-                    {
-                        if ( NULL != ic[s] )
-                        {
-                            QF_gc(&ic[s]->super);
-                            ic[s] = NULL;
-                        }
-                    }
-                    f->icon_status = (uint8_t)APPDATA_ICON_BUSY;
-                }
+                f->icon_status = (uint8_t)APPDATA_ICON_BUSY;
+            }
+            else
+            {
+                /* The icon has its pieces. */
             }
 
             QACTIVE_POST(req->who, &f->super, &me->super);
@@ -6270,6 +7051,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 static const QEvt end = QEVT_INITIALIZER(APPDATA_END_SIG);
                 QACTIVE_POST(req->who, &end, &me->super);
             }
+            me->read_tries = 0U;
             status = Q_HANDLED();
             break;
         }
@@ -6796,8 +7578,197 @@ static void card_pump(Storage * const me)
     }
 }
 
+/* ---- A request that writes, deletes or reads a folder waits for the transfer ---
+ * A host that makes a folder, puts two files and removes a third sends each
+ * request the moment the one before it is answered, and the launcher saves its
+ * own list a moment after any change: a request that meets that transfer is
+ * served when it ends, not lost to it. One write or delete waits at a time,
+ * for at most KODE_STORAGE_TURN_MS; a second, or one whose wait runs out, is
+ * refused by its own handler, as busy() makes every handler do. Reads of an
+ * app's data folder and of a manifest wait the same way, up to
+ * KODE_STORAGE_READ_WAIT_DEPTH of them in one line, in arrival order and
+ * bounded from the first; one over that, or past the bound, is answered
+ * "nothing read", as a read is during a transfer.
+ */
+
 /**
- * @brief The only state: hold what needs the card while a call to it is out, serve the rest.
+ * @brief Whether @p e writes or deletes, and its handler refuses while
+ *        busy() is true.
+ *
+ * Opens, reads, listings and a copy are not here: they are not metadata, and
+ * their askers retry on their own.
+ *
+ * @param e The event.
+ * @return true when it is held for the transfer in flight.
+ */
+static bool turn_wanted(QEvt const * const e)
+{
+    bool wanted = false;
+
+    switch ( e->sig )
+    {
+        case STORAGE_RECV_REQ_SIG:
+        case APPDATA_PUT_REQ_SIG:
+        case APPDATA_RM_REQ_SIG:
+        case STORAGE_APP_WIPE_REQ_SIG:
+        case STORAGE_TEXT_REQ_SIG: {
+            wanted = true;
+            break;
+        }
+        case STORAGE_PATH_REQ_SIG: {
+            storage_path_op_t const op =
+                (storage_path_op_t)Q_EVT_CAST(StoragePathEvt)->op;
+
+            wanted = (STORAGE_PATH_UNLINK == op) || (STORAGE_PATH_RMDIR == op)
+                  || (STORAGE_PATH_DELETE == op);
+            break;
+        }
+        case STORAGE_PAIR_REQ_SIG: {
+            wanted = ((storage_pair_op_t)Q_EVT_CAST(StoragePairEvt)->op
+                      == STORAGE_PAIR_MOVE);
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    return wanted;
+}
+
+/**
+ * @brief Keep a write or a delete until the transfer in flight ends.
+ *
+ * @param me The AO.
+ * @param e  The request.
+ * @return true when it was kept; false when one waits already and this one
+ *         has to be served, which refuses it.
+ */
+static bool turn_hold(Storage * const me, QEvt const * const e)
+{
+    bool const held = storage_wait_hold(&me->super, &me->turn, e);
+
+    if ( held )
+    {
+        KLOG_D(TAG, "a transfer is in flight; a request waits for it");
+    }
+    return held;
+}
+
+/**
+ * @brief Keep a read of a data folder, or of a manifest, until the transfer
+ *        in flight ends.
+ *
+ * @param me The AO.
+ * @param e  The request.
+ * @return true when it was kept; false when KODE_STORAGE_READ_WAIT_DEPTH
+ *         reads wait already and this one has to be served, which answers it
+ *         as a read is answered during a transfer.
+ */
+static bool read_hold(Storage * const me, QEvt const * const e)
+{
+    bool const held = storage_wait_hold(&me->super, &me->reads, e);
+
+    if ( held )
+    {
+        KLOG_D(TAG, "a transfer is in flight; a read waits for it");
+    }
+    return held;
+}
+
+/**
+ * @brief Take up what waits once no transfer is in flight.
+ *
+ * Run at the end of every event; what is taken up goes to the front of the
+ * queue, so nothing that arrived later is served before it. A write or delete
+ * that waits goes first, and then the reads, one at a time in arrival order:
+ * a read costs nothing and changes nothing, so it can wait a moment for a
+ * write, and a write served after the read that arrived beside it would leave
+ * that read describing the folder the write is about to replace. Reads cannot
+ * starve a write, which is taken up before any of them, and a read that waits
+ * is answered when its bound passes, whatever the writes do.
+ *
+ * @param me The AO.
+ */
+static void wait_pump(Storage * const me)
+{
+    if ( busy(me) )
+    {
+        return;
+    }
+    if ( QActive_recall(&me->super, &me->turn.q) )
+    {
+        storage_wait_stop(&me->turn);
+    }
+    else if ( !me->read_pause && QActive_recall(&me->super, &me->reads.q) )
+    {
+        if ( QEQueue_isEmpty(&me->reads.q) )
+        {
+            storage_wait_stop(&me->reads);
+        }
+    }
+    else
+    {
+        /* Nothing waits, or the read at the head waits for its pause. */
+    }
+}
+
+/**
+ * @brief The bound has passed: serve the write that waits, which refuses it.
+ *
+ * It is served where it stands, so the refusal is its handler's own - the
+ * answer it gave before it could wait - and the only trace of the wait is the
+ * time it took.
+ *
+ * @param me The AO.
+ */
+static void turn_expired(Storage * const me)
+{
+    if ( storage_wait_due(&me->turn) )
+    {
+        QEvt const * const held = QEQueue_get(&me->turn.q,
+                                              (uint_fast8_t)me->super.prio);
+
+        if ( NULL != held )
+        {
+            (void)Storage_serve(me, held);
+            QF_gc(held);
+        }
+    }
+}
+
+/**
+ * @brief The bound has passed: answer every read that waits as it is answered
+ *        during a transfer, or with what it found when nothing is in flight.
+ *
+ * Each is served where it stands, in arrival order; `read_final` keeps a read
+ * that still finds no block for its icon from waiting again.
+ *
+ * @param me The AO.
+ */
+static void read_expired(Storage * const me)
+{
+    if ( storage_wait_due(&me->reads) )
+    {
+        QEvt const *held = QEQueue_get(&me->reads.q,
+                                       (uint_fast8_t)me->super.prio);
+
+        me->read_final = true;
+        while ( NULL != held )
+        {
+            (void)Storage_serve(me, held);
+            QF_gc(held);
+            held = QEQueue_get(&me->reads.q, (uint_fast8_t)me->super.prio);
+        }
+        me->read_final = false;
+        me->read_pause = false;
+        me->read_tries = 0U;
+    }
+}
+
+/**
+ * @brief The only state: hold what needs the card while a call to it is out,
+ *        hold what writes or reads a data folder while a transfer is in
+ *        flight, serve the rest.
  *
  * @param me The AO.
  * @param e  The event.
@@ -6807,7 +7778,33 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
 {
     QState status;
 
-    if ( me->sdj.busy && needs_card(me, e) && card_hold(me, e) )
+    if ( (QSignal)STORAGE_TURN_TO_SIG == e->sig )
+    {
+        turn_expired(me);
+        status = Q_HANDLED();
+    }
+    else if ( (QSignal)STORAGE_READ_TO_SIG == e->sig )
+    {
+        read_expired(me);
+        status = Q_HANDLED();
+    }
+    else if ( (QSignal)STORAGE_READ_RETRY_SIG == e->sig )
+    {
+        me->read_pause = false;
+        wait_pump(me);
+        status = Q_HANDLED();
+    }
+    else if ( me->sdj.busy && needs_card(me, e) && card_hold(me, e) )
+    {
+        status = Q_HANDLED();
+    }
+    else if ( turn_wanted(e) && busy(me) && turn_hold(me, e) )
+    {
+        status = Q_HANDLED();
+    }
+    else if ( (((QSignal)APPDATA_REQ_SIG == e->sig)
+               || ((QSignal)STORAGE_DESC_REQ_SIG == e->sig))
+             && (busy(me) || me->read_pause) && read_hold(me, e) )
     {
         status = Q_HANDLED();
     }
@@ -6817,6 +7814,7 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
         if ( Q_HANDLED() == status )
         {
             card_pump(me);
+            wait_pump(me);
         }
     }
     return status;

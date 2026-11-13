@@ -115,6 +115,8 @@ _Static_assert((KAPPS_MAX_ENTRIES + 1U) <= UINT8_MAX,
  * the install's end. */
 #define APPMGR_TIDY_TICKS   KQP_TICKS_PER_MS(APPMGR_TIDY_MS)   /**< APPMGR_TIDY_MS (kaos.h) in ticks. */
 #define APPMGR_WIPE_TICKS   KQP_TICKS_PER_MS(APPMGR_WIPE_MS)   /**< APPMGR_WIPE_MS (kaos.h) in ticks. */
+#define APPMGR_PUT_RETRY_TICKS KQP_TICKS_PER_MS(KODE_APPMGR_PUT_RETRY_MS) /**< The pause before a fetched folder's put is asked again, in ticks. */
+#define APPMGR_TIDY_LATE_TICKS KQP_TICKS_PER_MS(APPMGR_TIDY_LATE_MS) /**< APPMGR_TIDY_LATE_MS (kaos.h) in ticks. */
 
 /* An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG): its two
  * files, by the names the folder gives them. */
@@ -125,7 +127,9 @@ _Static_assert((KAPPS_MAX_ENTRIES + 1U) <= UINT8_MAX,
 enum {
     GET_STEP_JSON = 0,   /**< app.json is being read from the URL.   */
     GET_STEP_ICON,       /**< icon.k64 is.                           */
-    GET_STEP_PUT         /**< AO_Storage is writing the folder.      */
+    GET_STEP_PUT,        /**< AO_Storage is writing the folder.      */
+    GET_STEP_RETRY       /**< AO_Storage had no turn for the put: the
+                          *   next try waits for the timer.            */
 };
 
 /* Immutable (statically allocated) outcome events, published on the QF bus.
@@ -393,6 +397,8 @@ typedef struct {
      * which frees it on every path, and an answer is taken only when it names
      * the request in flight (tidy_step and tidy_who()). */
     bool          tidy_swallow;    /**< A deadline already queued is stale: swallow it. */
+    bool          tidy_late;       /**< The last request went unanswered and the install ends in a
+                                    *   boot: its answer gets APPMGR_TIDY_LATE_MS more. */
     /* The evicted apps whose folders go, by project name: they are read off
      * the images before the install overwrites them. PSRAM, taken when the
      * first one is recorded (rule 8: KAPPS_MAX_ENTRIES names would be 2 KB of
@@ -412,19 +418,22 @@ typedef struct {
 
     /* ---- An app's data folder fetched from a URL (APPDATA_GET_REQ_SIG) ---
      * One buffer for both files, app.json then icon.k64, which is what
-     * appdata_put_request() takes: PSRAM, this AO's until AO_Storage has it.
+     * appdata_put_request() takes: PSRAM, this AO's for the whole fetch, since
+     * AO_Storage is handed a copy of it for each try.
      * The base URL is kept in PSRAM too, for the icon's open (rule 8: 200
      * bytes of internal RAM held for a fetch that rarely happens). */
     QActive      *get_who;         /**< Who asked.                              */
     char          get_project[KODE_APP_PROJECT_MAX]; /**< Whose folder.         */
     char         *get_url;         /**< The base URL, KODE_APPDATA_URL_MAX of
                                     *   PSRAM; NULL outside a fetch.            */
-    uint8_t      *get_buf;         /**< The two files; NULL when not this AO's. */
+    uint8_t      *get_buf;         /**< The two files; NULL outside a fetch.   */
     uint16_t      get_json_len;    /**< Bytes of app.json in it.                */
     uint16_t      get_icon_len;    /**< Bytes of icon.k64 after them.           */
     uint32_t      get_want;        /**< What the file in hand said it brings.   */
     uint32_t      get_fill;        /**< How much of it has arrived.             */
     uint8_t       get_step;        /**< GET_STEP_*: which part is out.          */
+    uint8_t       get_tries;       /**< Times the put was asked again after a
+                                    *   busy refusal.                          */
     bool          get_open;        /**< A transfer is open with AO_Net.         */
 } AppMgr;
 
@@ -1569,7 +1578,9 @@ static void erase_take_wipe(AppMgr * const me, StorageAppWipeRspEvt const * cons
  * After region_install() commits, the app's metadata folder is made to match
  * the container, and the folders of evicted apps with no copy on the card are
  * deleted, one request at a time. The install ends (done, launch, `>ok`, boot)
- * only when AO_Storage has answered each one or its deadline ran out.
+ * only when AO_Storage has answered each one or its deadline ran out; an
+ * install that ends in a boot waits once more, for APPMGR_TIDY_LATE_MS, for
+ * the last request it gave, so the reset does not cut a write under way.
  */
 
 /** @brief The project the request in flight is about, for the log. */
@@ -1598,6 +1609,14 @@ static bool tidy_ask_own(AppMgr * const me)
 
     if ( KFW_AD_RAW == me->tidy_ad.kind )
     {
+        return false;
+    }
+    if ( KFW_AD_DROPPED == me->tidy_ad.kind )
+    {
+        /* The container carried a block that could not be read: it said
+         * nothing of the folder, which is left as a bare image leaves it. */
+        KLOG_I(TAG, "the data block of '%s' was dropped; its data folder is "
+                    "left as it is", me->tidy_name);
         return false;
     }
     if ( '\0' == me->tidy_name[0] )
@@ -1714,6 +1733,7 @@ static void tidy_finish(AppMgr * const me)
     (void)QTimeEvt_disarm(&me->tidy);
     me->tidy_on      = false;
     me->tidy_swallow = false;
+    me->tidy_late    = false;
     me->tidy_step    = (uint8_t)TIDY_STEP_NONE;
     kfw_appdata_release(&me->tidy_ad);
 
@@ -1785,6 +1805,34 @@ static void tidy_finish(AppMgr * const me)
 }
 
 /**
+ * @brief Whether the install ends in a reset: a launch, or an adoption's boot request.
+ *
+ * @param me The AO, in its tidy step.
+ * @return true when finishing the tidy step is followed by the board resetting.
+ */
+static bool tidy_boots(const AppMgr * const me)
+{
+    bool boots = false;
+
+    switch ( me->tidy_after )
+    {
+        case TIDY_AFTER_FLASH:
+        case TIDY_AFTER_RECV: {
+            boots = me->launch;
+            break;
+        }
+        case TIDY_AFTER_ADOPT: {
+            boots = (!me->keep_forced) || me->adopt_run;
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    return boots;
+}
+
+/**
  * @brief Start the tidy step of an install that has just committed.
  *
  * Takes the block the decoder kept, and sends the first request or ends the
@@ -1801,6 +1849,7 @@ static void tidy_begin(AppMgr * const me, const char *name, uint8_t after)
     me->tidy_launch    = false;
     me->tidy_own_asked = false;
     me->tidy_swallow   = false;
+    me->tidy_late      = false;
     me->victim_next    = 0U;
     (void)snprintf(me->tidy_name, sizeof(me->tidy_name), "%.*s", (int)(sizeof(me->tidy_name) - 1U), name);
     if ( (uint8_t)TIDY_AFTER_ERASE == after )
@@ -4273,6 +4322,48 @@ static QState keep_only_ask(AppMgr * const me, QEvt const * const e)
  */
 
 /**
+ * @brief Say that a fetch ended without a folder: the one line about it.
+ *
+ * A fetch that ends in AO_Storage's put is told by AO_Storage, which knows what
+ * it wrote; every other end is told here.
+ *
+ * @param project Whose folder.
+ * @param why     What went wrong.
+ */
+static void get_say(const char *project, appdata_get_why_t why)
+{
+    const char *words = "AO_Storage did not say how it went";
+
+    switch ( why )
+    {
+        case APPDATA_GET_BUSY: {
+            words = "it could not be carried on for want of memory";
+            break;
+        }
+        case APPDATA_GET_NAME: {
+            words = "it is not a name a data folder takes";
+            break;
+        }
+        case APPDATA_GET_FETCH: {
+            words = "its files could not be fetched";
+            break;
+        }
+        case APPDATA_GET_JSON: {
+            words = "its app.json is not one the board reads";
+            break;
+        }
+        case APPDATA_GET_ICON: {
+            words = "its icon is not an icon of the one size";
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    KLOG_N(TAG, "the data folder of '%s' was not written: %s", project, words);
+}
+
+/**
  * @brief Answer a fetch.
  *
  * @param who     The asker.
@@ -4303,8 +4394,7 @@ static void get_reply(QActive * const who, const char *project,
 
 #if CONFIG_KODEOS_NET
 /**
- * @brief Give back what a fetch still holds: the files' buffer, unless
- *        AO_Storage has it, and the base URL.
+ * @brief Give back what a fetch still holds: the files' buffer and the base URL.
  *
  * @param me The AO.
  */
@@ -4362,24 +4452,39 @@ static QState get_fail(AppMgr * const me, appdata_get_why_t why)
         net_stream_close_request();
         me->get_open = false;
     }
+    get_say(me->get_project, why);
     get_reply(me->get_who, me->get_project, why, false);
     return Q_TRAN(&AppMgr_idle);
 }
 
 /**
- * @brief Hand the fetched folder to AO_Storage.
+ * @brief Hand the fetched folder to AO_Storage, as a copy of the files.
+ *
+ * AO_Storage frees the buffer it is handed on every path, a refusal included,
+ * so a put that may be asked again is never given the fetch's own.
  *
  * @param me The AO.
  * @return The state's answer: it stays for AO_Storage's, or ends busy.
  */
 static QState get_put(AppMgr * const me)
 {
-    if ( appdata_put_request(me->get_project, me->get_buf, me->get_json_len,
+    size_t const len = (size_t)me->get_json_len + (size_t)me->get_icon_len;
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+    uint8_t * const copy = (uint8_t *)khal_alloc_psram(1U, len);
+
+    if ( NULL == copy )
+    {
+        KLOG_W(TAG, "no PSRAM to hand the data folder of '%s' over",
+               me->get_project);
+        return get_fail(me, APPDATA_GET_BUSY);
+    }
+    (void)memcpy(copy, me->get_buf, len);
+    if ( appdata_put_request(me->get_project, copy, me->get_json_len,
                              me->get_icon_len, &me->super) != KODE_OK )
     {
-        return get_fail(me, APPDATA_GET_BUSY);   /* the buffer is still ours */
+        khal_free(copy);                         /* not posted: still ours */
+        return get_fail(me, APPDATA_GET_BUSY);
     }
-    me->get_buf  = NULL;                         /* AO_Storage's from here */
     me->get_step = (uint8_t)GET_STEP_PUT;
     (void)QTimeEvt_rearm(&me->idle, APPMGR_TIDY_TICKS);
     return Q_HANDLED();
@@ -4550,7 +4655,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
                               req->project) )
     {
-        KLOG_W(TAG, "'%s' cannot name a data folder", req->project);
+        get_say(req->project, APPDATA_GET_NAME);
         get_reply(req->who, req->project, APPDATA_GET_NAME, false);
         return Q_HANDLED();
     }
@@ -4562,7 +4667,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     me->get_url = (char *)khal_alloc_psram(1U, (size_t)KODE_APPDATA_URL_MAX);
     if ( (NULL == me->get_buf) || (NULL == me->get_url) )
     {
-        KLOG_W(TAG, "no PSRAM to fetch the data folder of '%s'", req->project);
+        get_say(req->project, APPDATA_GET_BUSY);
         get_release(me);
         get_reply(req->who, req->project, APPDATA_GET_BUSY, false);
         return Q_HANDLED();
@@ -4571,6 +4676,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     me->get_step     = (uint8_t)GET_STEP_JSON;
     me->get_json_len = 0U;
     me->get_icon_len = 0U;
+    me->get_tries    = 0U;
     me->get_open     = false;
     (void)snprintf(me->get_project, sizeof(me->get_project), "%s", req->project);
     (void)snprintf(me->get_url, (size_t)KODE_APPDATA_URL_MAX, "%s", req->url);
@@ -4579,6 +4685,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     return Q_TRAN(&AppMgr_fetching);
 #else
     KLOG_E(TAG, "this firmware has no network services");
+    get_say(req->project, APPDATA_GET_FETCH);
     get_reply(req->who, req->project, APPDATA_GET_FETCH, false);
     return Q_HANDLED();
 #endif
@@ -4590,9 +4697,10 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
  *        to write it.
  *
  * Every wait has the deadline timer the other transfers use; the states are
- * mutually exclusive and each disarms it on the way out. The buffer is this
- * AO's until AO_Storage takes it, and whatever is still held is freed on the
- * way out.
+ * mutually exclusive and each disarms it on the way out. The same timer paces
+ * the put's tries: a put AO_Storage refuses as busy is asked again after
+ * KODE_APPMGR_PUT_RETRY_MS, KODE_APPMGR_PUT_TRIES times. The buffer is this
+ * AO's throughout, and whatever is still held is freed on the way out.
  */
 static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
 {
@@ -4619,32 +4727,52 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
             if ( ((uint8_t)GET_STEP_PUT == me->get_step)
                 && (strcmp(rsp->project, me->get_project) == 0) )
             {
-                appdata_get_why_t why = APPDATA_GET_STORE;
-
-                if ( KODE_OK == rsp->rc )
+                if ( (KODE_DENIED == rsp->rc) && rsp->busy
+                    && (KODE_APPMGR_PUT_TRIES > me->get_tries) )
                 {
-                    why = APPDATA_GET_OK;
-                }
-                else if ( KODE_NO_RESOURCES == rsp->rc )
-                {
-                    why = APPDATA_GET_FULL;
-                }
-                else if ( KODE_DENIED == rsp->rc )
-                {
-                    why = APPDATA_GET_BUSY;
+                    /* Nothing was written, and the files are still here. */
+                    ++me->get_tries;
+                    me->get_step = (uint8_t)GET_STEP_RETRY;
+                    (void)QTimeEvt_rearm(&me->idle, APPMGR_PUT_RETRY_TICKS);
+                    KLOG_N(TAG, "AO_Storage had no turn for the data folder of "
+                                "'%s'; asking again (%u of %u)", me->get_project,
+                           (unsigned)me->get_tries,
+                           (unsigned)KODE_APPMGR_PUT_TRIES);
                 }
                 else
                 {
-                    /* The folder could not be written. */
+                    appdata_get_why_t why = APPDATA_GET_STORE;
+
+                    if ( KODE_OK == rsp->rc )
+                    {
+                        why = APPDATA_GET_OK;
+                    }
+                    else if ( KODE_NO_RESOURCES == rsp->rc )
+                    {
+                        why = APPDATA_GET_FULL;
+                    }
+                    else if ( KODE_DENIED == rsp->rc )
+                    {
+                        why = APPDATA_GET_BUSY;
+                    }
+                    else
+                    {
+                        /* The folder could not be written. */
+                    }
+                    get_reply(me->get_who, me->get_project, why,
+                              (APPDATA_GET_OK == why)
+                              && (0U != me->get_icon_len));
+                    status = Q_TRAN(&AppMgr_idle);
                 }
-                get_reply(me->get_who, me->get_project, why,
-                          (APPDATA_GET_OK == why) && (0U != me->get_icon_len));
-                status = Q_TRAN(&AppMgr_idle);
             }
             break;
         }
         case APP_RECV_IDLE_SIG: {
-            if ( (uint8_t)GET_STEP_PUT == me->get_step )
+            if ( (uint8_t)GET_STEP_RETRY == me->get_step )
+            {
+                status = get_put(me);
+            }
+            else if ( (uint8_t)GET_STEP_PUT == me->get_step )
             {
                 KLOG_W(TAG, "AO_Storage never said how the data folder of '%s' "
                             "went", me->get_project);
@@ -5012,14 +5140,35 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
                 me->tidy_swallow = false;   /* the deadline of an answered request */
                 break;
             }
+            if ( me->tidy_late )
+            {
+                KLOG_W(TAG, "AO_Storage still has not answered for the data "
+                            "folder of '%s'; the install goes on", tidy_who(me));
+                tidy_finish(me);
+                status = tidy_state(me);
+                break;
+            }
             KLOG_W(TAG, "AO_Storage did not answer for the data folder of "
                         "'%s'; the rest goes on", tidy_who(me));
             /* Nothing to free: a put's buffer is AO_Storage's. */
-            if ( !tidy_advance(me) )
+            uint8_t const owed = me->tidy_step;
+            if ( tidy_advance(me) )
             {
-                tidy_finish(me);
-                status = tidy_state(me);
+                break;
             }
+            if ( tidy_boots(me) )
+            {
+                /* Nothing more is asked, and the board resets right after:
+                 * the request that went unanswered may still be a write, and
+                 * AO_Storage answers in order, so its answer is the last
+                 * word. Awaited once more, under its own bound. */
+                me->tidy_step = owed;
+                me->tidy_late = true;
+                (void)QTimeEvt_rearm(&me->tidy, APPMGR_TIDY_LATE_TICKS);
+                break;
+            }
+            tidy_finish(me);
+            status = tidy_state(me);
             break;
         }
         case FLASH_REQ_SIG:

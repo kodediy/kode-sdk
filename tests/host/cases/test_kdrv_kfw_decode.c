@@ -677,6 +677,18 @@ static void ad_expect_none(void)
     TEST_ASSERT_EQUAL_UINT(fake_psram_alloc_count(), fake_psram_free_count());
 }
 
+/** @brief Assert the session dropped its block: nothing to take, and the folder is not its to touch. */
+static void ad_expect_dropped(void)
+{
+    kfw_appdata_t ad;
+
+    kfw_appdata_take(&ad);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KFW_AD_DROPPED, (int)ad.kind,
+        "a dropped block was reported as no block, and the folder would go");
+    TEST_ASSERT_NULL(ad.buf);
+    TEST_ASSERT_EQUAL_UINT(fake_psram_alloc_count(), fake_psram_free_count());
+}
+
 TEST_CASE("a container with a block installs and hands the block over",
           "[kfw_decode]")
 {
@@ -784,7 +796,7 @@ TEST_CASE("a block with a bad crc is dropped and the image still installs",
 
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_MEMORY(s_ad_body, s_got, sizeof(s_ad_body));
-    ad_expect_none();
+    ad_expect_dropped();
 }
 
 TEST_CASE("a block whose json is not kode 1 is dropped", "[kfw_decode]")
@@ -802,7 +814,7 @@ TEST_CASE("a block whose json is not kode 1 is dropped", "[kfw_decode]")
     TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
 
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
-    ad_expect_none();
+    ad_expect_dropped();
 }
 
 /* The size is read before anything is allocated, and a block that cannot be
@@ -826,7 +838,7 @@ TEST_CASE("a block with icon_len 100 is dropped without allocating",
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_MEMORY(s_ad_body, s_got, sizeof(s_ad_body));
     TEST_ASSERT_EQUAL_UINT(0U, fake_psram_alloc_count());
-    ad_expect_none();
+    ad_expect_dropped();
 }
 
 TEST_CASE("a block with an icon between the two sizes is dropped without allocating",
@@ -847,7 +859,7 @@ TEST_CASE("a block with an icon between the two sizes is dropped without allocat
 
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_UINT(0U, fake_psram_alloc_count());
-    ad_expect_none();
+    ad_expect_dropped();
 }
 
 TEST_CASE("a block that cannot get PSRAM is dropped and the image installs",
@@ -868,7 +880,7 @@ TEST_CASE("a block that cannot get PSRAM is dropped and the image installs",
 
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_MEMORY(s_ad_body, s_got, sizeof(s_ad_body));
-    ad_expect_none();
+    ad_expect_dropped();
 }
 
 TEST_CASE("a block that does not start with its magic ends the transfer",

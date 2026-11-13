@@ -185,8 +185,9 @@ typedef enum {
 /** @brief What a finished session has for the folder. */
 typedef enum {
     KFW_AD_RAW = 0,       /**< A bare image: the folder is left as it is.       */
-    KFW_AD_NONE,          /**< A container with no block, or a dropped one: the folder goes. */
-    KFW_AD_BLOCK          /**< A checked block: the folder becomes this.        */
+    KFW_AD_NONE,          /**< A container that carries no block: the folder goes. */
+    KFW_AD_BLOCK,         /**< A checked block: the folder becomes this.        */
+    KFW_AD_DROPPED        /**< A container whose block was dropped (size, CRC, syntax, no PSRAM): the folder is left as it is, like a bare image's. */
 } kfw_ad_kind_t;
 
 /** @brief The block a session kept, and who owns it now. */

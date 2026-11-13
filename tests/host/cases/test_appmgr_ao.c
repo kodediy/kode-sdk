@@ -6076,6 +6076,43 @@ TEST_CASE("a container without a block removes the folder before it is done",
     tidy_end_case();
 }
 
+/**
+ * @brief Build in s_cont a container for an app whose block cannot be believed.
+ *
+ * The block's CRC is wrong, so the decoder drops it and installs the image:
+ * the container did not say the folder should go, it said nothing that could
+ * be read.
+ *
+ * @param project The project the image carries.
+ * @return The container's length.
+ */
+static uint32_t container_dropped(const char *project)
+{
+    uint32_t const len = container_named(project, true, false);
+
+    s_cont[KFW_HDR_LEN + KFW_AD_OFS_CRC] ^= 1U;
+    return len;
+}
+
+TEST_CASE("a container whose block was dropped leaves the folder alone, as a bare image does",
+          "[appmgr_ao][tidy]")
+{
+    tidy_begin_case();
+    uint32_t const len = container_dropped("damaged");
+
+    install_container(len, false);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_folder_requests(),
+        "a block that could not be read deleted or wrote the app's folder");
+    ends_seen_t const seen = spy_ends();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.flash_done,
+        "the install waited for a folder nobody asked about");
+    TEST_ASSERT_EQUAL_STRING("damaged", seen.name);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("left as it is"),
+        "the folder was left without a word");
+    tidy_end_case();
+}
+
 TEST_CASE("a raw image leaves the folder alone", "[appmgr_ao][tidy]")
 {
     tidy_begin_case();
@@ -6114,6 +6151,84 @@ TEST_CASE("launch waits for the folder", "[appmgr_ao][tidy]")
     TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
         "the app was never launched once its folder was written");
     TEST_ASSERT_EQUAL_INT(KBOOT_RUN_ONCE, mode);
+    tidy_end_case();
+}
+
+/** @brief APPMGR_TIDY_MS in QP ticks, as appmgr_ao.c has it. */
+#define APPMGR_TIDY_TEST_TICKS       (APPMGR_TIDY_MS / 10U)
+
+/** @brief APPMGR_TIDY_LATE_MS in QP ticks. */
+#define APPMGR_TIDY_LATE_TEST_TICKS  (APPMGR_TIDY_LATE_MS / 10U)
+
+/* A folder AO_Storage has not answered for may still be being written: the
+ * reset that follows a launch would cut it. The install that ends in a boot
+ * gives the last request a little longer, once. */
+TEST_CASE("an install that boots does not reset over a folder write still under way",
+          "[appmgr_ao][tidy]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    tidy_begin_case();
+    (void)boot_run_request(&off, &size, &mode);
+    uint32_t const len = container_named("slowfolder", true, false);
+
+    install_container(len, true);
+    TEST_ASSERT_TRUE(storage_has_for(APPDATA_PUT_REQ_SIG, "slowfolder"));
+
+    run_ticks(APPMGR_TIDY_TEST_TICKS + 5U);
+    TEST_ASSERT_TRUE(klog_has("did not answer for the data folder"));
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 20U);
+    TEST_ASSERT_FALSE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "the board reset over a folder AO_Storage was still writing");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_ends().flash_done,
+        "the install ended with its folder still out");
+
+    put_rsp("slowfolder", KODE_OK);                      /* the late answer */
+    TEST_ASSERT_EQUAL_UINT(1U, spy_ends().flash_done);
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 20U);
+    TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "the launch did not follow the folder's late answer");
+    tidy_end_case();
+}
+
+TEST_CASE("an install that boots waits for a late folder answer once, and no longer",
+          "[appmgr_ao][tidy]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    tidy_begin_case();
+    (void)boot_run_request(&off, &size, &mode);
+    uint32_t const len = container_named("lostfolder", true, false);
+
+    install_container(len, true);
+    TEST_ASSERT_TRUE(storage_has_for(APPDATA_PUT_REQ_SIG, "lostfolder"));
+
+    run_ticks(APPMGR_TIDY_TEST_TICKS + APPMGR_TIDY_LATE_TEST_TICKS - 10U);
+    TEST_ASSERT_FALSE(boot_run_request(&off, &size, &mode));
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 30U);
+    TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
+        "a folder AO_Storage never answered held the launch for ever");
+    TEST_ASSERT_TRUE(klog_has("still has not answered"));
+    tidy_end_case();
+}
+
+TEST_CASE("an install that does not boot ends at the first deadline, as it did",
+          "[appmgr_ao][tidy]")
+{
+    tidy_begin_case();
+    uint32_t const len = container_named("quietfolder", true, false);
+
+    install_container(len, false);
+    TEST_ASSERT_TRUE(storage_has_for(APPDATA_PUT_REQ_SIG, "quietfolder"));
+
+    run_ticks(APPMGR_TIDY_TEST_TICKS + 5U);
+    ends_seen_t const seen = spy_ends();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.flash_done,
+        "an install with no reset ahead waited for a folder it can do without");
     tidy_end_case();
 }
 
@@ -7753,6 +7868,81 @@ static appdata_get_why_t fetch_answer(const char *project)
     return why;
 }
 
+/* AO_Net's stream buffers do not exist here, so the tests CMake renames
+ * AppMgr's one call that reads them to this function: a fetched file's bytes
+ * are in s_net_chunk, as buffer 0. Every other index is a buffer AO_Net has
+ * not got. */
+static uint8_t s_net_chunk[KAPP_DATA_JSON_MAX];
+
+const uint8_t *host_net_stream_buf(uint8_t idx);
+
+const uint8_t *host_net_stream_buf(uint8_t idx)
+{
+    const uint8_t *buf = NULL;
+
+    if ( 0U == idx )
+    {
+        buf = s_net_chunk;
+    }
+    return buf;
+}
+
+/** @brief The app.json every fetch below brings: it names no icon. */
+#define GET_JSON_BODY  "{\"kode\":\"1\",\"name\":\"Snake\",\"category\":\"games\"}"
+
+/**
+ * @brief Run a fetch of "snake" up to the put it asks AO_Storage for: app.json
+ *        arrives whole in one chunk and names no icon.
+ */
+static void fetch_to_the_put(void)
+{
+    StorageDataEvt d;
+    uint32_t const len = (uint32_t)(sizeof(GET_JSON_BODY) - 1U);
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_OK, len);
+
+    (void)memcpy(s_net_chunk, GET_JSON_BODY, len);
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.len    = (uint16_t)len;
+    d.idx    = 0U;
+    d.status = (uint8_t)KODE_OK;
+    d.eof    = true;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+}
+
+/**
+ * @brief AO_Storage reads the put AO_AppMgr asked for: it must name "snake"
+ *        and carry app.json whole, and it gives the buffer back.
+ */
+static void fetch_put_is_whole(void)
+{
+    const QEvt * const e = storage_take(APPDATA_PUT_REQ_SIG);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the folder was not asked for");
+    AppDataPutEvt const * const put = (AppDataPutEvt const *)e;
+    TEST_ASSERT_EQUAL_STRING("snake", put->project);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)(sizeof(GET_JSON_BODY) - 1U), put->json_len);
+    TEST_ASSERT_EQUAL_UINT16(0U, put->icon_len);
+    TEST_ASSERT_EQUAL_MEMORY(GET_JSON_BODY, put->buf, put->json_len);
+    put_done(e);
+}
+
+/** @brief AO_Storage answers "snake"'s put: refused for want of a turn. */
+static void put_rsp_busy(void)
+{
+    AppDataPutRspEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.super = (QEvt)QEVT_INITIALIZER(APPDATA_PUT_RSP_SIG);
+    (void)snprintf(r.project, sizeof(r.project), "%s", "snake");
+    r.rc   = KODE_DENIED;
+    r.busy = true;
+    QASM_DISPATCH(AO_AppMgr, &r.super, 0U);
+}
+
 /** @brief The start of a fetch case: an idle AppMgr, empty mailboxes, a clean heap. */
 static void fetch_fresh(void)
 {
@@ -7921,6 +8111,115 @@ TEST_CASE("a chunk that says the read failed ends the fetch",
     QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
     TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
     TEST_ASSERT_EQUAL_UINT(1U, net_seen().closes);
+    fetch_end();
+}
+
+TEST_CASE("a fetch whose put is refused as busy asks again after a pause, and "
+          "lands on the second try", "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    fetch_to_the_put();
+    fetch_put_is_whole();
+    put_rsp_busy();
+
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a busy put ended the fetch");
+    run_ticks((KODE_APPMGR_PUT_RETRY_MS / 10U) - 5U);
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(APPDATA_PUT_REQ_SIG, "snake"),
+        "asked again before the pause was over");
+
+    run_ticks(10U);
+    fetch_put_is_whole();                 /* the same folder, whole, again */
+    put_rsp("snake", KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_OK, fetch_answer("snake"));
+    fetch_end();
+}
+
+TEST_CASE("a fetch whose put stays refused as busy tells busy after its tries",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    fetch_to_the_put();
+    for ( uint32_t i = 0U; KODE_APPMGR_PUT_TRIES > i; ++i )
+    {
+        fetch_put_is_whole();
+        put_rsp_busy();
+        TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "gave up before its last try");
+        run_ticks((KODE_APPMGR_PUT_RETRY_MS / 10U) + 2U);
+    }
+    fetch_put_is_whole();                 /* the last try */
+    put_rsp_busy();
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_BUSY, fetch_answer("snake"));
+    TEST_ASSERT_FALSE_MESSAGE(storage_has_for(APPDATA_PUT_REQ_SIG, "snake"),
+        "asked once more than it may");
+    fetch_end();
+}
+
+TEST_CASE("a put refused for another reason is not asked again",
+          "[appmgr_ao][appdata_get]")
+{
+    fetch_fresh();
+
+    fetch_to_the_put();
+    fetch_put_is_whole();
+    put_rsp("snake", KODE_DENIED);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_BUSY, fetch_answer("snake"));
+    run_ticks((KODE_APPMGR_PUT_RETRY_MS / 10U) + 2U);
+    TEST_ASSERT_FALSE(storage_has_for(APPDATA_PUT_REQ_SIG, "snake"));
+    fetch_end();
+}
+
+/* A fetch that ends in AO_Storage's put is told by AO_Storage; every other end
+ * is told here, once. */
+TEST_CASE("a fetch that fails before its put says why no folder was written",
+          "[appmgr_ao][appdata_get][say]")
+{
+    fetch_fresh();
+    fake_klog_reset();
+
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_ERROR, 0U);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT(1U, klog_count("the data folder of 'snake' was not "
+                                          "written"));
+    TEST_ASSERT_TRUE(klog_has("the data folder of 'snake' was not written: "
+                              "its files could not be fetched"));
+    fetch_end();
+}
+
+TEST_CASE("a fetch for a name that cannot be a folder says why too",
+          "[appmgr_ao][appdata_get][say]")
+{
+    fetch_fresh();
+    fake_klog_reset();
+
+    ask_get("../etc", GET_URL);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_NAME, fetch_answer("../etc"));
+    TEST_ASSERT_TRUE(klog_has("the data folder of '../etc' was not written: "
+                              "it is not a name a data folder takes"));
+    fetch_end();
+}
+
+TEST_CASE("a fetch whose put is answered adds no line of its own",
+          "[appmgr_ao][appdata_get][say]")
+{
+    fetch_fresh();
+
+    fetch_to_the_put();
+    fetch_put_is_whole();
+    fake_klog_reset();
+    put_rsp("snake", KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_OK, fetch_answer("snake"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, klog_count("the data folder of 'snake' "),
+        "AO_Storage says how its put ended; this AO says nothing more");
     fetch_end();
 }
 

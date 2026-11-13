@@ -229,7 +229,8 @@ kode_status_t console_fs_write(QActive *who, const char *in, const char *text,
  *        receive a payload arriving on the console into it.
  *
  * AO_Storage answers @p who with RECV_READY_SIG, a RECV_ACK_SIG per chunk, and
- * one of RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG. A failed transfer
+ * one of RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG, or with RECV_BUSY_SIG
+ * alone when a transfer in flight outlasted its wait. A failed transfer
  * leaves nothing on disk. No STAT phase: an existing file is replaced. Raw
  * mode takes the port @p src names; verified on the cable, untried on BLE.
  *

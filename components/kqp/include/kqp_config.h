@@ -768,15 +768,13 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
                                        *   included.                        */
 /* An app's data folder (app.json and icon.k64) may reach the internal
  * partition before its app does, so nothing bounds how many there are but the
- * partition itself. A new one is refused when it would leave less than the
+ * partition itself. A put is charged what it weighs on the volume: its json
+ * and its icon, each in whole clusters, and the folder's own cluster when the
+ * folder is new; a replacement writes its pair beside the old one and is
+ * charged the pair. A new folder is refused when it would leave less than the
  * floor free: Kody's pack is staged beside the one in use when it updates. */
-#define KODE_APPDATA_CLUSTER_BYTES  4096U          /**< The internal FAT's allocation unit. */
-#define KODE_APPDATA_FOLDER_BYTES   ((2U + (KODE_APP_ICON_BYTES / KODE_APPDATA_CLUSTER_BYTES)) \
-                                     * KODE_APPDATA_CLUSTER_BYTES)
-                                      /**< What one data folder takes at most: the
-                                       *   directory's cluster, app.json's, and
-                                       *   the clusters of a 128x128 icon (a
-                                       *   64x64 one takes a quarter of them). */
+#define KODE_APPDATA_CLUSTER_BYTES  4096U          /**< The internal FAT's allocation unit the charge assumes when the
+                                       *   driver cannot say: what the volume is formatted with. */
 #define KODE_APPDATA_FREE_MIN_BYTES (128U * 1024U) /**< What a new data folder
                                        *   must leave free on the internal
                                        *   partition.                       */
@@ -1127,6 +1125,21 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         request over this many is refused the way it is when the AO has no
  *         room to run it. */
 #define KODE_STORAGE_DEFER_DEPTH      8U
+/** @brief The longest a request that writes or deletes waits for the transfer
+ *         AO_Storage has in flight to end. It is served when the transfer
+ *         does; past this it is refused as busy. */
+#define KODE_STORAGE_TURN_MS         2000U
+/** @brief Reads of an app's data folder, and of a manifest, AO_Storage holds in
+ *         arrival order while a transfer is in flight; each is answered when
+ *         it ends, or after KODE_STORAGE_TURN_MS from the first one held. One
+ *         over this many is answered at once, as a read is during a
+ *         transfer. */
+#define KODE_STORAGE_READ_WAIT_DEPTH  8U
+/** @brief The pause before a folder read whose icon found the icon pool short
+ *         tries again, within the same bound: the pool holds one icon's pieces,
+ *         and the reader of the last icon hands them back with no event of
+ *         its own to say so. */
+#define KODE_STORAGE_ICON_RETRY_MS    20U
 
 /* ---- The NFC row ----------------------------------------------------------
  * ASYNC, and it does what no other row does: it WRITES. The board's own
@@ -1603,6 +1616,11 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief The longest AO_AppMgr waits for AO_Storage or AO_Net to answer an
  *         open or a STAT of the card; then it gives that wait up. */
 #define KODE_APPMGR_OPEN_MS     30000U
+/** @brief How many times AO_AppMgr asks again for a fetched data folder's put
+ *         that AO_Storage refused as busy, before the fetch fails busy. */
+#define KODE_APPMGR_PUT_TRIES   3U
+/** @brief The pause before each of those tries, in ms. */
+#define KODE_APPMGR_PUT_RETRY_MS 500U
 
 /* ---- The factory reset's budgets ----------------------------------------
  * AO_Boot walks the reset one step at a time and arms one timer per step; a

@@ -25,6 +25,11 @@ bool        kdrv_fs_mounted(void);
 const char *kdrv_fs_mount_point(void);
 /** @brief Total and free bytes. */
 kode_status_t kdrv_fs_usage(uint64_t *total, uint64_t *free_bytes);
+/**
+ * @brief The volume's allocation unit, in bytes: what a file of one byte takes.
+ * @return The cluster size, or 0 when the volume is not mounted or will not say.
+ */
+uint32_t    kdrv_fs_cluster_bytes(void);
 
 #ifdef __cplusplus
 }

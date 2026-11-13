@@ -7943,6 +7943,17 @@ static QState console_own(Console * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case RECV_BUSY_SIG: {
+            /* AO_Storage's transfer in flight outlasted the wait of this
+             * `file_put`: nothing was armed, the host sends no byte. */
+            if ( (uint8_t)KCLI_RECV == me->inflight )
+            {
+                console_reply_err(KCLI_ERR_BUSY, "busy");
+                console_end();
+            }
+            status = Q_HANDLED();
+            break;
+        }
 #if CONFIG_KODEOS_SHOT_HTTP
         case NET_SHOT_RSP_SIG: {
             /* Only the order in flight hears it. AO_Net can answer a capture
@@ -8135,6 +8146,12 @@ static QState console_own(Console * const me, QEvt const * const e)
                     console_reply(">|appdata project=%s json=ok icon=%s",
                                   console_quote(q, sizeof(q), g->project), icon);
                     console_reply(">ok");
+                }
+                else if ( (uint8_t)APPDATA_GET_BUSY == g->why )
+                {
+                    /* The one refusal that asking again cures: the code every
+                     * other verb gives a busy answer. */
+                    console_reply_err(KCLI_ERR_BUSY, ad_get_word(g->why));
                 }
                 else
                 {
