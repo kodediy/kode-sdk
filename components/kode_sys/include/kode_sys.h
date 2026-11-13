@@ -1467,7 +1467,8 @@ kode_status_t kode_sys_wifi_scan(QActive *me);
  * listens on the network's own channel or refuses. One AO listens at a time.
  * AO_Radio posts the answers to @p me, never publishes them, and keeps
  * KQP_FRAMES_MARGIN slots of its queue free: what does not fit is counted in
- * the next tick's @c dropped. That count is this chip's alone: a frame the
+ * the next tick's @c dropped, as are the records of a batch that did not come
+ * whole. That count is this chip's alone: a frame the
  * C5 could not queue or fit in a batch is in @c heard and in no drop count,
  * and a tick this chip could not post is counted nowhere. A tick's
  * @c channel is the radio's when the batch was sent, so frames heard while a
@@ -1486,7 +1487,20 @@ typedef WifiFramesStateEvt kode_sys_wifi_frames_state_t;
 typedef WifiFramesTickEvt kode_sys_wifi_frames_tick_t;
 
 /* cppcheck-suppress misra-c2012-2.3 ; a frame's name for the apps that read it, never used inside the SDK */
-/** @brief One frame heard (WIFI_FRAME_SIG): @c channel, @c rssi, @c fc, @c addr1, @c addr2, @c len and @c head. */
+/** @brief One frame heard (WIFI_FRAME_SIG): @c channel, @c rssi, @c fc, @c addr1, @c addr2, @c addr3, @c len,
+ *         @c head_len and @c head.
+ *
+ * @c head is the first KWIFI_FRAME_HEAD_LEN bytes after the MAC header of a
+ * management or a control frame. In a beacon and a probe response that is the
+ * 12 fixed bytes - the capabilities at 10, privacy their bit 4 - and the first
+ * element, the network's name, whole up to its 32 bytes. A data frame's
+ * @c head is zeros and its @c head_len 0, from any C5: what follows its
+ * header is a third party's traffic.
+ * @c addr3 is the network's address in a management frame, a
+ * deauthentication among them; in a data frame it is the address its To DS
+ * and From DS bits (@c fc[1], bits 0 and 1) give it. @c head_len says how
+ * many bytes of @c head are kept: 8, with @c addr3 zeros, from a C5 older
+ * than the longer head - the name is not in those. */
 typedef WifiFrameEvt kode_sys_wifi_frame_t;
 
 /**

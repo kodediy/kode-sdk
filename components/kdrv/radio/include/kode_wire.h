@@ -21,6 +21,16 @@
  * changes. A new service or operation is not one, because a peer that does
  * not know it answers KODE_ST_BAD_REQUEST. The P4 refuses a C5 that answers
  * with another version.
+ *
+ * One record grew without the version: kode_sniff_rec_t, from 25 bytes to 71
+ * (a third address, and 48 bytes of head for 8). A C5 sends it only to a P4
+ * that asks with KODE_SNIFF_WIDE in SNIFF_START's flags, and otherwise sends
+ * kode_sniff_rec_short_t, the record as it was. A batch carries no record
+ * size; its length and its count give it. So every pair reads what it gets:
+ * a C5 from before the bit ignores the flags byte, which was reserved, and
+ * sends the short record, which a P4 that asks for the wide one reads as well
+ * (kdrv_frames.c); a P4 from before the bit asks with flags 0 and gets the
+ * short record it knows.
  */
 #ifndef KODE_WIRE_H_
 #define KODE_WIRE_H_
@@ -109,7 +119,12 @@
 #define KODE_SNIFF_WHY_MEMORY   4U  /**< No room for the queue or the task.  */
 
 #define KODE_SNIFF_BATCH_MAX    8U  /**< Records in one batch, at most.      */
-#define KODE_SNIFF_HEAD_LEN     8U  /**< Bytes kept after the MAC header.    */
+#define KODE_SNIFF_WIDE         0x01U /**< SNIFF_START flags: send kode_sniff_rec_t. */
+#define KODE_SNIFF_SHORT_HEAD_LEN 8U /**< Bytes of head in kode_sniff_rec_short_t. */
+#define KODE_SNIFF_HEAD_LEN     48U /**< Bytes kept after the MAC header: a
+                                     *   beacon's 12 fixed bytes, the 2 of its
+                                     *   name's element header and a name of
+                                     *   up to 32.                           */
 #define KODE_SNIFF_RSSI_NONE    (-128) /**< rssi_max of a period with no frame. */
 
 /** @brief Every message starts with this. */
@@ -224,7 +239,7 @@ _Static_assert(sizeof(kode_btkey_t) == (KODE_TOKEN_LEN + KODE_BTKEY_LEN), "kode_
 /** @brief SNIFF_START's request. */
 typedef struct __attribute__((packed)) {
     uint8_t channel;    /**< 1..KODE_SNIFF_CHANNEL_MAX, or 0: stay where the radio is. */
-    uint8_t reserved;   /**< 0.                                                */
+    uint8_t flags;      /**< KODE_SNIFF_WIDE, or 0 for the short record; other bits 0. */
 } kode_sniff_start_t;
 _Static_assert(sizeof(kode_sniff_start_t) == 2U, "kode_sniff_start_t layout");
 
@@ -243,10 +258,30 @@ typedef struct __attribute__((packed)) {
     uint8_t  fc[2];     /**< Frame control, as on the air.                     */
     uint8_t  addr1[6];  /**< Address 1, as on the air.                         */
     uint8_t  addr2[6];  /**< Zeros when the frame has none.                    */
+    uint8_t  addr3[6];  /**< Zeros when the frame has none.                    */
     uint16_t len;       /**< The frame's length on the air.                    */
-    uint8_t  head[KODE_SNIFF_HEAD_LEN]; /**< After the MAC header; zeros past the end. */
+    uint8_t  head[KODE_SNIFF_HEAD_LEN]; /**< After the MAC header; zeros past the end,
+                                         *   and in a data frame.                  */
 } kode_sniff_rec_t;
-_Static_assert(sizeof(kode_sniff_rec_t) == 25U, "kode_sniff_rec_t layout");
+_Static_assert(sizeof(kode_sniff_rec_t) == 71U, "kode_sniff_rec_t layout");
+
+/** @brief The record without KODE_SNIFF_WIDE: no third address, a short head. */
+typedef struct __attribute__((packed)) {
+    int8_t   rssi;      /**< dBm.                                              */
+    uint8_t  fc[2];     /**< Frame control, as on the air.                     */
+    uint8_t  addr1[6];  /**< Address 1, as on the air.                         */
+    uint8_t  addr2[6];  /**< Zeros when the frame has none.                    */
+    uint16_t len;       /**< The frame's length on the air.                    */
+    uint8_t  head[KODE_SNIFF_SHORT_HEAD_LEN]; /**< After the MAC header; zeros past the end,
+                                               *   and in a data frame.            */
+} kode_sniff_rec_short_t;
+_Static_assert(sizeof(kode_sniff_rec_short_t) == 25U, "kode_sniff_rec_short_t layout");
+/* Where a P4 from before KODE_SNIFF_WIDE reads the length and the head. */
+_Static_assert(offsetof(kode_sniff_rec_short_t, len) == 15U, "kode_sniff_rec_short_t len");
+_Static_assert(offsetof(kode_sniff_rec_short_t, head) == 17U, "kode_sniff_rec_short_t head");
+/* A batch's records are told apart by their size. */
+_Static_assert(sizeof(kode_sniff_rec_short_t) != sizeof(kode_sniff_rec_t),
+               "the two records differ in size");
 
 /** @brief KODE_SNIFF_EVT_BATCH's payload: this header, then count records. */
 typedef struct __attribute__((packed)) {

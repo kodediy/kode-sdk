@@ -4774,12 +4774,13 @@ typedef struct {
     uint32_t heard;     /**< Frames heard since the start.                  */
     uint16_t mgmt;      /**< Management frames in the period.               */
     uint16_t data;      /**< Data frames in the period.                     */
-    uint32_t dropped;   /**< Frames lost since the start: the ring's, and
+    uint32_t dropped;   /**< Frames lost since the start: the ring's, a
+                         *   batch's whose records were not whole, and
                          *   those the asker's queue had no room for.       */
 } WifiFramesTickEvt;
 
 /** @brief Bytes of a frame's header kept after the MAC header (kode_wire.h's KODE_SNIFF_HEAD_LEN). */
-#define KWIFI_FRAME_HEAD_LEN  8U
+#define KWIFI_FRAME_HEAD_LEN  48U
 
 /** @brief Bytes of a frame's frame control (kdrv_frames.h's KDRV_FRAME_FC_LEN). */
 #define KWIFI_FRAME_FC_LEN    2U
@@ -4795,8 +4796,24 @@ typedef struct {
     uint8_t  fc[KWIFI_FRAME_FC_LEN];       /**< Frame control, as on the air.     */
     uint8_t  addr1[KWIFI_FRAME_ADDR_LEN];  /**< Address 1, as on the air.         */
     uint8_t  addr2[KWIFI_FRAME_ADDR_LEN];  /**< Address 2; zeros when it has none. */
+    uint8_t  addr3[KWIFI_FRAME_ADDR_LEN];  /**< Address 3 - the network's in a
+                                            *   management frame; in a data
+                                            *   frame, the one its To DS and
+                                            *   From DS bits name; zeros when it
+                                            *   has none, and with a @c head_len
+                                            *   of 8.                            */
     uint16_t len;                          /**< The frame's length on the air.    */
-    uint8_t  head[KWIFI_FRAME_HEAD_LEN];   /**< After the MAC header; zeros past its end. */
+    uint8_t  head_len;                     /**< Bytes of @c head kept:
+                                            *   KWIFI_FRAME_HEAD_LEN, 8 from a
+                                            *   C5 older than the longer head,
+                                            *   0 in a data frame.               */
+    uint8_t  head[KWIFI_FRAME_HEAD_LEN];   /**< After the MAC header; zeros past
+                                            *   the frame's end, past
+                                            *   @c head_len and in a data
+                                            *   frame. In a beacon: 12
+                                            *   fixed bytes (the capabilities
+                                            *   at 10, privacy their bit 4),
+                                            *   then the name's element.         */
 } WifiFrameEvt;
 
 /** @brief Bytes of a network name in the radio check: 32 characters and the terminator. */

@@ -176,6 +176,7 @@ static void frames_start(RadioFrames *f, QActive *who, uint8_t channel)
     }
     (void)memset(&req, 0, sizeof(req));
     req.channel = channel;
+    req.flags   = KODE_SNIFF_WIDE;   /* a C5 from before the bit sends the short record anyway */
     kdrv_frames_forget();
     rc = f->send(f->ctx, KODE_SNIFF_START, &req, sizeof(req));
     if ( KODE_OK != rc )
@@ -418,12 +419,14 @@ static bool frames_frame_post(QActive *who, const kdrv_frame_t *fr)
     {
         return false;
     }
-    e->channel = fr->channel;
-    e->rssi    = fr->rssi;
-    e->len     = fr->len;
+    e->channel  = fr->channel;
+    e->rssi     = fr->rssi;
+    e->len      = fr->len;
+    e->head_len = fr->head_len;
     (void)memcpy(e->fc, fr->fc, sizeof(e->fc));
     (void)memcpy(e->addr1, fr->addr1, sizeof(e->addr1));
     (void)memcpy(e->addr2, fr->addr2, sizeof(e->addr2));
+    (void)memcpy(e->addr3, fr->addr3, sizeof(e->addr3));
     (void)memcpy(e->head, fr->head, sizeof(e->head));
     return QACTIVE_POST_X(who, &e->super, KQP_FRAMES_MARGIN, AO_Radio);
 }

@@ -39,6 +39,9 @@
 /** @brief Slots of a queue with no room left. */
 #define FR_FULL          0U
 
+/** @brief A record size neither chip uses. */
+#define FR_ODD_REC       40U
+
 /* ---- The C5's side ---------------------------------------------------------- */
 
 /**
@@ -109,6 +112,7 @@ static void c5_batch(uint8_t count)
         r.fc[1]    = i;
         r.addr1[0] = (uint8_t)(0x10U + i);
         r.addr2[5] = (uint8_t)(0x20U + i);
+        r.addr3[1] = (uint8_t)(0x30U + i);
         r.len      = (uint16_t)(100U + i);
         r.head[0]  = 0xA0U;
         r.head[KODE_SNIFF_HEAD_LEN - 1U] = i;
@@ -264,7 +268,8 @@ TEST_CASE("a start is sent to the C5 and its answer reaches the asker", "[radio_
     TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_START, req->op);
     TEST_ASSERT_EQUAL_UINT16(sizeof(kode_sniff_start_t), req->len);
     TEST_ASSERT_EQUAL_UINT8(FR_CH, ((const uint8_t *)&req[1])[0]);
-    TEST_ASSERT_EQUAL_UINT8(0U, ((const uint8_t *)&req[1])[1]);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_SNIFF_WIDE, ((const uint8_t *)&req[1])[1],
+                                    "a P4 that reads the wide record asks for it");
     expect_nothing(ao_spy());
 
     c5_answers(KODE_ST_OK, 1U, FR_CH, 0U, KODE_SNIFF_WHY_NONE);
@@ -463,6 +468,8 @@ TEST_CASE("a tick and its frames are posted to the asker and published to nobody
         TEST_ASSERT_EQUAL_UINT8(i, f->fc[1]);
         TEST_ASSERT_EQUAL_UINT8((uint8_t)(0x10U + i), f->addr1[0]);
         TEST_ASSERT_EQUAL_UINT8((uint8_t)(0x20U + i), f->addr2[5]);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)(0x30U + i), f->addr3[1]);
+        TEST_ASSERT_EQUAL_UINT8(KODE_SNIFF_HEAD_LEN, f->head_len);
         TEST_ASSERT_EQUAL_UINT16((uint16_t)(100U + i), f->len);
         TEST_ASSERT_EQUAL_UINT8(0xA0U, f->head[0]);
         TEST_ASSERT_EQUAL_UINT8(i, f->head[KODE_SNIFF_HEAD_LEN - 1U]);
@@ -471,6 +478,29 @@ TEST_CASE("a tick and its frames are posted to the asker and published to nobody
     /* Direct-post signals cannot be subscribed to (QP asserts), so what the
      * bus would have carried is read off the one AO that did not ask. */
     expect_nothing(ao_spy_other());
+    frames_end();
+}
+
+/* When the two chips disagree on a record's size every batch is refused:
+ * the listener still gets a tick, and its drop count says so. */
+TEST_CASE("a batch whose records are not whole still ticks, with what it lost", "[radio_frames]")
+{
+    /* Two records of a size neither chip uses. */
+    uint8_t                  p[sizeof(kode_sniff_batch_t) + (2U * FR_ODD_REC)];
+    kode_sniff_batch_t const h = { FR_CH, 2U, (int8_t)FR_RSSI_MAX, 0U, FR_HEARD, FR_MGMT, FR_DATA };
+
+    frames_up();
+    start_listening(ao_spy(), FR_CH);
+
+    (void)memset(p, 0, sizeof(p));
+    (void)memcpy(p, &h, sizeof(h));
+    c5_sends(KODE_SNIFF_EVT_BATCH, 0U, KODE_ST_OK, p, sizeof(p));
+    pump();
+
+    WifiFramesTickEvt const *const t = take_tick(ao_spy());
+    TEST_ASSERT_EQUAL_UINT32(FR_HEARD, t->heard);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2U, t->dropped, "the refused records reached nobody");
+    expect_nothing(ao_spy());
     frames_end();
 }
 
