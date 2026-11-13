@@ -100,7 +100,7 @@ typedef enum {
 } kdrv_wifi_state_t;
 
 /**
- * @brief Why the station last left a network or was refused one, in the three
+ * @brief Why the station last left a network or was refused one, in the four
  *        answers a person can act on. The stack's own codes stay in this
  *        driver: every other layer reads this.
  */
@@ -109,6 +109,8 @@ typedef enum {
     KDRV_WIFI_FAIL_PASSWORD,    /**< The network turned the password down.          */
     KDRV_WIFI_FAIL_NOT_FOUND,   /**< Not heard: out of range, or no such name.      */
     KDRV_WIFI_FAIL_OTHER,       /**< Anything else: full, incompatible, a fault.    */
+    KDRV_WIFI_FAIL_HANDSHAKE,   /**< The handshake timed out: a wrong password, or
+                                 *   a signal that went during it.                  */
 } kdrv_wifi_fail_t;
 
 /**
@@ -414,9 +416,11 @@ void kdrv_wifi_on_lost(kdrv_wifi_lost_cb_t cb);
 /**
  * @brief Sort a disconnect's reason into what a person can act on.
  *
- * A timed-out handshake counts as the password because that is what a wrong
- * WPA2 password looks like from here: the access point simply never finishes
- * it. A weak signal can do the same, and nothing on this side tells them apart.
+ * A timed-out handshake has an answer of its own, KDRV_WIFI_FAIL_HANDSHAKE.
+ * That is what a wrong WPA2 password looks like from here, the access point
+ * simply never finishes it, and a weak signal can do the same: nothing on this
+ * side tells them apart. KDRV_WIFI_FAIL_PASSWORD is kept for a refusal that is
+ * no timeout.
  *
  * @param reason The stack's wifi_err_reason_t, as the event carried it.
  * @return The answer it belongs to; never KDRV_WIFI_FAIL_NONE.

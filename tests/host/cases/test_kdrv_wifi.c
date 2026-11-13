@@ -567,9 +567,9 @@ TEST_CASE("a disconnect's reason is sorted into what a person can act on",
         kdrv_wifi_fail_t fail;
     } CASES[] = {
         { (uint16_t)WIFI_REASON_AUTH_FAIL,              KDRV_WIFI_FAIL_PASSWORD },
-        { (uint16_t)WIFI_REASON_HANDSHAKE_TIMEOUT,      KDRV_WIFI_FAIL_PASSWORD },
-        { (uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT, KDRV_WIFI_FAIL_PASSWORD },
         { (uint16_t)WIFI_REASON_MIC_FAILURE,            KDRV_WIFI_FAIL_PASSWORD },
+        { (uint16_t)WIFI_REASON_HANDSHAKE_TIMEOUT,      KDRV_WIFI_FAIL_HANDSHAKE },
+        { (uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT, KDRV_WIFI_FAIL_HANDSHAKE },
         { (uint16_t)WIFI_REASON_NO_AP_FOUND,            KDRV_WIFI_FAIL_NOT_FOUND },
         { (uint16_t)WIFI_REASON_BEACON_TIMEOUT,         KDRV_WIFI_FAIL_NOT_FOUND },
         { (uint16_t)WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD, KDRV_WIFI_FAIL_NOT_FOUND },
@@ -620,9 +620,9 @@ static bool wifi_log_says(const char *words)
     return found;
 }
 
-/* A handshake that times out reads as the password, and so does a signal too
- * weak to finish it: the stack's own number is what tells an engineer which
- * of its reasons it was. */
+/* A handshake that times out is a wrong password or a signal too weak to
+ * finish it, and the driver says which of the two it cannot tell apart: the
+ * stack's own number is what tells an engineer which of its reasons it was. */
 TEST_CASE("a refusal's log line carries the stack's own reason", "[kdrv_wifi]")
 {
     wifi_bring_up();
@@ -632,7 +632,15 @@ TEST_CASE("a refusal's log line carries the stack's own reason", "[kdrv_wifi]")
     fake_klog_reset();
     deliver_disconnect((uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT);
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
-    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (wrong password, reason 15)"),
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (handshake timed out, reason 15)"),
+                             fake_klog_last());
+
+    /* A refusal that is no timeout is the password, said outright. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
+    fake_klog_reset();
+    deliver_disconnect((uint16_t)WIFI_REASON_AUTH_FAIL);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (wrong password, reason 202)"),
                              fake_klog_last());
 
     /* The next attempt's line carries its own reason, not the last one's. */
