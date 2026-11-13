@@ -547,7 +547,8 @@ enum KodeSignals {
                                  *   self, one per app, never by anything
                                  *   external.                                */
     APP_BEAT_SIG,               /**< AO_AppMgr private QTimeEvt: a second of
-                                 *   waiting on the network has gone by -
+                                 *   waiting on the network, or for the
+                                 *   install a fetch announced, has gone by -
                                  *   report the write's percent again, so the
                                  *   glass and the LED stay up.               */
     FLASH_REQ_SIG,              /**< AO_AppMgr: one source-to-sink transfer
