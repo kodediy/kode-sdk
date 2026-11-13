@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kdrv_ble_adv.c
- * @brief What a scan response carries, packed as BLE lays it out, and the board's default name.
+ * @brief What a scan response carries, packed as BLE lays it out, the board's default name,
+ *        and what follows each pulse of a pulsed advert.
  */
 #include "kdrv_ble.h"
 
@@ -36,6 +37,10 @@
 #define CONN_Q_6S             24000U /**< 6 s.                               */
 #define CONN_LATENCY_MAX      30U    /**< The most events a board may skip.  */
 #define CONN_TIMEOUT_FACTOR   3U     /**< The timeout covers three misses.   */
+
+/* BLE counts an advertising interval in units of 0.625 ms: 5/8 of a ms. */
+#define BLE_ITVL_UNIT_NUM     5U     /**< The numerator of one interval unit, ms.   */
+#define BLE_ITVL_UNIT_DEN     8U     /**< The denominator of one interval unit, ms. */
 
 /** @brief The name of a board that does not know its serial. */
 #define BLE_NAME_UNKNOWN  "KODE-DOT"
@@ -184,4 +189,55 @@ bool kdrv_ble_conn_params_ok(const kdrv_ble_conn_params_t *p)
              && ((cycle_q * CONN_TIMEOUT_FACTOR) < tout_q);
     }
     return ok;
+}
+
+uint32_t kdrv_ble_pulse_period_ms(uint16_t itvl)
+{
+    return ((uint32_t)itvl * BLE_ITVL_UNIT_NUM) / BLE_ITVL_UNIT_DEN;
+}
+
+uint32_t kdrv_ble_pulse_pause_ms(uint16_t itvl, uint32_t run_ms)
+{
+    uint32_t const period = kdrv_ble_pulse_period_ms(itvl);
+    uint32_t       pause  = KDRV_BLE_PULSE_WAIT_MIN_MS;
+
+    if ( (run_ms < period) && ((period - run_ms) > KDRV_BLE_PULSE_WAIT_MIN_MS) )
+    {
+        pause = period - run_ms;
+    }
+    return pause;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; called by kdrv_ble.c, which is a file this check does not join to this one */
+kdrv_ble_pulse_do_t kdrv_ble_pulse_next(const kdrv_ble_pulse_t *in, uint32_t *wait_ms)
+{
+    kdrv_ble_pulse_do_t act  = KDRV_BLE_PULSE_NEXT;
+    uint32_t            wait = 0U;
+
+    if ( NULL == in )
+    {
+        act = KDRV_BLE_PULSE_DONE;
+    }
+    else if ( !in->live )
+    {
+        act = KDRV_BLE_PULSE_DONE;
+    }
+    else if ( (!in->timed_out) || (KDRV_BLE_PULSE_REFUSALS_MAX <= in->refused)
+              || ((0U != in->leg_ms) && (in->leg_ms <= in->leg_run_ms)) )
+    {
+        act = KDRV_BLE_PULSE_IDLE;
+    }
+    else
+    {
+        wait = kdrv_ble_pulse_pause_ms(in->itvl, in->pulse_run_ms);
+        if ( (0U != in->leg_ms) && ((in->leg_ms - in->leg_run_ms) < wait) )
+        {
+            wait = in->leg_ms - in->leg_run_ms;   /* the leg ends first: IDLE comes then */
+        }
+    }
+    if ( NULL != wait_ms )
+    {
+        *wait_ms = wait;
+    }
+    return act;
 }

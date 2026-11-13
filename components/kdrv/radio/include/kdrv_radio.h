@@ -41,7 +41,9 @@ typedef enum {
     KDRV_RADIO_JOB_WIFI_PREPARE, /**< Ready this side for a join the C5
                                   *   makes from its vault: station and
                                   *   netif up, the old network left, the
-                                  *   bits cleared (kdrv_wifi_prepare()). */
+                                  *   radio held to the band of req.channel,
+                                  *   the bits cleared
+                                  *   (kdrv_wifi_prepare()).               */
     KDRV_RADIO_JOB_WIFI_AWAIT,   /**< Wait for that join's lease
                                   *   (kdrv_wifi_await()); ends as
                                   *   a join this side made does, with the
@@ -59,9 +61,10 @@ typedef enum {
                                   *   req.on, first the scan response a
                                   *   BLE_RSP would set, from the same
                                   *   fields.                               */
-    KDRV_RADIO_JOB_BLE_ADV,      /**< Start or stop advertising (req.on).
-                                  *   Carries no duration: an advert lasts
-                                  *   until it is taken or stopped.         */
+    KDRV_RADIO_JOB_BLE_ADV,      /**< Start or stop advertising (req.on), as
+                                  *   req.itvl, req.len, req.hidden and
+                                  *   req.pulsed plan it. With no req.len an
+                                  *   advert lasts until it is taken or stopped. */
     KDRV_RADIO_JOB_BLE_SCAN,     /**< Listen for advertisers for req.len ms. */
     KDRV_RADIO_JOB_BLE_QUIET,    /**< Stop advertising and hang up, leaving
                                   *   the host running. What `ble_down` uses;
@@ -146,7 +149,10 @@ typedef struct {
                               *   BLE_FIND: the name. BLE_RSP, BLE_START:
                               *   the board's name, "" for the serial.       */
     char             ssid2[KDRV_RADIO_SSID_BYTES]; /**< WIFI_PROBE: the second network, "" for none. */
-    uint8_t          channel;  /**< WIFI_PROBE: the channel to listen on.       */
+    uint8_t          channel;  /**< WIFI_PROBE: the channel to listen on.
+                              *   WIFI_PREPARE: the channel of the access
+                              *   point the join is aimed at, 0 for none
+                              *   (KDRV_WIFI_CHANNEL_ANY).                   */
     uint16_t         dwell_ms; /**< WIFI_PROBE: the time on it.                 */
     char             pass[65];
     const uint8_t   *data;   /**< C5_WRITE, BLE_RSP, BLE_START: borrowed until the
@@ -155,6 +161,7 @@ typedef struct {
                               *   BLE_ADV: the time on the air in ms, 0 for no end. */
     uint16_t         itvl;   /**< BLE_ADV: the interval (KDRV_BLE_ITVL_*); 0 for slow. */
     bool             hidden; /**< BLE_ADV: hide the board (kdrv_ble_adv_plan()). */
+    bool             pulsed; /**< BLE_ADV: send the advert in pulses (kdrv_ble_adv_plan()). */
     bool             on;     /**< BLE_ADV: start or stop. WIFI_PS: modem save
                               *   (true) or none (false). EXP_POWER:
                               *   J3's supply on (true) or off.

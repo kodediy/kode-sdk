@@ -15,6 +15,7 @@
 #include "Mockesp_event.h"
 
 #include "fake_wifi_events.h"
+#include "fakes.h"
 #include "kdrv_wifi.h"
 
 /** @brief Exactly 32 characters - the longest name 802.11 permits. */
@@ -116,6 +117,7 @@ static void attempt_join(const char *ssid, const char *pass)
     esp_wifi_connect_IgnoreAndReturn(ESP_OK);
     esp_wifi_disconnect_IgnoreAndReturn(ESP_OK);
     esp_wifi_sta_get_ap_info_IgnoreAndReturn(ESP_FAIL);
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
 
     (void)kdrv_wifi_connect(ssid, pass, 1U);
 }
@@ -258,6 +260,7 @@ static void adopt_arm(c5_mode_t mode)
     esp_wifi_start_Stub(&stub_wifi_start);
     esp_wifi_connect_Stub(&stub_connect);
     esp_wifi_sta_get_ap_info_Stub(&stub_ap_info);
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
 }
 
 /** @brief Fresh mocks, as the first cases of this file start. */
@@ -386,7 +389,7 @@ TEST_CASE("a join after a failed adopt still works", "[kdrv_wifi]")
      * must reuse both: no second netif, no stop or start around one
      * (unarmed, so either would fail here), no second bring-up. */
     s_trace_n = 0U;
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_IDLE, (int)kdrv_wifi_state(NULL));
 
@@ -498,8 +501,9 @@ TEST_CASE("a join with no network name is refused before the stack is asked",
 
 /* ---- A join the C5 makes from its vault: prepare here, await here --------- */
 
-/** @brief The stubs prepare() and await() reach, all permissive. */
-static void join_stubs(void)
+/** @brief The stubs prepare() and await() reach but for the band call, all
+ *         permissive; a case that expects the band calls itself starts here. */
+static void join_stubs_no_band(void)
 {
     esp_netif_create_default_wifi_sta_IgnoreAndReturn((esp_netif_t *)&s_seen);
     esp_wifi_stop_IgnoreAndReturn(ESP_OK);
@@ -508,12 +512,19 @@ static void join_stubs(void)
     esp_wifi_sta_get_ap_info_IgnoreAndReturn(ESP_FAIL);
 }
 
+/** @brief The stubs prepare() and await() reach, all permissive. */
+static void join_stubs(void)
+{
+    join_stubs_no_band();
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
+}
+
 TEST_CASE("a vault join: prepare clears the way, await reports the address",
           "[kdrv_wifi]")
 {
     wifi_bring_up();
     join_stubs();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     /* Readied, not connecting: the C5 has not been asked yet. */
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_IDLE, (int)kdrv_wifi_state(NULL));
 
@@ -533,7 +544,7 @@ TEST_CASE("a vault join the network turns away is a refusal", "[kdrv_wifi]")
 {
     wifi_bring_up();
     join_stubs();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
 }
@@ -580,7 +591,7 @@ TEST_CASE("the refusal is what a join reports, not the leave that follows it",
     wifi_bring_up();
     join_stubs();
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_FAIL_NONE, (int)kdrv_wifi_fail_last());
 
     deliver_disconnect((uint16_t)WIFI_REASON_AUTH_FAIL);
@@ -590,11 +601,55 @@ TEST_CASE("the refusal is what a join reports, not the leave that follows it",
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_FAIL_PASSWORD, (int)kdrv_wifi_fail_last());
 
     /* The next attempt starts with nothing against it. */
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_FAIL_NONE, (int)kdrv_wifi_fail_last());
     deliver_disconnect((uint16_t)WIFI_REASON_NO_AP_FOUND);
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_FAIL_NOT_FOUND, (int)kdrv_wifi_fail_last());
+}
+
+/** @brief Whether a captured log line holds @p words. */
+static bool wifi_log_says(const char *words)
+{
+    bool found = false;
+
+    for ( unsigned i = 0U; (!found) && (fake_klog_count() > i); ++i )
+    {
+        found = (strstr(fake_klog_line(i), words) != NULL);
+    }
+    return found;
+}
+
+/* A handshake that times out reads as the password, and so does a signal too
+ * weak to finish it: the stack's own number is what tells an engineer which
+ * of its reasons it was. */
+TEST_CASE("a refusal's log line carries the stack's own reason", "[kdrv_wifi]")
+{
+    wifi_bring_up();
+    join_stubs();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
+    fake_klog_reset();
+    deliver_disconnect((uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (wrong password, reason 15)"),
+                             fake_klog_last());
+
+    /* The next attempt's line carries its own reason, not the last one's. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
+    fake_klog_reset();
+    deliver_disconnect((uint16_t)WIFI_REASON_ASSOC_TOOMANY);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (other failure, reason 5)"),
+                             fake_klog_last());
+
+    /* A disconnect that carries nothing has no number to give. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
+    fake_klog_reset();
+    fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("'home' refused us (other failure, reason 0)"),
+                             fake_klog_last());
 }
 
 TEST_CASE("a disconnect that carries nothing is the other failure, and an "
@@ -603,7 +658,7 @@ TEST_CASE("a disconnect that carries nothing is the other failure, and an "
     wifi_bring_up();
     join_stubs();
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_FAIL_OTHER, (int)kdrv_wifi_fail_last());
 
@@ -626,7 +681,7 @@ static void on_network(void)
 {
     wifi_bring_up();
     join_stubs();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     fake_wifi_events_deliver(IP_EVENT, IP_EVENT_STA_GOT_IP,
                              &(ip_event_got_ip_t){ 0 });
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_await("home", 50U));
@@ -649,6 +704,26 @@ TEST_CASE("a network that goes away by itself is reported, once", "[kdrv_wifi]")
     kdrv_wifi_on_lost(NULL);
 }
 
+/* "The network is gone" tells nobody why. The stack's reason does: a beacon
+ * timeout is range or the access point, a deauthentication is the network's
+ * own doing. */
+TEST_CASE("a network that goes away says the stack's reason", "[kdrv_wifi]")
+{
+    on_network();
+    fake_klog_reset();
+
+    deliver_disconnect((uint16_t)WIFI_REASON_BEACON_TIMEOUT);
+    TEST_ASSERT_TRUE_MESSAGE(wifi_log_says("the network dropped (reason 200)"), fake_klog_last());
+
+    /* A step off that was asked for is no loss and logs none. */
+    on_network();
+    fake_klog_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_disconnect());
+    deliver_disconnect((uint16_t)WIFI_REASON_ASSOC_LEAVE);
+    TEST_ASSERT_FALSE(wifi_log_says("the network dropped"));
+    kdrv_wifi_on_lost(NULL);
+}
+
 TEST_CASE("a step off the network that was asked for is not a network lost",
           "[kdrv_wifi]")
 {
@@ -659,7 +734,7 @@ TEST_CASE("a step off the network that was asked for is not a network lost",
 
     /* Nor is the one a join to another network takes first. */
     on_network();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("other"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("other", KDRV_WIFI_CHANNEL_ANY));
     deliver_disconnect((uint16_t)WIFI_REASON_ASSOC_LEAVE);
     TEST_ASSERT_EQUAL_UINT(0U, s_lost);
     kdrv_wifi_on_lost(NULL);
@@ -671,7 +746,7 @@ TEST_CASE("a join the network refuses is not a network lost", "[kdrv_wifi]")
     join_stubs();
     s_lost = 0U;
     kdrv_wifi_on_lost(&on_lost);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     deliver_disconnect((uint16_t)WIFI_REASON_AUTH_FAIL);
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
     TEST_ASSERT_EQUAL_UINT(0U, s_lost);
@@ -682,7 +757,7 @@ TEST_CASE("a vault join that never gets an address times out", "[kdrv_wifi]")
 {
     wifi_bring_up();
     join_stubs();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     /* A deadline of 0 ms: the host's FreeRTOS port can deadlock when its
      * tick lands inside a blocked wait, and what is under test is the
      * answer to an empty wait, not the scheduler. */
@@ -694,7 +769,7 @@ TEST_CASE("a vault join the C5 refuses leaves Wi-Fi idle, with no network named"
 {
     wifi_bring_up();
     join_stubs();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     /* the C5 answers the JOIN with a refusal: no await follows */
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_IDLE, (int)kdrv_wifi_state(NULL));
     TEST_ASSERT_EQUAL_STRING("", ssid_now());
@@ -704,15 +779,228 @@ TEST_CASE("an await that times out does not stay connecting", "[kdrv_wifi]")
 {
     wifi_bring_up();
     join_stubs();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kdrv_wifi_await("home", 0U));
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_IDLE, (int)kdrv_wifi_state(NULL));
 }
 
 TEST_CASE("prepare with no network name is refused", "[kdrv_wifi]")
 {
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_wifi_prepare(NULL));
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_wifi_prepare(""));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_wifi_prepare(NULL, KDRV_WIFI_CHANNEL_ANY));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_wifi_prepare("", KDRV_WIFI_CHANNEL_ANY));
+}
+
+/* ---- The band a join is aimed at ------------------------------------------- */
+
+/** @brief The channel of an access point on 5 GHz. */
+#define BAND_CH_5G   48U
+/** @brief The channel of an access point on 2.4 GHz. */
+#define BAND_CH_24   6U
+
+/** @brief How many captured log lines hold @p words. */
+static unsigned wifi_log_count(const char *words)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        if ( NULL != strstr(fake_klog_line(i), words) )
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/** @brief Fresh mocks and the stack up, with every call a join reaches armed
+ *         but the band call, which the case expects for itself. */
+static void band_case_start(void)
+{
+    Mockesp_wifi_Init();
+    Mockesp_netif_Init();
+    Mockesp_event_Init();
+
+    wifi_bring_up();
+    join_stubs_no_band();
+}
+
+/** @brief Check that every expected band call was made, and release the mocks. */
+static void band_case_end(void)
+{
+    Mockesp_wifi_Verify();
+    Mockesp_event_Destroy();
+    Mockesp_netif_Destroy();
+    Mockesp_wifi_Destroy();
+}
+
+TEST_CASE("prepare asks for the 5 GHz band alone when the access point is on it",
+          "[kdrv_wifi]")
+{
+    band_case_start();
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_5G_ONLY, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", BAND_CH_5G));
+
+    band_case_end();
+}
+
+TEST_CASE("prepare asks for the 2.4 GHz band alone when the access point is on it",
+          "[kdrv_wifi]")
+{
+    band_case_start();
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_2G_ONLY, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", BAND_CH_24));
+
+    band_case_end();
+}
+
+TEST_CASE("prepare asks for both bands when the channel is not known",
+          "[kdrv_wifi]")
+{
+    band_case_start();
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_AUTO, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
+
+    band_case_end();
+}
+
+TEST_CASE("the band changes where the lower band ends", "[kdrv_wifi]")
+{
+    static const struct {
+        uint8_t          channel;
+        wifi_band_mode_t band;
+    } AIMS[] = {
+        { 1U,                             WIFI_BAND_MODE_2G_ONLY },
+        { KDRV_WIFI_LAST_24_CHANNEL,      WIFI_BAND_MODE_2G_ONLY },
+        { KDRV_WIFI_LAST_24_CHANNEL + 1U, WIFI_BAND_MODE_5G_ONLY },
+        { 36U,                            WIFI_BAND_MODE_5G_ONLY },
+        { 165U,                           WIFI_BAND_MODE_5G_ONLY },
+    };
+
+    band_case_start();
+
+    for ( size_t i = 0U; (sizeof(AIMS) / sizeof(AIMS[0])) > i; ++i )
+    {
+        esp_wifi_set_band_mode_ExpectAndReturn(AIMS[i].band, ESP_OK);
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", AIMS[i].channel));
+    }
+
+    band_case_end();
+}
+
+TEST_CASE("await gives both bands back after a join that got its address",
+          "[kdrv_wifi]")
+{
+    band_case_start();
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_5G_ONLY, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", BAND_CH_5G));
+    fake_wifi_events_deliver(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                             &(ip_event_got_ip_t){ 0 });
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_AUTO, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_GOT_IP, (int)kdrv_wifi_state(NULL));
+
+    band_case_end();
+}
+
+TEST_CASE("await gives both bands back after a refusal", "[kdrv_wifi]")
+{
+    band_case_start();
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_5G_ONLY, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", BAND_CH_5G));
+    deliver_disconnect((uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT);
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_AUTO, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("home", 50U));
+
+    band_case_end();
+}
+
+TEST_CASE("await gives both bands back after a timeout", "[kdrv_wifi]")
+{
+    band_case_start();
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_2G_ONLY, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", BAND_CH_24));
+
+    esp_wifi_set_band_mode_ExpectAndReturn(WIFI_BAND_MODE_AUTO, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kdrv_wifi_await("home", 0U));
+
+    band_case_end();
+}
+
+/** @brief The band the stack was last asked for; 0 before any ask. */
+static wifi_band_mode_t s_band_asked;
+/** @brief The band that stood when the first scan step was started. */
+static wifi_band_mode_t s_band_at_scan;
+
+/** @brief Stands in for esp_wifi_set_band_mode and keeps what it was given. */
+static esp_err_t band_note(wifi_band_mode_t mode, int calls)
+{
+    (void)calls;
+    s_band_asked = mode;
+    return ESP_OK;
+}
+
+/** @brief Stands in for esp_wifi_scan_start: notes the band, refuses the step. */
+static esp_err_t scan_step_refused(const wifi_scan_config_t *config, bool block,
+                                   int calls)
+{
+    (void)config;
+    (void)block;
+    (void)calls;
+    s_band_at_scan = s_band_asked;
+    return ESP_FAIL;
+}
+
+TEST_CASE("a scan never runs band-limited, even after a join aimed at one band",
+          "[kdrv_wifi]")
+{
+    s_band_asked   = (wifi_band_mode_t)0;
+    s_band_at_scan = (wifi_band_mode_t)0;
+    band_case_start();
+    esp_wifi_set_band_mode_Stub(&band_note);
+    esp_wifi_get_country_IgnoreAndReturn(ESP_FAIL);
+    esp_wifi_scan_start_Stub(&scan_step_refused);
+    kdrv_wifi_scan_abort(false);
+
+    /* A join aimed at 5 GHz that no await followed: the C5's vault may refuse
+     * the join between the two. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", BAND_CH_5G));
+    TEST_ASSERT_EQUAL_INT((int)WIFI_BAND_MODE_5G_ONLY, (int)s_band_asked);
+
+    /* Every step is refused, so the sweep ends empty; what is judged is the
+     * band standing when it began. */
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_wifi_scan());
+    TEST_ASSERT_EQUAL_INT((int)WIFI_BAND_MODE_AUTO, (int)s_band_at_scan);
+
+    band_case_end();
+}
+
+TEST_CASE("a coprocessor that refuses the band call still joins, and the log "
+          "says so once", "[kdrv_wifi]")
+{
+    band_case_start();
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_ERR_NOT_SUPPORTED);
+    fake_klog_reset();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", BAND_CH_5G));
+    fake_wifi_events_deliver(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                             &(ip_event_got_ip_t){ 0 });
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_await("home", 50U));
+    TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_GOT_IP, (int)kdrv_wifi_state(NULL));
+
+    /* The next join is refused the same way and says nothing more. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", BAND_CH_24));
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kdrv_wifi_await("home", 0U));
+    TEST_ASSERT_EQUAL_UINT(1U, wifi_log_count("band mode"));
+
+    band_case_end();
 }
 
 /* ---- Power save ---------------------------------------------------------- */
@@ -782,7 +1070,7 @@ TEST_CASE("the ssid copy is whole, cut to the buffer and always terminated",
 
     wifi_bring_up();
     join_stubs();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("home", KDRV_WIFI_CHANNEL_ANY));
     fake_wifi_events_deliver(IP_EVENT, IP_EVENT_STA_GOT_IP, &(ip_event_got_ip_t){ 0 });
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_await("home", 50U));
 

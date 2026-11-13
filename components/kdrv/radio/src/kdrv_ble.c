@@ -219,8 +219,11 @@ static struct {
     bool               adv_hidden;  /**< The next advert hides the board and no
                                       *   new device may pair; false (the
                                       *   start) is visible.                */
+    bool               adv_pulsed;  /**< The next advert goes on the air in
+                                      *   pulses (kdrv_ble_adv_plan()).      */
     bool               adv_said;    /**< The log has told an advert.        */
     bool               adv_said_hidden; /**< Which one it told.             */
+    bool               adv_said_pulsed; /**< And whether it was pulsed.     */
 #if CONFIG_KODEOS_BLE_CONSOLE
     bool               console_on;  /**< A central is subscribed to TX.     */
     uint16_t           tx_drop;     /**< Lines the console ring refused, PLUS
@@ -326,6 +329,279 @@ static void ble_set_state(kdrv_ble_state_t state)
     if ( NULL != s_ble.cb )
     {
         s_ble.cb(state);
+    }
+}
+
+/* ---- The pulses of a pulsed advert -----------------------------------------
+ * With the advert enabled, the C5's station on a 5 GHz channel does not fetch
+ * the frames its access point holds for it; with the advert enabled only for
+ * the event, it does. A pulsed plan (kdrv_ble_adv_plan()) therefore goes on the
+ * air as a train: the advert is enabled for KDRV_BLE_PULSE_ON_MS, which holds
+ * one event, disabled until the interval is over, and enabled again by a
+ * callout on NimBLE's host task. The air sees one event per interval, as it
+ * does from a continuous advert, and the published state is ADVERTISING from
+ * the first pulse to the end of the train.
+ *
+ * Two threads own the train: the radio worker starts and ends it, the host
+ * task ends each pulse and starts the next. The fields below, and the NimBLE
+ * call that goes with each change of them, are under s_pulse_lock: a restart
+ * that has begun cannot outlive the stop that follows it, and one that comes
+ * after the stop finds the train over. The lock is never taken inside a NimBLE
+ * lock, and no callback is called with it held.
+ */
+
+/** @brief Half the range of khal_time_ms(): the distance past which a time is behind. */
+#define BLE_TIME_HALF  0x80000000U
+
+/* The GAP callback every advert starts with; defined with the GAP handlers below. */
+static int ble_gap_event(struct ble_gap_event *event, void *arg);
+
+static struct {
+    bool                      live;     /**< A train is on: a pulse is enabled, or the next is due.  */
+    bool                      on_air;   /**< A pulse is enabled now.                                  */
+    struct ble_gap_adv_params params;   /**< What every pulse starts with.                            */
+    uint32_t                  leg_ms;   /**< The plan's time on the air, ms; 0 for no end.            */
+    uint32_t                  leg_t0;   /**< khal_time_ms() when the first pulse began.               */
+    uint32_t                  pulse_t0; /**< khal_time_ms() when the last pulse, or its try, began.   */
+    uint32_t                  due;      /**< khal_time_ms() when the next pulse is due.               */
+    uint8_t                   refused;  /**< Restarts NimBLE refused in a row.                        */
+} s_pulse;
+
+static khal_mutex_t           s_pulse_lock;   /**< Guards s_pulse, and the NimBLE call of each change. */
+static struct ble_npl_callout s_pulse_co;     /**< The pause: expires when the next pulse is due.      */
+
+/**
+ * @brief The ms from @p now to @p due, on a clock that wraps.
+ * @param due The time reached.
+ * @param now The present.
+ * @return The ms left; 0 once @p due has passed.
+ */
+static uint32_t pulse_ms_left(uint32_t due, uint32_t now)
+{
+    uint32_t const left = due - now;
+    uint32_t       ms   = 0U;
+
+    if ( BLE_TIME_HALF > left )
+    {
+        ms = left;
+    }
+    return ms;
+}
+
+/**
+ * @brief What kdrv_ble_pulse_next() judges, from the train as it stands.
+ * @param now       khal_time_ms().
+ * @param timed_out Whether the pulse ended on its own time.
+ * @return The input. Called with s_pulse_lock held.
+ */
+static kdrv_ble_pulse_t pulse_input(uint32_t now, bool timed_out)
+{
+    kdrv_ble_pulse_t in;
+
+    in.live         = s_pulse.live;
+    in.timed_out    = timed_out;
+    in.itvl         = s_pulse.params.itvl_min;
+    in.leg_ms       = s_pulse.leg_ms;
+    in.leg_run_ms   = now - s_pulse.leg_t0;
+    in.pulse_run_ms = now - s_pulse.pulse_t0;
+    in.refused      = s_pulse.refused;
+    return in;
+}
+
+/**
+ * @brief Arm the pause: its callout expires in @p wait_ms.
+ * @param wait_ms The wait, ms.
+ * @return true when the callout is armed. Called with s_pulse_lock held.
+ */
+static bool pulse_arm(uint32_t wait_ms)
+{
+    s_pulse.due = khal_time_ms() + wait_ms;
+    return 0 == ble_npl_callout_reset(&s_pulse_co, ble_npl_time_ms_to_ticks32(wait_ms));
+}
+
+/**
+ * @brief End the train, if one is on: no pulse starts after this returns.
+ *
+ * A callout that already fired and is running on the host task waits for the
+ * lock, and finds the train over. Any thread may call it.
+ */
+static void pulse_train_end(void)
+{
+    if ( NULL != s_pulse_lock )
+    {
+        khal_mutex_lock(s_pulse_lock);
+        s_pulse.live   = false;
+        s_pulse.on_air = false;
+        if ( s_ble.up )
+        {
+            /* The callout belongs to the host: after nimble_port_deinit() it
+             * is gone, and kdrv_ble_stop() ends the train before that. */
+            ble_npl_callout_stop(&s_pulse_co);
+        }
+        khal_mutex_unlock(s_pulse_lock);
+    }
+}
+
+/**
+ * @brief Take the advert off the air: end the train, then disable the advert.
+ *
+ * The order is the point: a pulse the train started before it ended is on the
+ * air when the advert is disabled, and no other starts after.
+ */
+static void ble_adv_halt(void)
+{
+    pulse_train_end();
+    (void)ble_gap_adv_stop();
+}
+
+/**
+ * @brief Start the first pulse of a train. The radio worker's.
+ * @param params The advert's parameters, kept for every pulse after it.
+ * @return NimBLE's answer: 0, its refusal, or BLE_HS_EALREADY when a train is
+ *         on already, which goes on as it is.
+ */
+static int pulse_begin(const struct ble_gap_adv_params *params)
+{
+    int rc = BLE_HS_EALREADY;
+
+    khal_mutex_lock(s_pulse_lock);
+    if ( !s_pulse.live )
+    {
+        rc = ble_gap_adv_start(s_ble.own_addr_type, NULL, (int32_t)KDRV_BLE_PULSE_ON_MS,
+                               params, &ble_gap_event, NULL);
+        if ( 0 == rc )
+        {
+            uint32_t const now = khal_time_ms();
+
+            s_pulse.params   = *params;
+            s_pulse.live     = true;
+            s_pulse.on_air   = true;
+            s_pulse.leg_ms   = s_ble.adv_ms;
+            s_pulse.leg_t0   = now;
+            s_pulse.pulse_t0 = now;
+            s_pulse.refused  = 0U;
+        }
+    }
+    khal_mutex_unlock(s_pulse_lock);
+    return rc;
+}
+
+/**
+ * @brief A pulse ended (BLE_GAP_EVENT_ADV_COMPLETE): arm the pause for the next,
+ *        or say the state is to go IDLE. Runs on NimBLE's host task.
+ * @param reason NimBLE's: BLE_HS_ETIMEOUT for a pulse that ran its time.
+ * @return true when the state is to go IDLE: no train is on (the advert is a
+ *         continuous one, or was stopped), or the train is over. false while
+ *         the train goes on.
+ */
+static bool pulse_ended(int reason)
+{
+    bool idle = true;
+
+    khal_mutex_lock(s_pulse_lock);
+    if ( s_pulse.live )
+    {
+        uint32_t                  wait = 0U;
+        kdrv_ble_pulse_t const    in   = pulse_input(khal_time_ms(), BLE_HS_ETIMEOUT == reason);
+        kdrv_ble_pulse_do_t const act  = kdrv_ble_pulse_next(&in, &wait);
+
+        s_pulse.on_air = false;
+        if ( (KDRV_BLE_PULSE_NEXT == act) && pulse_arm(wait) )
+        {
+            idle = false;
+        }
+        else
+        {
+            s_pulse.live = false;
+        }
+    }
+    else
+    {
+        /* no train: the advert was a continuous one, or was stopped */
+    }
+    khal_mutex_unlock(s_pulse_lock);
+    return idle;
+}
+
+/**
+ * @brief The pause is over: start the next pulse, wait again, or end the train.
+ *        The callout's callback; runs on NimBLE's host task.
+ * @param ev Unused.
+ */
+static void pulse_timer(struct ble_npl_event *ev)
+{
+    bool     idle    = false;
+    bool     began   = false;
+    bool     first   = false;
+    int      refusal = 0;
+    uint32_t wait    = 0U;
+
+    (void)ev;
+    khal_mutex_lock(s_pulse_lock);
+    if ( s_pulse.live && (!s_pulse.on_air) )
+    {
+        uint32_t const now  = khal_time_ms();
+        uint32_t const left = pulse_ms_left(s_pulse.due, now);
+
+        if ( 0U != left )
+        {
+            /* Fired a tick early, or left over from a train that began
+             * again: the pulse is due when it is due. */
+            idle = !pulse_arm(left);
+        }
+        else
+        {
+            kdrv_ble_pulse_t    in  = pulse_input(now, true);
+            kdrv_ble_pulse_do_t act = kdrv_ble_pulse_next(&in, &wait);
+
+            if ( KDRV_BLE_PULSE_NEXT == act )
+            {
+                /* EALREADY is an advert on the air, which is what this wants. */
+                refusal = ble_gap_adv_start(s_ble.own_addr_type, NULL, (int32_t)KDRV_BLE_PULSE_ON_MS,
+                                            &s_pulse.params, &ble_gap_event, NULL);
+                if ( (0 == refusal) || (BLE_HS_EALREADY == refusal) )
+                {
+                    refusal           = 0;
+                    s_pulse.on_air    = true;
+                    s_pulse.pulse_t0  = now;
+                    s_pulse.refused   = 0U;
+                    began             = true;
+                }
+                else
+                {
+                    /* Tried again at the next period. */
+                    ++s_pulse.refused;
+                    first            = (1U == s_pulse.refused);
+                    s_pulse.pulse_t0 = now;
+                    in               = pulse_input(now, true);
+                    act              = kdrv_ble_pulse_next(&in, &wait);
+                    idle             = !((KDRV_BLE_PULSE_NEXT == act) && pulse_arm(wait));
+                }
+            }
+            else
+            {
+                idle = true;
+            }
+        }
+        if ( idle )
+        {
+            s_pulse.live   = false;
+            s_pulse.on_air = false;
+        }
+    }
+    khal_mutex_unlock(s_pulse_lock);
+
+    if ( began )
+    {
+        KLOG_D(TAG, "advert pulse");
+    }
+    if ( first )
+    {
+        KLOG_W(TAG, "an advert pulse was refused (%d); the next is tried at the next period", refusal);
+    }
+    if ( idle )
+    {
+        ble_set_state(KDRV_BLE_IDLE);
     }
 }
 
@@ -2055,6 +2331,7 @@ static void ble_on_reset(int reason)
      * is what actually recovers. */
     KLOG_W(TAG, "controller reset (reason %d)", reason);
     s_ble.synced = false;
+    pulse_train_end();
     ble_set_state(KDRV_BLE_IDLE);
 }
 
@@ -2343,6 +2620,14 @@ uint32_t kdrv_ble_activity(void)
 }
 #endif
 
+/** @brief Count a GAP event as the link moving, for the radio's sleep sentinel. */
+static void ble_gap_moved(void)
+{
+#if CONFIG_KODE_LOWPOWER
+    (void)atomic_fetch_add(&s_gap_activity, 1U);
+#endif
+}
+
 /**
  * @brief Whether the link @p conn is encrypted already.
  *
@@ -2394,9 +2679,12 @@ static int ble_conn_ask(uint16_t conn, bool rest)
 static int ble_gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
-#if CONFIG_KODE_LOWPOWER
-    (void)atomic_fetch_add(&s_gap_activity, 1U);
-#endif
+    /* The end of an advert is counted below: the end of a pulse is not the link
+     * moving, and one every interval would keep the sentinel awake. */
+    if ( BLE_GAP_EVENT_ADV_COMPLETE != event->type )
+    {
+        ble_gap_moved();
+    }
     /* Zero unless a case says otherwise: only the repeat-pairing event -
      * which exists only when pairing is built in - asks the caller to do
      * something with the answer. */
@@ -2417,6 +2705,9 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             (void)xEventGroupSetBits(s_ble.bits, BLE_BIT_SCAN_DONE);
             break;
         case BLE_GAP_EVENT_CONNECT:
+            /* The connection ends the advert, a pulse or a pause of its train,
+             * and nothing restarts it. */
+            pulse_train_end();
             if ( 0 == event->connect.status )
             {
                 bool const encrypted = ble_link_encrypted(event->connect.conn_handle);
@@ -2737,8 +3028,14 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_ADV_COMPLETE:
             /* The advert's time ran out (kdrv_ble_adv_plan()), or a controller
              * ended it for its own reasons. Publishing IDLE is what asks
-             * AO_Radio what comes next; the same path a disconnect takes. */
-            ble_set_state(KDRV_BLE_IDLE);
+             * AO_Radio what comes next; the same path a disconnect takes.
+             * The end of a pulse is not the end of the advert: the pause
+             * follows, and the state stays ADVERTISING until the train is over. */
+            if ( pulse_ended(event->adv_complete.reason) )
+            {
+                ble_gap_moved();
+                ble_set_state(KDRV_BLE_IDLE);
+            }
             break;
         default:
             break;
@@ -2765,6 +3062,17 @@ kode_status_t kdrv_ble_start(void)
         s_ble.bits = xEventGroupCreate();
         if ( NULL == s_ble.bits )
         {
+            return KODE_NO_RESOURCES;
+        }
+    }
+    /* Here rather than at the first pulse: the first user of the lock may be
+     * NimBLE's host task, which must not be the one that creates it. */
+    if ( NULL == s_pulse_lock )
+    {
+        s_pulse_lock = khal_mutex_create();
+        if ( NULL == s_pulse_lock )
+        {
+            KLOG_E(TAG, "no mutex for the advert's pulses");
             return KODE_NO_RESOURCES;
         }
     }
@@ -3020,6 +3328,14 @@ kode_status_t kdrv_ble_start(void)
     ble_store_config_init();
 #endif
 
+    /* The pulse's callout, cleared for the console pair's reason: the block
+     * it holds comes from a pool that nimble_port_deinit() frees. */
+    s_pulse.live   = false;
+    s_pulse.on_air = false;
+    (void)memset(&s_pulse_co, 0, sizeof(s_pulse_co));
+    (void)ble_npl_callout_init(&s_pulse_co, nimble_port_get_dflt_eventq(),
+                               &pulse_timer, NULL);
+
     nimble_port_freertos_init(&ble_host_task);
     s_ble.up = true;
 
@@ -3047,7 +3363,7 @@ kode_status_t kdrv_ble_quiet(void)
         return KODE_OK;
     }
 
-    (void)ble_gap_adv_stop();
+    ble_adv_halt();
     (void)ble_gap_disc_cancel();
 
     if ( BLE_HS_CONN_HANDLE_NONE != s_ble.conn )
@@ -3075,7 +3391,7 @@ kode_status_t kdrv_ble_stop(void)
         return KODE_OK;
     }
 
-    (void)ble_gap_adv_stop();
+    ble_adv_halt();
     (void)ble_gap_disc_cancel();
 #if CONFIG_KODEOS_BLE_CONSOLE
     app_quiet();
@@ -3109,6 +3425,7 @@ kode_status_t kdrv_ble_stop(void)
 
 void kdrv_ble_forget(void)
 {
+    pulse_train_end();
     s_ble.up     = false;
     s_ble.synced = false;
     s_ble.count  = 0U;
@@ -3242,11 +3559,12 @@ bool kdrv_ble_link_secure(void)
     return s_ble.secure;
 }
 
-void kdrv_ble_adv_plan(uint16_t itvl, uint32_t ms, bool hidden)
+void kdrv_ble_adv_plan(uint16_t itvl, uint32_t ms, bool hidden, bool pulsed)
 {
     s_ble.adv_itvl   = itvl;
     s_ble.adv_ms     = ms;
     s_ble.adv_hidden = hidden;
+    s_ble.adv_pulsed = pulsed;
 }
 
 kode_status_t kdrv_ble_advertise(bool on)
@@ -3257,7 +3575,7 @@ kode_status_t kdrv_ble_advertise(bool on)
         {
             return KODE_OK;
         }
-        (void)ble_gap_adv_stop();
+        ble_adv_halt();
         ble_set_state(KDRV_BLE_IDLE);
         return KODE_OK;
     }
@@ -3383,13 +3701,30 @@ kode_status_t kdrv_ble_advertise(bool on)
     params.itvl_min = itvl;
     params.itvl_max = itvl;
 
-    /* The time is NimBLE's host timer, an esp_timer: legacy advertising has no
-     * duration in the controller. When it runs out NimBLE stops the advert and
-     * ADV_COMPLETE publishes IDLE, which is what asks AO_Radio what comes
-     * next. A connection ends the advert before that, and the timer with it. */
-    rc_n = ble_gap_adv_start(s_ble.own_addr_type, NULL,
-                             (0U != s_ble.adv_ms) ? (int32_t)s_ble.adv_ms : BLE_HS_FOREVER,
-                             &params, &ble_gap_event, NULL);
+    bool const pulsed = s_ble.adv_pulsed;
+
+    if ( pulsed )
+    {
+        /* A train: the first pulse here, the rest from the pause's callout. */
+        rc_n = pulse_begin(&params);
+    }
+    else
+    {
+        int32_t duration = BLE_HS_FOREVER;
+
+        if ( 0U != s_ble.adv_ms )
+        {
+            duration = (int32_t)s_ble.adv_ms;
+        }
+        /* The time is NimBLE's host timer, an esp_timer: legacy advertising has
+         * no duration in the controller. When it runs out NimBLE stops the
+         * advert and ADV_COMPLETE publishes IDLE, which is what asks AO_Radio
+         * what comes next. A connection ends the advert before that, and the
+         * timer with it. A train still on gives way to a continuous plan. */
+        pulse_train_end();
+        rc_n = ble_gap_adv_start(s_ble.own_addr_type, NULL, duration,
+                                 &params, &ble_gap_event, NULL);
+    }
     /* EALREADY is the answer this call wants: the advert is on the air. A
      * state published late by the host task (a disconnect that waited on
      * the C5 to forget a bond's keys) can ask again for an advert that is
@@ -3401,15 +3736,36 @@ kode_status_t kdrv_ble_advertise(bool on)
     }
 
     ble_set_state(KDRV_BLE_ADVERTISING);
+    if ( pulsed && (0 == rc_n) )
+    {
+        KLOG_D(TAG, "advert pulse");
+    }
     /* A timed advert is started again every time it runs out: only a change
      * of kind is news. */
-    if ( s_ble.adv_said && (s_ble.adv_said_hidden == hidden) )
+    if ( s_ble.adv_said && (s_ble.adv_said_hidden == hidden)
+        && (s_ble.adv_said_pulsed == pulsed) )
     {
         return KODE_OK;
     }
     s_ble.adv_said        = true;
     s_ble.adv_said_hidden = hidden;
-    if ( hidden )
+    s_ble.adv_said_pulsed = pulsed;
+    if ( pulsed )
+    {
+        uint32_t const every = kdrv_ble_pulse_period_ms(itvl);
+
+        if ( hidden )
+        {
+            KLOG_I(TAG, "advertising hidden, to the devices that know it, one event every %u ms",
+                   (unsigned)every);
+        }
+        else
+        {
+            KLOG_I(TAG, "advertising as '%s', one event every %u ms", kdrv_ble_name(),
+                   (unsigned)every);
+        }
+    }
+    else if ( hidden )
     {
         KLOG_I(TAG, "advertising hidden, to the devices that know it");
     }
@@ -3425,10 +3781,11 @@ kode_status_t kdrv_ble_adv_calm(uint32_t ms)
     kode_status_t rc = KODE_OK;
 
     if ( s_ble.up && (KDRV_BLE_ADVERTISING == s_ble.state)
-        && (0U != s_ble.adv_itvl) && ((uint16_t)KDRV_BLE_ITVL_SLOW > s_ble.adv_itvl) )
+        && (s_ble.adv_pulsed
+            || ((0U != s_ble.adv_itvl) && ((uint16_t)KDRV_BLE_ITVL_SLOW > s_ble.adv_itvl))) )
     {
-        (void)ble_gap_adv_stop();
-        kdrv_ble_adv_plan((uint16_t)KDRV_BLE_ITVL_SLOW, ms, s_ble.adv_hidden);
+        ble_adv_halt();
+        kdrv_ble_adv_plan((uint16_t)KDRV_BLE_ITVL_SLOW, ms, s_ble.adv_hidden, false);
         rc = kdrv_ble_advertise(true);
     }
     return rc;

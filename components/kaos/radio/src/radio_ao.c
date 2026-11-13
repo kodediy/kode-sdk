@@ -182,6 +182,34 @@ _Static_assert(sizeof(RADIO_LP_WHY_FAILED) <= KODE_LOWPOWER_WHY_MAX,
  *         in a few; a radar channel is raised by kdrv_wifi_probe() to a beacon. */
 #define RADIO_HINT_DWELL_MS  120U
 
+#ifndef CONFIG_KODE_WIFI_HINT_YIELD_DB
+#define CONFIG_KODE_WIFI_HINT_YIELD_DB 6
+#endif
+
+/** @brief How much stronger, in dB, the other access point of a network has to
+ *         be heard than the remembered one for the join to go to it: 6 unless
+ *         the build's CONFIG_KODE_WIFI_HINT_YIELD_DB says otherwise. */
+#define RADIO_HINT_YIELD_DB  CONFIG_KODE_WIFI_HINT_YIELD_DB
+
+/** @brief Where the channel stands in a stored hint: after the name and its terminator. */
+#define RADIO_HINT_CHANNEL_AT  (KDRV_WIFI_SSID_LEN + 1U)
+
+/** @brief The bytes of one hint stored with no alternate: the name, its
+ *         terminator and the channel. A store of this many per network is
+ *         read, and is written back with the alternate. */
+#define RADIO_HINT_BARE_BYTES  (RADIO_HINT_CHANNEL_AT + 1U)
+
+/** @brief One network the board was last on, and where. */
+typedef struct {
+    char    ssid[KDRV_WIFI_SSID_LEN + 1U];
+    uint8_t channel;   /**< Where it was joined.                              */
+    uint8_t alt;       /**< The strongest other channel it was heard on; 0 for none. */
+} RadioHint;
+
+_Static_assert((sizeof(RadioHint) == (RADIO_HINT_BARE_BYTES + 1U))
+               && (offsetof(RadioHint, channel) == RADIO_HINT_CHANNEL_AT),
+               "a stored hint is its name, a terminator and two channels");
+
 /** @brief What a state handler reads of an outcome. */
 typedef struct {
     uint8_t evt;     /**< radio_out_t: which job ended, or the link lost.     */
@@ -345,6 +373,8 @@ typedef struct {
                                *   ble_pair_until, or until a device pairs.     */
     uint32_t ble_pair_until;  /**< The time to pair ends here.                  */
     bool     ble_adv_hidden;  /**< The last advert planned hides the board.     */
+    uint16_t ble_adv_itvl;    /**< Its interval (KDRV_BLE_ITVL_*).              */
+    bool     ble_adv_pulsed;  /**< It goes on the air in pulses.                */
     uint8_t  ble_refused;     /**< KQP_BLE_REFUSED_*: what the next BLE state
                                *   says of the request it answers.           */
     bool     ble_store_away;  /**< A DISCONNECT job is with the worker, which
@@ -576,16 +606,23 @@ typedef struct {
     bool     autojoin;   /**< This join came from the automatic path. */
 
     /* Where the networks last joined were. A hint, not a fact: what is heard on
-     * that channel decides, and a miss falls back to the sweep. NVS holds the
-     * names and the channels, which are public; the passwords stay in the C5. */
-    struct {
-        char    ssid[KDRV_WIFI_SSID_LEN + 1U];
-        uint8_t channel;
-    } hints[RADIO_HINTS_MAX];    /**< Most recent first; an empty name ends it. */
+     * that channel decides, and a miss falls back to the sweep. Beside it, the
+     * strongest other channel the network was heard on: a look at both, and the
+     * join goes to the other one when it is RADIO_HINT_YIELD_DB stronger. NVS
+     * holds the names and the channels, which are public; the passwords stay in
+     * the C5. */
+    RadioHint hints[RADIO_HINTS_MAX]; /**< Most recent first; an empty name ends it. */
     uint8_t  hint_at;            /**< The next one the round looks at.         */
     bool     hint_on;            /**< The round is still on the hints: no sweep
                                   *   has run, so the driver's table is not this
                                   *   round's.                                 */
+    bool     hint_alt;           /**< The look with the worker is at the hint's
+                                  *   alternate; the hint's own is answered.   */
+    uint8_t  hint_chan;          /**< Where the hint's own look heard the network. */
+    int8_t   hint_rssi;          /**< And how strongly, dBm.                    */
+    uint8_t  hint_fall;          /**< The channel the join goes back to if the
+                                  *   alternate will not have the board; 0 for
+                                  *   none.                                    */
 
     /* The KODE services on the C5 (kode_wire.h): one answer buffer and one
      * deadline per service, because one request per service may be in
@@ -3739,15 +3776,53 @@ static void radio_vault_lost(Radio * const me)
 }
 
 /**
+ * @brief The channel of the strongest access point the last sweep heard
+ *        under a network's name.
+ *
+ * The join of a saved network is aimed at the band of that access point
+ * (kdrv_wifi_prepare()); a name the last sweep did not list has no channel
+ * to aim at.
+ *
+ * @param ssid The network's name.
+ * @return The channel, or KDRV_WIFI_CHANNEL_ANY when the last sweep did not
+ *         list the name.
+ */
+static uint8_t radio_scan_channel(const char *ssid)
+{
+    uint8_t const n       = kdrv_wifi_scan_count();
+    uint8_t       channel = KDRV_WIFI_CHANNEL_ANY;
+    int8_t        best    = 0;
+    bool          heard   = false;
+
+    for ( uint8_t i = 0U; i < n; ++i )
+    {
+        kdrv_wifi_ap_t ap;
+
+        if ( kdrv_wifi_scan_get(i, &ap)
+            && (strncmp(ap.ssid, ssid, sizeof(ap.ssid)) == 0)
+            && ( (!heard) || (ap.rssi > best) ) )
+        {
+            heard   = true;
+            best    = ap.rssi;
+            channel = ap.channel;
+        }
+    }
+    return channel;
+}
+
+/**
  * @brief Pick the strongest network in the last scan that the vault keeps.
  *
  * The strongest, because signal is what predicts a join; and only networks the
  * scan saw. Entries already tried this round are skipped, so a network that
- * refuses us is not offered again.
+ * refuses us is not offered again. A network on both bands is two entries,
+ * one per access point, so the second try is the other band.
  *
+ * @param me      The AO.
+ * @param channel Receives the channel of the access point picked.
  * @return false when nothing is left to try.
  */
-static bool auto_pick(Radio * const me)
+static bool auto_pick(Radio * const me, uint8_t * const channel)
 {
     uint8_t const n = kdrv_wifi_scan_count();
     int           best = -1;
@@ -3784,7 +3859,9 @@ static bool auto_pick(Radio * const me)
     (void)kdrv_wifi_scan_get((uint8_t)best, &ap);
     me->tried |= (1UL << (uint8_t)best);
     (void)snprintf(me->ssid, sizeof(me->ssid), "%s", ap.ssid);
-    KLOG_I(TAG, "trying '%s' (%ddBm)", me->ssid, (int)ap.rssi);
+    *channel = ap.channel;
+    KLOG_I(TAG, "trying '%s' (%ddBm) on channel %u", me->ssid, (int)ap.rssi,
+           (unsigned)ap.channel);
     return true;
 }
 #endif /* CONFIG_KODEOS_WIFI */
@@ -3793,17 +3870,116 @@ static bool auto_pick(Radio * const me)
 /** @brief Read the channels back from NVS. Anything unexpected reads as none. */
 static void radio_hints_load(Radio * const me)
 {
-    size_t n = sizeof(me->hints);
+    char   bytes[sizeof(me->hints)];
+    size_t n      = sizeof(bytes);
+    size_t stride = 0U;
 
     (void)memset(me->hints, 0, sizeof(me->hints));
-    if ( (khal_nvs_get_blob(KSET_NAMESPACE, RADIO_HINTS_KEY, me->hints, &n) != KODE_OK)
-        || (sizeof(me->hints) != n) )
+    if ( khal_nvs_get_blob(KSET_NAMESPACE, RADIO_HINTS_KEY, bytes, &n) == KODE_OK )
     {
-        (void)memset(me->hints, 0, sizeof(me->hints));
+        if ( sizeof(me->hints) == n )
+        {
+            stride = sizeof(RadioHint);
+        }
+        else if ( (RADIO_HINTS_MAX * RADIO_HINT_BARE_BYTES) == n )
+        {
+            /* Stored with no alternates: each is read as having none. */
+            stride = RADIO_HINT_BARE_BYTES;
+        }
+        else
+        {
+            /* a layout nobody here wrote: no hints */
+        }
+    }
+    for ( uint8_t i = 0U; (0U != stride) && (RADIO_HINTS_MAX > i); ++i )
+    {
+        size_t const at = i * stride;
+
+        (void)memcpy(me->hints[i].ssid, &bytes[at], sizeof(me->hints[i].ssid));
+        me->hints[i].channel = (uint8_t)bytes[at + RADIO_HINT_CHANNEL_AT];
+        if ( sizeof(RadioHint) == stride )
+        {
+            me->hints[i].alt = (uint8_t)bytes[at + RADIO_HINT_BARE_BYTES];
+        }
     }
     for ( uint8_t i = 0U; RADIO_HINTS_MAX > i; ++i )
     {
         me->hints[i].ssid[KDRV_WIFI_SSID_LEN] = '\0';
+    }
+}
+
+/** @brief Keep the channels in NVS. */
+static void radio_hints_store(Radio const * const me)
+{
+    if ( khal_nvs_set_blob(KSET_NAMESPACE, RADIO_HINTS_KEY, me->hints,
+                          sizeof(me->hints)) != KODE_OK )
+    {
+        KLOG_W(TAG, "the channels of the networks could not be kept");
+    }
+}
+
+/**
+ * @brief The strongest channel other than @p channel the last sweep heard a
+ *        network on.
+ *
+ * @param ssid    The network's name.
+ * @param channel The channel to leave out.
+ * @param listed  Receives whether the sweep heard the network at all.
+ * @return The channel; 0 when the sweep heard the network on no other.
+ */
+static uint8_t radio_scan_alternate(const char *ssid, uint8_t channel, bool * const listed)
+{
+    uint8_t const n     = kdrv_wifi_scan_count();
+    uint8_t       other = 0U;
+    int8_t        best  = 0;
+
+    *listed = false;
+    for ( uint8_t i = 0U; i < n; ++i )
+    {
+        kdrv_wifi_ap_t ap;
+
+        if ( kdrv_wifi_scan_get(i, &ap) && ('\0' != ap.ssid[0])
+            && (strncmp(ap.ssid, ssid, sizeof(ap.ssid)) == 0) )
+        {
+            *listed = true;
+            if ( (ap.channel != channel) && ((0U == other) || (ap.rssi > best)) )
+            {
+                other = ap.channel;
+                best  = ap.rssi;
+            }
+        }
+    }
+    return other;
+}
+
+/**
+ * @brief A sweep reached its end: each remembered network it heard has the
+ *        other channel it was heard on, or none.
+ *
+ * A network the sweep did not hear keeps what it had, since the sweep says
+ * nothing of it.
+ *
+ * @param me The AO.
+ */
+static void radio_hints_sweep(Radio * const me)
+{
+    bool changed = false;
+
+    for ( uint8_t i = 0U; (RADIO_HINTS_MAX > i) && ('\0' != me->hints[i].ssid[0]); ++i )
+    {
+        bool          listed = false;
+        uint8_t const alt    = radio_scan_alternate(me->hints[i].ssid, me->hints[i].channel,
+                                                    &listed);
+
+        if ( listed && (alt != me->hints[i].alt) )
+        {
+            me->hints[i].alt = alt;
+            changed = true;
+        }
+    }
+    if ( changed )
+    {
+        radio_hints_store(me);
     }
 }
 
@@ -3812,20 +3988,22 @@ static void radio_hints_load(Radio * const me)
  *
  * Written only when something changed, so a board that keeps coming back to
  * the same network on the same channel never touches the flash for it. The
- * name comes from the driver because an adoption never knew it otherwise.
+ * name comes from the driver because an adoption never knew it otherwise. The
+ * other channel is the strongest one the last sweep heard the network on; when
+ * no sweep heard it, a join on another channel than the remembered one leaves
+ * the remembered one as the other, and a join on the same keeps its alternate.
  */
 static void radio_hint_learn(Radio * const me)
 {
     char          ssid[KDRV_WIFI_SSID_LEN + 1U];
     uint8_t const channel = kdrv_wifi_channel_last();
-    uint8_t       at = RADIO_HINTS_MAX - 1U;
+    uint8_t       at      = RADIO_HINTS_MAX - 1U;
+    bool          known   = false;
+    bool          listed  = false;
+    RadioHint     fresh;
 
     kdrv_wifi_ssid_copy(ssid, sizeof(ssid));
     if ( (0U == channel) || ('\0' == ssid[0]) )
-    {
-        return;
-    }
-    if ( (strcmp(me->hints[0].ssid, ssid) == 0) && (me->hints[0].channel == channel) )
     {
         return;
     }
@@ -3833,21 +4011,55 @@ static void radio_hint_learn(Radio * const me)
     {
         if ( strcmp(me->hints[i].ssid, ssid) == 0 )
         {
-            at = i;
+            at    = i;
+            known = true;
             break;
         }
+    }
+    (void)memset(&fresh, 0, sizeof(fresh));
+    (void)snprintf(fresh.ssid, sizeof(fresh.ssid), "%s", ssid);
+    fresh.channel = channel;
+    fresh.alt     = radio_scan_alternate(ssid, channel, &listed);
+    if ( known && (!listed) )
+    {
+        if ( me->hints[at].channel != channel )
+        {
+            fresh.alt = me->hints[at].channel;
+        }
+        else
+        {
+            fresh.alt = me->hints[at].alt;
+        }
+    }
+    if ( known && (0U == at) && (me->hints[0].channel == fresh.channel)
+        && (me->hints[0].alt == fresh.alt) )
+    {
+        return;
     }
     for ( uint8_t i = at; 0U < i; --i )
     {
         me->hints[i] = me->hints[i - 1U];
     }
-    (void)snprintf(me->hints[0].ssid, sizeof(me->hints[0].ssid), "%s", ssid);
-    me->hints[0].channel = channel;
-    if ( khal_nvs_set_blob(KSET_NAMESPACE, RADIO_HINTS_KEY, me->hints,
-                          sizeof(me->hints)) != KODE_OK )
-    {
-        KLOG_W(TAG, "the channel of '%s' could not be kept", ssid);
-    }
+    me->hints[0] = fresh;
+    radio_hints_store(me);
+}
+
+/**
+ * @brief Listen on @p channel for the network of the hint the round is at.
+ * @param me      The AO.
+ * @param channel The channel to listen on.
+ * @return true when the look is with the worker.
+ */
+static bool auto_hint_look(Radio * const me, uint8_t channel)
+{
+    kdrv_radio_req_t req;
+
+    (void)memset(&req, 0, sizeof(req));
+    req.type     = KDRV_RADIO_JOB_WIFI_PROBE;
+    req.channel  = channel;
+    req.dwell_ms = (uint16_t)RADIO_HINT_DWELL_MS;
+    (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->hints[me->hint_at].ssid);
+    return radio_submit_req(me, &req);
 }
 
 /**
@@ -3870,18 +4082,46 @@ static bool auto_hint_next(Radio * const me)
         }
         if ( (!me->vlist_ok) || vault_knows(me, me->hints[i].ssid) )
         {
-            kdrv_radio_req_t req;
-
-            (void)memset(&req, 0, sizeof(req));
-            req.type     = KDRV_RADIO_JOB_WIFI_PROBE;
-            req.channel  = me->hints[i].channel;
-            req.dwell_ms = (uint16_t)RADIO_HINT_DWELL_MS;
-            (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->hints[i].ssid);
-            return radio_submit_req(me, &req);
+            me->hint_alt  = false;
+            me->hint_fall = 0U;
+            return auto_hint_look(me, me->hints[i].channel);
         }
         ++me->hint_at;
     }
     return false;
+}
+
+/**
+ * @brief Ready this side for the join of the hint's network on @p channel,
+ *        and say so.
+ *
+ * @param me      The AO.
+ * @param channel Where it was heard.
+ * @param rssi    How strongly, dBm.
+ * @param left    The remembered channel the join left for a stronger one; 0
+ *                when it goes to the remembered channel itself.
+ * @return true when the readying is with the worker.
+ */
+static bool auto_hint_try(Radio * const me, uint8_t channel, int8_t rssi, uint8_t left)
+{
+    kdrv_radio_req_t req;
+
+    (void)snprintf(me->ssid, sizeof(me->ssid), "%s", me->hints[me->hint_at].ssid);
+    if ( 0U == left )
+    {
+        KLOG_I(TAG, "trying '%s' (%ddBm) on channel %u, where it was", me->ssid,
+               (int)rssi, (unsigned)channel);
+    }
+    else
+    {
+        KLOG_I(TAG, "trying '%s' (%ddBm) on channel %u, stronger than channel %u where it was",
+               me->ssid, (int)rssi, (unsigned)channel, (unsigned)left);
+    }
+    (void)memset(&req, 0, sizeof(req));
+    req.type    = KDRV_RADIO_JOB_WIFI_PREPARE;
+    req.channel = channel;
+    (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->ssid);
+    return radio_submit_req(me, &req);
 }
 #endif /* CONFIG_KODEOS_WIFI */
 
@@ -7216,13 +7456,65 @@ static void radio_ble_link_note(Radio * const me)
 }
 
 /**
+ * @brief Whether the Wi-Fi station holds an address on a 5 GHz channel.
+ *
+ * The channel is the one the driver read from the C5's record of the access
+ * point when the station got its address, not a guess from the last scan; it
+ * reads 0 once the association is gone.
+ *
+ * @return true on the upper band.
+ */
+static bool radio_station_on_5g(void)
+{
+    bool on = false;
+
+#if CONFIG_KODEOS_WIFI
+    on = (KDRV_WIFI_GOT_IP == kdrv_wifi_state(NULL))
+         && (KDRV_WIFI_LAST_24_CHANNEL < kdrv_wifi_channel_last());
+#endif
+    return on;
+}
+
+/**
+ * @brief Whether an advert at interval @p itvl goes on the air in pulses: the
+ *        slow one, while the station is on 5 GHz and the board is not at rest.
+ *
+ * With the advert enabled, the C5's station on a 5 GHz channel does not fetch
+ * the frames its access point holds for it; with the advert enabled only for
+ * the event, it does. So the driver enables the slow advert for its event and
+ * disables it until the interval is over (kdrv_ble_adv_plan()). The fast
+ * advert is never pulsed: its interval leaves no pause worth having, and it
+ * lasts 30 s at most. At rest the advert stays continuous: the pulses'
+ * commands wake the link several times a second, and a late inbound frame
+ * costs less than that.
+ *
+ * @param me   The AO.
+ * @param itvl The advert's interval, KDRV_BLE_ITVL_FAST or KDRV_BLE_ITVL_SLOW.
+ * @return true when the advert is pulsed.
+ */
+static bool radio_ble_pulsed(Radio const * const me, uint16_t itvl)
+{
+    bool pulsed = ((uint16_t)KDRV_BLE_ITVL_SLOW == itvl) && radio_station_on_5g();
+
+    /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the board can rest */
+    if ( pulsed && radio_ble_resting(me) )
+    {
+        pulsed = false;
+    }
+    return pulsed;
+}
+
+/**
  * @brief THE ADVERTISING INVARIANT: BLE on and nobody connected means on air.
  *
  * Reachable is what the `ble` flag means: this restores that state from
  * wherever the board drifted. Visible while it knows nobody or Pair new
  * device's time lasts, hidden but to its bonds otherwise. The advert runs in
  * legs, each one's end coming back here: fast for 30 s after somebody may be
- * looking, then slow. An advert showing the board the wrong way comes off.
+ * looking, then slow, and the slow one in pulses while the station is on
+ * 5 GHz and the board is awake. An advert showing the board the wrong way, or
+ * pulsed the wrong way for the station's band or the board's rest, comes off,
+ * and the one that follows is planned afresh.
  * OFF is not acted on: a stack that is down is the start debt's.
  *
  * @param me The AO.
@@ -7245,7 +7537,9 @@ static bool radio_ble_adv_reconcile(Radio * const me)
 
         (void)memset(&req, 0, sizeof(req));
         req.type = KDRV_RADIO_JOB_BLE_ADV;
-        if ( (KDRV_BLE_ADVERTISING == state) && (hidden != me->ble_adv_hidden) )
+        if ( (KDRV_BLE_ADVERTISING == state)
+            && ((hidden != me->ble_adv_hidden)
+                || (radio_ble_pulsed(me, me->ble_adv_itvl) != me->ble_adv_pulsed)) )
         {
             req.on    = false;
             submitted = radio_submit_req(me, &req);
@@ -7280,7 +7574,10 @@ static bool radio_ble_adv_reconcile(Radio * const me)
                     req.len = fast;
                 }
             }
+            req.pulsed         = radio_ble_pulsed(me, req.itvl);
             me->ble_adv_hidden = hidden;
+            me->ble_adv_itvl   = req.itvl;
+            me->ble_adv_pulsed = req.pulsed;
             submitted = radio_submit_req(me, &req);
         }
         else
@@ -9029,6 +9326,7 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
 {
     kdrv_radio_req_t req;
     bool             ok;
+    bool             calms = false;
 
     (void)memset(&req, 0, sizeof(req));
     req.type = KDRV_RADIO_JOB_SLEEP;
@@ -9040,6 +9338,9 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
 
         me->ble_fast_until = now;
         req.len = radio_ble_leg_ms(me, now);
+        /* A fast or a pulsed advert goes on at the slow interval, continuous
+         * (kdrv_ble_adv_calm()). */
+        calms   = (((uint16_t)KDRV_BLE_ITVL_FAST == me->ble_adv_itvl) || me->ble_adv_pulsed);
     }
 #endif
     me->lp_job = job;
@@ -9047,6 +9348,15 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
     if ( !ok )
     {
         me->lp_job = (uint8_t)RADIO_LPJ_NONE;
+    }
+    else if ( calms )
+    {
+        me->ble_adv_itvl   = (uint16_t)KDRV_BLE_ITVL_SLOW;
+        me->ble_adv_pulsed = false;
+    }
+    else
+    {
+        /* the advert on the air, if any, is not the one the rest changes */
     }
     return ok;
 }
@@ -10954,6 +11264,10 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             /* The sweep the radio check cut short has ended: its request
              * is over, and the next sweep runs whole. */
             kdrv_wifi_scan_abort(false);
+            if ( (uint8_t)KODE_OK == job->status )
+            {
+                radio_hints_sweep(me);
+            }
             if ( probe_owns(me, (uint8_t)PB_SWEEP) )
             {
                 /* The check's own sweep: read for two names, never listed. */
@@ -11597,6 +11911,10 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             me->retry_step = 0U;
             wifi_retry_arm(me);
             wifi_publish_state(me);
+#if CONFIG_KODEOS_BLE
+            /* The advert follows the station's band. */
+            (void)radio_ble_adv_reconcile(me);
+#endif
             status = Q_HANDLED();
             break;
         }
@@ -11695,7 +12013,8 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 {
                     /* A saved network: the C5 joins it from its vault, and
                      * this side only readies its netif and waits. */
-                    req.type = KDRV_RADIO_JOB_WIFI_PREPARE;
+                    req.type    = KDRV_RADIO_JOB_WIFI_PREPARE;
+                    req.channel = radio_scan_channel(j->ssid);
                     me->pass[0]  = '\0';
                     me->remember = false;
                 }
@@ -12286,6 +12605,18 @@ static QState auto_try(Radio * const me)
     }
     if ( me->hint_on )
     {
+        if ( 0U != me->hint_fall )
+        {
+            /* The stronger access point would not have us: the remembered
+             * one, which was heard. */
+            uint8_t const back = me->hint_fall;
+
+            me->hint_fall = 0U;
+            if ( auto_hint_try(me, back, me->hint_rssi, 0U) )
+            {
+                return Q_HANDLED();
+            }
+        }
         /* A hint that would not have us, or was not heard: the next, and when
          * they are spent the sweep the round would have begun with. */
         ++me->hint_at;
@@ -12301,7 +12632,9 @@ static QState auto_try(Radio * const me)
         }
         return auto_finish(me);
     }
-    if ( !auto_pick(me) )
+    uint8_t channel = KDRV_WIFI_CHANNEL_ANY;
+
+    if ( !auto_pick(me, &channel) )
     {
         KLOG_N(TAG, "none of the %u remembered networks in range would let "
                     "us on", (unsigned)me->vlist.count);
@@ -12309,7 +12642,8 @@ static QState auto_try(Radio * const me)
     }
     kdrv_radio_req_t req;
     (void)memset(&req, 0, sizeof(req));
-    req.type = KDRV_RADIO_JOB_WIFI_PREPARE;
+    req.type    = KDRV_RADIO_JOB_WIFI_PREPARE;
+    req.channel = channel;
     (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->ssid);
     if ( !radio_submit_req(me, &req) )
     {
@@ -12320,7 +12654,9 @@ static QState auto_try(Radio * const me)
 
 static QState auto_finish(Radio * const me)
 {
-    me->hint_on = false;
+    me->hint_on   = false;
+    me->hint_alt  = false;
+    me->hint_fall = 0U;
     /* A round follows a round no sooner than the second wait. */
     if ( 0U == me->retry_step )
     {
@@ -12362,9 +12698,12 @@ static QState auto_abandon(Radio * const me)
  *
  * A child of Radio_up, like the update: it needs the link and owns the
  * channel while it runs. First the channels the last networks were on
- * (auto_hint_next()), then a sweep if none is heard: the strongest network
- * the store recognises is joined, and on a refusal the next one. A network
- * that refuses us is marked tried for this round only.
+ * (auto_hint_next()), each with a look at the other channel the network was
+ * heard on, if there is one: the join goes there when it is clearly stronger,
+ * and back to the remembered channel if that access point will not have the
+ * board. Then a sweep if none is heard: the strongest network the store
+ * recognises is joined, and on a refusal the next one. A network that refuses
+ * us is marked tried for this round only.
  */
 static QState Radio_autojoin(Radio * const me, QEvt const * const e)
 {
@@ -12386,6 +12725,10 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
             {
                 case RADIO_OUT_WIFI_SCAN_DONE: {
                     me->busy = false;
+                    if ( (uint8_t)KODE_OK == job->status )
+                    {
+                        radio_hints_sweep(me);
+                    }
                     if ( !me->wifi_want )
                     {
                         status = auto_abandon(me);
@@ -12453,26 +12796,58 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                         break;
                     }
                     kdrv_radio_probe_result_t heard;
+                    bool                      go = false;
 
                     kdrv_radio_probe_result(&heard);
-                    if ( ((uint8_t)WOWED_JOIN != me->wifi_owed)
-                        && ((uint8_t)KODE_OK == job->status) && heard.net[0].seen )
+                    go = ((uint8_t)WOWED_JOIN != me->wifi_owed)
+                         && ((uint8_t)KODE_OK == job->status) && heard.net[0].seen;
+                    if ( me->hint_alt )
                     {
-                        kdrv_radio_req_t req;
-
-                        (void)snprintf(me->ssid, sizeof(me->ssid), "%s",
-                                       me->hints[me->hint_at].ssid);
-                        KLOG_I(TAG, "trying '%s' (%ddBm) on channel %u, where it was",
-                               me->ssid, (int)heard.net[0].rssi,
-                               (unsigned)heard.net[0].channel);
-                        (void)memset(&req, 0, sizeof(req));
-                        req.type = KDRV_RADIO_JOB_WIFI_PREPARE;
-                        (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->ssid);
-                        if ( radio_submit_req(me, &req) )
+                        /* The alternate's look: it takes the join when it is
+                         * heard and clearly stronger; the remembered channel,
+                         * heard a look ago, takes it otherwise. */
+                        me->hint_alt = false;
+                        if ( go && (((int)heard.net[0].rssi)
+                                    >= ((int)me->hint_rssi + RADIO_HINT_YIELD_DB)) )
+                        {
+                            me->hint_fall = me->hint_chan;
+                            if ( auto_hint_try(me, heard.net[0].channel, heard.net[0].rssi,
+                                               me->hint_chan) )
+                            {
+                                status = Q_HANDLED();
+                                break;
+                            }
+                            me->hint_fall = 0U;
+                        }
+                        if ( ((uint8_t)WOWED_JOIN != me->wifi_owed)
+                            && auto_hint_try(me, me->hint_chan, me->hint_rssi, 0U) )
                         {
                             status = Q_HANDLED();
                             break;
                         }
+                    }
+                    else if ( go )
+                    {
+                        uint8_t const alt = me->hints[me->hint_at].alt;
+
+                        me->hint_chan = heard.net[0].channel;
+                        me->hint_rssi = heard.net[0].rssi;
+                        if ( (0U != alt) && (alt != me->hint_chan)
+                            && auto_hint_look(me, alt) )
+                        {
+                            me->hint_alt = true;
+                            status = Q_HANDLED();
+                            break;
+                        }
+                        if ( auto_hint_try(me, me->hint_chan, me->hint_rssi, 0U) )
+                        {
+                            status = Q_HANDLED();
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        /* not heard where it was: the next */
                     }
                     status = auto_try(me);
                     break;
