@@ -19,15 +19,16 @@
 #include "kqp_config.h"
 #include "kqp_signals.h"
 
-/* Two pools rather than kqp's four. The tiers exist on the board to stop a
+/* Three pools rather than kqp's five. The tiers exist on the board to stop a
  * 4 KB firmware chunk from consuming a block that a log line needed; here
  * nothing competes, so one block size that fits the ordinary events is
  * simpler and cannot run out for the wrong reason.
  *
- * The jumbo tier is the exception, and it is not about size: how many of its
- * blocks are free is a fact AO_Storage ACTS on - an icon travels as three
- * events or not at all - so a case has to be able to take some and see the
- * refusal. It therefore has the board's own count, not a comfortable one. */
+ * The jumbo and icon tiers are the exception, and it is not about size: how
+ * many of the icon tier's blocks are free is a fact AO_Storage ACTS on - an
+ * icon travels as KODE_APP_ICON_PIECES events or not at all - so a case has
+ * to be able to take some and see the refusal. Each has the board's own
+ * count, not a comfortable one. */
 #define POOL_BLOCK  352U
 #define POOL_COUNT   32U
 
@@ -40,10 +41,13 @@ _Static_assert(sizeof(SchedSetReqEvt) <= POOL_BLOCK,
 _Static_assert(sizeof(SchedEntryEvt) <= POOL_BLOCK,
                "the scheduler's entry must fit the ordinary block");
 
-/* What QMPool_init() will round the block up to, worked out here so the
- * storage below holds KQP_JUMBO_POOL_COUNT blocks and not one more: the count
- * is the point of this pool, so it may not be an accident of padding. */
-#define JUMBO_BLOCK (((sizeof(AppDataIconEvt) + sizeof(void *) - 1U) \
+/* What QMPool_init() will round a block up to, worked out here so the storage
+ * below holds KQP_JUMBO_POOL_COUNT and KQP_ICON_POOL_COUNT blocks and not one
+ * more: the count is the point of these pools, so it may not be an accident
+ * of padding. */
+#define JUMBO_BLOCK (((sizeof(RecvDataEvt) + sizeof(void *) - 1U) \
+                      / sizeof(void *)) * sizeof(void *))
+#define ICON_BLOCK  (((sizeof(AppDataIconEvt) + sizeof(void *) - 1U) \
                       / sizeof(void *)) * sizeof(void *))
 
 _Static_assert(sizeof(MqttMsgEvt) <= POOL_BLOCK, "an MQTT message fits the ordinary block");
@@ -53,9 +57,15 @@ static QSubscrList s_subscr[MAX_PUB_SIG];
 static uint64_t    s_pool[(POOL_BLOCK * POOL_COUNT) / sizeof(uint64_t)];
 static uint64_t    s_jumbo[(JUMBO_BLOCK * KQP_JUMBO_POOL_COUNT)
                            / sizeof(uint64_t)];
+static uint64_t    s_icon[(ICON_BLOCK * KQP_ICON_POOL_COUNT)
+                          / sizeof(uint64_t)];
 
 _Static_assert(((JUMBO_BLOCK * KQP_JUMBO_POOL_COUNT) % sizeof(uint64_t)) == 0U,
                "the jumbo storage must be exactly the blocks it stands for");
+_Static_assert(((ICON_BLOCK * KQP_ICON_POOL_COUNT) % sizeof(uint64_t)) == 0U,
+               "the icon storage must be exactly the blocks it stands for");
+_Static_assert(sizeof(AppDataIconEvt) > JUMBO_BLOCK,
+               "an icon event must be too wide for the jumbo block, or it would be served from it");
 
 void qf_support_init(void)
 {
@@ -72,6 +82,7 @@ void qf_support_init(void)
     /* In order of strictly increasing block size, as QF requires. */
     QF_poolInit(s_pool, sizeof(s_pool), POOL_BLOCK);
     QF_poolInit(s_jumbo, sizeof(s_jumbo), JUMBO_BLOCK);
+    QF_poolInit(s_icon, sizeof(s_icon), ICON_BLOCK);
 }
 
 #define AO_QUEUE_LEN 32

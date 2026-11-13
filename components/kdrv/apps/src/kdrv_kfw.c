@@ -236,7 +236,8 @@ kode_status_t kfw_hdr_parse(const void *buf, size_t len, kfw_hdr_t *out)
 /**
  * @brief Whether a block's two lengths are the ones a block may carry.
  * @param h  The block's header.
- * @return true when json_len is 1..KFW_AD_JSON_MAX and icon_len is 0 or KFW_AD_ICON_LEN.
+ * @return true when json_len is 1..KFW_AD_JSON_MAX and icon_len is 0, KFW_AD_ICON_LEN
+ *         or KFW_AD_ICON_LEN_HALF.
  */
 static bool ad_sizes_ok(const kfw_ad_hdr_t *h)
 {
@@ -246,7 +247,8 @@ static bool ad_sizes_ok(const kfw_ad_hdr_t *h)
     {
         ok = false;
     }
-    if ( (0U != h->icon_len) && ((uint16_t)KFW_AD_ICON_LEN != h->icon_len) )
+    if ( (0U != h->icon_len) && ((uint16_t)KFW_AD_ICON_LEN != h->icon_len)
+        && ((uint16_t)KFW_AD_ICON_LEN_HALF != h->icon_len) )
     {
         ok = false;
     }

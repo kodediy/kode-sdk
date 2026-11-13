@@ -70,6 +70,12 @@ _Static_assert(sizeof(AppDataPutEvt) <= sizeof(ConsoleLineEvt),
 _Static_assert(sizeof(AppDataPutRspEvt) <= sizeof(ConsoleLineEvt),
                "AppDataPutRspEvt must fit the medium pool");
 
+/* kqp_config.h cannot see the icon's own size either: the pieces an icon
+ * travels in are the whole block this AO reads the file into, and the folder
+ * budget counts the same block. */
+_Static_assert(KODE_APP_ICON_BYTES == KAPP_ICON_BYTES,
+               "KODE_APP_ICON_BYTES twins KAPP_ICON_BYTES");
+
 /* A listing publishes at most one page plus its end marker at once, all
  * medium-tier events, so the pool must outlive that burst. */
 _Static_assert((KODE_STORAGE_LIST_MAX + 1U) < KQP_MEDIUM_POOL_COUNT,
@@ -246,7 +252,7 @@ typedef struct {
                               *   the host still owes the full count.        */
 
     /* The buffer one APPDATA_REQ_SIG stages an icon in, taken from PSRAM on the
-     * first request and held for the life of the firmware, to keep 12 KB out of
+     * first request and held for the life of the firmware, to keep 48 KB out of
      * internal RAM. One icon at a time: one request per dispatch step. */
     uint8_t *icon;           /**< KAPP_ICON_BYTES, NULL until first asked.   */
     bool     icon_warned;    /**< A refusal is logged once, not once per pill
@@ -2398,7 +2404,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
                                   req->project)
              || (NULL == req->buf) || (0U == req->json_len)
              || (KAPP_DATA_JSON_MAX < req->json_len)
-             || ((0U != req->icon_len) && (KAPP_ICON_BYTES != req->icon_len)) )
+             || ((0U != req->icon_len) && !kapp_icon_len_ok(req->icon_len)) )
     {
         KLOG_W(TAG, "'%s' cannot be a data folder as asked", req->project);
     }
@@ -6089,9 +6095,9 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             AppDataFieldsEvt *f = Q_NEW_X(AppDataFieldsEvt, 0U,
                                           APPDATA_FIELDS_SIG);
             /* A static: 1 KB the parser walks wants internal RAM. The
-             * 12 KB icon is only copied out of, so it is in PSRAM. */
+             * 48 KB icon is only copied out of, so it is in PSRAM. */
             static char     json[KAPP_DATA_JSON_MAX + 1U];
-            AppDataIconEvt *ic[3] = { NULL, NULL, NULL };
+            AppDataIconEvt *ic[KODE_APP_ICON_PIECES] = { NULL };
             char            folder[APPDATA_FOLDER_MAX];
             char            path[APPDATA_PATH_MAX];
             kapp_data_t     d;
@@ -6116,7 +6122,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             folder[0] = '\0';
 
             /* First ask, and only then: a firmware whose launcher never
-             * opens an app folder never pays the 12 KB. Never released -
+             * opens an app folder never pays the 48 KB. Never released -
              * the next request would only take it again, and a buffer that
              * comes and goes is a fragmentation source for no gain. */
             if ( NULL == me->icon )
@@ -6205,8 +6211,15 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                                    ? (uint8_t)APPDATA_ICON_PATH
                                    : (uint8_t)APPDATA_ICON_NONE;
                 }
-                else if ( (KAPP_ICON_BYTES != size) || (KAPP_ICON_BYTES != got) )
+                else if ( size != got )
                 {
+                    /* Longer than the block: not all of it was read. */
+                    f->icon_status = (uint8_t)APPDATA_ICON_SIZE;
+                }
+                else if ( !kapp_icon_widen(me->icon, got) )
+                {
+                    /* Neither size. A file of either is brought up to
+                     * KAPP_ICON_BYTES by this call, here and nowhere else. */
                     f->icon_status = (uint8_t)APPDATA_ICON_SIZE;
                 }
                 else
@@ -6215,20 +6228,20 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 }
             }
 
-            /* All three blocks or none, and taken BEFORE the fields event
+            /* All the pieces or none, and taken BEFORE the fields event
              * goes out: half an icon would be drawn wrong rather than not
              * drawn, and the status has to be true when the asker reads it. */
             if ( (uint8_t)APPDATA_ICON_OK == f->icon_status )
             {
                 bool all = true;
-                for ( uint8_t s = 0U; 3U > s; ++s )
+                for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
                 {
                     ic[s] = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
                     all   = all && (NULL != ic[s]);
                 }
                 if ( !all )
                 {
-                    for ( uint8_t s = 0U; 3U > s; ++s )
+                    for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
                     {
                         if ( NULL != ic[s] )
                         {
@@ -6242,15 +6255,15 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
 
             QACTIVE_POST(req->who, &f->super, &me->super);
 
-            for ( uint8_t s = 0U; (3U > s) && (NULL != ic[s]); ++s )
+            for ( uint8_t s = 0U; (KODE_APP_ICON_PIECES > s) && (NULL != ic[s]); ++s )
             {
                 (void)memset(ic[s]->project, 0, sizeof(ic[s]->project));
                 (void)snprintf(ic[s]->project, sizeof(ic[s]->project), "%s",
                                req->project);
                 ic[s]->seq = s;
                 (void)memcpy(ic[s]->data,
-                             &me->icon[(size_t)s * KODE_RECV_CHUNK],
-                             KODE_RECV_CHUNK);
+                             &me->icon[(size_t)s * KODE_APP_ICON_PIECE],
+                             KODE_APP_ICON_PIECE);
                 QACTIVE_POST(req->who, &ic[s]->super, &me->super);
             }
             {

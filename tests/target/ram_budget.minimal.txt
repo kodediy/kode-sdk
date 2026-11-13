@@ -36,7 +36,7 @@ buttons_stack          buttons_ao.c         3072
 s_watch_stack          khal_system_esp.c    3072
 
 # QP/C's three event pools.
-s_jumbo_pool           kqp.c                16560
+s_jumbo_pool           kqp.c                16432
 s_medium_pool          kqp.c                16128
 s_large_pool           kqp.c                16128
 

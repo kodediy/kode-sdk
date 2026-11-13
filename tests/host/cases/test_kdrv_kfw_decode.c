@@ -702,6 +702,28 @@ TEST_CASE("a container with a block installs and hands the block over",
     TEST_ASSERT_EQUAL_INT((int)KFW_AD_BLOCK, (int)ad.kind);   /* kind stays */
 }
 
+TEST_CASE("a container with a 64 px icon in its block hands it over as it is",
+          "[kfw_decode]")
+{
+    kfw_appdata_t ad;
+    size_t        n;
+
+    ad_fresh();
+    n = build_stream_ad(s_ad_stream, s_ad_body, sizeof(s_ad_body), AD_JSON,
+                        (uint16_t)strlen(AD_JSON), s_ad_icon,
+                        (uint16_t)KFW_AD_ICON_LEN_HALF, false);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(s_ad_stream, n));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
+
+    TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
+    kfw_appdata_take(&ad);
+    ad_expect_demo(&ad, (uint16_t)KFW_AD_ICON_LEN_HALF);
+    TEST_ASSERT_EQUAL_INT((int)KFW_AD_BLOCK, (int)ad.kind);
+}
+
 TEST_CASE("the block arrives one byte at a time", "[kfw_decode]")
 {
     kfw_appdata_t ad;
@@ -803,6 +825,27 @@ TEST_CASE("a block with icon_len 100 is dropped without allocating",
 
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_MEMORY(s_ad_body, s_got, sizeof(s_ad_body));
+    TEST_ASSERT_EQUAL_UINT(0U, fake_psram_alloc_count());
+    ad_expect_none();
+}
+
+TEST_CASE("a block with an icon between the two sizes is dropped without allocating",
+          "[kfw_decode]")
+{
+    static const uint8_t icon[KFW_AD_ICON_LEN_HALF + 1U] = { 0U };
+    size_t               n;
+
+    ad_fresh();
+    n = build_stream_ad(s_ad_stream, s_ad_body, sizeof(s_ad_body), AD_JSON,
+                        (uint16_t)strlen(AD_JSON), icon, (uint16_t)sizeof(icon),
+                        false);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(s_ad_stream, n));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
+
+    TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_UINT(0U, fake_psram_alloc_count());
     ad_expect_none();
 }
@@ -980,6 +1023,9 @@ TEST_CASE("kfw_ad_check judges a block with no session", "[kfw_decode]")
     ad_block(&h, body, AD_JSON, jl, (uint16_t)KFW_AD_ICON_LEN);
     TEST_ASSERT_EQUAL_INT((int)KFW_AD_OK, (int)kfw_ad_check(&h, body));
 
+    ad_block(&h, body, AD_JSON, jl, (uint16_t)KFW_AD_ICON_LEN_HALF);
+    TEST_ASSERT_EQUAL_INT((int)KFW_AD_OK, (int)kfw_ad_check(&h, body));
+
     ad_block(&h, body, AD_JSON, jl, 0U);
     TEST_ASSERT_EQUAL_INT((int)KFW_AD_OK, (int)kfw_ad_check(&h, body));
 
@@ -997,6 +1043,14 @@ TEST_CASE("kfw_ad_check judges a block with no session", "[kfw_decode]")
 
     ad_block(&h, body, AD_JSON, jl, 0U);
     h.icon_len = 1U;
+    TEST_ASSERT_EQUAL_INT((int)KFW_AD_BAD_SIZE, (int)kfw_ad_check(&h, body));
+
+    ad_block(&h, body, AD_JSON, jl, 0U);
+    h.icon_len = (uint16_t)(KFW_AD_ICON_LEN_HALF + 1U);
+    TEST_ASSERT_EQUAL_INT((int)KFW_AD_BAD_SIZE, (int)kfw_ad_check(&h, body));
+
+    ad_block(&h, body, AD_JSON, jl, 0U);
+    h.icon_len = (uint16_t)(KFW_AD_ICON_LEN - 1U);
     TEST_ASSERT_EQUAL_INT((int)KFW_AD_BAD_SIZE, (int)kfw_ad_check(&h, body));
 
     ad_block(&h, body, AD_JSON, jl, 0U);

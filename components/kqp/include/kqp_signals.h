@@ -582,7 +582,7 @@ enum KodeSignals {
                                  *   launcher or the console.                 */
     APPDATA_FIELDS_SIG,         /**< To the asker: the folder's fields
                                  *   (AppDataFieldsEvt).                      */
-    APPDATA_ICON_SIG,           /**< To the asker: one third of the icon
+    APPDATA_ICON_SIG,           /**< To the asker: one piece of the icon
                                  *   (AppDataIconEvt).                        */
     APPDATA_END_SIG,            /**< To the asker: the conversation is
                                  *   over.                                    */
@@ -2548,17 +2548,20 @@ typedef struct {
 } AppDataFieldsEvt;         /* 208 bytes plus QEvt: the medium tier */
 
 /**
- * @brief One third of the icon, back to `who` (APPDATA_ICON_SIG).
+ * @brief One piece of the icon, back to `who` (APPDATA_ICON_SIG).
  *
- * KAPP_ICON_BYTES (12288) does not fit one KODE_RECV_CHUNK-wide jumbo block,
- * so the icon travels as three: seq 0..2, each a full 4096-byte third.
+ * The icon is KODE_APP_ICON_BYTES, far more than one KODE_RECV_CHUNK-wide
+ * jumbo block holds, so it travels as KODE_APP_ICON_PIECES: seq 0 up, each a
+ * full KODE_APP_ICON_PIECE bytes, laid end to end in the order they arrive.
+ * A piece is wider than the jumbo tier's block, so it is served from the
+ * icon tier, which is in PSRAM.
  */
 typedef struct {
     QEvt     super;
     char     project[32];
-    uint8_t  seq;          /**< 0..2: which 4096-byte third.               */
-    uint8_t  data[KODE_RECV_CHUNK];
-} AppDataIconEvt;           /* the jumbo tier's second tenant */
+    uint8_t  seq;          /**< 0..KODE_APP_ICON_PIECES-1: which piece.   */
+    uint8_t  data[KODE_APP_ICON_PIECE];
+} AppDataIconEvt;           /* the icon tier's only tenant */
 
 /**
  * @brief How a delete of one app's data folder ended (APPDATA_RM_RSP_SIG).
