@@ -286,10 +286,13 @@ kdrv_wifi_fail_t kdrv_wifi_fail_of(uint16_t reason)
     switch ( reason )
     {
         case (uint16_t)WIFI_REASON_AUTH_FAIL:
-        case (uint16_t)WIFI_REASON_HANDSHAKE_TIMEOUT:
-        case (uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
         case (uint16_t)WIFI_REASON_MIC_FAILURE: {
             fail = KDRV_WIFI_FAIL_PASSWORD;
+            break;
+        }
+        case (uint16_t)WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case (uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: {
+            fail = KDRV_WIFI_FAIL_HANDSHAKE;
             break;
         }
         case (uint16_t)WIFI_REASON_NO_AP_FOUND:
@@ -342,6 +345,7 @@ static const char *wifi_fail_word(void)
         case KDRV_WIFI_FAIL_PASSWORD:  { word = "wrong password"; break; }
         case KDRV_WIFI_FAIL_NOT_FOUND: { word = "not found, or out of range"; break; }
         case KDRV_WIFI_FAIL_OTHER:     { word = "other failure"; break; }
+        case KDRV_WIFI_FAIL_HANDSHAKE: { word = "handshake timed out"; break; }
         default:                       { break; }
     }
     return word;
