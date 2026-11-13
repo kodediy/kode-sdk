@@ -1883,6 +1883,11 @@ static kode_status_t panel_read1(uint8_t cmd, uint8_t *val)
     {
         (void)mipi_dsi_host_ll_gen_read_payload_fifo(&MIPI_DSI_HOST);
     }
+    if ( !mipi_dsi_host_ll_gen_is_read_fifo_empty(&MIPI_DSI_HOST) )
+    {
+        KLOG_W(TAG, "DSI read FIFO still not empty after %u words: the host "
+                    "does not answer", (unsigned)PANEL_READ_DRAIN_MAX);
+    }
     *val = (uint8_t)(w & GRAM_BYTE_MASK);
     return KODE_OK;
 }
