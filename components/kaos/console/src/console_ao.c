@@ -87,7 +87,8 @@ KAOS_WEAK void storage_open_request(const char *name, QActive *who);
 KAOS_WEAK void storage_path_request(QActive *who, uint8_t op, const char *path);
 KAOS_WEAK void storage_read_request(void);
 KAOS_WEAK void storage_write_all_request(const char *name, const void *data,
-                                         uint32_t len, QActive *who);
+                                         uint32_t len, QActive *who,
+                                         uint32_t tag);
 KAOS_WEAK bool appmgr_image_ask_from(uint8_t src_kind, const char *src,
                                      uint8_t dst_kind, bool launch,
                                      QActive *who, uint8_t asker);
@@ -8240,7 +8241,8 @@ static QState console_own(Console * const me, QEvt const * const e)
                     if ( to_file )
                     {
                         storage_write_all_request(me->file_name, img, r->len,
-                                                  &me->super);
+                                                  &me->super,
+                                                  KODE_STORAGE_TAG_NONE);
                     }
                     else
                     {

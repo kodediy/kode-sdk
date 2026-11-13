@@ -3872,6 +3872,9 @@ void storage_next_request(uint8_t idx);
 /** @brief Close the open file and release any buffers still on loan. */
 void storage_close_request(void);
 
+/** @brief The tag of a write whose answer needs no number of its own. */
+#define KODE_STORAGE_TAG_NONE  0U
+
 /**
  * @brief Write @p len bytes of @p data to a file called @p name.
  *
@@ -3888,10 +3891,49 @@ void storage_close_request(void);
  * mounted again once the write is over. A name starting with '/' goes to the
  * volume it names only.
  *
- * @param who Receives STORAGE_WRITE_RSP_SIG when it is over, either way.
+ * @param name Where the bytes go.
+ * @param data The bytes.
+ * @param len  How many.
+ * @param who  Receives STORAGE_WRITE_RSP_SIG when it is over, either way.
+ * @param tag  Given back in that answer, so a writer that abandons a write
+ *             tells its late answer from the next write's;
+ *             KODE_STORAGE_TAG_NONE otherwise.
  */
 void storage_write_all_request(const char *name, const void *data,
-                               uint32_t len, QActive *who);
+                               uint32_t len, QActive *who, uint32_t tag);
+
+/**
+ * @brief Write as storage_write_all_request() does, giving way to a download.
+ *
+ * For a write that can be made again later, such as a copy kept on the card.
+ * While a download into a file runs (storage_fetch_ask()) the write is refused
+ * with KODE_DENIED and nothing opened. A download asked for while the write is
+ * in flight cuts it between two chunks: the half-written file is removed and
+ * the answer is KODE_DENIED with the bytes put down so far. A path on a card
+ * that has not proved it takes a write, the way a bare name's card must, is
+ * refused with KODE_ERROR and nothing written; one that fails on the card
+ * takes the card's word back, as a bare name's failure does.
+ *
+ * @param name Where the bytes go.
+ * @param data The bytes; valid and unchanged until the answer.
+ * @param len  How many.
+ * @param who  Receives STORAGE_WRITE_RSP_SIG when it is over, either way.
+ * @param tag  Given back in that answer, as for storage_write_all_request().
+ */
+void storage_write_yield_request(const char *name, const void *data,
+                                 uint32_t len, QActive *who, uint32_t tag);
+
+/**
+ * @brief End the write @p who asked for, between two of its chunks.
+ *
+ * AO_Storage stops, removes the half-written file and answers
+ * STORAGE_WRITE_RSP_SIG with a status other than KODE_OK and the bytes put down
+ * so far; the writer's buffer is its own again from that answer. A request
+ * from an AO that has no write in flight is ignored, so a late one is harmless.
+ *
+ * @param who The AO that called storage_write_all_request().
+ */
+void storage_write_abandon_request(QActive *who);
 
 /**
  * @brief Download @p url into the file at @p path; answered to @p who with one

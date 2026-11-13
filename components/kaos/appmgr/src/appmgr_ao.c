@@ -5425,7 +5425,8 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
             char tmp[KODE_APP_FILE_MAX];
 
             card_tmp_path(tmp, sizeof(tmp), me->keep_name);
-            storage_write_all_request(tmp, me->keep_buf, me->keep_len, &me->super);
+            storage_write_all_request(tmp, me->keep_buf, me->keep_len, &me->super,
+                                      KODE_STORAGE_TAG_NONE);
             (void)QTimeEvt_rearm(&me->idle,
                                  APPMGR_KEEP_WRITE_TICKS(me->keep_len));
             (void)QTimeEvt_rearm(&me->pacer, APPMGR_KEEP_BEAT_TICKS);

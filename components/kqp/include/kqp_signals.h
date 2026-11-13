@@ -633,6 +633,8 @@ enum KodeSignals {
     STORAGE_WRITE_NEXT_SIG,     /**< AO_Storage private self-post: the next
                                  *   chunk of the write in progress.         */
     STORAGE_WRITE_RSP_SIG,      /**< To the writer (StorageWriteRspEvt).      */
+    STORAGE_WRITE_ABANDON_REQ_SIG, /**< AO_Storage: the writer ends its write
+                                 *   in flight (StorageWriteAbandonEvt).      */
     STORAGE_DESC_REQ_SIG,       /**< AO_Storage: read the manifest out of the
                                  *   front of one file (StorageDescReqEvt).
                                  *   Posted directly, never published: the
@@ -2765,15 +2767,35 @@ typedef struct {
     const void *data;
     uint32_t    len;
     QActive    *who;    /**< Where the response goes.                         */
+    uint32_t    tag;    /**< The writer's own number for this write, given back
+                         *   in the answer; KODE_STORAGE_TAG_NONE when one write
+                         *   at a time is all the writer has. */
+    bool        yields; /**< The write gives way to a download: refused while
+                         *   one runs, and cut between two chunks when one is
+                         *   asked for. Set by storage_write_yield_request(). */
 } StorageWriteEvt;
 
 /** @brief How a write ended (STORAGE_WRITE_RSP_SIG). */
 typedef struct {
     QEvt     super;
     uint32_t written;
-    uint8_t  status;    /**< kode_status_t                                    */
+    uint8_t  status;    /**< kode_status_t. Before the file is opened:
+                         *   KODE_ERROR for a write that gives way on a card
+                         *   that has not proved it takes a write, KODE_DENIED
+                         *   for any other refusal. After: KODE_DENIED for a
+                         *   write that gave way to a download,
+                         *   KODE_NO_RESOURCES for one that gives way and
+                         *   found the card full, else how the medium failed. */
     uint8_t  medium;    /**< Where it landed.                                 */
+    uint32_t tag;       /**< The request's tag: a late answer to a write given
+                         *   up on is told from the answer to the write in hand. */
 } StorageWriteRspEvt;
+
+/** @brief The writer gives up its write in flight (STORAGE_WRITE_ABANDON_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    QActive *who;       /**< The AO that asked for the write; no other can end it. */
+} StorageWriteAbandonEvt;
 
 /**
  * @brief Ask what one file says it is (STORAGE_DESC_REQ_SIG).

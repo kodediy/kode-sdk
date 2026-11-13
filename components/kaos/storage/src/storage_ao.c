@@ -361,6 +361,8 @@ typedef struct {
     uint32_t       w_done;
     uint8_t        w_medium;
     bool           w_retried;                  /**< One other medium, once.   */
+    uint32_t       w_tag;                      /**< The writer's number, for its answer. */
+    bool           w_yields;                   /**< The write gives way to a download. */
     char           w_name[KODE_APP_FILE_MAX];  /**< Kept for the retry.       */
     QTimeEvt       w_pacer;             /**< 10 ms between chunks.             */
 
@@ -1398,8 +1400,17 @@ const uint8_t *storage_buf(uint8_t idx)
     return (STORAGE_BUFS > idx) ? l_storage.buf[idx] : NULL;
 }
 
-void storage_write_all_request(const char *name, const void *data,
-                               uint32_t len, QActive *who)
+/**
+ * @brief Post a whole-buffer write to AO_Storage.
+ * @param name   Where the bytes go.
+ * @param data   The bytes, the caller's until the answer.
+ * @param len    How many.
+ * @param who    Receives STORAGE_WRITE_RSP_SIG.
+ * @param tag    Given back in that answer.
+ * @param yields The write gives way to a download.
+ */
+static void write_post(const char *name, const void *data, uint32_t len,
+                       QActive *who, uint32_t tag, bool yields)
 {
     StorageWriteEvt *e = Q_NEW_X(StorageWriteEvt, 0U, STORAGE_WRITE_REQ_SIG);
     if ( NULL == e )
@@ -1407,9 +1418,11 @@ void storage_write_all_request(const char *name, const void *data,
         return;
     }
     (void)snprintf(e->name, sizeof(e->name), "%s", name);
-    e->data = data;
-    e->len  = len;
-    e->who  = who;
+    e->data   = data;
+    e->len    = len;
+    e->who    = who;
+    e->tag    = tag;
+    e->yields = yields;
     if ( '/' != name[0] )
     {
         /* A bare name may go to the card: one put in since the last listing
@@ -1417,6 +1430,29 @@ void storage_write_all_request(const char *name, const void *data,
         storage_request(KDRV_MEDIUM_SD, STORAGE_OP_MOUNT);
     }
     QACTIVE_POST(AO_Storage, &e->super, NULL);
+}
+
+void storage_write_all_request(const char *name, const void *data,
+                               uint32_t len, QActive *who, uint32_t tag)
+{
+    write_post(name, data, len, who, tag, false);
+}
+
+void storage_write_yield_request(const char *name, const void *data,
+                                 uint32_t len, QActive *who, uint32_t tag)
+{
+    write_post(name, data, len, who, tag, true);
+}
+
+void storage_write_abandon_request(QActive *who)
+{
+    StorageWriteAbandonEvt *e = Q_NEW_X(StorageWriteAbandonEvt, 0U,
+                                        STORAGE_WRITE_ABANDON_REQ_SIG);
+    if ( NULL != e )
+    {
+        e->who = who;
+        QACTIVE_POST(AO_Storage, &e->super, NULL);
+    }
 }
 
 /* ---- Listing ------------------------------------------------------------- */
@@ -5726,6 +5762,7 @@ static void recv_stall(Storage * const me)
 /* ---- Writing ------------------------------------------------------------- */
 
 static bool write_elsewhere(Storage * const me);
+static kode_status_t write_yielding_failed(Storage * const me, kode_status_t st);
 
 /**
  * @brief Close the write, tell the writer how it went, and free the handle.
@@ -5735,15 +5772,18 @@ static bool write_elsewhere(Storage * const me);
  * never reached the card is the counterfeit-card failure. A bare name's stub
  * is removed and the write starts once on the other medium, as a failed chunk
  * does (write_elsewhere()); a path's stub is left where it fell, and the
- * status tells the writer.
+ * status tells the writer. A remount owed is left to the caller
+ * (write_finish()).
  */
-static void write_finish(Storage * const me, kode_status_t st)
+static void write_end(Storage * const me, kode_status_t st)
 {
+    kode_status_t rc = st;
+
     (void)QTimeEvt_disarm(&me->w_pacer);
-    if ( KODE_OK == st )
+    if ( KODE_OK == rc )
     {
-        st = kdrv_storage_close();
-        if ( KODE_OK != st )
+        rc = kdrv_storage_close();
+        if ( KODE_OK != rc )
         {
             KLOG_E(TAG, "'%s' did not land: %lu bytes were written and the "
                         "close failed", me->w_name, (unsigned long)me->w_done);
@@ -5768,6 +5808,10 @@ static void write_finish(Storage * const me, kode_status_t st)
                                 "it is not written again inside", me->w_name);
                 }
             }
+            else
+            {
+                rc = write_yielding_failed(me, rc);
+            }
         }
     }
     else
@@ -5782,8 +5826,9 @@ static void write_finish(Storage * const me, kode_status_t st)
     if ( NULL != rsp )
     {
         rsp->written = me->w_done;
-        rsp->status  = (uint8_t)st;
+        rsp->status  = (uint8_t)rc;
         rsp->medium  = me->w_medium;
+        rsp->tag     = me->w_tag;
         QACTIVE_POST(me->writer, &rsp->super, &me->super);
     }
     else
@@ -5797,6 +5842,17 @@ static void write_finish(Storage * const me, kode_status_t st)
     me->w_data = NULL;
     me->w_len  = 0U;
     me->w_done = 0U;
+}
+
+/**
+ * @brief End the write as write_end() does, then begin a remount it owes.
+ *
+ * @param me The AO.
+ * @param st How the write went.
+ */
+static void write_finish(Storage * const me, kode_status_t st)
+{
+    write_end(me, st);
     card_remount_owed(me);
 }
 
@@ -5884,6 +5940,49 @@ static bool write_elsewhere(Storage * const me)
     return goes;
 }
 
+/**
+ * @brief A write that gives way failed on the card: the card is full, or it
+ *        loses its word.
+ *
+ * A write that gives way is kodeOS's own, the copy of an app, and is begun
+ * only on a card that took a write (write_begin()). A card with less room left
+ * than one chunk and the cluster it may start is full, which is no fault of
+ * the card: the write is told KODE_NO_RESOURCES and the card keeps its word.
+ * Any other failure there is the card's, as for a bare name: the card is not
+ * chosen again this boot, and is mounted again once the write is over.
+ * A counterfeit card claims room it does not have, so its failure stays its
+ * own. Any other write to a path tells only its writer.
+ *
+ * @param me The AO, with the failed write's file still on the medium.
+ * @param st How the write failed.
+ * @return KODE_NO_RESOURCES for a full card, else @p st.
+ */
+static kode_status_t write_yielding_failed(Storage * const me, kode_status_t st)
+{
+    kode_status_t rc = st;
+
+    if ( me->w_yields && ((uint8_t)KDRV_MEDIUM_SD == me->w_medium) )
+    {
+        uint64_t       total = 0U;
+        uint64_t       room  = 0U;
+        uint32_t const chunk = STORAGE_CHUNK;
+        uint64_t const need  = (uint64_t)chunk
+                             + (uint64_t)kdrv_storage_cluster_bytes(KDRV_MEDIUM_SD);
+
+        if ( (kdrv_storage_usage(KDRV_MEDIUM_SD, &total, &room) == KODE_OK)
+            && (need > room) )
+        {
+            KLOG_W(TAG, "the card is full: '%s' is not written", me->w_name);
+            rc = KODE_NO_RESOURCES;
+        }
+        else
+        {
+            card_write_failed(me);
+        }
+    }
+    return rc;
+}
+
 /** @brief Put one chunk on the medium and arm the next, or finish. */
 static void write_chunk(Storage * const me)
 {
@@ -5895,16 +5994,18 @@ static void write_chunk(Storage * const me)
     uint32_t const now  = ((uint32_t)STORAGE_CHUNK < left)
                         ? (uint32_t)STORAGE_CHUNK : left;
 
-    kode_status_t const st = kdrv_storage_write(&me->w_data[me->w_done],
-                                                (size_t)now);
+    kode_status_t st = kdrv_storage_write(&me->w_data[me->w_done],
+                                          (size_t)now);
     if ( KODE_OK != st )
     {
         KLOG_W(TAG, "%s failed at %lu/%lu bytes",
                ((uint8_t)KDRV_MEDIUM_SD == me->w_medium) ? "sd write"
                                                          : "fs write",
                (unsigned long)me->w_done, (unsigned long)me->w_len);
-        /* Undo the stub before anything else: a name in the listing that
-         * promises bytes it does not have is worse than no file at all. */
+        /* The card's room is judged while the stub still holds it; then the
+         * stub goes before anything else: a name in the listing that promises
+         * bytes it does not have is worse than no file at all. */
+        st = write_yielding_failed(me, st);
         kdrv_storage_discard();
 
         /* One failure earns one retry on the other medium. */
@@ -6090,19 +6191,88 @@ void storage_bare_failed(void)
     card_write_failed(&l_storage);
 }
 
-/** @brief Start a write, or refuse it because the one handle is taken. */
+/**
+ * @brief The writer ends its write: drop the file and answer short.
+ *
+ * Between two chunks, so the writer waits for at most the chunk in hand. Only
+ * the AO that asked can end its write; anyone else's request, or one that
+ * comes after the write ended, is ignored.
+ *
+ * @param me  The AO.
+ * @param req The request: who is giving up.
+ */
+static void write_abandon(Storage * const me, StorageWriteAbandonEvt const * const req)
+{
+    if ( (NULL != me->writer) && (req->who == me->writer) )
+    {
+        KLOG_N(TAG, "the write of '%s' is abandoned at %lu/%lu bytes",
+               me->w_name, (unsigned long)me->w_done, (unsigned long)me->w_len);
+        write_finish(me, KODE_ERROR);
+    }
+}
+
+/**
+ * @brief A download is asked for: a write in flight that gives way to one is
+ *        cut between two chunks, its half file removed and the writer answered
+ *        KODE_DENIED with the bytes put down, so the download finds the handle free.
+ *
+ * KODE_DENIED and not the KODE_ERROR an abandon gives: the card refused
+ * nothing, and the writer makes the write again later. A remount owed meanwhile
+ * is not begun here, where it would make the download wait: it goes after the
+ * download's event (Storage_active()).
+ *
+ * @param me The AO.
+ * @return true when a write was cut.
+ */
+static bool write_yield(Storage * const me)
+{
+    bool cut = false;
+
+    if ( (NULL != me->writer) && me->w_yields )
+    {
+        KLOG_N(TAG, "the write of '%s' gives way to a download at %lu/%lu bytes",
+               me->w_name, (unsigned long)me->w_done, (unsigned long)me->w_len);
+        write_end(me, KODE_DENIED);
+        cut = true;
+    }
+    return cut;
+}
+
+/**
+ * @brief Start a write, or refuse it because the one handle is taken, because
+ *        it gives way to the download that runs, or because it gives way and
+ *        its card has not proved it takes a write.
+ */
 static void write_begin(Storage * const me, StorageWriteEvt const * const req)
 {
     kdrv_medium_t medium = KDRV_MEDIUM_FS;
     kode_status_t st     = KODE_DENIED;
+    char          why[APPDATA_WHY_MAX];
 
     if ( busy(me) )
     {
         KLOG_W(TAG, "a file is already open; '%s' refused", req->name);
     }
+    else if ( req->yields && (NULL != storage_fetch_running)
+             && storage_fetch_running() )
+    {
+        /* Between two chunks a download holds no file, so the handle is
+         * free; a write that yields waits for the download's end instead. */
+        KLOG_I(TAG, "'%s' gives way to the download that runs", req->name);
+    }
     else if ( (NULL == req->data) || (0U == req->len) )
     {
         KLOG_W(TAG, "nothing to write to '%s'", req->name);
+    }
+    else if ( req->yields && ('/' == req->name[0])
+             && (KDRV_MEDIUM_SD == kdrv_storage_medium_of(req->name))
+             && !card_takes_writes(why, sizeof(why)) )
+    {
+        /* kodeOS's own write goes only to a card that took a write, as a bare
+         * name does: one that has not proved it may lose what it is given. */
+        KLOG_W(TAG, "'%s' is not written: %s", req->name, why);
+        medium = KDRV_MEDIUM_SD;
+        st     = KODE_ERROR;
     }
     else if ( '/' == req->name[0] )
     {
@@ -6111,7 +6281,6 @@ static void write_begin(Storage * const me, StorageWriteEvt const * const req)
     }
     else
     {
-        char                why[APPDATA_WHY_MAX];
         bool                over  = false;
         kdrv_medium_t const first = write_first(req->name, req->len, &over,
                                                 why, sizeof(why));
@@ -6137,12 +6306,15 @@ static void write_begin(Storage * const me, StorageWriteEvt const * const req)
             rsp->written = 0U;
             rsp->status  = (uint8_t)st;
             rsp->medium  = (uint8_t)medium;
+            rsp->tag     = req->tag;
             QACTIVE_POST(req->who, &rsp->super, &me->super);
         }
         return;
     }
 
     me->writer   = req->who;
+    me->w_tag    = req->tag;
+    me->w_yields = req->yields;
     (void)snprintf(me->w_name, sizeof(me->w_name), "%s", req->name);
     me->w_data   = (const uint8_t *)req->data;
     me->w_len    = req->len;
@@ -8458,6 +8630,11 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case STORAGE_WRITE_ABANDON_REQ_SIG: {
+            write_abandon(me, Q_EVT_CAST(StorageWriteAbandonEvt));
+            status = Q_HANDLED();
+            break;
+        }
         case STORAGE_TEST_NEXT_SIG: {
             sd_test_step(me);
             status = Q_HANDLED();
@@ -8789,6 +8966,7 @@ static bool card_refuse(Storage * const me, QEvt const * const e)
                 rsp->written = 0U;
                 rsp->status  = (uint8_t)KODE_DENIED;
                 rsp->medium  = (uint8_t)KDRV_MEDIUM_FS;
+                rsp->tag     = req->tag;
                 QACTIVE_POST(req->who, &rsp->super, &me->super);
             }
             break;
@@ -9075,6 +9253,16 @@ static void read_expired(Storage * const me)
 static QState Storage_active(Storage * const me, QEvt const * const e)
 {
     QState status;
+
+    if ( (QSignal)HTTP_FILE_REQ_SIG == e->sig )
+    {
+        /* Before the download is judged busy: a write that yields is not.
+         * What waited for the handle the cut frees is served next. */
+        if ( write_yield(me) )
+        {
+            wait_pump(me);
+        }
+    }
 
     if ( (QSignal)STORAGE_TURN_TO_SIG == e->sig )
     {

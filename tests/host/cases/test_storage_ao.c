@@ -173,8 +173,9 @@ static void ask_open(const char *name)
     QASM_DISPATCH(AO_Storage, &e.super, 0U);
 }
 
-/** @brief Dispatch a whole-payload write request, from the spy. */
-static void ask_write(const char *name, const void *data, uint32_t len)
+/** @brief Dispatch a whole-payload write request with its tag, from the spy. */
+static void ask_write_tag(const char *name, const void *data, uint32_t len,
+                          uint32_t tag)
 {
     StorageWriteEvt e;
 
@@ -184,8 +185,15 @@ static void ask_write(const char *name, const void *data, uint32_t len)
     e.data = data;
     e.len  = len;
     e.who  = ao_spy();
+    e.tag  = tag;
 
     QASM_DISPATCH(AO_Storage, &e.super, 0U);
+}
+
+/** @brief Dispatch a whole-payload write request, from the spy. */
+static void ask_write(const char *name, const void *data, uint32_t len)
+{
+    ask_write_tag(name, data, len, KODE_STORAGE_TAG_NONE);
 }
 
 /**
@@ -517,6 +525,102 @@ TEST_CASE("a write while a file is open for reading is refused",
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the write went unanswered");
     TEST_ASSERT_EQUAL_INT(STORAGE_WRITE_RSP_SIG, (int)e->sig);
+}
+
+/* ---- A writer gives up a write in flight ------------------------------------ */
+
+/* The writer that asked stops its own write between two chunks: the answer
+ * comes at once and short, the half-written file is gone, and the handle is
+ * free for the next write. */
+TEST_CASE("a write its writer abandons is answered short and leaves no file",
+          "[storage_ao]")
+{
+    static const uint8_t payload[8] = { 0U };
+
+    storage_fresh();
+
+    ask_write("/storage/outgoing.bin", s_big, sizeof(s_big));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the write was over at once");
+
+    storage_write_abandon_request(ao_spy());
+    (void)qf_support_pump(AO_Storage, 1U);
+
+    const QEvt * const rsp = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(rsp, "the abandoned write went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_WRITE_RSP_SIG, (int)rsp->sig);
+    const StorageWriteRspEvt * const w = (const StorageWriteRspEvt *)rsp;
+    TEST_ASSERT_NOT_EQUAL_INT_MESSAGE(KODE_OK, (int)w->status, "an abandoned write says it is done");
+    TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(sizeof(s_big), w->written, "it kept writing");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size("outgoing.bin"), "the half file stayed");
+
+    drain_write();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a stale chunk answered again");
+
+    ask_write("/storage/next.bin", payload, sizeof(payload));
+    const QEvt * const next = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(next, "the handle was not free for the next write");
+    TEST_ASSERT_EQUAL_INT(STORAGE_WRITE_RSP_SIG, (int)next->sig);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StorageWriteRspEvt *)next)->status);
+}
+
+/* A writer that abandons a write tells its late answer from the next one's by
+ * the tag, the answer to a refusal included. */
+TEST_CASE("a write's answer carries the tag its writer gave it", "[storage_ao]")
+{
+    static const uint8_t payload[8] = { 0U };
+
+    storage_fresh();
+
+    ask_write_tag("tagged.bin", payload, sizeof(payload), 0x1234U);
+    const QEvt * const done = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(done);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StorageWriteRspEvt *)done)->status);
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(0x1234U, ((const StorageWriteRspEvt *)done)->tag,
+        "the answer to a write lost its tag");
+
+    ask_write_tag("empty.bin", payload, 0U, 0x5678U);
+    const QEvt * const refused = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(refused);
+    TEST_ASSERT_NOT_EQUAL_INT(KODE_OK, (int)((const StorageWriteRspEvt *)refused)->status);
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(0x5678U, ((const StorageWriteRspEvt *)refused)->tag,
+        "the answer to a refused write lost its tag");
+}
+
+/* Only the AO that asked for a write can end it: another's abandon is nothing. */
+TEST_CASE("an abandon from an AO that is not the writer leaves the write running",
+          "[storage_ao]")
+{
+    storage_fresh();
+
+    ask_write("/storage/outgoing.bin", s_big, sizeof(s_big));
+    storage_write_abandon_request(AO_Storage);
+    (void)qf_support_pump(AO_Storage, 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a stranger ended the write");
+
+    drain_write();
+    const QEvt * const rsp = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(rsp, "the write never reported back");
+    TEST_ASSERT_EQUAL_INT(STORAGE_WRITE_RSP_SIG, (int)rsp->sig);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StorageWriteRspEvt *)rsp)->status);
+    TEST_ASSERT_EQUAL_INT((int)sizeof(s_big), (int)fs_size("outgoing.bin"));
+}
+
+/* A late abandon, after the write ended, finds nothing to end and says nothing. */
+TEST_CASE("an abandon with no write in flight is ignored", "[storage_ao]")
+{
+    static const uint8_t payload[8] = { 0U };
+
+    storage_fresh();
+
+    storage_write_abandon_request(ao_spy());
+    (void)qf_support_pump(AO_Storage, 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    ask_write("/storage/small.bin", payload, sizeof(payload));
+    const QEvt * const rsp = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(rsp);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StorageWriteRspEvt *)rsp)->status);
+    TEST_ASSERT_EQUAL_INT((int)sizeof(payload), (int)fs_size("small.bin"));
 }
 
 /* ---- The audit's third fix: `write` during a read must not steal it -------- */
@@ -7663,6 +7767,283 @@ TEST_CASE("a chunk that never gets its turn ends the download as busy",
     ao_spy_drain();
 }
 
+/* ---- A write that gives way to a download ---------------------------------
+ *
+ * storage_write_yield_request(): a write that can be made again later, the
+ * copy of an app kept on the card, never makes a download wait. While one runs
+ * the write is refused; a download asked for while the write is in flight cuts
+ * it between two chunks. Every other write is served as before.
+ */
+
+#define YIELD_FILE  "copy.bin.tmp"            /**< What the cases write beside the download, on the card. */
+#define YIELD_PATH  "/sdcard/" YIELD_FILE      /**< The same, as the copy names it.                         */
+
+/** @brief The size of @p rel under the card fake, or -1 when absent. */
+static long card_size(const char *rel)
+{
+    char  path[512];
+    FILE *f;
+    long  n;
+
+    (void)snprintf(path, sizeof(path), "%s/%s", fake_media_sd_dir(), rel);
+    f = fopen(path, "rb");
+    if ( NULL == f )
+    {
+        return -1L;
+    }
+    (void)fseek(f, 0L, SEEK_END);
+    n = ftell(f);
+    (void)fclose(f);
+    return n;
+}
+
+/** @brief Dispatch a whole-payload write from the second spy, marked to yield or not. */
+static void ask_write_other(const void *data, uint32_t len, bool yields)
+{
+    StorageWriteEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(STORAGE_WRITE_REQ_SIG);
+    (void)snprintf(e.name, sizeof(e.name), "%s", YIELD_PATH);
+    e.data   = data;
+    e.len    = len;
+    e.who    = ao_spy_other();
+    e.tag    = KODE_STORAGE_TAG_NONE;
+    e.yields = yields;
+
+    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+}
+
+/**
+ * @brief The answer the second spy holds, which must be a write's.
+ * @return Its status; @p written receives the bytes it says were put down.
+ */
+static kode_status_t write_answer_other(uint32_t *written)
+{
+    const QEvt * const e = ao_spy_other_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the write went unanswered");
+    TEST_ASSERT_EQUAL_INT((int)STORAGE_WRITE_RSP_SIG, (int)e->sig);
+    kode_status_t const st = (kode_status_t)((const StorageWriteRspEvt *)(const void *)e)->status;
+    *written = ((const StorageWriteRspEvt *)(const void *)e)->written;
+    QF_gc(e);
+    return st;
+}
+
+/** @brief The second spy holds nothing, or the case fails with @p msg. */
+static void other_quiet(const char *msg)
+{
+    const QEvt * const e = ao_spy_other_take();
+
+    if ( NULL != e )
+    {
+        QF_gc(e);
+        TEST_FAIL_MESSAGE(msg);
+    }
+}
+
+/** @brief A download just asked for: opened for a chunk and a tail, the chunk in the file. */
+static void fetch_first_chunk(void)
+{
+    net_expect_open(0U);
+    net_opens(KODE_OK, 200U, FETCH_CHUNK + FETCH_TAIL);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+    net_gives(KODE_OK, FETCH_CHUNK, 'a');
+    net_expect(NET_STREAM_NEXT_SIG);
+    ao_spy_drain();
+}
+
+/** @brief The tail of that download, which must end with the whole body in its file. */
+static void fetch_ends_whole(void)
+{
+    const HttpFileEvt *a;
+
+    net_gives(KODE_OK, FETCH_TAIL, 'b');
+    net_expect(NET_STREAM_NEXT_SIG);
+    (void)fetch_take(HTTP_FILE_PROGRESS_SIG);
+    ao_spy_release();
+    net_gives(KODE_OK, 0U, 0);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((uint32_t)KODE_OK, a->rc, "the download did not end whole");
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK + FETCH_TAIL, a->written);
+    ao_spy_drain();
+    net_expect_quiet();
+    TEST_ASSERT_EQUAL_INT((long)(FETCH_CHUNK + FETCH_TAIL), fs_size(FETCH_FILE));
+}
+
+TEST_CASE("a write that yields is refused while a download runs, and taken once it ends",
+          "[storage_ao][fetch][yield]")
+{
+    static const uint8_t payload[8] = { 0U };
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    fetch_asked();
+    fetch_first_chunk();
+
+    ask_write_other(payload, sizeof(payload), true);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, write_answer_other(&written),
+                                  "a write that yields was begun under a download");
+    TEST_ASSERT_EQUAL_UINT32(0U, written);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1L, card_size(YIELD_FILE), "the refused write opened its file");
+    net_expect_quiet();
+
+    fetch_ends_whole();
+
+    ask_write_other(payload, sizeof(payload), true);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, write_answer_other(&written),
+                                  "the write asked again after the download was refused");
+    TEST_ASSERT_EQUAL_UINT32(sizeof(payload), written);
+    TEST_ASSERT_EQUAL_INT((long)sizeof(payload), card_size(YIELD_FILE));
+}
+
+TEST_CASE("a download asked while a write that yields is in flight cuts the write and ends whole",
+          "[storage_ao][fetch][yield]")
+{
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    ask_write_other(s_big, sizeof(s_big), true);
+    other_quiet("the write was over at once");
+
+    fetch_asked();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, write_answer_other(&written),
+                                  "the write in flight was not cut for the download");
+    TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(sizeof(s_big), written, "the cut write kept writing");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1L, card_size(YIELD_FILE), "the half file of the cut write stayed");
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_sd_took_write(), "a cut took the card's word back");
+    TEST_ASSERT_FALSE_MESSAGE(run_sd_job(), "a cut asked the card to be mounted again");
+
+    fetch_first_chunk();
+    fetch_ends_whole();
+    drain_write();
+    other_quiet("the cut write was answered twice");
+}
+
+/* The copy given up by its writer is no failure of the card. */
+TEST_CASE("a copy abandoned on the card leaves the card's word and mounts nothing again",
+          "[storage_ao][yield][card]")
+{
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    ask_write_other(s_big, sizeof(s_big), true);
+    other_quiet("the write was over at once");
+
+    storage_write_abandon_request(ao_spy_other());
+    (void)qf_support_pump(AO_Storage, 1U);
+    TEST_ASSERT_NOT_EQUAL_INT(KODE_OK, write_answer_other(&written));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1L, card_size(YIELD_FILE), "the half copy stayed");
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_sd_took_write(), "an abandon took the card's word back");
+    TEST_ASSERT_FALSE_MESSAGE(run_sd_job(), "an abandon asked the card to be mounted again");
+}
+
+/* A bare name abandoned is not a write that failed: it is not begun again inside. */
+TEST_CASE("a bare name abandoned on the card is not written again inside",
+          "[storage_ao][yield][card]")
+{
+    storage_fresh();
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    ask_write("outgoing.bin", s_big, sizeof(s_big));
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    storage_write_abandon_request(ao_spy());
+    (void)qf_support_pump(AO_Storage, 1U);
+    const QEvt * const rsp = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(rsp);
+    TEST_ASSERT_NOT_EQUAL_INT(KODE_OK, (int)((const StorageWriteRspEvt *)rsp)->status);
+    drain_write();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the abandoned write went on");
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(), "outgoing.bin"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size("outgoing.bin"),
+                                  "the abandoned write was begun again inside");
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+}
+
+/* What waited for the handle the copy held is served once the cut frees it,
+ * not at its bound. */
+TEST_CASE("a request that waits for a copy is served as soon as a download cuts it",
+          "[storage_ao][yield]")
+{
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    make_file("target.bin", 8U);
+    ask_write_other(s_big, sizeof(s_big), true);
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_UNLINK, "/storage/target.bin");
+    (void)qf_support_pump(AO_Storage, 1U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the rm did not wait for the copy");
+
+    fetch_asked();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, write_answer_other(&written));
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the rm still waits for a handle the cut freed");
+    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "target.bin"));
+
+    fetch_first_chunk();
+    fetch_ends_whole();
+}
+
+/** @brief The card's word taken back by a download, as the download module does. */
+void storage_bare_failed(void);
+
+/* A remount owed while the copy held the handle waits for the download that
+ * cut the copy to be taken: a remount begun first would refuse it. */
+TEST_CASE("a remount owed during a copy goes after the download that cuts it, which is taken",
+          "[storage_ao][yield][card]")
+{
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    ask_write_other(s_big, sizeof(s_big), true);
+    storage_bare_failed();
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+
+    fetch_asked();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, write_answer_other(&written));
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the download that cut the copy was refused");
+    TEST_ASSERT_TRUE_MESSAGE(run_sd_job(), "the remount owed was never asked");
+
+    fetch_first_chunk();
+    fetch_ends_whole();
+}
+
+TEST_CASE("a write that does not yield is served during a download as any write is",
+          "[storage_ao][fetch][yield]")
+{
+    static const uint8_t payload[8] = { 0U };
+    uint32_t           written = 0U;
+    const HttpFileEvt *a;
+
+    /* Between two chunks of a download the handle is free: the write is made. */
+    fetch_fresh();
+    fetch_asked();
+    fetch_first_chunk();
+    ask_write_other(payload, sizeof(payload), false);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, write_answer_other(&written));
+    TEST_ASSERT_EQUAL_UINT32(sizeof(payload), written);
+    fetch_ends_whole();
+
+    /* A download asked for while it is in flight is refused at once, and the
+     * write goes on to its end. */
+    fetch_fresh();
+    ask_write_other(s_big, sizeof(s_big), false);
+    fetch_asked();
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, a->rc);
+    ao_spy_drain();
+    net_expect_quiet();
+    drain_write();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, write_answer_other(&written));
+    TEST_ASSERT_EQUAL_UINT32(sizeof(s_big), written);
+    TEST_ASSERT_EQUAL_INT((long)sizeof(s_big), card_size(YIELD_FILE));
+}
+
 /* AO_Net forgets a transfer when the network goes and tells its reader
  * nothing. The download's own clock ends the wait. */
 TEST_CASE("a download AO_Net goes silent on ends with a timeout", "[storage_ao][fetch]")
@@ -7782,6 +8163,7 @@ TEST_CASE("a round during a download is refused, and is ready once it ends",
 
 /** @brief The driver's notice when the card's word is taken back. */
 #define CARD_WORD_BACK  "a write on the card failed"
+#define FILL_FILES  11U   /**< Copies of s_big that fill a one-megabyte card. */
 
 /** @brief A payload two chunks long, the second 16 bytes. */
 static uint8_t s_close_payload[(32U * 1024U) + 16U];
@@ -7940,6 +8322,94 @@ TEST_CASE("a bare name whose write fails midway on the card is written again "
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(), "shot.bmp"));
     TEST_ASSERT_FALSE(kdrv_sd_took_write());
     TEST_ASSERT_EQUAL_UINT(1U, log_count(CARD_WORD_BACK));
+}
+
+/* ---- A copy and the card's word -------------------------------------------
+ * A write that gives way is kodeOS's own, the copy of an app: it goes only to
+ * a card that took a write, as a bare name does, and a failure there takes the
+ * card's word back, so the next copy is refused without a byte written. */
+
+TEST_CASE("a write that gives way is refused on a card that has not proved it takes a write",
+          "[storage_ao][yield][card]")
+{
+    static const uint8_t payload[8] = { 0U };
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    card_takes_no_write();
+    fake_sdmmc_fail_writes(false);      /* it would take this one: the refusal is the word's */
+    fake_klog_reset();
+
+    ask_write_other(payload, sizeof(payload), true);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR, write_answer_other(&written),
+                                  "a copy was begun on a card that has not proved it takes a write");
+    TEST_ASSERT_EQUAL_UINT32(0U, written);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1L, card_size(YIELD_FILE), "the refused copy opened its file");
+    TEST_ASSERT_TRUE(log_says("the card has not proved it takes a write"));
+
+    /* A write an app names the card for is its own choice, and is served. */
+    ask_write_other(payload, sizeof(payload), false);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, write_answer_other(&written));
+    TEST_ASSERT_EQUAL_INT((long)sizeof(payload), card_size(YIELD_FILE));
+}
+
+TEST_CASE("a write that gives way and fails on the card takes its word back, "
+          "and the next is refused", "[storage_ao][yield][card]")
+{
+    static const uint8_t payload[8] = { 0U };
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    fake_klog_reset();
+
+    ask_write_other(s_big, sizeof(s_big), true);
+    TEST_ASSERT_TRUE_MESSAGE(spoil_open_file(fake_media_sd_dir(), YIELD_FILE),
+                             "the copy is not open on the card");
+    drain_write();
+    TEST_ASSERT_NOT_EQUAL_INT(KODE_OK, write_answer_other(&written));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_sd_took_write(),
+                              "the card kept its word after a copy failed on it");
+    TEST_ASSERT_EQUAL_UINT(1U, log_count(CARD_WORD_BACK));
+    settle_card();                       /* the card is mounted again */
+
+    ask_write_other(payload, sizeof(payload), true);
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, write_answer_other(&written));
+    TEST_ASSERT_EQUAL_UINT32(0U, written);
+    TEST_ASSERT_EQUAL_INT(-1L, card_size(YIELD_FILE));
+}
+
+TEST_CASE("a write that gives way and fails on a card with no room left keeps "
+          "the card's word, and says the card is full", "[storage_ao][yield][card]")
+{
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    fake_klog_reset();
+
+    ask_write_other(s_big, sizeof(s_big), true);
+    /* Other files take what was left of a one-megabyte card while the copy
+     * runs, and the next chunk fails for want of room. */
+    fake_sdmmc_set_total_mb(1U);
+    for ( uint32_t i = 0U; FILL_FILES > i; ++i )
+    {
+        char name[16];
+
+        (void)snprintf(name, sizeof(name), "fill%lu.bin", (unsigned long)i);
+        fake_media_put_sd_path(name, s_big, sizeof(s_big));
+    }
+    TEST_ASSERT_TRUE_MESSAGE(spoil_open_file(fake_media_sd_dir(), YIELD_FILE),
+                             "the copy is not open on the card");
+    drain_write();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_NO_RESOURCES, write_answer_other(&written),
+                                  "a copy that failed on a full card was not told the card is full");
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_sd_took_write(),
+                             "a card with no room left lost its word as a bad card does");
+    TEST_ASSERT_EQUAL_UINT(0U, log_count(CARD_WORD_BACK));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(SD_WORKER),
+                                   "a full card is mounted again");
+    TEST_ASSERT_EQUAL_INT(-1L, card_size(YIELD_FILE));
 }
 
 /* ---- A put that waits for the card ---------------------------------------- */
@@ -8105,7 +8575,8 @@ TEST_CASE("a bare name asked with the card out mounts it first and lands on it",
     storage_fresh();
     card_out();
 
-    storage_write_all_request("shot.bmp", payload, sizeof(payload), ao_spy());
+    storage_write_all_request("shot.bmp", payload, sizeof(payload), ao_spy(),
+                              KODE_STORAGE_TAG_NONE);
     settle_card();
     drain_write();
 
@@ -8124,7 +8595,8 @@ TEST_CASE("a bare name asked with no card lands inside", "[storage_ao][first]")
     card_out();
     fake_media_set_sd_present(false);
 
-    storage_write_all_request("shot.bmp", payload, sizeof(payload), ao_spy());
+    storage_write_all_request("shot.bmp", payload, sizeof(payload), ao_spy(),
+                              KODE_STORAGE_TAG_NONE);
     settle_card();
     drain_write();
 

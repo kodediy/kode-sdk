@@ -1848,7 +1848,8 @@ static void job_done(Audio * const me, KqpWorkerDoneEvt const * const j)
                  * can reach it meanwhile. The guard is re-armed because the
                  * write is now what has to answer. */
                 audio_guard_start(me);
-                storage_write_all_request(me->path, image, bytes, &me->super);
+                storage_write_all_request(me->path, image, bytes, &me->super,
+                                          KODE_STORAGE_TAG_NONE);
             }
             break;
 
