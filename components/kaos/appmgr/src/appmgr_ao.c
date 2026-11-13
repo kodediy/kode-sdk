@@ -70,6 +70,7 @@
 /* Region bytes read per step while an evicted app is copied out of the
  * region: the same 32 KB the writes use, so a step stays short (rule 5). */
 #define APPMGR_KEEP_CHUNK      (32U * 1024U)
+#define APPMGR_KEEP_TMP_SUFFIX ".tmp"   /**< What a copy's name carries while it is written. */
 /* Re-publish the percent this often while the card writes a copy. AO_Power
  * takes the LED's orange pulse back after three seconds without a report, and
  * a multi-MB write has none of its own. */
@@ -377,12 +378,14 @@ typedef struct {
     bool        keep_forced;                   /**< Adoption had dst forced.   */
     bool        keep_writing;                  /**< AO_Storage holds keep_buf. */
     bool        keep_stat;                     /**< A STAT is out, unanswered. */
+    bool        keep_moving;                   /**< The copy's replacement of its name is out, unanswered. */
     /* Answers still owed for requests given up on at their deadline.
      * AO_Storage answers in order and its answers carry no path, so the
      * next that many answers of that kind are the abandoned requests', not
      * the victim's in hand. Kept across rounds: a late answer can outlive
      * the install it belonged to. */
     uint8_t     keep_stale_stat;               /**< STATs abandoned, owed.     */
+    uint8_t     keep_stale_move;               /**< Replacements abandoned, owed. */
     uint8_t     keep_stale_write;              /**< Writes abandoned, owed.    */
     uint8_t    *keep_orphan;                   /**< The buffer of the oldest
                                                 *   abandoned write, freed when
@@ -952,6 +955,7 @@ static void keep_clear(AppMgr * const me)
     me->keep_forced  = false;
     me->keep_writing = false;
     me->keep_stat    = false;
+    me->keep_moving  = false;
     me->keep_count   = 0U;
     me->keep_idx     = 0U;
     me->keep_total   = 0U;
@@ -3342,6 +3346,7 @@ void AppMgr_ctor(void)
     me->sink      = NULL;
     me->chunk     = NULL;
     me->keep_stale_stat  = 0U;
+    me->keep_stale_move  = 0U;
     me->keep_stale_write = 0U;
     me->keep_orphan      = NULL;
     me->ask_who          = NULL;
@@ -4378,8 +4383,9 @@ static const kapps_entry_t *keep_entry(uint32_t seq)
 }
 
 /**
- * @brief Settle an answer owed to a STAT or a write given up on, if @p e is
- *        one; the caller has checked it is a path or write answer.
+ * @brief Settle an answer owed to a STAT, a replacement or a write given up
+ *        on, if @p e is one; the caller has checked it is a path or write
+ *        answer.
  * @return true when @p e was such a late answer and is now spent.
  */
 static bool keep_owed_answer(AppMgr * const me, QEvt const * const e)
@@ -4391,6 +4397,13 @@ static bool keep_owed_answer(AppMgr * const me, QEvt const * const e)
         && (0U < me->keep_stale_stat) )
     {
         --me->keep_stale_stat;
+        spent = true;
+    }
+    else if ( ((QSignal)STORAGE_PATH_RSP_SIG == e->sig)
+             && ((uint8_t)STORAGE_PAIR_REPLACE == Q_EVT_CAST(StoragePathRspEvt)->op)
+             && (0U < me->keep_stale_move) )
+    {
+        --me->keep_stale_move;
         spent = true;
     }
     else if ( ((QSignal)STORAGE_WRITE_RSP_SIG == e->sig)
@@ -4425,6 +4438,7 @@ static void keep_settle(AppMgr * const me, keep_res_t res)
     }
     me->keep_writing = false;
     me->keep_stat    = false;
+    me->keep_moving  = false;
     (void)QTimeEvt_disarm(&me->idle);    /* the victim's answer deadline */
     ++me->keep_idx;
     if ( progress_pct(me) > me->reported )
@@ -4443,6 +4457,20 @@ static void card_copy_path(char *out, size_t cap, const char *project)
 {
     (void)snprintf(out, cap, KODE_CARD_APP_PREFIX "%s" KODE_CARD_APP_SUFFIX,
                    project);
+}
+
+/**
+ * @brief Write the path a copy of @p project is written to before it is put
+ *        on its name into @p out.
+ * @param out     Receives `/sdcard/<project>.bin.tmp`.
+ * @param cap     Its size in bytes.
+ * @param project The app's project name.
+ */
+static void card_tmp_path(char *out, size_t cap, const char *project)
+{
+    (void)snprintf(out, cap,
+                   KODE_CARD_APP_PREFIX "%s" KODE_CARD_APP_SUFFIX
+                   APPMGR_KEEP_TMP_SUFFIX, project);
 }
 
 /**
@@ -4546,6 +4574,50 @@ static bool keep_next(AppMgr * const me)
     return false;
 }
 
+/** @brief Count an answer given up on, never past the count's end. */
+static void stale_add(uint8_t * const count)
+{
+    if ( UINT8_MAX > *count )
+    {
+        ++*count;
+    }
+}
+
+/**
+ * @brief Ask AO_Storage to put the finished copy on the app's name.
+ *
+ * One request, whatever is on that name: AO_Storage moves it aside, puts the
+ * copy there and removes it, and puts it back when a step fails. One answer,
+ * a path answer of op STORAGE_PAIR_REPLACE; keep_moving says it is awaited.
+ *
+ * @param me The AO, with the copy whole under its temporary name.
+ */
+static void keep_move(AppMgr * const me)
+{
+    char tmp[KODE_APP_FILE_MAX];
+
+    card_tmp_path(tmp, sizeof(tmp), me->keep_name);
+    storage_pair_request(&me->super, (uint8_t)STORAGE_PAIR_REPLACE, tmp, me->keep_path);
+    me->keep_moving = true;
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
+}
+
+/**
+ * @brief Ask the card to remove the victim in hand's temporary.
+ *
+ * Its answer is not waited for: a temporary that stays is overwritten by the
+ * next copy of the app and is never listed as one.
+ *
+ * @param me The AO.
+ */
+static void keep_drop_tmp(AppMgr * const me)
+{
+    char tmp[KODE_APP_FILE_MAX];
+
+    card_tmp_path(tmp, sizeof(tmp), me->keep_name);
+    storage_path_request(&me->super, (uint8_t)STORAGE_PATH_UNLINK, tmp);
+}
+
 /** @brief Every victim tried: cancel (rule 5) or restart. */
 static QState keep_finish(AppMgr * const me)
 {
@@ -4574,11 +4646,22 @@ static QState keep_finish(AppMgr * const me)
     return Q_TRAN(&AppMgr_idle);
 }
 
+/** @brief Go on to the next victim after one was settled, or finish the round. */
+static QState keep_on(AppMgr * const me)
+{
+    if ( !keep_next(me) )
+    {
+        return keep_finish(me);
+    }
+    return Q_HANDLED();
+}
+
 /**
  * @brief Copy each victim to the card, one at a time, then restart.
  *
- * Per victim: STAT its path, and when it is not there, read its extent in
- * APPMGR_KEEP_CHUNK steps and hand them to AO_Storage. A failure is
+ * Per victim: STAT its path, and when its copy is not there, read its extent
+ * in APPMGR_KEEP_CHUNK steps, hand it to AO_Storage to write under a temporary
+ * name, and ask AO_Storage to put that file on the app's name. A failure is
  * KEEP_FAILED, and the round goes on.
  */
 static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
@@ -4612,7 +4695,6 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
         case APP_RECV_IDLE_SIG: {
             /* AO_Storage dropped a request on a dry pool, or the card never
              * answered: the victim is a failed copy and the round goes on. */
-            status = Q_HANDLED();
             if ( me->keep_writing )
             {
                 KLOG_E(TAG, "the card never answered for '%s'; its buffer is "
@@ -4632,39 +4714,65 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
                     ++me->keep_stale_write;
                 }
             }
+            else if ( me->keep_moving )
+            {
+                KLOG_W(TAG, "nothing answered about '%s' on the card",
+                       me->keep_name);
+                stale_add(&me->keep_stale_move);
+            }
             else if ( me->keep_stat )
             {
                 KLOG_W(TAG, "nothing answered about '%s' on the card",
                        me->keep_name);
-                if ( UINT8_MAX > me->keep_stale_stat )
-                {
-                    ++me->keep_stale_stat;
-                }
+                stale_add(&me->keep_stale_stat);
             }
             else
             {
+                status = Q_HANDLED();
                 break;                               /* a stale expiry */
             }
             keep_settle(me, KEEP_FAILED);
-            if ( !keep_next(me) )
-            {
-                status = keep_finish(me);
-            }
+            status = keep_on(me);
             break;
         }
         case STORAGE_PATH_RSP_SIG: {
             StoragePathRspEvt const * const r = Q_EVT_CAST(StoragePathRspEvt);
             status = Q_HANDLED();
+            if ( keep_owed_answer(me, e) )
+            {
+                break;   /* a STAT or replacement given up on, not this victim's */
+            }
+            if ( (uint8_t)STORAGE_PAIR_REPLACE == r->op )
+            {
+                if ( me->keep_moving )
+                {
+                    (void)QTimeEvt_disarm(&me->idle);
+                    if ( (uint8_t)KODE_OK == r->rc )
+                    {
+                        KLOG_N(TAG, "'%s' kept as %s", me->keep_name, me->keep_path);
+                        keep_settle(me, KEEP_SAVED);
+                    }
+                    else
+                    {
+                        /* The file on the name, if there was one, is as it was. */
+                        KLOG_W(TAG, "'%s' could not be put on its name", me->keep_name);
+                        keep_drop_tmp(me);
+                        keep_settle(me, KEEP_FAILED);
+                    }
+                    status = keep_on(me);
+                }
+                else
+                {
+                    KLOG_D(TAG, "a replacement's answer nobody is waiting for");
+                }
+                break;
+            }
             if ( (uint8_t)STORAGE_PATH_STAT != r->op )
             {
                 /* The answer to the unlink a failed copy asked for: it
                  * settles nothing, least of all the next victim's STAT. */
                 KLOG_D(TAG, "a path answer that is not a stat");
                 break;
-            }
-            if ( keep_owed_answer(me, e) )
-            {
-                break;   /* a STAT given up on, not this victim's */
             }
             if ( !me->keep_stat )
             {
@@ -4695,7 +4803,7 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
                 if ( r->exists )
                 {
                     /* Another file of the name: an older version, or not the
-                     * app at all. The copy truncates it. */
+                     * app at all. The copy replaces it once it is whole. */
                     KLOG_N(TAG, "'%s' is %u bytes and the image is %u; the "
                                 "app is copied over it", me->keep_path,
                            (unsigned)r->size, (unsigned)me->keep_len);
@@ -4770,8 +4878,10 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
                 break;
             }
             me->keep_writing = true;
-            storage_write_all_request(me->keep_path, me->keep_buf,
-                                      me->keep_len, &me->super);
+            char tmp[KODE_APP_FILE_MAX];
+
+            card_tmp_path(tmp, sizeof(tmp), me->keep_name);
+            storage_write_all_request(tmp, me->keep_buf, me->keep_len, &me->super);
             (void)QTimeEvt_rearm(&me->idle,
                                  APPMGR_KEEP_WRITE_TICKS(me->keep_len));
             (void)QTimeEvt_rearm(&me->pacer, APPMGR_KEEP_BEAT_TICKS);
@@ -4792,26 +4902,27 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
                 break;
             }
             (void)QTimeEvt_disarm(&me->pacer);
-            if ( (uint8_t)KODE_OK == w->status )
-            {
-                KLOG_N(TAG, "'%s' kept as %s", me->keep_name, me->keep_path);
-                keep_settle(me, KEEP_SAVED);
-            }
-            else
-            {
-                /* The path was absent when asked about, so whatever is
-                 * there now is this copy's stub (a close that failed leaves
-                 * the file): remove it, or the next round would find it and
-                 * call the app kept. Its answer is not waited for. */
-                storage_path_request(&me->super, (uint8_t)STORAGE_PATH_UNLINK,
-                                     me->keep_path);
-                keep_settle(me, KEEP_FAILED);
-            }
             status = Q_HANDLED();
-            if ( !keep_next(me) )
+            /* The answer says AO_Storage is done with the buffer. */
+            khal_free(me->keep_buf);
+            me->keep_buf     = NULL;
+            me->keep_writing = false;
+            if ( (uint8_t)KODE_OK != w->status )
             {
-                status = keep_finish(me);
+                /* Whatever is under the temporary name is this copy's stub
+                 * (a close that failed leaves the file): remove it. */
+                keep_drop_tmp(me);
+                keep_settle(me, KEEP_FAILED);
+                status = keep_on(me);
+                break;
             }
+            /* The copy is whole under its temporary name. It becomes the
+             * app's copy when it is on the app's name, in one step in
+             * AO_Storage whatever is there: a refusal or a failure leaves the
+             * file that was there on the name. A reset in the middle leaves
+             * it as `<name>.bak` and the copy under its temporary name,
+             * never a cut file on the name. */
+            keep_move(me);
             break;
         }
         case FLASH_REQ_SIG:
@@ -5076,13 +5187,13 @@ static bool card_answer_taken(AppMgr * const me, QEvt const * const e,
 {
     StoragePathRspEvt const * const r = Q_EVT_CAST(StoragePathRspEvt);
 
-    if ( (uint8_t)STORAGE_PATH_STAT != r->op )
+    if ( keep_owed_answer(me, e) )
+    {
+        return false;            /* a STAT or replacement given up on, not this question's */
+    }
+    if ( ((uint8_t)STORAGE_PATH_STAT != r->op) || (!*stat) )
     {
         return false;
-    }
-    if ( keep_owed_answer(me, e) || (!*stat) )
-    {
-        return false;            /* a STAT given up on, not this question's */
     }
     *stat = false;
     (void)QTimeEvt_disarm(&me->idle);
@@ -5780,8 +5891,8 @@ static const char *request_name(QSignal sig)
  * @brief The parent of every state with work in hand.
  *
  * Answers a question about the next install with `busy`, and settles the late
- * AO_Storage answers owed to a STAT or a write given up on, for every child
- * that does not take them itself.
+ * AO_Storage answers owed to a STAT, a replacement or a write given up on, for
+ * every child that does not take them itself.
  */
 static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
 {
