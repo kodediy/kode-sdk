@@ -16,11 +16,13 @@
 #include "esp_private/partition_linux.h"
 #include "esp_rom_crc.h"
 
+#include "fakes.h"
 #include "kapp_desc.h"
 #include "kapps_fmt.h"
 #include "kdrv_apps.h"
 #include "kdrv_bounce.h"
 #include "kdrv_kfw.h"
+#include "khal_crc32.h"
 
 /** @brief The region, found the same way the driver finds it. */
 static const esp_partition_t *region(void)
@@ -794,6 +796,103 @@ TEST_CASE("erasing follows the write across a block boundary, never behind it",
     TEST_ASSERT_EQUAL_MEMORY(out, in, sizeof(out));
 }
 
+/* What an install may take back after it fails is decided by which blocks the
+ * write got to erase, so the driver says it: an extent is reached when any
+ * block of the session's run has been erased over it, and never before the
+ * data gets there. */
+TEST_CASE("an extent is reached once the write erases a block of it, and not before",
+          "[apps_region]")
+{
+    static uint8_t out[0x40];
+    uint32_t const at = KAPPS_DATA_OFF + (2U * KAPPS_ALIGN);
+
+    apps_ready();
+    kapps_dir_t same = *kdrv_apps_dir();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&same));   /* starts the record over */
+    (void)memset(out, 0x5AU, sizeof(out));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, 3U * KAPPS_ALIGN));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at, KAPPS_ALIGN),
+        "an extent under a session that has written nothing is reached");
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at, KAPPS_ALIGN),
+        "the block the first bytes landed in is not reached");
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at + 0x10U, 1U),
+        "a one-byte extent inside the erased block is not reached");
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at - KAPPS_ALIGN, 2U * KAPPS_ALIGN),
+        "an extent that runs into the erased block is not reached");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at - KAPPS_ALIGN, KAPPS_ALIGN),
+        "the extent just below the session is reached");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at + KAPPS_ALIGN, KAPPS_ALIGN),
+        "a block the write has not got to is reached");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at + (2U * KAPPS_ALIGN), 4U),
+        "the last block of the session is reached before any byte lands in it");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at, 0U),
+        "an extent of no bytes is reached");
+    kdrv_apps_write_abort();
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at, KAPPS_ALIGN),
+        "an abandoned session forgot what it had erased");
+}
+
+TEST_CASE("the erases of the last session are not the next directory's",
+          "[apps_region]")
+{
+    static uint8_t out[0x40];
+    uint32_t const at = KAPPS_DATA_OFF;
+
+    apps_ready();
+    (void)memset(out, 0x5AU, sizeof(out));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, KAPPS_ALIGN));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    kdrv_apps_write_abort();
+    TEST_ASSERT_TRUE(kdrv_apps_write_reached(at, 1U));
+
+    kapps_dir_t same = *kdrv_apps_dir();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&same));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at, 1U),
+        "a committed directory kept the erases made before it");
+
+    /* A commit that fails changes nothing: the record stands. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, KAPPS_ALIGN));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    kdrv_apps_write_abort();
+    esp_partition_fail_after(0U, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, kdrv_apps_dir_commit(&same));
+    cut_off();
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at, 1U),
+        "a commit that failed wiped the record");
+
+    /* A new session starts its own record, and says nothing of the old one. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at + KAPPS_ALIGN, KAPPS_ALIGN));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_write_reached(at, 1U),
+        "a session that has erased nothing inherited the last one's");
+    kdrv_apps_write_abort();
+}
+
+TEST_CASE("an erase that fails counts as reaching its block",
+          "[apps_region]")
+{
+    static uint8_t out[0x40];
+    uint32_t const at = KAPPS_DATA_OFF + KAPPS_ALIGN;
+
+    apps_ready();
+    kapps_dir_t same = *kdrv_apps_dir();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&same));
+    (void)memset(out, 0x5AU, sizeof(out));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, 2U * KAPPS_ALIGN));
+    esp_partition_fail_after(0U, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    cut_off();
+    kdrv_apps_write_abort();
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_write_reached(at, KAPPS_ALIGN),
+        "a block a failed erase touched is called untouched");
+    TEST_ASSERT_FALSE(kdrv_apps_write_reached(at + KAPPS_ALIGN, KAPPS_ALIGN));
+}
+
 /** @brief A lead-in that leaves the next write starting mid-session. */
 #define LEAD_LEN         0x37U
 /** @brief One write two bounces and a part long, crossing every boundary. */
@@ -806,6 +905,178 @@ static void fill_pattern(uint8_t *buf, size_t len)
     {
         buf[i] = (uint8_t)((i * 7U) + (i >> 8U) + 3U);
     }
+}
+
+/* ---- The CRC of an extent -------------------------------------------------- */
+
+/** @brief The extent the CRC cases fold: odd on purpose, so a read cannot end on a chunk. */
+#define EXTENT_LEN   ((3U * 4096U) + 7U)
+
+/** @brief What lies right after the extent: a pattern no extent byte matches. */
+#define GUARD_LEN    64U
+
+/* A digest is what can be trusted over data that is not known to be an image:
+ * it reads the bytes it is given and nothing else. The guard after the
+ * extent is the proof: a read that ran on would fold it in. */
+TEST_CASE("an extent's CRC folds exactly its bytes and never the ones after it",
+          "[apps_region]")
+{
+    static uint8_t data[EXTENT_LEN + GUARD_LEN];
+    uint32_t       crc = KHAL_CRC32_INIT;
+
+    apps_ready();
+    fill_pattern(data, EXTENT_LEN);
+    (void)memset(&data[EXTENT_LEN], 0xEEU, GUARD_LEN);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(KAPPS_DATA_OFF, sizeof(data)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(data, sizeof(data)));
+    kdrv_apps_write_abort();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_extent_crc(KAPPS_DATA_OFF, EXTENT_LEN, &crc));
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(khal_crc32(KHAL_CRC32_INIT, data, EXTENT_LEN), crc,
+        "the CRC is not that of the extent's bytes");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(khal_crc32(KHAL_CRC32_INIT, data, sizeof(data)), crc,
+        "the guard after the extent was folded in");
+
+    /* In parts it is the same CRC, and a seed continues one. */
+    uint32_t part = KHAL_CRC32_INIT;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_extent_crc(KAPPS_DATA_OFF, 5000U, &part));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_extent_crc(KAPPS_DATA_OFF + 5000U,
+                                                        EXTENT_LEN - 5000U, &part));
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(crc, part, "an extent taken in two parts differs");
+}
+
+TEST_CASE("an extent that leaves the data area is refused and leaves the CRC alone",
+          "[apps_region]")
+{
+    uint32_t crc = 0xDEADBEEFU;
+
+    apps_ready();
+    uint32_t const end = kdrv_apps_region_size();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(KAPPS_DATA_OFF - 1U, 16U, &crc), "below the data area");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(0U, 16U, &crc), "the directory is not an extent");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(end - 15U, 16U, &crc), "one byte past the region");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(KAPPS_DATA_OFF, end, &crc), "longer than the region");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(UINT32_MAX - 7U, 16U, &crc), "an extent that wraps");
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(0xDEADBEEFU, crc, "a refusal changed the CRC");
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_apps_extent_crc(KAPPS_DATA_OFF, 16U, NULL));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kdrv_apps_extent_crc(KAPPS_DATA_OFF, 0U, &crc),
+        "an extent of no bytes is refused");
+    TEST_ASSERT_EQUAL_HEX32(0xDEADBEEFU, crc);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kdrv_apps_extent_crc(end - 16U, 16U, &crc),
+        "the last 16 bytes of the region are an extent");
+}
+
+/* ---- An image that claims more than it holds ------------------------------- */
+
+/** @brief Bytes the image of these cases is given in the region. */
+#define CLAIM_IMG_LEN  4096U
+
+/**
+ * @brief Write the head of an image at the first data block and close the session unverified.
+ * @param segments What the image header claims.
+ * @param data_len What its first segment header claims.
+ */
+static void claim_image(uint8_t segments, uint32_t data_len)
+{
+    static uint8_t             img[CLAIM_IMG_LEN];
+    esp_image_header_t         h;
+    esp_image_segment_header_t seg;
+
+    (void)memset(img, 0, sizeof(img));
+    (void)memset(&h, 0, sizeof(h));
+    h.magic         = ESP_IMAGE_HEADER_MAGIC;
+    h.segment_count = segments;
+    h.hash_appended = 0U;
+    (void)memcpy(&img[0], &h, sizeof(h));
+    (void)memset(&seg, 0, sizeof(seg));
+    seg.load_addr = 0x40000000U;
+    seg.data_len  = data_len;
+    (void)memcpy(&img[sizeof(h)], &seg, sizeof(seg));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(KAPPS_DATA_OFF, sizeof(img)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(img, sizeof(img)));
+    kdrv_apps_write_abort();
+}
+
+/* The verifier hashes every segment by the length its header declares and
+ * compares the total with the partition only afterwards, so a header that
+ * declares more than the image holds keeps it reading flash for as long as the
+ * lengths say. The segment chain is walked first, by its own bytes alone, and
+ * an image whose chain leaves them never reaches the verifier: the fake one
+ * here says yes to everything, so a refusal is the walk's. */
+TEST_CASE("an image whose segments leave its own bytes is refused unhashed",
+          "[apps_region]")
+{
+    apps_ready();
+
+    claim_image(1U, 0x7FFFFFF0U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL), "a segment of 2 GB");
+
+    claim_image(1U, 0xFFFFFFFCU);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL), "a length that wraps");
+
+    claim_image(1U, CLAIM_IMG_LEN);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL),
+        "a segment as long as the whole image, after its headers");
+
+    claim_image(0U, 16U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL), "no segments");
+
+    claim_image((uint8_t)(ESP_IMAGE_MAX_SEGMENTS + 1U), 16U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL), "more segments than an image has");
+}
+
+/* The walk is a length check and nothing more: an image whose chain holds is
+ * still the verifier's to judge. */
+TEST_CASE("an image whose segments fit is the verifier's to judge", "[apps_region]")
+{
+    uint32_t len = 0U;
+
+    apps_ready();
+    claim_image(1U, 256U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, &len));
+
+    fake_image_verify_set_result(ESP_FAIL);
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL));
+    fake_image_verify_set_result(ESP_OK);
+}
+
+/* An install ends with the same check: the session's own close refuses what
+ * the walk refuses. */
+TEST_CASE("a write session does not close on an image that claims more than it holds",
+          "[apps_region]")
+{
+    static uint8_t             img[CLAIM_IMG_LEN];
+    esp_image_header_t         h;
+    esp_image_segment_header_t seg;
+
+    apps_ready();
+    (void)memset(img, 0, sizeof(img));
+    (void)memset(&h, 0, sizeof(h));
+    h.magic         = ESP_IMAGE_HEADER_MAGIC;
+    h.segment_count = 1U;
+    (void)memcpy(&img[0], &h, sizeof(h));
+    (void)memset(&seg, 0, sizeof(seg));
+    seg.load_addr = 0x40000000U;
+    seg.data_len  = 0x00800000U;
+    (void)memcpy(&img[sizeof(h)], &seg, sizeof(seg));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(KAPPS_DATA_OFF, sizeof(img)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(img, sizeof(img)));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_apps_write_end());
 }
 
 /* A write longer than a bounce reaches the flash in pieces, and each piece

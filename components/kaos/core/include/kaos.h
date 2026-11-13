@@ -3528,6 +3528,39 @@ kode_status_t appdata_put_request(const char *project, uint8_t *buf,
  *         is still making would be cut. */
 #define APPMGR_TIDY_LATE_MS (5000U)
 
+/* ---- What an install evicted, kept in NVS until the install ends --------------
+ * An install takes its victims out of the directory before the first byte
+ * arrives. AO_AppMgr records them first, in its own namespace, so a reset in
+ * the middle of the install does not cost them: the next boot puts back the
+ * ones whose bytes are as they were, which each record says by a CRC-32 of the
+ * image's extent taken when the victim was evicted. One blob, a header and one
+ * record per victim; absent when no install is evicting. A boot takes the table
+ * out of NVS before it checks anything.
+ */
+#define APPMGR_UNDO_NS       "kappmgr"  /**< The namespace AO_AppMgr keeps its records in.      */
+#define APPMGR_UNDO_KEY      "undo"     /**< The table of the victims of the install in hand.   */
+#define APPMGR_UNDO_VERSION  2U         /**< The layout below; any other is ignored and erased. */
+#define APPMGR_UNDO_MAX      64U        /**< Records in a table: every slot of the directory.   */
+#define APPMGR_UNDO_HDR_LEN  4U         /**< Bytes of appmgr_undo_hdr_t.                         */
+#define APPMGR_UNDO_REC_LEN  52U        /**< Bytes of appmgr_undo_rec_t.                         */
+
+/** @brief The head of the blob. */
+typedef struct {
+    uint8_t version;       /**< APPMGR_UNDO_VERSION.                          */
+    uint8_t count;         /**< Records that follow: 1..APPMGR_UNDO_MAX.       */
+    uint8_t reserved[2];   /**< Zero.                                         */
+} appmgr_undo_hdr_t;
+
+/** @brief One victim: its directory entry as it stood, field for field, its name and the CRC of its extent. */
+typedef struct {
+    uint32_t offset;       /**< Region-relative, a multiple of 64 KB.          */
+    uint32_t size;         /**< The image's exact length in bytes.             */
+    uint32_t seq;          /**< Its install number.                            */
+    uint32_t flags;        /**< The entry's flags.                             */
+    char     project[KODE_APP_PROJECT_MAX]; /**< Its name, read before the install could overwrite it. */
+    uint32_t crc;          /**< khal_crc32() over [offset, offset + size), taken before the eviction. */
+} appmgr_undo_rec_t;
+
 /**
  * @brief The folder's path on @p m, or false when the name cannot be a folder.
  *
@@ -3592,8 +3625,10 @@ const uint8_t *net_stream_buf(uint8_t idx);
 
 /* ---- AO_AppMgr: owner of the apps region --------------------------------
  * Copies a .bin from a medium into the apps region (evicting the oldest install
- * when short of room), lists, launches and removes apps by name. Which firmware
- * boots is AO_Boot's; the two write different flash regions.
+ * when short of room), lists, launches and removes apps by name. An install that
+ * fails gives back every app it evicted whose flash its write never reached, and
+ * so does the next boot after a reset in the middle of one (the table below).
+ * Which firmware boots is AO_Boot's; the two write different flash regions.
  */
 extern QActive * const AO_AppMgr;   /**< The apps-region AO. */
 void AppMgr_ctor(void);             /**< Construct it; kaos_appmgr_start() calls it. */
@@ -3699,6 +3734,41 @@ bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
  */
 void appmgr_image_request(uint8_t src_kind, const char *src,
                           uint8_t dst_kind, bool launch);
+
+/**
+ * @brief appmgr_image_request(), asking AO_AppMgr for its verdict.
+ *
+ * AO_AppMgr posts @p who one APP_REQ_RSP_SIG (AppReqRspEvt) once it has
+ * decided: taken (an `https` source as soon as it starts opening, a file on a
+ * medium once the medium has opened it, the mailbox at once), busy, missing (no
+ * such file on the medium), empty (nothing in the mailbox) or refused. What
+ * goes wrong after that, a download that fails, is published as
+ * APP_FLASH_FAIL_SIG and says nothing here.
+ *
+ * @param src_kind kfw_src_t as a plain integer.
+ * @param src      File name for fs/sd, URL for http, ignored otherwise.
+ * @param dst_kind kfw_target_t as a plain integer.
+ * @param launch   Boot the image once it is written and verified.
+ * @param who      Where the verdict is posted.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
+                      bool launch, QActive *who);
+
+/**
+ * @brief appmgr_run_request(), asking AO_AppMgr for its verdict.
+ *
+ * AO_AppMgr posts @p who one APP_REQ_RSP_SIG: taken when an installed app has
+ * that name (the boot request is on its way to AO_Boot), missing when none
+ * does, busy when it has work in hand.
+ *
+ * @param name The installed app's project name.
+ * @param who  Where the verdict is posted.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_run_ask(const char *name, QActive *who);
 
 /**
  * @brief The event appmgr_image_request() posts, built for a caller that posts it itself.
@@ -3827,6 +3897,10 @@ typedef struct {
  * (appdata_put_request()), replacing one that was there. One APPDATA_GET_RSP_SIG
  * to @p who, refusals included: AO_AppMgr does one thing at a time and answers
  * APPDATA_GET_BUSY while it writes an image. Any task or AO.
+ *
+ * A fetch that began shows like a write: APP_FLASH_PROGRESS_SIG at 0 % at once
+ * and again every second while it waits on the network, ended by an unnamed
+ * APP_FLASH_DONE_SIG or by APP_FLASH_FAIL_SIG.
  *
  * @param project The app's project name, as its image declares it.
  * @param url     The base URL, ending where the file names begin; shorter than

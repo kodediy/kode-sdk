@@ -895,6 +895,11 @@ void fake_ble_mirror_reset(void);
 /** @brief Whether kdrv_ble_mirror_attached() reports a central subscribed. */
 void fake_ble_mirror_set_attached(bool attached);
 
+/** @brief What kdrv_ble_console_backlog() answers: the console's bytes the
+ *         link has not carried yet. 0 until a case says otherwise; a case
+ *         that sets one puts 0 back. */
+void fake_ble_console_set_backlog(uint16_t bytes);
+
 /** @brief Every kdrv_ble_mirror_write() from here answers KODE_DENIED - the
  *         unretryable "nobody is subscribed any more" a dropped central
  *         leaves behind (kdrv_ble.h's own contract). */

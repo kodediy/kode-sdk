@@ -116,6 +116,23 @@ kode_status_t kdrv_apps_write_end(void);
 void kdrv_apps_write_abort(void);
 
 /**
+ * @brief Has the write erased any part of an extent?
+ *
+ * Answers for the write session in hand, or the last one that ran, and starts
+ * over with every committed directory: a commit says which extents hold apps,
+ * so an erase made before it speaks for nothing that comes after. An erase that
+ * failed counts as having reached its block, because flash a failed erase
+ * touched is not flash that can be trusted. Only blocks the write got to count:
+ * the region erases 64 KB at a time, as the data arrives.
+ *
+ * @param offset Region-relative start of the extent.
+ * @param size   Its length in bytes.
+ * @return true when some of its bytes may no longer be what they were; false
+ *         when every one of them is, or when @p size is 0.
+ */
+bool kdrv_apps_write_reached(uint32_t offset, uint32_t size);
+
+/**
  * @brief Read @p len bytes of the region at region-relative @p offset.
  *
  * For reading an installed image back out - the copy AO_AppMgr makes on the
@@ -129,6 +146,26 @@ void kdrv_apps_write_abort(void);
  *         an extent outside the data area or a failed read.
  */
 kode_status_t kdrv_apps_read(uint32_t offset, void *buf, size_t len);
+
+/**
+ * @brief Fold the bytes of an extent of the region into a running CRC-32.
+ *
+ * Reads exactly @p size bytes from @p offset, in pieces, and never one more:
+ * what lies beyond the extent is not this call's to touch. The CRC is the
+ * one khal_crc32() gives, chainable, so an extent may be taken in parts: pass
+ * KHAL_CRC32_INIT in @p crc for the first and the result for the next. It
+ * does not parse the data. An image a reset half overwrote is another
+ * image's header and segments, and what a parser makes of them is not bounded
+ * by @p size; a digest is.
+ *
+ * @param offset Region-relative start, at or past KAPPS_DATA_OFF.
+ * @param size   How many bytes; 0 reads nothing and changes nothing.
+ * @param crc    The running CRC on entry and, on KODE_OK, the updated one;
+ *               left alone on any other answer.
+ * @return KODE_OK; KODE_DENIED with no region or a NULL @p crc; KODE_ERROR for
+ *         an extent that leaves the data area or one that cannot be mapped.
+ */
+kode_status_t kdrv_apps_extent_crc(uint32_t offset, uint32_t size, uint32_t *crc);
 
 /** @brief What kdrv_apps_sink() needs: where kdrv_apps_plan() said to write. */
 typedef struct {

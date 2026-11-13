@@ -6,6 +6,7 @@
 #include "kdrv_slot.h"
 #include "kdrv_desc_fill.h"
 #include "kdrv_bounce.h"
+#include "kdrv_image_walk.h"
 
 #include "kdrv_kfw.h"
 
@@ -221,6 +222,19 @@ kode_status_t kdrv_slot_end(void)
     if ( 0 == s_ota )
     {
         return KODE_DENIED;
+    }
+    /* esp_ota_end() hashes the image by the lengths its own header declares
+     * (see kdrv_image_walk.h): one whose segments leave the slot is refused
+     * here, unhashed, and the session given up. */
+    const esp_partition_t * const p = slot_part();
+
+    if ( (NULL == p) || (0U == kdrv_image_walk_len(p, 0U, p->size)) )
+    {
+        KLOG_E(TAG, "the image written does not hold together in the slot; "
+                    "it is not an update");
+        (void)esp_ota_abort(s_ota);
+        s_ota = 0;
+        return KODE_ERROR;
     }
     esp_err_t const err = esp_ota_end(s_ota);
     s_ota = 0;                      /* consumed by esp_ota_end either way */

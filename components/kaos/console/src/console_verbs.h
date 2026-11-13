@@ -51,6 +51,13 @@ void console_reply(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void console_reply_err(kcli_err_t code, const char *msg);
 
 /**
+ * @brief Close the command in flight with AO_AppMgr's verdict on its request.
+ * @param verdict app_req_verdict_t: `>ok` for taken; `busy` is code 4; `missing`,
+ *                `empty` and `refused` are code 5.
+ */
+void console_reply_app_verdict(uint8_t verdict);
+
+/**
  * @brief `>ok` when the request reached its owner, else code 5 naming the verb.
  * @param verb      The verb.
  * @param delivered Whether the event went out.

@@ -363,31 +363,120 @@ TEST_CASE("size and crc32 belong to the terminal alone", "[console_install]")
     TEST_ASSERT_NULL(take(AO_AppMgr, FLASH_REQ_SIG));
 }
 
-TEST_CASE("install off a medium accepts at once and hands AO_AppMgr the "
-          "source, the destination and run", "[console_install]")
+/** @brief Hand the console AO_AppMgr's verdict, as AO_AppMgr posts it. */
+static void verdict(app_req_verdict_t v)
 {
-    const FlashReqEvt *req;
+    AppReqRspEvt e;
 
+    (void)memset(&e, 0, sizeof(e));
+    e.super   = (QEvt)QEVT_INITIALIZER(APP_REQ_RSP_SIG);
+    e.verdict = (uint8_t)v;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief Type an install off a medium and take its request out of AO_AppMgr's queue. */
+static const FlashReqEvt *install_asked(const char *line)
+{
     console_up();
-    type_line("install src=\"sd:app.bin\" dst=app");
-    TEST_ASSERT_TRUE_MESSAGE(replied(">ok"),
-                             "off a medium the >ok is an accept");
-    req = (const FlashReqEvt *)take(AO_AppMgr, FLASH_REQ_SIG);
+    type_line(line);
+    return (const FlashReqEvt *)take(AO_AppMgr, FLASH_REQ_SIG);
+}
+
+/* The `>ok` of an install off a medium says AO_AppMgr took it. Posting the
+ * request says nothing of the kind: it may be busy, or the file may not be
+ * there. The console holds the line until AO_AppMgr's verdict. */
+TEST_CASE("install off a medium waits for AO_AppMgr's verdict and hands it the "
+          "source, the destination, run and who asked", "[console_install]")
+{
+    const FlashReqEvt *req = install_asked("install src=\"sd:app.bin\" dst=app");
+
     TEST_ASSERT_NOT_NULL(req);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KFW_SRC_SD, req->src_kind);
     TEST_ASSERT_EQUAL_STRING("app.bin", req->src);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KFW_TARGET_APP, req->dst_kind);
-    TEST_ASSERT_FALSE_MESSAGE(req->launch,
-                              "run defaults off, as from the wire");
+    TEST_ASSERT_FALSE_MESSAGE(req->launch, "run defaults off, as from the wire");
+    TEST_ASSERT_TRUE_MESSAGE(AO_Console == req->who,
+        "the request does not say who is waiting for the verdict");
     QF_gc(&req->super);
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"),
+        "the line answered before AO_AppMgr said whether it took the install");
+    TEST_ASSERT_FALSE(replied(">err"));
+
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_TRUE(replied(">ok"));
 
     fake_klog_reset();
-    type_line("install src=\"https://example.com/app.bin\" dst=app run=on");
-    req = (const FlashReqEvt *)take(AO_AppMgr, FLASH_REQ_SIG);
+    req = install_asked("install src=\"https://example.com/app.bin\" dst=app run=on");
     TEST_ASSERT_NOT_NULL(req);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KFW_SRC_HTTP, req->src_kind);
     TEST_ASSERT_TRUE(req->launch);
     QF_gc(&req->super);
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+TEST_CASE("install off a medium says why AO_AppMgr did not take it",
+          "[console_install]")
+{
+    static const struct {
+        const char        *line;
+        app_req_verdict_t  verdict;
+        const char        *reply;
+    } cases[] = {
+        { "install src=\"sd:app.bin\" dst=app",  APP_REQ_BUSY,    ">err code=4 msg=busy"    },
+        { "install src=\"sd:app.bin\" dst=app",  APP_REQ_MISSING, ">err code=5 msg=missing" },
+        { "install src=\"fs:app.bin\" dst=os",   APP_REQ_MISSING, ">err code=5 msg=missing" },
+        { "install src=\"pending\" dst=app",     APP_REQ_EMPTY,   ">err code=5 msg=empty"   },
+        { "install src=\"sd:app.bin\" dst=app",  APP_REQ_REFUSED, ">err code=5 msg=refused" },
+    };
+
+    for ( unsigned i = 0U; (sizeof(cases) / sizeof(cases[0])) > i; ++i )
+    {
+        const FlashReqEvt * const req = install_asked(cases[i].line);
+
+        TEST_ASSERT_NOT_NULL_MESSAGE(req, cases[i].line);
+        QF_gc(&req->super);
+        verdict(cases[i].verdict);
+        TEST_ASSERT_TRUE_MESSAGE(replied(cases[i].reply), cases[i].reply);
+        TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), cases[i].reply);
+    }
+
+    /* The command is closed: another one is not met with busy. */
+    fake_klog_reset();
+    type_line("nosuchverb");
+    TEST_ASSERT_TRUE(replied(">err code=1"));
+}
+
+TEST_CASE("an install that waits holds the console, and a verdict nobody waits "
+          "for says nothing", "[console_install]")
+{
+    const FlashReqEvt *req = install_asked("install src=\"sd:app.bin\" dst=app");
+
+    TEST_ASSERT_NOT_NULL(req);
+    QF_gc(&req->super);
+    fake_klog_reset();
+    type_line("ping");
+    TEST_ASSERT_TRUE_MESSAGE(replied(">err code=4"),
+        "a second command ran while the first waited for its verdict");
+
+    verdict(APP_REQ_TAKEN);
+    fake_klog_reset();
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), "a late verdict answered a command nobody typed");
+}
+
+/** @brief The console's wait for a verdict, in QP ticks, past which it gives up. */
+#define VERDICT_WAIT_TICKS  (((KODE_APPMGR_OPEN_MS + 5000U) / 10U) + 1U)
+
+TEST_CASE("an install whose verdict never comes ends with the verb named, not "
+          "in silence", "[console_install]")
+{
+    const FlashReqEvt *req = install_asked("install src=\"sd:app.bin\" dst=app");
+
+    TEST_ASSERT_NOT_NULL(req);
+    QF_gc(&req->super);
+    (void)qf_support_tick(AO_Console, VERDICT_WAIT_TICKS);
+    TEST_ASSERT_TRUE(replied(">err code=6 msg=install"));
 }
 
 TEST_CASE("the old verbs are gone", "[console_install]")
