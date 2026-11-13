@@ -19,9 +19,12 @@
 #include "esp_image_format.h"
 #include "esp_partition.h"
 #include "esp_rom_crc.h"
+#include "khal_crc32.h"
 
 #define TAG              "kdrv.apps"
 #define APPS_SECTOR      0x1000U   /* the 4 KB unit every metadata sector is erased in */
+/** Bytes of the region one extent CRC maps at a time. */
+#define APPS_CRC_WINDOW  (512U * 1024U)
 
 /* ---- State: the region partition and its RAM directory ------------------- */
 
@@ -555,6 +558,57 @@ kode_status_t kdrv_apps_read(uint32_t offset, void *buf, size_t len)
         return KODE_ERROR;
     }
     return KODE_OK;
+}
+
+kode_status_t kdrv_apps_extent_crc(uint32_t offset, uint32_t size, uint32_t *crc)
+{
+    if ( (NULL == s_part) || (NULL == crc) )
+    {
+        return KODE_DENIED;
+    }
+    if ( (KAPPS_DATA_OFF > offset)
+        || (((uint64_t)offset + (uint64_t)size) > (uint64_t)s_part->size) )
+    {
+        return KODE_ERROR;
+    }
+    if ( 0U == size )
+    {
+        return KODE_OK;
+    }
+    /* Through the mapping the images are verified and run through, a window
+     * at a time: the bytes come at the cache's pace, and nothing holds the
+     * flash with the cache off the way a read through the driver does. */
+    uint32_t      run  = *crc;
+    uint32_t      done = 0U;
+    kode_status_t st   = KODE_OK;
+
+    while ( (KODE_OK == st) && (done < size) )
+    {
+        uint32_t                    n   = size - done;
+        const void                 *map = NULL;
+        esp_partition_mmap_handle_t h   = 0U;
+
+        if ( APPS_CRC_WINDOW < n )
+        {
+            n = APPS_CRC_WINDOW;
+        }
+        if ( esp_partition_mmap(s_part, offset + done, n, ESP_PARTITION_MMAP_DATA,
+                                &map, &h) != ESP_OK )
+        {
+            st = KODE_ERROR;
+        }
+        else
+        {
+            run   = khal_crc32(run, map, n);
+            done += n;
+            esp_partition_munmap(h);
+        }
+    }
+    if ( KODE_OK == st )
+    {
+        *crc = run;
+    }
+    return st;
 }
 
 /* ---- The region as a kfw_sink_t -------------------------------------------

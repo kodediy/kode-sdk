@@ -542,6 +542,10 @@ enum KodeSignals {
     APP_TIDY_TIMEOUT_SIG,       /**< AO_AppMgr private QTimeEvt: AO_Storage
                                  *   did not answer a folder request in
                                  *   APPMGR_TIDY_MS (AppMgr_tidying).         */
+    APP_UNDO_STEP_SIG,          /**< AO_AppMgr private: verify the next app a
+                                 *   reset cut out of an install. Posted to
+                                 *   self, one per app, never by anything
+                                 *   external.                                */
     APP_BEAT_SIG,               /**< AO_AppMgr private QTimeEvt: a second of
                                  *   waiting on the network has gone by -
                                  *   report the write's percent again, so the

@@ -21,6 +21,7 @@
 #include "kdrv_apps.h"
 #include "kdrv_bounce.h"
 #include "kdrv_kfw.h"
+#include "khal_crc32.h"
 
 /** @brief The region, found the same way the driver finds it. */
 static const esp_partition_t *region(void)
@@ -903,6 +904,72 @@ static void fill_pattern(uint8_t *buf, size_t len)
     {
         buf[i] = (uint8_t)((i * 7U) + (i >> 8U) + 3U);
     }
+}
+
+/* ---- The CRC of an extent -------------------------------------------------- */
+
+/** @brief The extent the CRC cases fold: odd on purpose, so a read cannot end on a chunk. */
+#define EXTENT_LEN   ((3U * 4096U) + 7U)
+
+/** @brief What lies right after the extent: a pattern no extent byte matches. */
+#define GUARD_LEN    64U
+
+/* A digest is what can be trusted over data that is not known to be an image:
+ * it reads the bytes it is given and nothing else. The guard after the
+ * extent is the proof: a read that ran on would fold it in. */
+TEST_CASE("an extent's CRC folds exactly its bytes and never the ones after it",
+          "[apps_region]")
+{
+    static uint8_t data[EXTENT_LEN + GUARD_LEN];
+    uint32_t       crc = KHAL_CRC32_INIT;
+
+    apps_ready();
+    fill_pattern(data, EXTENT_LEN);
+    (void)memset(&data[EXTENT_LEN], 0xEEU, GUARD_LEN);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(KAPPS_DATA_OFF, sizeof(data)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(data, sizeof(data)));
+    kdrv_apps_write_abort();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_extent_crc(KAPPS_DATA_OFF, EXTENT_LEN, &crc));
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(khal_crc32(KHAL_CRC32_INIT, data, EXTENT_LEN), crc,
+        "the CRC is not that of the extent's bytes");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(khal_crc32(KHAL_CRC32_INIT, data, sizeof(data)), crc,
+        "the guard after the extent was folded in");
+
+    /* In parts it is the same CRC, and a seed continues one. */
+    uint32_t part = KHAL_CRC32_INIT;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_extent_crc(KAPPS_DATA_OFF, 5000U, &part));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_extent_crc(KAPPS_DATA_OFF + 5000U,
+                                                        EXTENT_LEN - 5000U, &part));
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(crc, part, "an extent taken in two parts differs");
+}
+
+TEST_CASE("an extent that leaves the data area is refused and leaves the CRC alone",
+          "[apps_region]")
+{
+    uint32_t crc = 0xDEADBEEFU;
+
+    apps_ready();
+    uint32_t const end = kdrv_apps_region_size();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(KAPPS_DATA_OFF - 1U, 16U, &crc), "below the data area");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(0U, 16U, &crc), "the directory is not an extent");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(end - 15U, 16U, &crc), "one byte past the region");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(KAPPS_DATA_OFF, end, &crc), "longer than the region");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_extent_crc(UINT32_MAX - 7U, 16U, &crc), "an extent that wraps");
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(0xDEADBEEFU, crc, "a refusal changed the CRC");
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_apps_extent_crc(KAPPS_DATA_OFF, 16U, NULL));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kdrv_apps_extent_crc(KAPPS_DATA_OFF, 0U, &crc),
+        "an extent of no bytes is refused");
+    TEST_ASSERT_EQUAL_HEX32(0xDEADBEEFU, crc);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kdrv_apps_extent_crc(end - 16U, 16U, &crc),
+        "the last 16 bytes of the region are an extent");
 }
 
 /* A write longer than a bounce reaches the flash in pieces, and each piece

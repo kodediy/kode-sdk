@@ -22,6 +22,7 @@
 #include "sdkconfig.h"
 #include "kode_log.h"
 #include "khal_crc32.h"
+#include "khal_nvs.h"
 #include "khal_system.h"
 #include "kaos_claim.h"
 #include "kverbs.h"
@@ -123,6 +124,18 @@ _Static_assert(((2U * (KODE_STORAGE_LIST_MAX + 1U)) + (KODE_APP_EVICT_MAX + 1U))
 _Static_assert((KAPPS_MAX_ENTRIES + 1U) <= UINT8_MAX,
                "AppEvictEndEvt.victims must hold every victim of a plan");
 
+/* The recovery of an install a reset cut runs one step at a time, each step
+ * started by a one-shot timer rather than posted at once, so everything else
+ * on the board runs between two. A step folds at most this many bytes of an
+ * image into its CRC: the read through the flash is the cost, and the time it
+ * takes is kept to a few tens of milliseconds, whatever the image's size. */
+#define APPMGR_UNDO_PACE_MS     50U                 /**< Between two steps of the recovery.        */
+#define APPMGR_UNDO_PACE_TICKS  KQP_TICKS_PER_MS(APPMGR_UNDO_PACE_MS) /**< The same in ticks.      */
+#define APPMGR_UNDO_STEP_BYTES  (512U * 1024U)      /**< Bytes of an image one step folds into its CRC. */
+
+/** Listings a start-up recovery holds for after it ends: the launcher's and the console's, and room. */
+#define APPMGR_REC_LIST_MAX  4U
+
 /* How long AO_Storage gets to answer one folder request of the tidy step
  * (APPMGR_TIDY_MS, kaos.h) before this AO gives up on it and goes on. The
  * install has already succeeded when the wait starts, so the budget only
@@ -214,14 +227,38 @@ typedef enum {
     KEEP_FAILED              /**< No card, no memory, no name, or the write failed. */
 } keep_res_t;
 
-/** @brief An app an install took out of the directory, as it stood. */
+/** @brief Which way an app an install evicted went (undo_table_t.fate). */
+enum {
+    UNDO_STAYS = 0,   /**< Never left the directory, or could not be put back. */
+    UNDO_CHECK,       /**< A reset cut the install: its image is still to be verified. */
+    UNDO_GONE,        /**< Overwritten, and gone.                               */
+    UNDO_BACK         /**< Put back.                                            */
+};
+
+/**
+ * @brief AO_AppMgr's table of what an install evicted.
+ *
+ * Its head is the blob kept in NVS, byte for byte: the header and the first
+ * `count` records. What became of each victim follows it and never leaves
+ * RAM: it lives and dies with the table, in the same PSRAM block.
+ */
 typedef struct {
-    kapps_entry_t entry;                           /**< Its directory entry.                  */
-    char          project[KDRV_SLOT_PROJECT_MAX];  /**< Its name; where it lay when the image
-                                                    *   would not say.                       */
-    bool          gone;                            /**< The write erased part of its extent.  */
-    bool          back;                            /**< The failure put its entry back.       */
-} undo_t;
+    appmgr_undo_hdr_t hdr;                       /**< Version and count.        */
+    appmgr_undo_rec_t rec[KAPPS_MAX_ENTRIES];    /**< One per victim, the first `count` of them. */
+    uint8_t           fate[KAPPS_MAX_ENTRIES];   /**< UNDO_*: what became of each; not in the blob. */
+} undo_table_t;
+
+/* A record is a directory entry and a name with nothing between, and a table
+ * has a slot for every entry of the directory: the layout in NVS is this one. */
+_Static_assert(sizeof(appmgr_undo_hdr_t) == APPMGR_UNDO_HDR_LEN,
+               "the table's header is a frozen NVS layout");
+_Static_assert(sizeof(appmgr_undo_rec_t) == APPMGR_UNDO_REC_LEN,
+               "the table's record is a frozen NVS layout");
+_Static_assert(sizeof(appmgr_undo_rec_t)
+               == (sizeof(kapps_entry_t) + KDRV_SLOT_PROJECT_MAX + sizeof(uint32_t)),
+               "a record is a directory entry, a name and a CRC");
+_Static_assert(APPMGR_UNDO_MAX == KAPPS_MAX_ENTRIES,
+               "a table holds every slot of the directory");
 
 /** @brief The apps-region AO, plus the state of one in-flight copy. */
 typedef struct {
@@ -445,8 +482,24 @@ typedef struct {
      * as the plan takes it, and a failed install puts back every one whose
      * extent was not reached (undo_restore()); a landed one discards them.
      * PSRAM, taken with the first victim (rule 8). */
-    undo_t       *undo;            /**< The evicted entries; NULL when none are held. */
-    uint32_t      undo_count;      /**< Entries noted in undo[].                */
+    undo_table_t *undo;            /**< The evicted entries; NULL when none are held. */
+    uint32_t      undo_count;      /**< Records noted in undo->rec[].            */
+    bool          undo_stored;     /**< The table is in NVS, so a reset in the middle
+                                    *   of the install gives the victims back. */
+
+    /* ---- Recovering what a reset cut out of an install (AppMgr_recovering)
+     * At start-up a table in NVS names apps a reset took out of the directory
+     * and never gave back. Each is checked by the CRC of its extent, a step at a
+     * time, and nothing is
+     * answered until the last is settled; a listing asked meanwhile waits. */
+    QTimeEvt      undo_tmo;        /**< Starts each step of the recovery (APP_UNDO_STEP_SIG). */
+    uint32_t      rec_next;        /**< The next record to look at.             */
+    uint32_t      rec_done;        /**< Bytes of that record's extent already folded into rec_crc. */
+    uint32_t      rec_crc;         /**< The running CRC of that extent.         */
+    bool          rec_adopt;       /**< The mailbox holds an image: adopt it once the recovery ends. */
+    uint8_t       rec_list_n;      /**< Listings asked during the recovery.     */
+    QActive      *rec_list_who[APPMGR_REC_LIST_MAX];  /**< Who asked.          */
+    uint16_t      rec_list_skip[APPMGR_REC_LIST_MAX]; /**< From which entry.   */
 
     /* ---- A verdict still owed (FlashReqEvt.who) ----------------------------
      * An install off a medium is taken once the medium has opened its file, so
@@ -498,6 +551,7 @@ static QState AppMgr_asking(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_finding(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_scrubbing(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e);
+static QState AppMgr_recovering(AppMgr * const me, QEvt const * const e);
 #if CONFIG_KODEOS_NET
 static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e);
 #endif
@@ -860,9 +914,21 @@ static void victims_clear(AppMgr * const me)
     me->victim_next  = 0U;
 }
 
-/** @brief Forget the apps the install evicted: it landed, or they were given back. */
+/**
+ * @brief Forget the apps the install evicted: it landed, or they were given back.
+ *
+ * The table in NVS goes with it, after whatever made it unnecessary.
+ */
 static void undo_clear(AppMgr * const me)
 {
+    if ( me->undo_stored )
+    {
+        me->undo_stored = false;
+        if ( khal_nvs_erase(APPMGR_UNDO_NS, APPMGR_UNDO_KEY) != KODE_OK )
+        {
+            KLOG_W(TAG, "cannot erase the record of the apps an install evicted");
+        }
+    }
     if ( NULL != me->undo )
     {
         khal_free(me->undo);
@@ -1203,8 +1269,7 @@ static void undo_note(AppMgr * const me, const kapps_dir_t *d, uint8_t idx)
     if ( NULL == me->undo )
     {
         /* cppcheck-suppress misra-c2012-11.5 ; a table from a void * allocator */
-        me->undo = (undo_t *)khal_realloc_psram(NULL, (size_t)KAPPS_MAX_ENTRIES
-                                                      * sizeof(undo_t));
+        me->undo = (undo_table_t *)khal_realloc_psram(NULL, sizeof(undo_table_t));
         me->undo_count = 0U;
     }
     if ( (NULL == me->undo) || (KAPPS_MAX_ENTRIES <= me->undo_count) )
@@ -1213,20 +1278,83 @@ static void undo_note(AppMgr * const me, const kapps_dir_t *d, uint8_t idx)
                     "of the install costs it");
         return;
     }
-    undo_t * const u = &me->undo[me->undo_count];
+    appmgr_undo_rec_t * const r = &me->undo->rec[me->undo_count];
 
-    u->entry = d->e[idx];
-    u->gone  = false;
-    u->back  = false;
+    (void)memset(r, 0, sizeof(*r));
+    r->offset = d->e[idx].offset;
+    r->size   = d->e[idx].size;
+    r->seq    = d->e[idx].seq;
+    r->flags  = d->e[idx].flags;
     if ( kdrv_apps_desc(&d->e[idx], &vd, NULL) == KODE_OK )
     {
-        (void)snprintf(u->project, sizeof(u->project), "%s", vd.project);
+        (void)snprintf(r->project, sizeof(r->project), "%s", vd.project);
     }
     else
     {
-        unnamed_label(u->project, sizeof(u->project), d->e[idx].offset);
+        unnamed_label(r->project, sizeof(r->project), d->e[idx].offset);
     }
+    /* The digest the next boot checks the image against: of the bytes as they
+     * lie now, before the install's first erase can reach them. Read in one
+     * step, for every victim of the plan: a few tens of ms per MB of images. */
+    uint32_t crc = KHAL_CRC32_INIT;
+
+    if ( kdrv_apps_extent_crc(d->e[idx].offset, d->e[idx].size, &crc) != KODE_OK )
+    {
+        KLOG_W(TAG, "cannot read '%s' to record it; a reset in the middle of "
+                    "the install costs it", r->project);
+        crc = 0U;
+    }
+    r->crc = crc;
+    me->undo->fate[me->undo_count] = (uint8_t)UNDO_STAYS;
     ++me->undo_count;
+}
+
+/**
+ * @brief The directory entry a record holds.
+ *
+ * @param r The record.
+ * @return The entry as it stood.
+ */
+static kapps_entry_t undo_entry(const appmgr_undo_rec_t *r)
+{
+    kapps_entry_t const e = {
+        .offset = r->offset, .size = r->size, .seq = r->seq, .flags = r->flags,
+    };
+
+    return e;
+}
+
+/**
+ * @brief Write the table of the victims noted so far into NVS.
+ *
+ * Before the eviction is committed, so a reset between the two loses nothing:
+ * the table is the only place the victims' entries are kept. One blob, so a
+ * power cut leaves the old table or the new. A write that fails costs the way
+ * back from a reset, never the install.
+ *
+ * @param me The AO, with its victims noted.
+ */
+static void undo_store(AppMgr * const me)
+{
+    if ( (NULL == me->undo) || (0U == me->undo_count) )
+    {
+        return;
+    }
+    me->undo->hdr.version     = (uint8_t)APPMGR_UNDO_VERSION;
+    me->undo->hdr.count       = (uint8_t)me->undo_count;
+    me->undo->hdr.reserved[0] = 0U;
+    me->undo->hdr.reserved[1] = 0U;
+    size_t const len = sizeof(me->undo->hdr)
+                     + ((size_t)me->undo_count * sizeof(appmgr_undo_rec_t));
+    if ( khal_nvs_set_blob(APPMGR_UNDO_NS, APPMGR_UNDO_KEY, me->undo, len) == KODE_OK )
+    {
+        me->undo_stored = true;
+    }
+    else
+    {
+        KLOG_W(TAG, "cannot record the apps this install evicts; a reset in the "
+                    "middle of it costs them");
+    }
 }
 
 /**
@@ -1248,6 +1376,10 @@ static bool plan_commit(AppMgr * const me, kapps_dir_t *d,
     for ( uint32_t i = 0U; i < plan->evict_count; ++i )
     {
         undo_note(me, d, plan->evict[i]);
+    }
+    if ( 0U < plan->evict_count )
+    {
+        undo_store(me);
     }
     plan_evict(me, d, plan);
     return (0U == plan->evict_count) || (kdrv_apps_dir_commit(d) == KODE_OK);
@@ -1325,15 +1457,22 @@ static void undo_restore(AppMgr * const me)
 
     for ( uint32_t i = 0U; i < me->undo_count; ++i )
     {
-        undo_t * const u = &me->undo[i];
+        kapps_entry_t const ent = undo_entry(&me->undo->rec[i]);
 
-        u->gone = kdrv_apps_write_reached(u->entry.offset, u->entry.size);
-        if ( !u->gone && !appdir_has_seq(&dir, u->entry.seq)
-            && (KAPPS_MAX_ENTRIES > dir.count) )
+        me->undo->fate[i] = (uint8_t)UNDO_STAYS;
+        if ( kdrv_apps_write_reached(ent.offset, ent.size) )
         {
-            appdir_insert(&dir, &u->entry);
-            u->back = true;
+            me->undo->fate[i] = (uint8_t)UNDO_GONE;
+        }
+        else if ( !appdir_has_seq(&dir, ent.seq) && (KAPPS_MAX_ENTRIES > dir.count) )
+        {
+            appdir_insert(&dir, &ent);
+            me->undo->fate[i] = (uint8_t)UNDO_BACK;
             changed = true;
+        }
+        else
+        {
+            /* Its eviction never reached the flash: it never left. */
         }
     }
     if ( changed && (kdrv_apps_dir_commit(&dir) != KODE_OK) )
@@ -1343,15 +1482,16 @@ static void undo_restore(AppMgr * const me)
     }
     for ( uint32_t i = 0U; i < me->undo_count; ++i )
     {
-        undo_t const * const u = &me->undo[i];
+        appmgr_undo_rec_t const * const r = &me->undo->rec[i];
 
-        if ( u->gone )
+        if ( (uint8_t)UNDO_GONE == me->undo->fate[i] )
         {
-            KLOG_N(TAG, "'%s' was overwritten and is gone", u->project);
+            KLOG_N(TAG, "'%s' was overwritten and is gone", r->project);
         }
-        else if ( u->back && appdir_has_seq(kdrv_apps_dir(), u->entry.seq) )
+        else if ( ((uint8_t)UNDO_BACK == me->undo->fate[i])
+                 && appdir_has_seq(kdrv_apps_dir(), r->seq) )
         {
-            KLOG_N(TAG, "kept '%s' after the failed install", u->project);
+            KLOG_N(TAG, "kept '%s' after the failed install", r->project);
         }
         else
         {
@@ -1359,6 +1499,285 @@ static void undo_restore(AppMgr * const me)
         }
     }
     undo_clear(me);
+}
+
+/**
+ * @brief Whether two extents share a 64 KB block of the region.
+ *
+ * An extent holds the blocks its length reaches into, so an image of 100 KB
+ * holds two.
+ *
+ * @param a_off  First extent's region-relative offset.
+ * @param a_size Its length in bytes.
+ * @param b_off  The second's offset.
+ * @param b_size Its length.
+ * @return true when they share a block.
+ */
+static bool extents_overlap(uint32_t a_off, uint32_t a_size, uint32_t b_off,
+                            uint32_t b_size)
+{
+    uint64_t const mask  = (uint64_t)KAPPS_ALIGN - 1U;
+    uint64_t const a_end = (uint64_t)a_off + (((uint64_t)a_size + mask) & ~mask);
+    uint64_t const b_end = (uint64_t)b_off + (((uint64_t)b_size + mask) & ~mask);
+
+    return ((uint64_t)a_off < b_end) && ((uint64_t)b_off < a_end);
+}
+
+/**
+ * @brief Whether the directory holds an entry that lies over @p r's blocks.
+ *
+ * @param d The directory.
+ * @param r The record of an app the directory no longer holds.
+ * @return true when a live entry shares a block with it.
+ */
+static bool appdir_overlaps(const kapps_dir_t *d, const appmgr_undo_rec_t *r)
+{
+    for ( uint32_t i = 0U; i < d->count; ++i )
+    {
+        if ( ((d->e[i].flags & KAPPS_ENTRY_VALID) != 0U)
+            && extents_overlap(d->e[i].offset, d->e[i].size, r->offset, r->size) )
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Settle the table a start-up found: put back what verified, say what
+ *        became of every victim, and take the table out of NVS.
+ *
+ * One directory commit for every app that comes back, in install order. A
+ * commit that fails leaves the table where it is, for the next boot to try
+ * again.
+ *
+ * @param me The AO, with its fates decided.
+ */
+static void undo_recover_end(AppMgr * const me)
+{
+    kapps_dir_t dir = *kdrv_apps_dir();
+    bool        changed = false;
+
+    for ( uint32_t i = 0U; i < me->undo_count; ++i )
+    {
+        kapps_entry_t const ent = undo_entry(&me->undo->rec[i]);
+
+        if ( ((uint8_t)UNDO_BACK == me->undo->fate[i])
+            && !appdir_has_seq(&dir, ent.seq) && (KAPPS_MAX_ENTRIES > dir.count) )
+        {
+            appdir_insert(&dir, &ent);
+            changed = true;
+        }
+        else if ( (uint8_t)UNDO_BACK == me->undo->fate[i] )
+        {
+            me->undo->fate[i] = (uint8_t)UNDO_STAYS;
+        }
+        else
+        {
+            /* Held already, overwritten or refused: nothing to add. */
+        }
+    }
+    /* No path here brings the table back: it left NVS before the first check,
+     * and a recovery that fails, or that dies on the next boot, must not be
+     * asked for again by a table that is still there - the board would take
+     * the same road at every boot. An app the commit fails to put back is
+     * lost, and the board is not. */
+    if ( changed && (kdrv_apps_dir_commit(&dir) != KODE_OK) )
+    {
+        KLOG_E(TAG, "cannot update the directory; the apps a reset cut out of "
+                    "an install stay out");
+        for ( uint32_t i = 0U; i < me->undo_count; ++i )
+        {
+            if ( (uint8_t)UNDO_BACK == me->undo->fate[i] )
+            {
+                me->undo->fate[i] = (uint8_t)UNDO_STAYS;
+            }
+        }
+    }
+    for ( uint32_t i = 0U; i < me->undo_count; ++i )
+    {
+        appmgr_undo_rec_t const * const r = &me->undo->rec[i];
+
+        if ( (uint8_t)UNDO_GONE == me->undo->fate[i] )
+        {
+            KLOG_N(TAG, "'%s' was overwritten by an install a reset cut and is gone",
+                   r->project);
+        }
+        else if ( (uint8_t)UNDO_BACK == me->undo->fate[i] )
+        {
+            KLOG_N(TAG, "kept '%s' after an install a reset cut", r->project);
+        }
+        else
+        {
+            /* Held, or not put back (said above). */
+        }
+    }
+    undo_clear(me);
+}
+
+/**
+ * @brief Look for the table of an install a reset cut, take it out of NVS, and
+ *        decide what is to be checked.
+ *
+ * The table is read into RAM and erased before anything else is done with it.
+ * One that is not this build's is ignored. Each victim the directory no longer
+ * holds, and that no entry the directory holds lies over, is a candidate; the
+ * others are settled here. This is all the initial transition pays for.
+ *
+ * @param me The AO, at start-up.
+ * @return true when there are candidates: AppMgr_recovering verifies them one
+ *         a step. false when there was no table, or nothing to verify.
+ */
+static bool undo_recover_begin(AppMgr * const me)
+{
+    size_t len = offsetof(undo_table_t, fate);   /* the blob's room: the fates are not in it */
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() hands back an untyped block aligned for any type */
+    undo_table_t * const t = (undo_table_t *)khal_alloc_psram(sizeof(uint32_t),
+                                                              sizeof(undo_table_t));
+
+    if ( NULL == t )
+    {
+        KLOG_W(TAG, "no PSRAM to look for the apps a reset cut out of an install");
+        return false;
+    }
+    kode_status_t const st = khal_nvs_get_blob(APPMGR_UNDO_NS, APPMGR_UNDO_KEY, t, &len);
+
+    if ( KODE_DENIED == st )
+    {
+        khal_free(t);                       /* no table: nothing was cut */
+        return false;
+    }
+    /* Out of NVS before anything is checked: whatever the checking does, the
+     * next boot finds no table. See undo_recover_end(). A table that cannot be
+     * taken out is not worked on, for the same reason. */
+    if ( khal_nvs_erase(APPMGR_UNDO_NS, APPMGR_UNDO_KEY) != KODE_OK )
+    {
+        KLOG_W(TAG, "cannot erase the record of the apps an install evicted; "
+                    "they are not looked for");
+        khal_free(t);
+        return false;
+    }
+    if ( (KODE_OK != st) || (sizeof(t->hdr) > len)
+        || ((uint8_t)APPMGR_UNDO_VERSION != t->hdr.version)
+        || (0U == t->hdr.count) || (KAPPS_MAX_ENTRIES < t->hdr.count)
+        || (len != (sizeof(t->hdr) + ((size_t)t->hdr.count * sizeof(appmgr_undo_rec_t)))) )
+    {
+        KLOG_W(TAG, "the record of the apps an install evicted is not this "
+                    "build's; it is ignored");
+        khal_free(t);
+        return false;
+    }
+    me->undo       = t;
+    me->undo_count = t->hdr.count;
+    me->rec_next   = 0U;
+    me->rec_done   = 0U;
+    me->rec_crc    = KHAL_CRC32_INIT;
+
+    kapps_dir_t const * const d = kdrv_apps_dir();
+    bool work = false;
+
+    for ( uint32_t i = 0U; i < me->undo_count; ++i )
+    {
+        appmgr_undo_rec_t const * const r = &t->rec[i];
+
+        me->undo->fate[i] = (uint8_t)UNDO_STAYS;
+        if ( appdir_has_seq(d, r->seq) )
+        {
+            /* Still in the directory: the eviction never reached it. */
+        }
+        else if ( appdir_overlaps(d, r) )
+        {
+            me->undo->fate[i] = (uint8_t)UNDO_GONE;
+        }
+        else
+        {
+            me->undo->fate[i] = (uint8_t)UNDO_CHECK;
+            work = true;
+        }
+    }
+    if ( !work )
+    {
+        undo_recover_end(me);
+    }
+    return work;
+}
+
+/**
+ * @brief One step of the recovery: fold the next part of a candidate's extent into
+ *        its CRC, or end.
+ *
+ * The image is not parsed: what a reset left in an extent may be another
+ * image's header, whose lengths no parser can be trusted to stop at. The CRC
+ * of the extent as it lies now is compared with the one taken when the app was
+ * evicted. At most APPMGR_UNDO_STEP_BYTES a step, and the next step waits for
+ * the timer, so the AO answers what arrives between two and the other tasks
+ * run.
+ *
+ * @param me The AO, recovering.
+ * @return The state's answer: handled while there is more, idle at the end.
+ */
+static QState undo_step(AppMgr * const me)
+{
+    while ( (me->rec_next < me->undo_count)
+           && ((uint8_t)UNDO_CHECK != me->undo->fate[me->rec_next]) )
+    {
+        ++me->rec_next;
+    }
+    if ( me->rec_next < me->undo_count )
+    {
+        appmgr_undo_rec_t const * const r = &me->undo->rec[me->rec_next];
+        uint32_t n = r->size - me->rec_done;
+
+        if ( APPMGR_UNDO_STEP_BYTES < n )
+        {
+            n = APPMGR_UNDO_STEP_BYTES;
+        }
+        KLOG_D(TAG, "checking '%s': %u bytes from %u of %u", r->project,
+               (unsigned)n, (unsigned)me->rec_done, (unsigned)r->size);
+        if ( kdrv_apps_extent_crc(r->offset + me->rec_done, n, &me->rec_crc) != KODE_OK )
+        {
+            me->undo->fate[me->rec_next] = (uint8_t)UNDO_GONE;   /* not readable where it lay */
+            ++me->rec_next;
+            me->rec_done = 0U;
+            me->rec_crc  = KHAL_CRC32_INIT;
+        }
+        else
+        {
+            me->rec_done += n;
+            if ( me->rec_done >= r->size )
+            {
+                me->undo->fate[me->rec_next] = (uint8_t)UNDO_GONE;
+                if ( me->rec_crc == r->crc )
+                {
+                    me->undo->fate[me->rec_next] = (uint8_t)UNDO_BACK;
+                }
+                ++me->rec_next;
+                me->rec_done = 0U;
+                me->rec_crc  = KHAL_CRC32_INIT;
+            }
+        }
+        (void)QTimeEvt_rearm(&me->undo_tmo, APPMGR_UNDO_PACE_TICKS);
+        return Q_HANDLED();
+    }
+    undo_recover_end(me);
+    for ( uint8_t k = 0U; k < me->rec_list_n; ++k )
+    {
+        AppListReqEvt req;
+
+        (void)memset(&req, 0, sizeof(req));
+        req.skip = me->rec_list_skip[k];
+        req.who  = me->rec_list_who[k];
+        app_list_page(&req);
+    }
+    me->rec_list_n = 0U;
+    if ( me->rec_adopt )
+    {
+        static const QEvt adopt = QEVT_INITIALIZER(APP_ADOPT_SIG);
+
+        me->rec_adopt = false;
+        QACTIVE_POST(&me->super, &adopt, &me->super);
+    }
+    return Q_TRAN(&AppMgr_idle);
 }
 
 /**
@@ -2913,6 +3332,7 @@ void AppMgr_ctor(void)
     QTimeEvt_ctorX(&me->pacer, &me->super, APP_FLASH_CHUNK_SIG, 0U);
     QTimeEvt_ctorX(&me->idle, &me->super, APP_RECV_IDLE_SIG, 0U);
     QTimeEvt_ctorX(&me->beat, &me->super, APP_BEAT_SIG, 0U);
+    QTimeEvt_ctorX(&me->undo_tmo, &me->super, APP_UNDO_STEP_SIG, 0U);
     QTimeEvt_ctorX(&me->answer, &me->super, APP_RECV_LAUNCH_SIG, 0U);
     QTimeEvt_ctorX(&me->tidy, &me->super, APP_TIDY_TIMEOUT_SIG, 0U);
     me->writing   = false;
@@ -2946,6 +3366,12 @@ void AppMgr_ctor(void)
     me->victims          = NULL;     /* a used AO's table is the heap's now */
     me->undo             = NULL;     /* and so is the one an install gives back from */
     me->undo_count       = 0U;
+    me->undo_stored      = false;
+    me->rec_next         = 0U;
+    me->rec_done         = 0U;
+    me->rec_crc          = KHAL_CRC32_INIT;
+    me->rec_adopt        = false;
+    me->rec_list_n       = 0U;
     me->req_who          = NULL;
     keep_clear(me);   /* no round: a constructor over a used AO frees its buffer */
     me->origin    = (uint8_t)APPMGR_ORIGIN_FILE;
@@ -3008,12 +3434,29 @@ static QState AppMgr_initial(AppMgr * const me, void const * const par)
      * Posted to self rather than done here - a multi-MB flash copy has no
      * business inside an initial transition. */
     uint32_t img_len = 0U;
+    /* A table in NVS is an install a reset cut: its apps are looked at before
+     * anything is served, the adoption included. */
+    (void)khal_nvs_init();
+    bool const recovering = undo_recover_begin(me);
     if ( kdrv_apps_pending_present(&img_len, NULL) )
     {
         static const QEvt adopt_evt = QEVT_INITIALIZER(APP_ADOPT_SIG);
-        QACTIVE_POST(&me->super, &adopt_evt, me);
+
+        if ( recovering )
+        {
+            me->rec_adopt = true;
+        }
+        else
+        {
+            QACTIVE_POST(&me->super, &adopt_evt, me);
+        }
     }
 
+    if ( recovering )
+    {
+        KLOG_N(TAG, "verifying the apps a reset cut out of an install");
+        return Q_TRAN(&AppMgr_recovering);
+    }
     KLOG_D(TAG, "FSM start: initial -> idle");
     return Q_TRAN(&AppMgr_idle);
 }
@@ -5377,6 +5820,71 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
         }
         default: {
             status = Q_SUPER(&QHsm_top);
+            break;
+        }
+    }
+    return status;
+}
+
+/**
+ * @brief Verifying the apps a reset cut out of an install, before anything is served.
+ *
+ * Entered from the initial transition when NVS held the table of an install
+ * that did not end. A step, started by a timer, folds a part of one image's
+ * extent into its CRC; every request but a listing is
+ * refused as busy, and a listing waits for the directory the recovery leaves,
+ * so the launcher is never given a list that is about to change.
+ */
+static QState AppMgr_recovering(AppMgr * const me, QEvt const * const e)
+{
+    QState status;
+    switch ( e->sig )
+    {
+        case Q_ENTRY_SIG: {
+            /* The first step is the timer's: the initial transition, which a
+             * boot task runs for every owner, has done nothing but read NVS. */
+            (void)QTimeEvt_rearm(&me->undo_tmo, APPMGR_UNDO_PACE_TICKS);
+            status = Q_HANDLED();
+            break;
+        }
+        case Q_EXIT_SIG: {
+            (void)QTimeEvt_disarm(&me->undo_tmo);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_UNDO_STEP_SIG: {
+            status = undo_step(me);
+            break;
+        }
+        case APP_LIST_REQ_SIG: {
+            AppListReqEvt const * const req = Q_EVT_CAST(AppListReqEvt);
+
+            if ( NULL != req->who )
+            {
+                if ( APPMGR_REC_LIST_MAX > me->rec_list_n )
+                {
+                    me->rec_list_who[me->rec_list_n]  = req->who;
+                    me->rec_list_skip[me->rec_list_n] = req->skip;
+                    ++me->rec_list_n;
+                }
+                else
+                {
+                    KLOG_W(TAG, "too many listings asked while the apps a reset "
+                                "cut out of an install are verified; one is dropped");
+                }
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_CAT_REQ_SIG: {
+            KLOG_W(TAG, "busy verifying the apps a reset cut out of an install; "
+                        "app_cat request denied");
+            app_cat_deny(me);
+            status = Q_HANDLED();
+            break;
+        }
+        default: {
+            status = Q_SUPER(&AppMgr_busy);
             break;
         }
     }

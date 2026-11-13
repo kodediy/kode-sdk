@@ -28,14 +28,18 @@
 #include "kdrv_kfw.h"
 #include "kbsp_owners.h"
 #include "khal_crc32.h"
+#include "khal_nvs.h"
 #include "khal_system.h"
 #include "kqp.h"
 #include "lowpower_cases.h"
 #include "miniz.h"
 #include "qf_support.h"
 
-/** @brief Put AO_AppMgr back to idle. */
-static void appmgr_fresh(void)
+/**
+ * @brief Construct and start AO_AppMgr over what the board holds, and leave what its
+ *        initial transition posted in its queue.
+ */
+static void appmgr_make(void)
 {
     static bool s_registered;
 
@@ -69,6 +73,12 @@ static void appmgr_fresh(void)
         s_registered = true;
     }
     QASM_INIT(AO_AppMgr, (void *)0, 0U);
+}
+
+/** @brief Put AO_AppMgr back to idle. */
+static void appmgr_fresh(void)
+{
+    appmgr_make();
 
     /* Drop whatever the initial transition announced, and whatever a previous
      * case left in the neighbour's queue - that queue is the discriminator
@@ -3881,6 +3891,559 @@ TEST_CASE("running an app is taken when it is installed and missing when it is n
     TEST_ASSERT_EQUAL_UINT(1U, v.count);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)APP_REQ_TAKEN, v.first);
     TEST_ASSERT_TRUE(boot_run_request(&off, &size, &mode));
+    keep_end();
+}
+
+/* ---- A reset in the middle of an install gives the victims back ---------------
+ * AO_AppMgr writes what an install evicts into NVS before it commits the
+ * eviction - each victim's entry, name and the CRC-32 of its extent - and takes
+ * it out when the install ends. A table found at start-up means a reset cut an
+ * install. It leaves NVS first of all; then each victim the directory no
+ * longer holds, and that nothing the directory holds now overlaps, is put back
+ * if the CRC of its extent, folded a part at a time, is the one recorded.
+ */
+
+/** @brief The five apps of region_of_victims(), by index: where each lay is its block there. */
+static const char *const s_victim_name[5] = { "v1", "v2", "v3", "k", "f" };
+
+/** @brief The CRC-32 of the extent [offset, offset + size), as the driver folds it. */
+static uint32_t extent_crc(uint32_t offset, uint32_t size)
+{
+    uint32_t crc = KHAL_CRC32_INIT;
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_extent_crc(offset, size, &crc));
+    return crc;
+}
+
+/** @brief The record the table holds for app @p i of region_of_victims(), taken from the full directory as the flash holds it. */
+static appmgr_undo_rec_t victim_rec(const kapps_dir_t *full, unsigned i)
+{
+    appmgr_undo_rec_t r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.offset = full->e[i].offset;
+    r.size   = full->e[i].size;
+    r.seq    = full->e[i].seq;
+    r.flags  = full->e[i].flags;
+    r.crc    = extent_crc(r.offset, r.size);
+    (void)snprintf(r.project, sizeof(r.project), "%s", s_victim_name[i]);
+    return r;
+}
+
+/** @brief Overwrite the start of the block at @p offset: what an install does to a victim it reaches. */
+static void overwrite_extent(uint32_t offset)
+{
+    static const uint8_t other[16] = { 0x11U, 0x22U };
+
+    kdrv_apps_write_abort();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(offset, sizeof(other)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(other, sizeof(other)));
+    kdrv_apps_write_abort();
+}
+
+/** @brief Store @p n records as AO_AppMgr's table, with the header @p version and @p count. */
+static void seed_table_as(const void *rec, size_t rec_len, uint8_t n, uint8_t version,
+                          uint8_t count)
+{
+    static uint8_t blob[APPMGR_UNDO_HDR_LEN + (APPMGR_UNDO_MAX * APPMGR_UNDO_REC_LEN)];
+    appmgr_undo_hdr_t h;
+
+    (void)memset(&h, 0, sizeof(h));
+    h.version = version;
+    h.count   = count;
+    (void)memcpy(blob, &h, sizeof(h));
+    (void)memcpy(&blob[sizeof(h)], rec, (size_t)n * rec_len);
+    fake_nvs_seed(APPMGR_UNDO_NS, APPMGR_UNDO_KEY, blob, sizeof(h) + ((size_t)n * rec_len));
+}
+
+/** @brief Store @p n records as a table of this build's layout. */
+static void seed_table(const appmgr_undo_rec_t *rec, uint8_t n)
+{
+    seed_table_as(rec, sizeof(*rec), n, (uint8_t)APPMGR_UNDO_VERSION, n);
+}
+
+/** @brief Is AO_AppMgr's table in NVS? */
+static bool table_in_nvs(void)
+{
+    size_t len = 0U;
+
+    return khal_nvs_get_blob(APPMGR_UNDO_NS, APPMGR_UNDO_KEY, NULL, &len) == KODE_OK;
+}
+
+/** @brief How many captured lines hold @p needle. */
+static unsigned klog_count_of(const char *needle)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const line = fake_klog_line(i);
+
+        if ( (NULL != line) && (strstr(line, needle) != NULL) )
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/**
+ * @brief The five apps laid out, the directory holding those in @p mask (bit i = app i).
+ * @param full Receives the directory with all five, for the records' sake.
+ */
+static void region_holding(unsigned mask, kapps_dir_t *full)
+{
+    region_of_victims();
+    *full = *kdrv_apps_dir();
+
+    kapps_dir_t dir = *full;
+    uint32_t    w   = 0U;
+
+    for ( uint32_t i = 0U; i < full->count; ++i )
+    {
+        if ( 0U != (mask & (1U << i)) )
+        {
+            dir.e[w++] = full->e[i];
+        }
+    }
+    dir.count = w;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&dir));
+}
+
+/** @brief One pace of the recovery, in QP ticks, as appmgr_ao.c has it. */
+#define APPMGR_UNDO_PACE_TEST_TICKS  (50U / 10U)
+
+/** @brief The bytes of an image one step of the recovery folds into its CRC. */
+#define APPMGR_UNDO_STEP_TEST_BYTES  (512U * 1024U)
+
+/** @brief A start-up: the AO is made again over what NVS and the directory hold, with nothing run yet. */
+static void start_over(void)
+{
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    appmgr_make();
+    kfw_abort();
+    kdrv_apps_write_abort();
+}
+
+/** @brief A start-up, run until the recovery has had every step it needs. */
+static void start_up(void)
+{
+    start_over();
+    run_ticks(20U * APPMGR_UNDO_PACE_TEST_TICKS);
+}
+
+/** @brief What the directory held at the moment NVS was written, and how many writes there were. */
+static unsigned s_dir_count_at_write;
+static unsigned s_writes_seen;
+
+/** @brief Run inside every NVS write the fake is asked for. */
+static void note_directory_at_write(void)
+{
+    s_dir_count_at_write = kdrv_apps_dir()->count;
+    ++s_writes_seen;
+}
+
+TEST_CASE("an install that evicts records its victims and their CRCs in NVS before the "
+          "eviction is committed", "[appmgr_ao][reset]")
+{
+    uint32_t want[3];
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+    for ( uint32_t i = 0U; 3U > i; ++i )
+    {
+        want[i] = extent_crc(kdrv_apps_dir()->e[i].offset, kdrv_apps_dir()->e[i].size);
+    }
+    s_dir_count_at_write = 0U;
+    s_writes_seen        = 0U;
+
+    fake_nvs_set_hook(&note_directory_at_write);
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
+                   false, "new");
+    raw_armed(true);
+    fake_nvs_set_hook(NULL);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_writes_seen,
+        "an install that evicts three apps wrote NVS more or less than once");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(5U, s_dir_count_at_write,
+        "the table was written after the directory lost its victims");
+    uint8_t blob[APPMGR_UNDO_HDR_LEN + (APPMGR_UNDO_MAX * APPMGR_UNDO_REC_LEN)];
+    size_t  len = sizeof(blob);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        khal_nvs_get_blob(APPMGR_UNDO_NS, APPMGR_UNDO_KEY, blob, &len));
+    TEST_ASSERT_EQUAL_UINT(APPMGR_UNDO_HDR_LEN + (3U * APPMGR_UNDO_REC_LEN), len);
+    appmgr_undo_hdr_t hdr;
+    (void)memcpy(&hdr, blob, sizeof(hdr));
+    TEST_ASSERT_EQUAL_UINT8(2U, hdr.version);
+    TEST_ASSERT_EQUAL_UINT8(3U, hdr.count);
+    appmgr_undo_rec_t rec[3];
+    (void)memcpy(rec, &blob[sizeof(hdr)], sizeof(rec));
+    TEST_ASSERT_EQUAL_STRING("v1", rec[0].project);
+    TEST_ASSERT_EQUAL_STRING("v2", rec[1].project);
+    TEST_ASSERT_EQUAL_STRING("v3", rec[2].project);
+    TEST_ASSERT_EQUAL_UINT32(2U, rec[1].seq);
+    TEST_ASSERT_EQUAL_UINT32(KAPPS_DATA_OFF + (2U * KAPPS_ALIGN), rec[1].offset);
+    TEST_ASSERT_EQUAL_UINT32(KAPPS_ALIGN, rec[1].size);
+    for ( uint32_t i = 0U; 3U > i; ++i )
+    {
+        TEST_ASSERT_EQUAL_HEX32_MESSAGE(want[i], rec[i].crc,
+            "a record carries a CRC that is not its extent's before the eviction");
+    }
+
+    run_ticks(APPMGR_RECV_IDLE_DEADLINE_TICKS + 50U);      /* the host never sends */
+    (void)log_saw(CONSOLE_RAW_END_SIG);
+    keep_end();
+}
+
+TEST_CASE("a landed install takes its table out of NVS, a failed one after its restore",
+          "[appmgr_ao][reset]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN) ^ 1U,
+                   false, "new");
+    raw_armed(true);
+    TEST_ASSERT_TRUE(table_in_nvs());
+    feed_undo_image(UNDO_IMG_LEN);                         /* the CRC fails at the end */
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    TEST_ASSERT_EQUAL_STRING("v1 k f", victims_left());
+    TEST_ASSERT_FALSE_MESSAGE(table_in_nvs(),
+        "a failed install left its table in NVS after giving the apps back");
+
+    region_of_victims();
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
+                   false, "new");
+    raw_armed(true);
+    TEST_ASSERT_TRUE(table_in_nvs());
+    feed_undo_image(UNDO_IMG_LEN);
+    tidy_settle();
+    TEST_ASSERT_TRUE(named_installed("new"));
+    TEST_ASSERT_FALSE_MESSAGE(table_in_nvs(),
+        "a landed install left its table in NVS");
+    keep_end();
+}
+
+TEST_CASE("an install that evicts nothing writes nothing to NVS, and one whose table "
+          "cannot be written goes on", "[appmgr_ao][reset]")
+{
+    uint32_t const len = image_named("new");
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+
+    ask_recv_named(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len), false, "new");
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+    tidy_settle();
+    TEST_ASSERT_TRUE(named_installed("new"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_nvs_set_count(),
+        "an install with no victim wrote NVS");
+    TEST_ASSERT_FALSE(table_in_nvs());
+
+    region_of_victims();
+    undo_image("new2");
+    fake_nvs_fail_next_set();
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
+                   false, "new2");
+    raw_armed(true);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("cannot record the apps this install evicts"),
+        "a table that could not be written went unsaid");
+    feed_undo_image(UNDO_IMG_LEN);
+    tidy_settle();
+    TEST_ASSERT_TRUE_MESSAGE(named_installed("new2"),
+        "an install stopped because its table could not be written");
+    keep_end();
+}
+
+TEST_CASE("a start-up takes the table out of NVS before it checks anything",
+          "[appmgr_ao][reset]")
+{
+    kapps_dir_t full;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_holding((1U << 3) | (1U << 4), &full);
+    appmgr_undo_rec_t const rec[2] = { victim_rec(&full, 0U), victim_rec(&full, 2U) };
+    seed_table(rec, 2U);
+    TEST_ASSERT_TRUE(table_in_nvs());
+
+    start_over();                                           /* the initial transition and no step */
+
+    TEST_ASSERT_FALSE_MESSAGE(table_in_nvs(),
+        "the table was still in NVS when the checking began: a reset in it would loop the boot");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("k f", victims_left(),
+        "the initial transition did the recovery's work");
+    TEST_ASSERT_FALSE(klog_has("kept 'v1'"));
+
+    run_ticks(20U * APPMGR_UNDO_PACE_TEST_TICKS);
+    TEST_ASSERT_EQUAL_STRING("v1 v3 k f", victims_left());
+    TEST_ASSERT_FALSE(table_in_nvs());
+    keep_end();
+}
+
+TEST_CASE("a start-up that finds a table puts back the victims whose extent still has "
+          "its CRC and says which changed", "[appmgr_ao][reset]")
+{
+    kapps_dir_t full;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_holding((1U << 3) | (1U << 4), &full);           /* k and f: v1, v2, v3 were evicted */
+    appmgr_undo_rec_t const rec[3] = { victim_rec(&full, 0U), victim_rec(&full, 1U),
+                                       victim_rec(&full, 2U) };
+    seed_table(rec, 3U);
+    overwrite_extent(full.e[1].offset);                     /* the install reached v2 */
+
+    start_up();
+
+    TEST_ASSERT_EQUAL_STRING("v1 v3 k f", victims_left());
+    TEST_ASSERT_TRUE(klog_has("kept 'v1' after an install a reset cut"));
+    TEST_ASSERT_TRUE(klog_has("kept 'v3' after an install a reset cut"));
+    TEST_ASSERT_TRUE(klog_has("'v2' was overwritten by an install a reset cut and is gone"));
+    TEST_ASSERT_FALSE_MESSAGE(table_in_nvs(), "the table is back in NVS");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_folder_requests(),
+        "a recovered app's data folder was touched");
+    keep_end();
+}
+
+TEST_CASE("a victim a reset left half written is told from one it left whole by its CRC "
+          "alone", "[appmgr_ao][reset]")
+{
+    kapps_dir_t full;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_holding((1U << 3) | (1U << 4), &full);
+    appmgr_undo_rec_t rec[2] = { victim_rec(&full, 0U), victim_rec(&full, 2U) };
+    rec[1].crc ^= 1U;                                       /* v3's bytes are not the recorded ones */
+    seed_table(rec, 2U);
+
+    start_up();
+
+    TEST_ASSERT_EQUAL_STRING("v1 k f", victims_left());
+    TEST_ASSERT_TRUE(klog_has("'v3' was overwritten by an install a reset cut and is gone"));
+    keep_end();
+}
+
+TEST_CASE("a start-up whose table names only apps the directory still holds changes "
+          "nothing and erases it", "[appmgr_ao][reset]")
+{
+    kapps_dir_t full;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_holding(0x1FU, &full);
+    uint32_t const gen = kdrv_apps_dir()->gen;
+    appmgr_undo_rec_t const rec[2] = { victim_rec(&full, 0U), victim_rec(&full, 1U) };
+    seed_table(rec, 2U);
+
+    start_up();
+
+    TEST_ASSERT_EQUAL_STRING("v1 v2 v3 k f", victims_left());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(gen, kdrv_apps_dir()->gen,
+        "the directory was committed with nothing to put back");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, klog_count_of("checking '"),
+        "an app the directory holds was checked");
+    TEST_ASSERT_FALSE(table_in_nvs());
+    keep_end();
+}
+
+TEST_CASE("a victim whose extent now overlaps an entry the directory holds is not put back",
+          "[appmgr_ao][reset]")
+{
+    kapps_dir_t full;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_holding((1U << 3) | (1U << 4), &full);
+    appmgr_undo_rec_t const rec[3] = { victim_rec(&full, 0U), victim_rec(&full, 1U),
+                                       victim_rec(&full, 2U) };
+    /* The install that was cut landed after all: its entry lies over v2. */
+    kapps_dir_t dir = *kdrv_apps_dir();
+    dir.e[dir.count].offset = full.e[1].offset;
+    dir.e[dir.count].size   = 2U * KAPPS_ALIGN;
+    dir.e[dir.count].seq    = 9U;
+    dir.e[dir.count].flags  = KAPPS_ENTRY_VALID;
+    ++dir.count;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&dir));
+    seed_table(rec, 3U);
+
+    start_up();
+
+    /* The entry over v2's blocks reads as "v2": its image is the one planted there. */
+    TEST_ASSERT_EQUAL_STRING("v1 v2 k f", victims_left());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(4U, kdrv_apps_dir()->count,
+        "v2 or v3 came back over the entry that overwrote them");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, klog_count_of("checking '"),
+        "an app lying under another entry was checked, or the free one was not");
+    TEST_ASSERT_TRUE(klog_has("'v2' was overwritten by an install a reset cut and is gone"));
+    TEST_ASSERT_TRUE(klog_has("'v3' was overwritten by an install a reset cut and is gone"));
+    TEST_ASSERT_TRUE(klog_has("kept 'v1' after an install a reset cut"));
+    keep_end();
+}
+
+TEST_CASE("a table of another version or size is ignored and erased, with a warning; "
+          "the first layout's is one", "[appmgr_ao][reset]")
+{
+    struct {
+        uint32_t offset, size, seq, flags;
+        char     project[KODE_APP_PROJECT_MAX];
+    } old_rec[1];
+    kapps_dir_t full;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_holding((1U << 3) | (1U << 4), &full);
+    appmgr_undo_rec_t const rec[1] = { victim_rec(&full, 0U) };
+
+    seed_table_as(rec, sizeof(rec[0]), 1U, (uint8_t)APPMGR_UNDO_VERSION + 1U, 1U);
+    start_up();
+    TEST_ASSERT_EQUAL_STRING("k f", victims_left());
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("not this build's"), "a table of another version went unsaid");
+    TEST_ASSERT_FALSE(table_in_nvs());
+
+    fake_klog_reset();
+    seed_table_as(rec, sizeof(rec[0]), 1U, (uint8_t)APPMGR_UNDO_VERSION, 2U);   /* a count the bytes do not carry */
+    start_up();
+    TEST_ASSERT_EQUAL_STRING("k f", victims_left());
+    TEST_ASSERT_TRUE(klog_has("not this build's"));
+    TEST_ASSERT_FALSE(table_in_nvs());
+
+    /* Version 1: records of 48 bytes, no digest. Nothing in them can be checked. */
+    fake_klog_reset();
+    (void)memset(old_rec, 0, sizeof(old_rec));
+    old_rec[0].offset = rec[0].offset;
+    old_rec[0].size   = rec[0].size;
+    old_rec[0].seq    = rec[0].seq;
+    old_rec[0].flags  = rec[0].flags;
+    (void)snprintf(old_rec[0].project, sizeof(old_rec[0].project), "%s", "v1");
+    seed_table_as(old_rec, sizeof(old_rec[0]), 1U, 1U, 1U);
+    start_up();
+    TEST_ASSERT_EQUAL_STRING("k f", victims_left());
+    TEST_ASSERT_TRUE(klog_has("not this build's"));
+    TEST_ASSERT_FALSE(table_in_nvs());
+    keep_end();
+}
+
+TEST_CASE("a start-up with no table does no work and writes nothing", "[appmgr_ao][reset]")
+{
+    kapps_dir_t full;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_holding((1U << 3) | (1U << 4), &full);
+    uint32_t const gen = kdrv_apps_dir()->gen;
+
+    start_up();
+
+    TEST_ASSERT_EQUAL_STRING("k f", victims_left());
+    TEST_ASSERT_EQUAL_UINT32(gen, kdrv_apps_dir()->gen);
+    TEST_ASSERT_EQUAL_UINT(0U, klog_count_of("checking '"));
+    TEST_ASSERT_EQUAL_UINT(0U, fake_nvs_set_count());
+    TEST_ASSERT_FALSE(klog_has("a reset cut"));
+    keep_end();
+}
+
+TEST_CASE("the recovery goes one paced step at a time, an extent in parts", "[appmgr_ao][reset]")
+{
+    uint32_t const big = 20U * KAPPS_ALIGN;                 /* 1.25 MB: three steps of 512 KB */
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    plant_app(KAPPS_DATA_OFF, "big");
+    appmgr_undo_rec_t rec;
+    (void)memset(&rec, 0, sizeof(rec));
+    rec.offset = KAPPS_DATA_OFF;
+    rec.size   = big;
+    rec.seq    = 1U;
+    rec.flags  = KAPPS_ENTRY_VALID;
+    rec.crc    = extent_crc(rec.offset, rec.size);
+    (void)snprintf(rec.project, sizeof(rec.project), "%s", "big");
+    seed_table(&rec, 1U);
+
+    start_over();
+    run_ticks(APPMGR_UNDO_PACE_TEST_TICKS - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, klog_count_of("checking '"),
+        "a step ran before the timer's period");
+    run_ticks(1U);
+    TEST_ASSERT_EQUAL_UINT(1U, klog_count_of("checking 'big': 524288 bytes from 0"));
+    run_ticks(APPMGR_UNDO_PACE_TEST_TICKS - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, klog_count_of("checking '"),
+        "a step followed another without waiting for the timer");
+    run_ticks(1U);
+    TEST_ASSERT_EQUAL_UINT(2U, klog_count_of("checking '"));
+    TEST_ASSERT_TRUE(klog_has("checking 'big': 524288 bytes from 524288"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, klog_count_of("kept 'big'"),
+        "the app was put back before its last part was read");
+
+    run_ticks(APPMGR_UNDO_PACE_TEST_TICKS);                 /* the third part: 262144 bytes */
+    TEST_ASSERT_TRUE(klog_has("checking 'big': 262144 bytes from 1048576"));
+    TEST_ASSERT_EQUAL_UINT(3U, klog_count_of("checking '"));
+    run_ticks(2U * APPMGR_UNDO_PACE_TEST_TICKS);            /* the end */
+    TEST_ASSERT_TRUE(klog_has("kept 'big' after an install a reset cut"));
+    TEST_ASSERT_TRUE(named_installed("big"));
+    TEST_ASSERT_EQUAL_UINT(3U, klog_count_of("checking '"));
+    keep_end();
+}
+
+TEST_CASE("a list asked during the recovery is answered with the recovered directory, "
+          "and an install is told busy", "[appmgr_ao][reset]")
+{
+    kapps_dir_t full;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_holding((1U << 3) | (1U << 4), &full);
+    appmgr_undo_rec_t const rec[2] = { victim_rec(&full, 0U), victim_rec(&full, 2U) };
+    seed_table(rec, 2U);
+
+    start_over();                                           /* recovering: no step has run */
+    AppListReqEvt list;
+    (void)memset(&list, 0, sizeof(list));
+    list.super = (QEvt)QEVT_INITIALIZER(APP_LIST_REQ_SIG);
+    list.who   = ao_spy();
+    QASM_DISPATCH(AO_AppMgr, &list.super, 0U);
+    ask_install_from((uint8_t)KFW_SRC_SD, "a.bin", (uint8_t)KFW_TARGET_APP);
+
+    unsigned entries = 0U;
+    unsigned ends    = 0U;
+    unsigned busy    = 0U;
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)e->sig == APP_ENTRY_SIG ) { ++entries; }
+        if ( (enum_t)e->sig == APP_LIST_END_SIG ) { ++ends; }
+        if ( ((enum_t)e->sig == APP_REQ_RSP_SIG)
+            && ((uint8_t)APP_REQ_BUSY == ((AppReqRspEvt const *)e)->verdict) ) { ++busy; }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, entries,
+        "a list was answered while the directory was about to change");
+    TEST_ASSERT_EQUAL_UINT(0U, ends);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, busy, "an install was not told the AO is busy");
+    ao_spy_drain();
+
+    run_ticks(20U * APPMGR_UNDO_PACE_TEST_TICKS);          /* the recovery ends */
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)e->sig == APP_ENTRY_SIG ) { ++entries; }
+        if ( (enum_t)e->sig == APP_LIST_END_SIG ) { ++ends; }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(4U, entries,
+        "the deferred list did not show the recovered apps, in the directory's order");
+    TEST_ASSERT_EQUAL_UINT(1U, ends);
+    TEST_ASSERT_EQUAL_STRING("v1 v3 k f", victims_left());
     keep_end();
 }
 

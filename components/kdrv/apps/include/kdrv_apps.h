@@ -147,6 +147,26 @@ bool kdrv_apps_write_reached(uint32_t offset, uint32_t size);
  */
 kode_status_t kdrv_apps_read(uint32_t offset, void *buf, size_t len);
 
+/**
+ * @brief Fold the bytes of an extent of the region into a running CRC-32.
+ *
+ * Reads exactly @p size bytes from @p offset, in pieces, and never one more:
+ * what lies beyond the extent is not this call's to touch. The CRC is the
+ * one khal_crc32() gives, chainable, so an extent may be taken in parts: pass
+ * KHAL_CRC32_INIT in @p crc for the first and the result for the next. It
+ * does not parse the data. An image a reset half overwrote is another
+ * image's header and segments, and what a parser makes of them is not bounded
+ * by @p size; a digest is.
+ *
+ * @param offset Region-relative start, at or past KAPPS_DATA_OFF.
+ * @param size   How many bytes; 0 reads nothing and changes nothing.
+ * @param crc    The running CRC on entry and, on KODE_OK, the updated one;
+ *               left alone on any other answer.
+ * @return KODE_OK; KODE_DENIED with no region or a NULL @p crc; KODE_ERROR for
+ *         an extent that leaves the data area or one that cannot be mapped.
+ */
+kode_status_t kdrv_apps_extent_crc(uint32_t offset, uint32_t size, uint32_t *crc);
+
 /** @brief What kdrv_apps_sink() needs: where kdrv_apps_plan() said to write. */
 typedef struct {
     uint32_t offset;   /**< Region-relative, 64 KB-aligned. */
