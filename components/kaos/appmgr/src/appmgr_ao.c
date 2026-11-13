@@ -15,6 +15,7 @@
 #include "kapp_cat.h"
 #include "kdrv_apps.h"
 #include "kdrv_kfw.h"
+#include "kdrv_image_check.h"
 #include "kapp_data.h"
 #if CONFIG_KODEOS_BLE_CONSOLE
 #include "kdrv_ble.h"      /* the console's second port: its backlog, before a launch */
@@ -71,6 +72,8 @@
  * region: the same 32 KB the writes use, so a step stays short (rule 5). */
 #define APPMGR_KEEP_CHUNK      (32U * 1024U)
 #define APPMGR_KEEP_TMP_SUFFIX ".tmp"   /**< What a copy's name carries while it is written. */
+#define APPMGR_BYTE_BITS       8U       /**< Bits in a byte: a word read from a chunk shifts by it. */
+#define APPMGR_LOAN_BITS       8U       /**< Bits of to_return: one per buffer a medium can lend. */
 /* Re-publish the percent this often while the card writes a copy. AO_Power
  * takes the LED's orange pulse back after three seconds without a report, and
  * a multi-MB write has none of its own. */
@@ -370,6 +373,23 @@ typedef struct {
                               *   host's byte count is the wire's only
                               *   boundary) but no longer written.           */
 
+    /* ---- Reading a file through before an install gives anything up ------
+     * An install from a file that has to give up something installed (it
+     * evicts, or drops the old copy of the app it replaces) stops at its plan
+     * and the file is read through once, by AppMgr_verifying: its chain
+     * against its length and the SHA-256 it carries. A file that does not hold
+     * together ends the install with nothing given up. A file that does starts
+     * the install again from the top with verify_done set, as the keep round
+     * does. A URL and a terminal install cannot be read twice; the mailbox is
+     * verified in place. A .kfw container is not read through: its decoder
+     * places the image, and so evicts, at its header, and compares the digest
+     * only at the end, so a cut container still costs what it gives up. */
+    bool        verify_pending;                /**< appmgr_place() deferred: read the file through first. */
+    bool        verify_done;                   /**< The file was read through, or needs no reading. */
+    bool        verify_restart;                /**< The next FLASH_REQ_SIG goes on with this install. */
+    bool        verify_opened;                 /**< The read-through's own open has answered. */
+    bool        verify_first;                  /**< The next chunk is the file's first. */
+
     /* ---- Keeping victims on the card before an eviction ----------------
      * One round per install: the first plan that names victims abandons the
      * transfer, AppMgr_keeping copies them, and the install starts again
@@ -560,6 +580,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e);
+static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_busy(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_asking(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_finding(AppMgr * const me, QEvt const * const e);
@@ -971,6 +992,9 @@ static void keep_clear(AppMgr * const me)
     me->keep_forced  = false;
     me->keep_writing = false;
     me->keep_stat    = false;
+    me->verify_pending = false;
+    me->verify_done    = false;
+    me->verify_restart = false;
     me->keep_hashing = false;
     me->keep_moving  = false;
     me->keep_count   = 0U;
@@ -1091,6 +1115,25 @@ static void app_list_page(AppListReqEvt const * const req)
                (unsigned)req->skip, (unsigned)(i - req->skip));
     }
     app_list_end(req->who, i < d->count);
+}
+
+/**
+ * @brief Decide whether the file must be read through before this plan is acted on.
+ *
+ * Only an install that gives something up needs it, and only from a file: a
+ * URL and a terminal install cannot be read twice, and the mailbox is verified
+ * in place.
+ *
+ * @param me   The AO.
+ * @param plan The plan the decoder's header made.
+ * @return true to defer the install.
+ */
+static bool verify_defer(const AppMgr * const me, const kapps_plan_t *plan)
+{
+    bool const file = ((uint8_t)APPMGR_ORIGIN_FILE == me->origin)
+                   || ((uint8_t)APPMGR_ORIGIN_CARD == me->origin);
+
+    return file && !me->verify_done && !me->bypass && (0U < plan->evict_count);
 }
 
 /**
@@ -2871,6 +2914,13 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
                     "everything", (unsigned long)img_len);
         return KODE_ERROR;
     }
+    if ( verify_defer(me, &plan) )
+    {
+        me->verify_pending = true;
+        KLOG_I(TAG, "the file is to be read through before this install gives "
+                    "anything up");
+        return KODE_ERROR;       /* the decoder stops before the sink opens */
+    }
     if ( keep_defer(me, &dir, &plan) )
     {
         me->keep_pending = true;
@@ -2971,6 +3021,29 @@ static void medium_return(AppMgr * const me, uint8_t idx)
     }
 #endif
     storage_next_request(idx);
+}
+
+/**
+ * @brief Hand back every buffer the medium lent since the last pacer tick.
+ *
+ * The pacer's gap is what lets the glass and the log run between two chunks;
+ * one tick returns however many buffers are waiting.
+ *
+ * @param me The AO, in a state that reads the medium.
+ */
+static void loans_return(AppMgr * const me)
+{
+    uint8_t const mask = me->to_return;
+
+    me->pacing    = false;
+    me->to_return = 0U;
+    for ( uint8_t i = 0U; APPMGR_LOAN_BITS > i; ++i )
+    {
+        if ( (mask & (uint8_t)(1U << i)) != 0U )
+        {
+            medium_return(me, i);
+        }
+    }
 }
 
 /**
@@ -3280,7 +3353,7 @@ static bool consume_chunk(AppMgr * const me, const StorageDataEvt *d)
     kode_status_t const wst = xfer_feed(me, buf, d->len);
     if ( KODE_OK != wst )
     {
-        if ( me->keep_pending )
+        if ( me->keep_pending || me->verify_pending )
         {
             return false;        /* deferred, not failed: the caller moves on */
         }
@@ -3820,11 +3893,12 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             FlashReqEvt const * const req = Q_EVT_CAST(FlashReqEvt);
 
             xfer_reset(me);
-            if ( !me->keep_round )
+            if ( !me->keep_round && !me->verify_restart )
             {
                 keep_clear(me);
                 me->keep_req = *req;   /* what a restart would send again */
             }
+            me->verify_restart = false;
             me->req_who = req->who;    /* owed a verdict, settled below or in AppMgr_opening */
             me->origin = (uint8_t)APPMGR_ORIGIN_FILE;
             if ( (uint8_t)KFW_SRC_HTTP == req->src_kind )
@@ -4425,6 +4499,27 @@ static void keep_pause(AppMgr * const me)
     me->keep_idx     = 0U;
 }
 
+static void install_again(AppMgr * const me);
+
+/**
+ * @brief Stop the install at its plan and open its file again, to read it through.
+ *
+ * Nothing was committed: the transfer is abandoned, the file closed and opened
+ * anew for AppMgr_verifying.
+ *
+ * @param me The AO, with verify_pending set.
+ * @return The state to go on in.
+ */
+static QState verify_start(AppMgr * const me)
+{
+    keep_pause(me);
+    me->verify_pending = false;
+    me->verify_opened  = false;
+    me->verify_first   = true;
+    storage_open_request(me->file, &me->super);
+    return Q_TRAN(&AppMgr_verifying);
+}
+
 /** @brief Start the same install again from the top; the round is done. */
 static void keep_restart(AppMgr * const me)
 {
@@ -4437,6 +4532,20 @@ static void keep_restart(AppMgr * const me)
         QACTIVE_POST_LIFO(&me->super, &adopt);
         return;
     }
+    install_again(me);
+}
+
+/**
+ * @brief Start the same install again from the top, ahead of any request
+ *        already queued.
+ *
+ * LIFO: a request already queued must not run between what was done for the
+ * install and the install it was done for. A failure to post ends the install.
+ *
+ * @param me The AO, whose keep_req is the request.
+ */
+static void install_again(AppMgr * const me)
+{
     FlashReqEvt * const r = Q_NEW_X(FlashReqEvt, 0U, FLASH_REQ_SIG);
     if ( NULL == r )
     {
@@ -4448,8 +4557,6 @@ static void keep_restart(AppMgr * const me)
     r->launch   = me->keep_req.launch;
     r->who      = NULL;               /* the verdict was given with the first open */
     (void)snprintf(r->src, sizeof(r->src), "%s", me->keep_req.src);
-    /* LIFO: a request already queued must not run between the copies and
-     * the install they were made for. */
     QACTIVE_POST_LIFO(&me->super, &r->super);
 }
 
@@ -6588,6 +6695,11 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             uint8_t const idx = d->idx;
             if ( !consume_chunk(me, d) )
             {
+                if ( me->verify_pending )
+                {
+                    status = verify_start(me);
+                    break;
+                }
                 if ( me->keep_pending )
                 {
                     keep_pause(me);
@@ -6612,16 +6724,7 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             break;
         }
         case APP_FLASH_CHUNK_SIG: {
-            me->pacing = false;
-            uint8_t const mask = me->to_return;
-            me->to_return = 0U;
-            for ( uint8_t i = 0U; 8U > i; ++i )
-            {
-                if ( (mask & (uint8_t)(1U << i)) != 0U )
-                {
-                    medium_return(me, i);
-                }
-            }
+            loans_return(me);
             status = Q_HANDLED();
             break;
         }
@@ -6644,6 +6747,213 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             KLOG_W(TAG, "busy writing %s (%u%%); app_cat request denied",
                    me->os_target ? "the kodeOS slot" : "the region",
                    (unsigned)((me->written * 100U) / me->total));
+            app_cat_deny(me);
+            status = Q_HANDLED();
+            break;
+        }
+        default: {
+            status = Q_SUPER(&AppMgr_busy);
+            break;
+        }
+    }
+    return status;
+}
+
+/**
+ * @brief Whether a file's first bytes are a `.kfw` container's.
+ * @param buf The first chunk.
+ * @param len Its length.
+ * @return true for the container's magic.
+ */
+static bool chunk_is_container(const uint8_t *buf, uint16_t len)
+{
+    uint32_t magic = 0U;
+
+    if ( sizeof(magic) > len )
+    {
+        return false;
+    }
+    for ( uint32_t i = 0U; sizeof(magic) > i; ++i )
+    {
+        magic |= (uint32_t)buf[i] << (APPMGR_BYTE_BITS * i);   /* little-endian, as the container's */
+    }
+    return KFW_MAGIC == magic;
+}
+
+/**
+ * @brief End the read-through: the file does not hold together, nothing was given up.
+ * @param me  The AO.
+ * @param why The log's phrase.
+ * @return AppMgr_idle.
+ */
+static QState verify_fail(AppMgr * const me, const char *why)
+{
+    kdrv_image_check_abort();
+    flash_fail(me, why, KFAIL_WRITE);
+    return Q_TRAN(&AppMgr_idle);
+}
+
+/**
+ * @brief The file reads through whole, or needs no reading: go on with the install.
+ * @param me The AO.
+ * @return AppMgr_idle.
+ */
+static QState verify_resume(AppMgr * const me)
+{
+    me->verify_done    = true;
+    me->verify_restart = true;
+    medium_close(me);
+    install_again(me);        /* a failed post calls flash_fail() itself */
+    return Q_TRAN(&AppMgr_idle);
+}
+
+/**
+ * @brief Read the file through once, then start the install again.
+ *
+ * The chunks are the install's own, one buffer at a time, paced like
+ * AppMgr_flashing's; they are fed to kdrv_image_check and written nowhere.
+ * A .kfw container is not read through: its first bytes tell it apart and it
+ * is left to its decoder, which places the image (and so evicts) at its header
+ * and compares the digest only at the end.
+ */
+static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
+{
+    QState status;
+    switch ( e->sig )
+    {
+        case Q_ENTRY_SIG: {
+            QTimeEvt_armX(&me->idle, APPMGR_OPEN_TICKS, 0U);
+            (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            status = Q_HANDLED();
+            break;
+        }
+        case Q_EXIT_SIG: {
+            (void)QTimeEvt_disarm(&me->idle);
+            (void)QTimeEvt_disarm(&me->beat);
+            (void)QTimeEvt_disarm(&me->pacer);
+            me->pacing    = false;
+            me->to_return = 0U;
+            kdrv_image_check_abort();
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BEAT_SIG: {
+            /* The read makes no report of its own: say the same percent again. */
+            beat_say(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_CANCEL_REQ_SIG: {
+            status = verify_fail(me, "the person went back");
+            break;
+        }
+        case APP_RECV_IDLE_SIG: {
+            status = verify_fail(me, "the medium stopped sending");
+            break;
+        }
+        case STORAGE_OPEN_RSP_SIG: {
+            StorageOpenRspEvt const * const rsp = Q_EVT_CAST(StorageOpenRspEvt);
+
+            if ( ((uint8_t)KODE_OK != rsp->status)
+                || (kdrv_image_check_begin(rsp->size) != KODE_OK) )
+            {
+                status = verify_fail(me, "the file could not be read through; "
+                                         "nothing was given up");
+                break;
+            }
+            me->verify_opened = true;
+            (void)QTimeEvt_rearm(&me->idle, APPMGR_CHUNK_TICKS);
+            medium_read(me);
+            medium_read(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case STORAGE_DATA_SIG: {
+            StorageDataEvt const * const d = Q_EVT_CAST(StorageDataEvt);
+
+            if ( !me->verify_opened )
+            {
+                /* The install's own second read, asked before it was stopped
+                 * at its plan: AO_Storage serves it while the first reader is
+                 * still open, ahead of the close and the open this state
+                 * asked for, so its chunk (or its end of file) lands here
+                 * before the open's answer. It is nobody's: AO_Storage's close
+                 * takes every buffer back, and a NEXT would only start a read
+                 * on the reader that is opened next. */
+                KLOG_D(TAG, "a chunk of the first reader, before the file was opened again");
+                status = Q_HANDLED();
+                break;
+            }
+            if ( (uint8_t)KODE_OK != d->status )
+            {
+                status = verify_fail(me, "read from storage failed");
+                break;
+            }
+            if ( d->eof )
+            {
+                if ( kdrv_image_check_end() != KODE_OK )
+                {
+                    status = verify_fail(me, "the file is cut or damaged; "
+                                             "nothing was given up");
+                    break;
+                }
+                KLOG_I(TAG, "'%s' reads through whole", me->file);
+                status = verify_resume(me);
+                break;
+            }
+            const uint8_t * const buf = medium_buf(me, d->idx);
+            if ( NULL == buf )
+            {
+                status = verify_fail(me, "storage handed back a buffer that "
+                                         "does not exist");
+                break;
+            }
+            if ( me->verify_first )
+            {
+                me->verify_first = false;
+                if ( chunk_is_container(buf, d->len) )
+                {
+                    KLOG_I(TAG, "'%s' is a container: it is not read through", me->file);
+                    kdrv_image_check_abort();
+                    status = verify_resume(me);
+                    break;
+                }
+            }
+            if ( kdrv_image_check_feed(buf, d->len) != KODE_OK )
+            {
+                status = verify_fail(me, "the file is cut or damaged; "
+                                         "nothing was given up");
+                break;
+            }
+            (void)QTimeEvt_rearm(&me->idle, APPMGR_CHUNK_TICKS);
+            /* The buffer goes back after the pacer's gap, as AppMgr_flashing's
+             * does: the glass and the log run between two chunks. */
+            me->to_return |= (uint8_t)(1U << d->idx);
+            if ( !me->pacing )
+            {
+                me->pacing = true;
+                QTimeEvt_armX(&me->pacer, APPMGR_CHUNK_GAP_TICKS, 0U);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_FLASH_CHUNK_SIG: {
+            loans_return(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case FLASH_REQ_SIG:
+        case APP_RUN_REQ_SIG:
+        case APP_ERASE_REQ_SIG:
+        case APP_LIST_REQ_SIG:
+        case APP_RECV_REQ_SIG: {
+            KLOG_W(TAG, "busy reading '%s' through; request ignored", me->file);
+            busy_deny(e);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_CAT_REQ_SIG: {
+            KLOG_W(TAG, "busy reading '%s' through; app_cat request denied", me->file);
             app_cat_deny(me);
             status = Q_HANDLED();
             break;
