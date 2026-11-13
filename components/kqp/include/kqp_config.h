@@ -335,7 +335,7 @@
 #define KODE_LOWPOWER_QUEUE_LEN        48U     /**< AO_LowPower's queue: every participant's answer, a request and the inputs. */
 #define KODE_LOWPOWER_RADIO_MAX_MS     60000U  /**< Longest a radio wake lasts before the radio owners are asked to rest, done or not. */
 #define KODE_LOWPOWER_SLEEP_AFTER_DEF_S 120U   /**< Idle time before ASLEEP: 2 min. */
-#define KODE_LOWPOWER_OFF_AFTER_DEF_S  3600U   /**< Asleep time before OFF: 1 h. */
+#define KODE_LOWPOWER_OFF_AFTER_DEF_S  1200U   /**< Asleep time before OFF: 20 min. */
 #define KODE_LOWPOWER_DIM_PCT          20U     /**< The glass in ASLEEP when no glyphs were handed;
                                                 *   the interface sets its own through rest_pct. */
 #define KODE_LOWPOWER_MINUTE_S         60U     /**< The minute the glass is lit for. */

@@ -49,7 +49,7 @@
 
 /** @brief `sleep_after` / `off_after` word indexes the cases use. */
 #define WORD_30S        0U   /**< sleep_after: "30s".   */
-#define WORD_1H         0U   /**< off_after: "1h".      */
+#define WORD_1H         1U   /**< off_after: "1h".      */
 #define WORD_NEVER      5U   /**< Either: "never".      */
 
 /** @brief The default idle time, milliseconds. */
@@ -1494,14 +1494,14 @@ TEST_CASE("sleep_after: default, set, stored and read back after a restart", "[l
 
 TEST_CASE("off_after: default, every word, never", "[lowpower_ao]")
 {
-    static const char * const words[] = { "1h", "6h", "24h", "3d", "7d", "never" };
+    static const char * const words[] = { "20m", "1h", "6h", "24h", "7d", "never" };
     const KodeConfigAnsEvt *a;
 
     lp_up(KODE_OK);
 
     a = config_ask(AO_LowPower, &(config_ask_t){ .key = KSET_KEY_OFF_AFTER });
     TEST_ASSERT_NOT_NULL(a);
-    TEST_ASSERT_EQUAL_STRING("1h", a->value);
+    TEST_ASSERT_EQUAL_STRING("20m", a->value);
     TEST_ASSERT_FALSE(a->stored);
 
     for ( uint8_t i = 0U; Q_DIM(words) > i; i++ )
@@ -1528,7 +1528,7 @@ TEST_CASE("a stored value this build does not list reads as the default, not sto
 
     a = config_ask(AO_LowPower, &(config_ask_t){ .key = KSET_KEY_OFF_AFTER });
     TEST_ASSERT_NOT_NULL(a);
-    TEST_ASSERT_EQUAL_STRING("1h", a->value);
+    TEST_ASSERT_EQUAL_STRING("20m", a->value);
     TEST_ASSERT_FALSE(a->stored);
     a = config_ask(AO_LowPower, &(config_ask_t){ .key = KSET_KEY_SLEEP_AFTER });
     TEST_ASSERT_NOT_NULL(a);
