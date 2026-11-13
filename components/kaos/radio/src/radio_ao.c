@@ -182,9 +182,14 @@ _Static_assert(sizeof(RADIO_LP_WHY_FAILED) <= KODE_LOWPOWER_WHY_MAX,
  *         in a few; a radar channel is raised by kdrv_wifi_probe() to a beacon. */
 #define RADIO_HINT_DWELL_MS  120U
 
+#ifndef CONFIG_KODE_WIFI_HINT_YIELD_DB
+#define CONFIG_KODE_WIFI_HINT_YIELD_DB 6
+#endif
+
 /** @brief How much stronger, in dB, the other access point of a network has to
- *         be heard than the remembered one for the join to go to it. */
-#define RADIO_HINT_YIELD_DB  10
+ *         be heard than the remembered one for the join to go to it: 6 unless
+ *         the build's CONFIG_KODE_WIFI_HINT_YIELD_DB says otherwise. */
+#define RADIO_HINT_YIELD_DB  CONFIG_KODE_WIFI_HINT_YIELD_DB
 
 /** @brief Where the channel stands in a stored hint: after the name and its terminator. */
 #define RADIO_HINT_CHANNEL_AT  (KDRV_WIFI_SSID_LEN + 1U)

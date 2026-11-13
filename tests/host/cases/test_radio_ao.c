@@ -10370,8 +10370,9 @@ TEST_CASE("an advert planned at rest on 5 GHz is continuous", "[radio_ao][pulse]
 #define YIELD_CH_OTHER    48U
 /** @brief The hint's own reading, dBm. */
 #define YIELD_RSSI_WEAK   (-80)
-/** @brief How much stronger the other access point has to be, dB. */
-#define YIELD_MARGIN_DB   10
+/** @brief How much stronger the other access point has to be, dB: the default
+ *         of CONFIG_KODE_WIFI_HINT_YIELD_DB, which this build does not set. */
+#define YIELD_MARGIN_DB   6
 
 /** @brief One remembered network as the AO keeps it in the store. */
 typedef struct {
@@ -10485,16 +10486,16 @@ TEST_CASE("a hint with no alternate joins as it does, after one look", "[radio][
     yield_case_end();
 }
 
-TEST_CASE("an alternate 10 dB stronger than the hint is joined", "[radio][vault][yield]")
+TEST_CASE("an alternate stronger than the hint by the margin is joined", "[radio][vault][yield]")
 {
     yield_first_look((int8_t)YIELD_RSSI_WEAK);
     yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_OK);
     yield_joins_on(YIELD_CH_OTHER);
-    TEST_ASSERT_TRUE(logged("trying 'home' (-70dBm) on channel 48, stronger than channel 6 where it was"));
+    TEST_ASSERT_TRUE(logged("trying 'home' (-74dBm) on channel 48, stronger than channel 6 where it was"));
     yield_case_end();
 }
 
-TEST_CASE("an alternate 9 dB stronger than the hint is not", "[radio][vault][yield]")
+TEST_CASE("an alternate one dB short of the margin is not joined", "[radio][vault][yield]")
 {
     yield_first_look((int8_t)YIELD_RSSI_WEAK);
     yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB - 1), KODE_OK);

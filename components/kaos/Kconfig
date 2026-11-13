@@ -147,6 +147,19 @@ menu "kodeOS active objects"
 
                 If unsure, say Y.
 
+        config KODE_WIFI_HINT_YIELD_DB
+            int "dB another access point must be stronger by to take the join"
+            depends on KODEOS_WIFI
+            range 0 40
+            default 6
+            help
+                A join starts on the channel the network was last joined on.
+                When the same network was also heard on another channel, the
+                board listens on both and joins the other access point when it
+                is this many dB stronger than the remembered one. A lower
+                value moves to the stronger access point sooner; a higher one
+                stays where the last join worked.
+
         config KODEOS_NET
             bool "AO_Net (ping, HTTP(S), UDP - the host's own lwIP)"
             depends on KODEOS_WIFI
