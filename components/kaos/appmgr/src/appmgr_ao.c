@@ -564,6 +564,7 @@ typedef struct {
      * AO_Storage is handed a copy of it for each try.
      * The base URL is kept in PSRAM too, for the icon's open (rule 8: 200
      * bytes of internal RAM held for a fetch that rarely happens). */
+    bool          get_install;     /**< An install follows: the card is its.    */
     QActive      *get_who;         /**< Who asked.                              */
     char          get_project[KODE_APP_PROJECT_MAX]; /**< Whose folder.         */
     char         *get_url;         /**< The base URL, KODE_APPDATA_URL_MAX of
@@ -577,7 +578,6 @@ typedef struct {
     uint8_t       get_tries;       /**< Times the put was asked again after a
                                     *   busy refusal.                          */
     bool          get_open;        /**< A transfer is open with AO_Net.         */
-    bool          get_install;     /**< An install follows: the card is its.    */
 
     /* ---- The card a fetch kept up for the install it announced -----------
      * Between `appdata_get install=on` and the install the host sends next,
@@ -587,8 +587,8 @@ typedef struct {
      * (hold_release()); anything else that idle turns to, a terminal install
      * included, or APPMGR_HOLD_BEATS beats with no install, ends it
      * (hold_end()). */
-    bool          held;            /**< The card is up, waiting for an install. */
-    uint8_t       hold_beats;      /**< Beats the card has waited so far.       */
+    uint8_t       hold_left;       /**< Beats the held card still waits; 0 when
+                                    *   no card is held.                       */
 } AppMgr;
 
 static AppMgr l_appMgr;
@@ -3345,7 +3345,7 @@ static void beat_say(AppMgr * const me)
  */
 static void hold_release(AppMgr * const me)
 {
-    me->held = false;
+    me->hold_left = 0U;
     (void)QTimeEvt_disarm(&me->beat);
 }
 
@@ -3358,7 +3358,7 @@ static void hold_release(AppMgr * const me)
  */
 static void hold_end(AppMgr * const me)
 {
-    if ( me->held )
+    if ( 0U < me->hold_left )
     {
         hold_release(me);
         QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);
@@ -4369,10 +4369,9 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             break;
         }
         case Q_ENTRY_SIG: {
-            if ( me->held )
+            if ( 0U < me->hold_left )
             {
                 /* A fetch that announced an install ended on the way here. */
-                me->hold_beats = 0U;
                 (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
             }
             status = Q_HANDLED();
@@ -4382,20 +4381,21 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             /* Only the held card's: a beat queued behind another state's
              * last disarm has nothing to say here. Each beat says the card
              * again, and the last one of its wait ends it. */
-            if ( me->held )
+            if ( 1U == me->hold_left )
             {
-                ++me->hold_beats;
-                if ( (uint8_t)APPMGR_HOLD_BEATS <= me->hold_beats )
-                {
-                    KLOG_W(TAG, "the install '%s' was fetched for did not come; "
-                                "its card ends", me->project);
-                    hold_end(me);
-                }
-                else
-                {
-                    progress_publish(me, 0U);
-                    (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
-                }
+                KLOG_W(TAG, "the install '%s' was fetched for did not come; "
+                            "its card ends", me->project);
+                hold_end(me);
+            }
+            else if ( 1U < me->hold_left )
+            {
+                --me->hold_left;
+                progress_publish(me, 0U);
+                (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            }
+            else
+            {
+                /* No card is held. */
             }
             status = Q_HANDLED();
             break;
@@ -4413,14 +4413,15 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
         case LOWPOWER_ROUND_SIG: {
             /* Idle: no image is being written, kept, received or launched;
              * a card waiting for its install is the one thing in hand. */
-            const char *why = NULL;
+            bool const  held = (0U < me->hold_left);
+            const char *why  = NULL;
 
-            if ( me->held )
+            if ( held )
             {
                 why = "install announced";
             }
             lowpower_ready(me->lp_who, Q_EVT_CAST(LowPowerRoundEvt)->round,
-                           me->held, why);
+                           held, why);
             status = Q_HANDLED();
             break;
         }
@@ -4433,7 +4434,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
     /* The card a fetch kept up is the next install's from a medium or a URL,
      * and only one that begins takes it over; one refused before it began
      * ends it here, where the refusal is known, rather than at the deadline. */
-    if ( me->held && ((QSignal)FLASH_REQ_SIG == e->sig) )
+    if ( (0U < me->hold_left) && ((QSignal)FLASH_REQ_SIG == e->sig) )
     {
         if ( Q_RET_TRAN == status )
         {
@@ -5887,7 +5888,8 @@ static void get_card_end(AppMgr * const me, bool ok)
     if ( me->get_install )
     {
         me->get_install = false;
-        me->held        = true;   /* AppMgr_idle's entry arms its timers */
+        /* AppMgr_idle's entry arms the beat that counts it down. */
+        me->hold_left   = (uint8_t)APPMGR_HOLD_BEATS;
         KLOG_N(TAG, "the card of '%s' waits for its install", me->get_project);
     }
     else if ( ok )
