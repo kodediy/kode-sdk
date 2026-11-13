@@ -3247,15 +3247,17 @@ TEST_CASE("a replacement of a folder on the card is written on the card",
         "the replacement of a card folder was written inside");
     (void)memset(got, 0, sizeof(got));
     {
-        char  path[512];
-        FILE *f;
+        char   path[512];
+        FILE  *f;
+        size_t n;
 
         (void)snprintf(path, sizeof(path), "%s/%s", fake_media_sd_dir(),
                        CARD_DEMO_JSON);
         f = fopen(path, "rb");
         TEST_ASSERT_NOT_NULL(f);
-        (void)fread(got, 1U, sizeof(got) - 1U, f);
+        n = fread(got, 1U, sizeof(got) - 1U, f);
         (void)fclose(f);
+        TEST_ASSERT_EQUAL_UINT(strlen(PUT_JSON), n);
     }
     TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
