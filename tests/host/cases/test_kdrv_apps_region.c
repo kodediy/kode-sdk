@@ -16,6 +16,7 @@
 #include "esp_private/partition_linux.h"
 #include "esp_rom_crc.h"
 
+#include "fakes.h"
 #include "kapp_desc.h"
 #include "kapps_fmt.h"
 #include "kdrv_apps.h"
@@ -970,6 +971,112 @@ TEST_CASE("an extent that leaves the data area is refused and leaves the CRC alo
     TEST_ASSERT_EQUAL_HEX32(0xDEADBEEFU, crc);
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kdrv_apps_extent_crc(end - 16U, 16U, &crc),
         "the last 16 bytes of the region are an extent");
+}
+
+/* ---- An image that claims more than it holds ------------------------------- */
+
+/** @brief Bytes the image of these cases is given in the region. */
+#define CLAIM_IMG_LEN  4096U
+
+/**
+ * @brief Write the head of an image at the first data block and close the session unverified.
+ * @param segments What the image header claims.
+ * @param data_len What its first segment header claims.
+ */
+static void claim_image(uint8_t segments, uint32_t data_len)
+{
+    static uint8_t             img[CLAIM_IMG_LEN];
+    esp_image_header_t         h;
+    esp_image_segment_header_t seg;
+
+    (void)memset(img, 0, sizeof(img));
+    (void)memset(&h, 0, sizeof(h));
+    h.magic         = ESP_IMAGE_HEADER_MAGIC;
+    h.segment_count = segments;
+    h.hash_appended = 0U;
+    (void)memcpy(&img[0], &h, sizeof(h));
+    (void)memset(&seg, 0, sizeof(seg));
+    seg.load_addr = 0x40000000U;
+    seg.data_len  = data_len;
+    (void)memcpy(&img[sizeof(h)], &seg, sizeof(seg));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(KAPPS_DATA_OFF, sizeof(img)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(img, sizeof(img)));
+    kdrv_apps_write_abort();
+}
+
+/* The verifier hashes every segment by the length its header declares and
+ * compares the total with the partition only afterwards, so a header that
+ * declares more than the image holds keeps it reading flash for as long as the
+ * lengths say. The segment chain is walked first, by its own bytes alone, and
+ * an image whose chain leaves them never reaches the verifier: the fake one
+ * here says yes to everything, so a refusal is the walk's. */
+TEST_CASE("an image whose segments leave its own bytes is refused unhashed",
+          "[apps_region]")
+{
+    apps_ready();
+
+    claim_image(1U, 0x7FFFFFF0U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL), "a segment of 2 GB");
+
+    claim_image(1U, 0xFFFFFFFCU);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL), "a length that wraps");
+
+    claim_image(1U, CLAIM_IMG_LEN);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL),
+        "a segment as long as the whole image, after its headers");
+
+    claim_image(0U, 16U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL), "no segments");
+
+    claim_image((uint8_t)(ESP_IMAGE_MAX_SEGMENTS + 1U), 16U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL), "more segments than an image has");
+}
+
+/* The walk is a length check and nothing more: an image whose chain holds is
+ * still the verifier's to judge. */
+TEST_CASE("an image whose segments fit is the verifier's to judge", "[apps_region]")
+{
+    uint32_t len = 0U;
+
+    apps_ready();
+    claim_image(1U, 256U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, &len));
+
+    fake_image_verify_set_result(ESP_FAIL);
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_apps_verify(KAPPS_DATA_OFF, CLAIM_IMG_LEN, NULL));
+    fake_image_verify_set_result(ESP_OK);
+}
+
+/* An install ends with the same check: the session's own close refuses what
+ * the walk refuses. */
+TEST_CASE("a write session does not close on an image that claims more than it holds",
+          "[apps_region]")
+{
+    static uint8_t             img[CLAIM_IMG_LEN];
+    esp_image_header_t         h;
+    esp_image_segment_header_t seg;
+
+    apps_ready();
+    (void)memset(img, 0, sizeof(img));
+    (void)memset(&h, 0, sizeof(h));
+    h.magic         = ESP_IMAGE_HEADER_MAGIC;
+    h.segment_count = 1U;
+    (void)memcpy(&img[0], &h, sizeof(h));
+    (void)memset(&seg, 0, sizeof(seg));
+    seg.load_addr = 0x40000000U;
+    seg.data_len  = 0x00800000U;
+    (void)memcpy(&img[sizeof(h)], &seg, sizeof(seg));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(KAPPS_DATA_OFF, sizeof(img)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(img, sizeof(img)));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_apps_write_end());
 }
 
 /* A write longer than a bounce reaches the flash in pieces, and each piece

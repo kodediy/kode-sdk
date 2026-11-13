@@ -10,6 +10,7 @@
 
 #include "Mockesp_ota_ops.h"
 
+#include "esp_image_format.h"
 #include "esp_partition.h"
 
 #include "kdrv_slot.h"
@@ -63,6 +64,36 @@ static void slot_done(void)
     Mockesp_ota_ops_Verify();
     Mockesp_ota_ops_Destroy();
 }
+
+/**
+ * @brief Put the head of an image at the start of the writable slot.
+ *
+ * esp_ota_write() is a mock here, so nothing a case "writes" reaches the
+ * emulated flash; what the end of a session reads there is what this lays.
+ *
+ * @param sub      The writable slot's subtype.
+ * @param data_len What the image's one segment claims to hold.
+ */
+static void slot_chain(esp_partition_subtype_t sub, uint32_t data_len)
+{
+    const esp_partition_t * const p = app_part(sub);
+    esp_image_header_t            h;
+    esp_image_segment_header_t    seg;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(p, 0U, 0x1000U));
+    (void)memset(&h, 0, sizeof(h));
+    h.magic         = ESP_IMAGE_HEADER_MAGIC;
+    h.segment_count = 1U;
+    h.hash_appended = 0U;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(p, 0U, &h, sizeof(h)));
+    (void)memset(&seg, 0, sizeof(seg));
+    seg.load_addr = 0x40000000U;
+    seg.data_len  = data_len;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(p, sizeof(h), &seg, sizeof(seg)));
+}
+
+/** @brief A segment length that fits any slot: the chain of an image that holds together. */
+#define SLOT_SEG_LEN  16U
 
 /* ---- Which slot ------------------------------------------------------------ */
 
@@ -236,6 +267,7 @@ TEST_CASE("a failed end still consumes the session", "[kdrv_slot]")
     expect_begin_ok();
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
 
+    slot_chain(ESP_PARTITION_SUBTYPE_APP_OTA_1, SLOT_SEG_LEN);
     esp_ota_end_ExpectAnyArgsAndReturn(ESP_ERR_OTA_VALIDATE_FAILED);
     TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_slot_end());
 
@@ -733,6 +765,32 @@ static void expect_desc(esp_app_desc_t *desc, const char *project)
     esp_ota_get_partition_description_ReturnThruPtr_app_desc(desc);
 }
 
+/* esp_ota_end() hashes every segment by the length its header declares and
+ * looks at the partition's size only afterwards, so an image that claims more
+ * than the slot holds keeps it reading flash for as long as the lengths say.
+ * The chain is walked first and such an image never reaches esp_ota_end():
+ * none is expected here, so a call fails the case. */
+TEST_CASE("an image whose segments leave the slot is refused before it is hashed",
+          "[kdrv_slot]")
+{
+    slot_fresh(ESP_PARTITION_SUBTYPE_APP_OTA_0);
+
+    expect_begin_ok();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
+    slot_chain(ESP_PARTITION_SUBTYPE_APP_OTA_1, 0x7FFFFFF0U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR, kdrv_slot_end(), "a segment of 2 GB");
+
+    /* The session is over all the same, and a new one opens. */
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_slot_end());
+
+    expect_begin_ok();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
+    slot_chain(ESP_PARTITION_SUBTYPE_APP_OTA_1, 0xFFFFFFFCU);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR, kdrv_slot_end(), "a length that wraps");
+
+    slot_done();
+}
+
 /* The slot is where this firmware's own update goes, and the next boot hands
  * the board to whatever it holds. What esp_ota_end() accepts is any image
  * built for the chip, an app's included, so the project's name is what tells
@@ -748,6 +806,7 @@ TEST_CASE("an image of the running project ends well", "[kdrv_slot]")
     expect_begin_ok();
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
 
+    slot_chain(ESP_PARTITION_SUBTYPE_APP_OTA_1, SLOT_SEG_LEN);
     esp_ota_end_ExpectAnyArgsAndReturn(ESP_OK);
     expect_desc(&desc, running.project);
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_end());
@@ -764,6 +823,7 @@ TEST_CASE("an image of another project is refused at the end", "[kdrv_slot]")
     expect_begin_ok();
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
 
+    slot_chain(ESP_PARTITION_SUBTYPE_APP_OTA_1, SLOT_SEG_LEN);
     esp_ota_end_ExpectAnyArgsAndReturn(ESP_OK);
     expect_desc(&desc, "buttons_led");
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR, kdrv_slot_end(),
@@ -785,6 +845,7 @@ TEST_CASE("an image with no description to read is refused at the end",
     expect_begin_ok();
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_begin());
 
+    slot_chain(ESP_PARTITION_SUBTYPE_APP_OTA_1, SLOT_SEG_LEN);
     esp_ota_end_ExpectAnyArgsAndReturn(ESP_OK);
     esp_ota_get_partition_description_ExpectAnyArgsAndReturn(ESP_ERR_NOT_FOUND);
     TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_slot_end());

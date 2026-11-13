@@ -20,6 +20,7 @@
 #include "esp_partition.h"
 #include "esp_rom_crc.h"
 #include "khal_crc32.h"
+#include "kdrv_image_walk.h"
 
 #define TAG              "kdrv.apps"
 #define APPS_SECTOR      0x1000U   /* the 4 KB unit every metadata sector is erased in */
@@ -742,6 +743,18 @@ kode_status_t kdrv_apps_verify(uint32_t offset, uint32_t size, uint32_t *img_len
     {
         return KODE_DENIED;
     }
+    /* esp_image_verify() hashes every segment by the length its header
+     * declares, and compares the total with `size` only afterwards: a header
+     * that declares more than the image holds keeps it reading flash for as
+     * long as the lengths say, in the caller's own step. The chain is walked
+     * first, and an image whose segments leave its bytes is refused unhashed. */
+    if ( (((uint64_t)offset + (uint64_t)size) > (uint64_t)s_part->size)
+        || (0U == kdrv_image_walk_len(s_part, offset, size)) )
+    {
+        KLOG_E(TAG, "verify @0x%x failed (the image does not hold together in its %u bytes)",
+               (unsigned)offset, (unsigned)size);
+        return KODE_ERROR;
+    }
     esp_image_metadata_t meta;
     esp_partition_pos_t const pos = {
         .offset = s_part->address + offset,
@@ -925,9 +938,10 @@ void kdrv_apps_req_clear(void)
  * validate a hash or a signature.
  *
  * Phase 2 is the real verification: once AppMgr copies those bytes into the
- * apps region, kdrv_apps_write_end() calls kdrv_apps_verify(), a plain
- * esp_image_verify(). Note what the region's growth did to that call - the
- * region now runs from 0xC40000 to 0x1800000 and therefore crosses 16 MB, so
+ * apps region, kdrv_apps_write_end() calls kdrv_apps_verify(): the same walk
+ * over the bytes written, then esp_image_verify(). Note what the region's
+ * growth did to that call - the region now runs from 0xC40000 to 0x1800000
+ * and therefore crosses 16 MB, so
  * an image installed in its upper part is verified through the same 32-bit
  * mapping it is executed through. The flag is not optional decoration for
  * this layout; without it, phase 2 fails on exactly the images phase 1 cannot
@@ -948,46 +962,7 @@ static uint32_t pending_walk_len(const esp_partition_t *p)
      * partition: an image allowed to run into that sector would be adopted
      * and then have its tail erased by consume(). This is the same ceiling
      * write_begin() enforces, so an esptool push and a cable upload agree. */
-    uint32_t const limit = pending_intent_off(p);
-    esp_image_header_t header;
-    if ( (esp_partition_read(p, 0, &header, sizeof(header)) != ESP_OK)
-        || (ESP_IMAGE_HEADER_MAGIC != header.magic)
-        || (0U == header.segment_count)
-        || (ESP_IMAGE_MAX_SEGMENTS < header.segment_count) )
-    {
-        return 0U;
-    }
-
-    uint32_t off = sizeof(esp_image_header_t);
-    for ( uint8_t i = 0U; i < header.segment_count; ++i )
-    {
-        esp_image_segment_header_t seg;
-        if ( (off > limit) || (esp_partition_read(p, off, &seg, sizeof(seg)) != ESP_OK) )
-        {
-            return 0U;
-        }
-        /* Bound the addition, not its result. `data_len` comes straight off
-         * flash and is not to be trusted: a value near UINT32_MAX wraps `off`
-         * back to a small number, and a check made afterwards waves that
-         * through. Such a segment does not run off the end of the partition,
-         * it runs around it. `off <= limit` holds above, so both
-         * subtractions here are safe. */
-        uint32_t const room = limit - off;
-        if ( ((uint32_t)sizeof(seg) > room)
-            || ((room - (uint32_t)sizeof(seg)) < seg.data_len) )
-        {
-            return 0U;
-        }
-        off += (uint32_t)sizeof(seg) + seg.data_len;
-    }
-    /* The trailing 1-byte checksum pads the image out to a 16-byte boundary,
-     * then the optional SHA-256 "simple hash" (32 bytes) follows it. */
-    off = (off | 15U) + 1U;
-    if ( 0U != header.hash_appended )
-    {
-        off += 32U;
-    }
-    return (off <= limit) ? off : 0U;
+    return kdrv_image_walk_len(p, 0U, pending_intent_off(p));
 }
 
 kode_status_t kdrv_apps_pending_verify(void)

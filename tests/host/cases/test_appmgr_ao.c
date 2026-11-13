@@ -855,6 +855,41 @@ TEST_CASE("running an installed app boots the extent the directory recorded",
 /** @brief The image image_named() builds; a case needs one at a time. */
 static uint8_t s_named_img[512];
 
+/** @brief Bytes of the one segment image_chain() declares. */
+#define CHAIN_SEG_LEN  16U
+
+/** @brief The least bytes image_chain() needs: both headers, the segment, the checksum pad. */
+#define CHAIN_MIN_LEN  64U
+
+/**
+ * @brief Make the head of a stand-in image a header chain that holds.
+ *
+ * The region walks an image's chain of segments before it hashes it, and
+ * refuses one that leaves the image's own bytes. A stand-in whose case is
+ * about something else still has to be an image that far: one segment of
+ * CHAIN_SEG_LEN bytes, no appended hash, this chip. What follows the two
+ * headers is left as the caller filled it.
+ *
+ * @param img The image, at least CHAIN_MIN_LEN bytes.
+ */
+static void image_chain(uint8_t *img)
+{
+    esp_image_header_t         header;
+    esp_image_segment_header_t seg;
+
+    (void)memset(&header, 0, sizeof(header));
+    header.magic         = ESP_IMAGE_HEADER_MAGIC;
+    header.chip_id       = ESP_CHIP_ID_ESP32P4;
+    header.segment_count = 1U;
+    header.hash_appended = 0U;
+    (void)memcpy(&img[0], &header, sizeof(header));
+
+    (void)memset(&seg, 0, sizeof(seg));
+    seg.load_addr = 0x40000000U;
+    seg.data_len  = CHAIN_SEG_LEN;
+    (void)memcpy(&img[sizeof(header)], &seg, sizeof(seg));
+}
+
 /**
  * @brief Build a minimal, walkable ESP image whose descriptor names
  *        @p project, in s_named_img.
@@ -1650,10 +1685,10 @@ TEST_CASE("the CRC verdict is RECV_DONE_SIG on a match, RECV_FAIL_SIG on one "
          * accidental match against an uninitialised want. */
         payload[i] = (uint8_t)((i * 7U) + 3U);
     }
-    /* Byte 0 must be the raw-image magic - see the ack case above for why. */
-    payload[0] = KFW_ESP_MAGIC;
-    payload[12] = (uint8_t)ESP_CHIP_ID_ESP32P4;   /* its chip_id: this one */
-    payload[13] = 0U;
+    /* Byte 0 must be the raw-image magic - see the ack case above for why -
+     * and the rest of the head a chain the region's walk accepts. */
+    TEST_ASSERT_TRUE(sizeof(payload) >= CHAIN_MIN_LEN);
+    image_chain(payload);
     good_crc = khal_crc32(KHAL_CRC32_INIT, payload, sizeof(payload));
 
     /* ---- Phase A: the wire matches the promise ------------------------- */
@@ -7137,11 +7172,14 @@ static void install_container(uint32_t len, bool launch)
 /** @brief The bytes the stand-in inflater produces: the image of the deflated container. */
 #define TIDY_ZIP_IMG  304U
 
+/** @brief The image the deflated container inflates to: what the stand-in inflater is told to write. */
+static uint8_t s_zip_img[TIDY_ZIP_IMG];
+
 /**
  * @brief Build in s_cont a deflated container for an app, with no block.
  *
  * The host has no inflater (fake_tinfl.c): the stand-in turns any payload into
- * TIDY_ZIP_IMG bytes of its fill byte, so the container's sha256 is that of
+ * the bytes it is given, s_zip_img, so the container's sha256 is that of
  * such an image. What matters is that the payload is shorter than the image
  * it becomes, so the wire and the image part ways the other way round from a
  * container with a block.
@@ -7150,10 +7188,11 @@ static void install_container(uint32_t len, bool launch)
  */
 static uint32_t container_deflated(void)
 {
-    static uint8_t img[TIDY_ZIP_IMG];
-    kfw_hdr_t      h;
+    uint8_t * const img = s_zip_img;
+    kfw_hdr_t       h;
 
-    (void)memset(img, 'Z', sizeof(img));      /* fake_tinfl's default fill */
+    (void)memset(img, 'Z', sizeof(s_zip_img));
+    image_chain(img);                         /* an image as far as its chain, with no descriptor */
     (void)memset(s_cont, 0xA5, sizeof(s_cont));
     (void)memset(&h, 0, sizeof(h));
     h.magic       = KFW_MAGIC;
@@ -7163,7 +7202,7 @@ static uint32_t container_deflated(void)
     h.comp        = (uint8_t)KFW_COMP_DEFLATE;
     h.payload_len = TIDY_ZIP_LEN;
     h.image_len   = TIDY_ZIP_IMG;
-    kfw_sha256(img, sizeof(img), h.sha256);
+    kfw_sha256(img, sizeof(s_zip_img), h.sha256);
     h.crc = kfw_crc32(&h, offsetof(kfw_hdr_t, crc));
     (void)memcpy(s_cont, &h, sizeof(h));
     return (uint32_t)KFW_HDR_LEN + TIDY_ZIP_LEN;
@@ -8510,6 +8549,7 @@ TEST_CASE("a compressed container streams in: the wire is shorter than the image
     fake_tinfl_reset();
     fake_tinfl_set((int)TINFL_STATUS_DONE, 4096U, TIDY_ZIP_IMG);
     uint32_t const len = container_deflated();
+    fake_tinfl_set_payload(s_zip_img, sizeof(s_zip_img));
 
     /* The header in one event, the payload in the next: the inflater runs once. */
     install_container_in(len, false, (uint32_t)KFW_HDR_LEN);
