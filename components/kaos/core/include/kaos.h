@@ -3877,6 +3877,8 @@ typedef struct {
                                               *   names are added to it.        */
     QActive *who;                            /**< Where APPDATA_GET_RSP_SIG is
                                               *   posted.                       */
+    bool     install;                        /**< An install of the app follows:
+                                              *   the card stays up for it.     */
 } AppDataGetReqEvt;
 
 /** @brief How a fetch of one app's data folder ended (APPDATA_GET_RSP_SIG). */
@@ -3902,16 +3904,25 @@ typedef struct {
  * and again every second while it waits on the network, ended by an unnamed
  * APP_FLASH_DONE_SIG or by APP_FLASH_FAIL_SIG.
  *
+ * A fetch asked with @p install is the first step of an install, and its card
+ * is the install's: whatever the fetch's end, neither event goes out. The card
+ * stays at 0 %, said again every second, until the next install request takes
+ * it over - its own reports carry it from there, so the glass never empties
+ * between the two - or until AO_AppMgr turns to anything else, a refused
+ * install included, or KODE_APPMGR_HOLD_MS goes by; then the unnamed
+ * APP_FLASH_DONE_SIG ends it. The answer to the fetch is the same either way.
+ *
  * @param project The app's project name, as its image declares it.
  * @param url     The base URL, ending where the file names begin; shorter than
  *                KODE_APPDATA_URL_MAX.
+ * @param install true when an install of the app follows the fetch.
  * @param who     The Active Object the answer is posted to. Not NULL.
  * @return KODE_OK when the request is posted and an answer is owed; KODE_ERROR
  *         for a NULL argument or a URL that does not fit; KODE_NO_RESOURCES when
  *         the pool is dry or the queue full. Nothing was posted for the last two.
  */
 kode_status_t appmgr_appdata_get_request(const char *project, const char *url,
-                                         QActive *who);
+                                         bool install, QActive *who);
 
 /* ---- AO_Boot: owner of otadata AND the apps boot request ----------------
  * kodeOS lives in `factory` or its OTA slot; apps live in the `apps` region.

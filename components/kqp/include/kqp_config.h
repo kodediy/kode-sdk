@@ -1631,6 +1631,11 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 #define KODE_APPMGR_PUT_TRIES   3U
 /** @brief The pause before each of those tries, in ms. */
 #define KODE_APPMGR_PUT_RETRY_MS 500U
+/** @brief How long the card of a fetch that announced an install
+ *         (`appdata_get install=on`) waits for that install to begin, in ms.
+ *         The host sends it the moment the fetch is answered; this only bounds
+ *         a host that never does, so the card does not stand for ever. */
+#define KODE_APPMGR_HOLD_MS     15000U
 
 /* ---- The factory reset's budgets ----------------------------------------
  * AO_Boot walks the reset one step at a time and arms one timer per step; a

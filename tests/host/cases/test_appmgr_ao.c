@@ -9331,8 +9331,11 @@ TEST_CASE("a kodeOS write names no project", "[appmgr_ao][project]")
 
 #define GET_URL  "http://example.invalid/apps/snake/"
 
-/** @brief Ask AO_AppMgr for @p project's folder from @p url, answered to the spy. */
-static void ask_get(const char *project, const char *url)
+/**
+ * @brief Ask AO_AppMgr for @p project's folder from @p url, answered to the
+ *        spy; @p install says an install of the app follows.
+ */
+static void ask_get_as(const char *project, const char *url, bool install)
 {
     AppDataGetReqEvt e;
 
@@ -9340,8 +9343,15 @@ static void ask_get(const char *project, const char *url)
     e.super = (QEvt)QEVT_INITIALIZER(APPDATA_GET_REQ_SIG);
     (void)snprintf(e.project, sizeof(e.project), "%s", project);
     (void)snprintf(e.url, sizeof(e.url), "%s", url);
-    e.who = ao_spy();
+    e.who     = ao_spy();
+    e.install = install;
     QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/** @brief Ask AO_AppMgr for @p project's folder from @p url, answered to the spy. */
+static void ask_get(const char *project, const char *url)
+{
+    ask_get_as(project, url, false);
 }
 
 /** @brief What AO_Net's queue holds: the opens and closes, and the last URL opened. */
@@ -9442,14 +9452,15 @@ const uint8_t *host_net_stream_buf(uint8_t idx)
 
 /**
  * @brief Run a fetch of "snake" up to the put it asks AO_Storage for: app.json
- *        arrives whole in one chunk and names no icon.
+ *        arrives whole in one chunk and names no icon. @p install says an
+ *        install of the app follows.
  */
-static void fetch_to_the_put(void)
+static void fetch_to_the_put_as(bool install)
 {
     StorageDataEvt d;
     uint32_t const len = (uint32_t)(sizeof(GET_JSON_BODY) - 1U);
 
-    ask_get("snake", GET_URL);
+    ask_get_as("snake", GET_URL, install);
     (void)net_seen();
     fetch_opened((uint8_t)KODE_OK, len);
 
@@ -9461,6 +9472,12 @@ static void fetch_to_the_put(void)
     d.status = (uint8_t)KODE_OK;
     d.eof    = true;
     QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+}
+
+/** @brief fetch_to_the_put_as() for a fetch that announces nothing. */
+static void fetch_to_the_put(void)
+{
+    fetch_to_the_put_as(false);
 }
 
 /**
@@ -9833,15 +9850,15 @@ TEST_CASE("the fetch's request refuses what it cannot post",
     (void)memset(long_url, 'u', sizeof(long_url) - 1U);
     long_url[sizeof(long_url) - 1U] = '\0';
 
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request(NULL, GET_URL, ao_spy()));
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request("snake", NULL, ao_spy()));
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request("snake", GET_URL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request(NULL, GET_URL, false, ao_spy()));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request("snake", NULL, false, ao_spy()));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, appmgr_appdata_get_request("snake", GET_URL, false, NULL));
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
-        appmgr_appdata_get_request("snake", long_url, ao_spy()),
+        appmgr_appdata_get_request("snake", long_url, false, ao_spy()),
         "a URL that does not fit the request was cut, not refused");
     TEST_ASSERT_EQUAL_UINT(0U, (unsigned)uxQueueMessagesWaiting(AO_AppMgr->eQueue));
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, appmgr_appdata_get_request("snake", GET_URL, ao_spy()));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, appmgr_appdata_get_request("snake", GET_URL, false, ao_spy()));
     (void)qf_support_pump(AO_AppMgr, 8U);
     net_seen_t const n = net_seen();
     TEST_ASSERT_EQUAL_UINT(1U, n.opens);
@@ -9880,5 +9897,270 @@ TEST_CASE("a fetch of an app's data folder shows from its first moment and ends 
 
     QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
     QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    fetch_end();
+}
+
+/* ---- A fetch that announces an install --------------------------------------
+ * `appdata_get install=on`: the host sends the app's install the moment the
+ * fetch is answered, and the glass must not empty between the two. The fetch's
+ * card stays at 0 % for the install; the install that begins takes it over, and
+ * anything else - a refusal, another request, the deadline - ends it with the
+ * unnamed done. */
+
+/** @brief KODE_APPMGR_HOLD_MS in QP ticks, as appmgr_ao.c has it. */
+#define APPMGR_HOLD_TEST_TICKS (KODE_APPMGR_HOLD_MS / 10U)
+
+/** @brief What the card was told, in the order the spy holds it. */
+typedef struct {
+    unsigned reports;         /**< APP_FLASH_PROGRESS_SIG.                */
+    unsigned dones;           /**< APP_FLASH_DONE_SIG.                    */
+    unsigned fails;           /**< APP_FLASH_FAIL_SIG.                    */
+    unsigned answers;         /**< APPDATA_GET_RSP_SIG.                   */
+    uint8_t  why;             /**< The last answer's appdata_get_why_t.   */
+    enum_t   first;           /**< The first of the card's three, or 0.   */
+    char     project[KODE_APP_PROJECT_MAX]; /**< The last report's.       */
+} card_seen_t;
+
+/** @brief Read what the spy holds about the card and the fetch, draining it. */
+static card_seen_t card_seen(void)
+{
+    card_seen_t seen;
+
+    (void)memset(&seen, 0, sizeof(seen));
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        enum_t const sig = (enum_t)e->sig;
+
+        if ( sig == APP_FLASH_PROGRESS_SIG )
+        {
+            ++seen.reports;
+            (void)snprintf(seen.project, sizeof(seen.project), "%s",
+                           ((AppProgressEvt const *)e)->project);
+        }
+        else if ( sig == APP_FLASH_DONE_SIG )
+        {
+            ++seen.dones;
+        }
+        else if ( sig == APP_FLASH_FAIL_SIG )
+        {
+            ++seen.fails;
+        }
+        else if ( sig == APPDATA_GET_RSP_SIG )
+        {
+            ++seen.answers;
+            seen.why = ((AppDataGetRspEvt const *)e)->why;
+            continue;
+        }
+        else
+        {
+            continue;
+        }
+        if ( 0 == seen.first )
+        {
+            seen.first = sig;
+        }
+    }
+    return seen;
+}
+
+/** @brief The spy hears the card: every report, done and failure. */
+static void card_listen(void)
+{
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+    ao_spy_subscribe(APP_FLASH_DONE_SIG);
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+}
+
+/** @brief A fetch of "snake" that announced an install, answered ok, its card held. */
+static void card_held(void)
+{
+    fetch_fresh();
+    card_listen();
+    fetch_to_the_put_as(true);
+    fetch_put_is_whole();
+    put_rsp("snake", KODE_OK);
+
+    card_seen_t const seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.answers, "the fetch is answered as ever");
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_OK, seen.why);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones, "the card closed before the install");
+    TEST_ASSERT_EQUAL_UINT(0U, seen.fails);
+}
+
+TEST_CASE("a fetch that announces nothing ends its card with the unnamed done",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    fetch_fresh();
+    card_listen();
+    fetch_to_the_put();
+    fetch_put_is_whole();
+    put_rsp("snake", KODE_OK);
+
+    card_seen_t const seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT(1U, seen.answers);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.dones, "the card the fetch raised is left up");
+    run_ticks(3U * APPMGR_WAIT_BEAT_TICKS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, card_seen().reports,
+        "a fetch that announced nothing kept saying its percent");
+
+    QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+TEST_CASE("a fetch that announces an install keeps its card at 0 % after its answer",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    card_held();
+
+    run_ticks((2U * APPMGR_WAIT_BEAT_TICKS) + 10U);
+    card_seen_t const seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, seen.reports,
+        "the held card fell silent, and the LED with it");
+    TEST_ASSERT_EQUAL_STRING("snake", seen.project);
+    TEST_ASSERT_EQUAL_UINT(0U, seen.dones);
+
+    QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+TEST_CASE("the install a fetch announced takes its card over without closing it",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    card_held();
+
+    ask_https("https://example.invalid/snake.bin");
+    card_seen_t seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones,
+        "the card closed between the fetch and its install");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.reports, "the install said nothing of its own");
+
+    let_the_open_expire();                       /* past the hold's deadline too */
+    seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.fails, "the install did not end its own card");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones,
+        "the hold outlived the install that took it over");
+
+    QActive_unsubscribeAll(ao_spy());
+    (void)net_seen();
+    fetch_end();
+}
+
+TEST_CASE("a terminal install takes the card over too",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    uint32_t const len = image_named("snake");
+
+    card_held();
+
+    ask_recv_named(len, 0xDEADBEEFU, false, "snake");
+    raw_armed(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, card_seen().dones,
+        "the card closed between the fetch and its install");
+
+    feed(s_named_img, (uint16_t)len);            /* the write ends, CRC refused */
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    (void)card_seen();
+    run_ticks(APPMGR_HOLD_TEST_TICKS + 10U);
+    card_seen_t const seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones,
+        "the hold outlived the install that took it over");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.reports,
+        "the hold kept saying 0 % after the install took the card");
+    QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+TEST_CASE("the card a fetch kept ends when its install does not come",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    card_held();
+
+    run_ticks(APPMGR_HOLD_TEST_TICKS - 50U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, card_seen().dones, "the card closed early");
+
+    run_ticks(100U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, card_seen().dones,
+        "a card waiting for an install that never comes stands for ever");
+    run_ticks(3U * APPMGR_WAIT_BEAT_TICKS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, card_seen().reports,
+        "the beat went on after the card ended");
+
+    QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+TEST_CASE("an install refused before it begins ends the card a fetch kept",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    card_held();
+
+    ask_recv(0U, 0U, false);                     /* no size: refused in idle */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, card_seen().dones,
+        "a refused install left the card waiting for it");
+    run_ticks(APPMGR_HOLD_TEST_TICKS + 10U);
+    card_seen_t const seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT(0U, seen.reports);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.dones, "the card was ended twice");
+
+    QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+TEST_CASE("another request ends the card a fetch kept before it is taken",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    card_held();
+
+    ask_get("ladder", GET_URL);                  /* another app's folder */
+    card_seen_t const seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT(1U, seen.dones);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_FLASH_DONE_SIG, seen.first,
+        "the next card rose over the one before, which wore another app's face");
+    TEST_ASSERT_EQUAL_STRING("ladder", seen.project);
+
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_ERROR, 0U);       /* the second fetch ends */
+    QActive_unsubscribeAll(ao_spy());
+    ao_spy_drain();
+    fetch_end();
+}
+
+TEST_CASE("a fetch that announces an install and fails leaves its card to the install",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    fetch_fresh();
+    card_listen();
+
+    ask_get_as("snake", GET_URL, true);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_ERROR, 0U);       /* the server says no */
+    card_seen_t seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT(1U, seen.answers);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APPDATA_GET_FETCH, seen.why,
+        "the fetch's own answer changed");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.fails,
+        "the app's data is not the install: its failure raised the failure sheet");
+    TEST_ASSERT_EQUAL_UINT(0U, seen.dones);
+
+    run_ticks(APPMGR_HOLD_TEST_TICKS + 10U);
+    seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.dones, "the deadline did not end the card");
+
+    QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+TEST_CASE("the fetch's request carries whether an install follows",
+          "[appmgr_ao][appdata_get][hold]")
+{
+    fetch_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        appmgr_appdata_get_request("snake", GET_URL, true, ao_spy()));
+
+    const QEvt *e = NULL;
+    TEST_ASSERT_TRUE(pdTRUE == xQueueReceive(AO_AppMgr->eQueue, &e, 0U));
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_REQ_SIG, (int)e->sig);
+    TEST_ASSERT_TRUE(((AppDataGetReqEvt const *)e)->install);
+    QF_gc(e);
     fetch_end();
 }
