@@ -591,6 +591,75 @@ kode_status_t kdrv_storage_list_path(const char *path,
     return KODE_OK;
 }
 
+kode_status_t kdrv_storage_names_open(const char *path, kdrv_names_t *walk)
+{
+    char          real[KDRV_REAL_PATH_MAX];
+    kode_status_t rc = KODE_DENIED;
+
+    if ( NULL != walk )
+    {
+        kdrv_storage_names_close(walk);
+        if ( NULL != path )
+        {
+            rc = real_path(path, real, sizeof(real));
+        }
+    }
+    if ( KODE_OK == rc )
+    {
+        /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+        walk->dir = opendir(real);
+        if ( NULL == walk->dir )
+        {
+            rc = KODE_ERROR;
+        }
+    }
+    return rc;
+}
+
+bool kdrv_storage_names_next(kdrv_names_t *walk, uint32_t max, kdrv_name_cb cb, void *ctx)
+{
+    bool     more = (NULL != walk) && (NULL != walk->dir) && (NULL != cb);
+    bool     go   = more;
+    uint32_t read = 0U;
+
+    while ( go && (read < max) )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; walk->dir is the DIR opendir() gave */
+        DIR * const dir = (DIR *)walk->dir;
+        /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+        const struct dirent * const ent = readdir(dir);
+
+        if ( NULL == ent )
+        {
+            more = false;
+            go   = false;
+        }
+        else if ( (strcmp(ent->d_name, ".") != 0) && (strcmp(ent->d_name, "..") != 0) )
+        {
+            read += 1U;
+            go    = cb(ent->d_name, ctx);
+        }
+        else
+        {
+            /* not a name of the directory's own */
+        }
+    }
+    return more;
+}
+
+void kdrv_storage_names_close(kdrv_names_t *walk)
+{
+    if ( (NULL != walk) && (NULL != walk->dir) )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; walk->dir is the DIR opendir() gave */
+        DIR * const dir = (DIR *)walk->dir;
+
+        /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+        (void)closedir(dir);
+        walk->dir = NULL;
+    }
+}
+
 /* ---- Changing the tree ---------------------------------------------------
  * mkdir, rm, rmdir and rename/mv. Every one of them but kdrv_storage_unlink()
  * is exactly real_path() then one libc call - the mapping is the only thing

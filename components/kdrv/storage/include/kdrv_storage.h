@@ -165,6 +165,55 @@ typedef bool (*kdrv_path_entry_cb)(const char *name, bool is_dir,
 kode_status_t kdrv_storage_list_path(const char *path,
                                      kdrv_path_entry_cb cb, void *ctx);
 
+/**
+ * @brief Called once per name of a directory, files and directories alike.
+ *
+ * @param name One path component, not a path. Valid for this call only.
+ * @param ctx  Whatever the caller handed kdrv_storage_names_next().
+ * @return false to end this call: the walk goes on at the next name.
+ */
+typedef bool (*kdrv_name_cb)(const char *name, void *ctx);
+
+/** @brief A walk over one directory by name, a few names a call. */
+typedef struct {
+    void *dir;   /**< The directory open for the walk; NULL when none is. */
+} kdrv_names_t;
+
+/**
+ * @brief Open @p path for a walk by name.
+ *
+ * kdrv_storage_list_path() without the stat of each entry, and a few names at
+ * a time: what a step can afford over a directory of any size. The directory
+ * stays open until kdrv_storage_names_close(); a walk is closed before its
+ * volume is unmounted.
+ *
+ * @param path Absolute, normalised, virtual; a directory on a volume.
+ * @param walk Receives the walk. Required; one already open is closed first.
+ * @return KODE_OK, KODE_DENIED for a bad path or a NULL walk, KODE_ERROR when
+ *         the volume will not mount or the directory will not open.
+ */
+kode_status_t kdrv_storage_names_open(const char *path, kdrv_names_t *walk);
+
+/**
+ * @brief The walk's next names: @p cb for each, at most @p max of them.
+ *
+ * "." and ".." are left out, and not counted.
+ *
+ * @param walk The walk; one that is not open has no names.
+ * @param max  The most names this call reads.
+ * @param cb   Called once per name. Required.
+ * @param ctx  Passed through unexamined.
+ * @return true while the directory may have names left; false once it has
+ *         none, or would not be read.
+ */
+bool kdrv_storage_names_next(kdrv_names_t *walk, uint32_t max, kdrv_name_cb cb, void *ctx);
+
+/**
+ * @brief End a walk: its directory is closed.
+ * @param walk The walk; one that is not open is left as it is.
+ */
+void kdrv_storage_names_close(kdrv_names_t *walk);
+
 /* ---- Changing the tree -----------------------------------------------
  * The four ways the console may reorganise a volume. Every one of them is
  * "real_path() then one libc call" - the same shape kdrv_storage_stat() has -

@@ -263,6 +263,105 @@ TEST_CASE("a listing carries directories as well as files",
     TEST_ASSERT_TRUE(walk_saw(&w, "logs", true));
 }
 
+/** @brief Collect one name of the walk by name alone, which carries nothing else. */
+static bool name_cb(const char *name, void *ctx)
+{
+    return walk_cb(name, false, 0U, ctx);
+}
+
+/** @brief Collect one name and refuse the rest. */
+static bool name_stop_cb(const char *name, void *ctx)
+{
+    (void)walk_cb(name, false, 0U, ctx);
+    return false;
+}
+
+/** @brief Names one call of a walk reads in the cases here: more than these directories hold. */
+#define NAMES_ALL  16U
+
+/* A pass over a whole directory reads its names and asks nothing of each
+ * entry, so it costs one walk whatever the directory holds. */
+TEST_CASE("the walk by name gives every name of one level, files and folders alike",
+          "[kdrv_storage_path]")
+{
+    walk_t       w;
+    kdrv_names_t walk = { NULL };
+
+    storage_fresh();
+    fake_media_put_fs_file("notes.txt", "hello");
+    fake_media_put_fs_dir("logs");
+    fake_media_put_fs_path("logs/inner.txt", "deep", 4U);
+
+    (void)memset(&w, 0, sizeof(w));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_names_open("/storage", &walk));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_storage_names_next(&walk, NAMES_ALL, name_cb, &w),
+        "a directory read to its end was said to have more");
+    kdrv_storage_names_close(&walk);
+    TEST_ASSERT_TRUE(walk_saw(&w, "notes.txt", false));
+    TEST_ASSERT_TRUE(walk_saw(&w, "logs", false));
+    TEST_ASSERT_FALSE_MESSAGE(walk_saw(&w, "inner.txt", false), "the walk went a level down");
+    TEST_ASSERT_FALSE(walk_saw(&w, ".", false));
+    TEST_ASSERT_NULL(walk.dir);
+
+    (void)memset(&w, 0, sizeof(w));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_names_open("/storage", &walk));
+    TEST_ASSERT_TRUE(kdrv_storage_names_next(&walk, NAMES_ALL, name_stop_cb, &w));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, w.count, "a callback that says stop was called again");
+    kdrv_storage_names_close(&walk);
+}
+
+/* A step reads a few names: the walk goes on where the last call left it,
+ * and gives each name once. */
+TEST_CASE("the walk by name reads at most the names asked for, and goes on from there",
+          "[kdrv_storage_path]")
+{
+    walk_t       w;
+    kdrv_names_t walk  = { NULL };
+    unsigned     calls = 0U;
+    char         name[16];
+
+    storage_fresh();
+    for ( unsigned i = 0U; 7U > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "f%u.txt", i);
+        fake_media_put_fs_file(name, "x");
+    }
+
+    (void)memset(&w, 0, sizeof(w));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_names_open("/storage", &walk));
+    TEST_ASSERT_TRUE(kdrv_storage_names_next(&walk, 2U, name_cb, &w));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, w.count, "a call read more names than it was asked for");
+    for ( bool more = true; more && (NAMES_ALL > calls); ++calls )
+    {
+        more = kdrv_storage_names_next(&walk, 2U, name_cb, &w);
+    }
+    kdrv_storage_names_close(&walk);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(7U, w.count, "a name was given twice, or not at all");
+    for ( unsigned i = 0U; 7U > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "f%u.txt", i);
+        TEST_ASSERT_TRUE(walk_saw(&w, name, false));
+    }
+}
+
+TEST_CASE("the walk by name refuses what the path walk refuses", "[kdrv_storage_path]")
+{
+    walk_t       w;
+    kdrv_names_t walk = { NULL };
+
+    storage_fresh();
+    (void)memset(&w, 0, sizeof(w));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_storage_names_open("/storage", NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_storage_names_open(NULL, &walk));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_storage_names_open("/storage/nowhere", &walk));
+    TEST_ASSERT_NULL(walk.dir);
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_storage_names_next(&walk, NAMES_ALL, name_cb, &w),
+        "a walk that is not open had names");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_names_open("/storage", &walk));
+    TEST_ASSERT_FALSE(kdrv_storage_names_next(&walk, NAMES_ALL, NULL, &w));
+    kdrv_storage_names_close(&walk);
+}
+
 /** @brief Collect one flat-walk entry, which carries no is_dir. */
 static bool flat_cb(const char *name, uint32_t size, void *ctx)
 {

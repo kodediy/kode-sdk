@@ -791,6 +791,9 @@ enum KodeSignals {
                                  *   STORAGE_CAT_LINES_PER_STEP per step, for
                                  *   the same reason STORAGE_WRITE_NEXT_SIG
                                  *   exists.                                  */
+    STORAGE_SWEEP_NEXT_SIG,     /**< AO_Storage private QTimeEvt: the next
+                                 *   pass over the card's root for what a cut
+                                 *   copy of an app left there.               */
     STORAGE_COPY_NEXT_SIG,      /**< AO_Storage private QTimeEvt: the next
                                  *   chunk of the `cp` in progress. One 32 KB
                                  *   chunk per step, for the same reason

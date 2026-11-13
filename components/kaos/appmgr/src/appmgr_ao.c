@@ -78,7 +78,7 @@
  * between one app and the next. */
 #define APPMGR_BACKUP_IDLE_TICKS KQP_TICKS_PER_MS(KODE_APP_BACKUP_IDLE_MS)
 #define APPMGR_BACKUP_GAP_TICKS  KQP_TICKS_PER_MS(KODE_APP_BACKUP_GAP_MS)
-#define APPMGR_KEEP_TMP_SUFFIX ".tmp"   /**< What a copy's name carries while it is written. */
+#define APPMGR_KEEP_TMP_SUFFIX KODE_CARD_APP_TMP   /**< What a copy's name carries while it is written. */
 #define APPMGR_BYTE_BITS       8U       /**< Bits in a byte: a word read from a chunk shifts by it. */
 #define APPMGR_LOAN_BITS       8U       /**< Bits of to_return: one per buffer a medium can lend. */
 /* Re-publish the percent this often while the card writes a copy. AO_Power

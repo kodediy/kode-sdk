@@ -4,6 +4,7 @@
  * @brief AO_Storage: the one file at a time, and who is allowed to close it.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -9207,4 +9208,224 @@ TEST_CASE("a card a script mounted again is published as mounted again",
     TEST_ASSERT_NOT_NULL_MESSAGE(c, "the card a script mounted again went untold");
     TEST_ASSERT_TRUE(c->mounted);
     kdrv_storage_unmount(KDRV_MEDIUM_SD);
+}
+
+/* ---- A card mounted again after a copy failed on it ------------------------
+ * The mount is told, so AO_AppMgr asks about the copies again, and swept; the
+ * copies asked again are refused at once, so nothing mounts the card again. */
+
+TEST_CASE("a card mounted again after a copy failed on it is told, swept, and takes no copy",
+          "[storage_ao][yield][card][sweep]")
+{
+    static const uint8_t payload[8] = { 0U };
+    uint32_t written = 0U;
+
+    fetch_fresh();
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    fake_media_put_sd_path("dead.bin.tmp", "half", 4U);
+    ao_spy_subscribe(STORAGE_CARD_SIG);
+
+    ask_write_other(s_big, sizeof(s_big), true);
+    TEST_ASSERT_TRUE(spoil_open_file(fake_media_sd_dir(), YIELD_FILE));
+    drain_write();
+    TEST_ASSERT_NOT_EQUAL_INT(KODE_OK, write_answer_other(&written));
+
+    ao_spy_drain();
+    settle_card();
+    const StorageCardEvt * const c = take_card();
+    TEST_ASSERT_NOT_NULL_MESSAGE(c, "the card mounted again went untold");
+    TEST_ASSERT_TRUE(c->mounted);
+    for ( unsigned i = 0U; 32U > i; ++i )
+    {
+        (void)qf_support_tick(AO_Storage, 2U);
+    }
+    TEST_ASSERT_FALSE_MESSAGE(on_sd("dead.bin.tmp"), "the card mounted again was not swept");
+
+    ao_spy_drain();
+    ask_write_other(payload, sizeof(payload), true);
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, write_answer_other(&written));
+    settle_card();
+    TEST_ASSERT_NULL_MESSAGE(take_card(), "a refused copy mounted the card again");
+}
+
+/* ---- What a cut copy leaves on the card is collected when the card mounts ------
+ * A copy of an app is written as `<name>.bin.tmp` and put on `<name>.bin`,
+ * the file there moved aside as `<name>.bin.bak` for the moment in between.
+ * A reset can leave either behind. */
+
+/** @brief Mount the card from unmounted, and let AO_Storage do what follows a mount. */
+static void mount_and_settle(void)
+{
+    ask_mount_job();
+    TEST_ASSERT_TRUE(run_sd_job());
+    for ( unsigned i = 0U; 32U > i; ++i )
+    {
+        (void)qf_support_tick(AO_Storage, 2U);
+    }
+    ao_spy_drain();
+}
+
+TEST_CASE("a card that mounts loses the temporary of a copy cut short, and no other file",
+          "[storage_ao][sweep]")
+{
+    storage_fresh();
+    card_out();
+    fake_media_put_sd_path("old.bin.tmp", "half", 4U);
+    fake_media_put_sd_path("old.bin", "whole", 5U);
+    fake_media_put_sd_path("notes.tmp", "mine", 4U);
+    fake_media_put_sd_path("song.bin.tmp.txt", "mine", 4U);
+
+    mount_and_settle();
+
+    TEST_ASSERT_FALSE_MESSAGE(on_sd("old.bin.tmp"), "the temporary of a cut copy stayed");
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("old.bin"), "an app's copy was taken for a leftover");
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("notes.tmp"), "a temporary that is not a copy's was removed");
+    TEST_ASSERT_TRUE(on_sd("song.bin.tmp.txt"));
+    TEST_ASSERT_TRUE_MESSAGE(log_says("'old.bin.tmp'"), "a file was removed and nothing said");
+}
+
+/* A reset between the two renames of a replacement: the name is free and the
+ * file that was on it waits as its backup. */
+TEST_CASE("a backup whose name is free goes back on its name", "[storage_ao][sweep]")
+{
+    storage_fresh();
+    card_out();
+    fake_media_put_sd_path("game.bin.bak", "old", 3U);
+
+    mount_and_settle();
+
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("game.bin"), "the file that was on the name is lost");
+    TEST_ASSERT_FALSE(on_sd("game.bin.bak"));
+    TEST_ASSERT_TRUE(log_says("'game.bin.bak'"));
+}
+
+TEST_CASE("a backup whose name is taken is removed, and the file on the name stays",
+          "[storage_ao][sweep]")
+{
+    char  path[512];
+    char  body[8] = { 0 };
+    FILE *f;
+
+    storage_fresh();
+    card_out();
+    fake_media_put_sd_path("game.bin", "new", 3U);
+    fake_media_put_sd_path("game.bin.bak", "old", 3U);
+
+    mount_and_settle();
+
+    TEST_ASSERT_FALSE_MESSAGE(on_sd("game.bin.bak"), "a backup nobody needs stayed");
+    (void)snprintf(path, sizeof(path), "%s/game.bin", fake_media_sd_dir());
+    f = fopen(path, "rb");
+    TEST_ASSERT_NOT_NULL_MESSAGE(f, "the file on the name went with its backup");
+    TEST_ASSERT_EQUAL_UINT(3U, fread(body, 1U, 3U, f));
+    (void)fclose(f);
+    TEST_ASSERT_EQUAL_STRING("new", body);
+}
+
+/* The file being written may be a copy's own temporary. */
+TEST_CASE("nothing is collected while a transfer is in flight; it is once the transfer ends",
+          "[storage_ao][sweep]")
+{
+    storage_fresh();
+    card_out();
+    fake_media_put_sd_path("old.bin.tmp", "half", 4U);
+    hold_reader();
+
+    mount_and_settle();
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("old.bin.tmp"), "the card was swept under a transfer");
+
+    release_reader();
+    (void)qf_support_tick(AO_Storage, 4U);
+    TEST_ASSERT_FALSE_MESSAGE(on_sd("old.bin.tmp"), "the sweep the transfer held never ran");
+}
+
+/* A copy's temporary waits between its write's answer and its move, and a
+ * sweep can run in between: the file written last is left alone. */
+TEST_CASE("the sweep leaves the temporary written last for its move",
+          "[storage_ao][sweep]")
+{
+    static const uint8_t payload[8] = { 0U };
+
+    storage_fresh();
+    card_out();
+    mount_and_settle();
+    ask_write("/sdcard/live.bin.tmp", payload, sizeof(payload));
+    const QEvt * const done = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(done);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StorageWriteRspEvt *)done)->status);
+    TEST_ASSERT_TRUE(on_sd("live.bin.tmp"));
+    fake_media_put_sd_path("dead.bin.tmp", "half", 4U);
+
+    card_out();
+    storage_write_abandon_request(ao_spy());    /* any event served: the card is told gone */
+    (void)qf_support_pump(AO_Storage, 1U);
+    mount_and_settle();
+
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("live.bin.tmp"), "the sweep took a copy's temporary before its move");
+    TEST_ASSERT_FALSE_MESSAGE(on_sd("dead.bin.tmp"), "the temporary of a cut copy stayed");
+}
+
+/* A root of any size is walked a few names a step, so the AOs below this one
+ * run between two (rule 5). */
+TEST_CASE("the sweep walks the root a few names at a time",
+          "[storage_ao][sweep]")
+{
+    char     name[32];
+    unsigned passes = 0U;
+
+    storage_fresh();
+    card_out();
+    for ( unsigned i = 0U; 100U > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "file%03u.txt", i);
+        fake_media_put_sd_path(name, "x", 1U);
+    }
+
+    mount_and_settle();
+
+    for ( unsigned i = 0U; (0U == passes) && (fake_klog_count() > i); ++i )
+    {
+        const char * const at = strstr(fake_klog_line(i), "the card's root is walked in ");
+        if ( NULL != at )
+        {
+            passes = (unsigned)strtoul(&at[strlen("the card's root is walked in ")], NULL, 10);
+        }
+    }
+    /* A walk of one pass is not said: no line is one step, or no end. */
+    TEST_ASSERT_TRUE_MESSAGE(1U < passes,
+        "a hundred names were walked in one step, or the walk never ended");
+}
+
+/* More leftovers than one pass takes, among more files than a listing's page:
+ * the walk goes on pass after pass to the root's last name. */
+TEST_CASE("the sweep walks the whole root, however many files and leftovers it holds",
+          "[storage_ao][sweep]")
+{
+    char name[32];
+
+    storage_fresh();
+    card_out();
+    for ( unsigned i = 0U; 60U > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "app%02u.bin", i);
+        fake_media_put_sd_path(name, "x", 1U);
+    }
+    for ( unsigned i = 0U; 20U > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "app%02u.bin.tmp", i);
+        fake_media_put_sd_path(name, "x", 1U);
+    }
+
+    mount_and_settle();
+
+    for ( unsigned i = 0U; 20U > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "app%02u.bin.tmp", i);
+        TEST_ASSERT_FALSE_MESSAGE(on_sd(name), "a leftover past the first pass stayed");
+    }
+    for ( unsigned i = 0U; 60U > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "app%02u.bin", i);
+        TEST_ASSERT_TRUE_MESSAGE(on_sd(name), "a file that is no leftover was removed");
+    }
 }

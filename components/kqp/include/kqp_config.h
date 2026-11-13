@@ -1695,6 +1695,8 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 #define KODE_CARD_APP_PREFIX    "/sdcard/"
 /** @brief The end of the path of an app's copy on the card, after its name. */
 #define KODE_CARD_APP_SUFFIX    ".bin"
+/** @brief What the path of an app's copy carries after that while it is written. */
+#define KODE_CARD_APP_TMP       ".tmp"
 
 /** @brief The longest AO_AppMgr waits for AO_Storage or AO_Net to answer an
  *         open or a STAT of the card; then it gives that wait up. */

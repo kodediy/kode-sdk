@@ -129,6 +129,13 @@ _Static_assert(KODE_APP_ICON_BYTES == KAPP_ICON_BYTES,
 _Static_assert(KODE_APP_BUILD_LEN == KAPP_BUILD_LEN,
                "KODE_APP_BUILD_LEN twins KAPP_BUILD_LEN");
 
+/* ---- What a cut copy of an app leaves on the card ---------------------------- */
+#define STORAGE_REPLACE_BAK   ".bak"       /**< What a replacement adds to the name of the file it moves aside. */
+#define STORAGE_SWEEP_TMP     KODE_CARD_APP_SUFFIX KODE_CARD_APP_TMP     /**< The end of the name of a copy being written. */
+#define STORAGE_SWEEP_BAK     KODE_CARD_APP_SUFFIX STORAGE_REPLACE_BAK   /**< The end of the name of a copy moved aside. */
+#define STORAGE_SWEEP_BATCH   8U           /**< Leftovers one pass over the root sees to; a pass that fills it is followed by another. */
+#define STORAGE_SWEEP_NAMES   32U          /**< Names of the root one pass reads, so a step stays short (rule 5). */
+
 /* A listing publishes at most one page plus its end marker at once, all
  * medium-tier events, so the pool must outlive that burst. */
 _Static_assert((KODE_STORAGE_LIST_MAX + 1U) < KQP_MEDIUM_POOL_COUNT,
@@ -365,11 +372,21 @@ typedef struct {
     bool           w_retried;                  /**< One other medium, once.   */
     uint32_t       w_tag;                      /**< The writer's number, for its answer. */
     bool           w_yields;                   /**< The write gives way to a download. */
-    char           w_name[KODE_APP_FILE_MAX];  /**< Kept for the retry.       */
+    char           w_name[KODE_APP_FILE_MAX];  /**< Kept for the retry, and after the
+                                                *   write: a copy's temporary waits
+                                                *   there for its move, and the sweep
+                                                *   leaves it alone. */
 
     /* The card's mount, as STORAGE_CARD_SIG last told it. */
     bool           card_told;                  /**< A mounted card was the last news. */
     bool           card_fresh;                 /**< A call mounted the card again: the mount told is not this one. */
+
+    /* The pass over a card just mounted, for what a cut copy of an app left. */
+    QTimeEvt       s_pacer;                    /**< 10 ms between passes.     */
+    bool           sweep_owed;                 /**< A card mounted and its root is still to be walked. */
+    bool           sweep_paced;                /**< s_pacer is armed: the next pass waits for it. */
+    kdrv_names_t   sweep_walk;                 /**< The walk of the root, open between passes. */
+    uint16_t       sweep_passes;               /**< Passes the walk has taken so far. */
     QTimeEvt       w_pacer;             /**< 10 ms between chunks.             */
 
     /* The card test. One chunk per step, paced by its own timer for the same
@@ -4478,7 +4495,7 @@ static void answer_pair_replace(QActive *who, uint8_t op, const char *src,
     kode_status_t rc;
 
     warn_if_card("replace", dst);
-    int const wrote = snprintf(bak, sizeof(bak), "%s.bak", dst);
+    int const wrote = snprintf(bak, sizeof(bak), "%s" STORAGE_REPLACE_BAK, dst);
     if ( (0 > wrote) || ((size_t)wrote >= sizeof(bak)) )
     {
         KLOG_W(TAG, "replace '%s': no room for a backup name", dst);
@@ -6339,6 +6356,7 @@ static void write_begin(Storage * const me, StorageWriteEvt const * const req)
 
 static void sd_job_complete(Storage * const me, kode_status_t rc,
                             uint32_t value);
+static void sweep_stop(Storage * const me);
 static void sd_script_overrun(Storage * const me);
 static void sd_test_finish(Storage * const me);
 static bool sd_test_restore_width(Storage * const me, SdThen then);
@@ -6476,6 +6494,10 @@ static bool sd_job_submit(Storage * const me, SdOp op, SdThen then)
     if ( (!me->worker_up) || me->sdj.busy )
     {
         return false;
+    }
+    if ( (SD_OP_READ != op) && (SD_OP_WRITE != op) )
+    {
+        sweep_stop(me);   /* no directory stays open across a mount, an unmount or a format */
     }
     me->sdj.op   = op;
     me->sdj.then = then;
@@ -7726,6 +7748,10 @@ void Storage_ctor(void)
     me->writer = NULL;
     me->card_told  = false;
     me->card_fresh = false;
+    me->sweep_owed  = false;
+    me->sweep_paced = false;
+    kdrv_storage_names_close(&me->sweep_walk);    /* none open in a fresh AO */
+    me->sweep_passes = 0U;
     me->t_phase = 0U;
     me->c_who  = NULL;
     me->p_who  = NULL;
@@ -7760,6 +7786,7 @@ void Storage_ctor(void)
     QTimeEvt_ctorX(&me->t_pacer, &me->super, STORAGE_TEST_NEXT_SIG, 0U);
     QTimeEvt_ctorX(&me->c_pacer, &me->super, STORAGE_CAT_NEXT_SIG, 0U);
     QTimeEvt_ctorX(&me->p_pacer, &me->super, STORAGE_COPY_NEXT_SIG, 0U);
+    QTimeEvt_ctorX(&me->s_pacer, &me->super, STORAGE_SWEEP_NEXT_SIG, 0U);
     QTimeEvt_ctorX(&me->r_idle,  &me->super, STORAGE_RECV_IDLE_SIG, 0U);
     QTimeEvt_ctorX(&me->x_pacer, &me->super, STORAGE_APP_WIPE_NEXT_SIG, 0U);
 #if CONFIG_KODE_LOWPOWER
@@ -8656,6 +8683,12 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case STORAGE_SWEEP_NEXT_SIG: {
+            /* The pause is over: the pass is made when this event has been served. */
+            me->sweep_paced = false;
+            status = Q_HANDLED();
+            break;
+        }
         case STORAGE_WRITE_ABANDON_REQ_SIG: {
             write_abandon(me, Q_EVT_CAST(StorageWriteAbandonEvt));
             status = Q_HANDLED();
@@ -9293,6 +9326,8 @@ static void card_note(Storage * const me)
                 ev->mounted    = now;
                 me->card_told  = now;
                 me->card_fresh = false;
+                me->sweep_owed = now;      /* a card just mounted has its root walked */
+                sweep_stop(me);            /* from its first name */
                 QACTIVE_PUBLISH(&ev->super, &me->super);
             }
             /* else: told at the next event served, the news still owed. */
@@ -9301,6 +9336,212 @@ static void card_note(Storage * const me)
         {
             me->card_fresh = false;
         }
+    }
+}
+
+/* ---- What a cut copy of an app leaves on the card ----------------------------
+ * A copy is written as `<name>.bin.tmp` and put on `<name>.bin`, the file
+ * there moved aside as `<name>.bin.bak` between the two renames. A reset can
+ * leave either. A card that mounts has its root walked by name for them, with
+ * no transfer in flight: the file being written may be a copy's own temporary.
+ */
+
+/** @brief The leftovers one pass found, by name. */
+typedef struct {
+    char    name[STORAGE_SWEEP_BATCH][KODE_APP_FILE_MAX];  /**< Names in the root, each with its NUL. */
+    uint8_t count;                                         /**< How many.                            */
+} sweep_found_t;
+
+/**
+ * @brief Whether @p name ends in @p end and has something before it.
+ * @param name A file's name.
+ * @param end  The ending looked for.
+ * @return true when it does.
+ */
+static bool name_ends(const char *name, const char *end)
+{
+    size_t const n = strlen(name);
+    size_t const e = strlen(end);
+
+    return (n > e) && (strcmp(&name[n - e], end) == 0);
+}
+
+/**
+ * @brief One name of the card's root: keep it when it is a leftover.
+ *
+ * A name too long for the path of an app's copy is no leftover of one.
+ *
+ * @param name The name.
+ * @param ctx  The sweep_found_t of the pass.
+ * @return false when the pass has all it sees to.
+ */
+static bool sweep_cb(const char *name, void *ctx)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; ctx is the sweep_found_t the pass handed the walk */
+    sweep_found_t * const f = (sweep_found_t *)ctx;
+
+    if ( (strlen(name) < sizeof(f->name[0]))
+        && (name_ends(name, STORAGE_SWEEP_TMP) || name_ends(name, STORAGE_SWEEP_BAK)) )
+    {
+        (void)snprintf(f->name[f->count], sizeof(f->name[0]), "%s", name);
+        f->count += 1U;
+    }
+    return STORAGE_SWEEP_BATCH > f->count;
+}
+
+/**
+ * @brief See to one leftover: a temporary goes, a backup goes back on its
+ *        name when the name is free and goes when it is taken.
+ * @param name Its name in the card's root.
+ * @return true when it is no longer there under that name.
+ */
+static bool sweep_leftover(const char *name)
+{
+    char          path[KODE_PATH_MAX];
+    kode_status_t rc;
+
+    (void)snprintf(path, sizeof(path), STORAGE_SD_ROOT "/%s", name);
+    if ( name_ends(name, STORAGE_SWEEP_TMP) )
+    {
+        rc = kdrv_storage_unlink(path);
+        if ( KODE_OK == rc )
+        {
+            KLOG_N(TAG, "'%s' is what a copy cut short left on the card; removed", name);
+        }
+    }
+    else
+    {
+        /* The name the backup was moved aside from: its path less the ending. */
+        char         dst[KODE_PATH_MAX];
+        kdrv_stat_t  st   = { .exists = false, .is_dir = false, .size = 0U };
+        size_t const keep = strlen(path) - strlen(STORAGE_REPLACE_BAK);
+
+        (void)snprintf(dst, sizeof(dst), "%.*s", (int)keep, path);
+        if ( (kdrv_storage_stat(dst, &st) == KODE_OK) && st.exists )
+        {
+            rc = kdrv_storage_unlink(path);
+            if ( KODE_OK == rc )
+            {
+                KLOG_N(TAG, "'%s' is the backup of a name that is taken; removed", name);
+            }
+        }
+        else
+        {
+            rc = kdrv_storage_rename(path, dst);
+            if ( KODE_OK == rc )
+            {
+                KLOG_N(TAG, "'%s' is the backup of a name left free; put back on it", name);
+            }
+        }
+    }
+    if ( KODE_OK != rc )
+    {
+        KLOG_W(TAG, "'%s' on the card could not be collected", name);
+    }
+    return KODE_OK == rc;
+}
+
+/**
+ * @brief End the walk of the root, where it is: a mount, an unmount or a
+ *        format comes, and a walk that goes on starts from the first name.
+ * @param me The AO.
+ */
+static void sweep_stop(Storage * const me)
+{
+    kdrv_storage_names_close(&me->sweep_walk);
+    me->sweep_passes = 0U;
+}
+
+/**
+ * @brief Whether a name of the card's root is the file this AO wrote last.
+ *
+ * A copy's temporary is written whole, then put on its name by a second
+ * request: a pass can come between the two, and the file is not a leftover.
+ *
+ * @param me   The AO.
+ * @param name A name of the card's root.
+ * @return true for the file the last write went to.
+ */
+static bool sweep_is_live(const Storage * const me, const char *name)
+{
+    char path[KODE_PATH_MAX];
+
+    (void)snprintf(path, sizeof(path), STORAGE_SD_ROOT "/%s", name);
+    return strcmp(path, me->w_name) == 0;
+}
+
+/**
+ * @brief One pass over the next names of the card's root, and what it found
+ *        seen to.
+ *
+ * A pass reads STORAGE_SWEEP_NAMES names at most, and stops at
+ * STORAGE_SWEEP_BATCH leftovers: the next pass goes on a pacer tick later, so
+ * the AOs below this one run between two (rule 5). The walk ends at the last
+ * name, or when the card goes. A walk of more than one pass says how many
+ * it took.
+ *
+ * @param me The AO, with no transfer in flight and no call to the card out.
+ */
+static void sweep_pass(Storage * const me)
+{
+    sweep_found_t found;
+    bool          more = false;
+
+    found.count = 0U;
+    if ( !kdrv_storage_mounted(KDRV_MEDIUM_SD) )
+    {
+        /* the card went: there is nothing left to walk */
+    }
+    else if ( (NULL == me->sweep_walk.dir)
+             && (kdrv_storage_names_open(STORAGE_SD_ROOT, &me->sweep_walk) != KODE_OK) )
+    {
+        KLOG_W(TAG, "the card's root could not be read for what a cut copy left");
+    }
+    else
+    {
+        me->sweep_passes = (uint16_t)(me->sweep_passes + 1U);
+        more = kdrv_storage_names_next(&me->sweep_walk, STORAGE_SWEEP_NAMES, sweep_cb, &found);
+        for ( uint8_t i = 0U; i < found.count; ++i )
+        {
+            if ( sweep_is_live(me, found.name[i]) )
+            {
+                KLOG_D(TAG, "'%s' is the file written last; it waits for its move", found.name[i]);
+            }
+            else
+            {
+                (void)sweep_leftover(found.name[i]);
+            }
+        }
+    }
+    if ( more )
+    {
+        me->sweep_paced = true;
+        QTimeEvt_armX(&me->s_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    }
+    else
+    {
+        if ( (NULL != me->sweep_walk.dir) && (1U < me->sweep_passes) )
+        {
+            /* Said only for a root of many names: a mount stays quiet. */
+            KLOG_I(TAG, "the card's root is walked in %u passes", (unsigned)me->sweep_passes);
+        }
+        sweep_stop(me);
+        me->sweep_owed = false;
+    }
+}
+
+/**
+ * @brief Walk the root of a card just mounted, once nothing is in flight.
+ *
+ * Run at the end of every event served.
+ *
+ * @param me The AO.
+ */
+static void sweep_pump(Storage * const me)
+{
+    if ( me->sweep_owed && (!me->sweep_paced) && (!busy(me)) && (!me->sdj.busy) )
+    {
+        sweep_pass(me);
     }
 }
 
@@ -9374,6 +9615,7 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
             card_pump(me);
             wait_pump(me);
             card_note(me);
+            sweep_pump(me);
         }
     }
     return status;
