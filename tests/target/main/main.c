@@ -94,6 +94,7 @@ static void link_standard_layer(void)
     (void)kode_file_space("flash", &space_total, &space_free);
     (void)kode_file_exists("flash/x");
     (void)kode_file_list("flash");
+    (void)kode_file_list_from("flash", 0U);
     (void)kode_file_delete("flash/x");
     (void)kode_file_create_folder("flash/x");
     (void)kode_file_rename("flash/x", "y");

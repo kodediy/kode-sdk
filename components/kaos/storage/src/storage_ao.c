@@ -596,13 +596,13 @@ void storage_cat_request(QActive *who, const char *path, uint32_t max)
 /**
  * @brief Build and post one StoragePathEvt on behalf of a blocked task.
  *
- * Shared by the two public wait variants, which differ in one field.
+ * Shared by the public wait variants.
  *
  * @param wait Where the answer goes. Not NULL.
  * @param gen  This request's tag.
  * @param op   storage_path_op_t.
  * @param path Absolute, normalised, virtual.
- * @param offset CAT only; ignored otherwise.
+ * @param offset A CAT's first byte, or a LIST's entries to skip; ignored otherwise.
  * @param max  CAT only; ignored otherwise.
  */
 static void path_request_wait(StorageWaiter *wait, uint32_t gen, uint8_t op,
@@ -634,6 +634,12 @@ void storage_path_request_wait(StorageWaiter *wait, uint32_t gen, uint8_t op,
                                const char *path)
 {
     path_request_wait(wait, gen, op, path, 0U, 0U);
+}
+
+void storage_list_request_wait(StorageWaiter *wait, uint32_t gen, const char *path,
+                               uint32_t skip)
+{
+    path_request_wait(wait, gen, (uint8_t)STORAGE_PATH_LIST, path, skip, 0U);
 }
 
 void storage_cat_request_wait(StorageWaiter *wait, uint32_t gen,
@@ -1403,7 +1409,8 @@ typedef struct {
                                  *   publish the walk as events.            */
     QActive    *ask;           /**< An asking AO the page is posted to, or
                                  *   NULL.                                  */
-    uint32_t    skip;          /**< An ask's entries still to leave out.    */
+    uint32_t    skip;          /**< An ask's or a blocked task's entries
+                                 *   still to leave out.                    */
     uint32_t    base;          /**< An ask's first entry's position.        */
 } PathListCtx;
 
@@ -1482,7 +1489,13 @@ static bool publish_path_entry(const char *name, bool is_dir, uint32_t size,
     {
         /* A blocked task asked: the row goes straight into its own array and
          * nothing is published. Its array's size is the ceiling, not
-         * KODE_STORAGE_LIST_MAX, and it is told when there was more. */
+         * KODE_STORAGE_LIST_MAX, and it is told when there was more. The
+         * entries earlier pages gave are left out first. */
+        if ( 0U < c->skip )
+        {
+            --c->skip;
+            return true;
+        }
         if ( c->published >= c->wait->cap )
         {
             c->capped = true;
@@ -1564,13 +1577,14 @@ static void list_ask(const char *path, uint32_t skip)
  * An ask's listing is list_ask()'s.
  *
  * @param path The directory.
- * @param skip An ask's entries to skip; nobody else's.
+ * @param skip An ask's or a blocked task's entries to skip; 0 for a console
+ *             listing, which asks for none.
  */
 static void do_path_list(const char *path, uint32_t skip)
 {
     PathListCtx ctx = { .dir_path = path, .published = 0U,
                         .truncated = false, .capped = false,
-                        .wait = s_waiter, .ask = NULL, .skip = 0U, .base = 0U };
+                        .wait = s_waiter, .ask = NULL, .skip = skip, .base = 0U };
 
     if ( NULL != s_ask_rsp )
     {
@@ -1581,8 +1595,14 @@ static void do_path_list(const char *path, uint32_t skip)
         kdrv_storage_list_path(path, &publish_path_entry, &ctx);
     if ( ctx.capped )
     {
-        KLOG_W(TAG, "listing stopped at %u entries (the ceiling)",
-               (unsigned)ctx.published);
+        /* A blocked task reads a long folder a page at a time and is told
+         * there is more (`cut`): a full page is no fault of its own. A
+         * listing published whole has met its ceiling, and that is said. */
+        if ( NULL == s_waiter )
+        {
+            KLOG_W(TAG, "listing stopped at %u entries (the ceiling)",
+                   (unsigned)ctx.published);
+        }
     }
     else if ( ctx.truncated )
     {
@@ -1590,7 +1610,22 @@ static void do_path_list(const char *path, uint32_t skip)
     }
     else if ( KODE_OK != rc )
     {
-        KLOG_W(TAG, "cannot list '%s'", path);
+        /* A folder that is not there is an answer, not a fault: `appdata_ls`
+         * lists two that a board with no app data never made. */
+        kdrv_stat_t st = { .exists = false, .is_dir = false, .size = 0U };
+
+        if ( (kdrv_storage_stat(path, &st) == KODE_OK) && !st.exists )
+        {
+            KLOG_D(TAG, "nothing at '%s' to list", path);
+        }
+        else
+        {
+            KLOG_W(TAG, "cannot list '%s'", path);
+        }
+    }
+    else
+    {
+        /* Listed whole. */
     }
 
     if ( NULL != s_waiter )
