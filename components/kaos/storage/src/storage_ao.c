@@ -3532,6 +3532,92 @@ static void answer_pair_move(QActive *who, uint8_t op, const char *src,
     post_path_rsp(who, op, rc, src_missing, false, 0U);
 }
 
+/**
+ * @brief Answer a STORAGE_PAIR_REPLACE: put @p src on @p dst, which may be taken.
+ *
+ * FatFs f_rename() will not overwrite, so a taken name is moved aside to
+ * `<dst>.bak`, @p src is put on it and the backup unlinked, as
+ * answer_text_line_write() does for a rewrite; a step that fails puts the
+ * original back. One dispatch step, one answer. A reset between the two
+ * renames leaves the name free, the original as `<dst>.bak` and @p src where it
+ * was: the next replacement of the name puts its copy there and removes that
+ * backup. A `<dst>.bak` that is there is removed, and said.
+ */
+static void answer_pair_replace(QActive *who, uint8_t op, const char *src,
+                                const char *dst)
+{
+    char          bak[KODE_PATH_MAX];
+    kdrv_stat_t   st   = { .exists = false, .is_dir = false, .size = 0U };
+    kode_status_t rc;
+
+    warn_if_card("replace", dst);
+    int const wrote = snprintf(bak, sizeof(bak), "%s.bak", dst);
+    if ( (0 > wrote) || ((size_t)wrote >= sizeof(bak)) )
+    {
+        KLOG_W(TAG, "replace '%s': no room for a backup name", dst);
+        post_path_rsp(who, op, KODE_DENIED, false, false, 0U);
+        return;
+    }
+    if ( (kdrv_storage_stat(dst, &st) != KODE_OK) || !st.exists )
+    {
+        /* The name is free (or the volume is not there, which the rename
+         * says): the one rename is the whole replacement. */
+        rc = kdrv_storage_rename(src, dst);
+        if ( KODE_OK != rc )
+        {
+            KLOG_W(TAG, "replace '%s' -> '%s' failed", src, dst);
+        }
+        else if ( kdrv_storage_unlink(bak) == KODE_OK )
+        {
+            KLOG_N(TAG, "replace '%s': '%s' was there and is removed", dst, bak);
+        }
+        else
+        {
+            /* no backup in the way: the usual case */
+        }
+        post_path_rsp(who, op, rc, false, false, 0U);
+        return;
+    }
+    if ( st.is_dir )
+    {
+        KLOG_W(TAG, "replace '%s': a folder is on the name", dst);
+        post_path_rsp(who, op, KODE_DENIED, false, false, 0U);
+        return;
+    }
+    if ( kdrv_storage_unlink(bak) == KODE_OK )
+    {
+        KLOG_N(TAG, "replace '%s': '%s' was there and is removed", dst, bak);
+    }
+    rc = kdrv_storage_rename(dst, bak);
+    if ( KODE_OK != rc )
+    {
+        KLOG_W(TAG, "replace '%s': could not move the file there aside", dst);
+        post_path_rsp(who, op, KODE_ERROR, false, false, 0U);
+        return;
+    }
+    rc = kdrv_storage_rename(src, dst);
+    if ( KODE_OK != rc )
+    {
+        if ( kdrv_storage_rename(bak, dst) == KODE_OK )
+        {
+            KLOG_W(TAG, "replace '%s' -> '%s' failed; the file there is put back",
+                   src, dst);
+        }
+        else
+        {
+            KLOG_E(TAG, "replace '%s' failed and the file there would not go "
+                        "back: it stays as '%s', the copy as '%s'", dst, bak, src);
+        }
+        post_path_rsp(who, op, KODE_ERROR, false, false, 0U);
+        return;
+    }
+    if ( kdrv_storage_unlink(bak) != KODE_OK )
+    {
+        KLOG_W(TAG, "replace '%s' done, backup '%s' left behind", dst, bak);
+    }
+    post_path_rsp(who, op, KODE_OK, false, false, 0U);
+}
+
 /* ---- cp -------------------------------------------------------------------
  * The only thing in kodeOS that holds a reader and a writer at once. One
  * 32 KB chunk per dispatch step with a QTimeEvt between, so AO_Gui, AO_Radio
@@ -4368,8 +4454,8 @@ static void handle_path_req(Storage * const me, const StoragePathEvt *q)
 /**
  * @brief Dispatch one StoragePairEvt by storage_pair_op_t.
  *
- * MOVE is one rename() answered in this step; COPY holds two handles and
- * answers many steps later. The default refuses, as in handle_path_req().
+ * MOVE and REPLACE are renames answered in this step; COPY holds two handles
+ * and answers many steps later. The default refuses, as in handle_path_req().
  */
 static void handle_pair_req(Storage * const me, const StoragePairEvt *q)
 {
@@ -4386,6 +4472,17 @@ static void handle_pair_req(Storage * const me, const StoragePairEvt *q)
                 break;
             }
             answer_pair_move(q->who, q->op, q->src, q->dst);
+            break;
+        }
+        case STORAGE_PAIR_REPLACE: {
+            if ( busy(me) )
+            {
+                KLOG_W(TAG, "a transfer is already in flight; replace of '%s' "
+                            "refused", q->dst);
+                post_path_rsp(q->who, q->op, KODE_DENIED, false, false, 0U);
+                break;
+            }
+            answer_pair_replace(q->who, q->op, q->src, q->dst);
             break;
         }
         case STORAGE_PAIR_COPY: {
@@ -7624,8 +7721,10 @@ static bool turn_wanted(QEvt const * const e)
             break;
         }
         case STORAGE_PAIR_REQ_SIG: {
-            wanted = ((storage_pair_op_t)Q_EVT_CAST(StoragePairEvt)->op
-                      == STORAGE_PAIR_MOVE);
+            storage_pair_op_t const op =
+                (storage_pair_op_t)Q_EVT_CAST(StoragePairEvt)->op;
+
+            wanted = (STORAGE_PAIR_MOVE == op) || (STORAGE_PAIR_REPLACE == op);
             break;
         }
         default: {
