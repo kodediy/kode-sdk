@@ -171,6 +171,9 @@ _Static_assert(KDRV_DISPLAY_CACHE_LINE == CONFIG_CACHE_L2_CACHE_LINE_SIZE,
  * window follows (gram_settle()). */
 #define GRAM_CHUNK_PX          64U
 #define GRAM_BYTES_PER_PX      2U
+#define GRAM_BLUE_MASK         0x001FU  /**< RGB565's blue: its low five bits.  */
+#define GRAM_GREEN_MASK        0x07E0U  /**< Its green: the six in the middle.  */
+#define GRAM_RED_SHIFT         11U      /**< Its red starts at this bit.        */
 #define GRAM_WORD_BYTES        4U
 #define GRAM_PKT_BYTES         (1U + (GRAM_CHUNK_PX * GRAM_BYTES_PER_PX))
 #define GRAM_PKT_WORDS         ((GRAM_PKT_BYTES + GRAM_WORD_BYTES - 1U) / GRAM_WORD_BYTES)
@@ -214,7 +217,8 @@ static esp_lcd_panel_io_handle_t s_io;
 static bool                     s_brought_up;
 /* s_keep_lit: this firmware is leaving the frame on the glass, and the restart
  * must not reset the panel; written here, read by the restart's handler.
- * s_video_owed: a resume is waiting for its first frame to start the scan-out. */
+ * s_video_owed: the panel shows its memory and the scan-out waits for the first
+ * whole frame, after a resume or a link that came up over a panel awake. */
 static volatile bool            s_keep_lit;
 static bool                     s_rail_was_off;  /* This boot powered the panel: see panel_power_on(). */
 static bool                     s_video_owed;
@@ -1660,8 +1664,13 @@ static kode_status_t link_down(void)
     /* The video ends in the vertical blanking (on_vsync()). A board that sees
      * no vsync in time goes on regardless: a dark line is less harm than a
      * glass that never rests. */
-    s_video_stopped  = false;
-    s_video_stop_ask = true;
+    if ( s_video_owed )
+    {
+        KLOG_D(TAG, "link down: the video was still owed, nothing to stop");
+    }
+    s_video_stopped  = s_video_owed;   /* owed, it never started: nothing to stop */
+    s_video_stop_ask = !s_video_owed;
+    s_video_owed     = false;
     for ( uint32_t waited = 0U; !s_video_stopped; ++waited )
     {
         if ( LINK_STOP_WAIT_MS <= waited )
@@ -1739,13 +1748,19 @@ static kode_status_t window_whole(void)
  *
  * The same rail, bus and control IO as the bring-up, then a plain video panel
  * of the same timing - not the CO5300 object, whose init would read the ID and
- * send the table - started with the generic init, which only turns the scan-out
- * on. The panel is told nothing but a brightness of 0.
+ * send the table. The framebuffers are new: black, and possibly at other
+ * addresses than before.
  *
- * The framebuffers are new: black, and possibly at other addresses than
- * before. The link comes back in the state the bring-up leaves, dark until the
- * first frame, and that first frame lights the panel at the last level asked
- * for (hold_release()).
+ * Over a panel that is awake nothing is written to the panel and the scan-out
+ * is left owed (s_video_owed): the glass goes on showing its memory at the
+ * brightness it has, and the first whole frame starts the video
+ * (video_begin()). No hold stands, so a brightness asked for meanwhile is
+ * written at once.
+ *
+ * Over a panel that sleeps the generic init turns the scan-out on at once and
+ * the panel is told a brightness of 0. The link comes back in the state the
+ * bring-up leaves, dark until the first frame, and that first frame lights the
+ * panel at the last level asked for (hold_release()).
  *
  * @return KODE_OK; KODE_DENIED before the bring-up; KODE_ERROR when a part
  *         refused (the link is left down, nothing standing).
@@ -1774,11 +1789,24 @@ static kode_status_t link_up(void)
     {
         KLOG_W(TAG, "link up: the full window was not written");
     }
-    esp_err_t err = esp_lcd_new_panel_dpi(s_bus, &dpi_cfg, &s_panel);
+    /* A panel that is awake shows its memory, the last picture and the hour
+     * written over it. Video started on the new, empty framebuffers would
+     * write black into that memory, and the glass taken dark to hide it is a
+     * blink on every wake from the ASLEEP rest. So the scan-out waits for the
+     * renderer's first whole frame, as it does after a restart with the glass
+     * kept lit (video_begin()), and the brightness is left alone. A panel
+     * that slept (OFF) has no picture to keep: it starts black and dark. */
+    bool const keeps = !s_asleep;
+    esp_err_t  err   = esp_lcd_new_panel_dpi(s_bus, &dpi_cfg, &s_panel);
+
     if ( ESP_OK != err )
     {
         KLOG_E(TAG, "dpi panel: %s", esp_err_to_name(err));
         s_panel = NULL;
+    }
+    else if ( keeps )
+    {
+        MIPI_DSI_BRIDGE.dpi_rsv_dpi_data.dpi_rsv_data = DSI_UNDERFLOW_BLACK;
     }
     else
     {
@@ -1788,9 +1816,12 @@ static kode_status_t link_up(void)
             KLOG_E(TAG, "dpi init: %s", esp_err_to_name(err));
         }
     }
-    if ( ESP_OK == err )
+    if ( (ESP_OK == err) && !keeps )
     {
         link_watch();
+    }
+    if ( ESP_OK == err )
+    {
         err = link_events_on();
     }
     if ( ESP_OK != err )
@@ -1807,12 +1838,6 @@ static kode_status_t link_up(void)
 
     link_frames_reset();
     s_fb_epoch = s_fb_epoch + 1U;
-    s_ready = true;
-    /* The scan-out is black until the renderer's first frame, so the panel
-     * goes dark with it and lights at that frame, as after the bring-up. */
-    kode_status_t const dark = brightness_write(0U);
-    s_held     = true;
-    s_held_pct = s_last_pct;
     s_up_ms    = khal_time_ms();
 #if CONFIG_KODEOS_SCREENSHOT
     shown_rows(0, (int32_t)KBSP_LCD_V_RES);
@@ -1820,13 +1845,33 @@ static kode_status_t link_up(void)
     KLOG_D(TAG, "link up: framebuffers 0x%08lx and 0x%08lx, epoch %lu",
            (unsigned long)(uintptr_t)s_fb[0], (unsigned long)(uintptr_t)s_fb[1],
            (unsigned long)s_fb_epoch);
-    if ( KODE_OK == dark )
+    if ( keeps )
     {
-        KLOG_D(TAG, "link up: video scanning black, brightness 0");
+        /* Nothing is scanned until the first frame, which goes to fb 0 itself:
+         * the engine starts there, always. */
+        s_back       = 0U;
+        s_video_owed = true;
+        s_held       = false;
+        s_ready      = true;
+        KLOG_D(TAG, "link up: the panel keeps its picture; video from the first frame");
     }
     else
     {
-        KLOG_W(TAG, "link up: video scanning black, brightness 0 not written");
+        s_ready = true;
+        /* The scan-out is black until the renderer's first frame, so the panel
+         * goes dark with it and lights at that frame, as after the bring-up. */
+        kode_status_t const dark = brightness_write(0U);
+
+        s_held     = true;
+        s_held_pct = s_last_pct;
+        if ( KODE_OK == dark )
+        {
+            KLOG_D(TAG, "link up: video scanning black, brightness 0");
+        }
+        else
+        {
+            KLOG_W(TAG, "link up: video scanning black, brightness 0 not written");
+        }
     }
     return KODE_OK;
 }
@@ -1986,7 +2031,7 @@ static esp_err_t panel_resume(uint8_t percent)
 }
 
 /**
- * @brief Start the scan-out a resume left waiting, on the first whole frame.
+ * @brief Start the scan-out left owed (s_video_owed), on the first whole frame.
  *
  * Called by the flush paths once the frame has been handed to esp_lcd.
  * esp_lcd_panel_init() starts the DPI on fb 0, always, so the frame has to be
@@ -2041,11 +2086,11 @@ static esp_err_t video_begin(uint8_t *shown)
     s_flipping = false;
     if ( ESP_OK != err )
     {
-        KLOG_E(TAG, "resume: the scan-out would not start (%s)", esp_err_to_name(err));
+        KLOG_E(TAG, "the scan-out would not start on the first frame (%s)", esp_err_to_name(err));
     }
     else
     {
-        KLOG_I(TAG, "resume: video from the first frame, %lu ms after the panel was up",
+        KLOG_I(TAG, "video from the first frame, %lu ms after the link came up",
                (unsigned long)(khal_time_ms() - s_up_ms));
     }
     return err;
@@ -2344,9 +2389,10 @@ static kode_status_t gram_settle(void)
  * @brief Send @p count pixels as RAMWR then RAMWRC packets into the window
  *        already set.
  *
- * Low byte first, the order LVGL keeps RGB565 in and the DPI path sends it
- * in: a pixel of white or black reads the same either way, a grey does not.
- * The window walks itself, so a packet need not end on a row.
+ * Over a command write the CO5300 takes each pixel low byte first with its
+ * fields in BGR order, red in the low five bits, which is not the order the
+ * video carries. Callers hand over the RGB565 LVGL keeps, and red and blue are
+ * swapped here. The window walks itself, so a packet need not end on a row.
  *
  * @return KODE_OK; KODE_TIMEOUT when a FIFO did not make room.
  */
@@ -2368,10 +2414,14 @@ static kode_status_t gram_pixels(const uint16_t *rgb565, size_t count)
         pkt[0] = cmd;
         for ( size_t i = 0U; i < k; ++i )
         {
-            uint16_t const p = rgb565[done + i];
+            uint16_t const p    = rgb565[done + i];
+            uint16_t const blue = (uint16_t)(p & GRAM_BLUE_MASK);
+            uint16_t const red  = (uint16_t)(p >> GRAM_RED_SHIFT);
+            uint16_t const q    = (uint16_t)((uint16_t)(blue << GRAM_RED_SHIFT)
+                                             | (uint16_t)(p & GRAM_GREEN_MASK) | red);
 
-            pkt[1U + (GRAM_BYTES_PER_PX * i)] = (uint8_t)(p & GRAM_BYTE_MASK);
-            pkt[2U + (GRAM_BYTES_PER_PX * i)] = (uint8_t)(p >> GRAM_BYTE_BITS);
+            pkt[1U + (GRAM_BYTES_PER_PX * i)] = (uint8_t)(q & GRAM_BYTE_MASK);
+            pkt[2U + (GRAM_BYTES_PER_PX * i)] = (uint8_t)(q >> GRAM_BYTE_BITS);
         }
         st   = gram_send(pkt, 1U + (GRAM_BYTES_PER_PX * k));
         cmd  = DCS_RAMWRC;

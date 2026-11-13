@@ -215,9 +215,12 @@ void *kdrv_display_front_buffer(void);
  * than two frames waits out the gap, so a ramp can call this in a loop - and
  * a FIFO that stays full is reported, never waited on for ever.
  *
- * Before the first frame has reached the glass nothing is written: the value
+ * While the panel is dark for its first frame nothing is written: the value
  * is kept, the last one asked for wins, and the first frame lights the panel
- * at it - at 100 when nothing was asked (see kdrv_display_init()).
+ * at it - at 100 when nothing was asked. That is after kdrv_display_init()
+ * and after kdrv_display_link_set(true) over a panel that sleeps. A link that
+ * comes up over a panel that is awake leaves the glass lit on its memory, and
+ * the value is written at once.
  *
  * @return KODE_OK, also for a value kept until the first frame; KODE_DENIED
  *         before init; KODE_TIMEOUT when the command FIFO did not drain, and
@@ -249,14 +252,23 @@ kode_status_t kdrv_display_brightness(uint8_t percent);
  * meanwhile, and kdrv_display_back_buffer() and kdrv_display_front_buffer()
  * answer NULL.
  *
- * Up raises the rail, the bus and the control IO again and restarts the
- * scan-out with no panel reset and no init sequence: the panel is told a
- * brightness of 0 and nothing else. The scan-out replaces what the panel's
- * memory held with black from the first frame it sends. The link then behaves
- * as after kdrv_display_init(): dark until the first frame reaches the glass,
- * which lights the panel at the last level kdrv_display_brightness() was
- * given. A panel put to sleep before the link went down is still asleep;
- * kdrv_display_panel_sleep(false) wakes it.
+ * Up raises the rail, the bus and the control IO again, with no panel reset
+ * and no init sequence. What follows depends on the panel:
+ *
+ * - **Awake** (the link went down over a lit glass). The panel goes on showing
+ *   its memory at the brightness it has, and nothing is written to it. The
+ *   scan-out does not start: the first whole frame flushed starts it, so the
+ *   glass goes from the picture it kept to that frame with no black between
+ *   them. Until then kdrv_display_brightness() writes at once, onto the kept
+ *   picture, and kdrv_display_panel_sleep() works as ever; a link taken down
+ *   again before any frame has no video to stop.
+ * - **Asleep** (kdrv_display_panel_sleep(true) before the link went down). The
+ *   scan-out starts at once on the new, black framebuffers and the panel is
+ *   told a brightness of 0: its memory is black from the first frame sent. The
+ *   link then behaves as after kdrv_display_init(), dark until the first frame
+ *   reaches the glass, which lights the panel at the last level
+ *   kdrv_display_brightness() was given. The panel is still asleep;
+ *   kdrv_display_panel_sleep(false) wakes it.
  *
  * **The framebuffers are new.** Down frees both, and up allocates a pair that
  * is black and not necessarily at the addresses the old one had; nothing in
@@ -308,8 +320,9 @@ uint32_t kdrv_display_buffers_epoch(void);
  * sleep and 120 ms to wake. Going to sleep writes a brightness of 0 first; a
  * wake writes none, so the glass is lit again only when the caller gives a
  * level with kdrv_display_brightness() - which takes effect at once, unless
- * the link has just come back and no frame has reached the glass yet, in which
- * case it is kept and lights that first frame (see kdrv_display_link_set()).
+ * the link has just come back over a sleeping panel and no frame has reached
+ * the glass yet, in which case it is kept and lights that first frame (see
+ * kdrv_display_link_set()).
  *
  * Needs the link up (the commands ride on it): a caller that wants the link
  * down and the panel asleep sleeps the panel first. A panel put to sleep stays
@@ -355,8 +368,9 @@ kode_status_t kdrv_display_reset_low(void);
  *
  * The CO5300 takes a window that starts on an even column and an even row and
  * is an even number of columns and rows wide: @p x, @p y, @p w and @p h are
- * all even, and anything else is refused rather than rounded. A pixel is sent
- * low byte first, the order LVGL keeps RGB565 in.
+ * all even, and anything else is refused rather than rounded. A pixel is
+ * RGB565 as LVGL keeps it; the driver puts it in the order the panel's memory
+ * takes (BGR, low byte first).
  *
  * After the pixels the panel's window is set back to the whole glass, because
  * the video scan-out streams a full frame through it: a window left on the
