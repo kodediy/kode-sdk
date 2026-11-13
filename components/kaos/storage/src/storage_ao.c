@@ -56,8 +56,6 @@ _Static_assert(sizeof(APPDATA_ICON_TMP) <= KAPP_DATA_ICON_MAX,
 #define APPDATA_WHY_MAX     128U   /**< The words saying why a put was refused, terminator included. */
 #define APPDATA_WHY_WRITE   "a file would not write"   /**< Why a put failed while writing a file. */
 #define APPDATA_WHY_PLACE   "the new files would not go in place"   /**< Why a put failed putting them in place. */
-#define APPDATA_TOP_DIR     "/storage/.kode"  /**< The tree's first level, internal. */
-#define APPDATA_TREE_DIR    APPDATA_TOP_DIR "/appsdata" /**< Holds one folder per app. */
 
 #define WIPE_FILES_MAX      KODE_APP_LIST_MAX /**< Images the wipe keeps from one medium's root: as many as the launcher lists. */
 #define WIPE_OS_IMAGE       "kodeos.bin"      /**< kodeOS's own image: never an app's file. */
@@ -406,6 +404,14 @@ typedef struct {
     uint8_t       *g_buf;          /**< app.json then icon.k64; this AO's.    */
     uint16_t       g_json_len;     /**< Bytes of app.json at the head of g_buf. */
     uint16_t       g_icon_len;     /**< 0 when there is no icon step.         */
+    AppDataMedium  g_medium;       /**< Where the folder is written: the
+                                    *   internal partition, or the card.      */
+    bool           g_spill;        /**< The internal partition had no room for
+                                    *   this new folder, so it goes to the
+                                    *   card.                                  */
+    char           g_full[APPDATA_WHY_MAX]; /**< Why the internal partition had
+                                    *   no room, for the put that went to the
+                                    *   card and failed there.                 */
     bool           g_fresh;        /**< The folder was not there when the put
                                     *   began: a failed put takes it away.     */
 
@@ -2037,8 +2043,16 @@ static kode_status_t appdata_rm_tree(const char *folder)
     return KODE_OK;
 }
 
+static void warn_if_card(const char *verb, const char *path);
+
 /**
- * @brief Delete @p project's folder on the internal partition, and say so.
+ * @brief Delete @p project's data folder, from the medium that holds it, and
+ *        say so.
+ *
+ * The internal partition first: a folder there is the one the reader shows,
+ * so it is the one removed, and a card folder of the same name is left where
+ * it is and said so. A folder only on the card, which a put that found no room
+ * inside wrote there, is removed from the card.
  *
  * @param me      The AO, for busy().
  * @param project The app's project name.
@@ -2049,16 +2063,9 @@ static kode_status_t appdata_rm(const Storage * const me, const char *project)
     char        folder[APPDATA_FOLDER_MAX];
     char        card[APPDATA_FOLDER_MAX];
     kdrv_stat_t st;
-
-    /* Said before anything is removed and whatever the outcome: an operator
-     * who copied a folder onto a card and then deletes "it" has to be told
-     * which one this verb can reach. */
-    if ( kdrv_storage_mounted(KDRV_MEDIUM_SD)
+    bool const  on_card = kdrv_storage_mounted(KDRV_MEDIUM_SD)
         && appdata_folder_path(card, sizeof(card), APPDATA_MEDIUM_SD, project)
-        && (kdrv_storage_stat(card, &st) == KODE_OK) && st.exists && st.is_dir )
-    {
-        KLOG_N(TAG, "card folder for '%s' left alone", project);
-    }
+        && (kdrv_storage_stat(card, &st) == KODE_OK) && st.exists && st.is_dir;
 
     if ( busy(me) )
     {
@@ -2081,10 +2088,29 @@ static kode_status_t appdata_rm(const Storage * const me, const char *project)
         return KODE_ERROR;
     }
 
-    kode_status_t const rc = appdata_rm_tree(folder);
+    kode_status_t rc = appdata_rm_tree(folder);
+    if ( (KODE_ERROR == rc) && on_card )
+    {
+        /* Nothing inside: the folder is the card's. */
+        warn_if_card("appdata_rm", card);
+        rc = appdata_rm_tree(card);
+        if ( KODE_OK == rc )
+        {
+            KLOG_N(TAG, "the data folder of '%s' is gone from the card",
+                   project);
+        }
+        return rc;
+    }
     if ( KODE_OK == rc )
     {
         KLOG_N(TAG, "the data folder of '%s' is gone", project);
+    }
+    if ( on_card )
+    {
+        /* Said whatever became of the internal one: an operator who copied a
+         * folder onto a card and then deletes "it" has to be told which one
+         * this verb reached. */
+        KLOG_N(TAG, "card folder for '%s' left alone", project);
     }
     return rc;
 }
@@ -2405,12 +2431,15 @@ static void wipe_step(Storage * const me)
  * @param project The project the put was for.
  * @param rc      How it ended.
  * @param icon    The folder has an icon: read only when @p rc is KODE_OK.
+ * @param medium  Where the folder was written: the card is said, the internal
+ *                partition is the default and is not.
  * @param why     Read only when @p rc is not KODE_OK: why it was not written.
  */
 static void appdata_put_say(const char *project, kode_status_t rc, bool icon,
-                            const char *why)
+                            AppDataMedium medium, const char *why)
 {
-    const char *what = "json, no icon";
+    const char *what  = "json, no icon";
+    const char *where = "";
 
     if ( KODE_OK != rc )
     {
@@ -2421,7 +2450,12 @@ static void appdata_put_say(const char *project, kode_status_t rc, bool icon,
     {
         what = "json, icon";
     }
-    KLOG_N(TAG, "the data folder of '%s' is in place (%s)", project, what);
+    if ( APPDATA_MEDIUM_SD == medium )
+    {
+        where = " on the card";
+    }
+    KLOG_N(TAG, "the data folder of '%s' is in place%s (%s)", project, where,
+           what);
 }
 
 /**
@@ -2496,6 +2530,40 @@ static kode_status_t appdata_put_mkdir(const char *path)
         return KODE_OK;
     }
     return st;
+}
+
+/**
+ * @brief Make the two levels above a data folder, on whichever medium it is
+ *        on: `.kode` and `.kode/appsdata`. One that is there is as good as new.
+ *
+ * @param folder The data folder's path, `<root>/.kode/appsdata/<project>`.
+ * @return KODE_OK, or what the medium said.
+ */
+static kode_status_t appdata_put_make_tree(const char *folder)
+{
+    char          tree[APPDATA_FOLDER_MAX];
+    char          top[APPDATA_FOLDER_MAX];
+    char         *cut;
+    kode_status_t rc = KODE_ERROR;
+
+    (void)snprintf(tree, sizeof(tree), "%s", folder);
+    cut = strrchr(tree, '/');
+    if ( NULL != cut )
+    {
+        *cut = '\0';
+        (void)snprintf(top, sizeof(top), "%s", tree);
+        cut = strrchr(top, '/');
+    }
+    if ( NULL != cut )
+    {
+        *cut = '\0';
+        rc = appdata_put_mkdir(top);
+        if ( KODE_OK == rc )
+        {
+            rc = appdata_put_mkdir(tree);
+        }
+    }
+    return rc;
 }
 
 /**
@@ -2640,7 +2708,9 @@ static void appdata_put_sweep(const char *folder)
  * removes is removed with the AO free.
  *
  * A failed put leaves the folder that was there as it was, less the
- * temporaries; a folder the put made is taken away again.
+ * temporaries; a folder the put made is taken away again. A put that went to
+ * the card for want of room inside and failed there is answered
+ * KODE_NO_RESOURCES, as with no card, and says both.
  *
  * @param me  The AO.
  * @param rc  How it ended.
@@ -2649,18 +2719,22 @@ static void appdata_put_sweep(const char *folder)
 static void appdata_put_finish(Storage * const me, kode_status_t rc,
                                const char *why)
 {
-    QActive * const who   = me->g_who;
-    bool const      fresh = me->g_fresh;
-    bool const      icon  = (0U != me->g_icon_len);
-    char            project[KDRV_SLOT_PROJECT_MAX];
-    char            folder[APPDATA_FOLDER_MAX];
+    QActive * const     who    = me->g_who;
+    bool const          fresh  = me->g_fresh;
+    bool const          icon   = (0U != me->g_icon_len);
+    bool const          spill  = me->g_spill;
+    AppDataMedium const medium = me->g_medium;
+    kode_status_t       answer = rc;
+    const char         *reason = why;
+    char                project[KDRV_SLOT_PROJECT_MAX];
+    char                folder[APPDATA_FOLDER_MAX];
+    char                told[APPDATA_WHY_MAX + 64U];
 
     (void)snprintf(project, sizeof(project), "%s", me->g_project);
     me->g_who      = NULL;
     appdata_put_free(me);
     if ( (KODE_OK != rc)
-        && appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
-                               project) )
+        && appdata_folder_path(folder, sizeof(folder), medium, project) )
     {
         appdata_put_drop_tmps(folder);
         if ( fresh )
@@ -2668,22 +2742,54 @@ static void appdata_put_finish(Storage * const me, kode_status_t rc,
             (void)appdata_rm_tree(folder);
         }
     }
-    appdata_put_say(project, rc, icon, why);
+    if ( (KODE_OK != rc) && spill )
+    {
+        /* The folder had no room inside and the card would not take it: that
+         * is `full`, as it is without a card, and says both. */
+        (void)snprintf(told, sizeof(told), "%s; the card would not take it "
+                       "either", me->g_full);
+        reason = told;
+        answer = KODE_NO_RESOURCES;
+    }
+    appdata_put_say(project, answer, icon, medium, reason);
     if ( NULL != who )
     {
-        appdata_put_answer(who, project, rc, false);
+        appdata_put_answer(who, project, answer, false);
     }
 }
 
-/** @brief What a put weighs on the internal partition, and what is free for it. */
+/**
+ * @brief The driver's name for a data folder's medium.
+ * @param medium APPDATA_MEDIUM_FS or APPDATA_MEDIUM_SD.
+ * @return KDRV_MEDIUM_SD for the card, KDRV_MEDIUM_FS for anything else.
+ */
+static kdrv_medium_t appdata_kdrv_medium(AppDataMedium medium)
+{
+    kdrv_medium_t km = KDRV_MEDIUM_FS;
+
+    if ( APPDATA_MEDIUM_SD == medium )
+    {
+        km = KDRV_MEDIUM_SD;
+    }
+    return km;
+}
+
+/** @brief What a put weighs on a medium, and what is free for it. */
 typedef struct {
     bool     there;  /**< The folder is there already: a replacement.          */
     uint32_t need;   /**< Bytes it takes: its files in whole clusters, and for a
                       *   new folder the folder's own cluster.                  */
     uint32_t keep;   /**< Bytes a new folder must leave free: the floor; 0 for a
-                      *   replacement.                                          */
+                      *   replacement, and on the card.                         */
     uint64_t avail;  /**< Bytes free on the volume, 0 when it cannot say.       */
 } AppDataRoom;
+
+/** @brief Where a put goes. */
+typedef struct {
+    AppDataMedium medium;  /**< The medium the folder is written on.            */
+    AppDataRoom   weight;  /**< What it weighs there, and what is free.         */
+    bool          spill;   /**< A new folder that had no room inside: the card. */
+} AppDataPlan;
 
 /**
  * @brief Round a size up to whole clusters: what a file of that size takes.
@@ -2698,32 +2804,34 @@ static uint32_t appdata_clusters(uint32_t len, uint32_t cluster)
 }
 
 /**
- * @brief Whether the internal partition has room for a put, and what it
- *        weighs.
+ * @brief Whether the put fits on a medium, and what it weighs.
  *
  * A put is charged what it takes on the volume: the bytes of its app.json and
- * of its icon, each rounded up to the volume's cluster. A new folder is
- * charged one cluster more, its own, and must leave KODE_APPDATA_FREE_MIN_BYTES
- * free besides: a data folder may arrive before its app, and nothing else
- * bounds how many do. A folder that is there is replaced by writing the new
- * pair beside the old, so it is charged the pair, which is the room of its
- * temporaries, and no floor.
+ * of its icon, each rounded up to the volume's cluster. On the internal
+ * partition a new folder is charged one cluster more, its own, and must leave
+ * KODE_APPDATA_FREE_MIN_BYTES free besides: a data folder may arrive before
+ * its app, and nothing else bounds how many do. A folder that is there is
+ * replaced by writing the new pair beside the old, so it is charged the pair,
+ * which is the room of its temporaries, and no floor. The card is the user's:
+ * it keeps no floor of ours, and a put is refused there only when the card
+ * says it has less free than the charge. A volume that cannot say lets the
+ * write decide.
  *
- * @param folder   The folder's path on the internal partition, mounted.
+ * @param medium   The medium: the internal partition or the card, mounted.
+ * @param folder   The folder's path on it.
  * @param json_len Bytes of the app.json the put carries.
  * @param icon_len Bytes of the icon.k64 it carries: 0 for none.
  * @param[out] r   What the put weighs and what is free.
- * @return false when the partition cannot take the put; true when it can, or
- *         cannot say and the write decides.
+ * @return false when the medium cannot take the put.
  */
-static bool appdata_room(const char *folder, uint32_t json_len,
-                         uint32_t icon_len, AppDataRoom *r)
+static bool appdata_room(AppDataMedium medium, const char *folder,
+                         uint32_t json_len, uint32_t icon_len, AppDataRoom *r)
 {
+    kdrv_medium_t const km = appdata_kdrv_medium(medium);
     kdrv_stat_t    st;
     uint64_t       total   = 0U;
     uint64_t       freeb   = 0U;
-    uint32_t       cluster = kdrv_storage_cluster_bytes(KDRV_MEDIUM_FS);
-    bool           known;
+    uint32_t       cluster = kdrv_storage_cluster_bytes(km);
     bool           room    = true;
 
     if ( 0U == cluster )
@@ -2737,17 +2845,163 @@ static bool appdata_room(const char *folder, uint32_t json_len,
     if ( !r->there )
     {
         r->need += cluster;
-        r->keep  = KODE_APPDATA_FREE_MIN_BYTES;
+        if ( APPDATA_MEDIUM_FS == medium )
+        {
+            r->keep = KODE_APPDATA_FREE_MIN_BYTES;
+        }
     }
-    known    = (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK);
-    r->avail = freeb;
-    if ( known )
+    r->avail = 0U;
+    if ( kdrv_storage_usage(km, &total, &freeb) == KODE_OK )
     {
         uint64_t const want = (uint64_t)r->need + (uint64_t)r->keep;
 
-        room = (want <= freeb);
+        r->avail = freeb;
+        room     = (want <= freeb);
     }
     return room;
+}
+
+/**
+ * @brief Which medium holds @p project's data folder, by the rule the reader
+ *        uses: the first, the internal partition before the card, that has
+ *        its app.json.
+ *
+ * A folder on both media is the internal one's: a put replaces it, and the
+ * card's is left as it is.
+ *
+ * @param project The app's project name.
+ * @return APPDATA_MEDIUM_FS, APPDATA_MEDIUM_SD, or APPDATA_MEDIUM_NONE.
+ */
+static AppDataMedium appdata_holder(const char *project)
+{
+    static const AppDataMedium ORDER[2] = { APPDATA_MEDIUM_FS,
+                                            APPDATA_MEDIUM_SD };
+    AppDataMedium              found    = APPDATA_MEDIUM_NONE;
+
+    for ( uint8_t i = 0U; (2U > i) && (APPDATA_MEDIUM_NONE == found); ++i )
+    {
+        kdrv_medium_t const km = appdata_kdrv_medium(ORDER[i]);
+        char                folder[APPDATA_FOLDER_MAX];
+        char                path[APPDATA_PATH_MAX];
+        kdrv_stat_t         st;
+
+        if ( kdrv_storage_mounted(km)
+            && appdata_folder_path(folder, sizeof(folder), ORDER[i], project)
+            && appdata_file_path(path, folder, APPDATA_JSON_NAME)
+            && (kdrv_storage_stat(path, &st) == KODE_OK) && st.exists
+            && !st.is_dir )
+        {
+            found = ORDER[i];
+        }
+    }
+    return found;
+}
+
+/**
+ * @brief Say in words what a put needs and what the medium has.
+ *
+ * @param out    Where the words go.
+ * @param cap    Its size.
+ * @param medium The medium the numbers are of.
+ * @param w      What the put weighs there.
+ */
+static void appdata_room_words(char *out, size_t cap, AppDataMedium medium,
+                               const AppDataRoom *w)
+{
+    uint32_t const need_kb = (w->need + (APPDATA_KB - 1U)) / APPDATA_KB;
+    const char    *name    = "internal volume";
+
+    if ( APPDATA_MEDIUM_SD == medium )
+    {
+        name = "card";
+    }
+    if ( w->there )
+    {
+        (void)snprintf(out, cap, "it needs %lu KB beside the old files and the "
+                       "%s has %lu KB free", (unsigned long)need_kb, name,
+                       (unsigned long)(w->avail / APPDATA_KB));
+    }
+    else
+    {
+        /* What is free beyond what a new folder keeps: the number to set
+         * beside what it needs. */
+        uint64_t spare = 0U;
+
+        if ( w->avail > (uint64_t)w->keep )
+        {
+            spare = w->avail - (uint64_t)w->keep;
+        }
+        (void)snprintf(out, cap, "it needs %lu KB and the %s has %lu KB free "
+                       "beyond the %lu KB it keeps", (unsigned long)need_kb,
+                       name, (unsigned long)(spare / APPDATA_KB),
+                       (unsigned long)(w->keep / APPDATA_KB));
+    }
+}
+
+/**
+ * @brief Decide where a put goes, or say why it goes nowhere.
+ *
+ * A folder that is there is replaced where it is, whichever medium holds its
+ * app.json, and never moved: a replacement that does not fit is refused. A new
+ * folder goes inside; when the internal partition has no room for it and a
+ * card is mounted that has, it goes to the card, which the reader finds. A
+ * folder on the card is not moved inside when room comes back.
+ *
+ * @param project  The app's project name.
+ * @param json_len Bytes of the app.json the put carries.
+ * @param icon_len Bytes of the icon it carries: 0 for none.
+ * @param[out] plan Where it goes, when it goes anywhere.
+ * @param[out] why  Why it goes nowhere; with a spill, why it is not inside.
+ * @param cap       The size of @p why.
+ * @return true when the put has a place.
+ */
+static bool appdata_plan(const char *project, uint32_t json_len,
+                         uint32_t icon_len, AppDataPlan *plan, char *why,
+                         size_t cap)
+{
+    AppDataMedium const holder = appdata_holder(project);
+    char                folder[APPDATA_FOLDER_MAX];
+    bool                fits   = false;
+
+    plan->medium = APPDATA_MEDIUM_FS;
+    plan->spill  = false;
+    (void)memset(&plan->weight, 0, sizeof(plan->weight));
+    if ( APPDATA_MEDIUM_SD == holder )
+    {
+        plan->medium = APPDATA_MEDIUM_SD;
+    }
+    if ( appdata_folder_path(folder, sizeof(folder), plan->medium, project) )
+    {
+        fits = appdata_room(plan->medium, folder, json_len, icon_len,
+                            &plan->weight);
+    }
+    if ( fits )
+    {
+        return true;
+    }
+    appdata_room_words(why, cap, plan->medium, &plan->weight);
+    if ( (APPDATA_MEDIUM_NONE == holder) && kdrv_storage_mounted(KDRV_MEDIUM_SD) )
+    {
+        AppDataRoom card;
+
+        if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_SD,
+                                 project) )
+        {
+            if ( appdata_room(APPDATA_MEDIUM_SD, folder, json_len, icon_len,
+                              &card) )
+            {
+                plan->medium = APPDATA_MEDIUM_SD;
+                plan->weight = card;
+                plan->spill  = true;
+                return true;
+            }
+            /* The card says it has less free than the folder takes. */
+            (void)snprintf(&why[strlen(why)], cap - strlen(why),
+                           "; the card has %lu KB free",
+                           (unsigned long)(card.avail / APPDATA_KB));
+        }
+    }
+    return false;
 }
 
 /**
@@ -2768,7 +3022,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     const char   *why = "it is not a name or a size a data folder takes";
     kode_status_t rc = KODE_DENIED;
     bool          no_turn = false;
-    AppDataRoom   weight  = { false, 0U, 0U, 0U };
+    AppDataPlan   plan    = { APPDATA_MEDIUM_FS, { false, 0U, 0U, 0U }, false };
 
     if ( busy(me) )
     {
@@ -2788,33 +3042,9 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         why = "the internal partition would not mount";
         rc  = KODE_ERROR;
     }
-    else if ( !appdata_room(folder, req->json_len, req->icon_len, &weight) )
+    else if ( !appdata_plan(req->project, req->json_len, req->icon_len, &plan,
+                            room, sizeof(room)) )
     {
-        uint32_t const need_kb = (weight.need + (APPDATA_KB - 1U)) / APPDATA_KB;
-
-        if ( weight.there )
-        {
-            (void)snprintf(room, sizeof(room), "it needs %lu KB beside the old "
-                           "files and the internal volume has %lu KB free",
-                           (unsigned long)need_kb,
-                           (unsigned long)(weight.avail / APPDATA_KB));
-        }
-        else
-        {
-            /* What is free beyond what a new folder keeps: the number to set
-             * beside what it needs. */
-            uint64_t spare = 0U;
-
-            if ( weight.avail > (uint64_t)weight.keep )
-            {
-                spare = weight.avail - (uint64_t)weight.keep;
-            }
-            (void)snprintf(room, sizeof(room), "it needs %lu KB and the "
-                           "internal volume has %lu KB free beyond the %lu KB "
-                           "it keeps", (unsigned long)need_kb,
-                           (unsigned long)(spare / APPDATA_KB),
-                           (unsigned long)(weight.keep / APPDATA_KB));
-        }
         why = room;
         rc  = KODE_NO_RESOURCES;
     }
@@ -2828,24 +3058,33 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         {
             khal_free(req->buf);
         }
-        appdata_put_say(req->project, rc, false, why);
+        appdata_put_say(req->project, rc, false, APPDATA_MEDIUM_FS, why);
         appdata_put_answer(req->who, req->project, rc, no_turn);
         return;
     }
 
     /* From here the put owns the AO. */
+    (void)appdata_folder_path(folder, sizeof(folder), plan.medium,
+                              req->project);
     me->g_who      = req->who;
     (void)snprintf(me->g_project, sizeof(me->g_project), "%s", req->project);
     me->g_buf      = req->buf;
     me->g_json_len = req->json_len;
     me->g_icon_len = req->icon_len;
-    me->g_fresh    = !weight.there;
-
-    rc = appdata_put_mkdir(APPDATA_TOP_DIR);
-    if ( KODE_OK == rc )
+    me->g_medium   = plan.medium;
+    me->g_spill    = plan.spill;
+    me->g_fresh    = !plan.weight.there;
+    if ( plan.spill )
     {
-        rc = appdata_put_mkdir(APPDATA_TREE_DIR);
+        (void)snprintf(me->g_full, sizeof(me->g_full), "%s", room);
     }
+    if ( APPDATA_MEDIUM_SD == plan.medium )
+    {
+        /* One line for the whole put, as the card's other writes say theirs. */
+        warn_if_card("appdata_put", folder);
+    }
+
+    rc = appdata_put_make_tree(folder);
     if ( KODE_OK == rc )
     {
         rc = appdata_put_mkdir(folder);
@@ -2892,7 +3131,7 @@ static void appdata_put_icon(Storage * const me)
     {
         return;   /* a stale tick: no put is under way */
     }
-    if ( !appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
+    if ( !appdata_folder_path(folder, sizeof(folder), me->g_medium,
                               me->g_project) )
     {
         rc = KODE_ERROR;
@@ -6038,6 +6277,9 @@ void Storage_ctor(void)
     me->g_json_len = 0U;
     me->g_icon_len = 0U;
     me->g_fresh    = false;
+    me->g_medium   = APPDATA_MEDIUM_FS;
+    me->g_spill    = false;
+    me->g_full[0]  = '\0';
     me->x_who      = NULL;
     me->x          = NULL;     /* as g_buf: the heap's now */
     me->worker_up  = false;

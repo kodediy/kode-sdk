@@ -2238,6 +2238,7 @@ TEST_CASE("put refuses a new folder that would leave the partition under its flo
           "[storage_ao][appdata][room]")
 {
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
     fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_128 - 1U);
 
@@ -2283,6 +2284,7 @@ TEST_CASE("put refuses a 64 px folder one cluster short of its weight",
           "[storage_ao][appdata][room]")
 {
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
     fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_64 - 1U);
 
@@ -2297,6 +2299,7 @@ TEST_CASE("put refuses a 128 px folder with the room a 64 px one takes",
           "[storage_ao][appdata][room]")
 {
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
     fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_64);
 
@@ -2327,6 +2330,7 @@ TEST_CASE("the charge follows the volume's cluster", "[storage_ao][appdata][room
 {
     /* 512-byte clusters: 512 + 12288 + 512, where 4096-byte ones take 20480. */
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
     fake_media_set_fs_cluster(512U);
     fake_media_set_fs_free(FLOOR_B + 13312U);
@@ -2338,6 +2342,7 @@ TEST_CASE("the charge follows the volume's cluster", "[storage_ao][appdata][room
 
     /* 8192-byte clusters: 8192 + 16384 + 8192, one byte over what is free. */
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
     fake_media_set_fs_cluster(8192U);
     fake_media_set_fs_free(FLOOR_B + 32768U - 1U);
@@ -2357,6 +2362,7 @@ TEST_CASE("180 KB free takes two 64 px folders and no 128 px one",
     unsigned taken  = 0U;
 
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
     fake_media_set_fs_free(free_b);
     ask_appdata_put("big", KAPP_ICON_BYTES);
@@ -2426,6 +2432,7 @@ TEST_CASE("the refusal of a new folder says the three numbers",
           "[storage_ao][appdata][room][say]")
 {
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
     fake_media_set_fs_free(FLOOR_B + 12U * 1024U);
     fake_klog_reset();
@@ -2904,7 +2911,7 @@ TEST_CASE("a put that fails writing a new folder leaves no folder",
 /** @brief The one line a put said about @p project, and no other. */
 static void assert_said_once(const char *project, const char *words)
 {
-    char key[64];
+    char key[256];
 
     (void)snprintf(key, sizeof(key), "the data folder of '%s'", project);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, log_count(key),
@@ -2973,6 +2980,7 @@ TEST_CASE("a put for want of room says how much a folder needs",
           "[storage_ao][appdata][say]")
 {
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
     fake_media_set_fs_free(0U);
     fake_klog_reset();
@@ -3082,6 +3090,225 @@ TEST_CASE("put answers after two steps", "[storage_ao][appdata]")
     assert_put_bufs_freed();
     TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
                           (int)fs_size(".kode/appsdata/demo/icon.k64"));
+}
+
+/* ---- A new data folder the internal volume has no room for goes to the card ---
+ * The reader looks at both media, the internal one first, by app.json, so a
+ * folder on the card is found and shown. A put of a new folder that does not
+ * fit inside is written on the card, in the same two steps with the same
+ * temporaries; a replacement stays on the medium that holds the folder. */
+
+/** @brief The card's copy of "demo"'s app.json, as a file on the card fake. */
+#define CARD_DEMO_JSON  ".kode/appsdata/demo/app.json"
+
+TEST_CASE("a new folder with no room inside lands on the card and is read back "
+          "from it", "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(0U);
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "a folder with no room inside was not taken by the card");
+    assert_put_bufs_freed();
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_sd_dir(), CARD_DEMO_JSON));
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_sd_dir(),
+                                            ".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_FALSE_MESSAGE(fake_media_file_exists(fake_media_fs_dir(),
+                                                     ".kode/appsdata/demo"),
+        "the folder was written inside as well");
+    assert_said_once("demo", "is in place on the card (json, icon)");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, log_count("on the card:"),
+        "one put logs one card write line");
+
+    ask_appdata("demo");
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_SD, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+}
+
+TEST_CASE("a put with no card and no room inside is refused full, with the "
+          "numbers", "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_sd_present(false);
+    fake_media_set_fs_free(FLOOR_B + 12U * 1024U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    assert_said_once("demo", "was not written: it needs 20 KB and the internal "
+                             "volume has 12 KB free beyond the 128 KB it keeps");
+}
+
+TEST_CASE("a card that refuses the write leaves nothing behind, and the put "
+          "answers full", "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(0U);
+    fake_sdmmc_fail_file_writes(true);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    assert_said_once("demo", "was not written: it needs 20 KB and the internal "
+                             "volume has 0 KB free beyond the 128 KB it keeps; "
+                             "the card would not take it either");
+    fake_sdmmc_fail_file_writes(false);
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
+                                             ".kode/appsdata/demo"));
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
+                                             ".kode/appsdata/demo"));
+}
+
+/* The card says what it has free, and a folder it has no room for is refused
+ * without a write. */
+TEST_CASE("a card with less free than the folder takes is not written",
+          "[storage_ao][appdata][card]")
+{
+    static uint8_t fill[1024U * 1024U];
+
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(0U);
+    fake_sdmmc_set_total_mb(1U);
+    fake_media_put_sd_path("fill.bin", fill, sizeof(fill));
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    assert_said_once("demo", "was not written: it needs 20 KB and the internal "
+                             "volume has 0 KB free beyond the 128 KB it keeps; "
+                             "the card has 0 KB free");
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
+                                             ".kode/appsdata/demo"));
+}
+
+TEST_CASE("a replacement of a folder on the card is written on the card",
+          "[storage_ao][appdata][card]")
+{
+    char got[sizeof(PUT_JSON)];
+
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_sd_path(CARD_DEMO_JSON, OLD_JSON, sizeof(OLD_JSON) - 1U);
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "a folder that lives on the card was not replaced there");
+    assert_put_bufs_freed();
+    TEST_ASSERT_FALSE_MESSAGE(fake_media_file_exists(fake_media_fs_dir(),
+                                                     ".kode/appsdata/demo"),
+        "the replacement of a card folder was written inside");
+    (void)memset(got, 0, sizeof(got));
+    {
+        char  path[512];
+        FILE *f;
+
+        (void)snprintf(path, sizeof(path), "%s/%s", fake_media_sd_dir(),
+                       CARD_DEMO_JSON);
+        f = fopen(path, "rb");
+        TEST_ASSERT_NOT_NULL(f);
+        (void)fread(got, 1U, sizeof(got) - 1U, f);
+        (void)fclose(f);
+    }
+    TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
+                                             ".kode/appsdata/demo/app.json.tmp"));
+    assert_said_once("demo", "is in place on the card (json, icon)");
+}
+
+/* A replacement of an internal folder stays inside however tight the volume is:
+ * the old folder's place is where its new files go, and the card is for what
+ * has no place yet. */
+TEST_CASE("a replacement of an internal folder never moves to the card",
+          "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", OLD_JSON,
+                           sizeof(OLD_JSON) - 1U);
+    fake_media_set_fs_free((uint64_t)PAIR_64 - 1U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
+                                             ".kode/appsdata/demo"));
+    assert_said_once("demo", "was not written: it needs 16 KB beside the old "
+                             "files and the internal volume has 15 KB free");
+}
+
+/* A folder on both media is the reader's to choose: the internal one shows, so
+ * the internal one is what a put replaces, and the card's is left as it is. */
+TEST_CASE("a folder on both media is replaced inside only",
+          "[storage_ao][appdata][card]")
+{
+    static const char card_json[] = "{\"kode\":\"1\",\"name\":\"Card\"}";
+
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", OLD_JSON,
+                           sizeof(OLD_JSON) - 1U);
+    fake_media_put_sd_path(CARD_DEMO_JSON, card_json, sizeof(card_json) - 1U);
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+                          (int)fs_size(".kode/appsdata/demo/app.json"));
+    {
+        char  path[512];
+        FILE *f;
+
+        (void)snprintf(path, sizeof(path), "%s/%s", fake_media_sd_dir(),
+                       CARD_DEMO_JSON);
+        f = fopen(path, "rb");
+        TEST_ASSERT_NOT_NULL(f);
+        TEST_ASSERT_EQUAL_UINT(sizeof(card_json) - 1U,
+            (unsigned)fseek(f, 0L, SEEK_END) + (unsigned)ftell(f));
+        (void)fclose(f);
+    }
+}
+
+TEST_CASE("appdata_rm removes a folder that is only on the card",
+          "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_media_put_sd_path(CARD_DEMO_JSON, OLD_JSON, sizeof(OLD_JSON) - 1U);
+    fake_media_put_sd_path(".kode/appsdata/demo/icon.k64", s_put_icon, 16U);
+
+    ask_appdata_rm("demo");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_rm_status(),
+        "a folder only on the card was reported missing");
+    TEST_ASSERT_FALSE_MESSAGE(fake_media_file_exists(fake_media_sd_dir(),
+                                                     ".kode/appsdata/demo"),
+        "the card's folder was left behind");
 }
 
 /* ---- A folder read during a transfer waits for it ---------------------------

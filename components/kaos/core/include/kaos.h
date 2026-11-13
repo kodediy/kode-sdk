@@ -3409,11 +3409,13 @@ void storage_desc_request(const char *name, QActive *who);
 void appdata_request(const char *project, QActive *who);
 
 /**
- * @brief Delete @p project's data folder on the internal partition.
+ * @brief Delete @p project's data folder, from the medium that holds it.
  *
- * The one recursive delete, bounded to `/storage/.kode/appsdata/<project>` and one
- * subfolder level (https://docs.kode.diy/sdk/kdrv/apps). The card is never touched;
- * a card folder of that name is logged. Always answered once posted, refusals
+ * The one recursive delete, bounded to `<root>/.kode/appsdata/<project>` and one
+ * subfolder level (https://docs.kode.diy/sdk/kdrv/apps). The internal partition's
+ * folder is the one removed; a card folder of that name is then left where it is
+ * and logged. A folder only on the card, where appdata_put_request() wrote it
+ * for want of room inside, is removed from the card. Always answered once posted, refusals
  * included, with an AppDataRmRspEvt naming @p project. It waits for a transfer in
  * flight like storage_path_request()'s deletes; a transfer that outlasts the wait
  * is KODE_DENIED.
@@ -3470,24 +3472,32 @@ typedef struct {
 } AppDataPutRspEvt;
 
 /**
- * @brief Write @p project's data folder on the internal partition, replacing
- *        whatever folder was there whole, or not at all.
+ * @brief Write @p project's data folder, replacing whatever folder was there
+ *        whole, or not at all.
+ *
+ * A folder that is there is replaced on the medium that holds its app.json, the
+ * internal partition before the card as the reader chooses, and never moved. A
+ * new folder goes inside; when the internal partition has no room for it and a
+ * card is mounted that has, it goes to the card, where the reader finds it, and
+ * stays there. A card that will not take the write leaves nothing behind and the
+ * answer is KODE_NO_RESOURCES, as with no card.
  *
  * Makes missing parents, writes `app.json` and, if @p icon_len, `icon.k64` in two
  * steps under temporary names beside the old files, and only when both are down
  * puts them in the old files' place and removes whatever else the folder held. A
  * put that fails, or never finishes, leaves the folder that was there as it was;
- * one it made is removed. Never the card. Once posted, AO_Storage owns @p buf and
+ * one it made is removed. Once posted, AO_Storage owns @p buf and
  * frees it on every path. A put that meets a transfer in flight waits for it
  * (KODE_STORAGE_TURN_MS). Always answered with an AppDataPutRspEvt: KODE_OK;
  * KODE_DENIED bad name, length, NULL buffer or busy (AppDataPutRspEvt.busy tells
  * the last apart); KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when
  * the put does not fit. It is charged what it weighs on the volume: its app.json
  * and its icon, each rounded up to the volume's cluster (kdrv_storage_cluster_bytes()).
- * A new folder is charged one cluster more, its own, and must leave
- * KODE_APPDATA_FREE_MIN_BYTES free besides; a folder that is there is charged
- * only that pair, the room of the temporaries it is written under beside the old
- * files. The refusal is told in the log with the numbers.
+ * A new folder is charged one cluster more, its own, and on the internal partition
+ * must leave KODE_APPDATA_FREE_MIN_BYTES free besides; a folder that is there is
+ * charged only that pair, the room of the temporaries it is written under beside
+ * the old files. The card keeps no floor: it refuses only when it says it has less
+ * free than the charge. The refusal is told in the log with the numbers.
  *
  * @param project  The app's project name, as the binary declares it.
  * @param buf      app.json then icon.k64, one allocation from khal_alloc_psram()
