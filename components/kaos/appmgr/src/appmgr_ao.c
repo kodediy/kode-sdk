@@ -329,6 +329,10 @@ typedef struct {
      * conversation - open, response, data with a lent buffer, return - so
      * this only decides which AO to talk to, not how. */
     bool                  from_net;
+    /* AO_Net's transfer is this install's: its open was asked for and not
+     * refused. A refused or failed open leaves AO_Net holding nothing, and a
+     * close then would end whoever holds its one transfer next. */
+    bool                  net_held;
     /* The mailbox copy reads by offset, so it needs to count what it has
      * CONSUMED from the source - which since the decoder arrived is no
      * longer the same number as what has been produced into the sink. One
@@ -2135,6 +2139,7 @@ static void xfer_reset(AppMgr * const me)
     me->bypass     = false;
     me->dst_forced = false;
     me->from_net   = false;
+    me->net_held   = false;
     me->launch     = false;
 }
 
@@ -2992,7 +2997,8 @@ static void medium_read(AppMgr * const me)
 }
 
 /**
- * @brief Close the medium in use: AO_Net's stream or AO_Storage's file.
+ * @brief Close the medium in use: AO_Net's stream, when this install holds
+ *        it, or AO_Storage's file.
  *
  * @param me The AO.
  */
@@ -3001,7 +3007,11 @@ static void medium_close(AppMgr * const me)
 #if CONFIG_KODEOS_NET
     if ( me->from_net )
     {
-        net_stream_close_request();
+        if ( me->net_held )
+        {
+            net_stream_close_request();
+            me->net_held = false;
+        }
         return;
     }
 #endif
@@ -4100,6 +4110,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                  * byte: DNS, TLS and the headers come before it. */
                 progress_publish(me, progress_pct(me));
                 net_stream_open_request(req->src, &me->super);
+                me->net_held = true;
                 /* The download's own failures are asynchronous: the verdict
                  * is that it has begun, not that it will end well. */
                 req_settle(me, APP_REQ_TAKEN);
@@ -4496,6 +4507,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
             StorageOpenRspEvt const * const rsp = Q_EVT_CAST(StorageOpenRspEvt);
             if ( (uint8_t)KODE_OK != rsp->status )
             {
+                me->net_held = false;            /* nothing was opened */
                 if ( (uint8_t)KODE_ERROR == rsp->status )
                 {
                     KLOG_E(TAG, me->from_net

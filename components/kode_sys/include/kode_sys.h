@@ -19,6 +19,7 @@
 #include "kapp_cat.h"
 #include "kqp.h"
 #include "kode_init.h"
+#include "kode_http_off.h"   /* kode_http_off_t, KODE_HTTP_OFF_MAX */
 
 #ifdef __cplusplus
 extern "C" {
@@ -1251,7 +1252,7 @@ kode_status_t kode_sys_file_write(QActive *me, const char *path, const void *dat
 /** @brief What a ping session added up to: @c ip4, @c tx, @c rx, @c min_ms, @c avg_ms, @c max_ms. */
 typedef NetPingStats kode_sys_ping_stats_t;
 
-/** @brief What an HTTP request came back with: @c status, @c content_length, @c body_len, @c kept, @c truncated. */
+/** @brief What an HTTP request came back with: @c status, @c content_length, @c body_len, @c kept, @c truncated, @c range_total. */
 typedef NetHttpResult kode_sys_http_result_t;
 
 /** @brief The longest host a request names, NUL included. */
@@ -1307,6 +1308,81 @@ kode_status_t kode_sys_net_ping(QActive *me, const char *host, uint8_t count);
  * @return As the requests' rules above.
  */
 kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap);
+
+/**
+ * @brief GET the @p cap bytes of a URL from @p offset on: a resource too big
+ *        for one buffer, a range at a time.
+ * @note LENT: AO_Net's worker writes @p buf until NET_HTTP_RSP_SIG arrives.
+ * @note The answer's @c result.status says where the bytes start: 206, at
+ *       @p offset, and @c range_total is then the length of the whole
+ *       resource when the server says it; 200, at byte 0 - the server ignores
+ *       ranges and sent the body from its start, of which only @p cap bytes
+ *       were read (@c truncated says more followed), kept only when @p offset
+ *       is 0; 416, nowhere - @p offset is past the end. Any other status (a
+ *       404, a 403, a redirect, which is not followed) is the server's page,
+ *       not the resource: its body is left unread and @c kept is 0, as for a
+ *       416 and for a 200 to an @p offset above 0. Each range is a connection of its own, and shares
+ *       kode_sys_http_get()'s turn: one GET or range per AO at a time.
+ * @param me     The asking AO; NET_HTTP_RSP_SIG answers it.
+ * @param url    Shorter than KODE_SYS_NET_URL_MAX.
+ * @param offset The first byte wanted.
+ * @param buf    Where the bytes go.
+ * @param cap    Its room, above 0.
+ * @return As the requests' rules above; KODE_DENIED also for a NULL @p buf, a
+ *         zero @p cap, or a range that runs past KODE_HTTP_OFF_MAX.
+ */
+kode_status_t kode_sys_http_get_range(QActive *me, const char *url, kode_http_off_t offset,
+                                      void *buf, uint32_t cap);
+
+/** @brief The longest URL a download into a file names, NUL included. */
+#define KODE_SYS_HTTP_FILE_URL_MAX  256U
+
+/* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
+/** @brief A download's progress (HTTP_FILE_PROGRESS_SIG) and its end (HTTP_FILE_RSP_SIG):
+ *         @c rc, @c stopped, @c status, @c written, @c size, @c total. */
+typedef HttpFileEvt kode_sys_http_file_answer_t;
+
+/**
+ * @brief Download a URL into a file, however big, and take it up again where
+ *        a cut left it.
+ *
+ * AO_Storage asks for the body from the length the file at @p path already
+ * has - nothing, for a new file - and appends what arrives, 32 KiB at a time,
+ * over one connection. @p me is posted one HTTP_FILE_PROGRESS_SIG per chunk
+ * in the file and one HTTP_FILE_RSP_SIG at the end. If the link drops or the
+ * medium refuses a chunk, the end says so and the file keeps what it has:
+ * the same call again goes on from there. To start over, delete the file
+ * first.
+ *
+ * @note The end's @c status says how the server took it: 200, the body from
+ *       its start; 206, the rest of it; 416 with KODE_OK, the file is as long
+ *       as the resource already; 416 with KODE_DENIED, the file is longer, or
+ *       the server did not say how long the resource is; 200 with
+ *       KODE_DENIED, a server that ignores ranges was asked for the rest. A
+ *       refusal leaves the file as it was. A redirect is not followed: it
+ *       ends the download with KODE_ERROR and its status.
+ * @note The rest is asked for by length alone: a file that is not the start
+ *       of this resource is taken up all the same.
+ * @note One download at a time on the board: a second, and kodeOS's install
+ *       from a URL while one runs, are refused KODE_DENIED. The board does not
+ *       rest while one runs. A file can hold 4 GB at most (FAT32).
+ * @param me   The asking AO.
+ * @param url  http:// or https://, shorter than KODE_SYS_HTTP_FILE_URL_MAX.
+ * @param path Where it goes: absolute and virtual, shorter than
+ *             KODE_SYS_FILE_PATH_MAX, in a folder that exists.
+ * @return As the requests' rules above; KODE_DENIED without CONFIG_KODEOS_NET.
+ */
+kode_status_t kode_sys_http_get_file(QActive *me, const char *url, const char *path);
+
+/**
+ * @brief End the download @p me started; its HTTP_FILE_RSP_SIG follows with
+ *        @c stopped true and what was written kept.
+ * @param me The AO that called kode_sys_http_get_file().
+ * @return KODE_OK when AO_Storage took it, also with no download to end;
+ *         KODE_DENIED for a NULL @p me or without CONFIG_KODEOS_NET;
+ *         KODE_NO_RESOURCES when its queue has no room.
+ */
+kode_status_t kode_sys_http_file_stop(QActive *me);
 
 /**
  * @brief POST @p body to a URL and keep the answer's body in @p buf.

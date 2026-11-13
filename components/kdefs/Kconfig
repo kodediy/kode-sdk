@@ -46,6 +46,14 @@ menu "Kode Dot"
             app; an app may put it off with kode_sys_home_defer(). Without it
             nothing reboots on the button.
 
+    config KODE_HTTP_OFFSET_64
+        bool "Ranged HTTP GETs take a 64-bit offset"
+        default n
+        help
+            kode_http_off_t, the offset of the two ranged GETs, is 64 bits wide
+            instead of 32, for resources past 4 GB. A download into a file
+            stays within FAT32's 4 GB.
+
     config KODE_LOWPOWER
         bool "AO_LowPower: the AWAKE, ASLEEP and OFF states"
         default n

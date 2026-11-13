@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "sdkconfig.h"
@@ -76,6 +77,21 @@
 /** What one read() off the body pulls. Also the discard buffer for the part
  *  past the caller's cap: the bytes are counted, not kept. */
 #define NET_HTTP_READ_CHUNK    256U
+
+/** @brief The status of a body sent whole. */
+#define NET_HTTP_OK            200U
+
+/** @brief The status of the part of a body a Range asked for. */
+#define NET_HTTP_PARTIAL       206U
+
+/** @brief The status of a Range that starts past the resource's end. */
+#define NET_HTTP_RANGE_PAST    416U
+
+/** @brief Room for a Range header's value: "bytes=", two numbers of 64 bits, the dash and the NUL. */
+#define NET_RANGE_TEXT_MAX     48U
+
+/** @brief The base the numbers of a Content-Range are written in. */
+#define NET_DECIMAL            10U
 /* Generous, because the far end is a server and the near end is a board that
  * would rather wait than restart a 1.5 MB download. */
 #define KDRV_NET_STREAM_TIMEOUT_MS  15000U
@@ -401,6 +417,81 @@ kode_status_t kdrv_net_ping(const char *host, uint8_t count,
     return rc;
 }
 
+/** @brief A ranged GET: the first byte it asks for, and what the server says of the whole. */
+typedef struct {
+    uint64_t first;  /**< The offset of the first byte asked for.                       */
+    int64_t  total;  /**< Out: the resource's length, from Content-Range; -1 for none. */
+} net_range_t;
+
+/**
+ * @brief The length of the whole resource, from a Content-Range value.
+ *
+ * "bytes 1000-1299/5000" says 5000, and so does the form a 416 carries, with
+ * a star for the range it could not serve. A total written as a star, or as
+ * anything that is not a number, is no answer.
+ *
+ * @param value The header's value.
+ * @return The length, or -1 when the value does not say one.
+ */
+static int64_t content_range_total(const char *value)
+{
+    const char *p     = strchr(value, '/');
+    uint64_t    total = 0U;
+    bool        ok    = false;
+
+    if ( NULL != p )
+    {
+        p  = &p[1];
+        ok = ('0' <= *p) && ('9' >= *p);
+        while ( ok && ('0' <= *p) && ('9' >= *p) )
+        {
+            uint64_t const digit = (uint64_t)(*p) - (uint64_t)'0';
+
+            if ( total > (((uint64_t)INT64_MAX - digit) / NET_DECIMAL) )
+            {
+                ok = false;   /* longer than a length can be */
+            }
+            else
+            {
+                total = (total * NET_DECIMAL) + digit;
+                p     = &p[1];
+            }
+        }
+        if ( ok && ('\0' != *p) && (' ' != *p) && ('\r' != *p) )
+        {
+            ok = false;
+        }
+    }
+    if ( !ok )
+    {
+        return -1;
+    }
+    return (int64_t)total;
+}
+
+/**
+ * @brief The client's event hook of a ranged GET: keep the Content-Range's total.
+ *
+ * Runs on the requesting task, inside the call that reads the headers.
+ *
+ * @param evt The client's event; its user data is the request's net_range_t.
+ * @return ESP_OK, always: a header this does not read is not an error.
+ */
+static esp_err_t range_on_event(esp_http_client_event_t *evt)
+{
+    if ( (NULL != evt) && (HTTP_EVENT_ON_HEADER == evt->event_id)
+        && (NULL != evt->user_data) && (NULL != evt->header_key)
+        && (NULL != evt->header_value)
+        && (strcasecmp(evt->header_key, "Content-Range") == 0) )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; the client hands back the context it was configured with */
+        net_range_t * const r = (net_range_t *)evt->user_data;
+
+        r->total = content_range_total(evt->header_value);
+    }
+    return ESP_OK;
+}
+
 /* ---- A URL as a medium --------------------------------------------------- */
 
 static esp_http_client_handle_t s_stream_h;
@@ -432,8 +523,11 @@ static uint32_t stream_time_left(uint32_t t0, uint32_t cap_ms)
     return left;
 }
 
-kode_status_t kdrv_net_stream_open(const char *url, uint32_t *total,
-                                   uint16_t *status)
+/** @brief The open stream's Content-Range, kept by its event hook: one stream at a time. */
+static net_range_t s_stream_range;
+
+kode_status_t kdrv_net_stream_open(const char *url, uint32_t offset,
+                                   uint32_t *total, uint16_t *status)
 {
     if ( (NULL == url) || ('\0' == url[0]) )
     {
@@ -463,11 +557,28 @@ kode_status_t kdrv_net_stream_open(const char *url, uint32_t *total,
     /* The same bundle http_get attaches, so https:// behaves identically to
      * the run net.md recorded rather than merely similarly. */
     cfg.crt_bundle_attach     = esp_crt_bundle_attach;
+    /* A 416 says the resource's length in its Content-Range, which the
+     * client hands out only through its event hook. */
+    s_stream_range.first      = offset;
+    s_stream_range.total      = -1;
+    cfg.event_handler         = &range_on_event;
+    cfg.user_data             = &s_stream_range;
 
     esp_http_client_handle_t const h = esp_http_client_init(&cfg);
     if ( NULL == h )
     {
         return KODE_ERROR;
+    }
+    /* What the body must start with to be read as asked: the whole of it, or
+     * the rest from the offset on. */
+    uint16_t want = NET_HTTP_OK;
+    if ( 0U < offset )
+    {
+        char range[NET_RANGE_TEXT_MAX];
+
+        (void)snprintf(range, sizeof(range), "bytes=%lu-", (unsigned long)offset);
+        (void)esp_http_client_set_header(h, "Range", range);
+        want = NET_HTTP_PARTIAL;
     }
     if ( esp_http_client_open(h, 0) != ESP_OK )
     {
@@ -493,16 +604,32 @@ kode_status_t kdrv_net_stream_open(const char *url, uint32_t *total,
     {
         *status = st;
     }
-    if ( 200U != st )
+    if ( want != st )
     {
-        KLOG_E(TAG, "GET %.*s: HTTP %u", shown, url, (unsigned)st);
+        /* A 200 to a request for the rest is a server that ignores the range:
+         * its body starts at the first byte, which is not what was asked. */
+        KLOG_E(TAG, "GET %.*s from %lu: HTTP %u", shown, url,
+               (unsigned long)offset, (unsigned)st);
+        if ( (NET_HTTP_RANGE_PAST == st) && (NULL != total) && (0 <= s_stream_range.total)
+            && ((int64_t)UINT32_MAX >= s_stream_range.total) )
+        {
+            /* Nothing past the offset: the resource's whole length, for the
+             * opener to hold against what it has. */
+            *total = (uint32_t)s_stream_range.total;
+        }
         esp_http_client_close(h);
         esp_http_client_cleanup(h);
         return KODE_ERROR;
     }
     if ( NULL != total )
     {
-        *total = (0 < cl) ? (uint32_t)cl : 0U;
+        /* 0 also for a length past what 32 bits hold, which no FAT32 file
+         * reaches: no length is better than one that wrapped. */
+        *total = 0U;
+        if ( (0 < cl) && ((int64_t)UINT32_MAX >= cl) )
+        {
+            *total = (uint32_t)cl;
+        }
     }
     /* The body is read with the normal timeout (each read sets its own). */
     (void)esp_http_client_set_timeout_ms(h, (int)KDRV_NET_STREAM_TIMEOUT_MS);
@@ -710,24 +837,29 @@ static esp_http_client_handle_t put_take_kept(const char *url)
  * @param auth     Authorization value to send; NULL sends none.
  * @param keep     PUT only: leave the connection open when the exchange
  *                 succeeded, for the next PUT to the same URL to reuse.
+ * @param range    A GET of one range: the bytes from @c first on, as many
+ *                 as @p cap, and the body is read no further than @p cap
+ *                 whatever the server sends. NULL asks for the whole body.
  * @param buf      Where the response body goes; NULL keeps nothing.
  * @param cap      Room in @p buf.
  * @param out      Out: status and lengths.
  * @param timeout_ms Whole-exchange network timeout.
- * @return KODE_OK once the response was read to its end, KODE_ERROR when the
- *         request could not be sent, KODE_TIMEOUT when the body stopped.
+ * @return KODE_OK once the response was read to its end, or to @p cap for a
+ *         range; KODE_ERROR when the request could not be sent, KODE_TIMEOUT
+ *         when the body stopped.
  */
 static kode_status_t http_exchange(const char *url,
                                    esp_http_client_method_t method,
                                    const char *body, size_t body_len,
                                    const char *ctype, const char *auth,
-                                   bool keep,
+                                   bool keep, net_range_t *range,
                                    uint8_t *buf, uint32_t cap,
                                    kdrv_net_http_result_t *out,
                                    uint32_t timeout_ms)
 {
     (void)memset(out, 0, sizeof(*out));
     out->content_length = -1;
+    out->range_total    = -1;
 
     /* What the log may say about the target. A PUT's URL carries a token in
      * its path, so its lines name the host and nothing after it. */
@@ -765,6 +897,13 @@ static kode_status_t http_exchange(const char *url,
          * certificate to ship. Harmless on plain http, which never asks for
          * it. */
         cfg.crt_bundle_attach     = esp_crt_bundle_attach;
+        if ( NULL != range )
+        {
+            /* The total rides in a response header, which the client hands
+             * out only through its event hook. */
+            cfg.event_handler = &range_on_event;
+            cfg.user_data     = range;
+        }
 
         h = esp_http_client_init(&cfg);
         if ( NULL == h )
@@ -774,6 +913,16 @@ static kode_status_t http_exchange(const char *url,
     }
 
     kode_status_t rc = KODE_OK;
+    if ( NULL != range )
+    {
+        char text[NET_RANGE_TEXT_MAX];
+
+        range->total = -1;
+        (void)snprintf(text, sizeof(text), "bytes=%llu-%llu",
+                       (unsigned long long)range->first,
+                       (unsigned long long)(range->first + ((uint64_t)cap - 1U)));
+        (void)esp_http_client_set_header(h, "Range", text);
+    }
     if ( NULL != ctype )
     {
         (void)esp_http_client_set_header(h, "Content-Type", ctype);
@@ -830,8 +979,10 @@ static kode_status_t http_exchange(const char *url,
          * that as 0, which is also what an empty body reports. Asking the
          * client which one it is keeps -1 meaning "undeclared" rather than
          * quietly turning every chunked page into content_len=0. */
-        if ( (0 < cl) || ((0 == cl) && !esp_http_client_is_chunked_response(h)) )
+        if ( ((0 < cl) && ((int64_t)INT32_MAX >= cl))
+            || ((0 == cl) && !esp_http_client_is_chunked_response(h)) )
         {
+            /* A length past INT32_MAX stays -1, undeclared, rather than wrap. */
             out->content_length = (int32_t)cl;
         }
 
@@ -839,10 +990,45 @@ static kode_status_t http_exchange(const char *url,
          * beyond cap are counted and dropped, so body_len is the truth and
          * `truncated` is not a guess. */
         uint8_t scratch[NET_HTTP_READ_CHUNK];
-        while ( KODE_OK == rc )
+        bool    cut       = false;
+        bool    body_read = true;
+        if ( NULL != range )
         {
-            int const n = esp_http_client_read(h, (char *)scratch,
-                                               (int)sizeof(scratch));
+            /* Only a 206, or a 200 to a range from byte 0, carries the bytes
+             * asked for. A 200 to a range further in is the resource from its
+             * start, and any other answer's body is the server's page about
+             * it (a 416's, a 404's): a caller that appends what it got would
+             * write either into its file, so it is left unread and kept is 0. */
+            bool const partial = (NET_HTTP_PARTIAL == out->status);
+            bool const whole   = (NET_HTTP_OK == out->status) && (0U == range->first);
+
+            if ( !partial && !whole )
+            {
+                body_read = false;
+            }
+        }
+        while ( (KODE_OK == rc) && body_read )
+        {
+            int want = (int)sizeof(scratch);
+
+            if ( NULL != range )
+            {
+                /* A range is read no further than the buffer: a server that
+                 * ignores it sends the whole resource, and that can be
+                 * hundreds of megabytes nobody asked for. */
+                uint32_t const room = cap - out->kept;
+
+                if ( 0U == room )
+                {
+                    cut = true;
+                    break;
+                }
+                if ( room < (uint32_t)want )
+                {
+                    want = (int)room;
+                }
+            }
+            int const n = esp_http_client_read(h, (char *)scratch, want);
             if ( 0 > n )
             {
                 /* Not the end of the body - the end of our patience with it.
@@ -881,6 +1067,14 @@ static kode_status_t http_exchange(const char *url,
             out->body_len += got;
         }
         out->truncated = (out->body_len > out->kept);
+        if ( NULL != range )
+        {
+            /* Stopped at the buffer's end: more follows unless the declared
+             * length says the buffer holds it all. */
+            out->truncated   = cut && ((0 > out->content_length)
+                                       || ((uint32_t)out->content_length > out->kept));
+            out->range_total = range->total;
+        }
         if ( keep && (KODE_OK == rc) && (HTTP_METHOD_PUT == method)
             && (NULL != s_put) && esp_http_client_is_persistent_connection(h) )
         {
@@ -906,7 +1100,23 @@ kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
     {
         return KODE_ERROR;
     }
-    return http_exchange(url, HTTP_METHOD_GET, NULL, 0U, NULL, NULL, false,
+    return http_exchange(url, HTTP_METHOD_GET, NULL, 0U, NULL, NULL, false, NULL,
+                         buf, cap, out, timeout_ms);
+}
+
+kode_status_t kdrv_net_http_get_range(const char *url, uint64_t offset,
+                                      uint8_t *buf, uint32_t cap,
+                                      kdrv_net_http_result_t *out,
+                                      uint32_t timeout_ms)
+{
+    net_range_t range = { offset, -1 };
+
+    if ( (NULL == url) || ('\0' == url[0]) || (NULL == out) || (NULL == buf)
+        || (0U == cap) || (offset > (UINT64_MAX - ((uint64_t)cap - 1U))) )
+    {
+        return KODE_ERROR;
+    }
+    return http_exchange(url, HTTP_METHOD_GET, NULL, 0U, NULL, NULL, false, &range,
                          buf, cap, out, timeout_ms);
 }
 
@@ -929,7 +1139,7 @@ kode_status_t kdrv_net_http_post(const char *url, const char *body,
         body = NULL;   /* nothing to write after the headers */
     }
     return http_exchange(url, HTTP_METHOD_POST, body, (size_t)len, ctype,
-                         NULL, false, buf, cap, out, timeout_ms);
+                         NULL, false, NULL, buf, cap, out, timeout_ms);
 }
 
 /** The next POST's body. Allocated on first use; a job reads it, the setter
@@ -1853,7 +2063,7 @@ static kode_status_t net_do_http_post(const kdrv_net_req_t *req)
         return KODE_ERROR;
     }
     return http_exchange(req->url, HTTP_METHOD_POST, s_post.body, s_post.len,
-                         "application/json", NULL, false,
+                         "application/json", NULL, false, NULL,
                          r->body, (uint32_t)KDRV_NET_BODY_MAX, &r->http,
                          NET_HTTP_TIMEOUT_MS);
 }
@@ -1892,7 +2102,7 @@ static kode_status_t net_do_http_put(const kdrv_net_req_t *req)
     {
         rc = http_exchange(
             s_put->url, HTTP_METHOD_PUT, (const char *)s_put->body, s_put->len,
-            s_put->type, s_put->auth, req->keep,
+            s_put->type, s_put->auth, req->keep, NULL,
             r->body, (uint32_t)KDRV_NET_BODY_MAX, &r->http,
             NET_HTTP_TIMEOUT_MS);
         kode_log_release(NET_HTTP_LOG_TAG);

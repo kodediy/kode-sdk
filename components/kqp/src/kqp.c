@@ -410,6 +410,13 @@ _Static_assert(sizeof(FlashReqEvt) <= KQP_BLOCK_LARGE,
                "FlashReqEvt must not reach the jumbo pool");
 _Static_assert(sizeof(NetStreamOpenEvt) <= KQP_BLOCK_LARGE,
                "NetStreamOpenEvt must not reach the jumbo pool");
+_Static_assert(sizeof(NetStreamFromEvt) <= KQP_BLOCK_LARGE,
+               "NetStreamFromEvt must not reach the jumbo pool");
+_Static_assert(sizeof(NetStreamFromRspEvt) <= KQP_BLOCK_SMALL,
+               "NetStreamFromRspEvt must fit the small pool");
+/* A progress event goes out per chunk of a download, with a margin. */
+_Static_assert(sizeof(HttpFileEvt) <= KQP_BLOCK_SMALL,
+               "HttpFileEvt must fit the small pool");
 _Static_assert(sizeof(StorageWriteEvt) <= KQP_BLOCK_LARGE,
                "StorageWriteEvt must not reach the jumbo pool");
 _Static_assert(sizeof(StorageWriteRspEvt) <= KQP_BLOCK_LARGE,

@@ -148,6 +148,9 @@ if(CONFIG_KODEOS_RADIO)
         # AO_Radio asks it through kdrv_c5svc.
         if(CONFIG_KODEOS_NET)
             list(APPEND srcs "net/src/net_ao.c")
+            # The download into a file: AO_Storage's steps over AO_Net's
+            # stream, linked only into an app that asks for one.
+            list(APPEND srcs "storage/src/storage_fetch.c")
             # The Kode channel's text: the api's answers, the bodies it is
             # sent, the verdict on an error and the back-off. Pure, so the
             # host suite compiles it on its own.

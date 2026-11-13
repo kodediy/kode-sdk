@@ -15,6 +15,7 @@
 #include "kode_colors.h"
 #include "kode_defs.h"
 #include "kode_init.h"
+#include "kode_http_off.h"   /* kode_http_off_t, KODE_HTTP_OFF_MAX */
 #include "kapp_desc.h"
 
 #ifdef __cplusplus
@@ -1410,6 +1411,37 @@ const char *kode_http_get(const char *url);
  * @return As for kode_http_get().
  */
 const char *kode_http_post(const char *url, const char *body);
+
+/**
+ * @brief Fetch the @p cap bytes of @p url from @p offset on, into a buffer of
+ *        the caller's own: a resource too big for kode_http_get(), a range at
+ *        a time.
+ *
+ * Blocks. Each call is a connection of its own, and a redirect is not
+ * followed. The call is true whenever the server answered, and
+ * kode_http_status() says what @p buf holds: 206, the bytes from @p offset;
+ * 200, the resource from byte 0 - the server ignores ranges - of which only
+ * @p cap bytes were read, and only when @p offset is 0: to a later @p offset
+ * a 200 leaves @p got 0, since its bytes are not the ones asked for; 416,
+ * nothing - @p offset is past the end. Any other status (a 404, a 403, a 302)
+ * is the server's page about the request, not the resource, and @p got is 0
+ * for it too. A file is put together by appending each range with
+ * kode_file_append_bytes() and asking the next from the size the file has,
+ * for as long as the answer is a 206 (or a 200 to the first range, which has
+ * the whole resource when @p got is under @p cap).
+ *
+ * @param url    As for kode_http_get().
+ * @param offset The first byte wanted.
+ * @param buf    Where the bytes go; what it holds after a failure is unspecified.
+ * @param cap    Its room, above 0.
+ * @param got    Out, may be NULL: the bytes written; 0 on failure.
+ * @param total  Out, may be NULL: the length of the whole resource when the
+ *               server says it (a 206 and a 416 do), else 0; one longer than
+ *               the type holds reads as KODE_HTTP_OFF_MAX.
+ * @return true when the server answered; false with kode_error() saying why.
+ */
+bool kode_http_get_range(const char *url, kode_http_off_t offset, void *buf, uint32_t cap,
+                         uint32_t *got, kode_http_off_t *total);
 
 /**
  * @brief The status this task's last request was answered with.

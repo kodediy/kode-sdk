@@ -1667,6 +1667,13 @@ enum KodeSignals {
                                  *   Answerable with no network at all: an
                                  *   address of 0.0.0.0 is an answer.        */
     NET_STREAM_OPEN_REQ_SIG,    /**< AO_Net: open NetStreamOpenEvt.url.       */
+    NET_STREAM_OPEN_FROM_SIG,   /**< AO_Net: open NetStreamFromEvt.url from
+                                 *   its offset on. Answered with
+                                 *   NET_STREAM_FROM_RSP_SIG; read and closed
+                                 *   as NET_STREAM_OPEN_REQ_SIG's transfer.   */
+    NET_STREAM_FROM_RSP_SIG,    /**< To the opener of
+                                 *   NET_STREAM_OPEN_FROM_SIG
+                                 *   (NetStreamFromRspEvt).                   */
     NET_STREAM_READ_REQ_SIG,    /**< AO_Net: fill a free buffer and send it.  */
     NET_STREAM_NEXT_SIG,        /**< AO_Net: a borrowed buffer, handed back
                                  *   (StorageBufEvt).                        */
@@ -1675,6 +1682,23 @@ enum KodeSignals {
     NET_STREAM_DATA_SIG,        /**< To the reader (StorageDataEvt) - the
                                  *   same conversation AO_Storage has, because
                                  *   over here a URL is just another medium.  */
+    HTTP_FILE_REQ_SIG,          /**< AO_Storage: download a URL into a file
+                                 *   (HttpFileReqEvt). Posted by
+                                 *   storage_fetch_ask(); answered with
+                                 *   HTTP_FILE_PROGRESS_SIG per chunk and one
+                                 *   HTTP_FILE_RSP_SIG, to the asker.         */
+    HTTP_FILE_STOP_SIG,         /**< AO_Storage: end the download its asker
+                                 *   started (HttpFileStopEvt).               */
+    HTTP_FILE_RETRY_SIG,        /**< AO_Storage private QTimeEvt: try again the
+                                 *   chunk that found another transfer holding
+                                 *   the file handle.                         */
+    HTTP_FILE_STALL_SIG,        /**< AO_Storage private QTimeEvt: AO_Net has
+                                 *   said nothing of the download for
+                                 *   KODE_HTTP_FILE_STALL_MS.                 */
+    HTTP_FILE_PROGRESS_SIG,     /**< To the asker: a chunk of its download is
+                                 *   in the file (HttpFileEvt).               */
+    HTTP_FILE_RSP_SIG,          /**< To the asker: its download ended
+                                 *   (HttpFileEvt).                           */
     NET_TEST_REQ_SIG,           /**< AO_Net: run the `test component=net`
                                  *   self-test; answers TEST_RESULT_SIG.     */
     NET_JOB_SIG,                /**< AO_Net private: a job came back from
@@ -2518,6 +2542,84 @@ typedef struct {
     char     url[KODE_FLASH_SRC_MAX];
     QActive *who;       /**< Where the response and the data go.              */
 } NetStreamOpenEvt;
+
+/**
+ * @brief Open this URL for reading from an offset on (NET_STREAM_OPEN_FROM_SIG).
+ *
+ * NetStreamOpenEvt fills its block to the byte, so the offset has an event of
+ * its own, with a URL four bytes shorter beside it. Its answer is
+ * NetStreamFromRspEvt; the reads, the loan and the close are NetStreamOpenEvt's.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t offset;    /**< Where the body is wanted from: what a cut
+                         *   download already has; 0 for all of it.          */
+    QActive *who;       /**< Where the response and the data go.              */
+    char     url[KODE_NET_FETCH_URL_MAX];
+} NetStreamFromEvt;
+
+/**
+ * @brief How far a download into a file is (HTTP_FILE_PROGRESS_SIG), and how
+ *        it ended (HTTP_FILE_RSP_SIG).
+ */
+typedef struct {
+    QEvt     super;
+    uint8_t  rc;       /**< kode_status_t. The end: KODE_OK when the body is
+                        *   all in the file, or kode_sys_http_file_stop()
+                        *   ended it; KODE_DENIED for a server that ignores
+                        *   ranges asked for the rest of a file (@c status
+                        *   200), no network, another download or transfer in
+                        *   the way, or a file that never had its turn;
+                        *   KODE_TIMEOUT for a
+                        *   body that stopped; otherwise the file's or the
+                        *   network's refusal. Progress: KODE_OK.            */
+    bool     stopped;  /**< The end: kode_sys_http_file_stop() ended it.    */
+    uint16_t status;   /**< The server's status: 200 for a body from its
+                        *   start, 206 for the rest of one, 416 for a file
+                        *   that was whole already; 0 when none answered.    */
+    uint32_t written;  /**< Bytes this download has appended to the file.   */
+    uint32_t size;     /**< The file's length now.                          */
+    uint32_t total;    /**< The length the file will have; 0 when the server
+                        *   did not say.                                     */
+} HttpFileEvt;
+
+/**
+ * @brief Download a URL into a file (HTTP_FILE_REQ_SIG).
+ *
+ * The URL and the path do not fit an event together, so they travel in a
+ * block of PSRAM the door fills and AO_Storage owns from the post on: it
+ * frees it when the download ends.
+ */
+typedef struct {
+    QEvt         super;
+    void        *job;   /**< The download's record, handed over.            */
+    QActive     *who;   /**< The asking AO.                                  */
+    HttpFileEvt *rsp;   /**< Its end's answer, taken with the request.      */
+} HttpFileReqEvt;
+
+/** @brief End a download (HTTP_FILE_STOP_SIG). */
+typedef struct {
+    QEvt     super;
+    QActive *who;       /**< The AO that asked for the download.             */
+} HttpFileStopEvt;
+
+/**
+ * @brief Whether an open from an offset worked (NET_STREAM_FROM_RSP_SIG).
+ *
+ * The server's status rides with the verdict, because the opener of a resumed
+ * download reads a refusal by it: a 200 is a server that ignores ranges, a
+ * 416 a body with nothing past the offset.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t size;      /**< What is left of the body from the offset on; for a
+                         *   416, the resource's whole length; 0 when the
+                         *   server did not say, and for any other refusal. */
+    uint16_t http;      /**< The server's status code, also when the open is
+                         *   refused; 0 when no server answered.             */
+    uint8_t  status;    /**< kode_status_t: KODE_OK when the body is ready to
+                         *   read from the offset.                           */
+} NetStreamFromRspEvt;
 
 /** @brief Whether the open worked, and how big the file is (STORAGE_OPEN_RSP_SIG). */
 typedef struct {
@@ -5099,7 +5201,13 @@ typedef struct {
     int32_t  content_length; /**< As declared; -1 when chunked or absent.   */
     uint32_t body_len;       /**< What the body actually held.              */
     uint32_t kept;           /**< What fitted in the caller's buffer.       */
-    bool     truncated;      /**< body_len > kept.                          */
+    bool     truncated;      /**< body_len > kept; for a range, the body
+                              *   went on past the buffer and was left
+                              *   unread.                                    */
+    int64_t  range_total;    /**< A range: the length of the whole resource,
+                              *   from the server's Content-Range; -1 when
+                              *   it sent none, and for a plain GET or a
+                              *   POST.                                      */
 } NetHttpResult;
 
 /** @brief Answers kode_sys_net_lookup() (NET_LOOKUP_RSP_SIG, @c stats.ip4 alone) and
@@ -5135,6 +5243,8 @@ typedef struct {
 typedef struct {
     QEvt           super;
     bool           post;    /**< POST @c body; false GETs.                   */
+    bool           ranged;  /**< A GET of the @c cap bytes from @c offset on. */
+    uint64_t       offset;  /**< A range's first byte.                       */
     char           url[KODE_NET_URL_MAX];
     char           ctype[KODE_NET_CTYPE_MAX]; /**< A POST's Content-Type; empty sends none. */
     const void    *body;    /**< A POST's body, read in place.               */

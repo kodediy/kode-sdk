@@ -577,6 +577,21 @@ kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t ca
                                          kode_sys_http_result_t *out);
 
 /**
+ * @brief GET the @p cap bytes of @p url from @p offset on, in the caller's task.
+ * @note Blocks, as kode_block_http_get_buffer(). The status says where the
+ *       bytes start (206: at @p offset; 200: at 0, cut at @p cap; 416: nowhere),
+ *       and @c range_total the length of the whole, -1 when the server sent none.
+ * @param url    The address.
+ * @param offset The first byte wanted.
+ * @param buf    Where the bytes go.
+ * @param cap    Its room, above 0.
+ * @param out    Out: status, lengths and the total; required.
+ * @return KODE_OK, KODE_TIMEOUT or KODE_ERROR; KODE_DENIED without CONFIG_KODEOS_NET.
+ */
+kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *buf,
+                                        uint32_t cap, kode_sys_http_result_t *out);
+
+/**
  * @brief POST @p body to @p url and read the answer into @p buf.
  * @note Blocks.
  * @param url   The target; https:// verifies against the Mozilla bundle.

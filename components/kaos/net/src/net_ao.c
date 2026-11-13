@@ -115,11 +115,19 @@ typedef enum {
     NETS_CLOSE      /**< The download's close.                              */
 } net_stream_kind_t;
 
-/** @brief What a download job is given. The worker reads it for as long as
- *         the job runs; the sizes a job measures come back in the done
- *         event's value. */
+/** @brief What a download job is given, and the one thing besides its value
+ *         it gives back. The worker reads the inputs for as long as the job
+ *         runs and writes @c code; the AO reads that after the done event.
+ *         The sizes a job measures come back in the done event's value. */
 typedef struct {
     uint8_t  kind;                    /**< net_stream_kind_t.                 */
+    uint16_t code;                    /**< NETS_OPEN out: the server's status;
+                                       *   0 when none answered.              */
+    uint32_t offset;                  /**< NETS_OPEN: where the body is wanted
+                                       *   from; 0 for all of it.             */
+    bool     from;                    /**< NETS_OPEN: asked with an offset
+                                       *   (NET_STREAM_OPEN_FROM_SIG), so
+                                       *   answered with the server's status. */
     char     url[KODE_FLASH_SRC_MAX]; /**< NETS_OPEN: the URL, as long as a
                                        *   request carries one.               */
     uint8_t *buf;                     /**< NETS_READ: where the chunk goes,
@@ -144,6 +152,8 @@ static kaos_ask_door_t s_net_doors[NET_ASK_KINDS];
 typedef struct {
     uint8_t                kind;   /**< NET_ASK_*.                               */
     bool                   post;   /**< HTTP: a POST.                            */
+    bool                   ranged; /**< HTTP: a GET of @c cap bytes from @c offset. */
+    uint64_t               offset; /**< HTTP: a range's first byte.              */
     uint8_t                count;  /**< PING: echoes.                            */
     uint16_t               port;   /**< UDP: the port.                           */
     uint16_t               dlen;   /**< UDP: bytes at @c data.                   */
@@ -171,6 +181,8 @@ typedef struct {
     NetAskJob      ask;               /**< Or an ask's job with @c worker.    */
     NetStreamJob   s;                 /**< The download job with @c sworker.  */
     char           purl[KODE_FLASH_SRC_MAX]; /**< The staged open's URL.      */
+    uint32_t       poffset;           /**< The staged open's offset.          */
+    bool           pfrom;             /**< The staged open was asked with one. */
     kdrv_mqtt_msg_t rx;               /**< The message being taken from the
                                        *   driver's ring: one copy, off the
                                        *   AO's stack.                         */
@@ -652,8 +664,26 @@ kode_status_t net_ping_ask(QActive *who, const char *host, uint8_t count)
     return host_ask(who, true, host, count);
 }
 
-kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void *body,
-                           uint32_t len, const char *ctype, void *buf, uint32_t cap)
+/** @brief What an HTTP ask carries besides its URL. */
+typedef struct {
+    bool        post;    /**< POST @c body; false GETs.              */
+    bool        ranged;  /**< A GET of @c cap bytes from @c offset.  */
+    uint64_t    offset;  /**< A range's first byte.                  */
+    const void *body;    /**< A POST's body, lent.                   */
+    uint32_t    len;     /**< Its bytes.                             */
+    const char *ctype;   /**< A POST's Content-Type; NULL for none.  */
+    void       *buf;     /**< Where the answer's body goes, lent.    */
+    uint32_t    cap;     /**< Its room.                              */
+} http_ask_t;
+
+/**
+ * @brief Post a GET, a range or a POST to AO_Net through the HTTP door.
+ * @param who The asking AO.
+ * @param url Shorter than KODE_NET_URL_MAX; copied.
+ * @param q   The rest of the request.
+ * @return As the asks.
+ */
+static kode_status_t http_ask(QActive *who, const char *url, const http_ask_t *q)
 {
     kode_status_t  rc = kaos_ask_take(&s_net_doors[NET_ASK_HTTP], who);
     NetHttpRspEvt *a;
@@ -673,22 +703,42 @@ kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void 
     {
         return kaos_ask_cancel(&s_net_doors[NET_ASK_HTTP], who, &a->super);
     }
-    a->post = post;
-    e->post = post;
+    a->post   = q->post;
+    e->post   = q->post;
+    e->ranged = q->ranged;
+    e->offset = q->offset;
     (void)snprintf(e->url, sizeof(e->url), "%s", url);
     e->ctype[0] = '\0';
-    if ( NULL != ctype )
+    if ( NULL != q->ctype )
     {
-        (void)snprintf(e->ctype, sizeof(e->ctype), "%s", ctype);
+        (void)snprintf(e->ctype, sizeof(e->ctype), "%s", q->ctype);
     }
-    e->body = body;
-    e->len  = len;
-    e->buf  = buf;
-    e->cap  = cap;
+    e->body = q->body;
+    e->len  = q->len;
+    e->buf  = q->buf;
+    e->cap  = q->cap;
     e->who  = who;
     e->rsp  = a;
     return kaos_ask_post(&s_net_doors[NET_ASK_HTTP], who, AO_Net, &e->super, &a->super,
                          KQP_NET_CMD_MARGIN);
+}
+
+kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void *body,
+                           uint32_t len, const char *ctype, void *buf, uint32_t cap)
+{
+    http_ask_t const q = { .post = post, .ranged = false, .offset = 0U, .body = body,
+                           .len = len, .ctype = ctype, .buf = buf, .cap = cap };
+
+    return http_ask(who, url, &q);
+}
+
+kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset, void *buf,
+                                 uint32_t cap)
+{
+    http_ask_t const q = { .post = false, .ranged = true, .offset = offset, .body = NULL,
+                           .len = 0U, .ctype = NULL, .buf = buf, .cap = cap };
+
+    return http_ask(who, url, &q);
 }
 
 kode_status_t net_udp_ask(QActive *who, const char *host, uint16_t port, const void *data,
@@ -1404,12 +1454,11 @@ static kode_status_t net_job_run(void *arg, uint32_t *value)
  * @param value Receives the one word the AO is told besides the status.
  * @return What the driver answered.
  */
-/* cppcheck-suppress constParameterCallback ; KqpJobFn fixes the signature, and its argument is void * */
 static kode_status_t net_stream_run(void *arg, uint32_t *value)
 {
     /* cppcheck-suppress misra-c2012-11.5 ; the worker hands back the pointer it was given, which is the AO's job storage */
-    NetStreamJob const * const j  = (NetStreamJob const *)arg;
-    kode_status_t              st = KODE_DENIED;
+    NetStreamJob * const j  = (NetStreamJob *)arg;
+    kode_status_t        st = KODE_DENIED;
 
     *value = 0U;
     switch ( (net_stream_kind_t)j->kind )
@@ -1418,8 +1467,9 @@ static kode_status_t net_stream_run(void *arg, uint32_t *value)
             uint32_t total = 0U;
             uint16_t code  = 0U;
 
-            st     = kdrv_net_stream_open(j->url, &total, &code);
-            *value = total;
+            st      = kdrv_net_stream_open(j->url, j->offset, &total, &code);
+            j->code = code;
+            *value  = total;
             break;
         }
         case NETS_READ: {
@@ -1729,6 +1779,11 @@ static kode_status_t net_ask_run(void *arg, uint32_t *value)
         st = kdrv_net_http_post(j->url, j->body, j->len, ctype, j->buf, j->cap,
                                 &j->result, KODE_HTTP_TIMEOUT_MS);
     }
+    else if ( j->ranged )
+    {
+        st = kdrv_net_http_get_range(j->url, j->offset, j->buf, j->cap, &j->result,
+                                     KODE_HTTP_TIMEOUT_MS);
+    }
     else
     {
         st = kdrv_net_http_get(j->url, j->buf, j->cap, &j->result, KODE_HTTP_TIMEOUT_MS);
@@ -1786,6 +1841,7 @@ static void http_reply(QActive *who, NetHttpRspEvt *a, kode_status_t rc, NetAskJ
     a->rc = (uint8_t)rc;
     (void)memset(&a->result, 0, sizeof(a->result));
     a->result.content_length = -1;
+    a->result.range_total    = -1;
     if ( NULL != j )
     {
         a->result.status         = j->result.status;
@@ -1793,6 +1849,7 @@ static void http_reply(QActive *who, NetHttpRspEvt *a, kode_status_t rc, NetAskJ
         a->result.body_len       = j->result.body_len;
         a->result.kept           = j->result.kept;
         a->result.truncated      = j->result.truncated;
+        a->result.range_total    = j->result.range_total;
     }
     kaos_ask_answer(&s_net_doors[NET_ASK_HTTP], who, &a->super, AO_Net);
 }
@@ -1862,6 +1919,7 @@ static void ask_take(Net * const me, QEvt const * const e)
     j = &me->jobs->ask;
     (void)memset(j, 0, sizeof(*j));
     j->result.content_length = -1;
+    j->result.range_total    = -1;
     if ( (QSignal)NET_HOST_ASK_SIG == e->sig )
     {
         NetHostAskEvt const * const q = Q_EVT_CAST(NetHostAskEvt);
@@ -1880,8 +1938,10 @@ static void ask_take(Net * const me, QEvt const * const e)
     {
         NetHttpAskEvt const * const q = Q_EVT_CAST(NetHttpAskEvt);
 
-        j->kind = (uint8_t)NET_ASK_HTTP;
-        j->post = q->post;
+        j->kind   = (uint8_t)NET_ASK_HTTP;
+        j->post   = q->post;
+        j->ranged = q->ranged;
+        j->offset = q->offset;
         (void)snprintf(j->url, sizeof(j->url), "%s", q->url);
         (void)snprintf(j->ctype, sizeof(j->ctype), "%s", q->ctype);
         /* cppcheck-suppress misra-c2012-11.5 ; the asker lends its body as bytes, untyped in the event */
@@ -5590,6 +5650,28 @@ void net_stream_open_request(const char *url, QActive *who)
     QACTIVE_POST(AO_Net, &e->super, NULL);
 }
 
+bool net_stream_open_from_request(const char *url, uint32_t offset, QActive *who)
+{
+    NetStreamFromEvt *e;
+
+    /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+    if ( (NULL == url) || (strnlen(url, KODE_NET_FETCH_URL_MAX) >= KODE_NET_FETCH_URL_MAX) )
+    {
+        return false;
+    }
+    e = Q_NEW_X(NetStreamFromEvt, 0U, NET_STREAM_OPEN_FROM_SIG);
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "out of events; stream open dropped");
+        return false;
+    }
+    (void)snprintf(e->url, sizeof(e->url), "%s", url);
+    e->offset = offset;
+    e->who    = who;
+    QACTIVE_POST(AO_Net, &e->super, NULL);
+    return true;
+}
+
 void net_stream_read_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(NET_STREAM_READ_REQ_SIG);
@@ -5730,25 +5812,53 @@ static void net_expired_net(Net * const me)
 /**
  * @brief Answer an open request.
  *
+ * An open asked with an offset is answered with the server's status beside
+ * the verdict (NetStreamFromRspEvt); a plain one as a file's open is.
+ *
  * @param who  Who asked.
  * @param rc   How it went.
- * @param size The Content-Length, 0 when there is none to report.
+ * @param size The Content-Length; for a 416, the resource's whole length;
+ *             0 when there is none to report.
+ * @param http The server's status code; 0 when no server was asked.
+ * @param from Whether the open was asked with an offset.
  */
 static void stream_reply_open(QActive * const who, kode_status_t rc,
-                              uint32_t size)
+                              uint32_t size, uint16_t http, bool from)
 {
-    StorageOpenRspEvt * const rsp = Q_NEW_X(StorageOpenRspEvt, 0U,
-                                            NET_STREAM_OPEN_RSP_SIG);
-
-    if ( NULL == rsp )
+    if ( from )
     {
-        KLOG_E(TAG, "out of events; an open's answer was dropped");
-        return;
+        NetStreamFromRspEvt * const rsp = Q_NEW_X(NetStreamFromRspEvt, 0U,
+                                                  NET_STREAM_FROM_RSP_SIG);
+
+        if ( NULL == rsp )
+        {
+            KLOG_E(TAG, "out of events; an open's answer was dropped");
+        }
+        else
+        {
+            rsp->size   = size;
+            rsp->http   = http;
+            rsp->status = (uint8_t)rc;
+            QACTIVE_POST(who, &rsp->super, AO_Net);
+        }
     }
-    rsp->medium = (uint8_t)KDRV_MEDIUM_COUNT;   /* neither card nor FAT */
-    rsp->size   = size;
-    rsp->status = (uint8_t)rc;
-    QACTIVE_POST(who, &rsp->super, AO_Net);
+    else
+    {
+        StorageOpenRspEvt * const rsp = Q_NEW_X(StorageOpenRspEvt, 0U,
+                                                NET_STREAM_OPEN_RSP_SIG);
+
+        if ( NULL == rsp )
+        {
+            KLOG_E(TAG, "out of events; an open's answer was dropped");
+        }
+        else
+        {
+            rsp->medium = (uint8_t)KDRV_MEDIUM_COUNT;   /* neither card nor FAT */
+            rsp->size   = size;
+            rsp->status = (uint8_t)rc;
+            QACTIVE_POST(who, &rsp->super, AO_Net);
+        }
+    }
 }
 
 /**
@@ -5809,12 +5919,14 @@ static uint8_t stream_free(const Net * const me)
  * @brief Open the transfer for @p who, or refuse it. The worker is free and no
  *        close is owed.
  *
- * @param me  The AO.
- * @param who Who asked; told how it went.
- * @param url The URL.
+ * @param me     The AO.
+ * @param who    Who asked; told how it went.
+ * @param url    The URL.
+ * @param offset Where the body is wanted from; 0 for all of it.
+ * @param from   Whether it was asked with an offset.
  */
 static void stream_begin_open(Net * const me, QActive * const who,
-                              const char *url)
+                              const char *url, uint32_t offset, bool from)
 {
     kode_status_t rc = KODE_OK;
 
@@ -5834,6 +5946,9 @@ static void stream_begin_open(Net * const me, QActive * const who,
     else
     {
         (void)snprintf(me->jobs->s.url, sizeof(me->jobs->s.url), "%s", url);
+        me->jobs->s.offset = offset;
+        me->jobs->s.from   = from;
+        me->jobs->s.code   = 0U;
         me->swho  = who;
         me->sheld = true;
         if ( !stream_job_start(me, NETS_OPEN, NET_STREAM_OPEN_GUARD_MS) )
@@ -5845,11 +5960,23 @@ static void stream_begin_open(Net * const me, QActive * const who,
     }
     if ( KODE_OK != rc )
     {
-        stream_reply_open(who, rc, 0U);
+        stream_reply_open(who, rc, 0U, 0U, from);
     }
 }
 
 static void stream_forget(Net * const me);
+
+/** @brief Whether the open with the worker was asked with an offset. */
+static bool stream_job_from(const Net * const me)
+{
+    return (NULL != me->jobs) && me->jobs->s.from;
+}
+
+/** @brief Whether the open that waits its turn was asked with an offset. */
+static bool stream_staged_from(const Net * const me)
+{
+    return (NULL != me->jobs) && me->jobs->pfrom;
+}
 
 /**
  * @brief One step of starting the next download job.
@@ -5892,7 +6019,7 @@ static bool stream_pump_once(Net * const me)
 
         me->popen = false;
         me->pwho  = NULL;
-        stream_begin_open(me, who, me->jobs->purl);
+        stream_begin_open(me, who, me->jobs->purl, me->jobs->poffset, me->jobs->pfrom);
     }
     else if ( me->sopen && (NULL != me->reader) && (0U < me->sreads) )
     {
@@ -5968,13 +6095,13 @@ static void stream_forget(Net * const me)
 
         me->popen = false;
         me->pwho  = NULL;
-        stream_reply_open(who, KODE_DENIED, 0U);
+        stream_reply_open(who, KODE_DENIED, 0U, 0U, stream_staged_from(me));
     }
     if ( me->sbusy && (!me->sreplied) )
     {
         if ( ((uint8_t)NETS_OPEN == me->skind) && (NULL != me->swho) )
         {
-            stream_reply_open(me->swho, KODE_DENIED, 0U);
+            stream_reply_open(me->swho, KODE_DENIED, 0U, 0U, stream_job_from(me));
         }
         me->sreplied = true;
     }
@@ -6008,11 +6135,14 @@ static void stream_abandon(Net * const me)
  * owed or a forgotten transfer's job is out, the open waits, staged in
  * @c jobs, and runs when the worker is free.
  *
- * @param me  The AO.
- * @param req The request.
+ * @param me     The AO.
+ * @param who    Who asked.
+ * @param url    The URL.
+ * @param offset Where the body is wanted from; 0 for all of it.
+ * @param from   Whether it was asked with an offset.
  */
-static void stream_open_request(Net * const me,
-                                NetStreamOpenEvt const * const req)
+static void stream_open_request(Net * const me, QActive * const who,
+                                const char *url, uint32_t offset, bool from)
 {
     bool const opening = me->sbusy && ((uint8_t)NETS_OPEN == me->skind)
                          && (!me->sreplied);
@@ -6020,25 +6150,26 @@ static void stream_open_request(Net * const me,
     if ( me->sopen || opening || me->popen )
     {
         KLOG_E(TAG, "a transfer is already open");
-        stream_reply_open(req->who, KODE_DENIED, 0U);
+        stream_reply_open(who, KODE_DENIED, 0U, 0U, from);
     }
     else if ( me->sbusy || me->sclose_owed )
     {
         if ( NULL == me->jobs )
         {
-            stream_reply_open(req->who, KODE_NO_RESOURCES, 0U);
+            stream_reply_open(who, KODE_NO_RESOURCES, 0U, 0U, from);
         }
         else
         {
-            (void)snprintf(me->jobs->purl, sizeof(me->jobs->purl), "%s",
-                           req->url);
-            me->pwho  = req->who;
-            me->popen = true;
+            (void)snprintf(me->jobs->purl, sizeof(me->jobs->purl), "%s", url);
+            me->jobs->poffset = offset;
+            me->jobs->pfrom   = from;
+            me->pwho          = who;
+            me->popen         = true;
         }
     }
     else
     {
-        stream_begin_open(me, req->who, req->url);
+        stream_begin_open(me, who, url, offset, from);
     }
 }
 
@@ -6104,14 +6235,22 @@ static void stream_open_done(Net * const me, kode_status_t rc, uint32_t total,
     }
     if ( (!replied) && (NULL != who) )
     {
-        if ( KODE_OK != rc )
+        /* The server's word goes with the verdict either way, and with an
+         * offset its length too: the opener of a resumed download reads a
+         * refusal by them. */
+        uint16_t http = 0U;
+
+        if ( NULL != me->jobs )
         {
-            stream_reply_open(who, rc, 0U);
+            http = me->jobs->s.code;
         }
-        else
+        uint32_t size = total;
+
+        if ( (KODE_OK != rc) && !stream_job_from(me) )
         {
-            stream_reply_open(who, rc, total);
+            size = 0U;   /* a file's open that failed carries no length */
         }
+        stream_reply_open(who, rc, size, http, stream_job_from(me));
     }
 }
 
@@ -6417,7 +6556,7 @@ static void stream_job_guard(Net * const me)
         case NETS_OPEN: {
             if ( NULL != me->swho )
             {
-                stream_reply_open(me->swho, KODE_TIMEOUT, 0U);
+                stream_reply_open(me->swho, KODE_TIMEOUT, 0U, 0U, stream_job_from(me));
             }
             me->sreplied = true;
             break;
@@ -6813,23 +6952,14 @@ static void net_say_offline(const char *what)
     KLOG_W(TAG, "no network; %s needs an address - `wifi_join` first", what);
 }
 
-/** @brief Answer a transfer's open with a refusal: nothing was opened. */
-static void stream_open_refuse(NetStreamOpenEvt const * const req)
+/**
+ * @brief Answer a transfer's open with a refusal: nothing was opened.
+ * @param who  Who asked.
+ * @param from Whether it was asked with an offset.
+ */
+static void stream_open_refuse(QActive * const who, bool from)
 {
-    StorageOpenRspEvt *rsp = Q_NEW_X(StorageOpenRspEvt, 0U,
-                                     NET_STREAM_OPEN_RSP_SIG);
-
-    if ( NULL != rsp )
-    {
-        rsp->medium = (uint8_t)KDRV_MEDIUM_COUNT;
-        rsp->size   = 0U;
-        rsp->status = (uint8_t)KODE_DENIED;
-        QACTIVE_POST(req->who, &rsp->super, AO_Net);
-    }
-    else
-    {
-        KLOG_E(TAG, "out of events; open request dropped");
-    }
+    stream_reply_open(who, KODE_DENIED, 0U, 0U, from);
 }
 
 /**
@@ -6863,7 +6993,13 @@ static QState Net_offline(Net * const me, QEvt const * const e)
             /* Refused with its own outcome event: the callers wait on it with
              * no deadline of their own. */
             net_say_offline("a transfer over HTTP");
-            stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt));
+            stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt)->who, false);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_STREAM_OPEN_FROM_SIG: {
+            net_say_offline("a transfer over HTTP");
+            stream_open_refuse(Q_EVT_CAST(NetStreamFromEvt)->who, true);
             status = Q_HANDLED();
             break;
         }
@@ -7002,7 +7138,10 @@ static bool net_lp_refuses(Net * const me, QEvt const * const e)
                 mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
                 break;
             case NET_STREAM_OPEN_REQ_SIG:
-                stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt));
+                stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt)->who, false);
+                break;
+            case NET_STREAM_OPEN_FROM_SIG:
+                stream_open_refuse(Q_EVT_CAST(NetStreamFromEvt)->who, true);
                 break;
 #if CONFIG_KODEOS_CHANNEL && CONFIG_KODEOS_SHOT_HTTP
             case NET_SHOT_REQ_SIG:
@@ -7061,7 +7200,16 @@ static QState Net_online(Net * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case NET_STREAM_OPEN_REQ_SIG: {
-            stream_open_request(me, Q_EVT_CAST(NetStreamOpenEvt));
+            NetStreamOpenEvt const * const q = Q_EVT_CAST(NetStreamOpenEvt);
+
+            stream_open_request(me, q->who, q->url, 0U, false);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_STREAM_OPEN_FROM_SIG: {
+            NetStreamFromEvt const * const q = Q_EVT_CAST(NetStreamFromEvt);
+
+            stream_open_request(me, q->who, q->url, q->offset, true);
             status = Q_HANDLED();
             break;
         }

@@ -297,12 +297,14 @@ static void ask_https(const char *url)
     QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
 }
 
-/* AO_Net keeps its download open after a read error, and says "a transfer is
- * already open" to the next one until Wi-Fi cycles - unless AppMgr closed it.
- * The failure's cleanup used to clear which medium it was before closing it,
- * and closed the storage reader the install never had. */
-TEST_CASE("a failed https install closes the download, and the next one is "
-          "asked for", "[appmgr_ao]")
+/* An open AO_Net refused or that failed leaves nothing open on AO_Net: it
+ * lets the transfer go itself. A close then is not this install's to send -
+ * AO_Net has one transfer, and the close would end whoever holds it, an app's
+ * download into a file among them. The failure's cleanup closes neither that
+ * nor the storage reader the install never had, and the next one is asked
+ * for. */
+TEST_CASE("a failed https install closes nothing it never opened, and the next "
+          "one is asked for", "[appmgr_ao]")
 {
     StorageOpenRspEvt rsp;
 
@@ -319,8 +321,8 @@ TEST_CASE("a failed https install closes the download, and the next one is "
     rsp.status = (uint8_t)KODE_ERROR;
     QASM_DISPATCH(AO_AppMgr, &rsp.super, 0U);
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_requests(NET_STREAM_CLOSE_REQ_SIG),
-        "the failed download was not closed on AO_Net");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, net_requests(NET_STREAM_CLOSE_REQ_SIG),
+        "a failed open closed AO_Net's transfer");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_requests(),
         "the storage reader was closed for a download");
 
@@ -329,9 +331,36 @@ TEST_CASE("a failed https install closes the download, and the next one is "
         "the second download was not asked for");
     (void)storage_requests();
 
-    /* Leave nothing armed: the open's deadline runs out and is cleaned up. */
+    /* AO_Net never answers it: the open's deadline runs out, and the open
+     * still out is withdrawn. */
     run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_requests(NET_STREAM_CLOSE_REQ_SIG),
+        "the open nobody answered was left on AO_Net");
+    (void)storage_requests();
+}
+
+/* AO_Net has one transfer. While an app's download holds it, an https install
+ * is refused at its open; the install's failure must not close the transfer,
+ * which is the download's. */
+TEST_CASE("an https install AO_Net refuses leaves the transfer it holds alone",
+          "[appmgr_ao]")
+{
+    StorageOpenRspEvt rsp;
+
+    appmgr_fresh();
     (void)net_requests(NET_STREAM_CLOSE_REQ_SIG);
+
+    ask_https("https://example.invalid/app.bin");
+    TEST_ASSERT_EQUAL_UINT(1U, net_requests(NET_STREAM_OPEN_REQ_SIG));
+    (void)storage_requests();
+
+    (void)memset(&rsp, 0, sizeof(rsp));
+    rsp.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_OPEN_RSP_SIG);
+    rsp.status = (uint8_t)KODE_DENIED;
+    QASM_DISPATCH(AO_AppMgr, &rsp.super, 0U);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, net_requests(NET_STREAM_CLOSE_REQ_SIG),
+        "the refused install closed the transfer another holds");
     (void)storage_requests();
 }
 

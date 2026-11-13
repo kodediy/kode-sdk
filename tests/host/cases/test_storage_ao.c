@@ -6198,3 +6198,681 @@ TEST_CASE("a call out to the card refuses the round until it returns",
     lp_round(AO_Storage, KODE_LP_ASLEEP);
     lp_expect_answer(false, NULL);
 }
+
+/* ---- A download into a file -------------------------------------------------
+ *
+ * kode_sys_http_get_file(): AO_Storage has the file, so it leads. It asks
+ * AO_Net for the body from the length the file already has, appends each
+ * chunk as it arrives and tells the asker how far it is. AO_Net is a mailbox
+ * here: the cases read what AO_Storage asked of it and answer as it would.
+ */
+
+#define FETCH_URL    "https://example.invalid/big.bin"  /**< What the cases download.          */
+#define FETCH_FILE   "dl.bin"                           /**< Where, under the internal fake.    */
+#define FETCH_PATH   "/storage/" FETCH_FILE             /**< The same, as an app names it.      */
+#define FETCH_HAD    400U                               /**< Bytes a cut download left behind.  */
+#define FETCH_CHUNK  1000U                              /**< Bytes of a chunk AO_Net hands over. */
+#define FETCH_TAIL   500U                               /**< Bytes of the last one.             */
+#define FETCH_BUF    2048U                              /**< Room of the stand-in stream buffer. */
+
+/** @brief AO_Net's stream buffer 0, which the tests' CMake hands storage_fetch.c. */
+static uint8_t s_fetch_buf[FETCH_BUF];
+
+const uint8_t *host_fetch_stream_buf(uint8_t idx);
+
+const uint8_t *host_fetch_stream_buf(uint8_t idx)
+{
+    const uint8_t *buf = NULL;
+
+    if ( 0U == idx )
+    {
+        buf = s_fetch_buf;
+    }
+    return buf;
+}
+
+/** @brief AO_Storage fresh, the internal volume empty, AO_Net's mailbox and both spies empty. */
+static void fetch_fresh(void)
+{
+    const QEvt *e = NULL;
+
+    storage_fresh();
+    fake_media_reset();
+    qf_support_give_queue(AO_Net);
+    while ( xQueueReceive(AO_Net->eQueue, &e, 0U) == pdTRUE )
+    {
+        QF_gc(e);
+    }
+    ao_spy_drain();
+    ao_spy_other_drain();
+}
+
+/**
+ * @brief The next thing AO_Storage asked of AO_Net.
+ * @return The event, to be given back with QF_gc(), or NULL for none.
+ */
+static const QEvt *net_asked(void)
+{
+    const QEvt *e = NULL;
+
+    if ( xQueueReceive(AO_Net->eQueue, &e, 0U) != pdTRUE )
+    {
+        e = NULL;
+    }
+    return e;
+}
+
+/** @brief The next thing asked of AO_Net must be @p sig; it is taken. */
+static void net_expect(enum_t sig)
+{
+    const QEvt * const e = net_asked();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "AO_Net was asked nothing");
+    TEST_ASSERT_EQUAL_INT((int)sig, (int)e->sig);
+    QF_gc(e);
+}
+
+/** @brief AO_Net was asked nothing more. */
+static void net_expect_quiet(void)
+{
+    const QEvt * const e = net_asked();
+
+    if ( NULL != e )
+    {
+        QF_gc(e);
+        TEST_FAIL_MESSAGE("AO_Net was asked something nobody expected");
+    }
+}
+
+/** @brief The open AO_Storage asked for must be FETCH_URL from @p offset. */
+static void net_expect_open(uint32_t offset)
+{
+    const QEvt * const e = net_asked();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the download asked AO_Net for nothing");
+    TEST_ASSERT_EQUAL_INT((int)NET_STREAM_OPEN_FROM_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_STRING(FETCH_URL, ((const NetStreamFromEvt *)(const void *)e)->url);
+    TEST_ASSERT_EQUAL_UINT32(offset, ((const NetStreamFromEvt *)(const void *)e)->offset);
+    TEST_ASSERT_TRUE(((const NetStreamFromEvt *)(const void *)e)->who == AO_Storage);
+    QF_gc(e);
+}
+
+/** @brief AO_Net's answer to the open. */
+static void net_opens(kode_status_t rc, uint16_t http, uint32_t left)
+{
+    NetStreamFromRspEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_FROM_RSP_SIG);
+    r.status = (uint8_t)rc;
+    r.http   = http;
+    r.size   = left;
+    QASM_DISPATCH(AO_Storage, &r.super, 0U);
+}
+
+/** @brief AO_Net hands over @p len bytes of @p fill in buffer 0, or the end, or a failure. */
+static void net_gives(kode_status_t rc, uint16_t len, char fill)
+{
+    StorageDataEvt d;
+
+    (void)memset(s_fetch_buf, fill, len);
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.len    = len;
+    d.idx    = 0U;
+    d.status = (uint8_t)rc;
+    d.eof    = (KODE_OK == rc) && (0U == len);
+    QASM_DISPATCH(AO_Storage, &d.super, 0U);
+}
+
+/** @brief The next event the asker holds, which must be @p sig. */
+static const HttpFileEvt *fetch_take(enum_t sig)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the asker was told nothing");
+    TEST_ASSERT_EQUAL_INT((int)sig, (int)e->sig);
+    return (const HttpFileEvt *)(const void *)e;
+}
+
+/** @brief Ask for the download and let AO_Storage read the request. */
+static void fetch_asked(void)
+{
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get_file(ao_spy(), FETCH_URL, FETCH_PATH));
+    (void)qf_support_settle(AO_Storage);
+}
+
+TEST_CASE("a download into a new file asks for the whole body and appends every chunk",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+    char               back[FETCH_BUF];
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "nothing is said before AO_Net answers");
+
+    net_opens(KODE_OK, 200U, FETCH_CHUNK + FETCH_TAIL);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+
+    net_gives(KODE_OK, FETCH_CHUNK, 'a');
+    TEST_ASSERT_EQUAL_INT((long)FETCH_CHUNK, fs_size(FETCH_FILE));
+    net_expect(NET_STREAM_NEXT_SIG);
+    a = fetch_take(HTTP_FILE_PROGRESS_SIG);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK, a->written);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK, a->size);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK + FETCH_TAIL, a->total);
+    ao_spy_release();
+
+    net_gives(KODE_OK, FETCH_TAIL, 'b');
+    net_expect(NET_STREAM_NEXT_SIG);
+    a = fetch_take(HTTP_FILE_PROGRESS_SIG);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK + FETCH_TAIL, a->written);
+    ao_spy_release();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "one progress a chunk, and no end yet");
+
+    net_gives(KODE_OK, 0U, 0);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_FALSE(a->stopped);
+    TEST_ASSERT_EQUAL_UINT16(200U, a->status);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK + FETCH_TAIL, a->written);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK + FETCH_TAIL, a->size);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK + FETCH_TAIL, a->total);
+    ao_spy_drain();
+    net_expect_quiet();
+
+    TEST_ASSERT_EQUAL_INT((long)(FETCH_CHUNK + FETCH_TAIL), fs_read(FETCH_FILE, back, sizeof(back)));
+    TEST_ASSERT_EACH_EQUAL_CHAR('a', back, FETCH_CHUNK);
+    TEST_ASSERT_EACH_EQUAL_CHAR('b', &back[FETCH_CHUNK], FETCH_TAIL);
+
+    /* The asker's door is open again. */
+    fetch_asked();
+    net_expect_open(FETCH_CHUNK + FETCH_TAIL);
+    net_opens(KODE_ERROR, 416U, 0U);
+    ao_spy_drain();
+}
+
+/* The offset is the file's own length, read when the download begins: what a
+ * cut download left is kept and the rest goes in behind it. */
+TEST_CASE("a download into a file that has part of the body asks for the rest",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+    char               back[FETCH_BUF];
+
+    fetch_fresh();
+    make_file(FETCH_FILE, FETCH_HAD);
+    fetch_asked();
+    net_expect_open(FETCH_HAD);
+
+    net_opens(KODE_OK, 206U, FETCH_CHUNK);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+    net_gives(KODE_OK, FETCH_CHUNK, 'r');
+    net_expect(NET_STREAM_NEXT_SIG);
+    a = fetch_take(HTTP_FILE_PROGRESS_SIG);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK, a->written);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_HAD + FETCH_CHUNK, a->size);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_HAD + FETCH_CHUNK, a->total);
+    ao_spy_release();
+
+    net_gives(KODE_OK, 0U, 0);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT16(206U, a->status);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK, a->written);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_HAD + FETCH_CHUNK, a->size);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT((long)(FETCH_HAD + FETCH_CHUNK), fs_read(FETCH_FILE, back, sizeof(back)));
+    TEST_ASSERT_EACH_EQUAL_CHAR('x', back, FETCH_HAD);
+    TEST_ASSERT_EACH_EQUAL_CHAR('r', &back[FETCH_HAD], FETCH_CHUNK);
+}
+
+/* A server that ignores ranges would send the body from its first byte, and
+ * appended to what the file has it would be a file nobody asked for. */
+TEST_CASE("a server that ignores the range ends the download and leaves the file as it was",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    make_file(FETCH_FILE, FETCH_HAD);
+    fetch_asked();
+    net_expect_open(FETCH_HAD);
+
+    net_opens(KODE_ERROR, 200U, 0U);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, a->rc);
+    TEST_ASSERT_EQUAL_UINT16(200U, a->status);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->written);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_HAD, a->size);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT((long)FETCH_HAD, fs_size(FETCH_FILE));
+    net_expect_quiet();
+}
+
+TEST_CASE("a file that is whole already is answered as done, with the server's 416",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    make_file(FETCH_FILE, FETCH_HAD);
+    fetch_asked();
+    net_expect_open(FETCH_HAD);
+
+    net_opens(KODE_ERROR, 416U, FETCH_HAD);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT16(416U, a->status);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->written);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_HAD, a->size);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_HAD, a->total);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT((long)FETCH_HAD, fs_size(FETCH_FILE));
+}
+
+/* A 416 also answers a file longer than the resource - one that was cut down,
+ * or another file at the same path - and so does one that says no length: the
+ * file is not called whole, and is left as it is. */
+TEST_CASE("a file longer than the resource, or of a resource of no length, is not whole",
+          "[storage_ao][fetch]")
+{
+    static const uint32_t told[] = { FETCH_HAD - 1U, 0U };
+    const HttpFileEvt *a;
+
+    for ( uint32_t i = 0U; (uint32_t)(sizeof(told) / sizeof(told[0])) > i; ++i )
+    {
+        fetch_fresh();
+        make_file(FETCH_FILE, FETCH_HAD);
+        fetch_asked();
+        net_expect_open(FETCH_HAD);
+
+        net_opens(KODE_ERROR, 416U, told[i]);
+        a = fetch_take(HTTP_FILE_RSP_SIG);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE((uint32_t)KODE_DENIED, a->rc, "a file the resource does not match was whole");
+        TEST_ASSERT_EQUAL_UINT16(416U, a->status);
+        TEST_ASSERT_EQUAL_UINT32(0U, a->written);
+        TEST_ASSERT_EQUAL_UINT32(FETCH_HAD, a->size);
+        TEST_ASSERT_EQUAL_UINT32(told[i], a->total);
+        ao_spy_drain();
+        TEST_ASSERT_EQUAL_INT((long)FETCH_HAD, fs_size(FETCH_FILE));
+        net_expect_quiet();
+    }
+}
+
+/* An open AO_Net refuses with no server's word - another transfer has the
+ * stream, the network is down - is the asker's refusal as it is. */
+TEST_CASE("a download AO_Net cannot open answers its status and touches no file",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_DENIED, 0U, 0U);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, a->rc);
+    TEST_ASSERT_EQUAL_UINT16(0U, a->status);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1L, fs_size(FETCH_FILE), "no file is made for a body that never came");
+}
+
+/* The link drops in the middle: what was appended stays, and asking again
+ * takes it up from there. */
+TEST_CASE("a body that stops arriving ends the download with what was written kept",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_OK, 200U, 0U);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+    net_gives(KODE_OK, FETCH_CHUNK, 'k');
+    net_expect(NET_STREAM_NEXT_SIG);
+    a = fetch_take(HTTP_FILE_PROGRESS_SIG);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, a->total, "a body of no declared length has no total");
+    ao_spy_release();
+
+    net_gives(KODE_TIMEOUT, 0U, 0);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_TIMEOUT, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK, a->written);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK, a->size);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT((long)FETCH_CHUNK, fs_size(FETCH_FILE));
+
+    fetch_asked();
+    net_expect_open(FETCH_CHUNK);
+    net_opens(KODE_ERROR, 416U, 0U);
+    ao_spy_drain();
+}
+
+TEST_CASE("a chunk the file does not take ends the download and closes the transfer",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kode_sys_http_get_file(ao_spy(), FETCH_URL, "/storage/no_such_folder/dl.bin"));
+    (void)qf_support_settle(AO_Storage);
+    net_expect(NET_STREAM_OPEN_FROM_SIG);
+    net_opens(KODE_OK, 200U, FETCH_CHUNK);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+
+    net_gives(KODE_OK, FETCH_CHUNK, 'z');
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_NOT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->written);
+    ao_spy_drain();
+    net_expect_quiet();
+}
+
+/* AO_Net has one stream, so there is one download: a second asker is told
+ * no at once, and the first goes on as if nobody had asked. */
+TEST_CASE("a second download while one runs is refused, and the first goes on",
+          "[storage_ao][fetch]")
+{
+    const QEvt        *o;
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_OK, 200U, FETCH_TAIL);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kode_sys_http_get_file(ao_spy_other(), FETCH_URL, "/storage/other.bin"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+        kode_sys_http_get_file(ao_spy(), FETCH_URL, FETCH_PATH),
+        "one download an asker at a time, refused where it is asked");
+    (void)qf_support_settle(AO_Storage);
+    o = ao_spy_other_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(o, "the second asker was told nothing");
+    TEST_ASSERT_EQUAL_INT((int)HTTP_FILE_RSP_SIG, (int)o->sig);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, ((const HttpFileEvt *)(const void *)o)->rc);
+    QF_gc(o);
+    net_expect_quiet();
+
+    net_gives(KODE_OK, FETCH_TAIL, 'f');
+    net_expect(NET_STREAM_NEXT_SIG);
+    net_gives(KODE_OK, 0U, 0);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    (void)fetch_take(HTTP_FILE_PROGRESS_SIG);
+    ao_spy_release();
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT((long)FETCH_TAIL, fs_size(FETCH_FILE));
+}
+
+/* Like every file request, a download is not begun over a transfer in
+ * flight: the asker is told at once, and asks again. */
+TEST_CASE("a download asked while a transfer is in flight is refused at once",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    hold_reader();
+    ao_spy_drain();
+    fetch_asked();
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, a->rc);
+    TEST_ASSERT_EQUAL_UINT16(0U, a->status);
+    ao_spy_drain();
+    net_expect_quiet();
+
+    release_reader();
+    ao_spy_drain();
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_DENIED, 0U, 0U);
+    ao_spy_drain();
+}
+
+TEST_CASE("a stop ends the asker's download and keeps what was written",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_OK, 200U, 0U);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+    net_gives(KODE_OK, FETCH_CHUNK, 's');
+    net_expect(NET_STREAM_NEXT_SIG);
+    ao_spy_drain();
+
+    /* Another AO's stop is not this download's. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_file_stop(ao_spy_other()));
+    (void)qf_support_settle(AO_Storage);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    net_expect_quiet();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_file_stop(ao_spy()));
+    (void)qf_support_settle(AO_Storage);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_TRUE(a->stopped);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK, a->written);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT((long)FETCH_CHUNK, fs_size(FETCH_FILE));
+
+    /* A chunk AO_Net had on its way is nobody's, and a stop with nothing to
+     * stop does nothing. */
+    net_gives(KODE_OK, FETCH_TAIL, 't');
+    TEST_ASSERT_EQUAL_INT((long)FETCH_CHUNK, fs_size(FETCH_FILE));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_file_stop(ao_spy()));
+    (void)qf_support_settle(AO_Storage);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    net_expect_quiet();
+}
+
+/* AO_Net answers every open, so a stop asked meanwhile waits for that answer:
+ * the answer is then this download's and not the next one's. */
+TEST_CASE("a stop asked while the open is out ends the download when AO_Net answers",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_file_stop(ao_spy()));
+    (void)qf_support_settle(AO_Storage);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "not before the open is answered");
+    net_expect_quiet();
+
+    net_opens(KODE_OK, 200U, FETCH_CHUNK);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_TRUE(a->stopped);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->written);
+    ao_spy_drain();
+    net_expect_quiet();
+}
+
+/** @brief 10 ms steps between two tries of a chunk that found the file handle taken. */
+#define FETCH_RETRY_STEPS  QF_SUPPORT_STEPS(KODE_HTTP_FILE_RETRY_MS)
+
+/* The download holds no file between chunks, so another transfer can have the
+ * one handle when a chunk arrives. The chunk waits for it, in its buffer. */
+TEST_CASE("a chunk that finds a transfer in flight waits its turn and is then written",
+          "[storage_ao][fetch]")
+{
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_OK, 200U, FETCH_CHUNK);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+
+    hold_reader();
+    ao_spy_drain();
+    net_gives(KODE_OK, FETCH_CHUNK, 'w');
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1L, fs_size(FETCH_FILE), "the handle is another transfer's");
+    net_expect_quiet();
+    (void)qf_support_tick(AO_Storage, 2U * FETCH_RETRY_STEPS);
+    TEST_ASSERT_EQUAL_INT(-1L, fs_size(FETCH_FILE));
+
+    release_reader();
+    (void)qf_support_tick(AO_Storage, FETCH_RETRY_STEPS + 1U);
+    TEST_ASSERT_EQUAL_INT((long)FETCH_CHUNK, fs_size(FETCH_FILE));
+    net_expect(NET_STREAM_NEXT_SIG);
+    (void)fetch_take(HTTP_FILE_PROGRESS_SIG);
+    ao_spy_drain();
+
+    net_gives(KODE_OK, 0U, 0);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    ao_spy_drain();
+}
+
+TEST_CASE("a chunk that never gets its turn ends the download as busy",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_OK, 200U, FETCH_CHUNK);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+
+    hold_reader();
+    ao_spy_drain();
+    net_gives(KODE_OK, FETCH_CHUNK, 'w');
+    wait_out_turn();
+    (void)qf_support_tick(AO_Storage, FETCH_RETRY_STEPS + 1U);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->written);
+    ao_spy_drain();
+    release_reader();
+    ao_spy_drain();
+}
+
+/* AO_Net forgets a transfer when the network goes and tells its reader
+ * nothing. The download's own clock ends the wait. */
+TEST_CASE("a download AO_Net goes silent on ends with a timeout", "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_OK, 200U, 0U);
+    net_expect(NET_STREAM_READ_REQ_SIG);
+    net_gives(KODE_OK, FETCH_CHUNK, 'q');
+    net_expect(NET_STREAM_NEXT_SIG);
+    ao_spy_drain();
+
+    (void)qf_support_tick(AO_Storage, QF_SUPPORT_STEPS(KODE_HTTP_FILE_STALL_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "not a step before");
+    (void)qf_support_tick(AO_Storage, 2U);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_TIMEOUT, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(FETCH_CHUNK, a->written);
+    ao_spy_drain();
+}
+
+/* AO_Net answers every open unless it has no event for the answer. The open
+ * has the same clock as a chunk, so a lost answer cannot hold the one
+ * download's door shut and the board awake. */
+TEST_CASE("an open AO_Net never answers ends the download after the same wait as a chunk",
+          "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+    ao_spy_drain();
+
+    (void)qf_support_tick(AO_Storage, QF_SUPPORT_STEPS(KODE_HTTP_FILE_STALL_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "not a step before");
+    (void)qf_support_tick(AO_Storage, 2U);
+    net_expect(NET_STREAM_CLOSE_REQ_SIG);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_TIMEOUT, a->rc);
+    TEST_ASSERT_EQUAL_UINT32(0U, a->written);
+    ao_spy_drain();
+
+    /* The door is open again. */
+    fetch_asked();
+    net_expect_open(0U);
+    net_opens(KODE_DENIED, 0U, 0U);
+    ao_spy_drain();
+}
+
+TEST_CASE("kode_sys_http_get_file refuses what cannot be a download and posts nothing",
+          "[storage_ao][fetch]")
+{
+    char longurl[KODE_SYS_HTTP_FILE_URL_MAX + 1U];
+    char longpath[KODE_SYS_FILE_PATH_MAX + 1U];
+
+    fetch_fresh();
+    (void)memset(longurl, 'u', sizeof(longurl) - 1U);
+    longurl[sizeof(longurl) - 1U] = '\0';
+    (void)memset(longpath, 'p', sizeof(longpath) - 1U);
+    longpath[sizeof(longpath) - 1U] = '\0';
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_file(NULL, FETCH_URL, FETCH_PATH));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_file(ao_spy(), NULL, FETCH_PATH));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_file(ao_spy(), longurl, FETCH_PATH));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_file(ao_spy(), FETCH_URL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_file(ao_spy(), FETCH_URL, longpath));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_file_stop(NULL));
+    (void)qf_support_settle(AO_Storage);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    net_expect_quiet();
+}
+
+TEST_CASE("a folder is no place to download into", "[storage_ao][fetch]")
+{
+    const HttpFileEvt *a;
+
+    fetch_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get_file(ao_spy(), FETCH_URL, "/storage"));
+    (void)qf_support_settle(AO_Storage);
+    a = fetch_take(HTTP_FILE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_IS_DIR, a->rc);
+    ao_spy_drain();
+    net_expect_quiet();
+}
+
+#if CONFIG_KODE_LOWPOWER
+/* The board does not rest in the middle of a download: its radio would, and
+ * the body with it. */
+TEST_CASE("a round during a download is refused, and is ready once it ends",
+          "[storage_ao][fetch][lowpower]")
+{
+    fetch_fresh();
+    fetch_asked();
+    net_expect_open(0U);
+
+    lp_round(AO_Storage, KODE_LP_ASLEEP);
+    lp_expect_answer(true, "download");
+
+    net_opens(KODE_DENIED, 0U, 0U);
+    ao_spy_drain();
+    lp_round(AO_Storage, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+}
+#endif

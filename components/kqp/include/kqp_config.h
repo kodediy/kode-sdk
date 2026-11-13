@@ -555,6 +555,20 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  * of them; a console line (KODE_CONSOLE_LINE_MAX) carries fewer. A file name
  * is still bounded by KODE_APP_FILE_MAX. */
 #define KODE_FLASH_SRC_MAX       257U
+/* A URL a download into a file names, terminator included: 255 characters.
+ * One less than a source string so that the offset a resumed download starts
+ * from fits beside it in the large event block (NetStreamFromEvt). */
+#define KODE_NET_FETCH_URL_MAX   256U
+/* A chunk of a download into a file that finds another transfer holding the
+ * one file handle is tried again this often, for KODE_STORAGE_TURN_MS in
+ * all: the bound every request that waits its turn at AO_Storage has. */
+#define KODE_HTTP_FILE_RETRY_MS  50U
+/* How long a download into a file waits for AO_Net's next chunk before it
+ * gives up. AO_Net answers a read within its own guard (the driver's 20 s and
+ * KODE_NET_STREAM_SLACK_MS), but forgets a transfer whose network went and
+ * tells its reader nothing: this is what ends that wait. Above the guard, so a
+ * read that is only slow is answered by AO_Net first. */
+#define KODE_HTTP_FILE_STALL_MS  30000U
 /* `dst=` values 0..2 are kfw_target_t. This one is not a container target -
  * nothing declares itself "for the mailbox" - it is an instruction to park
  * whatever arrives without decoding it. */
@@ -1830,6 +1844,7 @@ _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
 #define KQP_ID_ANSWER_MARGIN    0U    /**< Slots an identity, signature or wipe answer leaves free: 0 only asks that there be one. */
 #define KQP_FRAMES_MARGIN       4U    /**< Slots a Wi-Fi frames tick or frame leaves free in its asker's queue: room for its own traffic and the answer to a stop. */
 #define KQP_FRAMES_ANSWER_MARGIN 0U   /**< Slots a Wi-Fi frames answer leaves free: 0 only asks that there be one. */
+#define KQP_FETCH_POOL_MARGIN   16U   /**< Small blocks a download's progress event leaves free (half the tier), for every other AO's small events; a chunk with no block for it goes unannounced. */
 #define KQP_FRAMES_POOL_MARGIN  16U   /**< Blocks a Wi-Fi frames tick (the small tier) or frame (the medium tier) leaves free in its tier, for every other AO's events; kqp.c pins each event to its tier. */
 _Static_assert((KQP_FRAMES_POOL_MARGIN > 0U) && (KQP_FRAMES_POOL_MARGIN < KQP_SMALL_POOL_COUNT),
                "a tick leaves some of the small tier free, and the tier has more than that");

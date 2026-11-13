@@ -49,6 +49,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kode_sys/src/kode_sys_files.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_flash.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_net.c"
+    "${SDK_DIR}/components/kode_sys/src/kode_sys_http_file.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_mqtt.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi_status.c"
@@ -128,6 +129,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kaos/display/src/display_ao.c"
     "${SDK_DIR}/components/kaos/display/src/display_clock.c"
     "${SDK_DIR}/components/kaos/storage/src/storage_ao.c"
+    "${SDK_DIR}/components/kaos/storage/src/storage_fetch.c"
     "${SDK_DIR}/components/kaos/net/src/net_ao.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_ao.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_frames.c"
@@ -456,6 +458,13 @@ set_source_files_properties(
     "${SDK_DIR}/components/kaos/appmgr/src/appmgr_ao.c"
     PROPERTIES COMPILE_DEFINITIONS
         "net_stream_buf=host_net_stream_buf;CONFIG_KODEOS_BLE_CONSOLE=1")
+
+# AO_Storage's download reads its chunks out of the same stream buffers, for
+# the same reason: its one call that reads them is renamed to a function
+# test_storage_ao.c defines over a buffer of its own.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/storage/src/storage_fetch.c"
+    PROPERTIES COMPILE_DEFINITIONS "net_stream_buf=host_fetch_stream_buf")
 
 # The standard layer's Active Object is built for the APP role only, and the
 # project-wide role above is the OS one. This source is the app build, so the

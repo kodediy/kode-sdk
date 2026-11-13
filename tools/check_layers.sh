@@ -327,9 +327,10 @@ report "kode_sys_internal.h only in kode_sys and kode" \
 # app-description headers kdrv carries (kapp_desc.h, kapp_cat.h), the console
 # tables kaos carries (kode_variables.h, kode_functions.h, kode_config.h), and
 # kqp.h, which brings QP/C and every system event with it (and so khal_sync.h,
-# the `done` of the blocking requests). Any other include is a new dependency
+# the `done` of the blocking requests), and the two kode_sys headers that
+# kode.h shares with it, kode_init.h and kode_http_off.h. Any other include is a new dependency
 # of every app, and is added here in the same commit, where a reviewer sees it.
-sys_includes='^(stddef|stdint|stdbool|kode_defs|kode_log|kapp_desc|kode_variables|kode_functions|kode_config|kapp_cat|kqp|kode_init)\.h$'
+sys_includes='^(stddef|stdint|stdbool|kode_defs|kode_log|kapp_desc|kode_variables|kode_functions|kode_config|kapp_cat|kqp|kode_init|kode_http_off)\.h$'
 report "kode_sys.h includes only the headers named here" \
   "A driver type in the sys contract binds the app to the driver; give it a kode_sys_ type and convert in its kode_sys_<module>.c." \
   "$(grep -nE '^#include ' components/kode_sys/include/kode_sys.h \

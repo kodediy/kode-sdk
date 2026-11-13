@@ -25,6 +25,12 @@
 #include "khal_time.h"
 #include "kode_log.h"
 #include "krows.h"
+#include "storage_fetch.h"
+
+/* The download module, named weakly (KAOS_WEAK, kaos.h): naming it strongly
+ * would link it, and AO_Net with it, into every app that opens a file. */
+KAOS_WEAK bool storage_fetch_event(QEvt const * const e, bool busy);
+KAOS_WEAK bool storage_fetch_running(void);
 
 #define TAG            "kaos.storage"
 
@@ -6704,6 +6710,11 @@ static void storage_round(Storage const * const me, const LowPowerRoundEvt * con
     {
         lowpower_ready(me->lp_who, r->round, true, "file write");
     }
+    else if ( (NULL != storage_fetch_running) && storage_fetch_running() )
+    {
+        /* The radio would rest with the board, and the body with it. */
+        lowpower_ready(me->lp_who, r->round, true, "download");
+    }
     else if ( busy(me) || me->sdj.busy )
     {
         lowpower_ready(me->lp_who, r->round, true, "storage busy");
@@ -7891,6 +7902,13 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
     {
         me->read_pause = false;
         wait_pump(me);
+        status = Q_HANDLED();
+    }
+    else if ( (NULL != storage_fetch_event)
+             && storage_fetch_event(e, busy(me) || me->sdj.busy) )
+    {
+        /* A download's own event, in an image whose app asks for one: the
+         * module keeps no file open between chunks, so it takes no turn. */
         status = Q_HANDLED();
     }
     else if ( me->sdj.busy && needs_card(me, e) && card_hold(me, e) )

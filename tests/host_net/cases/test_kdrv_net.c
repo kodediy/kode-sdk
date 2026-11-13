@@ -1149,7 +1149,7 @@ TEST_CASE("a stream open gives each I/O the time left and reads on the normal ti
     esp_http_client_set_timeout_ms_ExpectAndReturn(STREAM_H, 15000, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_stream_open("http://example.invalid/app.bin", &total, &status));
+        kdrv_net_stream_open("http://example.invalid/app.bin", 0U, &total, &status));
     TEST_ASSERT_EQUAL_INT_MESSAGE(15000, s_cfg_timeout,
         "the connect gets a full per-I/O timeout while the budget is whole");
     TEST_ASSERT_EQUAL_UINT32(5000U, total);
@@ -1180,7 +1180,7 @@ TEST_CASE("a stream open logs the URL without its query", "[kdrv_net]")
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
         kdrv_net_stream_open("http://example.invalid/app.bin?token=s3cret#x",
-                             &total, &status));
+                             0U, &total, &status));
     TEST_ASSERT_TRUE_MESSAGE(log_stub_saw("GET http://example.invalid/app.bin: 5000 bytes"),
         "the open did not name the URL up to its query");
     TEST_ASSERT_FALSE_MESSAGE(log_stub_saw("s3cret"), "the log printed the token");
@@ -1207,7 +1207,7 @@ TEST_CASE("a slow connect leaves the headers only what is left of the budget",
     esp_http_client_set_timeout_ms_ExpectAndReturn(STREAM_H, 15000, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_stream_open("http://example.invalid/app.bin", &total, &status));
+        kdrv_net_stream_open("http://example.invalid/app.bin", 0U, &total, &status));
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, total,
         "no Content-Length is a 0, not a negative number");
 
@@ -1235,7 +1235,7 @@ TEST_CASE("an open that spent its whole budget is a timeout and holds nothing",
     esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT,
-        kdrv_net_stream_open("http://example.invalid/app.bin", &total, &status));
+        kdrv_net_stream_open("http://example.invalid/app.bin", 0U, &total, &status));
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(7U, total, "no length is reported for a timeout");
 
     Mockesp_http_client_Verify();
@@ -1249,9 +1249,487 @@ TEST_CASE("an open that spent its whole budget is a timeout and holds nothing",
     esp_http_client_close_IgnoreAndReturn(ESP_OK);
     esp_http_client_cleanup_IgnoreAndReturn(ESP_OK);
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
-        kdrv_net_stream_open("http://example.invalid/app.bin", &total, &status),
+        kdrv_net_stream_open("http://example.invalid/app.bin", 0U, &total, &status),
         "the first open left the driver holding a client");
     TEST_ASSERT_EQUAL_UINT16(404U, status);
 
+    Mockesp_http_client_Destroy();
+}
+
+/* ---- A stream opened part of the way in ------------------------------------
+ * A download that was cut is taken up where it stopped: the open asks for the
+ * body from an offset on, and the body is ready only when the server says it
+ * starts there.
+ */
+
+/** @brief Where a resumed stream of these cases starts. */
+#define STREAM_FROM  40000U
+
+TEST_CASE("a stream opened from an offset asks for the rest and takes a 206",
+          "[kdrv_net]")
+{
+    uint32_t total  = 0U;
+    uint16_t status = 0U;
+
+    time_stub_set_ms(1000U);
+    s_open_takes_ms = 0U;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(stream_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=40000-", ESP_OK);
+    esp_http_client_open_Stub(stream_open_takes);
+    esp_http_client_set_timeout_ms_IgnoreAndReturn(ESP_OK);
+    esp_http_client_fetch_headers_ExpectAndReturn(STREAM_H, 60000);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 206);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_stream_open("http://example.invalid/big.bin", STREAM_FROM, &total, &status));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(60000U, total, "what is left of the body");
+    TEST_ASSERT_EQUAL_UINT16(206U, status);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+    release_stream();
+}
+
+/* A server that ignores the range sends the body from its first byte. Read as
+ * the rest of the file it would be appended in the wrong place, so the open
+ * is refused, the status says why, and nothing is held. */
+TEST_CASE("a stream opened from an offset refuses a server that sends the whole body",
+          "[kdrv_net]")
+{
+    uint32_t total  = 7U;
+    uint16_t status = 0U;
+
+    time_stub_set_ms(1000U);
+    s_open_takes_ms = 0U;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(stream_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=40000-", ESP_OK);
+    esp_http_client_open_Stub(stream_open_takes);
+    esp_http_client_set_timeout_ms_IgnoreAndReturn(ESP_OK);
+    esp_http_client_fetch_headers_ExpectAndReturn(STREAM_H, 100000);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 200);
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_stream_open("http://example.invalid/big.bin", STREAM_FROM, &total, &status));
+    TEST_ASSERT_EQUAL_UINT16(200U, status);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(7U, total, "no length is reported for a refusal");
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* The offset is the whole file already: the server has nothing past it. */
+TEST_CASE("a stream opened past the end reports the server's 416 and holds nothing",
+          "[kdrv_net]")
+{
+    uint32_t total  = 0U;
+    uint16_t status = 0U;
+
+    time_stub_set_ms(1000U);
+    s_open_takes_ms = 0U;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(stream_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=40000-", ESP_OK);
+    esp_http_client_open_Stub(stream_open_takes);
+    esp_http_client_set_timeout_ms_IgnoreAndReturn(ESP_OK);
+    esp_http_client_fetch_headers_ExpectAndReturn(STREAM_H, 0);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 416);
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_stream_open("http://example.invalid/big.bin", STREAM_FROM, &total, &status));
+    TEST_ASSERT_EQUAL_UINT16(416U, status);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, total, "a 416 with no Content-Range said a length");
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* ---- A GET of one range ------------------------------------------------------
+ * kdrv_net_http_get_range(): the bytes from an offset, as many as the buffer
+ * holds, in one request. The server's Content-Range says how long the whole
+ * resource is.
+ */
+
+/** @brief Room of the buffer a ranged GET of these cases fills. */
+#define RANGE_CAP      300U
+/** @brief Where it starts. */
+#define RANGE_FROM     1000U
+/** @brief What the client is given as its deadline. */
+#define RANGE_TIMEOUT_MS 1000U
+/** @brief The driver's read size (kdrv_net.c's NET_HTTP_READ_CHUNK). */
+#define RANGE_CHUNK    256
+
+/** @brief The response header handler the driver gave the client, and its context. */
+static http_event_handle_cb s_range_handler;
+static void                *s_range_ctx;
+/** @brief The Content-Range the server of a case sends; NULL sends none. */
+static const char          *s_range_header;
+/** @brief What its headers declare as the body's length. */
+static int64_t              s_range_length;
+
+/** @brief Stands in for esp_http_client_init(): keeps the header handler. */
+static esp_http_client_handle_t range_init(const esp_http_client_config_t *config,
+                                           int num_calls)
+{
+    (void)num_calls;
+    s_range_handler = config->event_handler;
+    s_range_ctx     = config->user_data;
+    return STREAM_H;
+}
+
+/** @brief Stands in for the headers arriving: the server's Content-Range, if any, then the length. */
+static int64_t range_headers(esp_http_client_handle_t client, int num_calls)
+{
+    (void)num_calls;
+    if ( (NULL != s_range_header) && (NULL != s_range_handler) )
+    {
+        static char key[] = "content-range";
+        static char value[64];
+        esp_http_client_event_t evt;
+
+        (void)memset(&evt, 0, sizeof(evt));
+        (void)snprintf(value, sizeof(value), "%s", s_range_header);
+        evt.event_id     = HTTP_EVENT_ON_HEADER;
+        evt.client       = client;
+        evt.user_data    = s_range_ctx;
+        evt.header_key   = key;
+        evt.header_value = value;
+        (void)s_range_handler(&evt);
+    }
+    return s_range_length;
+}
+
+/** @brief Fills whatever the driver asks to read with a pattern, to the size asked. */
+static int range_read_full(esp_http_client_handle_t client, char *buffer, int len,
+                           int num_calls)
+{
+    (void)client;
+    (void)memset(buffer, 'a' + (num_calls % 26), (size_t)len);
+    return len;
+}
+
+TEST_CASE("a ranged GET asks for its bytes and reports the length of the whole",
+          "[kdrv_net]")
+{
+    static uint8_t         buf[RANGE_CAP];
+    kdrv_net_http_result_t res;
+
+    s_range_header = "bytes 1000-1299/5000";
+    s_range_length = (int64_t)RANGE_CAP;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(range_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=1000-1299", ESP_OK);
+    esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
+    esp_http_client_fetch_headers_Stub(range_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 206);
+    esp_http_client_is_chunked_response_IgnoreAndReturn(false);
+    esp_http_client_read_Stub(range_read_full);
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, buf,
+                                RANGE_CAP, &res, RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_UINT16(206U, res.status);
+    TEST_ASSERT_EQUAL_UINT32(RANGE_CAP, res.kept);
+    TEST_ASSERT_FALSE(res.truncated);
+    TEST_ASSERT_EQUAL_INT64(5000, res.range_total);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* The range can be past 4 GB: the offset and the total are 64 bits wide all
+ * the way to the header and back. */
+TEST_CASE("a ranged GET past four gigabytes keeps every digit", "[kdrv_net]")
+{
+    static uint8_t         buf[RANGE_CAP];
+    kdrv_net_http_result_t res;
+
+    s_range_header = "bytes 6000000000-6000000299/9000000000";
+    s_range_length = (int64_t)RANGE_CAP;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(range_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range",
+                                               "bytes=6000000000-6000000299", ESP_OK);
+    esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
+    esp_http_client_fetch_headers_Stub(range_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 206);
+    esp_http_client_is_chunked_response_IgnoreAndReturn(false);
+    esp_http_client_read_Stub(range_read_full);
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", 6000000000ULL, buf,
+                                RANGE_CAP, &res, RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_INT64(9000000000LL, res.range_total);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* A server that ignores the range answers 200 with the whole resource, which
+ * may be hundreds of megabytes. Asked from byte 0, those are the bytes wanted:
+ * the driver reads what the buffer holds and hangs up. */
+TEST_CASE("a ranged GET a server ignores is cut at the buffer's room", "[kdrv_net]")
+{
+    static uint8_t         buf[RANGE_CAP];
+    kdrv_net_http_result_t res;
+
+    s_range_header = NULL;
+    s_range_length = 400000000;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(range_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=0-299", ESP_OK);
+    esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
+    esp_http_client_fetch_headers_Stub(range_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 200);
+    esp_http_client_is_chunked_response_IgnoreAndReturn(false);
+    /* Two reads fill the buffer, the second for only what is left; no third. */
+    esp_http_client_read_ExpectAndReturn(STREAM_H, NULL, RANGE_CHUNK, RANGE_CHUNK);
+    esp_http_client_read_IgnoreArg_buffer();
+    esp_http_client_read_ExpectAndReturn(STREAM_H, NULL, (int)RANGE_CAP - RANGE_CHUNK,
+                                         (int)RANGE_CAP - RANGE_CHUNK);
+    esp_http_client_read_IgnoreArg_buffer();
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", 0U, buf,
+                                RANGE_CAP, &res, RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_UINT16(200U, res.status);
+    TEST_ASSERT_EQUAL_UINT32(RANGE_CAP, res.kept);
+    TEST_ASSERT_TRUE_MESSAGE(res.truncated, "the body went on past the buffer");
+    TEST_ASSERT_EQUAL_INT64_MESSAGE(-1, res.range_total, "nobody said how long the whole is");
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* Asked from further in, the same 200 is the resource's start, not the bytes
+ * asked for: a caller that appends what it got would write the first range
+ * again and again. Its body is left unread. */
+TEST_CASE("a ranged GET from an offset a server ignores keeps none of the start",
+          "[kdrv_net]")
+{
+    static uint8_t         buf[RANGE_CAP];
+    kdrv_net_http_result_t res;
+
+    s_range_header = NULL;
+    s_range_length = 400000000;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(range_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=1000-1299", ESP_OK);
+    esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
+    esp_http_client_fetch_headers_Stub(range_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 200);
+    esp_http_client_is_chunked_response_IgnoreAndReturn(false);
+    /* No read: CMock fails one nobody expected. */
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, buf,
+                                RANGE_CAP, &res, RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_UINT16(200U, res.status);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, res.kept, "the resource's start was handed over as the range");
+    TEST_ASSERT_FALSE(res.truncated);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* A file longer than the resource also gets a 416, and only its Content-Range
+ * tells the two apart: the open passes the whole length on. */
+TEST_CASE("a stream opened past the end says how long the resource is", "[kdrv_net]")
+{
+    uint32_t total  = 0U;
+    uint16_t status = 0U;
+
+    time_stub_set_ms(1000U);
+    s_open_takes_ms = 0U;
+    s_range_header  = "bytes */30000";
+    s_range_length  = 0;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(range_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=40000-", ESP_OK);
+    esp_http_client_open_Stub(stream_open_takes);
+    esp_http_client_set_timeout_ms_IgnoreAndReturn(ESP_OK);
+    esp_http_client_fetch_headers_Stub(range_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 416);
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_stream_open("http://example.invalid/big.bin", STREAM_FROM, &total, &status));
+    TEST_ASSERT_EQUAL_UINT16(416U, status);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(30000U, total, "the resource's length was not passed on");
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* A body longer than 32 bits hold is no FAT32 file's, and a length that
+ * wrapped would announce less than gets written: none is reported. */
+TEST_CASE("a stream longer than 32 bits hold reports no length", "[kdrv_net]")
+{
+    uint32_t total  = 7U;
+    uint16_t status = 0U;
+
+    time_stub_set_ms(1000U);
+    s_open_takes_ms = 0U;
+    s_range_header  = NULL;
+    s_range_length  = 5000000000;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(range_init);
+    esp_http_client_open_Stub(stream_open_takes);
+    esp_http_client_set_timeout_ms_IgnoreAndReturn(ESP_OK);
+    esp_http_client_fetch_headers_Stub(range_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 200);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_stream_open("http://example.invalid/huge.bin", 0U, &total, &status));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, total, "a length that does not fit was reported");
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+    release_stream();
+}
+
+/* Past the end of the resource: the server's 416 is an answer, as a 404 is. */
+TEST_CASE("a ranged GET past the end is the server's 416, with its total",
+          "[kdrv_net]")
+{
+    static uint8_t         buf[RANGE_CAP];
+    kdrv_net_http_result_t res;
+
+    s_range_header = "bytes */5000";
+    s_range_length = 0;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(range_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=1000-1299", ESP_OK);
+    esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
+    esp_http_client_fetch_headers_Stub(range_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 416);
+    esp_http_client_is_chunked_response_IgnoreAndReturn(false);
+    /* Its body is the server's page about it: never read. */
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, buf,
+                                RANGE_CAP, &res, RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_UINT16(416U, res.status);
+    TEST_ASSERT_EQUAL_UINT32(0U, res.kept);
+    TEST_ASSERT_EQUAL_INT64(5000, res.range_total);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* A server's error page is not the range. nginx, S3 and the CDNs answer a 416,
+ * a 404 or a 403 with a body of HTML or XML; a caller that appends what it
+ * got would write that page into its file. */
+TEST_CASE("a ranged GET answered with an error page keeps none of it",
+          "[kdrv_net]")
+{
+    static uint8_t         buf[RANGE_CAP];
+    kdrv_net_http_result_t res;
+
+    s_range_header = NULL;
+    s_range_length = 150;
+    (void)memset(buf, 0x5A, sizeof(buf));
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_Stub(range_init);
+    esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=1000-1299", ESP_OK);
+    esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
+    esp_http_client_fetch_headers_Stub(range_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 404);
+    esp_http_client_is_chunked_response_IgnoreAndReturn(false);
+    esp_http_client_read_Stub(range_read_full);
+    esp_http_client_is_complete_data_received_IgnoreAndReturn(true);
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, buf,
+                                RANGE_CAP, &res, RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_UINT16(404U, res.status);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, res.kept, "the error page was kept as the range");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x5A, buf[0], "the error page was written into the buffer");
+    TEST_ASSERT_FALSE(res.truncated);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+TEST_CASE("a ranged GET with nowhere to put its bytes never opens a client",
+          "[kdrv_net]")
+{
+    static uint8_t         buf[RANGE_CAP];
+    kdrv_net_http_result_t res;
+
+    Mockesp_http_client_Init();
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_http_get_range(NULL, 0U, buf, RANGE_CAP, &res, RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_http_get_range("http://example.invalid/x", 0U, NULL, RANGE_CAP, &res,
+                                RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_http_get_range("http://example.invalid/x", 0U, buf, 0U, &res,
+                                RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_http_get_range("http://example.invalid/x", 0U, buf, RANGE_CAP, NULL,
+                                RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
+        kdrv_net_http_get_range("http://example.invalid/x", UINT64_MAX - 10U, buf,
+                                RANGE_CAP, &res, RANGE_TIMEOUT_MS),
+        "a range that runs past the last offset there is");
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* A plain GET is the request it always was: no Range goes out, and nothing is
+ * said about a whole it never asked about. */
+TEST_CASE("a plain GET sends no range and reports no total", "[kdrv_net]")
+{
+    static uint8_t         buf[RANGE_CAP];
+    kdrv_net_http_result_t res;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_ExpectAnyArgsAndReturn(STREAM_H);
+    esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
+    esp_http_client_fetch_headers_ExpectAndReturn(STREAM_H, 0);
+    esp_http_client_get_status_code_ExpectAndReturn(STREAM_H, 200);
+    esp_http_client_is_chunked_response_ExpectAndReturn(STREAM_H, false);
+    esp_http_client_read_ExpectAndReturn(STREAM_H, NULL, RANGE_CHUNK, 0);
+    esp_http_client_read_IgnoreArg_buffer();
+    esp_http_client_is_complete_data_received_ExpectAndReturn(STREAM_H, true);
+    esp_http_client_close_ExpectAndReturn(STREAM_H, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_get("http://example.invalid/x", buf, RANGE_CAP, &res,
+                          RANGE_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL_INT64(-1, res.range_total);
+
+    Mockesp_http_client_Verify();
     Mockesp_http_client_Destroy();
 }

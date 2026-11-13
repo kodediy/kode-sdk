@@ -144,6 +144,7 @@ static kode_status_t wifi_auto(void)    { return kode_sys_wifi_connect(NULL, NUL
 static kode_status_t wifi_leave(void)   { return kode_sys_wifi_disconnect(); }
 #endif
 #if CONFIG_KODEOS_NET
+static kode_status_t file_stop(void)    { return kode_sys_http_file_stop(AO_Storage); }
 static kode_status_t mqtt_up(void)      { return kode_sys_mqtt_connect("mqtt://broker", NULL, NULL); }
 static kode_status_t mqtt_down(void)    { return kode_sys_mqtt_disconnect(); }
 static kode_status_t mqtt_pub(void)     { return kode_sys_mqtt_publish("t", "x", 1U); }
@@ -333,3 +334,14 @@ TEST_CASE("a command with the pools dry is KODE_NO_RESOURCES and posts nothing",
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_power_boost(false), "the pool is back");
     queue_drain(AO_Power);
 }
+
+#if CONFIG_KODEOS_NET
+/* The stop of a download is a command to AO_Storage: in a loop it is refused
+ * past the margin like any other, and a stop with no download to end is
+ * read and dropped. */
+TEST_CASE("the download's stop in a loop is refused past the margin, then taken again",
+          "[kode_sys_cmd]")
+{
+    loop_past_margin(AO_Storage, &file_stop, KQP_STORAGE_CMD_MARGIN);
+}
+#endif

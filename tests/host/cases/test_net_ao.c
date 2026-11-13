@@ -5142,15 +5142,22 @@ static size_t   s_read_got;
 /** @brief The URL the last open was asked for. */
 static char     s_open_url[KODE_FLASH_SRC_MAX];
 
-static kode_status_t stub_stream_open(const char *url, uint32_t *total,
+/** @brief Where the last open asked the body from. */
+static uint32_t s_open_offset;
+/** @brief What the open stand-in answers, and the status it says the server sent. */
+static kode_status_t s_open_rc = KODE_OK;
+static uint16_t      s_open_code = 200U;
+
+static kode_status_t stub_stream_open(const char *url, uint32_t offset, uint32_t *total,
                                       uint16_t *status, int n)
 {
     (void)n;
     s_n_open++;
+    s_open_offset = offset;
     (void)snprintf(s_open_url, sizeof(s_open_url), "%s", url);
     *total  = s_open_total;
-    *status = 200U;
-    return KODE_OK;
+    *status = s_open_code;
+    return s_open_rc;
 }
 
 static kode_status_t stub_stream_read(void *buf, size_t max, size_t *got, int n)
@@ -5215,6 +5222,9 @@ static void worker_fresh(void)
 
     s_n_open = 0U; s_n_read = 0U; s_n_close = 0U;
     s_open_total = 4242U;
+    s_open_offset = 0U;
+    s_open_rc     = KODE_OK;
+    s_open_code   = 200U;
     s_read_got   = 100U;
     s_nreq       = 0U;
     s_echo_n     = 0U;
@@ -5588,6 +5598,126 @@ TEST_CASE("an open that waited for a close, and whose asker closed before it "
     TEST_ASSERT_NOT_NULL(rsp);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, rsp->status);
 
+    worker_done();
+}
+
+/* ---- A transfer taken up part of the way in --------------------------------- */
+
+/** @brief Where the resumed transfers of these cases start. */
+#define RESUME_AT  40000U
+
+/** @brief Ask for a transfer from @p offset on, as net_stream_open_from_request() posts it. */
+static void ask_stream_open_from(const char *url, uint32_t offset)
+{
+    NetStreamFromEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_OPEN_FROM_SIG);
+    (void)snprintf(e.url, sizeof(e.url), "%s", url);
+    e.offset = offset;
+    e.who    = ao_spy();
+
+    net_dispatch(&e.super);
+}
+
+/** @brief The next answer the spy holds, which must be a resumed open's. */
+static const NetStreamFromRspEvt *from_rsp_next(void)
+{
+    const QEvt * const e = spy_next();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the open was not answered");
+    TEST_ASSERT_EQUAL_INT((int)NET_STREAM_FROM_RSP_SIG, (int)e->sig);
+    return (const NetStreamFromRspEvt *)(const void *)e;
+}
+
+TEST_CASE("a transfer opened from an offset asks the driver for the rest and "
+          "says what the server answered", "[net_ao]")
+{
+    const NetStreamFromRspEvt *rsp;
+
+    worker_fresh();
+    s_open_code = 206U;
+
+    ask_stream_open_from("http://example.invalid/big.bin", RESUME_AT);
+    TEST_ASSERT_EQUAL_UINT(1U, s_n_open);
+    TEST_ASSERT_EQUAL_UINT32(RESUME_AT, s_open_offset);
+    deliver_stream(KODE_OK);
+    rsp = from_rsp_next();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, rsp->status);
+    TEST_ASSERT_EQUAL_UINT16(206U, rsp->http);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(4242U, rsp->size, "what is left of the body");
+
+    ask_close();
+    deliver_stream(KODE_OK);
+    worker_done();
+}
+
+/* The opener decides what a refusal means, so it is told what the server
+ * said: a 200 is a server that ignores ranges, a 416 a file already whole. */
+TEST_CASE("an open the server refuses tells its opener the server's status",
+          "[net_ao]")
+{
+    const NetStreamFromRspEvt *rsp;
+
+    worker_fresh();
+
+    s_open_code = 200U;
+    s_open_rc   = KODE_ERROR;
+    ask_stream_open_from("http://example.invalid/big.bin", RESUME_AT);
+    deliver_stream(KODE_ERROR);
+    rsp = from_rsp_next();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_ERROR, rsp->status);
+    TEST_ASSERT_EQUAL_UINT16(200U, rsp->http);
+    ao_spy_drain();
+
+    s_open_code = 416U;
+    ask_stream_open_from("http://example.invalid/big.bin", RESUME_AT);
+    deliver_stream(KODE_ERROR);
+    rsp = from_rsp_next();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_ERROR, rsp->status);
+    TEST_ASSERT_EQUAL_UINT16(416U, rsp->http);
+
+    worker_done();
+}
+
+/* An open that has to wait for a close keeps the offset it was asked with,
+ * and the open after it starts from the beginning again. */
+TEST_CASE("an open that waited for a close keeps its offset, and the next has none",
+          "[net_ao]")
+{
+    const NetStreamFromRspEvt *rsp;
+    const StorageOpenRspEvt   *plain;
+
+    worker_fresh();
+    open_transfer();
+
+    ask_close();                       /* the close job is inside the worker */
+    s_open_code = 206U;
+    ask_stream_open_from("http://example.invalid/waiting.bin", RESUME_AT);
+    TEST_ASSERT_EQUAL_UINT(1U, s_n_open);
+    deliver_stream(KODE_OK);           /* the close is done: the open runs */
+    TEST_ASSERT_EQUAL_UINT(2U, s_n_open);
+    TEST_ASSERT_EQUAL_UINT32(RESUME_AT, s_open_offset);
+    deliver_stream(KODE_OK);
+    rsp = from_rsp_next();
+    TEST_ASSERT_EQUAL_UINT16(206U, rsp->http);
+    ao_spy_drain();
+
+    ask_close();
+    deliver_stream(KODE_OK);
+    s_open_code = 200U;
+    ask_stream_open("http://example.invalid/whole.bin");
+    TEST_ASSERT_EQUAL_UINT(3U, s_n_open);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_open_offset, "a plain open is the whole body");
+    deliver_stream(KODE_OK);
+    plain = (const StorageOpenRspEvt *)spy_next();
+    TEST_ASSERT_NOT_NULL(plain);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)NET_STREAM_OPEN_RSP_SIG, (int)plain->super.sig,
+        "a plain open is answered as it always was");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, plain->status);
+
+    ask_close();
+    deliver_stream(KODE_OK);
     worker_done();
 }
 
@@ -7957,6 +8087,7 @@ static void sys_stub_result(kdrv_net_http_result_t *out, uint8_t *buf, uint32_t 
     out->body_len       = SYS_BODY_LEN;
     out->kept           = keep;
     out->truncated      = SYS_BODY_LEN > keep;
+    out->range_total    = -1;
 }
 
 static kode_status_t sys_stub_get(const char *url, uint8_t *buf, uint32_t cap,
@@ -7966,6 +8097,33 @@ static kode_status_t sys_stub_get(const char *url, uint8_t *buf, uint32_t cap,
     s_sys_calls++;
     s_sys_seen_buf = buf;
     sys_stub_result(out, buf, cap);
+    return s_sys_rc;
+}
+
+/** @brief What the ranged GET stand-in was asked for, and what it says of the whole. */
+static uint64_t s_sys_seen_offset;
+static uint32_t s_sys_seen_cap;
+static uint32_t s_sys_range_calls;
+
+/** @brief The length of the whole resource the ranged stand-in reports. */
+#define SYS_RANGE_TOTAL   5000000000LL
+/** @brief The status of a served range. */
+#define SYS_RANGE_STATUS  206U
+/** @brief Where the ranged cases start: past what 32 bits hold. */
+#define SYS_RANGE_OFFSET  4294967296ULL
+
+static kode_status_t sys_stub_range(const char *url, uint64_t offset, uint8_t *buf, uint32_t cap,
+                                    kdrv_net_http_result_t *out, uint32_t timeout_ms, int n)
+{
+    (void)url; (void)timeout_ms; (void)n;
+    s_sys_calls++;
+    s_sys_range_calls++;
+    s_sys_seen_buf    = buf;
+    s_sys_seen_offset = offset;
+    s_sys_seen_cap    = cap;
+    sys_stub_result(out, buf, cap);
+    out->status      = SYS_RANGE_STATUS;
+    out->range_total = SYS_RANGE_TOTAL;
     return s_sys_rc;
 }
 
@@ -8008,7 +8166,11 @@ static void sys_fresh(void)
     kdrv_net_lookup_Stub(&sys_stub_lookup);
     kdrv_net_ping_Stub(&sys_stub_ping);
     kdrv_net_http_get_Stub(&sys_stub_get);
+    kdrv_net_http_get_range_Stub(&sys_stub_range);
     kdrv_net_http_post_Stub(&sys_stub_post);
+    s_sys_seen_offset = 0U;
+    s_sys_seen_cap    = 0U;
+    s_sys_range_calls = 0U;
     kdrv_net_udp_send_Stub(&sys_stub_udp);
 }
 
@@ -8123,6 +8285,114 @@ TEST_CASE("kode_sys_http_get fills the lent buffer on the worker and answers the
     TEST_ASSERT_FALSE(a->result.truncated);
     TEST_ASSERT_EQUAL_MEMORY(SYS_BODY, buf, SYS_BODY_LEN);
     TEST_ASSERT_EQUAL_UINT8(SYS_LENT_FILL, buf[SYS_BODY_LEN]);
+    worker_done();
+}
+
+/* A file too big for one buffer is fetched a range at a time: the offset goes
+ * to the driver whole, and the answer says how long the resource is. */
+TEST_CASE("kode_sys_http_get_range asks the worker for the range and answers the total",
+          "[net_ao][ask]")
+{
+    uint8_t              buf[SYS_BUF];
+    const NetHttpRspEvt *a;
+
+    sys_fresh();
+    (void)memset(buf, SYS_LENT_FILL, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", SYS_RANGE_OFFSET, buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", 0U, buf, SYS_BUF),
+        "a range shares the door of a GET: one at a time");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_sys_range_calls, "the range ran on the worker");
+    TEST_ASSERT_EQUAL_UINT64(SYS_RANGE_OFFSET, s_sys_seen_offset);
+    TEST_ASSERT_EQUAL_UINT32(SYS_BUF, s_sys_seen_cap);
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(buf, s_sys_seen_buf, "the worker wrote somewhere else");
+    deliver_held(KODE_OK);
+
+    a = (const NetHttpRspEvt *)(const void *)sys_take(NET_HTTP_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_FALSE(a->post);
+    TEST_ASSERT_EQUAL_UINT16(SYS_RANGE_STATUS, a->result.status);
+    TEST_ASSERT_EQUAL_UINT32(SYS_BODY_LEN, a->result.kept);
+    TEST_ASSERT_EQUAL_INT64(SYS_RANGE_TOTAL, a->result.range_total);
+    TEST_ASSERT_EQUAL_MEMORY(SYS_BODY, buf, SYS_BODY_LEN);
+    worker_done();
+}
+
+/* The request after a range is a plain one again: nothing of the range stays
+ * with the worker's job. */
+TEST_CASE("a plain GET after a range asks for no range and answers no total",
+          "[net_ao][ask]")
+{
+    uint8_t              buf[SYS_BUF];
+    const NetHttpRspEvt *a;
+
+    sys_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", SYS_RANGE_OFFSET, buf, SYS_BUF));
+    (void)net_settle();
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_sys_range_calls, "the plain GET went out as a range");
+    deliver_held(KODE_OK);
+    a = (const NetHttpRspEvt *)(const void *)sys_take(NET_HTTP_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT16(SYS_HTTP_STATUS, a->result.status);
+    TEST_ASSERT_EQUAL_INT64(-1, a->result.range_total);
+    worker_done();
+}
+
+TEST_CASE("with no network a range is answered KODE_IO_ERROR with no total, the driver untouched",
+          "[net_ao][ask]")
+{
+    uint8_t              buf[SYS_BUF];
+    const NetHttpRspEvt *a;
+
+    sys_fresh();
+    go_offline();
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        net_http_range_ask(ao_spy(), "http://example.com/big.bin", 0U, buf, SYS_BUF));
+    (void)net_settle();
+    a = (const NetHttpRspEvt *)(const void *)sys_take(NET_HTTP_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_IO_ERROR, a->rc);
+    TEST_ASSERT_EQUAL_INT64(-1, a->result.range_total);
+    TEST_ASSERT_EQUAL_UINT32(0U, s_sys_range_calls);
+    worker_done();
+}
+
+/* The door of the header: what it refuses, it refuses before anything is
+ * asked of AO_Net. */
+TEST_CASE("kode_sys_http_get_range refuses what cannot be a range and posts nothing",
+          "[net_ao][ask]")
+{
+    uint8_t buf[SYS_BUF];
+    char    longurl[KODE_SYS_NET_URL_MAX + 1U];
+
+    sys_fresh();
+    (void)memset(longurl, 'u', sizeof(longurl) - 1U);
+    longurl[sizeof(longurl) - 1U] = '\0';
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(NULL, "http://x/", 0U, buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), longurl, 0U, buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), "http://x/", 0U, NULL, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), "http://x/", 0U, buf, 0U));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+        kode_sys_http_get_range(ao_spy(), "http://x/", KODE_HTTP_OFF_MAX, buf, SYS_BUF),
+        "a range that runs past the last offset the type holds");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_sys_calls);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get_range(ao_spy(), "http://x/", 100U, buf, SYS_BUF));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT64(100U, s_sys_seen_offset);
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
     worker_done();
 }
 
