@@ -78,10 +78,15 @@
  * open of a download, a file that stops arriving, a data folder being fetched.
  * AO_Power takes the LED's orange pulse back after three seconds without a
  * report, and the glass's write card has nothing to follow between two. */
-#define APPMGR_WAIT_BEAT_TICKS KQP_TICKS_PER_MS(1000U)
-/* How long a fetch's card waits for the install the fetch announced
- * (appmgr_appdata_get_request()'s `install`). */
-#define APPMGR_HOLD_TICKS      KQP_TICKS_PER_MS(KODE_APPMGR_HOLD_MS)
+#define APPMGR_WAIT_BEAT_MS    1000U
+#define APPMGR_WAIT_BEAT_TICKS KQP_TICKS_PER_MS(APPMGR_WAIT_BEAT_MS)
+/* How many of those beats a fetch's card waits for the install the fetch
+ * announced (appmgr_appdata_get_request()'s `install`): the beat that says the
+ * card again is the one that counts its time. */
+#define APPMGR_HOLD_BEATS      (KODE_APPMGR_HOLD_MS / APPMGR_WAIT_BEAT_MS)
+_Static_assert(((KODE_APPMGR_HOLD_MS % APPMGR_WAIT_BEAT_MS) == 0U)
+               && (0U < APPMGR_HOLD_BEATS) && (UINT8_MAX >= APPMGR_HOLD_BEATS),
+               "a held card's wait is a whole number of beats that fits its count");
 /* How long the card may take over one copy before it is given up on: a base
  * that covers mounting and a slow counterfeit card, plus a second for every
  * 128 KB, so a 13 MB extent gets nearly three minutes and a small one a
@@ -546,9 +551,10 @@ typedef struct {
      * said again every second on `beat`, while AppMgr_idle waits. An
      * install from a medium or a URL that begins takes the card over
      * (hold_release()); anything else that idle turns to, a terminal install
-     * included, or `hold` going off, ends it (hold_end()). */
-    QTimeEvt      hold;            /**< How long the card waits (APP_HOLD_SIG). */
+     * included, or APPMGR_HOLD_BEATS beats with no install, ends it
+     * (hold_end()). */
     bool          held;            /**< The card is up, waiting for an install. */
+    uint8_t       hold_beats;      /**< Beats the card has waited so far.       */
 } AppMgr;
 
 static AppMgr l_appMgr;
@@ -3176,7 +3182,6 @@ static void beat_say(AppMgr * const me)
 static void hold_release(AppMgr * const me)
 {
     me->held = false;
-    (void)QTimeEvt_disarm(&me->hold);
     (void)QTimeEvt_disarm(&me->beat);
 }
 
@@ -3378,7 +3383,6 @@ void AppMgr_ctor(void)
     QTimeEvt_ctorX(&me->pacer, &me->super, APP_FLASH_CHUNK_SIG, 0U);
     QTimeEvt_ctorX(&me->idle, &me->super, APP_RECV_IDLE_SIG, 0U);
     QTimeEvt_ctorX(&me->beat, &me->super, APP_BEAT_SIG, 0U);
-    QTimeEvt_ctorX(&me->hold, &me->super, APP_HOLD_SIG, 0U);
     QTimeEvt_ctorX(&me->undo_tmo, &me->super, APP_UNDO_STEP_SIG, 0U);
     QTimeEvt_ctorX(&me->answer, &me->super, APP_RECV_LAUNCH_SIG, 0U);
     QTimeEvt_ctorX(&me->tidy, &me->super, APP_TIDY_TIMEOUT_SIG, 0U);
@@ -4203,7 +4207,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             if ( me->held )
             {
                 /* A fetch that announced an install ended on the way here. */
-                (void)QTimeEvt_rearm(&me->hold, APPMGR_HOLD_TICKS);
+                me->hold_beats = 0U;
                 (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
             }
             status = Q_HANDLED();
@@ -4211,21 +4215,22 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
         }
         case APP_BEAT_SIG: {
             /* Only the held card's: a beat queued behind another state's
-             * last disarm has nothing to say here. */
+             * last disarm has nothing to say here. Each beat says the card
+             * again, and the last one of its wait ends it. */
             if ( me->held )
             {
-                progress_publish(me, 0U);
-                (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
-            }
-            status = Q_HANDLED();
-            break;
-        }
-        case APP_HOLD_SIG: {
-            if ( me->held )
-            {
-                KLOG_W(TAG, "the install '%s' was fetched for did not come; "
-                            "its card ends", me->project);
-                hold_end(me);
+                ++me->hold_beats;
+                if ( (uint8_t)APPMGR_HOLD_BEATS <= me->hold_beats )
+                {
+                    KLOG_W(TAG, "the install '%s' was fetched for did not come; "
+                                "its card ends", me->project);
+                    hold_end(me);
+                }
+                else
+                {
+                    progress_publish(me, 0U);
+                    (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+                }
             }
             status = Q_HANDLED();
             break;

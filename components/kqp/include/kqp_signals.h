@@ -550,10 +550,6 @@ enum KodeSignals {
                                  *   waiting on the network has gone by -
                                  *   report the write's percent again, so the
                                  *   glass and the LED stay up.               */
-    APP_HOLD_SIG,               /**< AO_AppMgr private QTimeEvt: the install
-                                 *   an `appdata_get install=on` announced
-                                 *   did not begin in KODE_APPMGR_HOLD_MS -
-                                 *   end the card the fetch kept up for it.  */
     FLASH_REQ_SIG,              /**< AO_AppMgr: one source-to-sink transfer
                                  *   (FlashReqEvt). The only way to ask for
                                  *   an image to be written.                 */
