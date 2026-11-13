@@ -7,11 +7,16 @@
 
 #include "unity.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
 #include "fakes.h"
+#include "kaos.h"
 #include "khal_nvs.h"
 #include "kode_sys.h"
 #include "kode_sys_internal.h"
 #include "kqp.h"
+#include "qf_support.h"
 
 /* ---- Round trips --------------------------------------------------------- */
 
@@ -170,4 +175,50 @@ TEST_CASE("a null key, value or destination is refused", "[kode_nvs]")
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_get(NULL, out, sizeof(out)));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_get("k", NULL, sizeof(out)));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_get("k", out, 0U));
+}
+
+/* ---- The set an Active Object asks for -----------------------------------
+ *
+ * kode_sys_nvs_set() posts the pair to AO_Boot, so what it refuses it must
+ * refuse before anything is posted: a pair the store would not take never
+ * costs AO_Boot an event.
+ */
+
+/** @brief How many events wait in AO_Boot's queue. */
+static unsigned boot_waiting(void)
+{
+    return (unsigned)uxQueueMessagesWaiting(AO_Boot->eQueue);
+}
+
+TEST_CASE("an unusable key or value is refused before anything is posted",
+          "[kode_nvs]")
+{
+    char key_long[KODE_SYS_NVS_KEY_MAX + 1U];
+    char value_long[KODE_SYS_NVS_VALUE_MAX + 1U];
+    const QEvt *e = NULL;
+
+    qf_support_init();
+    qf_support_margin_queue(AO_Boot);
+    (void)memset(key_long, 'k', sizeof(key_long) - 1U);
+    key_long[sizeof(key_long) - 1U] = '\0';
+    (void)memset(value_long, 'v', sizeof(value_long) - 1U);
+    value_long[sizeof(value_long) - 1U] = '\0';
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_set(NULL, "v"));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_set("", "v"));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_set(key_long, "v"));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_set("k", NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_set("k", value_long));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, boot_waiting(), "nothing was posted");
+
+    /* The longest pair the store takes is posted whole. */
+    key_long[sizeof(key_long) - 2U]     = '\0';
+    value_long[sizeof(value_long) - 2U] = '\0';
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set(key_long, value_long));
+    TEST_ASSERT_EQUAL_UINT(1U, boot_waiting());
+    TEST_ASSERT_EQUAL_INT(pdTRUE, xQueueReceive(AO_Boot->eQueue, &e, 0U));
+    TEST_ASSERT_EQUAL_INT((int)BOOT_NVS_SET_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_STRING(key_long, Q_EVT_CAST(BootNvsSetEvt)->key);
+    TEST_ASSERT_EQUAL_STRING(value_long, Q_EVT_CAST(BootNvsSetEvt)->value);
+    QF_gc(e);
 }

@@ -819,6 +819,11 @@ enum KodeSignals {
                                  *   then long enough to forget its crashes.  */
     BOOT_RESET_AGAIN_SIG,       /**< AO_Boot private QTimeEvt: ask AO_Radio
                                  *   again for the wipe it refused as busy.   */
+    BOOT_NVS_SET_SIG,           /**< AO_Boot: write BootNvsSetEvt's pair to
+                                 *   the app's store. Posted by
+                                 *   kode_sys_nvs_set(); nobody is answered,
+                                 *   and a pair the store refuses is a warning
+                                 *   in the log.                              */
     LOG_LINE_SIG,               /**< AO_Log: put LogEvt.line on the console.  */
     CONSOLE_TIMEOUT_SIG,        /**< AO_Console private QTimeEvt: the command
                                  *   in flight never got its closing answer.  */
@@ -2924,6 +2929,18 @@ typedef struct {
     uint32_t         size;
     kboot_run_mode_t mode;
 } BootRunEvt;
+
+/**
+ * @brief A pair for the app's store (BOOT_NVS_SET_SIG).
+ *
+ * Both strings are copies: the asker's buffers are its own again once
+ * kode_sys_nvs_set() returns.
+ */
+typedef struct {
+    QEvt super;
+    char key[KODE_SYS_NVS_KEY_MAX];     /**< NUL-terminated, never empty.  */
+    char value[KODE_SYS_NVS_VALUE_MAX]; /**< NUL-terminated; may be empty. */
+} BootNvsSetEvt;
 
 /** @brief Ask AO_Boot for a factory reset (FACTORY_RESET_REQ_SIG). */
 typedef struct {

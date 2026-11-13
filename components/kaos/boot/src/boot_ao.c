@@ -723,6 +723,30 @@ static void leave_drop(void)
 }
 
 /**
+ * @brief Write a pair to the app's store for an asker that waits for no answer.
+ *
+ * kode_sys_nvs_set() posted it and its caller went on, so a pair the store
+ * refuses is a warning here and nothing else. The value is the app's own and
+ * is not logged.
+ *
+ * @param e The pair, both strings NUL-terminated.
+ */
+static void store_set(BootNvsSetEvt const * const e)
+{
+    kode_status_t const rc = khal_nvs_set_str(KODE_NVS_NAMESPACE, e->key, e->value);
+
+    if ( KODE_OK != rc )
+    {
+        KLOG_W(TAG, "the store refused '%s' (status %d); it is not kept",
+               e->key, (int)rc);
+    }
+    else
+    {
+        KLOG_D(TAG, "stored '%s' for an app", e->key);
+    }
+}
+
+/**
  * @brief Second step of the leave: AO_Radio hangs BLE up and parks the C5.
  *
  * An app without AO_Radio has nothing to wait for.
@@ -904,6 +928,11 @@ static bool reset_refuses(QEvt const * const e)
         break;
     case BUTTON_HOLD_SIG:
         KLOG_D(TAG, "busy with a factory reset; this button hold is dropped");
+        break;
+    case BOOT_NVS_SET_SIG:
+        /* The reset erases what the board remembers; a setting written in
+         * the middle would be the one thing it kept. */
+        KLOG_N(TAG, "busy with a factory reset; this setting is dropped");
         break;
     default:
         refused = false;
@@ -1497,6 +1526,13 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             status = Q_TRAN(&Boot_leaving);
             break;
         }
+        case BOOT_NVS_SET_SIG: {
+            /* One write a step, in the order the requests were made: a
+             * restart asked after it finds it done. */
+            store_set(Q_EVT_CAST(BootNvsSetEvt));
+            status = Q_HANDLED();
+            break;
+        }
         case BUTTON_HOLD_SIG: {
             ButtonHoldEvt const * const h = Q_EVT_CAST(ButtonHoldEvt);
             if ( (uint8_t)KDRV_BTN_BOT == h->id )
@@ -1676,6 +1712,13 @@ static QState Boot_leaving(Boot * const me, QEvt const * const e)
         }
         case BOOT_HOME_NOW_SIG: {
             leave_drop();
+            status = Q_HANDLED();
+            break;
+        }
+        case BOOT_NVS_SET_SIG: {
+            /* It reached the queue behind the request that began the leave:
+             * the board is on its way and writes nothing more. */
+            KLOG_N(TAG, "already leaving; this setting is dropped");
             status = Q_HANDLED();
             break;
         }

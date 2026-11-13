@@ -575,6 +575,25 @@ kode_status_t kode_sys_home_defer(void);
  */
 kode_status_t kode_sys_home_now(void);
 
+/* ---- The store: to AO_Boot, which writes it from its own thread ---- */
+
+/**
+ * @brief Store @p value under @p key, for kode_sys_nvs_get() to read back.
+ *
+ * The call waits on no flash, so an Active Object and a kode_worker job may
+ * make it. Both strings are copied before it returns. Nobody is answered: a
+ * pair the store refuses is a warning in the log. The pairs are written in
+ * the order they are asked, and one asked before kode_sys_exit_to_os() or
+ * kode_sys_home_now() is written before the board leaves; one that reaches
+ * AO_Boot once the board is leaving, or during a factory reset, is dropped
+ * with a notice in the log.
+ * @param key   At most KODE_SYS_NVS_KEY_MAX - 1 characters, not empty.
+ * @param value At most KODE_SYS_NVS_VALUE_MAX - 1 characters; may be empty.
+ * @return As the commands' rule above; KODE_DENIED for an unusable @p key or
+ *         @p value.
+ */
+kode_status_t kode_sys_nvs_set(const char *key, const char *value);
+
 /* =========================================================================
  * Requests
  *
@@ -1606,7 +1625,8 @@ bool kode_sys_console_congested(void);
 /**
  * @brief Read back what is stored under @p key.
  * @note Waits on the store's lock while another task writes or erases flash.
- *       Not from a kode_worker job. kode.h's kode_setting_set() stores a value.
+ *       Not from a kode_worker job. The command kode_sys_nvs_set() stores a
+ *       value from an Active Object, kode.h's kode_setting_set() from a task.
  * @param key At most KODE_SYS_NVS_KEY_MAX - 1 characters, not empty.
  * @param out Destination, NUL-terminated on KODE_OK and untouched otherwise.
  * @param cap Size of @p out; a value that does not fit is an error, not a truncation. KODE_SYS_NVS_VALUE_MAX always fits.

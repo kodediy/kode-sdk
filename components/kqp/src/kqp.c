@@ -312,6 +312,9 @@ _Static_assert(sizeof(WifiFramesTickEvt) <= KQP_BLOCK_SMALL,
                "WifiFramesTickEvt must fit the small pool");
 _Static_assert((sizeof(WifiFrameEvt) > KQP_BLOCK_SMALL) && (sizeof(WifiFrameEvt) <= KQP_BLOCK_MEDIUM),
                "WifiFrameEvt must land in the medium pool");
+/* The longest key and the longest value of the app's store, in one event. */
+_Static_assert(sizeof(BootNvsSetEvt) <= KQP_BLOCK_MEDIUM,
+               "BootNvsSetEvt must fit the medium pool");
 _Static_assert(sizeof(StoragePathEvt) <= KQP_BLOCK_MEDIUM,
                "StoragePathEvt must fit the medium pool");
 _Static_assert(sizeof(StoragePathRspEvt) <= KQP_BLOCK_SMALL,

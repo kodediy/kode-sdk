@@ -3602,3 +3602,178 @@ TEST_CASE("a reset with no asker or no end is not posted", "[boot_ao][reset]")
     TEST_ASSERT_EQUAL_INT(-1, mailbox_sig(AO_AppMgr));
     reset_down();
 }
+
+/* ---- The app's store, written for an Active Object -------------------------
+ *
+ * An Active Object's step may not wait on flash, so kode_sys_nvs_set() posts
+ * the pair to AO_Boot, which writes it from its own thread. Every case goes
+ * through that door and lets AO_Boot read its queue in the order the board
+ * would.
+ */
+
+/** @brief Whether the app's store holds @p value under @p key. */
+static bool store_holds(const char *key, const char *value)
+{
+    char out[KODE_SYS_NVS_VALUE_MAX];
+
+    return (khal_nvs_get_str(KODE_NVS_NAMESPACE, key, out, sizeof(out)) == KODE_OK)
+           && (strcmp(out, value) == 0);
+}
+
+/** @brief AO_Boot up on a power-on, an empty store and a queue a margin post reads. */
+static void store_up(void)
+{
+    fake_nvs_reset();
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    qf_support_margin_queue(AO_Boot);
+}
+
+/** @brief The end of a case store_up() began. */
+static void store_down(void)
+{
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("a setting an Active Object asks for is written by AO_Boot",
+          "[boot_ao][nvs]")
+{
+    char out[KODE_SYS_NVS_VALUE_MAX];
+
+    store_up();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set("netid", "dot-07"));
+    TEST_ASSERT_FALSE_MESSAGE(store_holds("netid", "dot-07"),
+        "the asker's thread writes nothing");
+
+    reset_pump();
+    TEST_ASSERT_TRUE(store_holds("netid", "dot-07"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK,
+        kode_sys_nvs_get("netid", out, sizeof(out)),
+        "and the read of the same header finds it");
+    TEST_ASSERT_EQUAL_STRING("dot-07", out);
+
+    store_down();
+}
+
+/* The pair is copied when it is asked: the asker's buffers are its own again
+ * the moment the call returns. */
+TEST_CASE("a setting is stored as it was when it was asked", "[boot_ao][nvs]")
+{
+    char key[KODE_SYS_NVS_KEY_MAX]     = "level";
+    char value[KODE_SYS_NVS_VALUE_MAX] = "7";
+
+    store_up();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set(key, value));
+    (void)snprintf(key, sizeof(key), "other");
+    (void)snprintf(value, sizeof(value), "changed");
+
+    reset_pump();
+    TEST_ASSERT_TRUE(store_holds("level", "7"));
+    TEST_ASSERT_FALSE(store_holds("other", "changed"));
+
+    store_down();
+}
+
+/* An app that saves and then goes home: the two requests share AO_Boot's
+ * queue, so the write is done before the leave begins. */
+TEST_CASE("a setting asked before a restart is written before the board leaves",
+          "[boot_ao][nvs]")
+{
+    const QEvt *e;
+
+    store_up();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set("level", "7"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_exit_to_os());
+
+    e = mailbox_event(AO_Boot);
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)BOOT_NVS_SET_SIG, (int)e->sig,
+        "the setting is first in the queue");
+    QASM_DISPATCH(AO_Boot, e, 0U);
+    QF_gc(e);
+    TEST_ASSERT_TRUE(store_holds("level", "7"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, mailbox_take(AO_Net, NULL),
+        "the leave has not begun");
+
+    reset_pump();
+    TEST_ASSERT_EQUAL_INT((int)NET_LEAVE_REQ_SIG, mailbox_take(AO_Net, NULL));
+    answer_net_left();
+    TEST_ASSERT_EQUAL_INT((int)RADIO_PARK_REQ_SIG, mailbox_take(AO_Radio, NULL));
+    finish_leave();
+    TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+    TEST_ASSERT_TRUE(store_holds("level", "7"));
+
+    store_down();
+}
+
+/* The asker has gone on by the time the store answers, so a refusal is a
+ * warning in the log and nothing else: the next setting is written. */
+TEST_CASE("a setting the store refuses leaves a warning and the next is written",
+          "[boot_ao][nvs]")
+{
+    store_up();
+    fake_klog_reset();
+    fake_nvs_fail_next_set();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set("netid", "first"));
+    reset_pump();
+    TEST_ASSERT_FALSE(store_holds("netid", "first"));
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("the store refused 'netid'"),
+        "the refusal names the key");
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set("netid", "second"));
+    reset_pump();
+    TEST_ASSERT_TRUE(store_holds("netid", "second"));
+
+    store_down();
+}
+
+/* A board on its way out writes nothing more: the setting that arrives behind
+ * the restart request is dropped, and said. */
+TEST_CASE("a setting asked while the board leaves is dropped", "[boot_ao][nvs]")
+{
+    store_up();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_exit_to_os());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set("level", "7"));
+    fake_klog_reset();
+    reset_pump();
+
+    TEST_ASSERT_EQUAL_INT((int)NET_LEAVE_REQ_SIG, mailbox_take(AO_Net, NULL));
+    TEST_ASSERT_FALSE(store_holds("level", "7"));
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("already leaving; this setting is dropped"),
+        "a dropped setting says so");
+
+    answer_net_left();
+    TEST_ASSERT_EQUAL_INT((int)RADIO_PARK_REQ_SIG, mailbox_take(AO_Radio, NULL));
+    finish_leave();
+    TEST_ASSERT_FALSE(store_holds("level", "7"));
+
+    store_down();
+}
+
+/* A reset is erasing what the board remembers: a setting written in the middle
+ * would be the one thing it kept. */
+TEST_CASE("a setting asked during a factory reset is dropped", "[boot_ao][reset][nvs]")
+{
+    fake_nvs_reset();
+    reset_up();
+    qf_support_margin_queue(AO_Boot);
+    reset_ask(KBOOT_RESET_RESTART);
+    expect_find_asked();
+    fake_klog_reset();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set("level", "7"));
+    reset_pump();
+    TEST_ASSERT_FALSE(store_holds("level", "7"));
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("busy with a factory reset; this setting is dropped"),
+        "a dropped setting says so");
+
+    answer_find(false, 0U, 0U, false, true);      /* ends the case */
+    expect_reply(KBOOT_RESET_STEP_FIND, KODE_NO_RESOURCES);
+    reset_down();
+}

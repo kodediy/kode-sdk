@@ -131,6 +131,7 @@ static kode_status_t off_cmd(void)      { return kode_sys_power_off(); }
 #endif
 static kode_status_t home_now(void)     { return kode_sys_home_now(); }
 static kode_status_t exit_os(void)      { return kode_sys_exit_to_os(); }
+static kode_status_t nvs_set(void)      { return kode_sys_nvs_set("k", "v"); }
 #if CONFIG_KODEOS_APPMGR
 static kode_status_t flash(void)        { return kode_sys_flash("fs:x.bin", "app", false); }
 #endif
@@ -194,6 +195,12 @@ TEST_CASE("the going-home commands in a loop are refused past the margin, then t
 {
     loop_past_margin(AO_Boot, &home_now, KQP_BOOT_CMD_MARGIN);
     loop_past_margin(AO_Boot, &exit_os, KQP_BOOT_CMD_MARGIN);
+}
+
+TEST_CASE("the store's command in a loop is refused past the margin, then taken again",
+          "[kode_sys_cmd]")
+{
+    loop_past_margin(AO_Boot, &nvs_set, KQP_BOOT_CMD_MARGIN);
 }
 
 #if CONFIG_KODEOS_APPMGR
