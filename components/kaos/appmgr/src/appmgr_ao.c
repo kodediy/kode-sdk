@@ -82,7 +82,15 @@
  * open of a download, a file that stops arriving, a data folder being fetched.
  * AO_Power takes the LED's orange pulse back after three seconds without a
  * report, and the glass's write card has nothing to follow between two. */
-#define APPMGR_WAIT_BEAT_TICKS KQP_TICKS_PER_MS(1000U)
+#define APPMGR_WAIT_BEAT_MS    1000U
+#define APPMGR_WAIT_BEAT_TICKS KQP_TICKS_PER_MS(APPMGR_WAIT_BEAT_MS)
+/* How many of those beats a fetch's card waits for the install the fetch
+ * announced (appmgr_appdata_get_request()'s `install`): the beat that says the
+ * card again is the one that counts its time. */
+#define APPMGR_HOLD_BEATS      (KODE_APPMGR_HOLD_MS / APPMGR_WAIT_BEAT_MS)
+_Static_assert(((KODE_APPMGR_HOLD_MS % APPMGR_WAIT_BEAT_MS) == 0U)
+               && (0U < APPMGR_HOLD_BEATS) && (UINT8_MAX >= APPMGR_HOLD_BEATS),
+               "a held card's wait is a whole number of beats that fits its count");
 /* How long the card may take over one copy before it is given up on: a base
  * that covers mounting and a slow counterfeit card, plus a second for every
  * 128 KB, so a 13 MB extent gets nearly three minutes and a small one a
@@ -556,6 +564,7 @@ typedef struct {
      * AO_Storage is handed a copy of it for each try.
      * The base URL is kept in PSRAM too, for the icon's open (rule 8: 200
      * bytes of internal RAM held for a fetch that rarely happens). */
+    bool          get_install;     /**< An install follows: the card is its.    */
     QActive      *get_who;         /**< Who asked.                              */
     char          get_project[KODE_APP_PROJECT_MAX]; /**< Whose folder.         */
     char         *get_url;         /**< The base URL, KODE_APPDATA_URL_MAX of
@@ -569,6 +578,17 @@ typedef struct {
     uint8_t       get_tries;       /**< Times the put was asked again after a
                                     *   busy refusal.                          */
     bool          get_open;        /**< A transfer is open with AO_Net.         */
+
+    /* ---- The card a fetch kept up for the install it announced -----------
+     * Between `appdata_get install=on` and the install the host sends next,
+     * the glass would empty and fill again: the fetch's card stays at 0 %,
+     * said again every second on `beat`, while AppMgr_idle waits. An
+     * install from a medium or a URL that begins takes the card over
+     * (hold_release()); anything else that idle turns to, a terminal install
+     * included, or APPMGR_HOLD_BEATS beats with no install, ends it
+     * (hold_end()). */
+    uint8_t       hold_left;       /**< Beats the held card still waits; 0 when
+                                    *   no card is held.                       */
 } AppMgr;
 
 static AppMgr l_appMgr;
@@ -728,7 +748,7 @@ bool appmgr_keep_only_request(const char *project, QActive *who)
 }
 
 kode_status_t appmgr_appdata_get_request(const char *project, const char *url,
-                                         QActive *who)
+                                         bool install, QActive *who)
 {
     if ( (NULL == project) || (NULL == url) || (NULL == who)
         || (strlen(url) >= (size_t)KODE_APPDATA_URL_MAX) )
@@ -743,7 +763,8 @@ kode_status_t appmgr_appdata_get_request(const char *project, const char *url,
     }
     (void)snprintf(e->project, sizeof(e->project), "%s", project);
     (void)snprintf(e->url, sizeof(e->url), "%s", url);
-    e->who = who;
+    e->who     = who;
+    e->install = install;
     if ( !QACTIVE_POST_X(AO_AppMgr, &e->super, 0U, NULL) )
     {
         KLOG_W(TAG, "AO_AppMgr's queue is full; the fetch of a data folder "
@@ -3315,6 +3336,36 @@ static void beat_say(AppMgr * const me)
 }
 
 /**
+ * @brief Let go of the card a fetch kept up, publishing nothing.
+ *
+ * What the install that took it over says from here is what the glass shows:
+ * from the fetch's 0 % to the install's, the card never empties.
+ *
+ * @param me The AO.
+ */
+static void hold_release(AppMgr * const me)
+{
+    me->hold_left = 0U;
+    (void)QTimeEvt_disarm(&me->beat);
+}
+
+/**
+ * @brief End the card a fetch kept up, when it is still up.
+ *
+ * The done names no app, as the fetch's own would have: nothing was installed.
+ *
+ * @param me The AO.
+ */
+static void hold_end(AppMgr * const me)
+{
+    if ( 0U < me->hold_left )
+    {
+        hold_release(me);
+        QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);
+    }
+}
+
+/**
  * @brief Write one delivered chunk into the region.
  * @return true while more chunks are wanted.
  */
@@ -3762,6 +3813,10 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             bool const to_pending =
                 ((uint8_t)KODE_FLASH_DST_PENDING == req->dst);
 
+            /* A terminal install announces itself at its ready, not before:
+             * it raises its own card there, and one it took over would have
+             * nobody to end it if the wire were refused. */
+            hold_end(me);
             if ( NULL == me->chunk )
             {
                 KLOG_E(TAG, "install failed: no chunk buffer (see the boot)");
@@ -4071,6 +4126,8 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             AppFlashEvt const * const req = Q_EVT_CAST(AppFlashEvt);
             kapps_dir_t const *d = kdrv_apps_dir();
             int const idx = appmgr_find_idx(d, req->file);
+
+            hold_end(me);   /* before anything this request publishes */
             if ( 0 > idx )
             {
                 KLOG_E(TAG, "'%s' is not installed - `app list` knows what is",
@@ -4087,10 +4144,15 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             break;
         }
         case APP_ERASE_REQ_SIG: {
+            hold_end(me);   /* before anything this request publishes */
             status = erase_begin(me, Q_EVT_CAST(AppFlashEvt));
             break;
         }
         case APPDATA_GET_REQ_SIG: {
+            /* Another fetch is another app's, and raises its own card: the
+             * held one ends first, or the new 0 % would reach the glass
+             * under the old face and the done after it would close it. */
+            hold_end(me);
             status = get_begin(me, Q_EVT_CAST(AppDataGetReqEvt));
             break;
         }
@@ -4099,6 +4161,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             break;
         }
         case APP_KEEP_ONLY_REQ_SIG: {
+            hold_end(me);   /* before anything this request publishes */
             status = keep_only_ask(me, e);
             break;
         }
@@ -4305,11 +4368,60 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             status = Q_TRAN(&AppMgr_adopting);
             break;
         }
+        case Q_ENTRY_SIG: {
+            if ( 0U < me->hold_left )
+            {
+                /* A fetch that announced an install ended on the way here. */
+                (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BEAT_SIG: {
+            /* Only the held card's: a beat queued behind another state's
+             * last disarm has nothing to say here. Each beat says the card
+             * again, and the last one of its wait ends it. */
+            if ( 1U == me->hold_left )
+            {
+                KLOG_W(TAG, "the install '%s' was fetched for did not come; "
+                            "its card ends", me->project);
+                hold_end(me);
+            }
+            else if ( 1U < me->hold_left )
+            {
+                --me->hold_left;
+                progress_publish(me, 0U);
+                (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            }
+            else
+            {
+                /* No card is held. */
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case Q_EXIT_SIG: {
+            /* Whatever else takes this AO out of idle - a question about the
+             * card, an adoption - is not the install the card waited for:
+             * one that was took the card over below. The requests that
+             * publish on their way in end the hold in their own case. */
+            hold_end(me);
+            status = Q_HANDLED();
+            break;
+        }
 #if CONFIG_KODE_LOWPOWER
         case LOWPOWER_ROUND_SIG: {
-            /* Idle: no image is being written, kept, received or launched. */
+            /* Idle: no image is being written, kept, received or launched;
+             * a card waiting for its install is the one thing in hand. */
+            bool const  held = (0U < me->hold_left);
+            const char *why  = NULL;
+
+            if ( held )
+            {
+                why = "install announced";
+            }
             lowpower_ready(me->lp_who, Q_EVT_CAST(LowPowerRoundEvt)->round,
-                           false, NULL);
+                           held, why);
             status = Q_HANDLED();
             break;
         }
@@ -4317,6 +4429,20 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
         default: {
             status = Q_SUPER(&QHsm_top);
             break;
+        }
+    }
+    /* The card a fetch kept up is the next install's from a medium or a URL,
+     * and only one that begins takes it over; one refused before it began
+     * ends it here, where the refusal is known, rather than at the deadline. */
+    if ( (0U < me->hold_left) && ((QSignal)FLASH_REQ_SIG == e->sig) )
+    {
+        if ( Q_RET_TRAN == status )
+        {
+            hold_release(me);
+        }
+        else
+        {
+            hold_end(me);
         }
     }
     return status;
@@ -5746,6 +5872,37 @@ static void get_open_file(AppMgr * const me, const char *file)
 }
 
 /**
+ * @brief End the card a fetch raised, or leave it up for the install it
+ *        announced.
+ *
+ * The done names no app, as a park's does: nothing was installed. A fetch
+ * asked with `install` publishes neither, whatever its end: the folder is
+ * what the install looks like, never what lets it happen, and the host sends
+ * the install all the same. AppMgr_idle keeps the card up for it.
+ *
+ * @param me The AO.
+ * @param ok The folder was written.
+ */
+static void get_card_end(AppMgr * const me, bool ok)
+{
+    if ( me->get_install )
+    {
+        me->get_install = false;
+        /* AppMgr_idle's entry arms the beat that counts it down. */
+        me->hold_left   = (uint8_t)APPMGR_HOLD_BEATS;
+        KLOG_N(TAG, "the card of '%s' waits for its install", me->get_project);
+    }
+    else if ( ok )
+    {
+        QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);
+    }
+    else
+    {
+        QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);
+    }
+}
+
+/**
  * @brief End a fetch that did not make a folder.
  *
  * @param me  The AO.
@@ -5761,7 +5918,7 @@ static QState get_fail(AppMgr * const me, appdata_get_why_t why)
     }
     get_say(me->get_project, why);
     get_reply(me->get_who, me->get_project, why, false);
-    QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);   /* the card the fetch raised ends too */
+    get_card_end(me, false);
     return Q_TRAN(&AppMgr_idle);
 }
 
@@ -5986,6 +6143,7 @@ static QState get_begin(AppMgr * const me, AppDataGetReqEvt const * const req)
     me->get_icon_len = 0U;
     me->get_tries    = 0U;
     me->get_open     = false;
+    me->get_install  = req->install;
     (void)snprintf(me->get_project, sizeof(me->get_project), "%s", req->project);
     (void)snprintf(me->get_url, (size_t)KODE_APPDATA_URL_MAX, "%s", req->url);
     KLOG_N(TAG, "fetching the data folder of '%s'", me->get_project);
@@ -6088,16 +6246,7 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
                     get_reply(me->get_who, me->get_project, why,
                               (APPDATA_GET_OK == why)
                               && (0U != me->get_icon_len));
-                    /* The card the fetch raised ends too; the done names no
-                     * app, as a park's does: nothing was installed. */
-                    if ( APPDATA_GET_OK == why )
-                    {
-                        QACTIVE_PUBLISH(&s_flash_done_evt.super, &me->super);
-                    }
-                    else
-                    {
-                        QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);
-                    }
+                    get_card_end(me, APPDATA_GET_OK == why);
                     status = Q_TRAN(&AppMgr_idle);
                 }
             }

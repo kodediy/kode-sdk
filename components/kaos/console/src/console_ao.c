@@ -73,7 +73,8 @@ KAOS_WEAK void kaos_net_start(void);
 KAOS_WEAK void appdata_request(const char *project, QActive *who);
 KAOS_WEAK kode_status_t appdata_rm_request(const char *project, QActive *who);
 KAOS_WEAK kode_status_t appmgr_appdata_get_request(const char *project,
-                                                   const char *url, QActive *who);
+                                                   const char *url, bool install,
+                                                   QActive *who);
 KAOS_WEAK const uint8_t *storage_buf(uint8_t idx);
 KAOS_WEAK void storage_close_request(void);
 KAOS_WEAK void storage_desc_request(const char *name, QActive *who);
@@ -2239,9 +2240,11 @@ static void h_appdata_rm(Console *me, const kcmd_t *c, const karg_val_t *v)
  *  answers every fetch, so this only bounds a lost answer. */
 #define KCLI_APPDATA_GET_MS  ((2U * KODE_APPMGR_OPEN_MS) + APPMGR_TIDY_MS + KCLI_CMD_TIMEOUT_MS)
 
-/** @brief appdata_get name=<project> url=<base>: fetch the app's data folder
- *        from `<base>app.json` and `<base>icon.k64`; closed by
- *        APPDATA_GET_RSP_SIG, or at once when the request is refused. */
+/** @brief appdata_get name=<project> url=<base> [install=on]: fetch the app's
+ *        data folder from `<base>app.json` and `<base>icon.k64`; closed by
+ *        APPDATA_GET_RSP_SIG, or at once when the request is refused.
+ *        `install=on` says an install of the app comes next, and the card the
+ *        fetch raises stays up for it (appmgr_appdata_get_request()). */
 static void h_appdata_get(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     if ( console_owner_absent(&kaos_storage_start) )
@@ -2258,7 +2261,9 @@ static void h_appdata_get(Console *me, const kcmd_t *c, const karg_val_t *v)
         return;
     }
     cmd_begin(me, KCLI_APPDATA_GET, c->verb);
-    kode_status_t const rc = appmgr_appdata_get_request(v[0].s, v[1].s, &me->super);
+    bool const install = v[2].present && v[2].b;
+    kode_status_t const rc = appmgr_appdata_get_request(v[0].s, v[1].s, install,
+                                                        &me->super);
     if ( KODE_OK != rc )
     {
         /* Nothing was posted, so nobody will answer. */
@@ -6260,9 +6265,12 @@ _Static_assert((sizeof(A_EXP) / sizeof(A_EXP[0])) <= (size_t)KCLI_MAX_KEYS,
 static const karg_spec_t A_NAME[] = {
     { .key = "name", .required = true, .type = KARG_STRING },
 };
+/* `install=on` when the host sends the app's install next: the fetch's card
+ * waits for it instead of closing between the two. */
 static const karg_spec_t A_APPDATA_GET[] = {
-    { .key = "name", .required = true, .type = KARG_STRING },
-    { .key = "url",  .required = true, .type = KARG_STRING },
+    { .key = "name",    .required = true,  .type = KARG_STRING },
+    { .key = "url",     .required = true,  .type = KARG_STRING },
+    { .key = "install", .required = false, .type = KARG_BOOL, .def = "off" },
 };
 /* `ls` may be typed bare (the cwd). `cd` and `stat` need a path, so a
  * mistyped key is not taken as the cwd. */
@@ -6452,7 +6460,7 @@ static const kcmd_t CMDS[] = {
     { "appdata_ls",   NULL,      0U, h_appdata_ls   },
     { "appdata_info", A_NAME,    1U, h_appdata_info },
     { "appdata_rm",   A_NAME,    1U, h_appdata_rm   },
-    { "appdata_get",  A_APPDATA_GET, 2U, h_appdata_get },
+    { "appdata_get",  A_APPDATA_GET, 3U, h_appdata_get },
     { "variable",      A_VARIABLE, 2U, h_variable      },
     { "variable_list", NULL,       0U, h_variable_list },
     { "function",        A_FUNCTION,   2U, h_function        },
