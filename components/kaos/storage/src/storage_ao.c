@@ -7610,6 +7610,7 @@ static bool turn_wanted(QEvt const * const e)
         case STORAGE_RECV_REQ_SIG:
         case APPDATA_PUT_REQ_SIG:
         case APPDATA_RM_REQ_SIG:
+        case STORAGE_APP_WIPE_REQ_SIG:
         case STORAGE_TEXT_REQ_SIG: {
             wanted = true;
             break;

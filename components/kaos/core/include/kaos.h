@@ -3434,9 +3434,11 @@ kode_status_t appdata_rm_request(const char *project, QActive *who);
  * The images at the root of the internal partition and of the card whose
  * descriptor names @p project, whatever the files are called, and the app's
  * data folder on each. `kodeos.bin` and `c5_slave.bin` are never opened. One
- * file a step, so the walk never holds AO_Storage. Always answered once
- * posted, with a StorageAppWipeRspEvt naming @p project; an absent card is
- * said there, and is no failure.
+ * file a step, so the walk never holds AO_Storage. One asked while a transfer
+ * is in flight waits for it, KODE_STORAGE_TURN_MS at most, and is refused with
+ * KODE_DENIED after it. Always answered once posted, with a
+ * StorageAppWipeRspEvt naming @p project; an absent card is said there, and is
+ * no failure.
  *
  * @param project The app's project name, as the binary declares it.
  * @param who     Where STORAGE_APP_WIPE_RSP_SIG is posted. Never NULL.

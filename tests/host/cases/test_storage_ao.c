@@ -1930,6 +1930,29 @@ TEST_CASE("an app wipe removes every image of the project on both media, "
     TEST_ASSERT_TRUE_MESSAGE(on_sd("demo2.bin"), "another app's image went");
 }
 
+/* An erase asked while a transfer runs - the card's check at start-up, the
+ * launcher saving its list - waits for it as a delete does: refused at once
+ * it would leave the app's files behind an image that is already gone. */
+TEST_CASE("an app wipe that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][wipe][turn]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    hold_reader();
+
+    ask_wipe("demo");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered while the transfer ran");
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("demo.bin"), "wiped under the transfer");
+
+    release_reader();
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.left);
+    TEST_ASSERT_FALSE(on_fs("demo.bin"));
+}
+
 /* The OS image and the coprocessor's are skipped by name before anything is
  * read: no descriptor, however it reads, puts them within reach of an erase. */
 TEST_CASE("an app wipe never takes the OS image nor the coprocessor's",
@@ -2067,9 +2090,10 @@ TEST_CASE("an app wipe with no name takes no file", "[storage_ao][wipe]")
 }
 
 /* The driver has one reader for the whole system: a wipe under a transfer
- * would read descriptors through the handle the transfer holds. */
-TEST_CASE("an app wipe is refused while a transfer is in flight, and touches nothing",
-          "[storage_ao][wipe]")
+ * would read descriptors through the handle the transfer holds. It waits for
+ * the transfer, and one that outlasts the bound refuses it. */
+TEST_CASE("an app wipe whose transfer never ends is refused, and touches nothing",
+          "[storage_ao][wipe][turn]")
 {
     storage_fresh();
     put_fs_image("demo.bin", "demo");
@@ -2078,6 +2102,8 @@ TEST_CASE("an app wipe is refused while a transfer is in flight, and touches not
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
 
     ask_wipe("demo");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "refused before it had waited");
+    wait_out_turn();
     const StorageAppWipeRspEvt * const r = take_wipe();
 
     TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, r->status);
