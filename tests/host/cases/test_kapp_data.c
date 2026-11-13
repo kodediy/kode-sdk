@@ -150,3 +150,112 @@ TEST_CASE("a fetched app.json the reader would refuse is refused, with its statu
     TEST_ASSERT_EQUAL_INT(KAPP_FETCH_REFUSED, kapp_data_fetched(syn, strlen(syn), &why));
     TEST_ASSERT_EQUAL_INT(KAPP_JSON_SYNTAX, why);
 }
+
+/* ---- The icon: two sizes on the media, one in memory -------------------------- */
+
+/** @brief The 128x128 block an icon is read into. */
+static uint8_t s_icon[KAPP_ICON_BYTES];
+
+/** @brief The colour a 64 px icon holds at (@p x, @p y): its two bytes are told apart. */
+static uint16_t half_colour(uint32_t x, uint32_t y)
+{
+    return (uint16_t)(0x1234U + (y * 251U) + (x * 7U));
+}
+
+/** @brief The alpha a 64 px icon holds at (@p x, @p y). */
+static uint8_t half_alpha(uint32_t x, uint32_t y)
+{
+    return (uint8_t)(0x5AU ^ ((y * 13U) + x));
+}
+
+/** @brief Lay a 64 px icon at the head of s_icon, as a file read leaves it. */
+static void put_half_icon(void)
+{
+    uint32_t const plane = (uint32_t)KAPP_ICON_HALF_W * KAPP_ICON_HALF_H * 2U;
+
+    (void)memset(s_icon, 0xEE, sizeof(s_icon));   /* what the read did not reach */
+    for ( uint32_t y = 0U; KAPP_ICON_HALF_H > y; ++y )
+    {
+        for ( uint32_t x = 0U; KAPP_ICON_HALF_W > x; ++x )
+        {
+            uint32_t const at = (y * KAPP_ICON_HALF_W) + x;
+            uint16_t const c  = half_colour(x, y);
+
+            s_icon[at * 2U]        = (uint8_t)(c & 0xFFU);
+            s_icon[(at * 2U) + 1U] = (uint8_t)(c >> 8);
+            s_icon[plane + at]     = half_alpha(x, y);
+        }
+    }
+}
+
+TEST_CASE("the two icon sizes are named and tie to each other", "[kapp_data][icon]")
+{
+    TEST_ASSERT_EQUAL_UINT32(49152U, KAPP_ICON_BYTES);
+    TEST_ASSERT_EQUAL_UINT32(12288U, KAPP_ICON_HALF_BYTES);
+    TEST_ASSERT_EQUAL_UINT32(128U, KAPP_ICON_W);
+    TEST_ASSERT_EQUAL_UINT32(64U, KAPP_ICON_HALF_W);
+    TEST_ASSERT_TRUE(kapp_icon_len_ok(KAPP_ICON_BYTES));
+    TEST_ASSERT_TRUE(kapp_icon_len_ok(KAPP_ICON_HALF_BYTES));
+    TEST_ASSERT_FALSE(kapp_icon_len_ok(0U));
+    TEST_ASSERT_FALSE(kapp_icon_len_ok(KAPP_ICON_HALF_BYTES - 1U));
+    TEST_ASSERT_FALSE(kapp_icon_len_ok(KAPP_ICON_HALF_BYTES + 1U));
+    TEST_ASSERT_FALSE(kapp_icon_len_ok(KAPP_ICON_BYTES - 1U));
+    TEST_ASSERT_FALSE(kapp_icon_len_ok(KAPP_ICON_BYTES + 1U));
+}
+
+TEST_CASE("a 128 px icon comes through byte for byte", "[kapp_data][icon]")
+{
+    static uint8_t want[KAPP_ICON_BYTES];
+
+    for ( size_t i = 0U; sizeof(s_icon) > i; ++i )
+    {
+        s_icon[i] = (uint8_t)((i * 31U) + (i >> 8));
+    }
+    (void)memcpy(want, s_icon, sizeof(want));
+
+    TEST_ASSERT_TRUE(kapp_icon_widen(s_icon, KAPP_ICON_BYTES));
+    TEST_ASSERT_EQUAL_MEMORY(want, s_icon, sizeof(want));
+}
+
+TEST_CASE("a 64 px icon is brought up to 128 px by doubling each pixel",
+          "[kapp_data][icon]")
+{
+    uint32_t const plane = (uint32_t)KAPP_ICON_W * KAPP_ICON_H * 2U;
+
+    put_half_icon();
+
+    TEST_ASSERT_TRUE(kapp_icon_widen(s_icon, KAPP_ICON_HALF_BYTES));
+
+    for ( uint32_t y = 0U; KAPP_ICON_H > y; ++y )
+    {
+        for ( uint32_t x = 0U; KAPP_ICON_W > x; ++x )
+        {
+            uint32_t const at = (y * KAPP_ICON_W) + x;
+            uint16_t const c  = half_colour(x / 2U, y / 2U);
+
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE((uint8_t)(c & 0xFFU), s_icon[at * 2U],
+                                           "colour, low byte");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE((uint8_t)(c >> 8), s_icon[(at * 2U) + 1U],
+                                           "colour, high byte");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(half_alpha(x / 2U, y / 2U),
+                                           s_icon[plane + at], "alpha");
+        }
+    }
+}
+
+TEST_CASE("any other icon length is refused and the block left as it was",
+          "[kapp_data][icon]")
+{
+    static uint8_t want[KAPP_ICON_BYTES];
+    static const size_t BAD[] = { 0U, 1U, KAPP_ICON_HALF_BYTES - 1U,
+                                  KAPP_ICON_HALF_BYTES + 1U, KAPP_ICON_BYTES - 1U,
+                                  KAPP_ICON_BYTES + 1U };
+
+    put_half_icon();
+    (void)memcpy(want, s_icon, sizeof(want));
+    for ( size_t i = 0U; (sizeof(BAD) / sizeof(BAD[0])) > i; ++i )
+    {
+        TEST_ASSERT_FALSE(kapp_icon_widen(s_icon, BAD[i]));
+        TEST_ASSERT_EQUAL_MEMORY(want, s_icon, sizeof(want));
+    }
+}

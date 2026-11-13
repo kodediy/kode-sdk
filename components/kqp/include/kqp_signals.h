@@ -542,9 +542,21 @@ enum KodeSignals {
     APP_TIDY_TIMEOUT_SIG,       /**< AO_AppMgr private QTimeEvt: AO_Storage
                                  *   did not answer a folder request in
                                  *   APPMGR_TIDY_MS (AppMgr_tidying).         */
+    APP_UNDO_STEP_SIG,          /**< AO_AppMgr private: verify the next app a
+                                 *   reset cut out of an install. Posted to
+                                 *   self, one per app, never by anything
+                                 *   external.                                */
+    APP_BEAT_SIG,               /**< AO_AppMgr private QTimeEvt: a second of
+                                 *   waiting on the network has gone by -
+                                 *   report the write's percent again, so the
+                                 *   glass and the LED stay up.               */
     FLASH_REQ_SIG,              /**< AO_AppMgr: one source-to-sink transfer
                                  *   (FlashReqEvt). The only way to ask for
                                  *   an image to be written.                 */
+    APP_REQ_RSP_SIG,            /**< To the asker: whether AO_AppMgr took an
+                                 *   install (FLASH_REQ_SIG) or run
+                                 *   (APP_RUN_REQ_SIG) request that named one
+                                 *   (AppReqRspEvt). Posted, not published.   */
     STORAGE_CMD_SIG,            /**< AO_Storage: do StorageCmdEvt.op.         */
     STORAGE_LIST_PAGE_SIG,      /**< AO_Storage: post a page of the bootable
                                  *   images on every medium to the asker
@@ -582,7 +594,7 @@ enum KodeSignals {
                                  *   launcher or the console.                 */
     APPDATA_FIELDS_SIG,         /**< To the asker: the folder's fields
                                  *   (AppDataFieldsEvt).                      */
-    APPDATA_ICON_SIG,           /**< To the asker: one third of the icon
+    APPDATA_ICON_SIG,           /**< To the asker: one piece of the icon
                                  *   (AppDataIconEvt).                        */
     APPDATA_END_SIG,            /**< To the asker: the conversation is
                                  *   over.                                    */
@@ -701,6 +713,12 @@ enum KodeSignals {
                                  *   StorageRecvEvt.who rather than published;
                                  *   see RECV_READY_SIG for why the two
                                  *   receivers differ there.                   */
+    RECV_BUSY_SIG,              /**< AO_Storage -> whoever asked for a file:
+                                 *   the transfer in flight did not end within
+                                 *   KODE_STORAGE_TURN_MS, so this one never
+                                 *   started - kcli error 4. POSTED, never
+                                 *   published, and bare and static like the
+                                 *   three endings of the receive protocol.   */
     STORAGE_TEST_NEXT_SIG,      /**< AO_Storage private QTimeEvt: the next
                                  *   step of the card test. One chunk per
                                  *   step, for the reason STORAGE_WRITE_NEXT_
@@ -740,6 +758,18 @@ enum KodeSignals {
                                  *   whoever waits for it is told it failed.
                                  *   The guard stays up until the call does
                                  *   return.                                  */
+    STORAGE_TURN_TO_SIG,        /**< AO_Storage private QTimeEvt: a request
+                                 *   that waits for the transfer in flight to
+                                 *   end has waited KODE_STORAGE_TURN_MS, so
+                                 *   it is refused as busy.                   */
+    STORAGE_READ_TO_SIG,        /**< AO_Storage private QTimeEvt: the reads of
+                                 *   a data folder that wait for the transfer
+                                 *   in flight have waited KODE_STORAGE_TURN_MS
+                                 *   from the first, so they are answered as
+                                 *   they are during one.                     */
+    STORAGE_READ_RETRY_SIG,     /**< AO_Storage private QTimeEvt: the pause
+                                 *   after a folder read found no event block
+                                 *   for its icon is over; try again.         */
 
     BOOT_OS_SWITCH_SIG,         /**< AO_Boot: point otadata at the inactive
                                  *   kodeOS slot, reset.                      */
@@ -1439,6 +1469,12 @@ enum KodeSignals {
     C5_BOOT_SIG,                /**< AO_Radio private one-shot QTimeEvt: the
                                  *   C5 it just let go has had its boot
                                  *   time.                                  */
+    RADIO_UPDATED_SIG,          /**< AO_Radio private one-shot QTimeEvt: the
+                                 *   C5 has restarted into the update it was
+                                 *   given and booted it; AO_Boot is asked to
+                                 *   reset the board, so the next link
+                                 *   reaches the new image before any reset
+                                 *   of the C5.                             */
     EXP_PULSE_SIG,              /**< AO_Radio private one-shot QTimeEvt: the
                                  *   C5 reset that switches the expansion
                                  *   header's supply on has lasted long
@@ -1688,6 +1724,9 @@ enum KodeSignals {
     NET_CHECK_TMO_SIG,          /**< AO_Net private QTimeEvt, one-shot: the
                                  *   dwell of a radio wake for that check has
                                  *   run out.                                 */
+    NET_JOB_FAST_SIG,           /**< AO_Net private QTimeEvt, one-shot: no job
+                                 *   with either worker for NET_FAST_JOB_HOLD_MS,
+                                 *   so the jobs' hold of the fast mode ends. */
 
     DISPLAY_TEST_REQ_SIG,       /**< AO_Display: `test component=display`;
                                  *   answers a published TEST_RESULT_SIG. No
@@ -1984,6 +2023,8 @@ typedef struct {
     QEvt super;
     char file[KODE_APP_FILE_MAX];
     bool launch;   /**< Boot the slot as soon as the write succeeds. */
+    QActive *who;  /**< APP_RUN_REQ_SIG only: where the verdict is posted
+                    *   (AppReqRspEvt), or NULL for none.              */
 } AppFlashEvt;
 
 /**
@@ -2160,12 +2201,35 @@ typedef struct {
  * time AO_AppMgr reads this.
  */
 typedef struct {
-    QEvt    super;
-    uint8_t src_kind;                  /**< kfw_src_t, as a plain integer.  */
-    uint8_t dst_kind;                  /**< kfw_target_t, likewise.         */
-    bool    launch;                    /**< Boot it once written.           */
-    char    src[KODE_FLASH_SRC_MAX];   /**< File name, or a URL.            */
+    QEvt     super;
+    uint8_t  src_kind;                 /**< kfw_src_t, as a plain integer.  */
+    uint8_t  dst_kind;                 /**< kfw_target_t, likewise.         */
+    bool     launch;                   /**< Boot it once written.           */
+    QActive *who;                      /**< Where AO_AppMgr's verdict is
+                                        *   posted (AppReqRspEvt), or NULL
+                                        *   for none.                       */
+    char     src[KODE_FLASH_SRC_MAX];  /**< File name, or a URL.            */
 } FlashReqEvt;
+
+/** @brief What AO_AppMgr made of a request that asked for a verdict (AppReqRspEvt.verdict). */
+typedef enum {
+    APP_REQ_TAKEN = 0,   /**< Taken: the install is under way, or the app is on its way to boot. */
+    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand: ask again.                           */
+    APP_REQ_MISSING,     /**< The file is not on the medium, or the app is not installed.      */
+    APP_REQ_EMPTY,       /**< The mailbox holds nothing to install.                            */
+    APP_REQ_REFUSED      /**< Refused for another reason, which the log gives.                 */
+} app_req_verdict_t;
+
+/**
+ * @brief AO_AppMgr's verdict on an install or run request (APP_REQ_RSP_SIG).
+ *
+ * Posted to the asker alone, once, never published: only the asker waits for
+ * it.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t verdict;   /**< app_req_verdict_t. */
+} AppReqRspEvt;
 
 /**
  * @brief One installed app, in answer to APP_LIST_REQ_SIG (APP_ENTRY_SIG).
@@ -2184,7 +2248,8 @@ typedef struct {
                             *   directory entry's own number, and the one
                             *   boot_app_offset() answers with.            */
     /* From the app's own manifest; both empty when it carries none, which
-     * every app built before manifests existed does. */
+     * every app built before manifests existed does, and the category empty
+     * when the manifest names none. */
     char     display[KODE_APP_DISPLAY_MAX];
     char     category[KODE_APP_CATEGORY_MAX];
     /* From IDF's descriptor in the image: when it was built, as the compiler
@@ -2504,7 +2569,7 @@ typedef struct {
     char    name[KODE_APP_FILE_MAX];             /**< Echoed: answers can cross. */
     char    project[32];                         /**< esp_app_desc_t.project_name. */
     char    display[KODE_APP_DISPLAY_MAX];       /**< Empty when unmanifested.   */
-    char    category[KODE_APP_CATEGORY_MAX];     /**< Empty when unmanifested.   */
+    char    category[KODE_APP_CATEGORY_MAX];     /**< Empty when none is named.  */
     uint8_t status;                              /**< kode_status_t of the read. */
 } StorageDescRspEvt;
 
@@ -2538,17 +2603,20 @@ typedef struct {
 } AppDataFieldsEvt;         /* 208 bytes plus QEvt: the medium tier */
 
 /**
- * @brief One third of the icon, back to `who` (APPDATA_ICON_SIG).
+ * @brief One piece of the icon, back to `who` (APPDATA_ICON_SIG).
  *
- * KAPP_ICON_BYTES (12288) does not fit one KODE_RECV_CHUNK-wide jumbo block,
- * so the icon travels as three: seq 0..2, each a full 4096-byte third.
+ * The icon is KODE_APP_ICON_BYTES, far more than one KODE_RECV_CHUNK-wide
+ * jumbo block holds, so it travels as KODE_APP_ICON_PIECES: seq 0 up, each a
+ * full KODE_APP_ICON_PIECE bytes, laid end to end in the order they arrive.
+ * A piece is wider than the jumbo tier's block, so it is served from the
+ * icon tier, which is in PSRAM.
  */
 typedef struct {
     QEvt     super;
     char     project[32];
-    uint8_t  seq;          /**< 0..2: which 4096-byte third.               */
-    uint8_t  data[KODE_RECV_CHUNK];
-} AppDataIconEvt;           /* the jumbo tier's second tenant */
+    uint8_t  seq;          /**< 0..KODE_APP_ICON_PIECES-1: which piece.   */
+    uint8_t  data[KODE_APP_ICON_PIECE];
+} AppDataIconEvt;           /* the icon tier's only tenant */
 
 /**
  * @brief How a delete of one app's data folder ended (APPDATA_RM_RSP_SIG).
@@ -6340,7 +6408,9 @@ typedef struct {
     uint32_t max;                  /**< CAT only: ceiling on bytes read,
                                      *   already bounded by the console's own
                                      *   key spec. Ignored by every other op. */
-    uint32_t offset;               /**< CAT only: first byte to read. */
+    uint32_t offset;               /**< CAT: first byte to read. An ask's or
+                                     *   a blocked task's LIST: the entries
+                                     *   to skip. Ignored by every other op. */
     StorageWaiter *wait;           /**< A blocked task's own storage, or NULL
                                      *   when `who` is an Active Object.     */
     uint32_t gen;                  /**< This request's tag, echoed into
@@ -6348,8 +6418,7 @@ typedef struct {
                                      *   `wait`.                             */
     FileRspEvt *rsp;               /**< An ask's answer, taken with the
                                      *   request and posted to `who`; NULL
-                                     *   otherwise. An ask's LIST counts
-                                     *   `offset` as the entries to skip.    */
+                                     *   otherwise.                          */
     void    *buf;                  /**< An ask's CAT: the lent buffer, `max`
                                      *   bytes, written before the answer.   */
 } StoragePathEvt;

@@ -111,6 +111,12 @@
 /* 3 is the renderer's - a consumer level, defined with its family below as
  * KODE_PRIO_USER_GUI. */
 #define KODE_PRIO_READER        4U    /**< Console reader task (blocking).  */
+/* The boot task is FreeRTOS's main task, at priority 1, and it runs every
+ * owner's initial transition. The renderer starts in the early row and draws
+ * without a pause; where the port puts it on the boot task's core, a walk at
+ * priority 1 gets only the gaps between its passes, and the rows below the
+ * early one come up seconds late. One level above the renderer is enough. */
+#define KODE_PRIO_BOOT_WALK     (KODE_PRIO_USER_GUI + 1U) /**< The boot task while kode_init() starts and parks the rows. */
 #define KODE_PRIO_RADIO         4U    /**< AO_Radio + its worker task.      */
 #define KODE_PRIO_STORAGE       5U    /**< AO_Storage + its storage_sd worker task. */
 #define KODE_PRIO_LOG           6U    /**< AO_Log (the console device).     */
@@ -557,6 +563,16 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  * over a slow link must not time out, but a host that dies mid-image must not
  * leave the console waiting forever. AO_AppMgr rearms it on every chunk. */
 #define KODE_RECV_IDLE_MS       5000U
+/* The same watchdog for a transfer that rides BLE. A link that stalls for a
+ * few seconds under interference is slow, not dead, and the phone app waits
+ * 10 s for each ack before it sends the chunk again: the bound has to outlast
+ * that wait, or the board gives up on a transfer the host is still retrying. */
+#define KODE_RECV_IDLE_BLE_MS  15000U
+/* How long a launch after a terminal install waits for the BLE console's
+ * outbound bytes to leave - the `>ok` the host is waiting for - before it
+ * resets the board anyway. A notification still queued when the board resets
+ * is lost, and the phone retries against a running app. */
+#define KODE_RECV_DRAIN_BLE_MS  2000U
 
 /* How long a BLE scan listens. Long enough to catch a phone's slow
  * advertising interval (up to ~1.3 s) several times over, short enough that
@@ -762,12 +778,13 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
                                        *   included.                        */
 /* An app's data folder (app.json and icon.k64) may reach the internal
  * partition before its app does, so nothing bounds how many there are but the
- * partition itself. A new one is refused when it would leave less than the
+ * partition itself. A put is charged what it weighs on the volume: its json
+ * and its icon, each in whole clusters, and the folder's own cluster when the
+ * folder is new; a replacement writes its pair beside the old one and is
+ * charged the pair. A new folder is refused when it would leave less than the
  * floor free: Kody's pack is staged beside the one in use when it updates. */
-#define KODE_APPDATA_FOLDER_BYTES   (20U * 1024U)  /**< What one data folder
-                                       *   takes: five 4 KB clusters, one for
-                                       *   the directory, one for app.json,
-                                       *   three for the icon.              */
+#define KODE_APPDATA_CLUSTER_BYTES  4096U          /**< The internal FAT's allocation unit the charge assumes when the
+                                       *   driver cannot say: what the volume is formatted with. */
 #define KODE_APPDATA_FREE_MIN_BYTES (128U * 1024U) /**< What a new data folder
                                        *   must leave free on the internal
                                        *   partition.                       */
@@ -1118,6 +1135,21 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         request over this many is refused the way it is when the AO has no
  *         room to run it. */
 #define KODE_STORAGE_DEFER_DEPTH      8U
+/** @brief The longest a request that writes or deletes waits for the transfer
+ *         AO_Storage has in flight to end. It is served when the transfer
+ *         does; past this it is refused as busy. */
+#define KODE_STORAGE_TURN_MS         2000U
+/** @brief Reads of an app's data folder, and of a manifest, AO_Storage holds in
+ *         arrival order while a transfer is in flight; each is answered when
+ *         it ends, or after KODE_STORAGE_TURN_MS from the first one held. One
+ *         over this many is answered at once, as a read is during a
+ *         transfer. */
+#define KODE_STORAGE_READ_WAIT_DEPTH  8U
+/** @brief The pause before a folder read whose icon found the icon pool short
+ *         tries again, within the same bound: the pool holds one icon's pieces,
+ *         and the reader of the last icon hands them back with no event of
+ *         its own to say so. */
+#define KODE_STORAGE_ICON_RETRY_MS    20U
 
 /* ---- The NFC row ----------------------------------------------------------
  * ASYNC, and it does what no other row does: it WRITES. The board's own
@@ -1594,6 +1626,11 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief The longest AO_AppMgr waits for AO_Storage or AO_Net to answer an
  *         open or a STAT of the card; then it gives that wait up. */
 #define KODE_APPMGR_OPEN_MS     30000U
+/** @brief How many times AO_AppMgr asks again for a fetched data folder's put
+ *         that AO_Storage refused as busy, before the fetch fails busy. */
+#define KODE_APPMGR_PUT_TRIES   3U
+/** @brief The pause before each of those tries, in ms. */
+#define KODE_APPMGR_PUT_RETRY_MS 500U
 
 /* ---- The factory reset's budgets ----------------------------------------
  * AO_Boot walks the reset one step at a time and arms one timer per step; a
@@ -1702,17 +1739,25 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
  * Eight: a central's writes waiting for the app, and the app's own values on
  * their way to AO_Radio, which takes each in one step. */
 #define KQP_WIDE_POOL_COUNT     8U
-/* The jumbo tier holds two things: a piece of an image arriving on the
- * console (a terminal install), and a third of an app icon leaving a medium
- * (`app_data`). Four blocks cover everything one 4 KB protocol chunk can
- * fragment into, and one icon is three of them taken in one step or not at
- * all, section E of the app data spec. For an install, that is
- * everything a chunk can fragment into on its way off the wire (the reader
- * drains the RX ring in whatever pieces it finds) with room to spare; the
- * transfer's actual flow control is the `>|ack` protocol, not this pool -
- * the wire itself has none (the USB-Serial/JTAG ISR drops silently once its
- * RX ring is full). */
+/* The jumbo tier holds one thing: a piece of an image arriving on the console
+ * (a terminal install). Four blocks cover everything one 4 KB protocol chunk
+ * can fragment into on its way off the wire (the reader drains the RX ring in
+ * whatever pieces it finds) with room to spare; the transfer's actual flow
+ * control is the `>|ack` protocol, not this pool - the wire itself has none
+ * (the USB-Serial/JTAG ISR drops silently once its RX ring is full). */
 #define KQP_JUMBO_POOL_COUNT    4U
+/* The icon tier holds one thing: a piece of an app's icon leaving a medium
+ * (`app_data`). An icon is KODE_APP_ICON_BYTES, 48 KB, and travels as
+ * KODE_APP_ICON_PIECES events taken in one step or not at all, section E of
+ * the app data spec; one icon is in flight at a time, so the tier is one
+ * icon's pieces. Its blocks come from PSRAM when kqp_init() runs: the same
+ * pieces in the internal pool would be 48 KB of the 640 KB, taken for the
+ * life of every firmware whether or not it ever shows an icon. */
+#define KODE_APP_ICON_BYTES     49152U  /**< == KAPP_ICON_BYTES: the 128x128 RGB565 + A8 block. */
+#define KODE_APP_ICON_PIECES    3U      /**< The events one icon travels in.                    */
+#define KODE_APP_ICON_PIECE     (KODE_APP_ICON_BYTES / KODE_APP_ICON_PIECES)
+                                        /**< What each carries: 16 KB.                          */
+#define KQP_ICON_POOL_COUNT     KODE_APP_ICON_PIECES  /**< One icon's pieces.                   */
 
 /* ---- System AO housekeeping --------------------------------------------- */
 #define KQP_AO_QUEUE_LEN        16U   /**< Events buffered per system AO.     */

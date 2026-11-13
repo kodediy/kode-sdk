@@ -65,7 +65,16 @@ kode_status_t kdrv_slot_begin(void);
 /** @brief Append to the open session. */
 kode_status_t kdrv_slot_write(const void *data, size_t len);
 
-/** @brief Close the session and verify what was written. */
+/**
+ * @brief Close the session and verify what was written.
+ *
+ * An image is taken only when it is sound and its description names the
+ * project that is running: the slot is this firmware's own update, and an
+ * app's image there would boot in its place.
+ *
+ * @return KODE_OK; KODE_DENIED with no session open; KODE_ERROR for an image
+ *         that fails its checks, has no description or is another project's.
+ */
 kode_status_t kdrv_slot_end(void);
 
 /** @brief Abandon the session, leaving the slot invalid. */

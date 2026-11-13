@@ -2188,7 +2188,9 @@ void wifi_rssi_request(void);
  *
  * On: no power save, every frame answered at once, about 27 mA more. Off (default)
  * is modem save. Applied while connected; a (re)connect or stop resets it. No
- * answer: a missed fast mode is only a slow reply. AO_Net is the one caller.
+ * answer: a missed fast mode is only a slow reply. AO_Net is the one caller: it
+ * asks while the Kode channel receives command lines and while a job is with one
+ * of its workers, and gives the default back when the last of them ends.
  *
  * @param on true for fast, false for the default.
  */
@@ -2746,7 +2748,11 @@ QEvt const *mqtt_down_evt(void);
  *
  * Fire-and-forget, like appmgr_flash_request(): queued in the client's
  * outbox and reported in '!' lines. A payload longer than
- * KODE_MQTT_PAYLOAD_MAX is cut to it.
+ * KODE_MQTT_PAYLOAD_MAX is cut to it. AO_Net answers with MQTT_STATE_SIG:
+ * no error when the client took it, KDRV_MQTT_ERR_REFUSED when no client is
+ * up, KDRV_MQTT_ERR_NO_NET with no address, KDRV_MQTT_ERR_BUSY while the Kode
+ * channel holds the client. mqtt_sub_request() and mqtt_unsub_request() are
+ * answered the same way.
  *
  * @param topic The topic.
  * @param data  The payload.
@@ -3042,6 +3048,10 @@ typedef enum {
  * @brief Ask AO_Storage about one path: STAT, LIST, MKDIR, UNLINK or RMDIR it.
  *
  * Every request is answered, refusals included: the console closes on it.
+ * UNLINK and RMDIR, and the delete that tries either, wait for the transfer
+ * AO_Storage has in flight to end, KODE_STORAGE_TURN_MS at most, and are refused
+ * with KODE_DENIED after it; one request waits at a time, and a second is refused
+ * at once.
  *
  * @param who  Where the response is posted. NULL is served and not answered.
  * @param op   storage_path_op_t, any but STORAGE_PATH_CAT (storage_cat_request()).
@@ -3054,8 +3064,9 @@ void storage_path_request(QActive *who, uint8_t op, const char *path);
  *
  * Answered once with StoragePathRspEvt; `rc` says how it went. On KODE_ERROR,
  * `exists` true means the source was checked afterwards and is missing.
- * MOVE: KODE_DENIED malformed, no volume, or two volumes; KODE_ERROR no mount or
- * rename failed. COPY: KODE_DENIED malformed, no volume, same file, or a transfer in
+ * MOVE waits for a transfer in flight like storage_path_request()'s deletes.
+ * MOVE: KODE_DENIED malformed, no volume, two volumes, or a transfer that outlasted
+ * the wait; KODE_ERROR no mount or rename failed. COPY: KODE_DENIED malformed, no volume, same file, or a transfer in
  * flight; KODE_ERROR otherwise. COPY answers at its end: size deadlines for it.
  *
  * @param who Where the response is posted. NULL is served and not answered for
@@ -3075,7 +3086,8 @@ void storage_pair_request(QActive *who, uint8_t op, const char *src,
  * StoragePathRspEvt tagged STORAGE_PATH_WRITE. @p line n: replaces line n (1-based)
  * via a temporary renamed over the original, so a failure leaves it untouched; the
  * file must fit a 32 KB buffer (else KODE_NO_RESOURCES); tagged
- * STORAGE_PATH_WRITE_LINE so path_answer() can tell the failures apart.
+ * STORAGE_PATH_WRITE_LINE so path_answer() can tell the failures apart. Either waits
+ * for a transfer in flight like storage_path_request()'s deletes.
  *
  * @param who    Where the response is posted. NULL is served and not
  *               answered.
@@ -3124,6 +3136,21 @@ void storage_cat_request(QActive *who, const char *path, uint32_t max);
  */
 void storage_path_request_wait(StorageWaiter *wait, uint32_t gen, uint8_t op,
                                const char *path);
+
+/**
+ * @brief A STORAGE_PATH_LIST answered into @p wait, from the @p skip-th entry on.
+ *
+ * storage_path_request_wait() with STORAGE_PATH_LIST is this with a @p skip
+ * of 0. The entries left out are counted as the walk finds them, after the
+ * names it never lists, so a page starts where the one before it ended.
+ *
+ * @param wait See storage_path_request_wait().
+ * @param gen  See storage_path_request_wait().
+ * @param path Absolute, normalised, virtual. Copied into the event.
+ * @param skip Entries to leave out: the ones earlier pages gave.
+ */
+void storage_list_request_wait(StorageWaiter *wait, uint32_t gen, const char *path,
+                               uint32_t skip);
 
 /**
  * @brief storage_cat_request(), answered into @p wait.
@@ -3272,8 +3299,11 @@ kode_status_t storage_space_ask(QActive *who, const char *path);
  * `file_put`: AO_Log hands over exactly @p size raw bytes, written to @p path
  * (truncating). Answered by RECV_READY_SIG, RECV_ACK_SIG per KODE_RECV_CHUNK, then
  * one of RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG, POSTED to @p who; no
- * APP_FLASH_* reporting. Any failure removes the file, so `app_run` never boots a
- * stub. Designed and verified on the cable; over BLE it is untried, not refused.
+ * APP_FLASH_* reporting. A transfer already in flight is waited for,
+ * KODE_STORAGE_TURN_MS at most; past it, and for a second request while one
+ * waits, the answer is RECV_BUSY_SIG and nothing was armed. Any failure removes
+ * the file, so `app_run` never boots a stub. Designed and verified on the cable;
+ * over BLE it is untried, not refused.
  *
  * @param who   Where the RECV_* conversation is posted. NULL is refused: it is
  *              AO_Storage's only sign the transfer is alive.
@@ -3344,6 +3374,10 @@ void storage_open_request(const char *name, QActive *who);
  * Open, read the first KAPP_PREFIX_LEN bytes, parse and close within one step.
  * It does not take the reader slot, so it can never strand the one open file.
  *
+ * A read that meets a transfer in flight waits for it, in the same line as the
+ * reads of appdata_request() and by the same rules, and is answered with a
+ * failed status only when that wait is full or has run out.
+ *
  * @param name The file, as a listing named it.
  * @param who  Where STORAGE_DESC_RSP_SIG is posted. Never NULL.
  */
@@ -3352,9 +3386,21 @@ void storage_desc_request(const char *name, QActive *who);
 /**
  * @brief Ask AO_Storage what the app data folder says about @p project.
  *
- * Posted to @p who: APPDATA_FIELDS_SIG once, APPDATA_ICON_SIG zero or three times,
- * APPDATA_END_SIG once. No reader slot taken. Refused during a transfer (medium=none,
- * json_status=none); unallocatable gives icon_status=busy and an empty project.
+ * Posted to @p who: APPDATA_FIELDS_SIG once, APPDATA_ICON_SIG zero or
+ * KODE_APP_ICON_PIECES times (the icon, always the 128x128 block, whichever
+ * size the file has), APPDATA_END_SIG once. No reader slot taken. The folder
+ * is on the first medium, the internal one before the card, that holds its
+ * app.json: a folder with no app.json is no data, and does not hide a folder
+ * on the other medium that has one.
+ * A read that meets a transfer in flight waits for it, with up to
+ * KODE_STORAGE_READ_WAIT_DEPTH others and in arrival order, behind a write or
+ * delete that waits; it is answered when the transfer ends. One that waits
+ * KODE_STORAGE_TURN_MS from the first, or finds the wait full, is refused
+ * (medium=none, json_status=none). An icon whose pieces the icon pool cannot
+ * all take, because the last icon is still with its reader, is tried again every
+ * KODE_STORAGE_ICON_RETRY_MS within the same bound, and then answered
+ * icon_status=busy with the medium and the json it found; no event at all gives
+ * icon_status=busy and an empty project.
  * Fields and end always arrive. See https://docs.kode.diy/sdk/kdrv/apps.
  *
  * @param project The app's project name, as the binary declares it.
@@ -3363,12 +3409,16 @@ void storage_desc_request(const char *name, QActive *who);
 void appdata_request(const char *project, QActive *who);
 
 /**
- * @brief Delete @p project's data folder on the internal partition.
+ * @brief Delete @p project's data folder, from the medium that holds it.
  *
- * The one recursive delete, bounded to `/storage/.kode/appsdata/<project>` and one
- * subfolder level (https://docs.kode.diy/sdk/kdrv/apps). The card is never touched;
- * a card folder of that name is logged. Always answered once posted, refusals
- * included, with an AppDataRmRspEvt naming @p project.
+ * The one recursive delete, bounded to `<root>/.kode/appsdata/<project>` and one
+ * subfolder level (https://docs.kode.diy/sdk/kdrv/apps). The internal partition's
+ * folder is the one removed; a card folder of that name is then left where it is
+ * and logged. A folder only on the card, where appdata_put_request() wrote it
+ * for want of room inside, is removed from the card. Always answered once posted, refusals
+ * included, with an AppDataRmRspEvt naming @p project. It waits for a transfer in
+ * flight like storage_path_request()'s deletes; a transfer that outlasts the wait
+ * is KODE_DENIED.
  *
  * @param project The app's project name, as the binary declares it.
  * @param who     Where APPDATA_RM_RSP_SIG is posted. Never NULL.
@@ -3384,9 +3434,11 @@ kode_status_t appdata_rm_request(const char *project, QActive *who);
  * The images at the root of the internal partition and of the card whose
  * descriptor names @p project, whatever the files are called, and the app's
  * data folder on each. `kodeos.bin` and `c5_slave.bin` are never opened. One
- * file a step, so the walk never holds AO_Storage. Always answered once
- * posted, with a StorageAppWipeRspEvt naming @p project; an absent card is
- * said there, and is no failure.
+ * file a step, so the walk never holds AO_Storage. One asked while a transfer
+ * is in flight waits for it, KODE_STORAGE_TURN_MS at most, and is refused with
+ * KODE_DENIED after it. Always answered once posted, with a
+ * StorageAppWipeRspEvt naming @p project; an absent card is said there, and is
+ * no failure.
  *
  * @param project The app's project name, as the binary declares it.
  * @param who     Where STORAGE_APP_WIPE_RSP_SIG is posted. Never NULL.
@@ -3404,7 +3456,8 @@ typedef struct {
                                 *   icon.k64. AO_Storage owns it from the post
                                 *   and khal_free()s it on every path.          */
     uint16_t        json_len;  /**< Bytes of app.json, 1..KAPP_DATA_JSON_MAX.     */
-    uint16_t        icon_len;  /**< Bytes of icon.k64 after it: 0 or KAPP_ICON_BYTES. */
+    uint16_t        icon_len;  /**< Bytes of icon.k64 after it: 0, KAPP_ICON_BYTES or
+                                *   KAPP_ICON_HALF_BYTES.                           */
     QActive        *who;       /**< Where APPDATA_PUT_RSP_SIG is posted.          */
 } AppDataPutEvt;
 
@@ -3413,26 +3466,47 @@ typedef struct {
     QEvt          super;
     char          project[KDRV_SLOT_PROJECT_MAX]; /**< Echoed: answers can cross. */
     kode_status_t rc;      /**< KODE_OK, KODE_DENIED, KODE_ERROR, KODE_IO_ERROR,
-                            *   or KODE_NO_RESOURCES: no room for a new folder. */
+                            *   or KODE_NO_RESOURCES: no room for the put.     */
+    bool          busy;    /**< With KODE_DENIED: the put was good but AO_Storage
+                            *   had no turn for it within KODE_STORAGE_TURN_MS,
+                            *   so nothing was written and the same put may be
+                            *   asked again. False for every other answer.   */
 } AppDataPutRspEvt;
 
 /**
- * @brief Write @p project's data folder on the internal partition, replacing
- *        whatever folder was there.
+ * @brief Write @p project's data folder, replacing whatever folder was there
+ *        whole, or not at all.
  *
- * Clears the folder (as appdata_rm_request()), makes missing parents, then writes
- * `app.json` and, if @p icon_len, `icon.k64` in two steps. Never the card. Once
- * posted, AO_Storage owns @p buf and frees it on every path. Always answered with an
- * AppDataPutRspEvt: KODE_OK; KODE_DENIED bad name, length, NULL buffer or busy;
- * KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when a new folder
- * would leave the partition under KODE_APPDATA_FREE_MIN_BYTES (a folder that is
- * there is always replaced). A failed put leaves no folder.
+ * A folder that is there is replaced on the medium that holds its app.json, the
+ * internal partition before the card as the reader chooses, and never moved. A
+ * new folder goes inside; when the internal partition has no room for it and a
+ * card is mounted that has, it goes to the card, where the reader finds it, and
+ * stays there. A card that will not take the write leaves nothing behind and the
+ * answer is KODE_NO_RESOURCES, as with no card.
+ *
+ * Makes missing parents, writes `app.json` and, if @p icon_len, `icon.k64` in two
+ * steps under temporary names beside the old files, and only when both are down
+ * puts them in the old files' place and removes whatever else the folder held. A
+ * put that fails, or never finishes, leaves the folder that was there as it was;
+ * one it made is removed. Once posted, AO_Storage owns @p buf and
+ * frees it on every path. A put that meets a transfer in flight waits for it
+ * (KODE_STORAGE_TURN_MS). Always answered with an AppDataPutRspEvt: KODE_OK;
+ * KODE_DENIED bad name, length, NULL buffer or busy (AppDataPutRspEvt.busy tells
+ * the last apart); KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when
+ * the put does not fit. It is charged what it weighs on the volume: its app.json
+ * and its icon, each rounded up to the volume's cluster (kdrv_storage_cluster_bytes()).
+ * A new folder is charged one cluster more, its own, and on the internal partition
+ * must leave KODE_APPDATA_FREE_MIN_BYTES free besides; a folder that is there is
+ * charged only that pair, the room of the temporaries it is written under beside
+ * the old files. The card keeps no floor: it refuses only when it says it has less
+ * free than the charge. The refusal is told in the log with the numbers.
  *
  * @param project  The app's project name, as the binary declares it.
  * @param buf      app.json then icon.k64, one allocation from khal_alloc_psram()
  *                 or khal_realloc_psram() (what kfw_appdata_take() gives).
  * @param json_len Bytes of app.json, 1 to KAPP_DATA_JSON_MAX.
- * @param icon_len Bytes of icon.k64 after it: 0 for none, else KAPP_ICON_BYTES.
+ * @param icon_len Bytes of icon.k64 after it: 0 for none, else KAPP_ICON_BYTES or
+ *                 KAPP_ICON_HALF_BYTES; the file is written as it is.
  * @param who      Where APPDATA_PUT_RSP_SIG is posted. Never NULL.
  * @return KODE_OK when the request is posted: @p buf is AO_Storage's and an
  *         answer is owed. KODE_NO_RESOURCES when the event pool is dry:
@@ -3447,6 +3521,45 @@ kode_status_t appdata_put_request(const char *project, uint8_t *buf,
  *         request of an install, in ms: a put of 13 KB onto the FAT, or one
  *         recursive delete. */
 #define APPMGR_TIDY_MS      (5000U)
+
+/** @brief How much longer an install that ends in a boot waits, in ms, for the
+ *         answer to the last data-folder request that went unanswered for
+ *         APPMGR_TIDY_MS: the board resets right after, and a write AO_Storage
+ *         is still making would be cut. */
+#define APPMGR_TIDY_LATE_MS (5000U)
+
+/* ---- What an install evicted, kept in NVS until the install ends --------------
+ * An install takes its victims out of the directory before the first byte
+ * arrives. AO_AppMgr records them first, in its own namespace, so a reset in
+ * the middle of the install does not cost them: the next boot puts back the
+ * ones whose bytes are as they were, which each record says by a CRC-32 of the
+ * image's extent taken when the victim was evicted. One blob, a header and one
+ * record per victim; absent when no install is evicting. A boot takes the table
+ * out of NVS before it checks anything.
+ */
+#define APPMGR_UNDO_NS       "kappmgr"  /**< The namespace AO_AppMgr keeps its records in.      */
+#define APPMGR_UNDO_KEY      "undo"     /**< The table of the victims of the install in hand.   */
+#define APPMGR_UNDO_VERSION  2U         /**< The layout below; any other is ignored and erased. */
+#define APPMGR_UNDO_MAX      64U        /**< Records in a table: every slot of the directory.   */
+#define APPMGR_UNDO_HDR_LEN  4U         /**< Bytes of appmgr_undo_hdr_t.                         */
+#define APPMGR_UNDO_REC_LEN  52U        /**< Bytes of appmgr_undo_rec_t.                         */
+
+/** @brief The head of the blob. */
+typedef struct {
+    uint8_t version;       /**< APPMGR_UNDO_VERSION.                          */
+    uint8_t count;         /**< Records that follow: 1..APPMGR_UNDO_MAX.       */
+    uint8_t reserved[2];   /**< Zero.                                         */
+} appmgr_undo_hdr_t;
+
+/** @brief One victim: its directory entry as it stood, field for field, its name and the CRC of its extent. */
+typedef struct {
+    uint32_t offset;       /**< Region-relative, a multiple of 64 KB.          */
+    uint32_t size;         /**< The image's exact length in bytes.             */
+    uint32_t seq;          /**< Its install number.                            */
+    uint32_t flags;        /**< The entry's flags.                             */
+    char     project[KODE_APP_PROJECT_MAX]; /**< Its name, read before the install could overwrite it. */
+    uint32_t crc;          /**< khal_crc32() over [offset, offset + size), taken before the eviction. */
+} appmgr_undo_rec_t;
 
 /**
  * @brief The folder's path on @p m, or false when the name cannot be a folder.
@@ -3512,8 +3625,10 @@ const uint8_t *net_stream_buf(uint8_t idx);
 
 /* ---- AO_AppMgr: owner of the apps region --------------------------------
  * Copies a .bin from a medium into the apps region (evicting the oldest install
- * when short of room), lists, launches and removes apps by name. Which firmware
- * boots is AO_Boot's; the two write different flash regions.
+ * when short of room), lists, launches and removes apps by name. An install that
+ * fails gives back every app it evicted whose flash its write never reached, and
+ * so does the next boot after a reset in the middle of one (the table below).
+ * Which firmware boots is AO_Boot's; the two write different flash regions.
  */
 extern QActive * const AO_AppMgr;   /**< The apps-region AO. */
 void AppMgr_ctor(void);             /**< Construct it; kaos_appmgr_start() calls it. */
@@ -3621,6 +3736,41 @@ void appmgr_image_request(uint8_t src_kind, const char *src,
                           uint8_t dst_kind, bool launch);
 
 /**
+ * @brief appmgr_image_request(), asking AO_AppMgr for its verdict.
+ *
+ * AO_AppMgr posts @p who one APP_REQ_RSP_SIG (AppReqRspEvt) once it has
+ * decided: taken (an `https` source as soon as it starts opening, a file on a
+ * medium once the medium has opened it, the mailbox at once), busy, missing (no
+ * such file on the medium), empty (nothing in the mailbox) or refused. What
+ * goes wrong after that, a download that fails, is published as
+ * APP_FLASH_FAIL_SIG and says nothing here.
+ *
+ * @param src_kind kfw_src_t as a plain integer.
+ * @param src      File name for fs/sd, URL for http, ignored otherwise.
+ * @param dst_kind kfw_target_t as a plain integer.
+ * @param launch   Boot the image once it is written and verified.
+ * @param who      Where the verdict is posted.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
+                      bool launch, QActive *who);
+
+/**
+ * @brief appmgr_run_request(), asking AO_AppMgr for its verdict.
+ *
+ * AO_AppMgr posts @p who one APP_REQ_RSP_SIG: taken when an installed app has
+ * that name (the boot request is on its way to AO_Boot), missing when none
+ * does, busy when it has work in hand.
+ *
+ * @param name The installed app's project name.
+ * @param who  Where the verdict is posted.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_run_ask(const char *name, QActive *who);
+
+/**
  * @brief The event appmgr_image_request() posts, built for a caller that posts it itself.
  * @param src_kind kfw_src_t as a plain integer.
  * @param src      File name for fs/sd, URL for http; NULL for none.
@@ -3713,7 +3863,8 @@ typedef enum {
     APPDATA_GET_JSON,     /**< app.json is longer than KAPP_DATA_JSON_MAX, is
                            *   not what the board reads, or names an icon
                            *   other than icon.k64.                             */
-    APPDATA_GET_ICON,     /**< icon.k64 is not KAPP_ICON_BYTES long.            */
+    APPDATA_GET_ICON,     /**< icon.k64 is neither KAPP_ICON_BYTES nor
+                           *   KAPP_ICON_HALF_BYTES long.                       */
     APPDATA_GET_FULL,     /**< The internal partition has no room for it.       */
     APPDATA_GET_STORE     /**< The folder could not be written.                 */
 } appdata_get_why_t;
@@ -3746,6 +3897,10 @@ typedef struct {
  * (appdata_put_request()), replacing one that was there. One APPDATA_GET_RSP_SIG
  * to @p who, refusals included: AO_AppMgr does one thing at a time and answers
  * APPDATA_GET_BUSY while it writes an image. Any task or AO.
+ *
+ * A fetch that began shows like a write: APP_FLASH_PROGRESS_SIG at 0 % at once
+ * and again every second while it waits on the network, ended by an unnamed
+ * APP_FLASH_DONE_SIG or by APP_FLASH_FAIL_SIG.
  *
  * @param project The app's project name, as its image declares it.
  * @param url     The base URL, ending where the file names begin; shorter than

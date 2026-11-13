@@ -331,7 +331,7 @@ TEST_CASE("sd_help lists every field, paced, and closes with ok", "[console_sd]"
     fake_klog_reset();
     (void)qf_support_tick(AO_Console, 1U);
     TEST_ASSERT_TRUE(
-        replied(">|field=\"freq_req_khz\" unit=kHz min=400 max=50000 rw=rw"));
+        replied(">|field=\"check_req\" unit=bool min=0 max=1 rw=rw"));
     TEST_ASSERT_TRUE(replied(">ok"));
 }
 

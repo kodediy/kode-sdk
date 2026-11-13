@@ -22,6 +22,7 @@
 #include "Mockesp_event.h"
 
 #include "esp_app_desc.h"   /* to lay IDF's descriptor in a test image */
+#include "esp_app_format.h" /* and its image and segment headers */
 
 #include "ao_spy.h"
 #include "ask_support.h"
@@ -228,6 +229,7 @@ static void run_scan_rc(kode_status_t want)
         esp_wifi_start_ExpectAndReturn(ESP_OK);
     }
     s_starts = 0U;
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
     esp_wifi_get_country_Stub(&country_now);
     esp_wifi_scan_start_Stub(&scan_start_now);
     esp_wifi_scan_get_ap_num_Stub(&ap_num_now);
@@ -2650,6 +2652,14 @@ static void make_image(uint16_t chip, const char *project, const char *version)
     s_img[0]  = 0xE9U;                       /* ESP_IMAGE_HEADER_MAGIC */
     s_img[12] = (uint8_t)(chip & 0xFFU);
     s_img[13] = (uint8_t)(chip >> 8);
+    /* Its first segment is the descriptor and no more: a length that fits
+     * the file, which is what the decoder holds a raw image to. */
+    esp_image_segment_header_t seg;
+
+    (void)memset(&seg, 0, sizeof(seg));
+    seg.load_addr = 0x40000000U;
+    seg.data_len  = (uint32_t)sizeof(d);
+    (void)memcpy(&s_img[sizeof(esp_image_header_t)], &seg, sizeof(seg));
     (void)memset(&d, 0, sizeof(d));
     d.magic_word = ESP_APP_DESC_MAGIC_WORD;
     (void)snprintf(d.project_name, sizeof(d.project_name), "%s", project);
@@ -2800,6 +2810,64 @@ static void inst_complete(void)
         "an update ends with the link off, as radio_down does - not failed");
 }
 
+static void radio_reboot(void);
+static void c5_case_end(void);
+
+/** @brief Ticks from an update's end to the restart it asks for. */
+#define INST_RESTART_STEPS \
+    QF_SUPPORT_STEPS(KDRV_RADIO_C5_ACTIVATE_MS + KDRV_RADIO_C5_BOOT_MS)
+
+/** @brief How many BOOT_EXIT_REQ_SIG AO_Boot holds; drains its queue. */
+static unsigned boot_exits_taken(void)
+{
+    const QEvt *e;
+    unsigned n = 0U;
+
+    while ( xQueueReceive(AO_Boot->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)BOOT_EXIT_REQ_SIG == e->sig )
+        {
+            n += 1U;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/**
+ * @brief Let @p steps 10 ms steps go by and count the restarts asked meanwhile.
+ *
+ * One pump at a time, the queue read after each: AO_Boot is a background AO
+ * once its own cases have run, and a tick takes a background AO's mail away
+ * before the next step, where a pump leaves it for the case to read.
+ */
+static unsigned boot_exits_within(unsigned steps)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; steps > i; ++i )
+    {
+        pump();
+        n += boot_exits_taken();
+    }
+    return n;
+}
+
+/**
+ * @brief What follows an update on the board: the one-shot asks AO_Boot for
+ *        exactly one restart, and the AO boots again.
+ *
+ * Every case that ends an update ends with this: the AO outlives the case,
+ * and one left waiting to restart is what every later case would inherit.
+ */
+static void inst_restart(void)
+{
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, boot_exits_within(INST_RESTART_STEPS + 2U),
+        "an update ends in exactly one restart");
+    radio_reboot();
+    c5_case_end();
+}
+
 TEST_CASE("install dst=c5 on a link that is up arms the console, says ready "
           "once, and answers once the C5 has activated the verified image",
           "[radio_ao]")
@@ -2825,12 +2893,13 @@ TEST_CASE("install dst=c5 on a link that is up arms the console, says ready "
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, done, "the activate is the `>ok`");
     TEST_ASSERT_EQUAL_UINT(0U, fail);
     TEST_ASSERT_TRUE(logged("is written and activated"));
-    TEST_ASSERT_TRUE_MESSAGE(logged("`radio_up` brings the link back"),
-        "the log says how to see what the C5 now runs");
+    TEST_ASSERT_TRUE_MESSAGE(logged("the board restarts by itself"),
+        "the log says the board restarts to see what the C5 now runs");
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)STORAGE_OP_MOUNT, next_storage_op(),
         "the card goes back on the plain path, as after radio_down");
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KRADIO_OFF, link_now(),
         "an update ends with the link off, as radio_down does - not failed");
+    inst_restart();
 }
 
 /* AO_AppMgr's done names the app it installed. A C5 image installs none, so
@@ -2874,6 +2943,7 @@ TEST_CASE("a C5 update's done arrives naming no app", "[radio_ao]")
         "activated: the card closes and the LED lets go");
     TEST_ASSERT_FALSE_MESSAGE(named,
         "a C5 image installs no app, so its done names none");
+    inst_restart();
 }
 
 TEST_CASE("a C5 that refuses to activate the image fails the install, and "
@@ -2924,6 +2994,7 @@ TEST_CASE("install dst=c5 on a link that is off brings the link up once the "
     TEST_ASSERT_EQUAL_UINT(1U, ready);
     TEST_ASSERT_EQUAL_UINT(0U, fail);
     inst_complete();
+    inst_restart();
 }
 
 TEST_CASE("an image built for another chip is refused before the C5 is touched",
@@ -3002,6 +3073,7 @@ TEST_CASE("install dst=c5 while a job holds the channel waits, and pushes the "
     TEST_ASSERT_EQUAL_UINT(1U, ready);
     TEST_ASSERT_EQUAL_UINT(0U, fail);
     inst_complete();
+    inst_restart();
 }
 
 TEST_CASE("a host that goes quiet mid-install is a stall, and raw mode comes "
@@ -3062,6 +3134,7 @@ TEST_CASE("install dst=c5 off a medium while one is receiving is refused",
     /* Let the install finish, so the next case starts clean. */
     inst_feed(s_img, (uint16_t)sizeof(s_img));
     inst_complete();
+    inst_restart();
 }
 
 TEST_CASE("install dst=c5 while the link is being torn down is refused with an "
@@ -3127,6 +3200,7 @@ TEST_CASE("the acks count one per whole chunk and none for the remainder",
     inst_answers(&ready, &ack, &done, &fail, &stall);
     TEST_ASSERT_EQUAL_UINT(1U, done);
     TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    inst_restart();
 }
 
 /* ---- What the glass and the LED see of a C5 update ---------------------------
@@ -3245,6 +3319,7 @@ TEST_CASE("install dst=c5 reports 0 % with its ready, half the bar staged, the "
     TEST_ASSERT_EQUAL_UINT(0U, w.fail);
 
     write_unspy();
+    inst_restart();
 }
 
 TEST_CASE("a C5 that refuses to activate ends the card as a failure, once",
@@ -3749,16 +3824,22 @@ static void boot_with_hint(const char *ssid, uint8_t channel)
     radio_reboot();
 }
 
-/** @brief What the probe "heard" of its network. */
-static void hint_heard(bool seen)
+/** @brief What the probe "heard" of its network, and on which channel. */
+static void hint_heard_on(bool seen, uint8_t channel)
 {
     kdrv_radio_probe_result_t res;
 
     (void)memset(&res, 0, sizeof(res));
     res.net[0].seen    = seen;
     res.net[0].rssi    = -50;
-    res.net[0].channel = 6U;
+    res.net[0].channel = channel;
     fake_radio_set_probe_result(&res);
+}
+
+/** @brief What the probe "heard" of its network, on channel 6. */
+static void hint_heard(bool seen)
+{
+    hint_heard_on(seen, 6U);
 }
 
 /** @brief Leave nothing of a hint case behind. */
@@ -3821,6 +3902,137 @@ TEST_CASE("a hint the vault no longer holds is not looked for", "[radio][vault]"
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
     hint_case_end();
+}
+
+/** @brief The channel of the weak, lower-band access point of one network. */
+#define BAND_CH_24       6U
+/** @brief The channel of the strong, upper-band access point of the same one. */
+#define BAND_CH_5G       48U
+/** @brief The weak access point's reading, dBm. */
+#define BAND_RSSI_WEAK   (-80)
+/** @brief The strong access point's reading, dBm. */
+#define BAND_RSSI_STRONG (-67)
+
+/** @brief Put one network in the air twice: weak on 2.4 GHz, strong on 5 GHz. */
+static void seed_two_bands(const char *ssid)
+{
+    (void)memset(s_recs, 0, sizeof(s_recs));
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        (void)snprintf((char *)s_recs[i].ssid, sizeof(s_recs[i].ssid), "%s", ssid);
+    }
+    s_recs[0].rssi    = (int8_t)BAND_RSSI_WEAK;
+    s_recs[0].primary = (uint8_t)BAND_CH_24;
+    s_recs[1].rssi    = (int8_t)BAND_RSSI_STRONG;
+    s_recs[1].primary = (uint8_t)BAND_CH_5G;
+    s_next  = 0U;
+    s_found = 2U;
+}
+
+TEST_CASE("the try on a network's remembered channel is readied for that channel",
+          "[radio][vault]")
+{
+    radio_fresh();
+    boot_with_hint("home", BAND_CH_5G);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    hint_heard_on(true, BAND_CH_5G);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    TEST_ASSERT_EQUAL_UINT8(BAND_CH_5G, held_req()->channel);
+    TEST_ASSERT_TRUE(logged("on channel 48, where it was"));
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_JOIN, kode_sent()->op);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    hint_case_end();
+}
+
+TEST_CASE("a sweep that hears a network on two bands tries the strong one first, "
+          "each readied for its own channel", "[radio][vault]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    seed_two_bands("home");
+    run_scan();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+
+    /* The strong one, on 5 GHz. */
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    TEST_ASSERT_EQUAL_UINT8(BAND_CH_5G, held_req()->channel);
+    TEST_ASSERT_TRUE(logged("trying 'home' (-67dBm) on channel 48"));
+    vault_joins("home");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_DENIED);
+
+    /* It would not have us: the weak one, on 2.4 GHz. */
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    TEST_ASSERT_EQUAL_UINT8(BAND_CH_24, held_req()->channel);
+    TEST_ASSERT_TRUE(logged("trying 'home' (-80dBm) on channel 6"));
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_JOIN, kode_sent()->op);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
+
+TEST_CASE("a saved network asked by name is readied for the band its last "
+          "sweep heard it on", "[radio][vault]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("home");
+    seed_two_bands("home");
+    run_scan();
+    wifi_join_request("home", "", true);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_UINT8(BAND_CH_5G, held_req()->channel);
+    vault_joins("home");
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
+
+TEST_CASE("a saved network asked by name that the last sweep did not list is "
+          "readied for both bands", "[radio][vault]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("home");
+    seed_two_bands("elsewhere");
+    run_scan();
+    wifi_join_request("home", "", true);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_UINT8(KDRV_WIFI_CHANNEL_ANY, held_req()->channel);
+    vault_joins("home");
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
 }
 
 TEST_CASE("wifi_forget asks the vault to forget", "[radio][vault]")
@@ -5337,8 +5549,7 @@ TEST_CASE("a C5 update leaves J3's rail unknown: an off then brings the link up,
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
     exp_heard_one(false, KODE_OK);
     exp_listen_end();
-    radio_reboot();
-    c5_case_end();
+    inst_restart();
 }
 
 TEST_CASE("a link-up whose switch of J3's supply failed leaves the rail unknown: "
@@ -6878,6 +7089,7 @@ TEST_CASE("a C5 update opens its session only after the card's unmount is answer
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_C5_BEGIN, running_job());
     s_gate_auto = true;
     inst_push_to_end();
+    inst_restart();
 }
 
 TEST_CASE("a C5 update is refused while the card is still mounted, after a "
@@ -6940,6 +7152,7 @@ TEST_CASE("a C5 update waits out a refused unmount and opens its session when "
     TEST_ASSERT_FALSE(logged("stayed busy"));
     s_gate_auto = true;
     inst_push_to_end();
+    inst_restart();
 }
 
 /* The C5's update has no rollback, so a link that drops under it is the case
@@ -7073,6 +7286,95 @@ static void boot_wanting_no_ble(void)
     fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_BLE, &off, sizeof(off));
     boot_wanting_nothing();
     fake_nvs_reset();
+}
+
+/* ---- After an update: the restart, and the boot that confirms it -----------
+ * A closed C5 rolls an update back at its next reset unless a request has
+ * reached the new image first. The update's teardown leaves no link this
+ * boot, so the board restarts once the C5 has booted the image, and nothing
+ * resets the C5 until the next boot's link has reached it.
+ */
+
+TEST_CASE("an update ends in one restart, once the C5 has had time to boot "
+          "the new image", "[radio_ao][park]")
+{
+    radio_fresh();
+    go_up();
+    inst_deliver();
+    inst_push_to_end();
+    ao_spy_drain();
+    (void)boot_exits_taken();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, boot_exits_within(INST_RESTART_STEPS - 2U),
+        "a restart before the C5 has booted the new image links to the old one");
+    TEST_ASSERT_EQUAL_UINT(1U, boot_exits_within(4U));
+    TEST_ASSERT_TRUE(logged("the board restarts so a link reaches it"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, boot_exits_within(INST_RESTART_STEPS + 2U),
+                                   "asked once");
+
+    radio_reboot();
+    c5_case_end();
+}
+
+TEST_CASE("the park before that restart leaves the update's note, whatever "
+          "the jump's target", "[radio_ao][park]")
+{
+    radio_fresh();
+    go_up();
+    inst_deliver();
+    inst_push_to_end();
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT(1U, boot_exits_within(INST_RESTART_STEPS + 2U));
+
+    park_ask(KDRV_RADIO_NOTE_OS);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KDRV_RADIO_NOTE_UPDATE,
+                             fake_radio_note_last());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, boot_parked_taken(),
+        "AO_Boot is answered once, as for any park");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(),
+        "the C5 is asked nothing: there is no link");
+    TEST_ASSERT_TRUE(logged("C5 left running its update"));
+
+    radio_reboot();
+    c5_case_end();
+}
+
+TEST_CASE("after an update the C5 is not held, even with nothing wanted",
+          "[radio_ao][park]")
+{
+    radio_fresh();
+    radio_reboot();
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_radio_c5_held(),
+                             "the case starts on a boot that wants nothing");
+    go_up();
+    inst_deliver();
+    inst_push_to_end();
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_radio_c5_held(),
+        "a hold before the next link would roll the new image back");
+
+    inst_restart();
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_radio_c5_held(),
+        "the next boot that wants nothing holds the C5 again");
+}
+
+TEST_CASE("a boot whose C5 runs an update to confirm brings the link up with "
+          "nothing wanted", "[radio_ao][park]")
+{
+    radio_fresh();
+    fake_radio_set_update_waits(true);
+    radio_reboot();
+    fake_radio_set_update_waits(false);
+
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_radio_c5_held(),
+                              "the C5 is held under the link it needs");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    TEST_ASSERT_TRUE(logged("the link comes up for it"));
+
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    c5_case_end();
 }
 
 /** @brief IDF's STA netif registers this at creation; esp_restart() runs it. */
@@ -7882,6 +8184,7 @@ TEST_CASE("an amplifier owed during a C5 update is answered when the update ends
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, running_said(), "a sound with no link coming waited");
     TEST_ASSERT_FALSE(job_held());
     amp_case_end();
+    inst_restart();
 }
 
 TEST_CASE("an amplifier owed while the link comes up is answered when the bring-up "
@@ -9692,6 +9995,670 @@ TEST_CASE("Pair new device with Bluetooth off puts nothing on the air", "[radio_
     TEST_ASSERT_FALSE_MESSAGE(job_held(), "a board switched off went on the air");
     TEST_ASSERT_FALSE(ble_enabled());
     ble_adv_case_end();
+}
+
+/* ---- The advert in pulses, while the station is on 5 GHz ---------------------- */
+
+/** @brief The signal the mocked access point reads, dBm. */
+#define PULSE_AP_RSSI   (-50)
+
+/** @brief A channel of the upper band. */
+#define PULSE_CH_5G     36U
+
+/** @brief Another channel of the upper band. */
+#define PULSE_CH_5G_2   44U
+
+/** @brief The last channel of the lower band. */
+#define PULSE_CH_24G    KDRV_WIFI_LAST_24_CHANNEL
+
+/** @brief The channel the access point the mocked station holds is on. */
+static uint8_t s_ap_channel;
+
+/** @brief The record of the access point the station holds, as the C5 answers it. */
+static esp_err_t ap_on_channel(wifi_ap_record_t *ap, int calls)
+{
+    (void)calls;
+    (void)memset(ap, 0, sizeof(*ap));
+    ap->primary = s_ap_channel;
+    ap->rssi    = PULSE_AP_RSSI;
+    return ESP_OK;
+}
+
+/**
+ * @brief The station holds an address on @p channel: the driver's own event
+ *        says so and its own sample of the access point reads the channel,
+ *        as it does at the end of a join.
+ * @param channel The channel of the access point.
+ */
+static void station_on_channel(uint8_t channel)
+{
+    wifi_station_up();
+    s_ap_channel = channel;
+    esp_wifi_sta_get_ap_info_Stub(&ap_on_channel);
+    (void)kdrv_wifi_rssi();
+    TEST_ASSERT_EQUAL_UINT8(channel, kdrv_wifi_channel_last());
+}
+
+/** @brief The advert the worker holds is, or is not, a pulsed one. */
+static void expect_pulsed(bool pulsed)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "no advert was planned");
+    TEST_ASSERT_TRUE_MESSAGE(held_req()->on, "the advert was taken off the air");
+    TEST_ASSERT_EQUAL_MESSAGE(pulsed, held_req()->pulsed, "the advert was planned the wrong way");
+}
+
+/** @brief Bluetooth on, the fast leg over: the slow advert is the one planned and held. */
+static void pulse_to_slow(void)
+{
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+    fake_time_advance_ms(30000U);
+    fake_ble_adv_end();
+    pump();
+}
+
+/** @brief A case's end: Bluetooth is off, then the station leaves. */
+static void pulse_case_end(void)
+{
+    ble_adv_case_end();
+    wifi_station_gone();
+    pump();
+}
+
+TEST_CASE("the slow advert is pulsed while the station is on a 5 GHz channel, the fast one never",
+          "[radio_ao][pulse]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+
+    fake_time_advance_ms(30000U);
+    fake_ble_adv_end();
+    pump();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    pulse_case_end();
+}
+
+TEST_CASE("the slow advert is continuous on a 2.4 GHz channel, and with no station", "[radio_ao][pulse]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_24G);
+
+    pulse_to_slow();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    pulse_case_end();
+
+    fake_ble_reset();
+    pulse_to_slow();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    ble_adv_case_end();
+}
+
+TEST_CASE("Pair new device is fast and continuous, then pulsed for the rest of its time and after",
+          "[radio_ao][pulse]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_set_bonds(1U);
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, true);
+
+    dispatch(BLE_PAIR_OPEN_REQ_SIG);
+    pump();
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+
+    fake_time_advance_ms(30000U);
+    fake_ble_adv_end();
+    pump();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 270000U, false);
+
+    /* The time runs out: the board hides again, and its advert is pulsed still. */
+    fake_time_advance_ms(270000U);
+    fake_ble_adv_end();
+    pump();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, true);
+    pulse_case_end();
+}
+
+TEST_CASE("joining a 5 GHz network takes the continuous slow advert off and puts a pulsed one back",
+          "[radio_ao][pulse]")
+{
+    unsigned submits;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    pulse_to_slow();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+
+    wifi_join_request("net", "12345678", false);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_JOIN, running_job());
+    station_on_channel(PULSE_CH_5G);
+    submits = job_submits();
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "the advert was left as it was");
+    TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the continuous advert stayed on the air");
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a second re-plan followed");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(submits + 2U, job_submits(), "the re-plan took more than an off and an on");
+    pulse_case_end();
+    /* An accepted join records "wifi wanted"; the next case starts without it. */
+    wifi_stop_request();
+    pump();
+    finish_whatever_runs();
+}
+
+TEST_CASE("the station leaving the 5 GHz network puts a continuous slow advert back",
+          "[radio_ao][pulse]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+
+    wifi_station_gone();
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "the pulsed advert stayed");
+    TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the pulsed advert stayed on the air");
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    ble_adv_case_end();
+}
+
+TEST_CASE("an advert whose plan does not change is not planned again", "[radio_ao][pulse]")
+{
+    unsigned submits;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    submits = job_submits();
+
+    /* Any job's end sweeps the invariant: a signal reading, then the same
+     * access point's other channel of the upper band. */
+    wifi_rssi_request();
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the advert was planned again with nothing changed");
+    s_ap_channel = PULSE_CH_5G_2;
+    (void)kdrv_wifi_rssi();
+    wifi_rssi_request();
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a move inside the upper band planned the advert again");
+    TEST_ASSERT_EQUAL_UINT(submits + 2U, job_submits());
+    pulse_case_end();
+
+    /* The same on the lower band: a continuous advert stays. */
+    fake_ble_reset();
+    station_on_channel(PULSE_CH_24G);
+    pulse_to_slow();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    submits = job_submits();
+    wifi_rssi_request();
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK);
+    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_EQUAL_UINT(submits + 1U, job_submits());
+    pulse_case_end();
+}
+
+TEST_CASE("a station that left keeps no channel: an address that comes with no reading is not 5 GHz",
+          "[radio_ao][pulse]")
+{
+    radio_fresh();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+
+    wifi_station_gone();
+    pump();
+    TEST_ASSERT_EQUAL_UINT8(0U, kdrv_wifi_channel_last());
+
+    wifi_station_up();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, kdrv_wifi_channel_last(), "the last network's band outlived it");
+    wifi_station_gone();
+    pump();
+}
+
+/** @brief The board goes to rest: the sentinel's start runs and is answered. */
+static void pulse_to_rest(void)
+{
+    lp_radio_round(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_SLEEP, running_job());
+    finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the advert the rest left was planned again");
+    lp_expect_answer(false, NULL);
+}
+
+/** @brief The board wakes: the advert comes off, and the one planned for the
+ *         awake board goes on, pulsed or not. */
+static void pulse_wakes_to(bool pulsed)
+{
+    lp_radio_awake();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_ADV, running_job(), "waking left the advert as the rest had it");
+    TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the advert stayed on the air");
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(false));
+    expect_pulsed(pulsed);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a second re-plan followed");
+}
+
+TEST_CASE("the calm advert of a rest on 5 GHz is continuous", "[radio_ao][pulse][lowpower]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, false);
+
+    pulse_to_rest();
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)KDRV_BLE_ITVL_SLOW, fake_ble_adv_itvl());
+    TEST_ASSERT_FALSE_MESSAGE(fake_ble_adv_pulsed(), "the rest's slow advert is pulsed");
+
+    /* Nothing at rest asks for pulses: any job's end sweeps the invariant. */
+    wifi_rssi_request();
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the rest's advert was planned again with nothing changed");
+
+    lp_radio_awake();
+    finish_whatever_runs();
+    pulse_case_end();
+}
+
+TEST_CASE("waking from a rest on 5 GHz puts the advert back pulsed, with one off job and one on job",
+          "[radio_ao][pulse][lowpower]")
+{
+    unsigned submits;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    pulse_to_rest();
+
+    submits = job_submits();
+    pulse_wakes_to(true);
+    /* The stop of the sentinel is a job too: the re-plan is the off and the on. */
+    TEST_ASSERT_EQUAL_UINT(submits + 3U, job_submits());
+    pulse_case_end();
+}
+
+TEST_CASE("going to rest from a pulsed advert ends in the continuous calm one", "[radio_ao][pulse][lowpower]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+
+    pulse_to_rest();
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)KDRV_BLE_ITVL_SLOW, fake_ble_adv_itvl());
+    TEST_ASSERT_FALSE_MESSAGE(fake_ble_adv_pulsed(), "the pulsed advert went into the rest");
+
+    lp_radio_awake();
+    finish_whatever_runs();
+    pulse_case_end();
+}
+
+TEST_CASE("an advert planned at rest on 5 GHz is continuous", "[radio_ao][pulse][lowpower]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    station_on_channel(PULSE_CH_5G);
+    pulse_to_slow();
+    expect_pulsed(true);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+    pulse_to_rest();
+
+    /* A phone connects and leaves: the invariant plans the advert afresh. */
+    fake_ble_central(true);
+    pump();
+    fake_ble_central(false);
+    pump();
+    expect_pulsed(false);
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, false);
+
+    lp_radio_awake();
+    finish_whatever_runs();
+    pulse_case_end();
+}
+
+/* ---- A remembered channel yields to a clearly stronger access point -------------- */
+
+/** @brief The channel of the weak access point, where the hint is. */
+#define YIELD_CH_WEAK     6U
+/** @brief The channel of the other access point of the same network. */
+#define YIELD_CH_OTHER    48U
+/** @brief The hint's own reading, dBm. */
+#define YIELD_RSSI_WEAK   (-80)
+/** @brief How much stronger the other access point has to be, dB: the default
+ *         of CONFIG_KODE_WIFI_HINT_YIELD_DB, which this build does not set. */
+#define YIELD_MARGIN_DB   6
+
+/** @brief One remembered network as the AO keeps it in the store. */
+typedef struct {
+    char    ssid[33];
+    uint8_t channel;
+    uint8_t alt;
+} YieldHint;
+
+/** @brief Boot with one network remembered on @p channel and, as @p alt, the
+ *         other channel it was heard on (0 for none). */
+static void boot_with_alt(const char *ssid, uint8_t channel, uint8_t alt)
+{
+    YieldHint hints[4];
+
+    (void)memset(hints, 0, sizeof(hints));
+    (void)snprintf(hints[0].ssid, sizeof(hints[0].ssid), "%s", ssid);
+    hints[0].channel = channel;
+    hints[0].alt     = alt;
+    fake_nvs_seed(KSET_NAMESPACE, "wifi_hints", hints, sizeof(hints));
+    radio_reboot();
+}
+
+/** @brief The first network the AO has kept, as it stands in the store. */
+static YieldHint stored_hint(void)
+{
+    YieldHint hints[4];
+    size_t    n = sizeof(hints);
+
+    (void)memset(hints, 0, sizeof(hints));
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)khal_nvs_get_blob(KSET_NAMESPACE, "wifi_hints", hints, &n));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(sizeof(hints), n, "the store holds another layout");
+    return hints[0];
+}
+
+/** @brief What the probe heard of the network on @p channel, and how strongly. */
+static void probe_heard(bool seen, uint8_t channel, int8_t rssi)
+{
+    kdrv_radio_probe_result_t res;
+
+    (void)memset(&res, 0, sizeof(res));
+    res.net[0].seen    = seen;
+    res.net[0].rssi    = rssi;
+    res.net[0].channel = channel;
+    fake_radio_set_probe_result(&res);
+}
+
+/** @brief The round has begun on a hint with an alternate, and the look at the
+ *         hint's channel is answered with @p rssi. */
+static void yield_first_look(int8_t rssi)
+{
+    radio_fresh();
+    boot_with_alt("home", YIELD_CH_WEAK, YIELD_CH_OTHER);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, held_req()->channel);
+    probe_heard(true, YIELD_CH_WEAK, rssi);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+}
+
+/** @brief The look at the alternate is the next job, and it is answered. */
+static void yield_second_look(bool seen, int8_t rssi, kode_status_t rc)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job(), "the alternate was not looked at");
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_OTHER, held_req()->channel);
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    probe_heard(seen, YIELD_CH_OTHER, rssi);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, rc);
+}
+
+/** @brief The join is readied for @p channel. */
+static void yield_joins_on(uint8_t channel)
+{
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    TEST_ASSERT_EQUAL_STRING("home", held_req()->ssid);
+    TEST_ASSERT_EQUAL_UINT8(channel, held_req()->channel);
+}
+
+/** @brief End a case whose join is readied and waits on the vault. */
+static void yield_case_end(void)
+{
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    if ( KDRV_RADIO_JOB_WIFI_PREPARE == running_job() )
+    {
+        /* The vault said nothing: the join goes back to the hint, and that is
+         * readied and waits as well. */
+        finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+        tick(QF_SUPPORT_STEPS(3000U) + 2U);
+        pump();
+    }
+    hint_case_end();
+}
+
+TEST_CASE("a hint with no alternate joins as it does, after one look", "[radio][vault][yield]")
+{
+    radio_fresh();
+    boot_with_alt("home", YIELD_CH_WEAK, 0U);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    probe_heard(true, YIELD_CH_WEAK, (int8_t)YIELD_RSSI_WEAK);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    yield_joins_on(YIELD_CH_WEAK);
+    TEST_ASSERT_TRUE(logged("on channel 6, where it was"));
+    yield_case_end();
+}
+
+TEST_CASE("an alternate stronger than the hint by the margin is joined", "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_OK);
+    yield_joins_on(YIELD_CH_OTHER);
+    TEST_ASSERT_TRUE(logged("trying 'home' (-74dBm) on channel 48, stronger than channel 6 where it was"));
+    yield_case_end();
+}
+
+TEST_CASE("an alternate one dB short of the margin is not joined", "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB - 1), KODE_OK);
+    yield_joins_on(YIELD_CH_WEAK);
+    TEST_ASSERT_TRUE(logged("on channel 6, where it was"));
+    yield_case_end();
+}
+
+TEST_CASE("an alternate the look did not hear is not joined", "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(false, 0, KODE_OK);
+    yield_joins_on(YIELD_CH_WEAK);
+    yield_case_end();
+}
+
+TEST_CASE("a look at the alternate that is refused joins the hint", "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_DENIED);
+    yield_joins_on(YIELD_CH_WEAK);
+    yield_case_end();
+}
+
+TEST_CASE("a hint not heard is left to the sweep, alternate or not", "[radio][vault][yield]")
+{
+    radio_fresh();
+    boot_with_alt("home", YIELD_CH_WEAK, YIELD_CH_OTHER);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    probe_heard(false, YIELD_CH_WEAK, 0);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+    hint_case_end();
+}
+
+TEST_CASE("an alternate that will not have the board gives the join back to the hint",
+          "[radio][vault][yield]")
+{
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_OK);
+    yield_joins_on(YIELD_CH_OTHER);
+    vault_joins("home");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_DENIED);
+
+    yield_joins_on(YIELD_CH_WEAK);
+    TEST_ASSERT_TRUE(logged("(-80dBm) on channel 6, where it was"));
+    yield_case_end();
+}
+
+/** @brief The station holds an address from @p ssid on @p channel, read as a join reads it. */
+static void station_joined(const char *ssid, uint8_t channel)
+{
+    station_on_channel(channel);
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)kdrv_wifi_await(ssid, 50U));
+}
+
+TEST_CASE("a join that works on the alternate makes it the hint and the old channel the alternate",
+          "[radio][vault][yield]")
+{
+    YieldHint kept;
+
+    yield_first_look((int8_t)YIELD_RSSI_WEAK);
+    yield_second_look(true, (int8_t)(YIELD_RSSI_WEAK + YIELD_MARGIN_DB), KODE_OK);
+    yield_joins_on(YIELD_CH_OTHER);
+    vault_joins("home");
+    station_joined("home", YIELD_CH_OTHER);
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
+
+    kept = stored_hint();
+    TEST_ASSERT_EQUAL_STRING("home", kept.ssid);
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_OTHER, kept.channel);
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, kept.alt);
+    wifi_station_gone();
+    pump();
+    hint_case_end();
+}
+
+/** @brief Put one network in the air on one channel only. */
+static void seed_one_band(const char *ssid, uint8_t channel, int8_t rssi)
+{
+    (void)memset(s_recs, 0, sizeof(s_recs));
+    (void)snprintf((char *)s_recs[0].ssid, sizeof(s_recs[0].ssid), "%s", ssid);
+    s_recs[0].rssi    = rssi;
+    s_recs[0].primary = channel;
+    s_next  = 0U;
+    s_found = 1U;
+}
+
+/** @brief A sweep a person asked for, run over what @c seed_* put in the air. */
+static void yield_sweeps(void)
+{
+    dispatch(WIFI_SCAN_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    run_scan();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+}
+
+TEST_CASE("the alternate is learnt from a sweep that heard the network on two channels, and "
+          "forgotten when a sweep hears it on one", "[radio][vault][yield]")
+{
+    radio_fresh();
+    boot_with_alt("home", YIELD_CH_WEAK, 0U);
+    go_up();
+    vault_has("home");
+
+    seed_two_bands("home");
+    yield_sweeps();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(YIELD_CH_OTHER, stored_hint().alt, "the other channel was not learnt");
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, stored_hint().channel);
+
+    seed_two_bands("elsewhere");
+    yield_sweeps();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(YIELD_CH_OTHER, stored_hint().alt, "a sweep that did not hear the network forgot it");
+
+    seed_one_band("home", YIELD_CH_WEAK, (int8_t)YIELD_RSSI_WEAK);
+    yield_sweeps();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, stored_hint().alt, "the other channel was kept");
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, stored_hint().channel);
+    hint_case_end();
+}
+
+TEST_CASE("a hint stored with no alternate is read, and kept with one once a sweep hears it",
+          "[radio][vault][yield]")
+{
+    radio_fresh();
+    boot_with_hint("home", YIELD_CH_WEAK);   /* the store as it was before alternates */
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job(), "the hint was not read");
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, held_req()->channel);
+    probe_heard(false, YIELD_CH_WEAK, 0);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    seed_two_bands("home");
+    run_scan();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_OTHER, stored_hint().alt);
+    TEST_ASSERT_EQUAL_UINT8(YIELD_CH_WEAK, stored_hint().channel);
+    TEST_ASSERT_EQUAL_STRING("home", stored_hint().ssid);
+
+    /* The round goes on to try both access points; neither is readied. */
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_ERROR);
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_ERROR);
+    hint_case_end();
 }
 
 /** @brief The next BLE state in the spy, copied; fails the case if none. */

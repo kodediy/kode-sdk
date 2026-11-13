@@ -130,7 +130,7 @@ typedef struct {
  *
  *   0x00  4   magic "KAD1"
  *   0x04  2   json_len   1..KFW_AD_JSON_MAX
- *   0x06  2   icon_len   0, or KFW_AD_ICON_LEN
+ *   0x06  2   icon_len   0, KFW_AD_ICON_LEN or KFW_AD_ICON_LEN_HALF
  *   0x08  4   CRC32 (kfw_crc32) of the json_len + icon_len bytes that follow
  *   0x0C      app.json, then icon.k64
  *
@@ -149,13 +149,15 @@ typedef struct {
 /* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_kfw.c; the addon reads the header from a file that does not use it */
 #define KFW_AD_JSON_MAX    KAPP_DATA_JSON_MAX   /**< Longest app.json a block carries. */
 /* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_kfw.c; the addon reads the header from a file that does not use it */
-#define KFW_AD_ICON_LEN    KAPP_ICON_BYTES      /**< The one icon size: 64x64, RGB565 + A8. */
+#define KFW_AD_ICON_LEN    KAPP_ICON_BYTES      /**< The icon the board holds: 128x128, RGB565 + A8. */
+/* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_kfw.c; the addon reads the header from a file that does not use it */
+#define KFW_AD_ICON_LEN_HALF KAPP_ICON_HALF_BYTES  /**< The smaller icon a block may carry: 64x64, RGB565 + A8. */
 
 /** @brief The block's header, exactly as it sits in the stream. */
 typedef struct {
     uint32_t magic;       /**< KFW_AD_MAGIC.                                    */
     uint16_t json_len;    /**< Bytes of app.json: 1..KFW_AD_JSON_MAX.           */
-    uint16_t icon_len;    /**< Bytes of icon.k64: 0 or KFW_AD_ICON_LEN.         */
+    uint16_t icon_len;    /**< Bytes of icon.k64: 0, KFW_AD_ICON_LEN or KFW_AD_ICON_LEN_HALF. */
     uint32_t crc;         /**< CRC32 of the json_len + icon_len bytes after it. */
 } kfw_ad_hdr_t;
 
@@ -183,8 +185,9 @@ typedef enum {
 /** @brief What a finished session has for the folder. */
 typedef enum {
     KFW_AD_RAW = 0,       /**< A bare image: the folder is left as it is.       */
-    KFW_AD_NONE,          /**< A container with no block, or a dropped one: the folder goes. */
-    KFW_AD_BLOCK          /**< A checked block: the folder becomes this.        */
+    KFW_AD_NONE,          /**< A container that carries no block: the folder goes. */
+    KFW_AD_BLOCK,         /**< A checked block: the folder becomes this.        */
+    KFW_AD_DROPPED        /**< A container whose block was dropped (size, CRC, syntax, no PSRAM): the folder is left as it is, like a bare image's. */
 } kfw_ad_kind_t;
 
 /** @brief The block a session kept, and who owns it now. */
@@ -192,7 +195,7 @@ typedef struct {
     kfw_ad_kind_t kind;       /**< Which of the three answers this is.          */
     uint8_t      *buf;        /**< PSRAM: json_len bytes of app.json, then icon_len of icon.k64; NULL unless BLOCK. */
     uint16_t      json_len;   /**< Bytes of app.json at the head of @p buf.     */
-    uint16_t      icon_len;   /**< Bytes of icon.k64 after it: 0 or KFW_AD_ICON_LEN. */
+    uint16_t      icon_len;   /**< Bytes of icon.k64 after it: 0, KFW_AD_ICON_LEN or KFW_AD_ICON_LEN_HALF. */
 } kfw_appdata_t;
 
 /**

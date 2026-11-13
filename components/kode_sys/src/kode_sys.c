@@ -179,6 +179,11 @@ const kode_sys_row_t kode_sys_rows[KODE_SYS_ROWS] = {
 
 void kode_sys_rows_walk(const kode_sys_row_t *rows, size_t n)
 {
+    /* The walk outranks the renderer the early row starts: every row comes
+     * up at the pace of its own bring-up, on whichever core the renderer
+     * landed. The boot task has its own priority back when it ends. */
+    uint32_t const was = khal_task_priority_set(KODE_PRIO_BOOT_WALK);
+
     for ( size_t i = 0U; i < n; ++i )
     {
         if ( NULL != rows[i].start )
@@ -193,6 +198,7 @@ void kode_sys_rows_walk(const kode_sys_row_t *rows, size_t n)
             rows[i].park();
         }
     }
+    (void)khal_task_priority_set(was);
 }
 
 /** @brief The bring-up itself; kode_init() runs it behind the one-shot. */

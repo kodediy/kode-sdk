@@ -56,6 +56,17 @@ const char *kdrv_storage_mount_point(kdrv_medium_t m);
 /** @brief Total and free bytes on @p m. */
 kode_status_t kdrv_storage_usage(kdrv_medium_t m, uint64_t *total, uint64_t *free_bytes);
 
+/**
+ * @brief The allocation unit of @p m's volume: what a file of one byte takes.
+ *
+ * The internal partition answers; the card has no caller that needs it yet and
+ * answers 0, as a volume that is not mounted does.
+ *
+ * @param m The medium.
+ * @return The cluster size in bytes, or 0 when it is not known.
+ */
+uint32_t kdrv_storage_cluster_bytes(kdrv_medium_t m);
+
 /** @brief Log what @p m is - for the console's `sd info` / `fs info`. */
 void kdrv_storage_dump(kdrv_medium_t m);
 
@@ -226,11 +237,15 @@ kode_status_t kdrv_storage_rmdir(const char *path);
  * not. The two volumes are compared with kdrv_storage_medium_of() before
  * either path is touched, so a refused crossing never opens anything.
  *
+ * FAT never replaces a file: a @p to that is another object than @p from is
+ * refused, and the caller removes it first.
+ *
  * @param from Absolute, normalised, virtual.
  * @param to   Absolute, normalised, virtual.
  * @return KODE_OK; KODE_DENIED for a malformed path, either path naming no
  *         volume, or the two paths naming different volumes; KODE_ERROR when
- *         the volume will not mount or the rename itself fails.
+ *         the volume will not mount, @p to is there, or the rename itself
+ *         fails.
  */
 kode_status_t kdrv_storage_rename(const char *from, const char *to);
 

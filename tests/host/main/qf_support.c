@@ -19,15 +19,16 @@
 #include "kqp_config.h"
 #include "kqp_signals.h"
 
-/* Two pools rather than kqp's four. The tiers exist on the board to stop a
+/* Three pools rather than kqp's five. The tiers exist on the board to stop a
  * 4 KB firmware chunk from consuming a block that a log line needed; here
  * nothing competes, so one block size that fits the ordinary events is
  * simpler and cannot run out for the wrong reason.
  *
- * The jumbo tier is the exception, and it is not about size: how many of its
- * blocks are free is a fact AO_Storage ACTS on - an icon travels as three
- * events or not at all - so a case has to be able to take some and see the
- * refusal. It therefore has the board's own count, not a comfortable one. */
+ * The jumbo and icon tiers are the exception, and it is not about size: how
+ * many of the icon tier's blocks are free is a fact AO_Storage ACTS on - an
+ * icon travels as KODE_APP_ICON_PIECES events or not at all - so a case has
+ * to be able to take some and see the refusal. Each has the board's own
+ * count, not a comfortable one. */
 #define POOL_BLOCK  352U
 #define POOL_COUNT   32U
 
@@ -40,10 +41,13 @@ _Static_assert(sizeof(SchedSetReqEvt) <= POOL_BLOCK,
 _Static_assert(sizeof(SchedEntryEvt) <= POOL_BLOCK,
                "the scheduler's entry must fit the ordinary block");
 
-/* What QMPool_init() will round the block up to, worked out here so the
- * storage below holds KQP_JUMBO_POOL_COUNT blocks and not one more: the count
- * is the point of this pool, so it may not be an accident of padding. */
-#define JUMBO_BLOCK (((sizeof(AppDataIconEvt) + sizeof(void *) - 1U) \
+/* What QMPool_init() will round a block up to, worked out here so the storage
+ * below holds KQP_JUMBO_POOL_COUNT and KQP_ICON_POOL_COUNT blocks and not one
+ * more: the count is the point of these pools, so it may not be an accident
+ * of padding. */
+#define JUMBO_BLOCK (((sizeof(RecvDataEvt) + sizeof(void *) - 1U) \
+                      / sizeof(void *)) * sizeof(void *))
+#define ICON_BLOCK  (((sizeof(AppDataIconEvt) + sizeof(void *) - 1U) \
                       / sizeof(void *)) * sizeof(void *))
 
 _Static_assert(sizeof(MqttMsgEvt) <= POOL_BLOCK, "an MQTT message fits the ordinary block");
@@ -53,9 +57,15 @@ static QSubscrList s_subscr[MAX_PUB_SIG];
 static uint64_t    s_pool[(POOL_BLOCK * POOL_COUNT) / sizeof(uint64_t)];
 static uint64_t    s_jumbo[(JUMBO_BLOCK * KQP_JUMBO_POOL_COUNT)
                            / sizeof(uint64_t)];
+static uint64_t    s_icon[(ICON_BLOCK * KQP_ICON_POOL_COUNT)
+                          / sizeof(uint64_t)];
 
 _Static_assert(((JUMBO_BLOCK * KQP_JUMBO_POOL_COUNT) % sizeof(uint64_t)) == 0U,
                "the jumbo storage must be exactly the blocks it stands for");
+_Static_assert(((ICON_BLOCK * KQP_ICON_POOL_COUNT) % sizeof(uint64_t)) == 0U,
+               "the icon storage must be exactly the blocks it stands for");
+_Static_assert(sizeof(AppDataIconEvt) > JUMBO_BLOCK,
+               "an icon event must be too wide for the jumbo block, or it would be served from it");
 
 void qf_support_init(void)
 {
@@ -72,6 +82,7 @@ void qf_support_init(void)
     /* In order of strictly increasing block size, as QF requires. */
     QF_poolInit(s_pool, sizeof(s_pool), POOL_BLOCK);
     QF_poolInit(s_jumbo, sizeof(s_jumbo), JUMBO_BLOCK);
+    QF_poolInit(s_icon, sizeof(s_icon), ICON_BLOCK);
 }
 
 #define AO_QUEUE_LEN 32
@@ -343,6 +354,65 @@ static portMUX_TYPE s_tick_mux = portMUX_INITIALIZER_UNLOCKED;
  * tick (a request queued ahead of a window's expiry) depend on it. */
 #define QF_SUPPORT_STEP_TICKS  KQP_TICKS_PER_MS(10U)   /* QF_SUPPORT_STEPS(10) */
 
+/* QF's two lists of time events, as qf_time.c defines them: the armed ones
+ * from .next and the ones armed since the last tick from .act. The header that
+ * declares it is QP's own and is not for callers, so it is declared here as
+ * the definition has it. */
+extern QTimeEvt QTimeEvt_timeEvtHead_[QF_MAX_TICK_RATE];
+
+/** @brief Most links of a list this follows: a longer one is a cycle. */
+#define TIMER_LIST_MAX  4096U
+
+/**
+ * @brief Whether either of QF's lists of time events runs in a cycle.
+ *
+ * An Active Object built again while one of its time events is armed leaves
+ * the list in a cycle, and the next tick walks it for ever. The walk is cut
+ * at TIMER_LIST_MAX links.
+ *
+ * @return true for a cycle.
+ */
+static bool timer_lists_cycle(void)
+{
+    QTimeEvt *list[2];
+    bool      cycle = false;
+
+    list[0] = QTimeEvt_timeEvtHead_[0U].next;
+    list[1] = (QTimeEvt *)QTimeEvt_timeEvtHead_[0U].act;
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        unsigned n = 0U;
+
+        for ( QTimeEvt *t = list[i]; NULL != t; t = t->next )
+        {
+            ++n;
+            if ( TIMER_LIST_MAX < n )
+            {
+                cycle = true;
+                break;
+            }
+        }
+    }
+    return cycle;
+}
+
+/**
+ * @brief Fail the case that is about to tick a list in a cycle, instead of
+ *        walking it for ever, and drop the list so the cases after it run.
+ */
+static void timers_sound(void)
+{
+    if ( timer_lists_cycle() )
+    {
+        QTimeEvt_timeEvtHead_[0U].next = NULL;
+        QTimeEvt_timeEvtHead_[0U].act  = NULL;
+        TEST_FAIL_MESSAGE("QF's list of armed time events runs in a cycle: an "
+                          "Active Object was built again with a time event "
+                          "armed (qf_support_disarm_timers() before the "
+                          "constructor)");
+    }
+}
+
 unsigned qf_support_tick(QActive *ao, unsigned ticks)
 {
     unsigned n = 0U;
@@ -351,6 +421,7 @@ unsigned qf_support_tick(QActive *ao, unsigned ticks)
     {
         return 0U;
     }
+    timers_sound();
 
     portENTER_CRITICAL(&s_tick_mux);
 
@@ -379,6 +450,7 @@ unsigned qf_support_pump(QActive *ao, unsigned max)
     {
         return 0U;
     }
+    timers_sound();
 
     portENTER_CRITICAL(&s_tick_mux);   /* see the note above qf_support_tick */
 
@@ -423,8 +495,33 @@ void qf_support_tick_escaped(void)
 
 void qf_support_reap_timers(void)
 {
+    timers_sound();
     portENTER_CRITICAL(&s_tick_mux);   /* see the note above qf_support_tick */
     QTIMEEVT_TICK_X(0U, (void *)0);
+    portEXIT_CRITICAL(&s_tick_mux);
+}
+
+void qf_support_disarm_timers(QActive *ao)
+{
+    QTimeEvt *list[2];
+
+    portENTER_CRITICAL(&s_tick_mux);
+    list[0] = QTimeEvt_timeEvtHead_[0U].next;
+    list[1] = (QTimeEvt *)QTimeEvt_timeEvtHead_[0U].act;
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        unsigned n = 0U;
+
+        for ( QTimeEvt *t = list[i]; (NULL != t) && (TIMER_LIST_MAX > n);
+              t = t->next )
+        {
+            if ( t->act == (void *)ao )
+            {
+                (void)QTimeEvt_disarm(t);
+            }
+            ++n;
+        }
+    }
     portEXIT_CRITICAL(&s_tick_mux);
 }
 
@@ -485,6 +582,7 @@ void qf_support_pool_give_back(qf_support_dry_t *dry)
 
 void qf_support_time_passes(uint32_t ticks)
 {
+    timers_sound();
     for ( uint32_t i = 0U; i < ticks; ++i )
     {
         QTIMEEVT_TICK_X(0U, (void *)0);

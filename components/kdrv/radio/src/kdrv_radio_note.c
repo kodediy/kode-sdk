@@ -28,6 +28,17 @@ kradio_note_t kradio_note_unpack(uint32_t word)
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a file of its own so the host suite can compile the rule; kdrv_radio.c calls it */
+bool kradio_note_is_update(const kradio_note_t *note, bool reset_was_sw)
+{
+    if ( (NULL == note) || !reset_was_sw )
+    {
+        return false;
+    }
+    return (KRADIO_NOTE_MAGIC == note->magic)
+           && ((uint32_t)KDRV_RADIO_NOTE_UPDATE == note->target);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a file of its own so the host suite can compile the rule; kdrv_radio.c calls it */
 bool kradio_note_keeps_c5(const kradio_note_t *note, bool reset_was_sw,
                           bool role_is_os, bool wants_wifi)
 {
@@ -40,6 +51,12 @@ bool kradio_note_keeps_c5(const kradio_note_t *note, bool reset_was_sw,
     if ( KRADIO_NOTE_MAGIC != note->magic )
     {
         return false;
+    }
+    /* The new image is confirmed by the first request that reaches it, and a
+     * reset before that is what gives it up: no wish outranks that. */
+    if ( kradio_note_is_update(note, reset_was_sw) )
+    {
+        return true;
     }
     if ( !reset_was_sw || !wants_wifi )
     {

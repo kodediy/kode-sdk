@@ -290,7 +290,7 @@ TEST_CASE("a command with the pools dry is KODE_NO_RESOURCES and posts nothing",
     /* Both pools: an event too big for the ordinary block takes a jumbo one. */
     s_held_n = 0U;
     pool_take_all((uint_fast16_t)sizeof(LedEvt));
-    pool_take_all((uint_fast16_t)sizeof(AppDataIconEvt));
+    pool_take_all((uint_fast16_t)sizeof(RecvDataEvt));
 
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_led_set(true));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_led_toggle());

@@ -97,6 +97,13 @@ void kdrv_radio_note_leave(kdrv_radio_note_t target)
     kdrv_radio_note_reg_write(kradio_note_pack((uint32_t)target));
 }
 
+bool kdrv_radio_note_update_waits(void)
+{
+    kradio_note_t const note = kradio_note_unpack(kdrv_radio_note_reg_read());
+
+    return kradio_note_is_update(&note, esp_reset_reason() == ESP_RST_SW);
+}
+
 bool kdrv_radio_adopted(void)
 {
     return s_radio.adopted;
@@ -525,6 +532,10 @@ static kode_status_t radio_platform_init(void)
  * every later one resets the C5. Runs before esp-hosted takes the line, which
  * is the only time kdrv_radio_c5_hold() is allowed.
  *
+ * A C5 kept for an update is not parked: it booted the new image by itself
+ * and nobody has spoken to it yet, so it is kept only so that the first
+ * request reaches that image, and there is nothing of it to adopt.
+ *
  * @param wants_wifi This boot wants Wi-Fi.
  * @return true when the C5 was left running, parked by the last firmware.
  */
@@ -544,6 +555,11 @@ static bool radio_c5_decide(bool wants_wifi)
 
     kdrv_radio_note_reg_write(0U);
 
+    if ( !held && kradio_note_is_update(&note, reset_was_sw) )
+    {
+        KLOG_N(TAG, "C5 kept: it runs an update its first request confirms");
+        return false;
+    }
     if ( !held &&
         kradio_note_keeps_c5(&note, reset_was_sw, role_is_os, wants_wifi) )
     {
@@ -933,7 +949,7 @@ static bool radio_run_wifi(const kdrv_radio_req_t *req, kode_status_t *rc)
                                                  KDRV_RADIO_JOIN_MS));
             break;
         case KDRV_RADIO_JOB_WIFI_PREPARE:
-            *rc = radio_answer(kdrv_wifi_prepare(req->ssid));
+            *rc = radio_answer(kdrv_wifi_prepare(req->ssid, req->channel));
             break;
         case KDRV_RADIO_JOB_WIFI_AWAIT:
             *rc = radio_answer(kdrv_wifi_await(req->ssid, KDRV_RADIO_JOIN_MS));
@@ -1034,7 +1050,7 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
         case KDRV_RADIO_JOB_BLE_ADV:
             if ( req->on )
             {
-                kdrv_ble_adv_plan(req->itvl, req->len, req->hidden);
+                kdrv_ble_adv_plan(req->itvl, req->len, req->hidden, req->pulsed);
             }
             *rc = radio_answer(kdrv_ble_advertise(req->on));
             break;

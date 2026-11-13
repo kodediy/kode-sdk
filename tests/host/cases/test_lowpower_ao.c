@@ -1503,6 +1503,7 @@ TEST_CASE("off_after: default, every word, never", "[lowpower_ao]")
     TEST_ASSERT_NOT_NULL(a);
     TEST_ASSERT_EQUAL_STRING("20m", a->value);
     TEST_ASSERT_FALSE(a->stored);
+    TEST_ASSERT_EQUAL_UINT32(20U * 60U, KODE_LOWPOWER_OFF_AFTER_DEF_S);
 
     for ( uint8_t i = 0U; Q_DIM(words) > i; i++ )
     {

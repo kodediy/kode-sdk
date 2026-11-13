@@ -19,9 +19,13 @@
 #include "esp_image_format.h"
 #include "esp_partition.h"
 #include "esp_rom_crc.h"
+#include "khal_crc32.h"
+#include "kdrv_image_walk.h"
 
 #define TAG              "kdrv.apps"
 #define APPS_SECTOR      0x1000U   /* the 4 KB unit every metadata sector is erased in */
+/** Bytes of the region one extent CRC maps at a time. */
+#define APPS_CRC_WINDOW  (512U * 1024U)
 
 /* ---- State: the region partition and its RAM directory ------------------- */
 
@@ -37,6 +41,10 @@ static uint32_t s_wr_off;
 static uint32_t s_wr_size;
 static uint32_t s_wr_written;
 static uint32_t s_wr_erased;   /* region offset erased up to, monotonic */
+/* Region offset up to which the flash from s_wr_off on may have been changed:
+ * s_wr_erased, and the block of an erase that failed. An empty run (nothing at
+ * or past the start) is what a record with nothing in it looks like. */
+static uint32_t s_wr_reach;
 
 /**
  * @brief Find the `app_pending` mailbox partition.
@@ -265,6 +273,8 @@ kode_status_t kdrv_apps_dir_commit(const kapps_dir_t *d)
     }
     s_dir        = next;      /* only adopted once the write above succeeded */
     s_dir_active = target;
+    s_wr_off     = 0U;        /* the new directory is what says which extents hold apps: */
+    s_wr_reach   = 0U;        /* no erase made before it speaks for them */
     return KODE_OK;
 }
 
@@ -464,6 +474,7 @@ kode_status_t kdrv_apps_write_begin(uint32_t offset, uint32_t size)
     s_wr_size    = size;
     s_wr_written = 0U;
     s_wr_erased  = offset;
+    s_wr_reach   = offset;
     s_wr_open    = true;
     return KODE_OK;
 }
@@ -485,6 +496,7 @@ kode_status_t kdrv_apps_write(const void *data, size_t len)
     uint32_t const reach = s_wr_off + s_wr_written + (uint32_t)len;
     while ( s_wr_erased < reach )
     {
+        s_wr_reach = s_wr_erased + KAPPS_ALIGN;   /* before the erase: a failed one may have changed the block */
         esp_err_t const err = esp_partition_erase_range(s_part, s_wr_erased, KAPPS_ALIGN);
         if ( ESP_OK != err )
         {
@@ -521,6 +533,14 @@ void kdrv_apps_write_abort(void)
     s_wr_open = false;
 }
 
+bool kdrv_apps_write_reached(uint32_t offset, uint32_t size)
+{
+    uint64_t const end = (uint64_t)offset + (uint64_t)size;
+
+    return (0U < size) && (s_wr_off < s_wr_reach)
+        && (offset < s_wr_reach) && ((uint64_t)s_wr_off < end);
+}
+
 /* ---- Reading an image back ------------------------------------------------- */
 
 kode_status_t kdrv_apps_read(uint32_t offset, void *buf, size_t len)
@@ -539,6 +559,57 @@ kode_status_t kdrv_apps_read(uint32_t offset, void *buf, size_t len)
         return KODE_ERROR;
     }
     return KODE_OK;
+}
+
+kode_status_t kdrv_apps_extent_crc(uint32_t offset, uint32_t size, uint32_t *crc)
+{
+    if ( (NULL == s_part) || (NULL == crc) )
+    {
+        return KODE_DENIED;
+    }
+    if ( (KAPPS_DATA_OFF > offset)
+        || (((uint64_t)offset + (uint64_t)size) > (uint64_t)s_part->size) )
+    {
+        return KODE_ERROR;
+    }
+    if ( 0U == size )
+    {
+        return KODE_OK;
+    }
+    /* Through the mapping the images are verified and run through, a window
+     * at a time: the bytes come at the cache's pace, and nothing holds the
+     * flash with the cache off the way a read through the driver does. */
+    uint32_t      run  = *crc;
+    uint32_t      done = 0U;
+    kode_status_t st   = KODE_OK;
+
+    while ( (KODE_OK == st) && (done < size) )
+    {
+        uint32_t                    n   = size - done;
+        const void                 *map = NULL;
+        esp_partition_mmap_handle_t h   = 0U;
+
+        if ( APPS_CRC_WINDOW < n )
+        {
+            n = APPS_CRC_WINDOW;
+        }
+        if ( esp_partition_mmap(s_part, offset + done, n, ESP_PARTITION_MMAP_DATA,
+                                &map, &h) != ESP_OK )
+        {
+            st = KODE_ERROR;
+        }
+        else
+        {
+            run   = khal_crc32(run, map, n);
+            done += n;
+            esp_partition_munmap(h);
+        }
+    }
+    if ( KODE_OK == st )
+    {
+        *crc = run;
+    }
+    return st;
 }
 
 /* ---- The region as a kfw_sink_t -------------------------------------------
@@ -671,6 +742,18 @@ kode_status_t kdrv_apps_verify(uint32_t offset, uint32_t size, uint32_t *img_len
     if ( NULL == s_part )
     {
         return KODE_DENIED;
+    }
+    /* esp_image_verify() hashes every segment by the length its header
+     * declares, and compares the total with `size` only afterwards: a header
+     * that declares more than the image holds keeps it reading flash for as
+     * long as the lengths say, in the caller's own step. The chain is walked
+     * first, and an image whose segments leave its bytes is refused unhashed. */
+    if ( (((uint64_t)offset + (uint64_t)size) > (uint64_t)s_part->size)
+        || (0U == kdrv_image_walk_len(s_part, offset, size)) )
+    {
+        KLOG_E(TAG, "verify @0x%x failed (the image does not hold together in its %u bytes)",
+               (unsigned)offset, (unsigned)size);
+        return KODE_ERROR;
     }
     esp_image_metadata_t meta;
     esp_partition_pos_t const pos = {
@@ -855,9 +938,10 @@ void kdrv_apps_req_clear(void)
  * validate a hash or a signature.
  *
  * Phase 2 is the real verification: once AppMgr copies those bytes into the
- * apps region, kdrv_apps_write_end() calls kdrv_apps_verify(), a plain
- * esp_image_verify(). Note what the region's growth did to that call - the
- * region now runs from 0xC40000 to 0x1800000 and therefore crosses 16 MB, so
+ * apps region, kdrv_apps_write_end() calls kdrv_apps_verify(): the same walk
+ * over the bytes written, then esp_image_verify(). Note what the region's
+ * growth did to that call - the region now runs from 0xC40000 to 0x1800000
+ * and therefore crosses 16 MB, so
  * an image installed in its upper part is verified through the same 32-bit
  * mapping it is executed through. The flag is not optional decoration for
  * this layout; without it, phase 2 fails on exactly the images phase 1 cannot
@@ -878,46 +962,7 @@ static uint32_t pending_walk_len(const esp_partition_t *p)
      * partition: an image allowed to run into that sector would be adopted
      * and then have its tail erased by consume(). This is the same ceiling
      * write_begin() enforces, so an esptool push and a cable upload agree. */
-    uint32_t const limit = pending_intent_off(p);
-    esp_image_header_t header;
-    if ( (esp_partition_read(p, 0, &header, sizeof(header)) != ESP_OK)
-        || (ESP_IMAGE_HEADER_MAGIC != header.magic)
-        || (0U == header.segment_count)
-        || (ESP_IMAGE_MAX_SEGMENTS < header.segment_count) )
-    {
-        return 0U;
-    }
-
-    uint32_t off = sizeof(esp_image_header_t);
-    for ( uint8_t i = 0U; i < header.segment_count; ++i )
-    {
-        esp_image_segment_header_t seg;
-        if ( (off > limit) || (esp_partition_read(p, off, &seg, sizeof(seg)) != ESP_OK) )
-        {
-            return 0U;
-        }
-        /* Bound the addition, not its result. `data_len` comes straight off
-         * flash and is not to be trusted: a value near UINT32_MAX wraps `off`
-         * back to a small number, and a check made afterwards waves that
-         * through. Such a segment does not run off the end of the partition,
-         * it runs around it. `off <= limit` holds above, so both
-         * subtractions here are safe. */
-        uint32_t const room = limit - off;
-        if ( ((uint32_t)sizeof(seg) > room)
-            || ((room - (uint32_t)sizeof(seg)) < seg.data_len) )
-        {
-            return 0U;
-        }
-        off += (uint32_t)sizeof(seg) + seg.data_len;
-    }
-    /* The trailing 1-byte checksum pads the image out to a 16-byte boundary,
-     * then the optional SHA-256 "simple hash" (32 bytes) follows it. */
-    off = (off | 15U) + 1U;
-    if ( 0U != header.hash_appended )
-    {
-        off += 32U;
-    }
-    return (off <= limit) ? off : 0U;
+    return kdrv_image_walk_len(p, 0U, pending_intent_off(p));
 }
 
 kode_status_t kdrv_apps_pending_verify(void)

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -52,6 +53,7 @@ static void storage_fresh(void)
     /* The case before may have ended on a call's return, which disarms its
      * deadline and leaves the node linked until a tick; the constructor below
      * would cut QF's timer list there. */
+    qf_support_disarm_timers(AO_Storage);
     qf_support_reap_timers();
     Storage_ctor();
     qf_support_give_queue(AO_Storage);
@@ -117,6 +119,46 @@ static void make_file(const char *name, size_t bytes)
     (void)fclose(f);
 }
 
+/** @brief The size of @p rel under the internal fake, or -1 when absent. */
+static long fs_size(const char *rel)
+{
+    char  path[512];
+    FILE *f;
+    long  n;
+
+    (void)snprintf(path, sizeof(path), "%s/%s", fake_media_fs_dir(), rel);
+    f = fopen(path, "rb");
+    if ( NULL == f )
+    {
+        return -1L;
+    }
+    (void)fseek(f, 0L, SEEK_END);
+    n = ftell(f);
+    (void)fclose(f);
+    return n;
+}
+
+/**
+ * @brief Read @p rel under the internal fake into @p out.
+ * @return The bytes read, or -1 when the file is not there.
+ */
+static long fs_read(const char *rel, char *out, size_t cap)
+{
+    char   path[512];
+    FILE  *f;
+    size_t n;
+
+    (void)snprintf(path, sizeof(path), "%s/%s", fake_media_fs_dir(), rel);
+    f = fopen(path, "rb");
+    if ( NULL == f )
+    {
+        return -1L;
+    }
+    n = fread(out, 1U, cap, f);
+    (void)fclose(f);
+    return (long)n;
+}
+
 /** @brief Dispatch an open request for @p name, from the spy. */
 static void ask_open(const char *name)
 {
@@ -174,6 +216,46 @@ static kode_status_t take_open_status(void)
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the request went unanswered");
     TEST_ASSERT_EQUAL_INT(STORAGE_OPEN_RSP_SIG, (int)e->sig);
     return (kode_status_t)((const StorageOpenRspEvt *)e)->status;
+}
+
+/* ---- A request that writes or deletes waits for the transfer in flight ------
+ * A file held open for reading is a transfer in flight; closing it ends it. */
+
+/** @brief Hold the reader slot the way a transfer does. */
+static void hold_reader(void)
+{
+    make_file("held.bin", 512U);
+    ask_open("held.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+}
+
+/** @brief End the transfer hold_reader() started, and let what waited run. */
+static void release_reader(void)
+{
+    storage_close_request();
+    (void)qf_support_pump(AO_Storage, 32U);
+}
+
+/**
+ * @brief Take one block of the icon pool, as an icon still on its way to its
+ *        reader holds them. The pool has KODE_APP_ICON_PIECES, which is one
+ *        icon: with one taken the next icon cannot start.
+ */
+static AppDataIconEvt *hold_icon_block(void)
+{
+    AppDataIconEvt *b = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(b, "the icon pool is empty at the start");
+    return b;
+}
+
+/** @brief 10 ms steps in the bound a request waits for its turn. */
+#define TURN_STEPS  QF_SUPPORT_STEPS(KODE_STORAGE_TURN_MS)
+
+/** @brief Let the whole bound pass, and a step more. */
+static void wait_out_turn(void)
+{
+    (void)qf_support_tick(AO_Storage, TURN_STEPS + 1U);
 }
 
 /* ---- Bring-up -------------------------------------------------------------- */
@@ -444,42 +526,30 @@ TEST_CASE("a write while a file is open for reading is refused",
  * handle split removed that refusal along with the accident it was, and this
  * was the one opener in the file that never asked busy() for itself, because
  * it never had to. A console `write` arriving while AO_AppMgr holds a read
- * open across many dispatch steps - a GUI-driven `app install`, say - must
- * still be refused, and the install's own read must still be exactly as
- * usable afterwards as if the write had never arrived. */
-TEST_CASE("a text write while a file is open for reading is refused, and "
-          "the read still answers", "[storage_ao]")
+ * open across many dispatch steps - a GUI-driven `app install`, say - waits
+ * for it, is refused when the read outlasts the wait, and the install's own
+ * read must still be exactly as usable throughout as if the write had never
+ * arrived. */
+TEST_CASE("a text write while a file is open for reading never touches it, "
+          "and is refused when the read outlasts its wait", "[storage_ao]")
 {
-    StorageTextEvt e;
-
     storage_fresh();
     make_file("held.bin", 16U);
 
     ask_open("held.bin");
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
 
-    (void)memset(&e, 0, sizeof(e));
-    e.super = (QEvt)QEVT_INITIALIZER(STORAGE_TEXT_REQ_SIG);
-    (void)snprintf(e.path, sizeof(e.path), "%s", "/storage/outgoing.txt");
-    (void)snprintf(e.text, sizeof(e.text), "%s", "hi");
-    e.len    = 2U;
-    e.append = false;
-    e.who    = ao_spy();
-    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+    storage_text_request(ao_spy(), "/storage/outgoing.txt", "hi", false, 0U);
+    (void)qf_support_pump(AO_Storage, 8U);
 
-    const QEvt * const wrsp = ao_spy_take();
-    TEST_ASSERT_NOT_NULL_MESSAGE(wrsp, "the write went unanswered");
-    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)wrsp->sig);
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
-        (int)((const StoragePathRspEvt *)wrsp)->rc);
-
-    /* Refused before kdrv was ever asked, so nothing was created at all -
-     * not even the stub a failed create would otherwise leave. */
+    /* Waiting, and nothing created: not even the stub a failed create would
+     * otherwise leave. */
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the write was answered early");
     TEST_ASSERT_FALSE(
         fake_media_file_exists(fake_media_fs_dir(), "outgoing.txt"));
 
-    /* And the read the write did not touch still works, exactly as it would
-     * have if the write had never arrived. */
+    /* The read the write waits for still works, exactly as it would have if
+     * the write had never arrived. */
     static const QEvt read_evt = QEVT_INITIALIZER(STORAGE_READ_REQ_SIG);
     QASM_DISPATCH(AO_Storage, &read_evt, 0U);
 
@@ -490,6 +560,15 @@ TEST_CASE("a text write while a file is open for reading is refused, and "
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)d->status);
     TEST_ASSERT_FALSE(d->eof);
     TEST_ASSERT_EQUAL_UINT16(16U, d->len);
+
+    wait_out_turn();
+    const QEvt * const wrsp = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(wrsp, "the write went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)wrsp->sig);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+        (int)((const StoragePathRspEvt *)wrsp)->rc);
+    TEST_ASSERT_FALSE(
+        fake_media_file_exists(fake_media_fs_dir(), "outgoing.txt"));
 }
 
 /* ---- The audit's fourth fix: a copy with nobody to answer ------------------ */
@@ -542,8 +621,8 @@ TEST_CASE("a copy with nobody to answer is refused before it opens anything",
  * a directory mid-walk, or selftesting a partition a write is still landing
  * on. Same guard, the sites it had not reached yet. */
 
-TEST_CASE("rm is refused while a transfer is in flight, and the file "
-          "survives", "[storage_ao]")
+TEST_CASE("rm is refused when the transfer in flight outlasts its wait, and "
+          "the file survives", "[storage_ao]")
 {
     storage_fresh();
     make_file("held.bin", 16U);
@@ -554,7 +633,7 @@ TEST_CASE("rm is refused while a transfer is in flight, and the file "
 
     storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_UNLINK,
                          "/storage/target.bin");
-    (void)qf_support_pump(AO_Storage, 8U);
+    wait_out_turn();
 
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the rm went unanswered");
@@ -566,7 +645,8 @@ TEST_CASE("rm is refused while a transfer is in flight, and the file "
         "rm ran anyway");
 }
 
-TEST_CASE("rmdir is refused while a transfer is in flight", "[storage_ao]")
+TEST_CASE("rmdir is refused when the transfer in flight outlasts its wait",
+          "[storage_ao]")
 {
     storage_fresh();
     make_file("held.bin", 16U);
@@ -576,7 +656,7 @@ TEST_CASE("rmdir is refused while a transfer is in flight", "[storage_ao]")
 
     storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_RMDIR,
                          "/storage/somedir");
-    (void)qf_support_pump(AO_Storage, 8U);
+    wait_out_turn();
 
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the rmdir went unanswered");
@@ -585,8 +665,8 @@ TEST_CASE("rmdir is refused while a transfer is in flight", "[storage_ao]")
         (int)((const StoragePathRspEvt *)e)->rc);
 }
 
-TEST_CASE("mv is refused while a transfer is in flight, and the source "
-          "stays put", "[storage_ao]")
+TEST_CASE("mv is refused when the transfer in flight outlasts its wait, and "
+          "the source stays put", "[storage_ao]")
 {
     storage_fresh();
     make_file("held.bin", 16U);
@@ -597,7 +677,7 @@ TEST_CASE("mv is refused while a transfer is in flight, and the source "
 
     storage_pair_request(ao_spy(), (uint8_t)STORAGE_PAIR_MOVE,
                          "/storage/src.bin", "/storage/dst.bin");
-    (void)qf_support_pump(AO_Storage, 8U);
+    wait_out_turn();
 
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the mv went unanswered");
@@ -607,6 +687,130 @@ TEST_CASE("mv is refused while a transfer is in flight, and the source "
     TEST_ASSERT_TRUE_MESSAGE(
         fake_media_file_exists(fake_media_fs_dir(), "src.bin"),
         "mv ran anyway");
+}
+
+TEST_CASE("rm that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][turn]")
+{
+    storage_fresh();
+    hold_reader();
+    make_file("target.bin", 8U);
+
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_UNLINK,
+                         "/storage/target.bin");
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the rm was answered while the "
+                                            "transfer still ran");
+    TEST_ASSERT_TRUE_MESSAGE(
+        fake_media_file_exists(fake_media_fs_dir(), "target.bin"),
+        "the rm ran over the transfer");
+
+    release_reader();
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the rm never ran");
+    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "target.bin"));
+}
+
+TEST_CASE("mv that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][turn]")
+{
+    storage_fresh();
+    hold_reader();
+    make_file("src.bin", 8U);
+
+    storage_pair_request(ao_spy(), (uint8_t)STORAGE_PAIR_MOVE,
+                         "/storage/src.bin", "/storage/dst.bin");
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the mv never ran");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_fs_dir(), "dst.bin"));
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "src.bin"));
+}
+
+TEST_CASE("a text write that meets a transfer waits for it and lands when it ends",
+          "[storage_ao][turn]")
+{
+    storage_fresh();
+    hold_reader();
+
+    storage_text_request(ao_spy(), "/storage/note.txt", "hi", false, 0U);
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL(ao_spy_take());
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "note.txt"));
+
+    release_reader();
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the write never ran");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_EQUAL_INT(2, (int)fs_size("note.txt"));
+}
+
+/** @brief Whether a captured log line holds @p words. */
+static bool log_says(const char *words)
+{
+    bool found = false;
+
+    for ( unsigned i = 0U; (!found) && (fake_klog_count() > i); ++i )
+    {
+        found = (strstr(fake_klog_line(i), words) != NULL);
+    }
+    return found;
+}
+
+/** @brief How many captured log lines hold @p words. */
+static unsigned log_count(const char *words)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        if ( strstr(fake_klog_line(i), words) != NULL )
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/* `appdata_ls` lists .kode/appsdata on both volumes without asking first
+ * whether the folder is there, and a board with no app data has none. */
+TEST_CASE("a listing of a folder that is not there ends without a warning",
+          "[storage_ao]")
+{
+    storage_fresh();
+    ao_spy_subscribe(STORAGE_LIST_END_SIG);
+    fake_klog_reset();
+
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_LIST, "/storage/.kode/appsdata");
+    (void)qf_support_pump(AO_Storage, 8U);
+
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the listing did not end");
+    TEST_ASSERT_EQUAL_INT(STORAGE_LIST_END_SIG, (int)e->sig);
+    TEST_ASSERT_FALSE_MESSAGE(log_says("cannot list"), "a folder that is not there was a warning");
+}
+
+TEST_CASE("a listing of a path that is a file ends and warns",
+          "[storage_ao]")
+{
+    storage_fresh();
+    make_file("plain.bin", 16U);
+    ao_spy_subscribe(STORAGE_LIST_END_SIG);
+    fake_klog_reset();
+
+    storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_LIST, "/storage/plain.bin");
+    (void)qf_support_pump(AO_Storage, 8U);
+
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the listing did not end");
+    TEST_ASSERT_EQUAL_INT(STORAGE_LIST_END_SIG, (int)e->sig);
+    TEST_ASSERT_TRUE_MESSAGE(log_says("cannot list '/storage/plain.bin'"), "a listing that failed said nothing");
 }
 
 /* A rescan is the case this exists for: storage_list_request()'s own
@@ -982,8 +1186,9 @@ TEST_CASE("reading a manifest does not take the reader slot", "[storage_ao]")
 
 /* ---- The app data folder ----------------------------------------------------- */
 
-/* https://docs.kode.diy/sdk/kdrv/apps: one fields event, then zero or three
- * icon events, then the end marker - to whoever asked, never on the bus. The
+/* https://docs.kode.diy/sdk/kdrv/apps: one fields event, then zero or
+ * KODE_APP_ICON_PIECES icon events, then the end marker - to whoever asked,
+ * never on the bus. The
  * statuses are the whole point of the reply: every case below reads one, and
  * the conversation has to close even when there is nothing to say. */
 
@@ -1000,9 +1205,13 @@ static void ask_appdata(const char *project)
     QASM_DISPATCH(AO_Storage, &e.super, 0U);
 }
 
+/** @brief The icon as the asker received it: the pieces, laid end to end. */
+static uint8_t s_got_icon[KAPP_ICON_BYTES];
+
 /**
  * @brief Take the fields event and assert the conversation closes.
- * @param icons_expected How many icon events must arrive before the end.
+ * @param icons_expected How many icon events must arrive before the end; the
+ *        pieces are kept in s_got_icon.
  * @return The fields event, still owned by the spy.
  */
 static const AppDataFieldsEvt *take_fields(uint8_t icons_expected)
@@ -1011,12 +1220,15 @@ static const AppDataFieldsEvt *take_fields(uint8_t icons_expected)
     TEST_ASSERT_NOT_NULL_MESSAGE(ev, "no fields event");
     TEST_ASSERT_EQUAL_INT(APPDATA_FIELDS_SIG, (int)ev->sig);
     const AppDataFieldsEvt *f = (const AppDataFieldsEvt *)ev;
+    (void)memset(s_got_icon, 0, sizeof(s_got_icon));
     for ( uint8_t i = 0U; i < icons_expected; ++i )
     {
         const QEvt *ic = ao_spy_take();
         TEST_ASSERT_NOT_NULL(ic);
         TEST_ASSERT_EQUAL_INT(APPDATA_ICON_SIG, (int)ic->sig);
         TEST_ASSERT_EQUAL_UINT8(i, ((const AppDataIconEvt *)ic)->seq);
+        (void)memcpy(&s_got_icon[(size_t)i * KODE_APP_ICON_PIECE],
+                     ((const AppDataIconEvt *)ic)->data, KODE_APP_ICON_PIECE);
     }
     const QEvt *end = ao_spy_take();
     TEST_ASSERT_NOT_NULL(end);
@@ -1055,7 +1267,7 @@ TEST_CASE("a folder with app.json and no icon", "[storage_ao][appdata]")
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_NONE, f->icon_status);
 }
 
-TEST_CASE("a folder with a right-sized icon streams three thirds",
+TEST_CASE("a folder with a 128 px icon streams it in pieces, byte for byte",
           "[storage_ao][appdata]")
 {
     static uint8_t icon[KAPP_ICON_BYTES];
@@ -1063,7 +1275,7 @@ TEST_CASE("a folder with a right-sized icon streams three thirds",
     storage_fresh();
     for ( size_t i = 0U; sizeof(icon) > i; ++i )
     {
-        icon[i] = (uint8_t)i;
+        icon[i] = (uint8_t)((i * 31U) + (i >> 8));
     }
     fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
                            sizeof(JSON_OK) - 1U);
@@ -1071,23 +1283,79 @@ TEST_CASE("a folder with a right-sized icon streams three thirds",
 
     ask_appdata("scope");
 
-    const AppDataFieldsEvt *f = take_fields(3U);
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+    TEST_ASSERT_EQUAL_MEMORY(icon, s_got_icon, sizeof(icon));
 }
 
-TEST_CASE("an icon of the wrong size is refused with size",
+TEST_CASE("a folder with a 64 px icon answers the 128 px icon it doubles to",
           "[storage_ao][appdata]")
 {
-    static uint8_t icon[KAPP_ICON_BYTES - 1U];
+    static uint8_t icon[KAPP_ICON_HALF_BYTES];
+    uint32_t const colour_bytes = (uint32_t)KAPP_ICON_HALF_W * KAPP_ICON_HALF_H * 2U;
 
     storage_fresh();
+    for ( uint32_t y = 0U; KAPP_ICON_HALF_H > y; ++y )
+    {
+        for ( uint32_t x = 0U; KAPP_ICON_HALF_W > x; ++x )
+        {
+            uint32_t const at = (y * KAPP_ICON_HALF_W) + x;
+            uint16_t const c  = (uint16_t)(0x1234U + (y * 251U) + (x * 7U));
+
+            icon[at * 2U]          = (uint8_t)(c & 0xFFU);
+            icon[(at * 2U) + 1U]   = (uint8_t)(c >> 8);
+            icon[colour_bytes + at] = (uint8_t)(0x5AU ^ ((y * 13U) + x));
+        }
+    }
     fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
                            sizeof(JSON_OK) - 1U);
     fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, sizeof(icon));
 
     ask_appdata("scope");
 
-    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_SIZE, take_fields(0U)->icon_status);
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+    for ( uint32_t y = 0U; KAPP_ICON_H > y; ++y )
+    {
+        for ( uint32_t x = 0U; KAPP_ICON_W > x; ++x )
+        {
+            uint32_t const at   = (y * KAPP_ICON_W) + x;
+            uint32_t const from = ((y / 2U) * KAPP_ICON_HALF_W) + (x / 2U);
+
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(icon[from * 2U], s_got_icon[at * 2U],
+                                           "colour, low byte");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(icon[(from * 2U) + 1U],
+                                           s_got_icon[(at * 2U) + 1U],
+                                           "colour, high byte");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(icon[colour_bytes + from],
+                                           s_got_icon[((uint32_t)KAPP_ICON_W * KAPP_ICON_H * 2U) + at],
+                                           "alpha");
+        }
+    }
+}
+
+TEST_CASE("an icon of a size that is neither is refused with size",
+          "[storage_ao][appdata]")
+{
+    static uint8_t icon[KAPP_ICON_BYTES + 1U];
+    static const size_t BAD[] = { 1U, KAPP_ICON_HALF_BYTES - 1U,
+                                  KAPP_ICON_HALF_BYTES + 1U,
+                                  (KAPP_ICON_HALF_BYTES + KAPP_ICON_BYTES) / 2U,
+                                  KAPP_ICON_BYTES - 1U, KAPP_ICON_BYTES + 1U };
+
+    for ( size_t i = 0U; (sizeof(BAD) / sizeof(BAD[0])) > i; ++i )
+    {
+        storage_fresh();
+        fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
+                               sizeof(JSON_OK) - 1U);
+        fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, BAD[i]);
+
+        ask_appdata("scope");
+
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPDATA_ICON_SIZE,
+                                        take_fields(0U)->icon_status,
+                                        "a length that is neither size was taken");
+    }
 }
 
 TEST_CASE("the icon key names a file that is not there",
@@ -1147,6 +1415,66 @@ TEST_CASE("the internal folder wins over the card's, whole",
     TEST_ASSERT_EQUAL_STRING("", f->version);   /* not merged from the card */
 }
 
+/* A folder is there only when it has its app.json: an empty or icon-only one,
+ * which a failed put or a copy cut short can leave, is no data, and does not
+ * hide a complete folder on the other medium. */
+static const uint8_t ICON_STUB[16] = { 0x5AU };
+
+TEST_CASE("an icon-only internal folder does not hide a complete one on the card",
+          "[storage_ao][appdata]")
+{
+    static const char card[] = "{\"kode\":\"1\",\"name\":\"Card\"}";
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", ICON_STUB, sizeof(ICON_STUB));
+    fake_media_put_sd_path(".kode/appsdata/scope/app.json", card,
+                           sizeof(card) - 1U);
+
+    ask_appdata("scope");
+
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_SD, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_STRING("Card", f->name);
+}
+
+TEST_CASE("an empty internal folder does not hide a complete one on the card",
+          "[storage_ao][appdata]")
+{
+    static const char card[] = "{\"kode\":\"1\",\"name\":\"Card\"}";
+    char              dir[512];
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_fs_path(".kode/appsdata/scope/gone", "x", 1U);
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/scope/gone",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, unlink(dir));
+    fake_media_put_sd_path(".kode/appsdata/scope/app.json", card,
+                           sizeof(card) - 1U);
+
+    ask_appdata("scope");
+
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_SD, take_fields(0U)->medium);
+}
+
+TEST_CASE("a folder with no app.json on any medium reads as no data, icon and all",
+          "[storage_ao][appdata]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", ICON_STUB, sizeof(ICON_STUB));
+    fake_media_put_sd_path(".kode/appsdata/scope/icon.k64", ICON_STUB, sizeof(ICON_STUB));
+
+    ask_appdata("scope");
+
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_NONE, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_NONE, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_NONE, f->icon_status);
+}
+
 TEST_CASE("a card folder alone is found with medium=sd", "[storage_ao][appdata]")
 {
     static const char card[] = "{\"kode\":\"1\",\"name\":\"Card\"}";
@@ -1161,7 +1489,7 @@ TEST_CASE("a card folder alone is found with medium=sd", "[storage_ao][appdata]"
     TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_SD, take_fields(0U)->medium);
 }
 
-TEST_CASE("a folder is not read while a transfer is in flight",
+TEST_CASE("a folder is not read over a transfer that outlasts its wait",
           "[storage_ao][appdata]")
 {
     storage_fresh();
@@ -1173,6 +1501,7 @@ TEST_CASE("a folder is not read while a transfer is in flight",
     (void)take_open_status();
 
     ask_appdata("scope");
+    wait_out_turn();
 
     const AppDataFieldsEvt *f = take_fields(0U);
     TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_NONE, f->medium);
@@ -1245,12 +1574,11 @@ TEST_CASE("a folder question the pool cannot carry is answered busy at once",
     TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, f->icon_status);
 }
 
-/* All three blocks or none: an icon that arrived in pieces would be drawn
+/* All the pieces or none: an icon that arrived in pieces would be drawn
  * wrong rather than not drawn, so a short pool is a refusal and not a
- * partial send. The console's own upload is what takes the blocks in the
- * field; two of them here is the same shortage. */
-TEST_CASE("an icon is not started when the jumbo pool is short",
-          "[storage_ao][appdata]")
+ * partial send. Another icon's pieces still held is the same shortage. */
+TEST_CASE("an icon is not started when the icon pool is short: the read waits "
+          "and is answered busy only after the bound", "[storage_ao][appdata]")
 {
     static uint8_t icon[KAPP_ICON_BYTES];
 
@@ -1259,8 +1587,34 @@ TEST_CASE("an icon is not started when the jumbo pool is short",
                            sizeof(JSON_OK) - 1U);
     fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, sizeof(icon));
 
-    RecvDataEvt *held[2];
-    for ( unsigned i = 0U; 2U > i; ++i )
+    AppDataIconEvt *held = hold_icon_block();
+
+    ask_appdata("scope");
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered before the bound");
+
+    wait_out_turn();
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, f->icon_status);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
+
+    QF_gc(&held->super);
+}
+
+/* The terminal install's blocks are not the icon's: a transfer holding every
+ * jumbo block does not delay a folder's icon at all. */
+TEST_CASE("an icon does not wait for the jumbo pool", "[storage_ao][appdata]")
+{
+    static uint8_t icon[KAPP_ICON_BYTES];
+    RecvDataEvt   *held[KQP_JUMBO_POOL_COUNT];
+
+    storage_fresh();
+    fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", icon, sizeof(icon));
+    for ( unsigned i = 0U; KQP_JUMBO_POOL_COUNT > i; ++i )
     {
         held[i] = Q_NEW_X(RecvDataEvt, 0U, RECV_DATA_SIG);
         TEST_ASSERT_NOT_NULL_MESSAGE(held[i], "the jumbo pool is smaller than "
@@ -1269,9 +1623,10 @@ TEST_CASE("an icon is not started when the jumbo pool is short",
 
     ask_appdata("scope");
 
-    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, take_fields(0U)->icon_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK,
+                            take_fields(KODE_APP_ICON_PIECES)->icon_status);
 
-    for ( unsigned i = 0U; 2U > i; ++i )
+    for ( unsigned i = 0U; KQP_JUMBO_POOL_COUNT > i; ++i )
     {
         QF_gc(&held[i]->super);
     }
@@ -1412,7 +1767,7 @@ TEST_CASE("a delete of a folder that is not there is refused, and answered",
 /* A folder is never worth displacing a transfer, and the delete says which of
  * the two refusals it is - an operator whose `appdata_rm` was refused while a
  * file streamed needs to know to type it again. */
-TEST_CASE("a delete is refused while a transfer is in flight",
+TEST_CASE("a delete is refused when the transfer in flight outlasts its wait",
           "[storage_ao][appdata]")
 {
     storage_fresh();
@@ -1424,10 +1779,31 @@ TEST_CASE("a delete is refused while a transfer is in flight",
     (void)take_open_status();
 
     ask_appdata_rm("scope");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "refused before it had waited");
+    wait_out_turn();
 
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_rm_status());
     TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_fs_dir(),
                                             ".kode/appsdata/scope/app.json"));
+}
+
+TEST_CASE("a delete that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][appdata][turn]")
+{
+    storage_fresh();
+    fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    hold_reader();
+
+    ask_appdata_rm("scope");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered while the transfer ran");
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_fs_dir(),
+                                            ".kode/appsdata/scope/app.json"));
+
+    release_reader();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_rm_status());
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
+                                             ".kode/appsdata/scope"));
 }
 
 /* An asker with a delete in flight takes only the answer that names it. */
@@ -1552,6 +1928,29 @@ TEST_CASE("an app wipe removes every image of the project on both media, "
     TEST_ASSERT_TRUE_MESSAGE(on_fs("other.bin"), "another app's image went");
     TEST_ASSERT_TRUE_MESSAGE(on_fs("notes.txt"), "a file that is no image went");
     TEST_ASSERT_TRUE_MESSAGE(on_sd("demo2.bin"), "another app's image went");
+}
+
+/* An erase asked while a transfer runs - the card's check at start-up, the
+ * launcher saving its list - waits for it as a delete does: refused at once
+ * it would leave the app's files behind an image that is already gone. */
+TEST_CASE("an app wipe that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][wipe][turn]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    hold_reader();
+
+    ask_wipe("demo");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered while the transfer ran");
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("demo.bin"), "wiped under the transfer");
+
+    release_reader();
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.left);
+    TEST_ASSERT_FALSE(on_fs("demo.bin"));
 }
 
 /* The OS image and the coprocessor's are skipped by name before anything is
@@ -1691,9 +2090,10 @@ TEST_CASE("an app wipe with no name takes no file", "[storage_ao][wipe]")
 }
 
 /* The driver has one reader for the whole system: a wipe under a transfer
- * would read descriptors through the handle the transfer holds. */
-TEST_CASE("an app wipe is refused while a transfer is in flight, and touches nothing",
-          "[storage_ao][wipe]")
+ * would read descriptors through the handle the transfer holds. It waits for
+ * the transfer, and one that outlasts the bound refuses it. */
+TEST_CASE("an app wipe whose transfer never ends is refused, and touches nothing",
+          "[storage_ao][wipe][turn]")
 {
     storage_fresh();
     put_fs_image("demo.bin", "demo");
@@ -1702,6 +2102,8 @@ TEST_CASE("an app wipe is refused while a transfer is in flight, and touches not
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
 
     ask_wipe("demo");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "refused before it had waited");
+    wait_out_turn();
     const StorageAppWipeRspEvt * const r = take_wipe();
 
     TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, r->status);
@@ -1756,28 +2158,33 @@ static const char PUT_JSON[] = "{\"name\":\"Demo\",\"category\":\"tools\"}";
 static uint8_t    s_put_icon[KAPP_ICON_BYTES];
 
 /** @brief Dispatch APPDATA_PUT_REQ_SIG for @p project, from the spy, with a
- *         fresh buffer that is AO_Storage's from here. */
+ *         fresh buffer that is AO_Storage's from here.
+ *
+ * A pool event, put at the front of the queue and taken from it the way the
+ * AO's own loop does, so the reference count a wait relies on is the real one:
+ * the request is served before whatever else is queued, and one that waits
+ * for its turn is held by the pool, not by this frame. */
 static void ask_appdata_put(const char *project, uint16_t icon_len)
 {
-    static AppDataPutEvt e;
-    uint16_t const       jlen = (uint16_t)(sizeof(PUT_JSON) - 1U);
+    AppDataPutEvt *e = Q_NEW_X(AppDataPutEvt, 0U, APPDATA_PUT_REQ_SIG);
+    uint16_t const jlen = (uint16_t)(sizeof(PUT_JSON) - 1U);
 
-    (void)memset(&e, 0, sizeof(e));
-    e.super = (QEvt)QEVT_INITIALIZER(APPDATA_PUT_REQ_SIG);
-    (void)snprintf(e.project, sizeof(e.project), "%s", project);
+    TEST_ASSERT_NOT_NULL(e);
+    (void)snprintf(e->project, sizeof(e->project), "%s", project);
     /* cppcheck-suppress misra-c2012-11.5 ; a byte buffer from a void * allocator */
-    e.buf = (uint8_t *)khal_realloc_psram(NULL, (size_t)jlen + (size_t)icon_len);
-    TEST_ASSERT_NOT_NULL(e.buf);
-    (void)memcpy(e.buf, PUT_JSON, jlen);
+    e->buf = (uint8_t *)khal_realloc_psram(NULL, (size_t)jlen + (size_t)icon_len);
+    TEST_ASSERT_NOT_NULL(e->buf);
+    (void)memcpy(e->buf, PUT_JSON, jlen);
     if ( 0U != icon_len )
     {
-        (void)memcpy(&e.buf[jlen], s_put_icon, icon_len);
+        (void)memcpy(&e->buf[jlen], s_put_icon, icon_len);
     }
-    e.json_len = jlen;
-    e.icon_len = icon_len;
-    e.who      = ao_spy();
+    e->json_len = jlen;
+    e->icon_len = icon_len;
+    e->who      = ao_spy();
 
-    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+    QACTIVE_POST_LIFO(AO_Storage, &e->super);
+    (void)qf_support_pump(AO_Storage, 1U);
 }
 
 /** @brief Every buffer a put was handed has been given back. */
@@ -1789,31 +2196,18 @@ static void assert_put_bufs_freed(void)
 }
 
 /** @brief Take the put's answer; every request is answered. */
-static kode_status_t take_put_status(void)
+static const AppDataPutRspEvt *take_put_rsp(void)
 {
     const QEvt *ev = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(ev, "the put went unanswered");
     TEST_ASSERT_EQUAL_INT(APPDATA_PUT_RSP_SIG, (int)ev->sig);
-    return ((const AppDataPutRspEvt *)ev)->rc;
+    return (const AppDataPutRspEvt *)ev;
 }
 
-/** @brief The size of @p rel under the internal fake, or -1 when absent. */
-static long fs_size(const char *rel)
+/** @brief Take the put's answer and say how it ended. */
+static kode_status_t take_put_status(void)
 {
-    char  path[512];
-    FILE *f;
-    long  n;
-
-    (void)snprintf(path, sizeof(path), "%s/%s", fake_media_fs_dir(), rel);
-    f = fopen(path, "rb");
-    if ( NULL == f )
-    {
-        return -1L;
-    }
-    (void)fseek(f, 0L, SEEK_END);
-    n = ftell(f);
-    (void)fclose(f);
-    return n;
+    return take_put_rsp()->rc;
 }
 
 TEST_CASE("put writes app.json and icon.k64 into the internal folder",
@@ -1842,7 +2236,8 @@ TEST_CASE("put writes app.json and icon.k64 into the internal folder",
                            fread(got, 1U, sizeof(got), f));
     (void)fclose(f);
     TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
                                              ".kode/appsdata/demo/app.json"));
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
@@ -1851,14 +2246,27 @@ TEST_CASE("put writes app.json and icon.k64 into the internal folder",
 
 /* A data folder may arrive before its app, and nothing bounds how many do but
  * the partition: a new folder is refused when it would leave the partition
- * under its floor, where Kody's pack is staged beside the one in use. */
+ * under its floor, where Kody's pack is staged beside the one in use.
+ *
+ * What a put is charged is what it weighs on the volume: the bytes of its json
+ * and of its icon, each rounded up to the volume's cluster, and one cluster
+ * more for the folder itself when it is new; a replacement writes its pair
+ * beside the old one, so it is charged the pair and nothing for the folder.
+ * The fake volume's cluster is 4096 bytes. */
+#define CL         4096U                          /**< The fake volume's cluster. */
+#define FLOOR_B    ((uint64_t)KODE_APPDATA_FREE_MIN_BYTES)
+#define PAIR_64    (CL + KAPP_ICON_HALF_BYTES)    /**< json 1 cluster, icon 3.    */
+#define PAIR_128   (CL + KAPP_ICON_BYTES)         /**< json 1 cluster, icon 12.   */
+#define NEW_64     (PAIR_64 + CL)                 /**< 20 KB.                     */
+#define NEW_128    (PAIR_128 + CL)                /**< 56 KB.                     */
+
 TEST_CASE("put refuses a new folder that would leave the partition under its floor",
-          "[storage_ao][appdata]")
+          "[storage_ao][appdata][room]")
 {
     storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
     fake_psram_reset();
-    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FREE_MIN_BYTES
-                           + (uint64_t)KODE_APPDATA_FOLDER_BYTES - 1U);
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_128 - 1U);
 
     ask_appdata_put("demo", KAPP_ICON_BYTES);
     drain_write();
@@ -1870,12 +2278,11 @@ TEST_CASE("put refuses a new folder that would leave the partition under its flo
 }
 
 TEST_CASE("put takes a new folder that leaves the partition at its floor",
-          "[storage_ao][appdata]")
+          "[storage_ao][appdata][room]")
 {
     storage_fresh();
     fake_psram_reset();
-    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FREE_MIN_BYTES
-                           + (uint64_t)KODE_APPDATA_FOLDER_BYTES);
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_128);
 
     ask_appdata_put("demo", KAPP_ICON_BYTES);
     drain_write();
@@ -1884,22 +2291,203 @@ TEST_CASE("put takes a new folder that leaves the partition at its floor",
     assert_put_bufs_freed();
 }
 
-TEST_CASE("put replaces a folder that is there however full the partition is",
-          "[storage_ao][appdata]")
+TEST_CASE("put takes a 64 px folder for what it weighs, not what a 128 px one does",
+          "[storage_ao][appdata][room]")
 {
     storage_fresh();
     fake_psram_reset();
-    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
-    fake_media_set_fs_free(0U);
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_64);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "a 64 px folder was charged the room of a 128 px one");
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("put refuses a 64 px folder one cluster short of its weight",
+          "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
+    fake_psram_reset();
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_64 - 1U);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("put refuses a 128 px folder with the room a 64 px one takes",
+          "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
+    fake_psram_reset();
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_64);
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+}
+
+/* A json shorter than a cluster takes the whole cluster, so the rounding is
+ * of each file and not of the sum. */
+TEST_CASE("put charges a folder with no icon its json's cluster and the folder's",
+          "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)(2U * CL));
 
     ask_appdata_put("demo", 0U);
     drain_write();
 
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("the charge follows the volume's cluster", "[storage_ao][appdata][room]")
+{
+    /* 512-byte clusters: 512 + 12288 + 512, where 4096-byte ones take 20480. */
+    storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
+    fake_psram_reset();
+    fake_media_set_fs_cluster(512U);
+    fake_media_set_fs_free(FLOOR_B + 13312U);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+
+    /* 8192-byte clusters: 8192 + 16384 + 8192, one byte over what is free. */
+    storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
+    fake_psram_reset();
+    fake_media_set_fs_cluster(8192U);
+    fake_media_set_fs_free(FLOOR_B + 32768U - 1U);
+
+    ask_appdata_put("other", KAPP_ICON_HALF_BYTES);
+    drain_write();
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+}
+
+/* With 180 KB free, which is what a bench board had left: two 64 px folders
+ * fit above the floor, and not one 128 px folder. */
+TEST_CASE("180 KB free takes two 64 px folders and no 128 px one",
+          "[storage_ao][appdata][room]")
+{
+    uint64_t free_b = 180ULL * 1024ULL;
+    unsigned taken  = 0U;
+
+    storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
+    fake_psram_reset();
+    fake_media_set_fs_free(free_b);
+    ask_appdata_put("big", KAPP_ICON_BYTES);
+    drain_write();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_NO_RESOURCES, take_put_status(),
+        "a 128 px folder fits in 180 KB");
+
+    for ( unsigned i = 0U; 4U > i; ++i )
+    {
+        char project[8];
+
+        (void)snprintf(project, sizeof(project), "p%u", i);
+        fake_media_set_fs_free(free_b);
+        ask_appdata_put(project, KAPP_ICON_HALF_BYTES);
+        drain_write();
+        if ( KODE_OK != take_put_status() )
+        {
+            break;
+        }
+        ++taken;
+        free_b -= (uint64_t)NEW_64;
+    }
+    TEST_ASSERT_EQUAL_UINT(2U, taken);
+}
+
+/* The new files are written beside the old ones, so a replacement needs the
+ * room of its own pair - the clusters of its temporaries - and neither the
+ * folder's cluster nor the floor a new folder must leave. */
+TEST_CASE("put replaces a folder that is there when its pair fits beside the old",
+          "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
+    fake_media_set_fs_free((uint64_t)PAIR_64);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
-        "a replacement takes the room it gives back");
+        "a replacement needs no more than its own temporaries");
     assert_put_bufs_freed();
     TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
                           (int)fs_size(".kode/appsdata/demo/app.json"));
+}
+
+TEST_CASE("put refuses a replacement whose pair does not fit beside the old "
+          "files, and leaves them", "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
+    fake_media_set_fs_free((uint64_t)PAIR_64 - 1U);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, (int)fs_size(".kode/appsdata/demo/app.json"),
+        "a refused replacement touched the old app.json");
+}
+
+/* The refusal says what it weighed: what the put needs, what the volume has
+ * free beyond what it keeps back, and what it keeps. */
+TEST_CASE("the refusal of a new folder says the three numbers",
+          "[storage_ao][appdata][room][say]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
+    fake_psram_reset();
+    fake_media_set_fs_free(FLOOR_B + 12U * 1024U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    TEST_ASSERT_TRUE_MESSAGE(log_says("the data folder of 'demo' was not written: "
+        "it needs 20 KB and the internal volume has 12 KB free beyond the "
+        "128 KB it keeps"), "the refusal does not carry its three numbers");
+}
+
+TEST_CASE("the refusal of a replacement says what it needs beside the old files",
+          "[storage_ao][appdata][room][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
+    fake_media_set_fs_free(8U * 1024U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    TEST_ASSERT_TRUE(log_says("the data folder of 'demo' was not written: "
+        "it needs 16 KB beside the old files and the internal volume has "
+        "8 KB free"));
 }
 
 TEST_CASE("put without an icon writes app.json only and removes an old icon",
@@ -1939,7 +2527,8 @@ TEST_CASE("put replaces a folder that had other files", "[storage_ao][appdata]")
                                              ".kode/appsdata/demo/logo.k64"));
     TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
                           (int)fs_size(".kode/appsdata/demo/app.json"));
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
 }
 
 TEST_CASE("put creates .kode and appsdata when missing", "[storage_ao][appdata]")
@@ -2006,40 +2595,167 @@ TEST_CASE("put refuses a name that cannot be a folder", "[storage_ao][appdata]")
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), ".kode"));
 }
 
-TEST_CASE("put with an icon length the format does not have is refused",
+TEST_CASE("put stores a 64 px icon as it is, and does not widen it on the medium",
           "[storage_ao][appdata]")
 {
     storage_fresh();
     fake_psram_reset();
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
 
-    ask_appdata_put("demo", 100U);
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
     drain_write();
 
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     assert_put_bufs_freed();
-    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), ".kode"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_HALF_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
 }
 
-TEST_CASE("put while a transfer runs answers busy", "[storage_ao][appdata]")
+TEST_CASE("put with an icon length the format does not have is refused",
+          "[storage_ao][appdata]")
+{
+    static const uint16_t BAD[] = { 1U, 100U, (uint16_t)(KAPP_ICON_HALF_BYTES - 1U),
+                                    (uint16_t)(KAPP_ICON_HALF_BYTES + 1U),
+                                    (uint16_t)(KAPP_ICON_BYTES - 1U) };
+
+    for ( size_t i = 0U; (sizeof(BAD) / sizeof(BAD[0])) > i; ++i )
+    {
+        storage_fresh();
+        fake_psram_reset();
+
+        ask_appdata_put("demo", BAD[i]);
+        drain_write();
+
+        TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
+        assert_put_bufs_freed();
+        TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), ".kode"));
+    }
+}
+
+TEST_CASE("a put that meets a transfer waits for it and lands when it ends",
+          "[storage_ao][appdata][turn]")
 {
     storage_fresh();
     fake_psram_reset();
-    make_file("app.bin", 512U);
-
-    ask_open("app.bin");                 /* takes the reader slot */
-    (void)take_open_status();
+    hold_reader();
 
     ask_appdata_put("demo", 0U);
     drain_write();
 
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
+        "the put was answered while the transfer still ran");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size(".kode/appsdata/demo/app.json"),
+        "the put ran over the transfer");
+
+    release_reader();
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+                          (int)fs_size(".kode/appsdata/demo/app.json"));
+}
+
+TEST_CASE("a put that waits past the bound is refused as busy, and frees its buffer",
+          "[storage_ao][appdata][turn]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+
+    ask_appdata_put("demo", 0U);
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "refused before the bound");
+
+    wait_out_turn();
+    const AppDataPutRspEvt *rsp = take_put_rsp();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, rsp->rc);
+    TEST_ASSERT_TRUE_MESSAGE(rsp->busy, "a busy refusal is told apart");
     assert_put_bufs_freed();
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), ".kode"));
+
+    release_reader();
+    drain_write();
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a refused put was answered twice");
+}
+
+TEST_CASE("a put refused for another reason is not told as busy",
+          "[storage_ao][appdata][turn]")
+{
+    storage_fresh();
+    fake_psram_reset();
+
+    ask_appdata_put("bad/name", 0U);
+    drain_write();
+
+    const AppDataPutRspEvt *rsp = take_put_rsp();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, rsp->rc);
+    TEST_ASSERT_FALSE(rsp->busy);
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("a second put while one waits is refused at once",
+          "[storage_ao][appdata][turn]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+
+    ask_appdata_put("demo", 0U);
+    ask_appdata_put("other", 0U);
+
+    const AppDataPutRspEvt *rsp = take_put_rsp();
+    TEST_ASSERT_EQUAL_STRING("other", rsp->project);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, rsp->rc);
+    TEST_ASSERT_TRUE(rsp->busy);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_psram_free_count(),
+        "the refused put's buffer was not given back, or the waiting one's was");
+
+    release_reader();
+    drain_write();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_TRUE(fs_size(".kode/appsdata/demo/app.json") > 0L);
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size(".kode/appsdata/other/app.json"));
+}
+
+/* The bound's timer can fire and queue its event, and the transfer then end
+ * before that event is dispatched. The request that waited is taken up and
+ * meets another transfer, so it waits again under a new bound; the old
+ * timer's event, arriving behind it, must not end that one early. */
+TEST_CASE("a wait that ended before its timer was heard does not cut the next "
+          "wait short", "[storage_ao][appdata][turn]")
+{
+    static const QEvt close_evt = QEVT_INITIALIZER(STORAGE_CLOSE_REQ_SIG);
+
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+
+    ask_appdata_put("demo", 0U);
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS) + 10U);
+
+    /* The transfer ends with the bound's event queued; another begins before
+     * the put is served again. */
+    QASM_DISPATCH(AO_Storage, &close_evt, 0U);
+    ask_open("held.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+    (void)qf_support_pump(AO_Storage, 8U);
+
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
+        "the old timer's event refused a put that had begun a new wait");
+
+    wait_out_turn();
+    const AppDataPutRspEvt *rsp = take_put_rsp();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, rsp->rc);
+    TEST_ASSERT_TRUE(rsp->busy);
+    assert_put_bufs_freed();
 }
 
 /* Between the two steps the put owns the AO: busy() reads it, so a second put
- * is refused and the first one still lands whole. */
-TEST_CASE("a second put during the first answers busy", "[storage_ao][appdata]")
+ * waits for the first to land, and then lands whole itself. */
+TEST_CASE("a second put during the first waits for it and lands after",
+          "[storage_ao][appdata][turn]")
 {
     storage_fresh();
     fake_psram_reset();
@@ -2047,16 +2763,314 @@ TEST_CASE("a second put during the first answers busy", "[storage_ao][appdata]")
     ask_appdata_put("demo", KAPP_ICON_BYTES);   /* step one done, icon pending */
     ask_appdata_put("other", 0U);
 
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_psram_free_count(),
-        "the refused put's buffer was not given back, or the running one's was");
-    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
-                                             ".kode/appsdata/other"));
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the second put was answered early");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/other/app.json"),
+        "the second put ran inside the first");
 
     drain_write();
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     assert_put_bufs_freed();
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_TRUE(fs_size(".kode/appsdata/other/app.json") > 0L);
+}
+
+/* ---- A folder is replaced whole or not at all ------------------------------
+ * The new app.json and icon.k64 are written under temporary names in the
+ * folder and put in place only when both are down. A put that fails or never
+ * finishes leaves the pair that was there. */
+
+static const char OLD_JSON[] = "{\"kode\":\"1\",\"name\":\"Old\"}";
+static uint8_t    s_old_icon[KAPP_ICON_BYTES];
+
+/** @brief Put a pair in demo's folder: OLD_JSON and an icon of 0x11s. */
+static void put_old_pair(void)
+{
+    (void)memset(s_old_icon, 0x11, sizeof(s_old_icon));
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", OLD_JSON,
+                           sizeof(OLD_JSON) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/demo/icon.k64", s_old_icon,
+                           sizeof(s_old_icon));
+}
+
+/** @brief Assert demo's folder still holds put_old_pair()'s pair, whole. */
+static void assert_old_pair(void)
+{
+    char got[sizeof(OLD_JSON) + 8U];
+    long n = fs_read(".kode/appsdata/demo/app.json", got, sizeof(got));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)(sizeof(OLD_JSON) - 1U), (int)n,
+        "the old app.json is gone or was cut");
+    TEST_ASSERT_EQUAL_MEMORY(OLD_JSON, got, sizeof(OLD_JSON) - 1U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KAPP_ICON_BYTES,
+        (int)fs_size(".kode/appsdata/demo/icon.k64"),
+        "the old icon is gone or was cut");
+    n = fs_read(".kode/appsdata/demo/icon.k64", (char *)s_put_icon,
+                sizeof(s_put_icon));
+    TEST_ASSERT_EQUAL_HEX8(0x11, s_put_icon[0]);
+}
+
+/** @brief Assert no temporary of demo's folder is left. */
+static void assert_no_temporaries(void)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/demo/app.json.tmp"),
+        "app.json.tmp was left behind");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/demo/icon.k64.tmp"),
+        "icon.k64.tmp was left behind");
+}
+
+TEST_CASE("a put that fails while writing leaves the old json and icon",
+          "[storage_ao][appdata][whole]")
+{
+    char dir[512];
+
+    storage_fresh();
+    fake_psram_reset();
+    put_old_pair();
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);   /* the new app.json is down */
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/demo/icon.k64.tmp",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0755));
+    drain_write();
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    assert_old_pair();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/demo/app.json.tmp"),
+        "the failed put left its app.json.tmp");
+    TEST_ASSERT_EQUAL_INT(0, rmdir(dir));
+}
+
+TEST_CASE("a put that never finishes leaves the old pair, and the next put "
+          "cleans the temporaries", "[storage_ao][appdata][whole]")
+{
+    char got[sizeof(PUT_JSON)];
+
+    storage_fresh();
+    fake_psram_reset();
+    put_old_pair();
+    fake_media_put_fs_path(".kode/appsdata/demo/icon.k64.tmp", "half", 4U);
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);   /* the new app.json is down */
+    TEST_ASSERT_TRUE_MESSAGE(fs_size(".kode/appsdata/demo/app.json.tmp") > 0L,
+        "the new app.json was not written under its temporary name");
+
+    /* The board resets here: the AO starts again and nothing finishes the put. */
+    storage_fresh();
+    fake_psram_reset();
+    assert_old_pair();
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    assert_no_temporaries();
+    (void)memset(got, 0, sizeof(got));
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+        (int)fs_read(".kode/appsdata/demo/app.json", got, sizeof(got)));
+    TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1,
+        (int)fs_size(".kode/appsdata/demo/icon.k64"),
+        "a put without an icon left the old icon");
+}
+
+TEST_CASE("a put over a folder that is there shows the new pair and no "
+          "temporaries", "[storage_ao][appdata][whole]")
+{
+    char got[sizeof(PUT_JSON)];
+
+    storage_fresh();
+    fake_psram_reset();
+    put_old_pair();
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    assert_no_temporaries();
+    (void)memset(got, 0, sizeof(got));
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+        (int)fs_read(".kode/appsdata/demo/app.json", got, sizeof(got)));
+    TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    (void)fs_read(".kode/appsdata/demo/icon.k64", (char *)s_old_icon,
+                  sizeof(s_old_icon));
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x5A, s_old_icon[0],
+        "the folder still shows the old icon");
+}
+
+TEST_CASE("a put that fails writing a new folder leaves no folder",
+          "[storage_ao][appdata][whole]")
+{
+    char dir[512];
+
+    storage_fresh();
+    fake_psram_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/demo/icon.k64.tmp",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0755));
+    drain_write();
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
+                                             ".kode/appsdata/demo"));
+}
+
+/* ---- What a put says --------------------------------------------------------
+ * One NOTICE line per put, whichever way it ends and whoever asked: an
+ * install's tidy step, a fetch or the console. */
+
+/** @brief The one line a put said about @p project, and no other. */
+static void assert_said_once(const char *project, const char *words)
+{
+    char key[256];
+
+    (void)snprintf(key, sizeof(key), "the data folder of '%s'", project);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, log_count(key),
+        "a put says one line about its folder");
+    (void)snprintf(key, sizeof(key), "the data folder of '%s' %s", project, words);
+    TEST_ASSERT_TRUE_MESSAGE(log_says(key), key);
+}
+
+TEST_CASE("a put with an icon says the folder is in place, json and icon",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_said_once("demo", "is in place (json, icon)");
+}
+
+TEST_CASE("a put with no icon says so", "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_klog_reset();
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_said_once("demo", "is in place (json, no icon)");
+}
+
+TEST_CASE("a put that waited past its bound says why it was not written",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+    fake_klog_reset();
+
+    ask_appdata_put("demo", 0U);
+    wait_out_turn();
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_rsp()->rc);
+    assert_said_once("demo", "was not written: a transfer is in flight");
+}
+
+TEST_CASE("a put that is not one a folder takes says so",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_klog_reset();
+
+    ask_appdata_put("bad/name", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_put_status());
+    assert_said_once("bad/name", "was not written: ");
+}
+
+TEST_CASE("a put for want of room says how much a folder needs",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(false);   /* nowhere else to put it */
+    fake_psram_reset();
+    fake_media_set_fs_free(0U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_said_once("demo", "was not written: it needs 8 KB and the internal "
+                             "volume has 0 KB free beyond the 128 KB it keeps");
+}
+
+TEST_CASE("a put on a partition that will not mount says so",
+          "[storage_ao][appdata][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    kdrv_storage_unmount(KDRV_MEDIUM_FS);
+    fake_fs_mount_set_fails(true);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, take_put_status());
+    assert_said_once("demo", "was not written: the internal partition would not mount");
+}
+
+TEST_CASE("a put that fails writing says so once, and says nothing of the folder "
+          "it takes away", "[storage_ao][appdata][say]")
+{
+    char dir[512];
+
+    storage_fresh();
+    fake_psram_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/demo/icon.k64.tmp",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0755));
+    fake_klog_reset();
+    drain_write();
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_put_status());
+    assert_said_once("demo", "was not written: a file would not write");
+}
+
+TEST_CASE("a put whose files will not go in place says so",
+          "[storage_ao][appdata][say]")
+{
+    char dir[512];
+
+    storage_fresh();
+    fake_psram_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    (void)snprintf(dir, sizeof(dir), "%s/.kode/appsdata/demo/icon.k64",
+                   fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0755));
+    fake_klog_reset();
+    drain_write();
+
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, take_put_status());
+    assert_said_once("demo", "was not written: the new files would not go in place");
 }
 
 /* A name that is a directory cannot be created as a file, which is how the
@@ -2088,16 +3102,558 @@ TEST_CASE("put answers after two steps", "[storage_ao][appdata]")
 
     ask_appdata_put("demo", KAPP_ICON_BYTES);
 
-    /* The json is down, the icon is not, and nobody has been told. */
+    /* The json is down under its temporary name, the icon is not, nothing is
+     * in place, and nobody has been told. */
     TEST_ASSERT_NULL(ao_spy_take());
-    TEST_ASSERT_TRUE(fs_size(".kode/appsdata/demo/app.json") > 0L);
+    TEST_ASSERT_TRUE(fs_size(".kode/appsdata/demo/app.json.tmp") > 0L);
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size(".kode/appsdata/demo/app.json"));
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size(".kode/appsdata/demo/icon.k64.tmp"));
     TEST_ASSERT_EQUAL_INT(-1, (int)fs_size(".kode/appsdata/demo/icon.k64"));
 
     TEST_ASSERT_EQUAL_UINT(1U, qf_support_pump(AO_Storage, 1U));
 
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     assert_put_bufs_freed();
-    TEST_ASSERT_EQUAL_INT(12288, (int)fs_size(".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_EQUAL_INT((int)KAPP_ICON_BYTES,
+                          (int)fs_size(".kode/appsdata/demo/icon.k64"));
+}
+
+/* ---- A new data folder the internal volume has no room for goes to the card ---
+ * The reader looks at both media, the internal one first, by app.json, so a
+ * folder on the card is found and shown. A put of a new folder that does not
+ * fit inside is written on the card, in the same two steps with the same
+ * temporaries; a replacement stays on the medium that holds the folder. */
+
+/** @brief The card's copy of "demo"'s app.json, as a file on the card fake. */
+#define CARD_DEMO_JSON  ".kode/appsdata/demo/app.json"
+
+TEST_CASE("a new folder with no room inside lands on the card and is read back "
+          "from it", "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(0U);
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "a folder with no room inside was not taken by the card");
+    assert_put_bufs_freed();
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_sd_dir(), CARD_DEMO_JSON));
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_sd_dir(),
+                                            ".kode/appsdata/demo/icon.k64"));
+    TEST_ASSERT_FALSE_MESSAGE(fake_media_file_exists(fake_media_fs_dir(),
+                                                     ".kode/appsdata/demo"),
+        "the folder was written inside as well");
+    assert_said_once("demo", "is in place on the card (json, icon)");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, log_count("on the card:"),
+        "one put logs one card write line");
+
+    ask_appdata("demo");
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_SD, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+}
+
+TEST_CASE("a put with no card and no room inside is refused full, with the "
+          "numbers", "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_sd_present(false);
+    fake_media_set_fs_free(FLOOR_B + 12U * 1024U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    assert_said_once("demo", "was not written: it needs 20 KB and the internal "
+                             "volume has 12 KB free beyond the 128 KB it keeps");
+}
+
+TEST_CASE("a card that refuses the write leaves nothing behind, and the put "
+          "answers full", "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(0U);
+    fake_sdmmc_fail_file_writes(true);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    assert_said_once("demo", "was not written: it needs 20 KB and the internal "
+                             "volume has 0 KB free beyond the 128 KB it keeps; "
+                             "the card would not take it either");
+    fake_sdmmc_fail_file_writes(false);
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
+                                             ".kode/appsdata/demo"));
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(),
+                                             ".kode/appsdata/demo"));
+}
+
+/* The card says what it has free, and a folder it has no room for is refused
+ * without a write. */
+TEST_CASE("a card with less free than the folder takes is not written",
+          "[storage_ao][appdata][card]")
+{
+    static uint8_t fill[1024U * 1024U];
+
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(0U);
+    fake_sdmmc_set_total_mb(1U);
+    fake_media_put_sd_path("fill.bin", fill, sizeof(fill));
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    assert_said_once("demo", "was not written: it needs 20 KB and the internal "
+                             "volume has 0 KB free beyond the 128 KB it keeps; "
+                             "the card has 0 KB free");
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
+                                             ".kode/appsdata/demo"));
+}
+
+TEST_CASE("a replacement of a folder on the card is written on the card",
+          "[storage_ao][appdata][card]")
+{
+    char got[sizeof(PUT_JSON)];
+
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_sd_path(CARD_DEMO_JSON, OLD_JSON, sizeof(OLD_JSON) - 1U);
+    (void)memset(s_put_icon, 0x5A, sizeof(s_put_icon));
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "a folder that lives on the card was not replaced there");
+    assert_put_bufs_freed();
+    TEST_ASSERT_FALSE_MESSAGE(fake_media_file_exists(fake_media_fs_dir(),
+                                                     ".kode/appsdata/demo"),
+        "the replacement of a card folder was written inside");
+    (void)memset(got, 0, sizeof(got));
+    {
+        char   path[512];
+        FILE  *f;
+        size_t n;
+
+        (void)snprintf(path, sizeof(path), "%s/%s", fake_media_sd_dir(),
+                       CARD_DEMO_JSON);
+        f = fopen(path, "rb");
+        TEST_ASSERT_NOT_NULL(f);
+        n = fread(got, 1U, sizeof(got) - 1U, f);
+        (void)fclose(f);
+        TEST_ASSERT_EQUAL_UINT(strlen(PUT_JSON), n);
+    }
+    TEST_ASSERT_EQUAL_STRING(PUT_JSON, got);
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
+                                             ".kode/appsdata/demo/app.json.tmp"));
+    assert_said_once("demo", "is in place on the card (json, icon)");
+}
+
+/* A replacement of an internal folder stays inside however tight the volume is:
+ * the old folder's place is where its new files go, and the card is for what
+ * has no place yet. */
+TEST_CASE("a replacement of an internal folder never moves to the card",
+          "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", OLD_JSON,
+                           sizeof(OLD_JSON) - 1U);
+    fake_media_set_fs_free((uint64_t)PAIR_64 - 1U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_sd_dir(),
+                                             ".kode/appsdata/demo"));
+    assert_said_once("demo", "was not written: it needs 16 KB beside the old "
+                             "files and the internal volume has 15 KB free");
+}
+
+/* A folder on both media is the reader's to choose: the internal one shows, so
+ * the internal one is what a put replaces, and the card's is left as it is. */
+TEST_CASE("a folder on both media is replaced inside only",
+          "[storage_ao][appdata][card]")
+{
+    static const char card_json[] = "{\"kode\":\"1\",\"name\":\"Card\"}";
+
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", OLD_JSON,
+                           sizeof(OLD_JSON) - 1U);
+    fake_media_put_sd_path(CARD_DEMO_JSON, card_json, sizeof(card_json) - 1U);
+
+    ask_appdata_put("demo", 0U);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+    TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
+                          (int)fs_size(".kode/appsdata/demo/app.json"));
+    {
+        char  path[512];
+        FILE *f;
+
+        (void)snprintf(path, sizeof(path), "%s/%s", fake_media_sd_dir(),
+                       CARD_DEMO_JSON);
+        f = fopen(path, "rb");
+        TEST_ASSERT_NOT_NULL(f);
+        TEST_ASSERT_EQUAL_UINT(sizeof(card_json) - 1U,
+            (unsigned)fseek(f, 0L, SEEK_END) + (unsigned)ftell(f));
+        (void)fclose(f);
+    }
+}
+
+TEST_CASE("appdata_rm removes a folder that is only on the card",
+          "[storage_ao][appdata][card]")
+{
+    storage_fresh();
+    fake_media_put_sd_path(CARD_DEMO_JSON, OLD_JSON, sizeof(OLD_JSON) - 1U);
+    fake_media_put_sd_path(".kode/appsdata/demo/icon.k64", s_put_icon, 16U);
+
+    ask_appdata_rm("demo");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_rm_status(),
+        "a folder only on the card was reported missing");
+    TEST_ASSERT_FALSE_MESSAGE(fake_media_file_exists(fake_media_sd_dir(),
+                                                     ".kode/appsdata/demo"),
+        "the card's folder was left behind");
+}
+
+/* ---- A folder read during a transfer waits for it ---------------------------
+ * The launcher saves its list to the card right after an install, and the
+ * console and the launcher ask for folders in that same moment: a read that
+ * answered "nothing there" drew a row without its name or its icon. */
+
+static uint8_t s_scope_icon[KAPP_ICON_BYTES];
+
+/** @brief Put "scope"'s folder, json and icon, on the internal partition. */
+static void put_scope_folder(void)
+{
+    fake_media_put_fs_path(".kode/appsdata/scope/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/scope/icon.k64", s_scope_icon,
+                           sizeof(s_scope_icon));
+}
+
+/** @brief Ask for @p project's folder as the AO's own loop would deliver it. */
+static void post_read(const char *project)
+{
+    appdata_request(project, ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+}
+
+TEST_CASE("a folder read during a transfer waits for it and is answered with "
+          "the real fields", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    hold_reader();
+
+    post_read("scope");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the read was answered during the "
+                                            "transfer");
+
+    release_reader();
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
+    TEST_ASSERT_EQUAL_STRING("scope", f->project);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_STRING("Scope", f->name);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+}
+
+TEST_CASE("two folder reads during a transfer are both answered, in order",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    hold_reader();
+
+    post_read("other");
+    post_read("scope");
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    TEST_ASSERT_EQUAL_STRING("other", take_fields(0U)->project);
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
+    TEST_ASSERT_EQUAL_STRING("scope", f->project);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
+}
+
+TEST_CASE("a folder read that waits past the bound is answered as it is "
+          "during a transfer", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    hold_reader();
+
+    post_read("scope");
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered before the bound");
+
+    wait_out_turn();
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_NONE, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_NONE, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_BUSY, f->icon_status);
+
+    release_reader();
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read was answered twice");
+}
+
+TEST_CASE("a read over the room for waiting reads is answered at once, and the "
+          "rest in order", "[storage_ao][appdata][read]")
+{
+    char project[8];
+
+    storage_fresh();
+    hold_reader();
+
+    for ( unsigned i = 0U; (KODE_STORAGE_READ_WAIT_DEPTH + 1U) > i; ++i )
+    {
+        (void)snprintf(project, sizeof(project), "p%u", i);
+        post_read(project);
+    }
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("p8", f->project,
+        "the read over the room was not the one answered at once");
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_NONE, f->medium);
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    for ( unsigned i = 0U; KODE_STORAGE_READ_WAIT_DEPTH > i; ++i )
+    {
+        (void)snprintf(project, sizeof(project), "p%u", i);
+        TEST_ASSERT_EQUAL_STRING(project, take_fields(0U)->project);
+    }
+    TEST_ASSERT_NULL(ao_spy_take());
+}
+
+/* An icon travels as KODE_APP_ICON_PIECES events from a pool that holds one
+ * icon's worth, so the next icon cannot start while the last is still with its
+ * reader, and a block that goes back to the pool says nothing: the read tries
+ * again after a pause, inside the same bound, and answers `busy` only when that
+ * runs out. */
+TEST_CASE("a folder read whose icon finds the icon pool short is answered with "
+          "the icon once the blocks are free", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    AppDataIconEvt *held = hold_icon_block();
+
+    post_read("scope");
+    (void)qf_support_tick(AO_Storage, 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
+        "the read was answered with no icon at once");
+
+    QF_gc(&held->super);
+    (void)qf_support_tick(AO_Storage, 5U);
+
+    const AppDataFieldsEvt *f = take_fields(KODE_APP_ICON_PIECES);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_MEDIUM_FS, f->medium);
+    TEST_ASSERT_EQUAL_UINT8(KAPP_JSON_OK, f->json_status);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK, f->icon_status);
+}
+
+/* A retry that finds the pool still short is a look at the pool and nothing
+ * more: a pause that read the icon file again would keep this AO, which ranks
+ * above the reader that must hand the blocks back, busy for the whole wait. The
+ * event pool is emptied here, so a retry that took the fields event first would
+ * find none and answer at once. */
+TEST_CASE("a read that waits for icon blocks takes nothing while they are short",
+          "[storage_ao][appdata][read]")
+{
+    AppDataFieldsEvt *fill[KQP_MEDIUM_POOL_COUNT];
+    unsigned          n = 0U;
+
+    storage_fresh();
+    put_scope_folder();
+    AppDataIconEvt *held = hold_icon_block();
+
+    post_read("scope");
+    while ( KQP_MEDIUM_POOL_COUNT > n )
+    {
+        fill[n] = Q_NEW_X(AppDataFieldsEvt, 0U, APPDATA_FIELDS_SIG);
+        if ( NULL == fill[n] )
+        {
+            break;
+        }
+        ++n;
+    }
+    (void)qf_support_tick(AO_Storage, 10U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(),
+        "a retry took what it needs from the event pool before the blocks "
+        "were free");
+
+    for ( unsigned i = 0U; n > i; ++i )
+    {
+        QF_gc(&fill[i]->super);
+    }
+    QF_gc(&held->super);
+    (void)qf_support_tick(AO_Storage, 5U);
+    TEST_ASSERT_EQUAL_UINT8(APPDATA_ICON_OK,
+                            take_fields(KODE_APP_ICON_PIECES)->icon_status);
+}
+
+TEST_CASE("a read that waits for an icon block keeps the reads behind it in "
+          "order", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    AppDataIconEvt *held = hold_icon_block();
+
+    post_read("scope");
+    post_read("other");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a read went ahead of the one "
+                                            "that waits for its icon");
+
+    QF_gc(&held->super);
+    (void)qf_support_tick(AO_Storage, 5U);
+    TEST_ASSERT_EQUAL_STRING("scope", take_fields(KODE_APP_ICON_PIECES)->project);
+    TEST_ASSERT_EQUAL_STRING("other", take_fields(0U)->project);
+}
+
+/* A manifest read is the same read seen from the listing: a project dropped
+ * from `appdata_ls` because its .bin was read during a transfer is the fault a
+ * folder read answered "nothing there" is. It waits in the same line. */
+
+/** @brief Take the next answer and assert it is a manifest answer. */
+static const StorageDescRspEvt *take_desc(void)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the manifest read went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_DESC_RSP_SIG, (int)e->sig);
+    return (const StorageDescRspEvt *)e;
+}
+
+TEST_CASE("a manifest read during a transfer waits for it and is answered with "
+          "the project", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    hold_reader();
+
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the manifest was answered during "
+                                            "the transfer");
+
+    release_reader();
+    const StorageDescRspEvt *r = take_desc();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_STRING("demo", r->project);
+    TEST_ASSERT_EQUAL_STRING("demo.bin", r->name);
+}
+
+TEST_CASE("a manifest read that waits past the bound is refused as it is during "
+          "a transfer", "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    hold_reader();
+
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_tick(AO_Storage, TURN_STEPS - 5U);
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "refused before the bound");
+
+    wait_out_turn();
+    const StorageDescRspEvt *r = take_desc();
+    TEST_ASSERT_NOT_EQUAL((uint8_t)KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_STRING("", r->project);
+
+    release_reader();
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a manifest was answered twice");
+}
+
+TEST_CASE("a manifest read and a folder read wait in one line, in order",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    put_scope_folder();
+    hold_reader();
+
+    post_read("scope");
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    TEST_ASSERT_EQUAL_STRING("scope", take_fields(KODE_APP_ICON_PIECES)->project);
+    TEST_ASSERT_EQUAL_STRING("demo", take_desc()->project);
+    TEST_ASSERT_EQUAL_STRING("demo", take_desc()->project);
+    TEST_ASSERT_NULL(ao_spy_take());
+}
+
+/* A case that stops where it is, with a read waiting under its bound, leaves
+ * that time event armed, and the next case builds the AO again over it: QF's
+ * list of armed time events can then run in a cycle that the next tick walks
+ * for ever. storage_fresh() disarms the AO's time events first. */
+TEST_CASE("disarming the AO's time events leaves none to fire",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_scope_folder();
+    hold_reader();
+    post_read("scope");              /* its bound is armed */
+
+    qf_support_disarm_timers(AO_Storage);
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS) + 10U);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U,
+        qf_support_waiting_of(AO_Storage, STORAGE_READ_TO_SIG),
+        "the bound fired after it was disarmed");
+    qf_support_reap_timers();
+}
+
+/* A write that waits and a read that waits: the write goes first. A read costs
+ * nothing and changes nothing, so it can wait for a write a moment; a write
+ * served after the read that arrived beside it would leave that read describing
+ * the folder the write is about to replace. Reads never starve a write, which
+ * is taken up before any of them. */
+TEST_CASE("a waiting write is served before a waiting read, which then sees it",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    hold_reader();
+
+    post_read("demo");                 /* the read arrives first */
+    ask_appdata_put("demo", 0U);
+    TEST_ASSERT_NULL(ao_spy_take());
+
+    release_reader();
+    drain_write();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "the read was answered before the write");
+    const AppDataFieldsEvt *f = take_fields(0U);
+    TEST_ASSERT_EQUAL_STRING("demo", f->project);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPDATA_MEDIUM_FS, f->medium,
+        "the read did not see the folder the write made");
 }
 
 /* ---- The card's fields ------------------------------------------------------ */
@@ -2345,7 +3901,7 @@ TEST_CASE("the card row leaves nothing of its own behind and does not format",
  * middle of the run did with it: leaving a unit on four data lines after a
  * production test would leave a counterfeit card one failed write away from a
  * controller that only a reset brings back. */
-TEST_CASE("the card row hands the slot back at one data line",
+TEST_CASE("the card row hands the slot back on the everyday width",
           "[storage_ao]")
 {
     bool    ok[SD_TEST_STEPS];
@@ -2359,6 +3915,90 @@ TEST_CASE("the card row hands the slot back at one data line",
     TEST_ASSERT_TRUE(take_verdict("sd"));
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width));
     TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
+}
+
+/** @brief How many calls the card seam traced whose text starts with @p what. */
+static unsigned traced(const char *what)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_sdmmc_trace_count() > i; ++i )
+    {
+        const char * const line = fake_sdmmc_trace_line(i);
+
+        if ( (NULL != line) && (strncmp(line, what, strlen(what)) == 0) )
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/* The row judges the slot, so its four lines are mounted as asked. The check
+ * that keeps a counterfeit card off four lines would narrow the card before
+ * the row looked, and a bad card would fail a good board. */
+TEST_CASE("the card row's four-line mount does no write check", "[storage_ao]")
+{
+    sd_script_fresh();
+    fake_sdmmc_fail_wide_writes(true);   /* reads on four lines, takes no write */
+    fake_sdmmc_fresh_card();
+    fake_sdmmc_trace_reset();
+
+    ask_sd_test();
+    TEST_ASSERT_TRUE(run_sd_job());      /* the script's remount */
+
+    TEST_ASSERT_EQUAL_UINT(2U, fake_sdmmc_trace_count());
+    TEST_ASSERT_EQUAL_STRING("unmount", fake_sdmmc_trace_line(0U));
+    TEST_ASSERT_EQUAL_STRING("mount 4", fake_sdmmc_trace_line(1U));
+
+    run_sd_script();
+    const StorageTestEvt * const t = take_phase(SD_TEST_IDENTIFY);
+    TEST_ASSERT_TRUE_MESSAGE(t->ok, "the card was narrowed before the row looked");
+    TEST_ASSERT_EQUAL_UINT8(4U, t->width);
+}
+
+/* A card that takes no write on four lines is the card's fault, not the
+ * slot's: the row passes it, and the mount that follows the row - the slot
+ * handed back on the everyday width - is the checked one, which leaves the
+ * card on one line. The row asks for nothing more after that: a card on the
+ * line it was judged to need is where an everyday mount puts it. */
+TEST_CASE("the card row on a card that takes no write on four lines passes the "
+          "slot and hands the card back on one line", "[storage_ao]")
+{
+    unsigned const chunks = (KODE_SD_TEST_KB * 1024U) / (32U * 1024U);
+    int32_t        width  = 0;
+
+    sd_script_fresh();
+    fake_sdmmc_fail_wide_writes(true);
+    fake_sdmmc_fresh_card();
+    fake_sdmmc_trace_reset();
+
+    ask_sd_test();
+    run_sd_script();
+
+    const StorageTestEvt *t = take_phase(SD_TEST_IDENTIFY);
+    TEST_ASSERT_TRUE(t->ok);
+    TEST_ASSERT_EQUAL_UINT8(4U, t->width);
+    t = take_phase(SD_TEST_READ4);
+    TEST_ASSERT_TRUE(t->ok);
+    TEST_ASSERT_EQUAL_UINT8(4U, t->width);
+    t = take_phase(SD_TEST_READ1);
+    TEST_ASSERT_TRUE(t->ok);
+    TEST_ASSERT_EQUAL_UINT8(1U, t->width);
+    TEST_ASSERT_TRUE(take_phase(SD_TEST_WRITE)->ok);
+    TEST_ASSERT_TRUE(take_phase(SD_TEST_VERIFY)->ok);
+    TEST_ASSERT_TRUE_MESSAGE(take_verdict("sd"), "a bad card condemned a good slot");
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, traced("write"),
+                                   "one failed write: the checked mount after "
+                                   "the row");
+    TEST_ASSERT_EQUAL_UINT(2U, traced("mount 4"));    /* the row's, the restore's */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((2U * chunks) + 3U, sd_jobs_run,
+                                   "a card on one line was remounted for it");
+    TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width));
+    TEST_ASSERT_EQUAL_INT32(1, width);
+    TEST_ASSERT_TRUE(kdrv_sd_mounted_everyday());
 }
 
 /* Three of the four data lines not reaching the slot is a defect of the unit,
@@ -2391,14 +4031,15 @@ TEST_CASE("an empty slot fails the board's verdict", "[storage_ao]")
 }
 
 /* The heart of the row: a data line that does not carry shows up as a read
- * that will not complete, because the peripheral checks a CRC per line. */
+ * that will not complete, because the peripheral checks a CRC per line. The
+ * one read the mount makes to prove the card passes; the row's are behind it. */
 TEST_CASE("a four-line read that will not complete fails the board's verdict",
           "[storage_ao]")
 {
     bool ok[SD_TEST_STEPS];
 
     sd_script_fresh();
-    fake_sdmmc_fail_reads(true);
+    fake_sdmmc_fail_reads_after(1U);
 
     ask_sd_test();
     run_sd_script();
@@ -3026,9 +4667,9 @@ TEST_CASE("a done event that is not the call's is dropped by its sequence",
  * create() may place it on the internal partition and a PSRAM stack must not
  * touch that flash. So the count of calls the worker makes is the audit: a
  * remount to start, the four-line chunks, a remount onto one line and its
- * chunks - and no call for the file. The file is written on that one line,
- * the width the slot is handed back at, so no remount comes before it or
- * after the verdict. */
+ * chunks, a remount back onto the everyday width - and no call for the file.
+ * The file is written on that width, the one the slot is handed back at, so
+ * no remount comes after the verdict. */
 TEST_CASE("the card row's remounts and raw reads are jobs; its file is not",
           "[storage_ao][worker]")
 {
@@ -3038,7 +4679,7 @@ TEST_CASE("the card row's remounts and raw reads are jobs; its file is not",
     ask_sd_test();
     run_sd_script();
 
-    TEST_ASSERT_EQUAL_UINT((2U * chunks) + 2U, sd_jobs_run);
+    TEST_ASSERT_EQUAL_UINT((2U * chunks) + 3U, sd_jobs_run);
     TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
     TEST_ASSERT_TRUE(take_phase(SD_TEST_IDENTIFY)->ok);
 }
@@ -3057,6 +4698,23 @@ TEST_CASE("sd_verify's probe and format are jobs", "[storage_ao][worker]")
     TEST_ASSERT_TRUE(take_phase(SD_VERIFY_PROBE)->ok);
     TEST_ASSERT_TRUE(take_phase(SD_VERIFY_FORMAT)->ok);
     TEST_ASSERT_TRUE(take_verdict("sd_verify"));
+}
+
+/* sd_verify judges the card on the width it is used at: through the checked
+ * mount, whatever an earlier run or a bench session left in the knob. */
+TEST_CASE("sd_verify mounts the card the everyday way", "[storage_ao]")
+{
+    sd_script_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_set(KDRV_SD_CHECK_REQ, 0));
+    fake_sdmmc_fresh_card();
+    fake_sdmmc_trace_reset();
+
+    ask_sd_verify();
+    TEST_ASSERT_TRUE(run_sd_job());      /* the script's remount */
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, traced("write"), "the card was not checked");
+    TEST_ASSERT_TRUE(kdrv_sd_mounted_everyday());
+    run_sd_script();
 }
 
 TEST_CASE("a card row with no room for a call is refused and answered",
@@ -3125,10 +4783,11 @@ TEST_CASE("a call that overruns inside the card row ends the run with a false "
                              "the AO stayed wedged after the late return");
 }
 
-/* An overrun in the four-line read leaves the slot on four data lines: it is
- * put back on one when the call returns, not skipped. */
-TEST_CASE("a call that overruns on four data lines puts the slot back on one "
-          "when it returns", "[storage_ao][worker]")
+/* An overrun in the four-line read leaves the slot on four lines the row asked
+ * for without the write check: it is put back through the checked mount when
+ * the call returns, not skipped. */
+TEST_CASE("a call that overruns on four data lines puts the slot back through "
+          "the checked mount when it returns", "[storage_ao][worker]")
 {
     unsigned const steps =
         QF_SUPPORT_STEPS(KDRV_SD_SECTORS_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS);
@@ -3142,6 +4801,7 @@ TEST_CASE("a call that overruns on four data lines puts the slot back on one "
     TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(SD_WORKER));
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
     TEST_ASSERT_EQUAL_INT32((int32_t)KBSP_SD_WIDTH, width);
+    TEST_ASSERT_FALSE(kdrv_sd_mounted_everyday());
     ao_spy_drain();
 
     (void)qf_support_tick(AO_Storage, steps);
@@ -3151,18 +4811,18 @@ TEST_CASE("a call that overruns on four data lines puts the slot back on one "
 
     TEST_ASSERT_TRUE(run_sd_job());     /* the late chunk comes back... */
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
-                                   "the width was not asked for back");
+                                   "the card was left without its check");
     TEST_ASSERT_TRUE(run_sd_job());     /* ...and the remount puts it right. */
+    TEST_ASSERT_TRUE(kdrv_sd_mounted_everyday());
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
     TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 }
 
-/* An overrun in the one-line read leaves the slot on the width it is handed
- * back at already: the late return owes nothing, and asking the card for a
- * remount anyway would be a call for no reason. */
-TEST_CASE("a call that overruns on one data line owes no remount when it "
-          "returns", "[storage_ao][worker]")
+/* An overrun in the one-line read leaves the slot on one data line: it is put
+ * back on the width it is handed back at when the call returns, not skipped. */
+TEST_CASE("a call that overruns on one data line puts the slot back on four "
+          "when it returns", "[storage_ao][worker]")
 {
     unsigned const steps =
         QF_SUPPORT_STEPS(KDRV_SD_SECTORS_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS);
@@ -3185,7 +4845,7 @@ TEST_CASE("a call that overruns on one data line owes no remount when it "
     (void)qf_support_pump(AO_Storage, 8U);
     TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(SD_WORKER));
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
-    TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
+    TEST_ASSERT_EQUAL_INT32(1, width);
     ao_spy_drain();
 
     (void)qf_support_tick(AO_Storage, steps);
@@ -3193,10 +4853,10 @@ TEST_CASE("a call that overruns on one data line owes no remount when it "
     TEST_ASSERT_FALSE_MESSAGE(take_verdict("sd"),
                               "an overrun is the slot's, not a pass");
 
-    TEST_ASSERT_TRUE(run_sd_job());     /* the late chunk comes back */
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(SD_WORKER),
-                                   "a remount was asked for a slot already "
-                                   "on one data line");
+    TEST_ASSERT_TRUE(run_sd_job());     /* the late chunk comes back... */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
+                                   "the width was not asked for back");
+    TEST_ASSERT_TRUE(run_sd_job());     /* ...and the remount puts it right. */
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
     TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
@@ -3269,22 +4929,18 @@ TEST_CASE("an unmount the worker cannot take is answered and leaves the card "
  * phase has been judged, so no second record is made for a phase that passed
  * (here the identify's, already published), and the width stays owed - also
  * when the call that pays it overruns in turn. The identify ends the run on
- * four lines (the card is smaller than the test), so the slot has a line to
- * be put back on; the controller then goes away, as it does while the C5's
- * link is down, so no remount reaches one line until it is back. */
+ * one line (the card will not come up on more), so the slot has lines to be
+ * put back on; the controller then goes away, as it does while the C5's link
+ * is down, so no remount reaches the everyday width until it is back. */
 TEST_CASE("an overrun of the final width restore adds no record and keeps the "
           "width owed", "[storage_ao][worker]")
 {
     unsigned const steps =
         QF_SUPPORT_STEPS(KDRV_SD_MOUNT_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS);
-    khal_sdmmc_card_t card;
-    int32_t           width = 0;
+    int32_t        width = 0;
 
     sd_script_fresh();
-    fake_sdmmc_default_card(&card);
-    card.sectors = 2U * ((KODE_SD_TEST_KB * 1024U)
-                         / (uint32_t)card.sector_size);
-    fake_sdmmc_set_card(&card);         /* the identify fails on four lines */
+    fake_sdmmc_set_max_width(1U);       /* the identify fails: one line */
     ask_sd_test();
 
     TEST_ASSERT_TRUE(run_sd_job());     /* the script's remount */
@@ -3311,6 +4967,7 @@ TEST_CASE("an overrun of the final width restore adds no record and keeps the "
 
     /* The controller is back, and the remount that pays the width lands. */
     fake_sdmmc_set_deny(false);
+    fake_sdmmc_set_max_width(4U);
     TEST_ASSERT_TRUE(run_sd_job());
     (void)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width);
     TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, width);
@@ -3346,6 +5003,62 @@ TEST_CASE("a page of the image listing waits behind a card call",
     TEST_ASSERT_EQUAL_INT(STORAGE_LIST_END_SIG, (int)end->super.sig);
     TEST_ASSERT_FALSE(end->more);
     ao_spy_drain();
+}
+
+/* The rescan's unmount is refused while a transfer holds the card, which is
+ * what keeps the card mounted under it - and the listing behind it walks the
+ * card as it is mounted. Expected in that window, so it is no warning. */
+TEST_CASE("a rescan during a transfer lists the mounted card, and the refused "
+          "unmount is no warning", "[storage_ao][worker][pages]")
+{
+    unsigned entries = 0U;
+    unsigned ends    = 0U;
+    bool     said    = false;
+
+    storage_fresh();
+    make_sd_file("a.bin");
+    make_sd_file("held.bin");
+    ask_mount_job();
+    (void)run_sd_job();
+    ao_spy_drain();
+    ask_open("/sdcard/held.bin");        /* a transfer on the card */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+
+    storage_list_request(ao_spy());
+    settle_card();
+    ao_spy_drain();
+    fake_klog_reset();
+    storage_list_request(ao_spy());      /* a rescan: it unmounts first */
+    settle_card();
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_storage_mounted(KDRV_MEDIUM_SD),
+        "the refused unmount left the card unmounted");
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( STORAGE_ENTRY_SIG == (int)e->sig )
+        {
+            ++entries;
+        }
+        if ( STORAGE_LIST_END_SIG == (int)e->sig )
+        {
+            ++ends;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, entries, "the listing did not find the "
+                                                "card's two images");
+    TEST_ASSERT_EQUAL_UINT(1U, ends);
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const line = fake_klog_line(i);
+
+        if ( (NULL != line) && (strstr(line, "unmount is refused") != NULL) )
+        {
+            said = true;
+            TEST_ASSERT_NULL_MESSAGE(strstr(line, "!W"),
+                "the refused unmount was a warning");
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(said, "the refused unmount was not logged at all");
 }
 
 TEST_CASE("a page over the hold queue's room is answered with its end",

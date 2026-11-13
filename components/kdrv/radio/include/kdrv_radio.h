@@ -41,7 +41,9 @@ typedef enum {
     KDRV_RADIO_JOB_WIFI_PREPARE, /**< Ready this side for a join the C5
                                   *   makes from its vault: station and
                                   *   netif up, the old network left, the
-                                  *   bits cleared (kdrv_wifi_prepare()). */
+                                  *   radio held to the band of req.channel,
+                                  *   the bits cleared
+                                  *   (kdrv_wifi_prepare()).               */
     KDRV_RADIO_JOB_WIFI_AWAIT,   /**< Wait for that join's lease
                                   *   (kdrv_wifi_await()); ends as
                                   *   a join this side made does, with the
@@ -59,9 +61,10 @@ typedef enum {
                                   *   req.on, first the scan response a
                                   *   BLE_RSP would set, from the same
                                   *   fields.                               */
-    KDRV_RADIO_JOB_BLE_ADV,      /**< Start or stop advertising (req.on).
-                                  *   Carries no duration: an advert lasts
-                                  *   until it is taken or stopped.         */
+    KDRV_RADIO_JOB_BLE_ADV,      /**< Start or stop advertising (req.on), as
+                                  *   req.itvl, req.len, req.hidden and
+                                  *   req.pulsed plan it. With no req.len an
+                                  *   advert lasts until it is taken or stopped. */
     KDRV_RADIO_JOB_BLE_SCAN,     /**< Listen for advertisers for req.len ms. */
     KDRV_RADIO_JOB_BLE_QUIET,    /**< Stop advertising and hang up, leaving
                                   *   the host running. What `ble_down` uses;
@@ -146,7 +149,10 @@ typedef struct {
                               *   BLE_FIND: the name. BLE_RSP, BLE_START:
                               *   the board's name, "" for the serial.       */
     char             ssid2[KDRV_RADIO_SSID_BYTES]; /**< WIFI_PROBE: the second network, "" for none. */
-    uint8_t          channel;  /**< WIFI_PROBE: the channel to listen on.       */
+    uint8_t          channel;  /**< WIFI_PROBE: the channel to listen on.
+                              *   WIFI_PREPARE: the channel of the access
+                              *   point the join is aimed at, 0 for none
+                              *   (KDRV_WIFI_CHANNEL_ANY).                   */
     uint16_t         dwell_ms; /**< WIFI_PROBE: the time on it.                 */
     char             pass[65];
     const uint8_t   *data;   /**< C5_WRITE, BLE_RSP, BLE_START: borrowed until the
@@ -155,6 +161,7 @@ typedef struct {
                               *   BLE_ADV: the time on the air in ms, 0 for no end. */
     uint16_t         itvl;   /**< BLE_ADV: the interval (KDRV_BLE_ITVL_*); 0 for slow. */
     bool             hidden; /**< BLE_ADV: hide the board (kdrv_ble_adv_plan()). */
+    bool             pulsed; /**< BLE_ADV: send the advert in pulses (kdrv_ble_adv_plan()). */
     bool             on;     /**< BLE_ADV: start or stop. WIFI_PS: modem save
                               *   (true) or none (false). EXP_POWER:
                               *   J3's supply on (true) or off.
@@ -277,34 +284,57 @@ bool kdrv_radio_c5_held(void);
 /** How long the C5 is given to boot after its reset line is released:
  * esp-hosted's own wait (CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS), asserted
  * against it in kdrv_radio.c. */
-/* cppcheck-suppress misra-c2012-2.5 ; read by kdrv_radio.c alone, no twin */
 #define KDRV_RADIO_C5_BOOT_MS   1500U
 
+/** How long the C5 waits after answering an activate before it restarts into
+ * the new image: esp-hosted's slave arms a one-shot of this length
+ * (RESTART_TIMEOUT, slave_control.c) and then calls esp_restart(). */
+#define KDRV_RADIO_C5_ACTIVATE_MS 2000U
+
 /**
- * @brief The role of the firmware a deliberate restart goes to.
+ * @brief What a deliberate restart tells the next firmware about the C5.
  *
- * A note names it, and a firmware keeps a parked C5 only when the note names
- * its own role: the only firmware that can read a note meant for another is
- * one built before the note existed, which ignores it.
+ * A jump names the role of the firmware it goes to, and a firmware keeps a
+ * parked C5 only when the note names its own role: the only firmware that can
+ * read a note meant for another is one built before the note existed, which
+ * ignores it. An update names no role.
  */
 typedef enum {
-    KDRV_RADIO_NOTE_OS  = 1,    /**< A jump home: kodeOS.                     */
-    KDRV_RADIO_NOTE_APP = 2,    /**< A jump to an app.                        */
+    KDRV_RADIO_NOTE_OS     = 1, /**< A jump home: kodeOS.                     */
+    KDRV_RADIO_NOTE_APP    = 2, /**< A jump to an app.                        */
+    KDRV_RADIO_NOTE_UPDATE = 3, /**< The C5 runs an update it has not
+                                 *   confirmed: a closed C5 confirms it at the
+                                 *   first KODE request, and its bootloader
+                                 *   goes back to the old image if a reset
+                                 *   comes first.                            */
 } kdrv_radio_note_t;
 
 /**
  * @brief Leave the handover note for the next firmware.
  *
- * Call it only after the C5 has answered the park with OK, right before the
- * restart. The note is one word in a register of the chip's
+ * Call it right before the restart: for a jump, only after the C5 has
+ * answered the park with OK; for an update, once the C5 has restarted into
+ * the new image. The note is one word in a register of the chip's
  * low-power domain: it survives esp_restart() and every reset but a power-on,
  * whichever firmware runs next. The next firmware's first link reads it and erases it,
  * and keeps the C5 running only when every condition of the rule holds;
  * otherwise it resets the C5 as it always did.
  *
- * @param target The role of the firmware the restart goes to.
+ * @param target What the restart leaves the C5 doing.
  */
 void kdrv_radio_note_leave(kdrv_radio_note_t target);
+
+/**
+ * @brief Whether this boot found an update note its first link has not read
+ *        yet.
+ *
+ * Reads the note without erasing it, so a boot that wants neither Wi-Fi nor
+ * BLE can still bring the link up once, and the new image is confirmed
+ * instead of held in reset and given up.
+ *
+ * @return true for a KDRV_RADIO_NOTE_UPDATE note after a software reset.
+ */
+bool kdrv_radio_note_update_waits(void);
 
 /**
  * @brief Make the lock that gives synchronous RPCs to the C5 their turns

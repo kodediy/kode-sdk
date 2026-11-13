@@ -266,6 +266,91 @@ TEST_CASE("nvs_del with a key too long for the store is refused", "[console_apps
     console_end();
 }
 
+/* ---- app_run ------------------------------------------------------------------ */
+
+/** @brief Hand the console AO_AppMgr's verdict on a request, as it posts it. */
+static void verdict(app_req_verdict_t v)
+{
+    AppReqRspEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super   = (QEvt)QEVT_INITIALIZER(APP_REQ_RSP_SIG);
+    e.verdict = (uint8_t)v;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief The one request of kind @p sig AO_AppMgr's queue holds, or NULL; the caller frees. */
+static const QEvt *appmgr_took(enum_t sig)
+{
+    const QEvt *e = NULL;
+
+    if ( (xQueueReceive(AO_AppMgr->eQueue, &e, 0U) == pdTRUE) && ((enum_t)e->sig != sig) )
+    {
+        QF_gc(e);
+        e = NULL;
+    }
+    return e;
+}
+
+/* `>ok` on an `app_run` says AO_AppMgr has the app on its way to boot. A name
+ * nobody installed, or an AO_AppMgr with work in hand, is told to the person
+ * who typed it. */
+TEST_CASE("app_run waits for AO_AppMgr's verdict on the installed app it names",
+          "[console_apps]")
+{
+    console_up();
+    ask("app_run name=\"scope\"");
+
+    const AppFlashEvt * const req = (const AppFlashEvt *)appmgr_took(APP_RUN_REQ_SIG);
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_EQUAL_STRING("scope", req->file);
+    TEST_ASSERT_TRUE_MESSAGE(AO_Console == req->who,
+        "the request does not say who is waiting for the verdict");
+    QF_gc(&req->super);
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), "the line answered before the verdict");
+
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_TRUE(replied(">ok"));
+    console_end();
+}
+
+TEST_CASE("app_run of an app that is not installed, or while AO_AppMgr is busy, is an error",
+          "[console_apps]")
+{
+    console_up();
+    ask("app_run name=\"ghost\"");
+    appmgr_queue_drained();
+    verdict(APP_REQ_MISSING);
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=missing"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    ask("app_run name=\"scope\"");
+    appmgr_queue_drained();
+    verdict(APP_REQ_BUSY);
+    TEST_ASSERT_TRUE(replied(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+    console_end();
+}
+
+TEST_CASE("app_run of a .bin asks for it to be installed and booted, and waits the same way",
+          "[console_apps]")
+{
+    console_up();
+    ask("app_run name=\"scope.bin\"");
+
+    const FlashReqEvt * const req = (const FlashReqEvt *)appmgr_took(FLASH_REQ_SIG);
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_EQUAL_STRING("scope.bin", req->src);
+    TEST_ASSERT_TRUE(req->launch);
+    TEST_ASSERT_TRUE(AO_Console == req->who);
+    QF_gc(&req->super);
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    verdict(APP_REQ_MISSING);
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=missing"));
+    console_end();
+}
+
 /* ---- app_erase --------------------------------------------------------------- */
 
 /**

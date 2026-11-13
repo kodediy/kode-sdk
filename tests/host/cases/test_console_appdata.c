@@ -630,7 +630,7 @@ TEST_CASE("appdata_get says why no folder was made", "[console_appdata]")
         appdata_get_why_t why;
         const char       *line;
     } CASES[] = {
-        { APPDATA_GET_BUSY,  ">err code=5 msg=busy"  },
+        { APPDATA_GET_BUSY,  ">err code=4 msg=busy"  },   /* busy is code 4 on every verb */
         { APPDATA_GET_NAME,  ">err code=5 msg=name"  },
         { APPDATA_GET_FETCH, ">err code=5 msg=fetch" },
         { APPDATA_GET_JSON,  ">err code=5 msg=json"  },

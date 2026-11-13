@@ -795,29 +795,31 @@ static kode_status_t http_exchange(const char *url,
             err = ESP_FAIL;
         }
     }
+    const char *verb = "GET";
+    if ( HTTP_METHOD_POST == method )
+    {
+        verb = "POST";
+    }
+    if ( HTTP_METHOD_PUT == method )
+    {
+        verb = "PUT";
+    }
     if ( ESP_OK != err )
     {
-        const char *verb = "GET";
-        if ( HTTP_METHOD_POST == method )
-        {
-            verb = "POST";
-        }
-        if ( HTTP_METHOD_PUT == method )
-        {
-            verb = "PUT";
-        }
         KLOG_W(TAG, "%s %s: %s", verb, shown, esp_err_to_name(err));
         rc = KODE_ERROR;
     }
     else
     {
         int64_t const cl = esp_http_client_fetch_headers(h);
-        if ( (HTTP_METHOD_PUT == method) && (0 > cl) )
+        if ( 0 > cl )
         {
-            /* No answer came: a kept connection the server closed meanwhile
-             * takes the request in its socket buffer and fails here. Reading
-             * on would report the old reply's end as this one's. */
-            KLOG_W(TAG, "PUT %s: no answer", shown);
+            /* No answer came: the server ended the connection before a
+             * status line, or a kept connection it had closed meanwhile took
+             * the request in its socket buffer and fails here. Reading on
+             * would report a status nobody sent, or the old reply's end as
+             * this one's. */
+            KLOG_W(TAG, "%s %s: no answer", verb, shown);
             rc = KODE_ERROR;
         }
         else

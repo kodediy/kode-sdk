@@ -2237,6 +2237,186 @@ TEST_CASE("a folder of exactly twenty-four files does not say more", "[kode_file
     file_no_settle();
 }
 
+/** @brief Fill the internal volume's root with TEST_MANY_FILES files, f00.txt on. */
+static void put_many_files(void)
+{
+    char name[TEST_NAME_BYTES];
+
+    for ( uint32_t i = 0U; TEST_MANY_FILES > i; i++ )
+    {
+        (void)snprintf(name, sizeof(name), "f%02lu.txt", (unsigned long)i);
+        put_fs_bytes(name, 1U);
+    }
+}
+
+/** @brief Count each fNN.txt of @p list in @p seen, one slot a file. */
+static void mark_seen(const kode_file_list_t *list, uint8_t seen[TEST_MANY_FILES])
+{
+    for ( uint32_t i = 0U; i < list->count; i++ )
+    {
+        const unsigned long n = strtoul(&list->entries[i].name[1], NULL, 10);
+
+        if ( TEST_MANY_FILES > n )
+        {
+            seen[n]++;
+        }
+    }
+}
+
+TEST_CASE("a listing from the twenty-fourth entry gives the six left and no more", "[kode_file]")
+{
+    const kode_file_list_t *list;
+    uint8_t                 seen[TEST_MANY_FILES] = { 0U };
+
+    file_fresh();
+    put_many_files();
+
+    list = kode_file_list_from("flash", 0U);
+    TEST_ASSERT_EQUAL_UINT32(KODE_FILE_LIST_MAX, list->count);
+    TEST_ASSERT_TRUE(list->more);
+    mark_seen(list, seen);
+
+    list = kode_file_list_from("flash", KODE_FILE_LIST_MAX);
+    TEST_ASSERT_NOT_NULL(list);
+    TEST_ASSERT_EQUAL_UINT32(TEST_MANY_FILES - KODE_FILE_LIST_MAX, list->count);
+    TEST_ASSERT_FALSE(list->more);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    mark_seen(list, seen);
+
+    /* The two pages name every file once. */
+    for ( uint32_t i = 0U; TEST_MANY_FILES > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_UINT8(1U, seen[i]);
+    }
+    file_no_settle();
+}
+
+/** @brief Entries to skip so that exactly one full page is left of the many files. */
+#define TEST_SKIP_TO_LAST_PAGE (TEST_MANY_FILES - KODE_FILE_LIST_MAX)
+
+/** @brief A skip into the first page, two entries in. */
+#define TEST_SKIP_SOME 2U
+
+/** @brief How far past the last entry the too-far listing asks. */
+#define TEST_SKIP_PAST 100U
+
+/** @brief Whether a captured log line holds @p words. */
+static bool file_log_says(const char *words)
+{
+    bool found = false;
+
+    for ( unsigned i = 0U; (!found) && (fake_klog_count() > i); ++i )
+    {
+        found = (strstr(fake_klog_line(i), words) != NULL);
+    }
+    return found;
+}
+
+TEST_CASE("a listing that leaves exactly one page gives it whole and no more", "[kode_file]")
+{
+    const kode_file_list_t *list;
+
+    file_fresh();
+    put_many_files();
+
+    list = kode_file_list_from("flash", TEST_SKIP_TO_LAST_PAGE);
+    TEST_ASSERT_EQUAL_UINT32(KODE_FILE_LIST_MAX, list->count);
+    TEST_ASSERT_FALSE(list->more);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    file_no_settle();
+}
+
+TEST_CASE("a folder read page by page names every entry once and logs no warning", "[kode_file]")
+{
+    const kode_file_list_t *list;
+    uint8_t                 seen[TEST_MANY_FILES] = { 0U };
+    uint32_t                skip  = 0U;
+    uint32_t                pages = 0U;
+
+    file_fresh();
+    put_many_files();
+    fake_klog_reset();
+
+    do
+    {
+        list = kode_file_list_from("flash", skip);
+        mark_seen(list, seen);
+        skip += list->count;
+        pages++;
+    } while ( list->more && (TEST_MANY_FILES > pages) );
+
+    TEST_ASSERT_EQUAL_UINT32(2U, pages);
+    TEST_ASSERT_EQUAL_UINT32(TEST_MANY_FILES, skip);
+    for ( uint32_t i = 0U; TEST_MANY_FILES > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_UINT8(1U, seen[i]);
+    }
+    /* A full page is how a long folder is read, not something that went wrong. */
+    TEST_ASSERT_FALSE_MESSAGE(file_log_says("listing stopped"), "a full page was logged as a warning");
+    file_no_settle();
+}
+
+TEST_CASE("a listing from the third entry of thirty is a full page and says more", "[kode_file]")
+{
+    const kode_file_list_t *list;
+    char                    third[KODE_FILE_NAME_MAX];
+    char                    fourth[KODE_FILE_NAME_MAX];
+
+    file_fresh();
+    put_many_files();
+
+    /* The listing is the task's until its next one: keep the two names. */
+    list = kode_file_list_from("flash", 0U);
+    (void)snprintf(third, sizeof(third), "%s", list->entries[TEST_SKIP_SOME].name);
+    (void)snprintf(fourth, sizeof(fourth), "%s", list->entries[TEST_SKIP_SOME + 1U].name);
+
+    list = kode_file_list_from("flash", TEST_SKIP_SOME);
+    TEST_ASSERT_EQUAL_UINT32(KODE_FILE_LIST_MAX, list->count);
+    TEST_ASSERT_TRUE(list->more);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_STRING(third, list->entries[0].name);
+    TEST_ASSERT_EQUAL_STRING(fourth, list->entries[1].name);
+    file_no_settle();
+}
+
+TEST_CASE("a listing from past the last entry is empty and is no error", "[kode_file]")
+{
+    const kode_file_list_t *list;
+
+    file_fresh();
+    put_many_files();
+
+    list = kode_file_list_from("flash", TEST_MANY_FILES);
+    TEST_ASSERT_NOT_NULL(list);
+    TEST_ASSERT_EQUAL_UINT32(0U, list->count);
+    TEST_ASSERT_FALSE(list->more);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+
+    list = kode_file_list_from("flash", TEST_MANY_FILES + TEST_SKIP_PAST);
+    TEST_ASSERT_EQUAL_UINT32(0U, list->count);
+    TEST_ASSERT_FALSE(list->more);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    file_no_settle();
+}
+
+TEST_CASE("a listing from an entry of a file or of nothing is empty and says why", "[kode_file]")
+{
+    const kode_file_list_t *list;
+
+    file_fresh();
+    put_fs_bytes("a.txt", 1U);
+
+    list = kode_file_list_from("flash/a.txt", 1U);
+    TEST_ASSERT_NOT_NULL(list);
+    TEST_ASSERT_EQUAL_UINT32(0U, list->count);
+    TEST_ASSERT_EQUAL_STRING("flash/a.txt: it is a file", kode_error());
+
+    list = kode_file_list_from("flash/nope", 1U);
+    TEST_ASSERT_EQUAL_UINT32(0U, list->count);
+    TEST_ASSERT_EQUAL_STRING("flash/nope: no such folder", kode_error());
+    file_no_settle();
+}
+
 TEST_CASE("the list of a file or of nothing is empty and says why", "[kode_file]")
 {
     const kode_file_list_t *list;

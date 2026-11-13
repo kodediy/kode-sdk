@@ -145,6 +145,37 @@ static size_t build_stream(uint8_t *out, const uint8_t *body, uint32_t len,
 
 /* ---- Telling a container from a raw image ---------------------------------- */
 
+/**
+ * @brief Say how long a raw image's first segment is, in its segment header.
+ * @param raw The image, already filled.
+ * @param seg The length the segment header declares.
+ */
+static void raw_seg_len(uint8_t *raw, uint32_t seg)
+{
+    esp_image_segment_header_t h;
+
+    (void)memset(&h, 0, sizeof(h));
+    h.load_addr = 0x40000000U;
+    h.data_len  = seg;
+    (void)memcpy(&raw[sizeof(esp_image_header_t)], &h, sizeof(h));
+}
+
+/**
+ * @brief Give a stand-in raw image a first segment that fits it.
+ *
+ * The decoder refuses a raw image whose first segment is longer than the
+ * source, so a stand-in that is filler from end to end has to say a length
+ * that fits: here, everything behind the two headers.
+ *
+ * @param raw The image, already filled.
+ * @param len Its length, at least the two headers.
+ */
+static void raw_first_seg(uint8_t *raw, size_t len)
+{
+    raw_seg_len(raw, (uint32_t)(len - (sizeof(esp_image_header_t)
+                                       + sizeof(esp_image_segment_header_t))));
+}
+
 /* The first byte settles it. An ESP image starts 0xE9 and has no header to
  * read, so the decoder must not sit waiting for 72 bytes that will never
  * describe anything. */
@@ -157,6 +188,7 @@ TEST_CASE("a raw ESP image is recognised from its first byte", "[kfw_decode]")
     raw[0] = 0xE9U;
     raw[12] = (uint8_t)ESP_CHIP_ID_ESP32P4;     /* chip_id, little-endian */
     raw[13] = 0U;
+    raw_first_seg(raw, sizeof(raw));
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
         kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, sizeof(raw), NULL, NULL));
@@ -189,6 +221,7 @@ TEST_CASE("a raw image built for another chip is refused before it is placed",
     raw[0] = 0xE9U;
     raw[12] = (uint8_t)ESP_CHIP_ID_ESP32C5;
     raw[13] = 0U;
+    raw_first_seg(raw, sizeof(raw));
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
         kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, sizeof(raw), NULL, NULL));
@@ -203,6 +236,60 @@ TEST_CASE("a raw image built for another chip is refused before it is placed",
     TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(raw, sizeof(raw)));
     TEST_ASSERT_TRUE(sink_saw(SINK_BEGIN));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
+}
+
+/* A file cut short is refused from its header too, when the cut falls inside
+ * the first segment: the header says how long that segment is, and the source
+ * says how long the file is. The verify at the end would say the same, after
+ * the apps the image displaced were gone. */
+/** @brief Bytes of the two headers a raw image starts with: its own and its first segment's. */
+#define RAW_HEADS_LEN  ((uint32_t)(sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t)))
+
+TEST_CASE("a raw image cut inside its first segment is refused before it is placed",
+          "[kfw_decode]")
+{
+    static uint8_t raw[64];
+
+    sink_fresh();
+    (void)memset(raw, 0, sizeof(raw));
+    raw[0]  = 0xE9U;
+    raw[1]  = 1U;                               /* one segment */
+    raw[12] = (uint8_t)ESP_CHIP_ID_ESP32P4;
+    raw_seg_len(raw, (uint32_t)sizeof(raw) - RAW_HEADS_LEN + 1U);   /* one byte more than the file has */
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, sizeof(raw), NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kfw_feed(raw, sizeof(raw)));
+    TEST_ASSERT_FALSE(sink_saw(SINK_BEGIN));
+    kfw_abort();
+
+    /* One byte less and the segment fits: the image goes through. */
+    sink_fresh();
+    raw_seg_len(raw, (uint32_t)sizeof(raw) - RAW_HEADS_LEN);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, sizeof(raw), NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(raw, sizeof(raw)));
+    TEST_ASSERT_TRUE(sink_saw(SINK_BEGIN));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
+
+    /* A first chunk that ends before the segment's header does says nothing
+     * of its length, and is the end's to judge. */
+    sink_fresh();
+    raw_seg_len(raw, (uint32_t)sizeof(raw) - RAW_HEADS_LEN + 1U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, sizeof(raw), NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(raw, RAW_HEADS_LEN - 1U));
+    TEST_ASSERT_TRUE(sink_saw(SINK_BEGIN));
+    kfw_abort();
+
+    /* A source of no stated length cannot be cut short of it. */
+    sink_fresh();
+    raw_seg_len(raw, 0x00100000U);                                  /* 1 MB */
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(raw, sizeof(raw)));
+    TEST_ASSERT_TRUE(sink_saw(SINK_BEGIN));
+    kfw_abort();
 }
 
 /* A raw image carries no digest, so there is nothing to check at the end -
@@ -677,6 +764,18 @@ static void ad_expect_none(void)
     TEST_ASSERT_EQUAL_UINT(fake_psram_alloc_count(), fake_psram_free_count());
 }
 
+/** @brief Assert the session dropped its block: nothing to take, and the folder is not its to touch. */
+static void ad_expect_dropped(void)
+{
+    kfw_appdata_t ad;
+
+    kfw_appdata_take(&ad);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KFW_AD_DROPPED, (int)ad.kind,
+        "a dropped block was reported as no block, and the folder would go");
+    TEST_ASSERT_NULL(ad.buf);
+    TEST_ASSERT_EQUAL_UINT(fake_psram_alloc_count(), fake_psram_free_count());
+}
+
 TEST_CASE("a container with a block installs and hands the block over",
           "[kfw_decode]")
 {
@@ -700,6 +799,28 @@ TEST_CASE("a container with a block installs and hands the block over",
     kfw_appdata_take(&ad);
     ad_expect_demo(&ad, (uint16_t)KFW_AD_ICON_LEN);
     TEST_ASSERT_EQUAL_INT((int)KFW_AD_BLOCK, (int)ad.kind);   /* kind stays */
+}
+
+TEST_CASE("a container with a 64 px icon in its block hands it over as it is",
+          "[kfw_decode]")
+{
+    kfw_appdata_t ad;
+    size_t        n;
+
+    ad_fresh();
+    n = build_stream_ad(s_ad_stream, s_ad_body, sizeof(s_ad_body), AD_JSON,
+                        (uint16_t)strlen(AD_JSON), s_ad_icon,
+                        (uint16_t)KFW_AD_ICON_LEN_HALF, false);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(s_ad_stream, n));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
+
+    TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
+    kfw_appdata_take(&ad);
+    ad_expect_demo(&ad, (uint16_t)KFW_AD_ICON_LEN_HALF);
+    TEST_ASSERT_EQUAL_INT((int)KFW_AD_BLOCK, (int)ad.kind);
 }
 
 TEST_CASE("the block arrives one byte at a time", "[kfw_decode]")
@@ -762,7 +883,7 @@ TEST_CASE("a block with a bad crc is dropped and the image still installs",
 
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_MEMORY(s_ad_body, s_got, sizeof(s_ad_body));
-    ad_expect_none();
+    ad_expect_dropped();
 }
 
 TEST_CASE("a block whose json is not kode 1 is dropped", "[kfw_decode]")
@@ -780,7 +901,7 @@ TEST_CASE("a block whose json is not kode 1 is dropped", "[kfw_decode]")
     TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
 
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
-    ad_expect_none();
+    ad_expect_dropped();
 }
 
 /* The size is read before anything is allocated, and a block that cannot be
@@ -804,7 +925,28 @@ TEST_CASE("a block with icon_len 100 is dropped without allocating",
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_MEMORY(s_ad_body, s_got, sizeof(s_ad_body));
     TEST_ASSERT_EQUAL_UINT(0U, fake_psram_alloc_count());
-    ad_expect_none();
+    ad_expect_dropped();
+}
+
+TEST_CASE("a block with an icon between the two sizes is dropped without allocating",
+          "[kfw_decode]")
+{
+    static const uint8_t icon[KFW_AD_ICON_LEN_HALF + 1U] = { 0U };
+    size_t               n;
+
+    ad_fresh();
+    n = build_stream_ad(s_ad_stream, s_ad_body, sizeof(s_ad_body), AD_JSON,
+                        (uint16_t)strlen(AD_JSON), icon, (uint16_t)sizeof(icon),
+                        false);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(s_ad_stream, n));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
+
+    TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
+    TEST_ASSERT_EQUAL_UINT(0U, fake_psram_alloc_count());
+    ad_expect_dropped();
 }
 
 TEST_CASE("a block that cannot get PSRAM is dropped and the image installs",
@@ -825,7 +967,7 @@ TEST_CASE("a block that cannot get PSRAM is dropped and the image installs",
 
     TEST_ASSERT_EQUAL_UINT32(sizeof(s_ad_body), s_got_n);
     TEST_ASSERT_EQUAL_MEMORY(s_ad_body, s_got, sizeof(s_ad_body));
-    ad_expect_none();
+    ad_expect_dropped();
 }
 
 TEST_CASE("a block that does not start with its magic ends the transfer",
@@ -870,6 +1012,7 @@ TEST_CASE("a raw image reports raw", "[kfw_decode]")
     raw[0]  = 0xE9U;
     raw[12] = (uint8_t)ESP_CHIP_ID_ESP32P4;     /* chip_id, little-endian */
     raw[13] = 0U;
+    raw_first_seg(raw, sizeof(raw));
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
         kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, sizeof(raw), NULL, NULL));
@@ -980,6 +1123,9 @@ TEST_CASE("kfw_ad_check judges a block with no session", "[kfw_decode]")
     ad_block(&h, body, AD_JSON, jl, (uint16_t)KFW_AD_ICON_LEN);
     TEST_ASSERT_EQUAL_INT((int)KFW_AD_OK, (int)kfw_ad_check(&h, body));
 
+    ad_block(&h, body, AD_JSON, jl, (uint16_t)KFW_AD_ICON_LEN_HALF);
+    TEST_ASSERT_EQUAL_INT((int)KFW_AD_OK, (int)kfw_ad_check(&h, body));
+
     ad_block(&h, body, AD_JSON, jl, 0U);
     TEST_ASSERT_EQUAL_INT((int)KFW_AD_OK, (int)kfw_ad_check(&h, body));
 
@@ -997,6 +1143,14 @@ TEST_CASE("kfw_ad_check judges a block with no session", "[kfw_decode]")
 
     ad_block(&h, body, AD_JSON, jl, 0U);
     h.icon_len = 1U;
+    TEST_ASSERT_EQUAL_INT((int)KFW_AD_BAD_SIZE, (int)kfw_ad_check(&h, body));
+
+    ad_block(&h, body, AD_JSON, jl, 0U);
+    h.icon_len = (uint16_t)(KFW_AD_ICON_LEN_HALF + 1U);
+    TEST_ASSERT_EQUAL_INT((int)KFW_AD_BAD_SIZE, (int)kfw_ad_check(&h, body));
+
+    ad_block(&h, body, AD_JSON, jl, 0U);
+    h.icon_len = (uint16_t)(KFW_AD_ICON_LEN - 1U);
     TEST_ASSERT_EQUAL_INT((int)KFW_AD_BAD_SIZE, (int)kfw_ad_check(&h, body));
 
     ad_block(&h, body, AD_JSON, jl, 0U);

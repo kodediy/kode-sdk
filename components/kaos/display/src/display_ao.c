@@ -2670,6 +2670,13 @@ static QState Display_active(Display * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case DISPLAY_HEALTH_SIG: {
+            /* In every build: the look and the retry of a panel that did not
+             * come up are not about rest. */
+            display_health(me);
+            status = Q_HANDLED();
+            break;
+        }
 #if CONFIG_KODE_LOWPOWER
         case LOWPOWER_ROUND_SIG: {
             rest_round(me, Q_EVT_CAST(LowPowerRoundEvt));
@@ -2683,11 +2690,6 @@ static QState Display_active(Display * const me, QEvt const * const e)
         }
         case DISPLAY_GLYPHS_SIG: {
             rest_glyphs(me, Q_EVT_CAST(DisplayGlyphsEvt));
-            status = Q_HANDLED();
-            break;
-        }
-        case DISPLAY_HEALTH_SIG: {
-            display_health(me);
             status = Q_HANDLED();
             break;
         }

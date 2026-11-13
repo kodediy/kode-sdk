@@ -236,7 +236,8 @@ kode_status_t kfw_hdr_parse(const void *buf, size_t len, kfw_hdr_t *out)
 /**
  * @brief Whether a block's two lengths are the ones a block may carry.
  * @param h  The block's header.
- * @return true when json_len is 1..KFW_AD_JSON_MAX and icon_len is 0 or KFW_AD_ICON_LEN.
+ * @return true when json_len is 1..KFW_AD_JSON_MAX and icon_len is 0, KFW_AD_ICON_LEN
+ *         or KFW_AD_ICON_LEN_HALF.
  */
 static bool ad_sizes_ok(const kfw_ad_hdr_t *h)
 {
@@ -246,7 +247,8 @@ static bool ad_sizes_ok(const kfw_ad_hdr_t *h)
     {
         ok = false;
     }
-    if ( (0U != h->icon_len) && ((uint16_t)KFW_AD_ICON_LEN != h->icon_len) )
+    if ( (0U != h->icon_len) && ((uint16_t)KFW_AD_ICON_LEN != h->icon_len)
+        && ((uint16_t)KFW_AD_ICON_LEN_HALF != h->icon_len) )
     {
         ok = false;
     }
@@ -388,6 +390,7 @@ static struct {
     kfw_ad_hdr_t            ad_hdr;     /**< The block's header, once read.        */
     uint32_t                ad_fill;    /**< Block header or body bytes seen so far. */
     bool                    ad_skip;    /**< The block's bytes are stepped over, not kept. */
+    bool                    ad_dropped; /**< A block was there and was not believed: not the same as none. */
 } s_kfw;
 
 bool kfw_busy(void)
@@ -547,6 +550,34 @@ static uint16_t target_chip(kfw_target_t t)
     return chip;
 }
 
+/**
+ * @brief How long a raw image says its first segment is.
+ *
+ * The one fact about an image's size its first bytes hold: the first
+ * segment's header follows the image header at once, and its length is how
+ * many bytes of the file that segment takes.
+ *
+ * @param prefix  The first bytes of the image.
+ * @param len     How many bytes @p prefix holds.
+ * @param seg_len The first segment's declared length in bytes; left alone
+ *                when the read is refused.
+ * @return true when the prefix starts with the ESP image magic and holds the
+ *         first segment's header.
+ */
+static bool raw_first_seg(const uint8_t *prefix, size_t len, uint32_t *seg_len)
+{
+    esp_image_segment_header_t seg;
+
+    if ( ((sizeof(esp_image_header_t) + sizeof(seg)) > len)
+        || (KFW_ESP_MAGIC != prefix[0]) )
+    {
+        return false;
+    }
+    (void)memcpy(&seg, &prefix[sizeof(esp_image_header_t)], sizeof(seg));
+    *seg_len = seg.data_len;
+    return true;
+}
+
 kode_status_t kfw_feed(const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
@@ -587,6 +618,24 @@ kode_status_t kfw_feed(const void *data, size_t len)
                         KLOG_E(TAG, "that image was built for chip id 0x%04x, "
                                     "not this target's 0x%04x", (unsigned)chip,
                                (unsigned)target_chip(s_kfw.want));
+                        s_kfw.st = KFW_ST_DEAD;
+                        return KODE_ERROR;
+                    }
+                    /* A file cut short inside its first segment is refused
+                     * here for the same reason: the header says how long that
+                     * segment is and the source how long the file is. A cut
+                     * further on, or a source of no stated length, is the
+                     * end's to judge. */
+                    uint32_t seg0 = 0U;
+                    if ( (0U != s_kfw.src_len)
+                        && raw_first_seg(p, len, &seg0)
+                        && (((uint64_t)sizeof(esp_image_header_t)
+                             + (uint64_t)sizeof(esp_image_segment_header_t)
+                             + (uint64_t)seg0) > (uint64_t)s_kfw.src_len) )
+                    {
+                        KLOG_E(TAG, "that image's first segment is %u bytes and "
+                                    "the file holds %u: it was cut short",
+                               (unsigned)seg0, (unsigned)s_kfw.src_len);
                         s_kfw.st = KFW_ST_DEAD;
                         return KODE_ERROR;
                     }
@@ -728,6 +777,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                 {
                     KLOG_W(TAG, "app data dropped: %s",
                            kfw_ad_status_name(KFW_AD_BAD_SIZE));
+                    s_kfw.ad_dropped = true;
                 }
                 else
                 {
@@ -739,6 +789,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                     if ( NULL == s_ad.buf )
                     {
                         KLOG_W(TAG, "app data dropped: no PSRAM for it");
+                        s_kfw.ad_dropped = true;
                     }
                     else
                     {
@@ -780,6 +831,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                         KLOG_W(TAG, "app data dropped: %s",
                                kfw_ad_status_name(ast));
                         ad_drop();
+                        s_kfw.ad_dropped = true;
                     }
                     else
                     {
@@ -886,8 +938,10 @@ kode_status_t kfw_end(void)
     }
 
     /* What the owner may take: only from an image that went in whole. A raw
-     * image says so, so the folder is left alone; a container says block or
-     * none by whether a checked block survived. Anything else frees it. */
+     * image says so, so the folder is left alone; a container says block, none
+     * or dropped by whether a checked block survived and, when none did,
+     * whether one was there to be believed: a block that could not be read
+     * says nothing about the folder. Anything else frees it. */
     if ( KODE_OK != rc )
     {
         ad_drop();
@@ -900,6 +954,10 @@ kode_status_t kfw_end(void)
     else if ( NULL != s_ad.buf )
     {
         s_ad.kind = KFW_AD_BLOCK;
+    }
+    else if ( s_kfw.ad_dropped )
+    {
+        s_ad.kind = KFW_AD_DROPPED;
     }
     else
     {
@@ -1176,7 +1234,7 @@ kode_status_t kfw_selftest(void)
 
     if ( selftest_inflate()
         && selftest_block(false, KFW_AD_BLOCK)
-        && selftest_block(true, KFW_AD_NONE) )
+        && selftest_block(true, KFW_AD_DROPPED) )
     {
         rc = KODE_OK;
     }

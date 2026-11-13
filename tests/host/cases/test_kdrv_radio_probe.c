@@ -54,6 +54,8 @@ static unsigned           s_starts;
 static esp_err_t          s_start_rc;
 static bool               s_abort_at_start;
 static unsigned           s_steps_seen;
+static wifi_band_mode_t   s_band_asked;     /**< The band the stack was last asked for.  */
+static wifi_band_mode_t   s_band_at_start;  /**< The band standing at the first start.   */
 
 /** @brief An empty room, a stack that starts everything. */
 static void room_reset(void)
@@ -66,6 +68,8 @@ static void room_reset(void)
     s_start_rc       = ESP_OK;
     s_abort_at_start = false;
     s_steps_seen     = 0U;
+    s_band_asked     = (wifi_band_mode_t)0;
+    s_band_at_start  = (wifi_band_mode_t)0;
 }
 
 /** @brief Put one network in the room. */
@@ -87,6 +91,10 @@ static esp_err_t scan_start_now(const wifi_scan_config_t *config, bool block,
     TEST_ASSERT_FALSE(block);
     ++s_starts;
     ++s_steps_seen;
+    if ( 1U == s_starts )
+    {
+        s_band_at_start = s_band_asked;
+    }
     s_cfg = *config;
     s_room_taken = 0U;
     if ( ESP_OK != s_start_rc )
@@ -131,6 +139,14 @@ static esp_err_t country_now(wifi_country_t *country, int calls)
     return ESP_OK;
 }
 
+/** @brief Stands in for esp_wifi_set_band_mode and keeps what it was given. */
+static esp_err_t band_note(wifi_band_mode_t mode, int calls)
+{
+    (void)calls;
+    s_band_asked = mode;
+    return ESP_OK;
+}
+
 /** @brief Point the whole stack at the stubs above and bring it up once. */
 static void probe_setup(void)
 {
@@ -142,6 +158,7 @@ static void probe_setup(void)
     room_reset();
     kdrv_wifi_scan_abort(false);
 
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
     esp_wifi_get_country_Stub(&country_now);
     esp_wifi_scan_start_Stub(&scan_start_now);
     esp_wifi_scan_get_ap_num_Stub(&ap_num_now);
@@ -209,6 +226,23 @@ TEST_CASE("a later channel does not weaken an earlier reading", "[kdrv_radio_pro
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_probe(11U, PROBE_DWELL_ACTIVE_MS, want, 1U, NULL));
     TEST_ASSERT_EQUAL_INT8((int8_t)PROBE_RSSI_STRONG, want[0].rssi);
     TEST_ASSERT_EQUAL_UINT8(PROBE_CH_ACTIVE, want[0].channel);
+    probe_teardown();
+}
+
+TEST_CASE("a probe listens to both bands, whatever a join aimed at before it",
+          "[kdrv_radio_probe]")
+{
+    kdrv_wifi_probe_t want[1];
+
+    probe_setup();
+    esp_wifi_set_band_mode_Stub(&band_note);
+    s_band_asked = WIFI_BAND_MODE_5G_ONLY;   /* what a join left standing */
+    (void)memset(want, 0, sizeof(want));
+    want[0].ssid = "kode-test";
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_probe(PROBE_CH_ACTIVE, PROBE_DWELL_ACTIVE_MS,
+                                                   want, 1U, NULL));
+    TEST_ASSERT_EQUAL_INT((int)WIFI_BAND_MODE_AUTO, (int)s_band_at_start);
     probe_teardown();
 }
 

@@ -10,6 +10,7 @@
 
 #include "kbsp.h"
 #include "khal_gpio.h"
+#include "khal_system.h"
 #include "khal_time.h"
 #include "khal_sdmmc.h"
 #include "kode_log.h"
@@ -29,6 +30,7 @@ static bool s_powered;
 
 static uint8_t  s_width_req = (uint8_t)KDRV_SD_WIDTH_USE;
 static uint32_t s_freq_req  = (uint32_t)KBSP_SD_FREQ_KHZ;
+static bool     s_check_req = true;
 
 /* ESP-IDF tells an empty slot in five lines a mount: the card's protocol, the
  * FAT mount and the pins the slot takes again, as errors. Every probe holds
@@ -40,6 +42,43 @@ static uint32_t s_freq_req  = (uint32_t)KBSP_SD_FREQ_KHZ;
 
 _Static_assert((SD_PROBE_TAG_COUNT + SD_OTHER_HOLDS) <= KODE_LOG_HOLD_MAX,
                "klog has a slot for each probe tag beside the other holds");
+
+/* A mount that comes up on four lines is proved with one sector: read, then
+ * written back as it was. */
+
+#define SD_WIDTH_NARROW   1U    /**< One data line, the width every card takes. */
+#define SD_CHECK_SECTORS  1U    /**< Sectors the write check reads and writes back. */
+/** @brief Alignment of the check's buffer: a cache line, which a transfer to
+ *         or from external memory needs. */
+#define SD_CHECK_ALIGN    64U
+
+/* What the driver remembers of the last card it judged, in RAM for the boot:
+ * what the card took on four lines, and who it is. A card is known by what the
+ * snapshot holds of its CID - manufacturer, OEM, name, revision, serial and
+ * date - and a card that differs in any of them is another. */
+
+/** @brief What the last card judged took on four lines. */
+typedef enum {
+    SD_VERDICT_NONE = 0,   /**< No card has been judged since the boot.       */
+    SD_VERDICT_FOUR,       /**< It took a write there: four lines it is.      */
+    SD_VERDICT_ONE         /**< It took none: one line it is.                 */
+} sd_verdict_t;
+
+/** @brief What a card is known by. */
+typedef struct {
+    uint8_t  mfg_id;                      /**< CID manufacturer.              */
+    uint16_t oem_id;                      /**< CID OEM or application.        */
+    char     name[KHAL_SDMMC_NAME_LEN];   /**< CID product name.              */
+    uint8_t  revision;                    /**< CID product revision.          */
+    uint32_t serial;                      /**< CID serial number.             */
+    uint16_t date;                        /**< CID manufacturing date, raw.   */
+} card_id_t;
+
+static sd_verdict_t s_verdict = SD_VERDICT_NONE;
+static card_id_t    s_judged;   /**< Who s_verdict is about; valid with a verdict. */
+
+/** @brief Whether the mount that stands was asked on everyday terms. */
+static bool s_everyday;
 
 /* ---- The table ----------------------------------------------------------- */
 
@@ -115,6 +154,7 @@ static const field_t FIELDS[KDRV_SD_FIELD_MAX] = {
 
     [KDRV_SD_WIDTH_REQ]       = KNOB("width_req",    "bits", 1, 4),
     [KDRV_SD_FREQ_REQ_KHZ]    = KNOB("freq_req_khz", "kHz",  400, 50000),
+    [KDRV_SD_CHECK_REQ]       = KNOB("check_req",    "bool", 0, 1),
 };
 
 /** @brief Megabytes in @p sectors of @p sector_size bytes. */
@@ -210,6 +250,7 @@ static void snap_field(kdrv_sd_field_t f, int32_t *value)
         case KDRV_SD_HOSTED:   *value = khal_sdmmc_hosted() ? 1 : 0; break;
         case KDRV_SD_WIDTH_REQ:    *value = (int32_t)s_width_req; break;
         case KDRV_SD_FREQ_REQ_KHZ: *value = (int32_t)s_freq_req; break;
+        case KDRV_SD_CHECK_REQ:    *value = s_check_req ? 1 : 0; break;
 
         default:
             *value = 0;
@@ -262,6 +303,10 @@ kode_status_t kdrv_sd_set(kdrv_sd_field_t f, int32_t value)
             return KODE_DENIED;
         }
         s_width_req = (uint8_t)value;
+    }
+    else if ( KDRV_SD_CHECK_REQ == f )
+    {
+        s_check_req = (0 != value);
     }
     else
     {
@@ -318,6 +363,7 @@ kode_status_t kdrv_sd_format(void)
          * goes with it: answering questions about a card nobody can reach is
          * exactly what the snapshot must not do. */
         (void)memset(&s_snap, 0, sizeof(s_snap));
+        s_everyday = false;
     }
     return st;
 }
@@ -343,6 +389,11 @@ const char *kdrv_sd_mount_point(void)
 bool kdrv_sd_mounted(void)
 {
     return khal_sdmmc_mounted();
+}
+
+bool kdrv_sd_mounted_everyday(void)
+{
+    return khal_sdmmc_mounted() && s_everyday;
 }
 
 void kdrv_sd_set_hosted(bool hosted)
@@ -385,6 +436,23 @@ static void card_power(void)
 }
 
 /**
+ * @brief Cut the card's supply for its off time and switch it on again.
+ *
+ * What brings a card back to answering after a failed transfer: the host
+ * cannot be reset for it, because the controller is shared with the C5's link.
+ */
+static void card_cycle(void)
+{
+    if ( kdrv_sd_park() != KODE_OK )
+    {
+        KLOG_W(TAG, "SD_PWR (GPIO%u) could not be driven; the card's supply "
+                    "is not cycled", (unsigned)KBSP_PIN_SD_PWR);
+    }
+    khal_delay_ms(KDRV_SD_POWER_OFF_MS);
+    card_power();
+}
+
+/**
  * @brief Hold ESP-IDF's account of an empty slot quiet, or let it speak again.
  *
  * A tag that cannot be held (klog's table is full) is left to speak.
@@ -411,34 +479,259 @@ static void probe_quiet(bool quiet)
     }
 }
 
+/** @brief What @p c is known by. */
+static card_id_t id_of(const khal_sdmmc_card_t *c)
+{
+    card_id_t id;
+
+    (void)memset(&id, 0, sizeof(id));
+    id.mfg_id   = c->mfg_id;
+    id.oem_id   = c->oem_id;
+    (void)memcpy(id.name, c->name, sizeof(id.name));
+    id.revision = c->revision;
+    id.serial   = c->serial;
+    id.date     = c->date;
+    return id;
+}
+
+/** @brief Whether @p c is the card the last verdict is about. */
+static bool is_judged(const khal_sdmmc_card_t *c)
+{
+    card_id_t const id = id_of(c);
+
+    return (SD_VERDICT_NONE != s_verdict)
+        && (id.mfg_id == s_judged.mfg_id)
+        && (id.oem_id == s_judged.oem_id)
+        && (strncmp(id.name, s_judged.name, sizeof(id.name)) == 0)
+        && (id.revision == s_judged.revision)
+        && (id.serial == s_judged.serial)
+        && (id.date == s_judged.date);
+}
+
 /**
- * @brief Mount four data lines first and then one, quietly after a miss.
+ * @brief Prove the card takes a write on the lines it came up on, leaving what
+ *        it holds as it was.
  *
- * @return What khal_sdmmc_mount() said of the last try.
+ * Reads the card's last sector and writes the same bytes back. No partition
+ * lives that far out, so a write cut short by a power loss costs nothing.
+ *
+ * @param[out] asked true when the card was asked and its answer is its
+ *                   verdict; false when the check could not be made.
+ * @return NULL when the read and the write-back both passed; otherwise why the
+ *         card is not trusted on these lines, as a phrase for the log.
+ */
+static const char *card_check_write(bool *asked)
+{
+    const char *why = NULL;
+    void       *buf = NULL;
+
+    *asked = false;
+    if ( (0U != s_snap.sectors) && (0U != s_snap.sector_size) )
+    {
+        buf = khal_alloc_psram(SD_CHECK_ALIGN,
+                               (size_t)s_snap.sector_size * SD_CHECK_SECTORS);
+    }
+    if ( NULL == buf )
+    {
+        return "there is no sector or no memory to check a write on four lines";
+    }
+
+    uint32_t const last = s_snap.sectors - SD_CHECK_SECTORS;
+
+    *asked = true;
+    if ( kdrv_sd_read_sectors(last, SD_CHECK_SECTORS, buf) != KODE_OK )
+    {
+        why = "the card's last sector cannot be read on four lines";
+    }
+    else if ( kdrv_sd_write_sectors(last, SD_CHECK_SECTORS, buf) != KODE_OK )
+    {
+        why = "the card takes no write on four lines";
+    }
+    else
+    {
+        /* both transfers passed */
+    }
+    khal_free(buf);
+    return why;
+}
+
+/**
+ * @brief Take a card that was not shown to take a write on four lines down to
+ *        one: unmount it, cycle its supply and mount it on one line, again
+ *        after another cycle if it does not answer.
+ *
+ * Nothing is left describing the four-line mount. The host is not touched
+ * beyond the unmount and the mount: the C5's link shares its controller.
+ *
+ * @param why What the check found, as it is told at NOTICE once the card is up.
+ * @return KODE_OK with s_snap filled in for the one-line mount; KODE_DENIED
+ *         when khal refused a mount without a try; KODE_ERROR with s_snap
+ *         cleared when the card came up on none of the tries.
+ */
+static kode_status_t card_narrow(const char *why)
+{
+    kode_status_t st   = KODE_ERROR;
+    uint8_t       left = (uint8_t)KDRV_SD_ONE_LINE_TRIES;
+
+    khal_sdmmc_unmount();
+    (void)memset(&s_snap, 0, sizeof(s_snap));
+
+    while ( (0U < left) && (KODE_ERROR == st) )
+    {
+        --left;
+        card_cycle();
+        st = khal_sdmmc_mount(SD_WIDTH_NARROW, s_freq_req, &s_snap);
+        if ( (KODE_OK != st) && (KODE_DENIED != st) )
+        {
+            /* A card that answered on four lines is no empty slot, whatever
+             * this try said: the caller reports it as one that would not come
+             * up. */
+            KLOG_D(TAG, "1-bit mount after the supply's cycle failed (%d)",
+                   (int)st);
+            st = KODE_ERROR;
+        }
+    }
+    if ( KODE_OK == st )
+    {
+        KLOG_N(TAG, "%s; it is mounted on one line", why);
+    }
+    return st;
+}
+
+/**
+ * @brief Settle a mount that came up on four lines: kept when the card is
+ *        known to take a write there or proves to, narrowed to one otherwise.
+ *
+ * What a card took is remembered for the boot, so a card is judged once: a
+ * card that took the write is not checked again, and one that did not is
+ * mounted on one line from then on (card_mount_known()). A check that could
+ * not be made is no verdict.
+ *
+ * @return KODE_OK with s_snap describing the mount that stands; what
+ *         card_narrow() answers when the card was narrowed.
+ */
+static kode_status_t card_settle(void)
+{
+    card_id_t const id    = id_of(&s_snap);
+    bool            asked = false;
+
+    if ( (SD_VERDICT_FOUR == s_verdict) && is_judged(&s_snap) )
+    {
+        KLOG_D(TAG, "the card took a write on four lines before; it is not "
+                    "checked again");
+        return KODE_OK;
+    }
+
+    const char * const why = card_check_write(&asked);
+
+    if ( NULL == why )
+    {
+        s_judged  = id;
+        s_verdict = SD_VERDICT_FOUR;
+        return KODE_OK;
+    }
+
+    kode_status_t const st = card_narrow(why);
+
+    if ( (KODE_OK == st) && asked )
+    {
+        s_judged  = id;
+        s_verdict = SD_VERDICT_ONE;
+    }
+    return st;
+}
+
+/**
+ * @brief Mount on the lines asked for: four first and then one, a four-line
+ *        mount settled by the write check when the check is asked for.
+ *
+ * @return What khal_sdmmc_mount() said of the last try, or card_settle()'s
+ *         answer when the card came up on four lines.
+ */
+static kode_status_t card_mount_asked(void)
+{
+    kode_status_t st = khal_sdmmc_mount(s_width_req, s_freq_req, &s_snap);
+
+    if ( (KODE_OK != st) && (KODE_DENIED != st) && (KODE_TIMEOUT != st)
+        && (SD_WIDTH_NARROW < s_width_req) )
+    {
+        /* Four lines first, then one. A card that does not honour the 4-bit
+         * mode it advertises in its SCR is still worth having on one line.
+         * An empty slot is empty at one line too. */
+        KLOG_D(TAG, "4-bit bring-up failed; retrying at 1-bit");
+        st = khal_sdmmc_mount(SD_WIDTH_NARROW, s_freq_req, &s_snap);
+    }
+    if ( s_check_req && (KODE_OK == st) && (SD_WIDTH_NARROW < s_snap.bus_width) )
+    {
+        /* Up on four lines. The counterfeit cards shipped with some units
+         * read there and fail the first write, and a failed write leaves the
+         * controller unable to bring a card up until the card's supply is
+         * cycled, so the write is tried here, on the card's last sector, and
+         * not by the first file. */
+        st = card_settle();
+    }
+    return st;
+}
+
+/**
+ * @brief Mount on one line first, as the last card judged is mounted, and
+ *        take the four-line way when another card is the one that answers.
+ *
+ * @return What khal_sdmmc_mount() said of a card that does not answer, or
+ *         card_mount_asked()'s answer for a card that was not judged.
+ */
+static kode_status_t card_mount_known(void)
+{
+    kode_status_t st = khal_sdmmc_mount(SD_WIDTH_NARROW, s_freq_req, &s_snap);
+
+    if ( KODE_OK != st )
+    {
+        return st;
+    }
+    if ( is_judged(&s_snap) )
+    {
+        KLOG_D(TAG, "the card took no write on four lines before; it is "
+                    "mounted on one");
+        return KODE_OK;
+    }
+    /* Another card: let go of it, and it is judged as a card nobody judged. */
+    KLOG_D(TAG, "a card that was not judged is in the slot");
+    khal_sdmmc_unmount();
+    (void)memset(&s_snap, 0, sizeof(s_snap));
+    return card_mount_asked();
+}
+
+/**
+ * @brief Mount the card, quietly after a miss.
+ *
+ * With the check asked for, a card remembered as one that takes no write on
+ * four lines is mounted on one at once; every other mount is card_mount_asked().
+ * With the check off the mount is as asked and nothing is remembered or
+ * consulted.
+ *
+ * @return What the mount said of the card.
  */
 static kode_status_t card_mount(void)
 {
     kode_status_t st;
 
     probe_quiet(true);
-    st = khal_sdmmc_mount(s_width_req, s_freq_req, &s_snap);
-    if ( (KODE_OK != st) && (KODE_DENIED != st) && (KODE_TIMEOUT != st)
-        && (4U == s_width_req) )
+    if ( s_check_req && (SD_WIDTH_NARROW < s_width_req)
+        && (SD_VERDICT_ONE == s_verdict) )
     {
-        /* Four lines first, then one. The fallback is not paranoia: the
-         * custom cards shipped with some units are counterfeit and do not
-         * honour the 4-bit mode they advertise in their SCR. Reads are what
-         * kodeOS needs and those work either way - it is 4-bit *writes* that
-         * fail on those cards. An empty slot is empty at one line too. */
-        KLOG_D(TAG, "4-bit bring-up failed; retrying at 1-bit");
-        st = khal_sdmmc_mount(1U, s_freq_req, &s_snap);
+        st = card_mount_known();
+    }
+    else
+    {
+        st = card_mount_asked();
     }
     probe_quiet(false);
     return st;
 }
 
 /**
- * @brief Power the card and mount its volume, four data lines first and then one.
+ * @brief Power the card and mount its volume, four data lines first and then
+ *        one, a four-line mount proved to take a write.
  *
  * @return KODE_OK with s_snap filled in; KODE_DENIED when no mount was tried
  *         (the link holds the controller and is down) or khal refused it
@@ -452,6 +745,7 @@ static kode_status_t card_up(void)
      * a repeat is not news. */
     static bool s_missing = false;
 
+    s_everyday = false;
     card_power();
     if ( !khal_sdmmc_ready() )
     {
@@ -463,7 +757,8 @@ static kode_status_t card_up(void)
 
     if ( KODE_OK == st )
     {
-        s_missing = false;
+        s_missing  = false;
+        s_everyday = s_check_req && ((uint8_t)KDRV_SD_WIDTH_USE == s_width_req);
     }
     else if ( KODE_DENIED == st )
     {
@@ -535,6 +830,7 @@ void kdrv_sd_unmount(void)
     }
     khal_sdmmc_unmount();
     (void)memset(&s_snap, 0, sizeof(s_snap));
+    s_everyday = false;
     KLOG_I(TAG, "card unmounted");
 }
 

@@ -215,6 +215,9 @@ void khal_panic(const char *why)
 #define FAKE_CHIP_FLASH      (32U * 1024U * 1024U) /**< The 32 MB NOR.       */
 #define FAKE_CHIP_PSRAM      (32U * 1024U * 1024U) /**< The 32 MB HEX PSRAM. */
 
+/** @brief The chip's own MAC, e8:f6:0a:00:00:01: a P4's prefix, as its USB port gives it. */
+static const uint8_t FAKE_CHIP_MAC[KHAL_CHIP_MAC_LEN] = { 0xE8U, 0xF6U, 0x0AU, 0x00U, 0x00U, 0x01U };
+
 kode_status_t khal_chip_info(khal_chip_info_t *out)
 {
     if ( NULL == out )
@@ -226,6 +229,7 @@ kode_status_t khal_chip_info(khal_chip_info_t *out)
     out->rev_minor   = (uint8_t)FAKE_CHIP_REV_MINOR;
     out->flash_bytes = FAKE_CHIP_FLASH;
     out->psram_bytes = FAKE_CHIP_PSRAM;
+    (void)memcpy(out->mac, FAKE_CHIP_MAC, sizeof(out->mac));
     return KODE_OK;
 }
 
@@ -325,6 +329,27 @@ size_t khal_task_list(khal_task_info_t *out, size_t max, size_t *total)
 const char *khal_task_name(void)
 {
     return "host";
+}
+
+/** @brief The priority the calling task is at, as the cases set and read it. */
+static uint32_t s_task_priority = 1U;
+
+uint32_t khal_task_priority_set(uint32_t priority)
+{
+    uint32_t const was = s_task_priority;
+
+    s_task_priority = priority;
+    return was;
+}
+
+void fake_task_priority_set(uint32_t priority)
+{
+    s_task_priority = priority;
+}
+
+uint32_t fake_task_priority(void)
+{
+    return s_task_priority;
 }
 
 /* The task helpers call the same FreeRTOS functions the board does, on the

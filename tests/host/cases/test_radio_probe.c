@@ -191,6 +191,7 @@ static unsigned run_real_sweep(void)
         esp_wifi_set_mode_ExpectAndReturn(WIFI_MODE_STA, ESP_OK);
         esp_wifi_start_ExpectAndReturn(ESP_OK);
     }
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
     esp_wifi_get_country_Stub(&sweep_country);
     esp_wifi_scan_start_Stub(&sweep_start);
     esp_wifi_scan_get_ap_num_Stub(&sweep_num);

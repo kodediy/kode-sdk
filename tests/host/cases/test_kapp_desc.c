@@ -143,16 +143,16 @@ TEST_CASE("an unterminated name is refused", "[kapp_desc]")
         kapp_desc_parse(s_prefix, sizeof(s_prefix), &got));
 }
 
-TEST_CASE("an empty category is not a category", "[kapp_desc]")
+TEST_CASE("an empty category keeps the name and names no category",
+          "[kapp_desc]")
 {
-    kapp_desc_t good;
     kapp_desc_t got;
 
-    put_v2("Kode Runner", "Game", &good);
-    good.category[0] = '\0';
-    put_raw(&good);
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+    put_v2("Welcome", "", NULL);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
         kapp_desc_parse(s_prefix, sizeof(s_prefix), &got));
+    TEST_ASSERT_EQUAL_STRING("Welcome", got.name);
+    TEST_ASSERT_EQUAL_STRING("", got.category);
 }
 
 TEST_CASE("a prefix that stops short of the manifest is refused", "[kapp_desc]")

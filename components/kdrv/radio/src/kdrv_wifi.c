@@ -48,7 +48,14 @@ static struct {
     uint8_t            channel;      /**< The same read's primary channel;
                                        *   kdrv_wifi_channel_last().          */
     kdrv_wifi_fail_t   fail;         /**< kdrv_wifi_fail_last().              */
+    uint16_t           reason;       /**< The stack's own reason behind `fail`,
+                                       *   for the log; 0 when the disconnect
+                                       *   carried none.                      */
     uint8_t            count;
+    bool               band_warned;  /**< The first refusal of the band call
+                                       *   is logged; the rest are not. Kept
+                                       *   across stop() and forget(): it is
+                                       *   once per boot.                     */
     /* Both tables are one PSRAM block, taken at the first scan
      * (scan_tables()): KDRV_WIFI_SCAN_MAX entries of `aps`, then
      * KDRV_WIFI_LIST_MAX of `ring`. NULL until then, while `count` is 0 and
@@ -92,6 +99,48 @@ static void ssid_set(const char *name)
     taskENTER_CRITICAL(&s_ssid_mux);
     (void)memcpy(s_wifi.ssid, fresh, sizeof(s_wifi.ssid));
     taskEXIT_CRITICAL(&s_ssid_mux);
+}
+
+/**
+ * @brief Hold the radio to the band of an access point, or give both bands
+ *        back.
+ *
+ * The C5 joins the first access point of a name that its own scan finds,
+ * which is the 2.4 GHz one when the network is on both bands, however weak
+ * that one is. A coprocessor that refuses the call (an older firmware) leaves
+ * the radio as it is: the caller goes on, and the first refusal of a boot is
+ * the only one logged. The call is made whether or not the station is
+ * associated, and its answer is never the caller's failure.
+ *
+ * @param channel The channel of the access point: the lower band up to
+ *                KDRV_WIFI_LAST_24_CHANNEL, the upper band above it, both
+ *                bands for KDRV_WIFI_CHANNEL_ANY.
+ */
+static void wifi_band_aim(uint8_t channel)
+{
+    wifi_band_mode_t mode = WIFI_BAND_MODE_AUTO;
+
+    if ( KDRV_WIFI_LAST_24_CHANNEL < channel )
+    {
+        mode = WIFI_BAND_MODE_5G_ONLY;
+    }
+    else if ( KDRV_WIFI_CHANNEL_ANY != channel )
+    {
+        mode = WIFI_BAND_MODE_2G_ONLY;
+    }
+    else
+    {
+        /* Not known: both bands. */
+    }
+
+    esp_err_t const err = esp_wifi_set_band_mode(mode);
+
+    if ( (ESP_OK != err) && !s_wifi.band_warned )
+    {
+        s_wifi.band_warned = true;
+        KLOG_W(TAG, "band mode: %s; a join goes to the band the C5 finds "
+                    "the network on", esp_err_to_name(err));
+    }
 }
 
 bool kdrv_wifi_scan_next(kdrv_wifi_ap_t *out)
@@ -237,10 +286,13 @@ kdrv_wifi_fail_t kdrv_wifi_fail_of(uint16_t reason)
     switch ( reason )
     {
         case (uint16_t)WIFI_REASON_AUTH_FAIL:
-        case (uint16_t)WIFI_REASON_HANDSHAKE_TIMEOUT:
-        case (uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
         case (uint16_t)WIFI_REASON_MIC_FAILURE: {
             fail = KDRV_WIFI_FAIL_PASSWORD;
+            break;
+        }
+        case (uint16_t)WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case (uint16_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: {
+            fail = KDRV_WIFI_FAIL_HANDSHAKE;
             break;
         }
         case (uint16_t)WIFI_REASON_NO_AP_FOUND:
@@ -270,13 +322,15 @@ static void wifi_fail_note(void const *data)
 {
     if ( KDRV_WIFI_FAIL_NONE == s_wifi.fail )
     {
-        s_wifi.fail = KDRV_WIFI_FAIL_OTHER;
+        s_wifi.fail   = KDRV_WIFI_FAIL_OTHER;
+        s_wifi.reason = 0U;
         if ( NULL != data )
         {
             /* cppcheck-suppress misra-c2012-11.5 ; IDF posts the disconnect's payload untyped */
             wifi_event_sta_disconnected_t const * const ev = (wifi_event_sta_disconnected_t const *)data;
 
-            s_wifi.fail = kdrv_wifi_fail_of((uint16_t)ev->reason);
+            s_wifi.reason = (uint16_t)ev->reason;
+            s_wifi.fail   = kdrv_wifi_fail_of(s_wifi.reason);
         }
     }
 }
@@ -291,6 +345,7 @@ static const char *wifi_fail_word(void)
         case KDRV_WIFI_FAIL_PASSWORD:  { word = "wrong password"; break; }
         case KDRV_WIFI_FAIL_NOT_FOUND: { word = "not found, or out of range"; break; }
         case KDRV_WIFI_FAIL_OTHER:     { word = "other failure"; break; }
+        case KDRV_WIFI_FAIL_HANDSHAKE: { word = "handshake timed out"; break; }
         default:                       { break; }
     }
     return word;
@@ -313,14 +368,21 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             s_wifi.state = KDRV_WIFI_DISCONNECTED;
             s_wifi.ip4   = 0U;
             s_wifi.rssi  = 0;   /* stale strength for a network we just left */
+            s_wifi.channel = 0U;
             if ( NULL != s_wifi.bits )
             {
                 (void)xEventGroupSetBits(s_wifi.bits, WIFI_BIT_DISCONNECTED);
             }
             /* No reconnect here: whether anyone still wants the network is AO_Radio's call. */
-            if ( lost && (NULL != s_wifi.on_lost) )
+            if ( lost )
             {
-                s_wifi.on_lost();
+                /* The stack's own reason: a beacon timeout is range or the
+                 * access point, a deauthentication is the network's doing. */
+                KLOG_W(TAG, "the network dropped (reason %u)", (unsigned)s_wifi.reason);
+                if ( NULL != s_wifi.on_lost )
+                {
+                    s_wifi.on_lost();
+                }
             }
         }
         else if ( WIFI_EVENT_SCAN_DONE == id )
@@ -478,6 +540,7 @@ kode_status_t kdrv_wifi_stop(void)
     s_wifi.ip4      = 0U;
     ssid_set(NULL);
     s_wifi.rssi     = 0;
+    s_wifi.channel  = 0U;
     s_wifi.count    = 0U;
     s_wifi.head     = 0U;
     s_wifi.tail     = 0U;
@@ -495,6 +558,7 @@ void kdrv_wifi_forget(void)
     s_wifi.ip4     = 0U;
     ssid_set(NULL);
     s_wifi.rssi    = 0;
+    s_wifi.channel = 0U;
     s_wifi.count   = 0U;
     s_wifi.head    = 0U;
     s_wifi.tail    = 0U;
@@ -780,6 +844,10 @@ kode_status_t kdrv_wifi_scan(void)
         return KODE_NO_RESOURCES;
     }
 
+    /* A join readied for one band and never awaited, because the C5's vault
+     * refused it, leaves the radio on that band. A sweep covers both. */
+    wifi_band_aim(KDRV_WIFI_CHANNEL_ANY);
+
     /* Before the radio is even asked, so a failed sweep cannot leave the last
      * room's networks readable as if they were this one's - the ring
      * included, or a listing would open with somebody else's leftovers. */
@@ -985,6 +1053,7 @@ kode_status_t kdrv_wifi_probe(uint8_t channel, uint16_t dwell_ms,
     {
         return rc;
     }
+    wifi_band_aim(KDRV_WIFI_CHANNEL_ANY);   /* as the sweep does */
     bool const pas = probe_is_radar(channel);
     if ( NULL != passive )
     {
@@ -1097,7 +1166,7 @@ static kode_status_t wifi_ensure_netif(void)
     return KODE_OK;
 }
 
-kode_status_t kdrv_wifi_prepare(const char *ssid)
+kode_status_t kdrv_wifi_prepare(const char *ssid, uint8_t channel)
 {
     if ( (NULL == ssid) || ('\0' == ssid[0]) )
     {
@@ -1129,6 +1198,10 @@ kode_status_t kdrv_wifi_prepare(const char *ssid)
         khal_delay_ms(300U);
     }
 
+    /* Aimed after the step off, so no association is held on the band being
+     * left, and before the bits are cleared, so an event the change raises is
+     * not taken for the new attempt's. */
+    wifi_band_aim(channel);
     (void)xEventGroupClearBits(s_wifi.bits,
                                WIFI_BIT_GOT_IP | WIFI_BIT_DISCONNECTED);
     /* Readied, not connecting: whoever makes the join may still refuse it
@@ -1167,6 +1240,7 @@ kode_status_t kdrv_wifi_await(const char *ssid, uint32_t timeout_ms)
     EventBits_t const bits =
         xEventGroupWaitBits(s_wifi.bits, WIFI_BIT_GOT_IP | WIFI_BIT_DISCONNECTED,
                             pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
+    kode_status_t rc = KODE_OK;
 
     if ( (bits & WIFI_BIT_GOT_IP) != 0U )
     {
@@ -1176,19 +1250,32 @@ kode_status_t kdrv_wifi_await(const char *ssid, uint32_t timeout_ms)
          * asks for a refresh, and a `wifi_info` right after a join was
          * reporting no signal at all for a board demonstrably on a network. */
         (void)kdrv_wifi_rssi();
-        return KODE_OK;
+    }
+    else
+    {
+        (void)esp_wifi_disconnect();
+        ssid_set(NULL);
+        if ( (bits & WIFI_BIT_DISCONNECTED) != 0U )
+        {
+            /* The word is what a person can act on; the number is the
+             * stack's own reason, which tells a handshake that timed out on a
+             * weak signal from one the network turned down. */
+            KLOG_W(TAG, "'%s' refused us (%s, reason %u)", name, wifi_fail_word(),
+                   (unsigned)s_wifi.reason);
+            rc = KODE_DENIED;
+        }
+        else
+        {
+            s_wifi.state = KDRV_WIFI_IDLE;   /* no event will say so: nothing happened */
+            KLOG_W(TAG, "'%s': no address within %ums", name, (unsigned)timeout_ms);
+            rc = KODE_TIMEOUT;
+        }
     }
 
-    (void)esp_wifi_disconnect();
-    ssid_set(NULL);
-    if ( (bits & WIFI_BIT_DISCONNECTED) != 0U )
-    {
-        KLOG_W(TAG, "'%s' refused us (%s)", name, wifi_fail_word());
-        return KODE_DENIED;
-    }
-    s_wifi.state = KDRV_WIFI_IDLE;   /* no event will say so: nothing happened */
-    KLOG_W(TAG, "'%s': no address within %ums", name, (unsigned)timeout_ms);
-    return KODE_TIMEOUT;
+    /* The attempt is over, whatever it came to: the radio has both bands
+     * again, so the network may change band and a scan hears both. */
+    wifi_band_aim(KDRV_WIFI_CHANNEL_ANY);
+    return rc;
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; called by the kdrv_radio worker, which is a file this check does not join to this one */
@@ -1250,7 +1337,7 @@ kode_status_t kdrv_wifi_adopt(uint32_t timeout_ms)
 kode_status_t kdrv_wifi_connect(const char *ssid, const char *pass,
                                 uint32_t timeout_ms)
 {
-    kode_status_t const rc = kdrv_wifi_prepare(ssid);
+    kode_status_t const rc = kdrv_wifi_prepare(ssid, KDRV_WIFI_CHANNEL_ANY);
     if ( KODE_OK != rc )
     {
         return rc;
@@ -1302,6 +1389,7 @@ kode_status_t kdrv_wifi_disconnect(void)
     s_wifi.ip4     = 0U;
     ssid_set(NULL);
     s_wifi.rssi    = 0;
+    s_wifi.channel = 0U;
     return KODE_OK;
 }
 

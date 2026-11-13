@@ -62,7 +62,7 @@ _Static_assert(KODE_FILE_NAME_MAX == KODE_APP_FILE_MAX,
 struct kode_file_state {
     char             *text;   /**< The last kode_file_read() text.      */
     uint8_t          *bytes;  /**< The last kode_file_read_bytes() data. */
-    kode_file_list_t *list;   /**< The last kode_file_list() listing.   */
+    kode_file_list_t *list;   /**< The last listing, of either call.    */
 };
 
 /** @brief What one try of kode_file_sys() carries. */
@@ -1160,6 +1160,7 @@ bool kode_file_append_bytes(const char *path, const void *data, uint32_t len)
 /** @brief What one list try carries. */
 typedef struct {
     const char       *path;  /**< The volume path.     */
+    uint32_t          skip;  /**< Entries to leave out. */
     kode_file_list_t *list;  /**< Where the entries go. */
 } list_try_t;
 
@@ -1357,17 +1358,18 @@ static kode_status_t list_op(void *ctx)
     const list_try_t *const t = (const list_try_t *)ctx;
 
     (void)memset(t->list, 0, sizeof(*t->list));
-    return kode_block_file_list_each(t->path, &list_collect, t->list);
+    return kode_block_file_list_each(t->path, t->skip, &list_collect, t->list);
 }
 
 /**
- * @brief Fill @p list with the entries of a folder.
+ * @brief Fill @p list with the entries of a folder, from the @p skip-th on.
  * @param user The folder as typed.
+ * @param skip Entries to leave out.
  * @param list Out: the entries; zeroed first.
  * @return true on success, `more` set when there were others; false with the
  *         error set.
  */
-static bool list_fill(const char *user, kode_file_list_t *list)
+static bool list_fill(const char *user, uint32_t skip, kode_file_list_t *list)
 {
     char                   vol[KODE_PATH_MAX];
     kode_sys_file_status_t st;
@@ -1388,7 +1390,7 @@ static bool list_fill(const char *user, kode_file_list_t *list)
         }
         else
         {
-            list_try_t          t  = { vol, list };
+            list_try_t          t  = { vol, skip, list };
             const kode_status_t rc = kode_file_sys(&list_op, &t);
 
             /* The STAT above took the sys buffer: NO_RESOURCES here means more entries only. */
@@ -1411,12 +1413,19 @@ static bool list_fill(const char *user, kode_file_list_t *list)
     return ok;
 }
 
-const kode_file_list_t *kode_file_list(const char *folder)
+/**
+ * @brief The body of the two listing calls.
+ * @param name   The public name of the call.
+ * @param folder The folder as typed.
+ * @param skip   Entries to leave out.
+ * @return The task's listing; an empty one on failure, with the error set.
+ */
+static const kode_file_list_t *list_call(const char *name, const char *folder, uint32_t skip)
 {
     static const kode_file_list_t no_list = { 0U };  /* a failed listing */
     const kode_file_list_t       *list = &no_list;
 
-    if ( files_enter("kode_file_list") )
+    if ( files_enter(name) )
     {
         struct kode_file_state *const s = kode_file_state_ensure();
 
@@ -1431,12 +1440,23 @@ const kode_file_list_t *kode_file_list(const char *folder)
         }
         else
         {
-            (void)list_fill(folder, s->list);
+            (void)list_fill(folder, skip, s->list);
             list = s->list;
         }
         files_leave();
     }
     return list;
+}
+
+const kode_file_list_t *kode_file_list(const char *folder)
+{
+    return list_call("kode_file_list", folder, 0U);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+const kode_file_list_t *kode_file_list_from(const char *folder, uint32_t skip)
+{
+    return list_call("kode_file_list_from", folder, skip);
 }
 
 /** @brief Whether @p vol is a volume itself, "/sdcard" or "/storage". */
