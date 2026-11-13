@@ -139,7 +139,7 @@ typedef struct {
     QActive     super;
     Tmo         round_tmo;        /**< LOWPOWER_ROUND_TMO_SIG: the round's budget, or OFF's grace. */
     Tmo         idle_tmo;         /**< LOWPOWER_IDLE_TMO_SIG: the idle time, AWAKE only. */
-    Tmo         radio_tmo;        /**< LOWPOWER_RADIO_TMO_SIG: the bound of a radio wake. */
+    Tmo         dark_tmo;         /**< LOWPOWER_DARK_TMO_SIG: the bound of a dark wake. */
     Tmo         retry_tmo;        /**< LOWPOWER_RETRY_TMO_SIG: the wait before a requested round begins again. */
     Participant parts[KODE_LOWPOWER_PARTICIPANTS]; /**< The table lowpower_join() fills. */
     uint8_t     joined;           /**< Entries of parts in use.              */
@@ -169,15 +169,15 @@ typedef struct {
     uint32_t    wakes[LP_CAUSES]; /**< Wakes from ASLEEP, by the cause that ended it. */
     uint64_t    minute_due_us;    /**< When the one-shot comes due.          */
     uint64_t    boundary_us;      /**< When the minute's work is due.        */
-    uint64_t    wake_due_us;      /**< When a radio owner's work is due; 0 for none. */
-    uint8_t     wake_who;         /**< The radio owner whose time that is.   */
+    uint64_t    wake_due_us;      /**< When a dark-wake owner's work is due; 0 for none. */
+    uint8_t     wake_who;         /**< The dark-wake owner whose time that is.   */
     uint64_t    app_due_us;       /**< When any other owner's work is due; 0 for none. A
-                                   *   radio wake does not touch it.          */
+                                   *   dark wake does not touch it.          */
     uint8_t     app_who;          /**< The owner whose time that is.         */
-    uint32_t    radio_mask;       /**< Bit n: participant n takes part in radio wakes. */
-    uint32_t    radio_pending;    /**< Bit n: radio owner n has not said it is done. */
-    bool        radio;            /**< A radio wake is on: the tick runs and the lock is held inside ASLEEP. */
-    bool        radio_resting;    /**< The radio wake's round for ASLEEP is open. */
+    uint32_t    dark_mask;        /**< Bit n: participant n takes part in dark wakes. */
+    uint32_t    dark_pending;     /**< Bit n: dark-wake owner n has not said it is done. */
+    bool        dark;             /**< A dark wake is on: the tick runs and the lock is held inside ASLEEP. */
+    bool        dark_resting;     /**< The dark wake's round for ASLEEP is open. */
     uint8_t     minute_out;       /**< One-shots armed and not yet heard.    */
     lowpower_last_t *last;        /**< This rest's summary, in PSRAM while ASLEEP; NULL otherwise. */
     bool        sample_due;       /**< The minute asked AO_Power for a reading and it has not come. */
@@ -189,7 +189,7 @@ typedef struct {
     uint8_t     owed_state;       /**< The kode_lp_state_t that change reached. */
     uint8_t     owed_cause;       /**< The kode_lp_cause_t of that change.   */
     uint8_t     owed_prev;        /**< The kode_lp_state_t it left.          */
-    bool        radio_closing;    /**< The radio wake's STATE(ASLEEP) is owed: the tick and the lock stay until it goes out. */
+    bool        dark_closing;     /**< The dark wake's STATE(ASLEEP) is owed: the tick and the lock stay until it goes out. */
     bool        used;             /**< Something other than an owner's time used the board since it last woke:
                                    *   every wake but a timer's, and each real input after. */
     bool        rest_on;          /**< The request in hand, round or retry, is a rest (lowpower_request_rest()). */
@@ -206,7 +206,7 @@ static QState LowPower_on(LowPower * const me, QEvt const * const e);
 static QState LowPower_awake(LowPower * const me, QEvt const * const e);
 static QState LowPower_resting(LowPower * const me, QEvt const * const e);
 static QState LowPower_asleep(LowPower * const me, QEvt const * const e);
-static QState LowPower_radio(LowPower * const me, QEvt const * const e);
+static QState LowPower_dark(LowPower * const me, QEvt const * const e);
 static QState LowPower_off(LowPower * const me, QEvt const * const e);
 
 /* ---- Names ---------------------------------------------------------------- */
@@ -214,7 +214,7 @@ static QState LowPower_off(LowPower * const me, QEvt const * const e);
 /** @brief A state's name for the log. */
 static const char *state_name(uint8_t state)
 {
-    static const char * const names[] = { "AWAKE", "ASLEEP", "OFF", "RADIO" };
+    static const char * const names[] = { "AWAKE", "ASLEEP", "OFF", "DARK" };
     const char *name = "?";
 
     if ( Q_DIM(names) > state )
@@ -382,8 +382,8 @@ static void idle_restart(LowPower * const me)
 /**
  * @brief Whether a state that no event could carry is published again later.
  *
- * AWAKE is (owners restore on it), RADIO is (Net and Radio start on it), and so
- * is the ASLEEP that ends a radio wake (Net and Radio leave RADIO on it). The
+ * AWAKE is (owners restore on it), DARK is (the dark-wake owners start on it), and so
+ * is the ASLEEP that ends a dark wake (they leave DARK on it). The
  * ASLEEP and OFF of an ordinary round are not: the owners rested on the round.
  *
  * @param state The state reached.
@@ -394,11 +394,11 @@ static bool state_is_owed(uint8_t state, uint8_t prev)
 {
     bool owed = false;
 
-    if ( ((uint8_t)KODE_LP_AWAKE == state) || ((uint8_t)KODE_LP_RADIO == state) )
+    if ( ((uint8_t)KODE_LP_AWAKE == state) || ((uint8_t)KODE_LP_DARK == state) )
     {
         owed = true;
     }
-    else if ( ((uint8_t)KODE_LP_ASLEEP == state) && ((uint8_t)KODE_LP_RADIO == prev) )
+    else if ( ((uint8_t)KODE_LP_ASLEEP == state) && ((uint8_t)KODE_LP_DARK == prev) )
     {
         owed = true;
     }
@@ -484,8 +484,8 @@ static void publish_state(LowPower * const me, uint8_t state, uint8_t cause,
  * @brief LOWPOWER_STATE_RETRY_SIG: publish the state that was owed.
  *
  * Does nothing when the board has gone on since: that change's own event is
- * the news. An owed AWAKE needs the board AWAKE; an owed RADIO or the ASLEEP
- * that ends a radio wake needs the radio wake still on.
+ * the news. An owed AWAKE needs the board AWAKE; an owed DARK or the ASLEEP
+ * that ends a dark wake needs the dark wake still on.
  *
  * @param me The AO.
  * @return true when the owed state went out on this call.
@@ -504,7 +504,7 @@ static bool state_retry_fire(LowPower * const me)
         }
         else
         {
-            still = me->radio;
+            still = me->dark;
         }
         if ( still )
         {
@@ -897,39 +897,39 @@ static void light_up(void)
 }
 
 /**
- * @brief A radio wake is over, one way or another: forget what it counted.
+ * @brief A dark wake is over, one way or another: forget what it counted.
  *
  * The tick and the lock are the caller's to settle. The round's one-shot is
  * stopped only when this wake's own round is the one it times.
  *
  * @param me The AO.
  */
-static void radio_clear(LowPower * const me)
+static void dark_clear(LowPower * const me)
 {
-    tmo_stop(&me->radio_tmo);
-    if ( me->radio_resting )
+    tmo_stop(&me->dark_tmo);
+    if ( me->dark_resting )
     {
         tmo_stop(&me->round_tmo);
     }
-    me->radio         = false;
-    me->radio_resting = false;
-    me->radio_closing = false;
-    me->radio_pending = 0U;
+    me->dark          = false;
+    me->dark_resting  = false;
+    me->dark_closing  = false;
+    me->dark_pending  = 0U;
     me->waiting       = 0U;
 }
 
 /**
  * @brief Have the tick and the lock back, from either phase of ASLEEP.
  *
- * A radio wake has them already.
+ * A dark wake has them already.
  *
  * @param me The AO, ASLEEP.
  */
 static void rest_up(LowPower * const me)
 {
-    if ( me->radio )
+    if ( me->dark )
     {
-        radio_clear(me);
+        dark_clear(me);
     }
     else
     {
@@ -940,14 +940,14 @@ static void rest_up(LowPower * const me)
 /**
  * @brief Leave ASLEEP: the tick, then the lock, then the news.
  *
- * @param me    The AO, ASLEEP, or in a radio wake.
+ * @param me    The AO, ASLEEP, or in a dark wake.
  * @param cause The kode_lp_cause_t that woke the board.
  */
 static void wake_up(LowPower * const me, uint8_t cause)
 {
     uint8_t const prev = me->state;
-    /* A radio wake counted itself when it began. */
-    bool const counted = me->radio && ((uint8_t)KODE_LP_CAUSE_TIMER == cause);
+    /* A dark wake counted itself when it began. */
+    bool const counted = me->dark && ((uint8_t)KODE_LP_CAUSE_TIMER == cause);
 
     rest_up(me);
     me->state = (uint8_t)KODE_LP_AWAKE;
@@ -1409,8 +1409,8 @@ static uint64_t time_wait_us(uint64_t due_us, uint64_t now)
 /**
  * @brief Microseconds from @p now to the first owner's time the one-shot serves.
  *
- * Another owner's time always counts. A radio owner's counts only outside a
- * radio wake, which is awake for the radio owners' work already.
+ * Another owner's time always counts. A dark-wake owner's counts only outside a
+ * dark wake, which is awake for the dark-wake owners' work already.
  *
  * @param me  The AO.
  * @param now khal_time_us().
@@ -1420,13 +1420,13 @@ static uint64_t owner_wait_us(const LowPower *me, uint64_t now)
 {
     uint64_t wait = time_wait_us(me->app_due_us, now);
 
-    if ( !me->radio )
+    if ( !me->dark )
     {
-        uint64_t const radio = time_wait_us(me->wake_due_us, now);
+        uint64_t const dark = time_wait_us(me->wake_due_us, now);
 
-        if ( (0U != radio) && ((0U == wait) || (radio < wait)) )
+        if ( (0U != dark) && ((0U == wait) || (dark < wait)) )
         {
-            wait = radio;
+            wait = dark;
         }
     }
     return wait;
@@ -1488,22 +1488,22 @@ static const char *owner_name(const LowPower *me, uint8_t who)
 }
 
 /**
- * @brief Whether participant @p who takes part in radio wakes.
+ * @brief Whether participant @p who takes part in dark wakes.
  *
  * @param me  The AO.
  * @param who The participant.
- * @return true for a radio owner.
+ * @return true for a dark-wake owner.
  */
-static bool is_radio_owner(const LowPower *me, uint8_t who)
+static bool is_dark_owner(const LowPower *me, uint8_t who)
 {
-    return (WAITING_BITS > who) && ((me->radio_mask & ((uint32_t)1U << who)) != 0U);
+    return (WAITING_BITS > who) && ((me->dark_mask & ((uint32_t)1U << who)) != 0U);
 }
 
 /**
- * @brief LOWPOWER_WAKE_AT_SIG: keep the earliest time a radio owner gave, and
+ * @brief LOWPOWER_WAKE_AT_SIG: keep the earliest time a dark-wake owner gave, and
  *        the earliest any other owner gave, apart.
  *
- * Apart because a radio wake asks the radio owners alone to say their times
+ * Apart because a dark wake asks the dark-wake owners alone to say their times
  * again: another owner's time must outlive it.
  *
  * @param me The AO.
@@ -1513,7 +1513,7 @@ static void wake_store(LowPower * const me, const LowPowerWakeAtEvt *w)
 {
     if ( 0U != w->due_us )
     {
-        if ( is_radio_owner(me, w->who) )
+        if ( is_dark_owner(me, w->who) )
         {
             if ( (0U == me->wake_due_us) || (w->due_us < me->wake_due_us) )
             {
@@ -1550,83 +1550,83 @@ static void wake_fold(LowPower * const me)
     }
 }
 
-/* ---- The radio wake ------------------------------------------------------------------ */
+/* ---- The dark wake ------------------------------------------------------------------- */
 
 /**
- * @brief An owner's time came, and it is a radio owner's: wake the radio alone.
+ * @brief An owner's time came, and it is a dark-wake owner's: wake with the glass dark.
  *
  * The one-shot that came was this wake's, so the minute is armed again; the
- * radio owners' time is forgotten, and they say theirs again in the round
+ * dark-wake owners' time is forgotten, and they say theirs again in the round
  * that ends the wake. Another owner's time is kept: that round does not ask
  * it.
  *
  * @param me  The AO, ASLEEP.
  * @param now khal_time_us().
- * @return The transition into the radio wake.
+ * @return The transition into the dark wake.
  */
-static QState radio_begin(LowPower * const me, uint64_t now)
+static QState dark_begin(LowPower * const me, uint64_t now)
 {
-    KLOG_N(TAG, "%s has work due: a radio wake, the glass stays asleep",
+    KLOG_N(TAG, "%s has work due: a dark wake, the glass stays asleep",
            owner_name(me, me->wake_who));
     me->wake_due_us = 0U;
     minute_schedule(me, now);
-    return Q_TRAN(&LowPower_radio);
+    return Q_TRAN(&LowPower_dark);
 }
 
 /**
- * @brief Entering the radio wake: the tick, the lock, then the news.
+ * @brief Entering the dark wake: the tick, the lock, then the news.
  *
  * @param me The AO, ASLEEP.
  */
-static void radio_enter(LowPower * const me)
+static void dark_enter(LowPower * const me)
 {
     light_up();
-    me->radio         = true;
-    me->radio_resting = false;
-    me->radio_closing = false;
-    me->radio_pending = me->radio_mask;
+    me->dark          = true;
+    me->dark_resting  = false;
+    me->dark_closing  = false;
+    me->dark_pending  = me->dark_mask;
     me->waiting       = 0U;
     me->wakes[KODE_LP_CAUSE_TIMER] += 1U;
-    tmo_start(&me->radio_tmo, KODE_LOWPOWER_RADIO_MAX_MS);
-    (void)state_send(me, (uint8_t)KODE_LP_RADIO, (uint8_t)KODE_LP_CAUSE_TIMER,
+    tmo_start(&me->dark_tmo, KODE_LOWPOWER_DARK_MAX_MS);
+    (void)state_send(me, (uint8_t)KODE_LP_DARK, (uint8_t)KODE_LP_CAUSE_TIMER,
                      (uint8_t)KODE_LP_ASLEEP);
 }
 
 /**
- * @brief Leaving the radio wake by any transition: its one-shot ends with it.
+ * @brief Leaving the dark wake by any transition: its one-shot ends with it.
  *
  * What the transition's own handler left to settle (the tick, the lock, a
  * round it began) is not touched here.
  *
  * @param me The AO.
  */
-static void radio_exit(LowPower * const me)
+static void dark_exit(LowPower * const me)
 {
-    tmo_stop(&me->radio_tmo);
-    me->radio         = false;
-    me->radio_resting = false;
-    me->radio_closing = false;
+    tmo_stop(&me->dark_tmo);
+    me->dark         = false;
+    me->dark_resting = false;
+    me->dark_closing = false;
 }
 
 /**
- * @brief The radio wake cannot rest again: the board is whole AWAKE.
+ * @brief The dark wake cannot rest again: the board is whole AWAKE.
  *
- * The owners that rested for ASLEEP restore on the STATE(AWAKE); the radio
+ * The owners that rested for ASLEEP restore on the STATE(AWAKE); the dark-wake
  * owners restore again, which is idempotent. The caller has set the refusal.
  *
- * @param me The AO, in the radio wake.
+ * @param me The AO, in the dark wake.
  * @return The transition to AWAKE.
  */
-static QState radio_abandon(LowPower * const me)
+static QState dark_abandon(LowPower * const me)
 {
-    KLOG_N(TAG, "radio wake cannot rest again (%s): AWAKE", s_refusal);
+    KLOG_N(TAG, "dark wake cannot rest again (%s): AWAKE", s_refusal);
     wake_up(me, (uint8_t)KODE_LP_CAUSE_TIMER);
     refusal_publish((uint8_t)KODE_LOG_SRC_NONE);
     return Q_TRAN(&LowPower_awake);
 }
 
 /**
- * @brief Post the round for ASLEEP to the radio owners, one event each.
+ * @brief Post the round for ASLEEP to the dark-wake owners, one event each.
  *
  * One event for each, because a dynamic event posted to two queues needs a
  * reference held across the posts, and publishing is what holds one.
@@ -1634,13 +1634,13 @@ static QState radio_abandon(LowPower * const me)
  * @param me The AO.
  * @return false when an event was missing; some owners may have been asked.
  */
-static bool radio_round_post(LowPower * const me)
+static bool dark_round_post(LowPower * const me)
 {
     bool ok = true;
 
     for ( uint8_t i = 0U; i < me->joined; i++ )
     {
-        if ( (me->radio_mask & (1U << i)) != 0U )
+        if ( (me->dark_mask & (1U << i)) != 0U )
         {
             LowPowerRoundEvt *ev = Q_NEW_X(LowPowerRoundEvt, 0U, LOWPOWER_ROUND_SIG);
 
@@ -1660,17 +1660,17 @@ static bool radio_round_post(LowPower * const me)
 }
 
 /**
- * @brief Ask the radio owners to rest again: the end of the radio wake.
+ * @brief Ask the dark-wake owners to rest again: the end of the dark wake.
  *
- * @param me The AO, in the radio wake.
+ * @param me The AO, in the dark wake.
  * @return The QP status: handled while the round is out, or the way home to
  *         AWAKE when it could not be asked.
  */
-static QState radio_rest(LowPower * const me)
+static QState dark_rest(LowPower * const me)
 {
     QState status = Q_HANDLED();
 
-    if ( !me->radio_resting )
+    if ( !me->dark_resting )
     {
         me->round += 1U;
         if ( ROUND_NONE == me->round )
@@ -1680,37 +1680,37 @@ static QState radio_rest(LowPower * const me)
         me->target        = (uint8_t)KODE_LP_ASLEEP;
         me->cause         = (uint8_t)KODE_LP_CAUSE_TIMER;
         me->round_src     = (uint8_t)KODE_LOG_SRC_NONE;
-        me->wake_due_us   = 0U;   /* the radio owners say their times again */
-        me->waiting       = me->radio_mask;
-        me->radio_resting = true;
-        tmo_stop(&me->radio_tmo);
-        if ( radio_round_post(me) )
+        me->wake_due_us   = 0U;   /* the dark-wake owners say their times again */
+        me->waiting       = me->dark_mask;
+        me->dark_resting  = true;
+        tmo_stop(&me->dark_tmo);
+        if ( dark_round_post(me) )
         {
-            KLOG_I(TAG, "round %u to ASLEEP (radio wake): asking the radio owners",
+            KLOG_I(TAG, "round %u to ASLEEP (dark wake): asking the dark-wake owners",
                    (unsigned)me->round);
             tmo_start(&me->round_tmo, KODE_LOWPOWER_ROUND_MS);
         }
         else
         {
             refusal_set(WHO_REQUEST, "out of events");
-            status = radio_abandon(me);
+            status = dark_abandon(me);
         }
     }
     return status;
 }
 
 /**
- * @brief The radio wake lets go: the tick stops, then the lock goes.
+ * @brief The dark wake lets go: the tick stops, then the lock goes.
  *
  * Runs once STATE(ASLEEP) is on the bus, never before.
  *
- * @param me The AO, in the radio wake, its ASLEEP published.
+ * @param me The AO, in the dark wake, its ASLEEP published.
  * @return The transition back to ASLEEP, without leaving it.
  */
-static QState radio_release(LowPower * const me)
+static QState dark_release(LowPower * const me)
 {
-    radio_clear(me);
-    KLOG_N(TAG, "radio wake done: ASLEEP again, the glass was not lit");
+    dark_clear(me);
+    KLOG_N(TAG, "dark wake done: ASLEEP again, the glass was not lit");
     wake_fold(me);   /* a time the owners gave in the round */
     kqp_tick_rest(true);
     khal_console_rest(true);
@@ -1719,33 +1719,33 @@ static QState radio_release(LowPower * const me)
 }
 
 /**
- * @brief The radio wake is over: ASLEEP again, nothing else woken.
+ * @brief The dark wake is over: ASLEEP again, nothing else woken.
  *
  * The state is published before the tick stops and the lock goes (rule 6).
  * When no event can carry it, the tick and the lock stay and the state is
- * retried on the timer; radio_retry() releases once it went out, so a rest
- * never begins with Net and Radio still in RADIO.
+ * retried on the timer; dark_retry() releases once it went out, so a rest
+ * never begins with a dark-wake owner still in DARK.
  *
- * @param me The AO, in the radio wake, every radio owner at rest.
+ * @param me The AO, in the dark wake, every dark-wake owner at rest.
  * @return The transition back to ASLEEP, or handled while the state is owed.
  */
-static QState radio_back(LowPower * const me)
+static QState dark_back(LowPower * const me)
 {
     QState status;
 
     tmo_stop(&me->round_tmo);
-    me->radio_resting = false;
-    me->radio_pending = 0U;
+    me->dark_resting  = false;
+    me->dark_pending  = 0U;
     me->waiting       = 0U;
     if ( state_send(me, (uint8_t)KODE_LP_ASLEEP, (uint8_t)KODE_LP_CAUSE_TIMER,
-                   (uint8_t)KODE_LP_RADIO) )
+                   (uint8_t)KODE_LP_DARK) )
     {
-        status = radio_release(me);
+        status = dark_release(me);
     }
     else
     {
-        me->radio_closing = true;
-        KLOG_W(TAG, "radio wake: ASLEEP not published; the wake holds the "
+        me->dark_closing = true;
+        KLOG_W(TAG, "dark wake: ASLEEP not published; the wake holds the "
                     "tick and the lock until it is");
         status = Q_HANDLED();
     }
@@ -1753,34 +1753,34 @@ static QState radio_back(LowPower * const me)
 }
 
 /**
- * @brief LOWPOWER_STATE_RETRY_SIG in the radio wake.
+ * @brief LOWPOWER_STATE_RETRY_SIG in the dark wake.
  *
- * A RADIO that went out late changes nothing else. The ASLEEP that ends the
+ * A DARK that went out late changes nothing else. The ASLEEP that ends the
  * wake, once out, lets the wake go.
  *
- * @param me The AO, in the radio wake.
+ * @param me The AO, in the dark wake.
  * @return The QP status.
  */
-static QState radio_retry(LowPower * const me)
+static QState dark_retry(LowPower * const me)
 {
     QState status = Q_HANDLED();
-    bool const closing = me->radio_closing;
+    bool const closing = me->dark_closing;
 
     if ( state_retry_fire(me) && closing )
     {
-        status = radio_release(me);
+        status = dark_release(me);
     }
     return status;
 }
 
 /**
- * @brief LOWPOWER_RADIO_DONE_SIG: one radio owner's work is finished.
+ * @brief LOWPOWER_DARK_DONE_SIG: one dark-wake owner's work is finished.
  *
- * @param me The AO, in the radio wake.
+ * @param me The AO, in the dark wake.
  * @param d  The note.
  * @return The QP status.
  */
-static QState radio_done(LowPower * const me, const LowPowerRadioDoneEvt *d)
+static QState dark_done(LowPower * const me, const LowPowerDarkDoneEvt *d)
 {
     QState status = Q_HANDLED();
 
@@ -1788,28 +1788,28 @@ static QState radio_done(LowPower * const me, const LowPowerRadioDoneEvt *d)
     {
         uint32_t const bit = (uint32_t)1U << d->who;
 
-        me->radio_pending &= ~bit;
+        me->dark_pending &= ~bit;
     }
-    if ( (0U == me->radio_pending) && (!me->radio_resting) && (!me->radio_closing) )
+    if ( (0U == me->dark_pending) && (!me->dark_resting) && (!me->dark_closing) )
     {
-        KLOG_I(TAG, "the radio owners are done");
-        status = radio_rest(me);
+        KLOG_I(TAG, "the dark-wake owners are done");
+        status = dark_rest(me);
     }
     return status;
 }
 
 /**
- * @brief A radio owner's answer to the radio wake's round.
+ * @brief A dark-wake owner's answer to the dark wake's round.
  *
- * @param me The AO, in the radio wake.
+ * @param me The AO, in the dark wake.
  * @param a  The answer.
  * @return The QP status.
  */
-static QState radio_ready(LowPower * const me, const LowPowerReadyEvt *a)
+static QState dark_ready(LowPower * const me, const LowPowerReadyEvt *a)
 {
     QState status = Q_HANDLED();
 
-    if ( (!me->radio_resting) || (a->round != me->round) || (a->who >= me->joined)
+    if ( (!me->dark_resting) || (a->round != me->round) || (a->who >= me->joined)
         || ((me->waiting & (1U << a->who)) == 0U) )
     {
         KLOG_D(TAG, "answer dropped: participant %u, round %u (this is %u)",
@@ -1821,30 +1821,30 @@ static QState radio_ready(LowPower * const me, const LowPowerReadyEvt *a)
 
         why_copy(why, sizeof(why), a->why);
         refusal_set(me->parts[a->who].name, why);
-        status = radio_abandon(me);
+        status = dark_abandon(me);
     }
     else
     {
         me->waiting &= ~(1U << a->who);
         if ( 0U == me->waiting )
         {
-            status = radio_back(me);
+            status = dark_back(me);
         }
     }
     return status;
 }
 
 /**
- * @brief The radio wake's round ran out of time: name whoever is silent.
+ * @brief The dark wake's round ran out of time: name whoever is silent.
  *
- * @param me The AO, in the radio wake.
+ * @param me The AO, in the dark wake.
  * @return The QP status.
  */
-static QState radio_round_timeout(LowPower * const me)
+static QState dark_round_timeout(LowPower * const me)
 {
     QState status = Q_HANDLED();
 
-    if ( me->radio_resting )
+    if ( me->dark_resting )
     {
         bool first = true;
 
@@ -1862,7 +1862,7 @@ static QState radio_round_timeout(LowPower * const me)
                 }
             }
         }
-        status = radio_abandon(me);
+        status = dark_abandon(me);
     }
     return status;
 }
@@ -1889,8 +1889,8 @@ static void minute_work(LowPower * const me)
 /**
  * @brief An owner's time has come and the board is not off: wake for it.
  *
- * Another owner's time wakes the whole board, even inside a radio wake. A
- * radio owner's wakes the radio alone; the minute's work, if it falls due in
+ * Another owner's time wakes the whole board, even inside a dark wake. A
+ * dark-wake owner's wakes it with the glass dark; the minute's work, if it falls due in
  * the same wake, is done first, since the glass stays asleep and would
  * otherwise miss it.
  *
@@ -1915,7 +1915,7 @@ static QState asleep_owner(LowPower * const me, uint64_t now)
         {
             minute_work(me);
         }
-        status = radio_begin(me, now);
+        status = dark_begin(me, now);
     }
     return status;
 }
@@ -1952,7 +1952,7 @@ static QState asleep_minute(LowPower * const me)
                              (uint8_t)KODE_LOG_SRC_NONE);
     }
     else if ( time_due(me->app_due_us, now)
-             || (time_due(me->wake_due_us, now) && (!me->radio)) )
+             || (time_due(me->wake_due_us, now) && (!me->dark)) )
     {
         status = asleep_owner(me, now);
     }
@@ -2282,9 +2282,9 @@ static QState LowPower_on(LowPower * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case LOWPOWER_RADIO_TMO_SIG: {
-            /* An expiry of a radio wake that is over. */
-            (void)tmo_fresh(&me->radio_tmo);
+        case LOWPOWER_DARK_TMO_SIG: {
+            /* An expiry of a dark wake that is over. */
+            (void)tmo_fresh(&me->dark_tmo);
             status = Q_HANDLED();
             break;
         }
@@ -2295,9 +2295,9 @@ static QState LowPower_on(LowPower * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case LOWPOWER_RADIO_DONE_SIG: {
-            /* A radio owner's word, late or with no radio wake to belong to. */
-            KLOG_D(TAG, "radio done dropped: no radio wake is running");
+        case LOWPOWER_DARK_DONE_SIG: {
+            /* A dark-wake owner's word, late or with no dark wake to belong to. */
+            KLOG_D(TAG, "dark done dropped: no dark wake is running");
             status = Q_HANDLED();
             break;
         }
@@ -2697,7 +2697,7 @@ static QState LowPower_asleep(LowPower * const me, QEvt const * const e)
 }
 
 /**
- * @brief A radio wake: ASLEEP with the tick and the lock, for the radio owners.
+ * @brief A dark wake: ASLEEP with the tick and the lock, for the dark-wake owners.
  *
  * A substate of ASLEEP, so the minute, the inputs that wake the board whole
  * and the requests are ASLEEP's own and are handled there.
@@ -2706,36 +2706,36 @@ static QState LowPower_asleep(LowPower * const me, QEvt const * const e)
  * @param e  The event.
  * @return The QP status.
  */
-static QState LowPower_radio(LowPower * const me, QEvt const * const e)
+static QState LowPower_dark(LowPower * const me, QEvt const * const e)
 {
     QState status;
 
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
-            radio_enter(me);
+            dark_enter(me);
             status = Q_HANDLED();
             break;
         }
         case Q_EXIT_SIG: {
-            radio_exit(me);
+            dark_exit(me);
             status = Q_HANDLED();
             break;
         }
-        case LOWPOWER_RADIO_DONE_SIG: {
-            status = radio_done(me, Q_EVT_CAST(LowPowerRadioDoneEvt));
+        case LOWPOWER_DARK_DONE_SIG: {
+            status = dark_done(me, Q_EVT_CAST(LowPowerDarkDoneEvt));
             break;
         }
         case LOWPOWER_STATE_RETRY_SIG: {
-            status = radio_retry(me);
+            status = dark_retry(me);
             break;
         }
-        case LOWPOWER_RADIO_TMO_SIG: {
-            if ( tmo_fresh(&me->radio_tmo) )
+        case LOWPOWER_DARK_TMO_SIG: {
+            if ( tmo_fresh(&me->dark_tmo) )
             {
-                KLOG_N(TAG, "radio wake: %u ms are up; the radio owners are asked "
-                            "to rest", (unsigned)KODE_LOWPOWER_RADIO_MAX_MS);
-                status = radio_rest(me);
+                KLOG_N(TAG, "dark wake: %u ms are up; the dark-wake owners are asked "
+                            "to rest", (unsigned)KODE_LOWPOWER_DARK_MAX_MS);
+                status = dark_rest(me);
             }
             else
             {
@@ -2744,13 +2744,13 @@ static QState LowPower_radio(LowPower * const me, QEvt const * const e)
             break;
         }
         case LOWPOWER_READY_SIG: {
-            status = radio_ready(me, Q_EVT_CAST(LowPowerReadyEvt));
+            status = dark_ready(me, Q_EVT_CAST(LowPowerReadyEvt));
             break;
         }
         case LOWPOWER_ROUND_TMO_SIG: {
             if ( tmo_fresh(&me->round_tmo) )
             {
-                status = radio_round_timeout(me);
+                status = dark_round_timeout(me);
             }
             else
             {
@@ -2852,7 +2852,7 @@ void LowPower_ctor(void)
     QActive_ctor(&me->super, Q_STATE_CAST(&LowPower_initial));
     QTimeEvt_ctorX(&me->round_tmo.evt, &me->super, LOWPOWER_ROUND_TMO_SIG, 0U);
     QTimeEvt_ctorX(&me->idle_tmo.evt, &me->super, LOWPOWER_IDLE_TMO_SIG, 0U);
-    QTimeEvt_ctorX(&me->radio_tmo.evt, &me->super, LOWPOWER_RADIO_TMO_SIG, 0U);
+    QTimeEvt_ctorX(&me->dark_tmo.evt, &me->super, LOWPOWER_DARK_TMO_SIG, 0U);
     QTimeEvt_ctorX(&me->retry_tmo.evt, &me->super, LOWPOWER_RETRY_TMO_SIG, 0U);
     QTimeEvt_ctorX(&me->state_retry, &me->super, LOWPOWER_STATE_RETRY_SIG, 0U);
     me->state_owed = false;
@@ -2864,19 +2864,19 @@ void LowPower_ctor(void)
     me->round_tmo.live  = false;
     me->idle_tmo.stale  = 0U;
     me->idle_tmo.live   = false;
-    me->radio_tmo.stale = 0U;
-    me->radio_tmo.live  = false;
+    me->dark_tmo.stale  = 0U;
+    me->dark_tmo.live   = false;
     me->retry_tmo.stale = 0U;
     me->retry_tmo.live  = false;
     me->retry_on        = false;
     me->used            = true;
     me->rest_on         = false;
     me->request_us      = 0U;
-    me->radio_mask      = 0U;
-    me->radio_pending   = 0U;
-    me->radio           = false;
-    me->radio_resting   = false;
-    me->radio_closing   = false;
+    me->dark_mask       = 0U;
+    me->dark_pending    = 0U;
+    me->dark            = false;
+    me->dark_resting    = false;
+    me->dark_closing    = false;
     (void)memset(me->parts, 0, sizeof(me->parts));
     me->joined   = 0U;
     me->sealed   = false;
@@ -3078,26 +3078,26 @@ uint8_t lowpower_join(QActive *ao, const char *name)
     return id;
 }
 
-uint8_t lowpower_join_radio(QActive *ao, const char *name)
+uint8_t lowpower_join_dark(QActive *ao, const char *name)
 {
     LowPower * const me = &l_lowpower;
     uint8_t const id = lowpower_join(ao, name);
 
     if ( KODE_LOWPOWER_WHO_NONE != id )
     {
-        me->radio_mask |= (1U << id);
+        me->dark_mask |= (1U << id);
     }
     return id;
 }
 
-void lowpower_radio_done(uint8_t who)
+void lowpower_dark_done(uint8_t who)
 {
-    LowPowerRadioDoneEvt *e = Q_NEW_X(LowPowerRadioDoneEvt, 0U, LOWPOWER_RADIO_DONE_SIG);
+    LowPowerDarkDoneEvt *e = Q_NEW_X(LowPowerDarkDoneEvt, 0U, LOWPOWER_DARK_DONE_SIG);
 
     if ( NULL == e )
     {
-        /* The bound of the radio wake brings the board back. */
-        KLOG_E(TAG, "out of events; participant %u's radio done was dropped",
+        /* The bound of the dark wake brings the board back. */
+        KLOG_E(TAG, "out of events; participant %u's dark done was dropped",
                (unsigned)who);
         return;
     }

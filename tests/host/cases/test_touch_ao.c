@@ -1745,22 +1745,22 @@ TEST_CASE("the guided test refuses the round", "[touch_ao][lowpower]")
     mock_down();
 }
 
-/** @brief AO_LowPower says the radio alone is awake: the glass is not. */
+/** @brief AO_LowPower says a dark wake runs: the glass stays asleep. */
 static void state_radio(void)
 {
     LowPowerStateEvt e;
 
     (void)memset(&e, 0, sizeof(e));
     e.super = (QEvt)QEVT_INITIALIZER(LOWPOWER_STATE_SIG);
-    e.state = (uint8_t)KODE_LP_RADIO;
+    e.state = (uint8_t)KODE_LP_DARK;
     e.cause = (uint8_t)KODE_LP_CAUSE_TIMER;
     e.prev  = (uint8_t)KODE_LP_ASLEEP;
     QASM_DISPATCH(AO_Touch, &e.super, 0U);
 }
 
-/* A radio wake leaves the controller in its rest: nothing is written, no
+/* A dark wake leaves the controller in its rest: nothing is written, no
  * read is tried, and the AWAKE that follows still puts it back. */
-TEST_CASE("STATE(RADIO) leaves a rested controller alone; AWAKE still puts it back",
+TEST_CASE("STATE(DARK) leaves a rested controller alone; AWAKE still puts it back",
           "[touch_ao][lowpower]")
 {
     touch_armed();
@@ -1772,9 +1772,9 @@ TEST_CASE("STATE(RADIO) leaves a rested controller alone; AWAKE still puts it ba
     ao_spy_drain();
     state_radio();
     (void)qf_support_tick(AO_Touch, QF_SUPPORT_STEPS(KODE_TOUCH_RESTORE_RETRY_MS) * 3U);
-    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x55U, s_regs[REG_IRQ_CTL], "the radio wake restored the chip");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_bus_tries, "the radio wake touched the bus");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the radio wake published something");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x55U, s_regs[REG_IRQ_CTL], "the dark wake restored the chip");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_bus_tries, "the dark wake touched the bus");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the dark wake published something");
 
     state_awake();
     expect_awake_settings();

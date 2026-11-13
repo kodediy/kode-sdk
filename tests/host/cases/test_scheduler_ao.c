@@ -2000,7 +2000,7 @@ TEST_CASE("a check made is answered with the next time, even asleep; a change as
     lp_expect_answer(false, NULL);
     s_checks = 0U;
 
-    /* The radio wake made the check at 18:45:30. */
+    /* The dark wake made the check at 18:45:30. */
     sleep_until(at_us(T_1845 + 30, 0U));
     sched_check_done(T_1845);
     (void)qf_support_settle(AO_Scheduler);

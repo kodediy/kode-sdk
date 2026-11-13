@@ -444,16 +444,16 @@ typedef struct {
     uint16_t leave_left; /**< Reply lines the leave may still publish before
                           *   it says offline; 0 while it is not draining.  */
 #if CONFIG_KODE_LOWPOWER
-    uint8_t  lp_who;   /**< The id lowpower_join_radio() gave.              */
+    uint8_t  lp_who;   /**< The id lowpower_join_dark() gave.              */
     bool     lp_rest;  /**< The board sleeps: nothing new is started.       */
-    bool     lp_radio; /**< A radio wake is on and this AO has not said it is done. */
+    bool     lp_dark;  /**< A dark wake is on and this AO has not said it is done. */
     bool     lp_owed;  /**< An OFF round waits for the sessions to close.   */
     bool     lp_rejoin;/**< The channel is joined at the next AWAKE: its
                         *   sessions were closed for an OFF round, or its
                         *   start came while the board slept.                */
     uint32_t lp_round; /**< That round's number.                            */
     int64_t  chk_s;    /**< Unix seconds the scheduler's `mqtt` check falls due; -1 for none. */
-    bool     chk_dwell;/**< The check is due in this radio wake and its dwell has not run out. */
+    bool     chk_dwell;/**< The check is due in this dark wake and its dwell has not run out. */
     bool     link_up;  /**< AO_Radio says the C5 link is up.                */
     QTimeEvt chk_tmo;  /**< NET_CHECK_TMO_SIG: the dwell.                   */
 #endif
@@ -2187,7 +2187,7 @@ static void chan_due_arm(Net * const me)
 }
 
 #if CONFIG_KODE_LOWPOWER
-static void net_lp_radio_check(Net * const me);
+static void net_lp_dark_check(Net * const me);
 #endif
 
 /**
@@ -2201,7 +2201,7 @@ static void chan_wait(Net * const me, uint32_t ms)
     me->cdue_us = khal_time_us() + ((uint64_t)ms * CHAN_US_PER_MS);
     chan_due_arm(me);
 #if CONFIG_KODE_LOWPOWER
-    net_lp_radio_check(me);   /* a join that ended in a wait is the work done */
+    net_lp_dark_check(me);   /* a join that ended in a wait is the work done */
 #endif
 }
 
@@ -2487,7 +2487,7 @@ static void chan_refused(Net * const me, const char *why)
     chan_set(me, CHAN_REFUSED, why);
     KLOG_N(TAG, "channel: refused (%s)", why);
 #if CONFIG_KODE_LOWPOWER
-    net_lp_radio_check(me);
+    net_lp_dark_check(me);
 #endif
 }
 
@@ -2507,7 +2507,7 @@ static void chan_no_identity(Net * const me)
     chan_set(me, CHAN_NO_IDENTITY, "no_identity");
     KLOG_N(TAG, "channel: no identity in the C5");
 #if CONFIG_KODE_LOWPOWER
-    net_lp_radio_check(me);
+    net_lp_dark_check(me);
 #endif
 }
 
@@ -2798,7 +2798,7 @@ static void chan_halt(Net * const me)
         }
     }
 #if CONFIG_KODE_LOWPOWER
-    net_lp_radio_check(me);   /* a channel that ended is no work left */
+    net_lp_dark_check(me);   /* a channel that ended is no work left */
 #endif
 }
 
@@ -5123,7 +5123,7 @@ static void net_chk_serve(Net * const me)
  *        is connected.
  *
  * @param me The AO.
- * @return true when a radio wake for the scheduler's check has anything to do.
+ * @return true when a dark wake for the scheduler's check has anything to do.
  */
 static bool net_chk_listens(Net const * const me)
 {
@@ -5136,7 +5136,7 @@ static bool net_chk_listens(Net const * const me)
 }
 
 /**
- * @brief A wake begins (a radio wake, or a whole one from ASLEEP): a check
+ * @brief A wake begins (a dark wake, or a whole one from ASLEEP): a check
  *        that is due is made after its dwell when something listens, and at
  *        once when nothing does. A dwell already on is kept.
  *
@@ -5165,7 +5165,7 @@ static void net_chk_begin(Net * const me)
  *        the channel's deadline and the scheduler's check.
  *
  * The check counts only when something listens (net_chk_listens()); with
- * nothing to listen to there is nothing for a radio wake to do.
+ * nothing to listen to there is nothing for a dark wake to do.
  *
  * @param me The AO.
  * @return false when no event was left to carry the note; true otherwise, also
@@ -5197,7 +5197,7 @@ static bool net_lp_wake_note(Net const * const me)
 }
 
 /**
- * @brief Whether AO_Net has nothing left to do in a radio wake.
+ * @brief Whether AO_Net has nothing left to do in a dark wake.
  *
  * Nothing is in the way of resting, and the channel is either not in use or
  * waiting for a time further off than CHAN_LP_SETTLE_MS.
@@ -5205,7 +5205,7 @@ static bool net_lp_wake_note(Net const * const me)
  * @param me The AO.
  * @return true when the board can go back to sleep for this AO.
  */
-static bool net_lp_radio_settled(Net const * const me)
+static bool net_lp_dark_settled(Net const * const me)
 {
     bool settled = (net_lp_busy_why(me, true) == NULL);
 
@@ -5220,18 +5220,18 @@ static bool net_lp_radio_settled(Net const * const me)
 }
 
 /**
- * @brief Tell AO_LowPower the work of a radio wake is finished, once, when it is.
+ * @brief Tell AO_LowPower the work of a dark wake is finished, once, when it is.
  *
  * Called when the wake begins and at every end of a step of the channel.
  *
  * @param me The AO.
  */
-static void net_lp_radio_check(Net * const me)
+static void net_lp_dark_check(Net * const me)
 {
-    if ( me->lp_radio && net_lp_radio_settled(me) )
+    if ( me->lp_dark && net_lp_dark_settled(me) )
     {
-        me->lp_radio = false;
-        lowpower_radio_done(me->lp_who);
+        me->lp_dark = false;
+        lowpower_dark_done(me->lp_who);
     }
 }
 
@@ -5322,7 +5322,7 @@ static void net_lp_round(Net * const me, const LowPowerRoundEvt * const r)
 
     me->lp_round = r->round;
     me->lp_owed  = false;
-    me->lp_radio = false;   /* a round ends the radio wake's work */
+    me->lp_dark  = false;   /* a round ends the dark wake's work */
     if ( (NULL == why) && ((uint8_t)KODE_LP_OFF != r->target) )
     {
         net_chk_serve(me);
@@ -5367,25 +5367,25 @@ static void net_lp_round(Net * const me, const LowPowerRoundEvt * const r)
 }
 
 /**
- * @brief LOWPOWER_STATE_SIG: on AWAKE, or on a radio wake, start working again.
+ * @brief LOWPOWER_STATE_SIG: on AWAKE, or on a dark wake, start working again.
  *
  * It may repeat, and an answer owed to a round that is over is not given. The
  * long timer counts its real time again and a start that waited begins. A
- * radio wake is the same work with the glass asleep (net_lp_radio_check()).
+ * dark wake is the same work with the glass asleep (net_lp_dark_check()).
  *
  * @param me The AO.
  * @param s  The change.
  */
 static void net_lp_state(Net * const me, const LowPowerStateEvt * const s)
 {
-    bool const radio = ((uint8_t)KODE_LP_RADIO == s->state);
+    bool const dark = ((uint8_t)KODE_LP_DARK == s->state);
 
-    if ( ((uint8_t)KODE_LP_AWAKE == s->state) || radio )
+    if ( ((uint8_t)KODE_LP_AWAKE == s->state) || dark )
     {
         me->lp_rest  = false;
         me->lp_owed  = false;
-        me->lp_radio = radio;
-        if ( radio || ((uint8_t)KODE_LP_AWAKE != s->prev) )
+        me->lp_dark  = dark;
+        if ( dark || ((uint8_t)KODE_LP_AWAKE != s->prev) )
         {
             net_chk_begin(me);
         }
@@ -5397,7 +5397,7 @@ static void net_lp_state(Net * const me, const LowPowerStateEvt * const s)
         chan_lp_resume(me);
 #endif
         net_lp_rejoin(me);
-        net_lp_radio_check(me);
+        net_lp_dark_check(me);
     }
 }
 
@@ -5425,12 +5425,12 @@ static void net_lp_check_at(Net * const me, const NetCheckAtEvt * const c)
     }
     else
     {
-        net_lp_radio_check(me);
+        net_lp_dark_check(me);
     }
 }
 
 /**
- * @brief NET_CHECK_TMO_SIG: the dwell of the check's radio wake has run out.
+ * @brief NET_CHECK_TMO_SIG: the dwell of the check's dark wake has run out.
  *
  * @param me The AO.
  */
@@ -5439,7 +5439,7 @@ static void net_lp_check_dwelled(Net * const me)
     if ( me->chk_dwell )
     {
         net_chk_pass(me);
-        net_lp_radio_check(me);
+        net_lp_dark_check(me);
     }
 }
 
@@ -5632,7 +5632,7 @@ void Net_ctor(void)
 #if CONFIG_KODE_LOWPOWER
     me->lp_who     = KODE_LOWPOWER_WHO_NONE;
     me->lp_rest    = false;
-    me->lp_radio   = false;
+    me->lp_dark    = false;
     me->lp_owed    = false;
     me->lp_rejoin  = false;
     me->lp_round   = 0U;
@@ -6539,7 +6539,7 @@ static void net_job_done(Net * const me, KqpWorkerDoneEvt const * const j)
 #if CONFIG_KODE_LOWPOWER
     net_lp_settle(me);
     net_lp_rejoin(me);   /* an AWAKE that came while the stop was out */
-    net_lp_radio_check(me);
+    net_lp_dark_check(me);
 #endif
     net_fast_job_end(me);
 }
@@ -6697,7 +6697,7 @@ static QState Net_initial(Net * const me, void const * const par)
      * the driver enforces, not a resource anybody has to own. */
     QActive_subscribe(&me->super, WIFI_STATE_SIG);
 #if CONFIG_KODE_LOWPOWER
-    me->lp_who = lowpower_join_radio(&me->super, "net");
+    me->lp_who = lowpower_join_dark(&me->super, "net");
     if ( KODE_LOWPOWER_WHO_NONE != me->lp_who )
     {
         QActive_subscribe(&me->super, LOWPOWER_ROUND_SIG);

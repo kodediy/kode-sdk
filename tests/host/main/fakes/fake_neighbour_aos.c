@@ -27,7 +27,7 @@ static LowPowerReadyEvt  s_ready[LP_STASH_READY];   /**< Answers passed over, ol
 static unsigned          s_ready_n;                 /**< How many of them.                  */
 static LowPowerWakeAtEvt s_wake;                    /**< The newest wake note passed over.  */
 static bool              s_wake_have;               /**< @c s_wake means something.         */
-static unsigned          s_radio_done;              /**< Radio-done notes passed over.      */
+static unsigned          s_dark_done;               /**< Dark-done notes passed over.       */
 static unsigned          s_rest;                    /**< Rest requests passed over.         */
 static uint8_t           s_rest_src;                /**< The source of the newest.          */
 #endif
@@ -117,7 +117,7 @@ void fake_neighbours_reset(void)
     drain(AO_LowPower);
     s_ready_n   = 0U;
     s_wake_have = false;
-    s_radio_done = 0U;
+    s_dark_done  = 0U;
     s_rest       = 0U;
 #endif
 }
@@ -160,9 +160,9 @@ static void lp_scan(void)
             s_ready[s_ready_n] = *(const LowPowerReadyEvt *)e;
             s_ready_n++;
         }
-        else if ( (QSignal)LOWPOWER_RADIO_DONE_SIG == e->sig )
+        else if ( (QSignal)LOWPOWER_DARK_DONE_SIG == e->sig )
         {
-            s_radio_done++;
+            s_dark_done++;
         }
         else if ( (QSignal)LOWPOWER_REST_SIG == e->sig )
         {
@@ -200,13 +200,13 @@ bool fake_lowpower_ready_take(LowPowerReadyEvt *out)
     return found;
 }
 
-unsigned fake_lowpower_radio_done_count(void)
+unsigned fake_lowpower_dark_done_count(void)
 {
     unsigned n;
 
     lp_scan();
-    n = s_radio_done;
-    s_radio_done = 0U;
+    n = s_dark_done;
+    s_dark_done = 0U;
     return n;
 }
 

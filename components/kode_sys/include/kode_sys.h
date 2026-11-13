@@ -458,7 +458,7 @@ kode_status_t kode_sys_ble_queue_clear(const char *chr);
  * commands: the answer is the state the board ends up in, published as
  * LOWPOWER_STATE_SIG, or the refusal, published as LOWPOWER_REFUSED_SIG (an
  * app with an AO of its own subscribes to them). The same signal also says
- * RADIO when the radio alone wakes in ASLEEP: ignore any state that is not
+ * DARK when a dark wake runs in ASLEEP: ignore any state that is not
  * AWAKE, ASLEEP or OFF. While a cable is in the board does not sleep or switch
  * off: the request is refused and the board stays awake.
  *

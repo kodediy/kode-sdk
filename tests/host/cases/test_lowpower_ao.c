@@ -2558,19 +2558,19 @@ TEST_CASE("the info times the state from its change, and an abandoned round is n
     lp_down();
 }
 
-/* ---- The radio wake -------------------------------------------------------------------- */
+/* ---- The dark wake --------------------------------------------------------------------- */
 
-/** @brief The radio owners' ids in the cases below: A is not one. */
+/** @brief The dark-wake owners' ids in the cases below: A is not one. */
 #define WHO_PLAIN       0U
 #define WHO_NET         1U
 #define WHO_RADIO       2U
 
-/** @brief Join a plain owner, then two radio owners, in that order. */
-static void join_radio(void)
+/** @brief Join a plain owner, then two dark-wake owners, in that order. */
+static void join_dark(void)
 {
     TEST_ASSERT_EQUAL_UINT8(WHO_PLAIN, lowpower_join(ao_spy(), "A"));
-    TEST_ASSERT_EQUAL_UINT8(WHO_NET, lowpower_join_radio(ao_spy(), "B"));
-    TEST_ASSERT_EQUAL_UINT8(WHO_RADIO, lowpower_join_radio(ao_spy(), "C"));
+    TEST_ASSERT_EQUAL_UINT8(WHO_NET, lowpower_join_dark(ao_spy(), "B"));
+    TEST_ASSERT_EQUAL_UINT8(WHO_RADIO, lowpower_join_dark(ao_spy(), "C"));
 }
 
 /** @brief Answer a round for ASLEEP as all three owners, B giving its time first. */
@@ -2589,7 +2589,7 @@ static void rest_all(uint32_t round, uint32_t b_wake_ms)
 /** @brief Put the board ASLEEP with B's time @p b_wake_ms from now. */
 static void radio_asleep(uint32_t b_wake_ms)
 {
-    join_radio();
+    join_dark();
     ask(KODE_LP_ASLEEP);
     rest_all(expect_round(KODE_LP_ASLEEP), b_wake_ms);
     expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
@@ -2599,26 +2599,26 @@ static void radio_asleep(uint32_t b_wake_ms)
 }
 
 /** @brief Fire the one-shot of B's time and insist the radio woke, alone. */
-static void radio_wake(void)
+static void dark_wake(void)
 {
     fire_one_shot();
-    expect_state(KODE_LP_RADIO, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
+    expect_state(KODE_LP_DARK, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
                                    "nothing else was published: the glass owners hear no AWAKE");
 }
 
-/** @brief Take two rounds off the spy: the radio owners', and no one else's. */
-static uint32_t expect_radio_rounds(void)
+/** @brief Take two rounds off the spy: the dark-wake owners', and no one else's. */
+static uint32_t expect_dark_rounds(void)
 {
     uint32_t round = expect_round(KODE_LP_ASLEEP);
 
     TEST_ASSERT_EQUAL_UINT32(round, expect_round(KODE_LP_ASLEEP));
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "two radio owners, two rounds");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "two dark-wake owners, two rounds");
     return round;
 }
 
-/** @brief Both radio owners rest: the board is ASLEEP again. */
-static void radio_rest_both(uint32_t round, uint32_t b_wake_ms)
+/** @brief Both dark-wake owners rest: the board is ASLEEP again. */
+static void dark_rest_both(uint32_t round, uint32_t b_wake_ms)
 {
     if ( 0U != b_wake_ms )
     {
@@ -2629,15 +2629,15 @@ static void radio_rest_both(uint32_t round, uint32_t b_wake_ms)
     say_ready(WHO_RADIO, round, false, NULL);
 }
 
-static void radio_done_all(void)
+static void dark_done_all(void)
 {
-    lowpower_radio_done(WHO_NET);
+    lowpower_dark_done(WHO_NET);
     (void)qf_support_settle(AO_LowPower);
-    lowpower_radio_done(WHO_RADIO);
+    lowpower_dark_done(WHO_RADIO);
     (void)qf_support_settle(AO_LowPower);
 }
 
-TEST_CASE("a radio owner's time wakes the radio alone: the tick and the lock, STATE(RADIO), no AWAKE",
+TEST_CASE("a dark-wake owner's time wakes with the glass dark: the tick and the lock, STATE(DARK), no AWAKE",
           "[lowpower_ao]")
 {
     lowpower_info_t info;
@@ -2647,23 +2647,23 @@ TEST_CASE("a radio owner's time wakes the radio alone: the tick and the lock, ST
     TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running(), "asleep has no tick");
     TEST_ASSERT_EQUAL_UINT(0U, s_hold_true);
 
-    radio_wake();
+    dark_wake();
 
     TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running(), "the radio work needs the tick");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "and the lock");
-    TEST_ASSERT_TRUE(log_has("B has work due: a radio wake"));
+    TEST_ASSERT_TRUE(log_has("B has work due: a dark wake"));
     lowpower_info_get(&info);
     TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KODE_LP_ASLEEP, info.state,
                                     "the board is still ASLEEP to anyone who asks");
     TEST_ASSERT_EQUAL_UINT32(1U, info.wakes_timer);
 
-    radio_done_all();
-    radio_rest_both(expect_radio_rounds(), 0U);
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    dark_done_all();
+    dark_rest_both(expect_dark_rounds(), 0U);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     lp_down();
 }
 
-TEST_CASE("the radio wake ends when every radio owner is done: a round to those two alone, then ASLEEP",
+TEST_CASE("the dark wake ends when every dark-wake owner is done: a round to those two alone, then ASLEEP",
           "[lowpower_ao]")
 {
     uint32_t round;
@@ -2671,43 +2671,43 @@ TEST_CASE("the radio wake ends when every radio owner is done: a round to those 
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
+    dark_wake();
 
-    lowpower_radio_done(WHO_NET);
+    lowpower_dark_done(WHO_NET);
     (void)qf_support_settle(AO_LowPower);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "one owner is still at work");
-    lowpower_radio_done(WHO_RADIO);
+    lowpower_dark_done(WHO_RADIO);
     (void)qf_support_settle(AO_LowPower);
 
-    round = expect_radio_rounds();
+    round = expect_dark_rounds();
     TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running(), "still awake until they have rested");
-    radio_rest_both(round, 23U * 3600U * SECOND_MS);
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    dark_rest_both(round, 23U * 3600U * SECOND_MS);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
 
     TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running(), "the tick stops again");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_hold_false, "and the lock goes, once more");
     TEST_ASSERT_FALSE_MESSAGE(s_tick_at_release, "the tick stops before the lock is let go");
     TEST_ASSERT_GREATER_THAN_UINT_MESSAGE(0U, s_spy_at_release,
                                           "the state was published before the lock was let go");
-    TEST_ASSERT_TRUE_MESSAGE(log_has("radio wake done"), "and said");
+    TEST_ASSERT_TRUE_MESSAGE(log_has("dark wake done"), "and said");
     lowpower_info_get(&info);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_ASLEEP, info.state);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_off_enter, "ASLEEP, not OFF");
     lp_down();
 }
 
-TEST_CASE("the minute goes on through a radio wake and after it",
+TEST_CASE("the minute goes on through a dark wake and after it",
           "[lowpower_ao]")
 {
     uint32_t round;
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
-    radio_done_all();
-    round = expect_radio_rounds();
-    radio_rest_both(round, 0U);
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    dark_wake();
+    dark_done_all();
+    round = expect_dark_rounds();
+    dark_rest_both(round, 0U);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     ao_spy_drain();
     (void)queued(AO_Display, DISPLAY_MINUTE_REQ_SIG);
 
@@ -2718,77 +2718,77 @@ TEST_CASE("the minute goes on through a radio wake and after it",
     lp_down();
 }
 
-TEST_CASE("the second time given in the radio round is the next radio wake",
+TEST_CASE("the second time given in the dark wake's round is the next dark wake",
           "[lowpower_ao]")
 {
     uint32_t round;
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();                                /* at 20 s */
-    radio_done_all();
-    round = expect_radio_rounds();
-    radio_rest_both(round, 15U * SECOND_MS);     /* 35 s */
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    dark_wake();                                /* at 20 s */
+    dark_done_all();
+    round = expect_dark_rounds();
+    dark_rest_both(round, 15U * SECOND_MS);     /* 35 s */
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     ao_spy_drain();
 
     TEST_ASSERT_EQUAL_UINT64_MESSAGE(15U * 1000000ULL, fake_time_once_last_delay_us(),
                                      "a one-shot for the owner's new time, nearer than the minute");
     fire_one_shot();
-    expect_state(KODE_LP_RADIO, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
-    radio_done_all();
-    radio_rest_both(expect_radio_rounds(), 0U);
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    expect_state(KODE_LP_DARK, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
+    dark_done_all();
+    dark_rest_both(expect_dark_rounds(), 0U);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     lp_down();
 }
 
-TEST_CASE("a radio wake that no one finishes is ended by its bound",
+TEST_CASE("a dark wake that no one finishes is ended by its bound",
           "[lowpower_ao]")
 {
     uint32_t round;
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
+    dark_wake();
 
-    wait_ms(KODE_LOWPOWER_RADIO_MAX_MS - SECOND_MS);
+    wait_ms(KODE_LOWPOWER_DARK_MAX_MS - SECOND_MS);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "not yet");
     wait_ms(2U * SECOND_MS);
 
-    round = expect_radio_rounds();
+    round = expect_dark_rounds();
     TEST_ASSERT_TRUE(log_has("are up"));
-    radio_rest_both(round, 0U);
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    dark_rest_both(round, 0U);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     lp_down();
 }
 
-TEST_CASE("BOT during a radio wake is a whole AWAKE, and the lock is taken once",
+TEST_CASE("BOT during a dark wake is a whole AWAKE, and the lock is taken once",
           "[lowpower_ao]")
 {
     lowpower_info_t info;
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
+    dark_wake();
 
     expander(LEVELS_BOT, CHANGED_BOT);
 
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_ASLEEP);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "the radio wake's lock stands; no second");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "the dark wake's lock stands; no second");
     TEST_ASSERT_TRUE(fake_time_periodic_running());
     lowpower_info_get(&info);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_AWAKE, info.state);
     TEST_ASSERT_EQUAL_UINT32(1U, info.wakes_bot);
     TEST_ASSERT_EQUAL_UINT32(1U, info.wakes_timer);
 
-    /* A late word of a radio owner is nothing to anyone now. */
-    lowpower_radio_done(WHO_NET);
+    /* A late word of a dark-wake owner is nothing to anyone now. */
+    lowpower_dark_done(WHO_NET);
     (void)qf_support_settle(AO_LowPower);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
     lp_down();
 }
 
-TEST_CASE("a message, a console line or a cable during a radio wake is a whole AWAKE",
+TEST_CASE("a message, a console line or a cable during a dark wake is a whole AWAKE",
           "[lowpower_ao]")
 {
     MqttMsgEvt m;
@@ -2798,7 +2798,7 @@ TEST_CASE("a message, a console line or a cable during a radio wake is a whole A
     (void)memset(&m, 0, sizeof(m));
     m.super = (QEvt)QEVT_INITIALIZER(MQTT_MSG_SIG);
 
-    radio_wake();
+    dark_wake();
     feed(&m.super);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_MQTT, KODE_LP_ASLEEP);
 
@@ -2806,7 +2806,7 @@ TEST_CASE("a message, a console line or a cable during a radio wake is a whole A
     lp_down();
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
+    dark_wake();
     console_line((uint8_t)KODE_CONSOLE_SRC_BLE);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BLE, KODE_LP_ASLEEP);
 
@@ -2814,34 +2814,34 @@ TEST_CASE("a message, a console line or a cable during a radio wake is a whole A
     lp_down();
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
+    dark_wake();
     charger_reading(true);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_VBUS, KODE_LP_ASLEEP);
     lp_down();
 }
 
-TEST_CASE("BOT while the radio owners are resting is a whole AWAKE, and their late answers are dropped",
+TEST_CASE("BOT while the dark-wake owners are resting is a whole AWAKE, and their late answers are dropped",
           "[lowpower_ao]")
 {
     uint32_t round;
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
-    radio_done_all();
-    round = expect_radio_rounds();
+    dark_wake();
+    dark_done_all();
+    round = expect_dark_rounds();
 
     expander(LEVELS_BOT, CHANGED_BOT);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_ASLEEP);
     ao_spy_drain();
 
-    radio_rest_both(round, 0U);
+    dark_rest_both(round, 0U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the board does not go back to sleep");
     TEST_ASSERT_TRUE(fake_time_periodic_running());
     lp_down();
 }
 
-TEST_CASE("a radio owner busy on the radio round turns the wake into a whole AWAKE",
+TEST_CASE("a dark-wake owner busy on the dark-wake round turns the wake into a whole AWAKE",
           "[lowpower_ao]")
 {
     char why[KODE_LOWPOWER_REFUSAL_MAX];
@@ -2849,10 +2849,10 @@ TEST_CASE("a radio owner busy on the radio round turns the wake into a whole AWA
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
     ao_spy_subscribe(LOWPOWER_REFUSED_SIG);
-    radio_wake();
-    radio_done_all();
+    dark_wake();
+    dark_done_all();
 
-    say_ready(WHO_NET, expect_radio_rounds(), true, "net job");
+    say_ready(WHO_NET, expect_dark_rounds(), true, "net job");
 
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
     expect_refused(why, sizeof(why));
@@ -2862,16 +2862,16 @@ TEST_CASE("a radio owner busy on the radio round turns the wake into a whole AWA
     lp_down();
 }
 
-TEST_CASE("a radio owner silent on the radio round turns the wake into a whole AWAKE",
+TEST_CASE("a dark-wake owner silent on the dark-wake round turns the wake into a whole AWAKE",
           "[lowpower_ao]")
 {
     uint32_t round;
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
-    radio_done_all();
-    round = expect_radio_rounds();
+    dark_wake();
+    dark_done_all();
+    round = expect_dark_rounds();
 
     say_ready(WHO_NET, round, false, NULL);
     wait_ms(KODE_LOWPOWER_ROUND_MS + SECOND_MS);
@@ -2881,13 +2881,13 @@ TEST_CASE("a radio owner silent on the radio round turns the wake into a whole A
     lp_down();
 }
 
-TEST_CASE("an owner that is not a radio owner still gets a whole AWAKE for its time",
+TEST_CASE("an owner that is not a dark-wake owner still gets a whole AWAKE for its time",
           "[lowpower_ao]")
 {
     uint32_t round;
 
     lp_up(KODE_OK);
-    join_radio();
+    join_dark();
     ask(KODE_LP_ASLEEP);
     round = expect_round(KODE_LP_ASLEEP);
     TEST_ASSERT_TRUE(lowpower_wake_at(WHO_PLAIN, khal_time_us() + (20ULL * 1000000ULL)));
@@ -2903,13 +2903,13 @@ TEST_CASE("an owner that is not a radio owner still gets a whole AWAKE for its t
     lp_down();
 }
 
-TEST_CASE("another owner's later time outlives a radio wake and still wakes the whole board",
+TEST_CASE("another owner's later time outlives a dark wake and still wakes the whole board",
           "[lowpower_ao]")
 {
     uint32_t round;
 
     lp_up(KODE_OK);
-    join_radio();
+    join_dark();
     ask(KODE_LP_ASLEEP);
     round = expect_round(KODE_LP_ASLEEP);
     TEST_ASSERT_TRUE(lowpower_wake_at(WHO_PLAIN, khal_time_us() + (90ULL * 1000000ULL)));
@@ -2917,10 +2917,10 @@ TEST_CASE("another owner's later time outlives a radio wake and still wakes the 
     expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     ao_spy_drain();
 
-    radio_wake();                                     /* at 20 s */
-    radio_done_all();
-    radio_rest_both(expect_radio_rounds(), 0U);       /* the radio owners give no time */
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    dark_wake();                                     /* at 20 s */
+    dark_done_all();
+    dark_rest_both(expect_dark_rounds(), 0U);       /* the dark-wake owners give no time */
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     ao_spy_drain();
 
     for ( unsigned i = 0U; (10U > i) && (ao_spy_count() == 0U); i++ )
@@ -2930,18 +2930,18 @@ TEST_CASE("another owner's later time outlives a radio wake and still wakes the 
         (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
     }
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_hold_true, "the radio wake's lock, then the whole wake's");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_hold_true, "the dark wake's lock, then the whole wake's");
     TEST_ASSERT_TRUE(log_has("A has work due: waking for it"));
     lp_down();
 }
 
-TEST_CASE("another owner's time that comes inside a radio wake wakes the whole board",
+TEST_CASE("another owner's time that comes inside a dark wake wakes the whole board",
           "[lowpower_ao]")
 {
     uint32_t round;
 
     lp_up(KODE_OK);
-    join_radio();
+    join_dark();
     ask(KODE_LP_ASLEEP);
     round = expect_round(KODE_LP_ASLEEP);
     TEST_ASSERT_TRUE(lowpower_wake_at(WHO_PLAIN, khal_time_us() + (30ULL * 1000000ULL)));
@@ -2949,15 +2949,15 @@ TEST_CASE("another owner's time that comes inside a radio wake wakes the whole b
     expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     ao_spy_drain();
 
-    radio_wake();                                     /* at 20 s; nobody finishes */
+    dark_wake();                                      /* at 20 s; nobody finishes */
     fire_one_shot();                                  /* A's time, at 30 s */
 
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "the radio wake's lock stands; no second");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "the dark wake's lock stands; no second");
     lp_down();
 }
 
-TEST_CASE("a radio owner's time and the minute due together do the minute's work too",
+TEST_CASE("a dark-wake owner's time and the minute due together do the minute's work too",
           "[lowpower_ao]")
 {
     lp_up(KODE_OK);
@@ -2965,19 +2965,19 @@ TEST_CASE("a radio owner's time and the minute due together do the minute's work
 
     fire_one_shot();
 
-    expect_state(KODE_LP_RADIO, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
+    expect_state(KODE_LP_DARK, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, queued(AO_Display, DISPLAY_MINUTE_REQ_SIG),
                                    "the glass missed its minute");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, queued(AO_Power, POWER_PEEK_REQ_SIG),
                                    "and so did the reading of the cable");
 
-    radio_done_all();                                 /* a case never ends inside the wake */
-    radio_rest_both(expect_radio_rounds(), 0U);
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    dark_done_all();                                 /* a case never ends inside the wake */
+    dark_rest_both(expect_dark_rounds(), 0U);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     lp_down();
 }
 
-TEST_CASE("off_after reached during a radio wake goes to OFF without lighting the lock twice",
+TEST_CASE("off_after reached during a dark wake goes to OFF without lighting the lock twice",
           "[lowpower_ao]")
 {
     uint32_t round;
@@ -2991,7 +2991,7 @@ TEST_CASE("off_after reached during a radio wake goes to OFF without lighting th
         (void)queued(AO_Display, DISPLAY_MINUTE_REQ_SIG);
         (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
     }
-    expect_state(KODE_LP_RADIO, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
+    expect_state(KODE_LP_DARK, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
     TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
 
     for ( unsigned i = 0U; (100U > i) && (ao_spy_count() == 0U); i++ )
@@ -3010,13 +3010,13 @@ TEST_CASE("off_after reached during a radio wake goes to OFF without lighting th
     lp_down();
 }
 
-TEST_CASE("a radio owner's word outside a radio wake is dropped",
+TEST_CASE("a dark-wake owner's word outside a dark wake is dropped",
           "[lowpower_ao]")
 {
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
 
-    lowpower_radio_done(WHO_NET);
+    lowpower_dark_done(WHO_NET);
     (void)qf_support_settle(AO_LowPower);
 
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
@@ -3024,7 +3024,7 @@ TEST_CASE("a radio owner's word outside a radio wake is dropped",
     lp_down();
 }
 
-/* ---- A radio wake's states no event could carry ---------------------------------------- */
+/* ---- A dark wake's states no event could carry ----------------------------------------- */
 
 /**
  * @brief Hand AO_LowPower an answer without taking a block from the pool.
@@ -3046,10 +3046,10 @@ static void feed_ready(uint8_t who, uint32_t round)
     feed(&a.super);
 }
 
-/* Net and Radio start their work on STATE(RADIO) and on nothing else: a wake
+/* Net and Radio start their work on STATE(DARK) and on nothing else: a wake
  * whose event the pool could not carry is published again on the timer, which
  * runs because the tick is back. */
-TEST_CASE("STATE(RADIO) the pool could not carry is published again, once",
+TEST_CASE("STATE(DARK) the pool could not carry is published again, once",
           "[lowpower_ao]")
 {
     const QEvt *held[POOL_HOLD_MAX];
@@ -3066,22 +3066,22 @@ TEST_CASE("STATE(RADIO) the pool could not carry is published again, once",
 
     pool_give_back(held, n);
     wait_ms(KODE_LOWPOWER_STATE_RETRY_MS * 2U);
-    expect_state(KODE_LP_RADIO, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
-    TEST_ASSERT_TRUE(log_has("RADIO published late"));
+    expect_state(KODE_LP_DARK, KODE_LP_CAUSE_TIMER, KODE_LP_ASLEEP);
+    TEST_ASSERT_TRUE(log_has("DARK published late"));
 
     wait_ms(KODE_LOWPOWER_STATE_RETRY_MS * 5U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the retry went on after it was said");
 
-    radio_done_all();                                 /* a case never ends inside the wake */
-    radio_rest_both(expect_radio_rounds(), 0U);
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    dark_done_all();                                 /* a case never ends inside the wake */
+    dark_rest_both(expect_dark_rounds(), 0U);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     lp_down();
 }
 
-/* A rest must not begin with Net and Radio still in RADIO: when no event can
+/* A rest must not begin with Net and Radio still in DARK: when no event can
  * carry the ASLEEP that ends the wake, the wake keeps the tick and the lock,
  * and lets go only after the state went out. */
-TEST_CASE("the radio wake keeps the lock until its ASLEEP is published",
+TEST_CASE("the dark wake keeps the lock until its ASLEEP is published",
           "[lowpower_ao]")
 {
     const QEvt     *held[POOL_HOLD_MAX];
@@ -3090,9 +3090,9 @@ TEST_CASE("the radio wake keeps the lock until its ASLEEP is published",
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
-    radio_done_all();
-    round = expect_radio_rounds();
+    dark_wake();
+    dark_done_all();
+    round = expect_dark_rounds();
     say_ready(WHO_NET, round, false, NULL);
 
     size_t const n = pool_take_all(held);
@@ -3110,7 +3110,7 @@ TEST_CASE("the radio wake keeps the lock until its ASLEEP is published",
 
     pool_give_back(held, n);
     wait_ms(KODE_LOWPOWER_STATE_RETRY_MS * 2U);
-    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_RADIO);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running(), "the tick stops once it is said");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_hold_false, "and the lock goes, once");
     TEST_ASSERT_FALSE_MESSAGE(s_tick_at_release, "the tick stops before the lock is let go");
@@ -3126,7 +3126,7 @@ TEST_CASE("the radio wake keeps the lock until its ASLEEP is published",
 
 /* The owed ASLEEP is the news of a rest that did not happen if the board wakes
  * whole first: AWAKE alone is said, the lock stands once and is not taken twice. */
-TEST_CASE("a whole AWAKE ends the radio wake that was waiting to publish its ASLEEP",
+TEST_CASE("a whole AWAKE ends the dark wake that was waiting to publish its ASLEEP",
           "[lowpower_ao]")
 {
     const QEvt *held[POOL_HOLD_MAX];
@@ -3134,9 +3134,9 @@ TEST_CASE("a whole AWAKE ends the radio wake that was waiting to publish its ASL
 
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
-    radio_wake();
-    radio_done_all();
-    round = expect_radio_rounds();
+    dark_wake();
+    dark_done_all();
+    round = expect_dark_rounds();
     say_ready(WHO_NET, round, false, NULL);
 
     size_t const n = pool_take_all(held);

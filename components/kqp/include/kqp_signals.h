@@ -1842,7 +1842,7 @@ enum KodeSignals {
                                  *   scheduler's `mqtt` entry falls due
                                  *   (NetCheckAtEvt).                         */
     NET_CHECK_TMO_SIG,          /**< AO_Net private QTimeEvt, one-shot: the
-                                 *   dwell of a radio wake for that check has
+                                 *   dwell of a dark wake for that check has
                                  *   run out.                                 */
     NET_JOB_FAST_SIG,           /**< AO_Net private QTimeEvt, one-shot: no job
                                  *   with either worker for NET_FAST_JOB_HOLD_MS,
@@ -1999,12 +1999,12 @@ enum KodeSignals {
                                  *   lowpower_wake_at()): an owner has work
                                  *   due at a real time; asleep, the board
                                  *   wakes for it (LowPowerWakeAtEvt).      */
-    LOWPOWER_RADIO_DONE_SIG,    /**< AO_LowPower (direct post, from
-                                 *   lowpower_radio_done()): a radio owner's
-                                 *   work in a radio wake is finished
-                                 *   (LowPowerRadioDoneEvt).                */
-    LOWPOWER_RADIO_TMO_SIG,     /**< AO_LowPower private QTimeEvt, one-shot:
-                                 *   a radio wake ran KODE_LOWPOWER_RADIO_MAX_MS. */
+    LOWPOWER_DARK_DONE_SIG,     /**< AO_LowPower (direct post, from
+                                 *   lowpower_dark_done()): a dark-wake owner's
+                                 *   work in a dark wake is finished
+                                 *   (LowPowerDarkDoneEvt).                */
+    LOWPOWER_DARK_TMO_SIG,      /**< AO_LowPower private QTimeEvt, one-shot:
+                                 *   a dark wake ran KODE_LOWPOWER_DARK_MAX_MS. */
     LOWPOWER_RETRY_TMO_SIG,     /**< AO_LowPower private QTimeEvt, one-shot:
                                  *   begin a requested round again, an owner
                                  *   having been busy or silent in the last
@@ -7303,8 +7303,8 @@ typedef enum {
     KODE_LP_AWAKE = 0,   /**< Everything runs; the CPU holds its lock.       */
     KODE_LP_ASLEEP,      /**< Light sleep whenever every task is idle.       */
     KODE_LP_OFF,         /**< Deep sleep; the pins held at rest.             */
-    KODE_LP_RADIO        /**< A radio wake inside ASLEEP: the tick runs and the
-                          *   lock is held for the radio owners alone, and the
+    KODE_LP_DARK         /**< A dark wake inside ASLEEP: the tick runs and the
+                          *   lock is held for the dark-wake owners alone, and the
                           *   glass stays asleep. Published as a state, never
                           *   a target, and never what the board is said to be
                           *   in (lowpower_info says asleep).                 */
@@ -7643,12 +7643,12 @@ typedef struct {
  * and began from ASLEEP), for owners that had already rested. state ASLEEP is
  * published before the QP tick stops, so nobody may arm a QTimeEvt on it.
  *
- * state RADIO says an owner's work fell due while ASLEEP and that the radio
+ * state DARK says an owner's work fell due while ASLEEP and that the dark-wake
  * owners alone are to do it: the tick runs and the lock is held, but the
  * glass and the other devices stay at rest. Only the owners that joined with
- * lowpower_join_radio() act on it (they restore as for AWAKE); everyone else
+ * lowpower_join_dark() act on it (they restore as for AWAKE); everyone else
  * ignores any state that is not AWAKE. The wake ends with state ASLEEP and
- * prev RADIO, or with AWAKE when something real used the board.
+ * prev DARK, or with AWAKE when something real used the board.
  */
 typedef struct {
     QEvt    super;
@@ -7691,11 +7691,11 @@ typedef struct {
     uint8_t  who;      /**< The id lowpower_join() gave the owner, for the log. */
 } LowPowerWakeAtEvt;
 
-/** @brief A radio owner's work in a radio wake is finished (LOWPOWER_RADIO_DONE_SIG). */
+/** @brief A dark-wake owner's work in a dark wake is finished (LOWPOWER_DARK_DONE_SIG). */
 typedef struct {
     QEvt    super;
-    uint8_t who;       /**< The id lowpower_join_radio() gave the owner.     */
-} LowPowerRadioDoneEvt;
+    uint8_t who;       /**< The id lowpower_join_dark() gave the owner.     */
+} LowPowerDarkDoneEvt;
 
 /** @brief A request to go to a state (LOWPOWER_REQ_SIG). */
 typedef struct {

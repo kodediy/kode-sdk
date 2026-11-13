@@ -340,7 +340,7 @@
 #define KODE_LOWPOWER_ORDER_MS         10000U  /**< The longest a request for OFF waits for a busy or silent owner;
                                                 *   the board goes OFF when it runs out, done or not. */
 #define KODE_LOWPOWER_QUEUE_LEN        48U     /**< AO_LowPower's queue: every participant's answer, a request and the inputs. */
-#define KODE_LOWPOWER_RADIO_MAX_MS     60000U  /**< Longest a radio wake lasts before the radio owners are asked to rest, done or not. */
+#define KODE_LOWPOWER_DARK_MAX_MS      60000U  /**< Longest a dark wake lasts before the dark-wake owners are asked to rest, done or not. */
 #define KODE_LOWPOWER_SLEEP_AFTER_DEF_S 120U   /**< Idle time before ASLEEP: 2 min. */
 #define KODE_LOWPOWER_OFF_AFTER_DEF_S  1200U   /**< Asleep time before OFF: 20 min. */
 #define KODE_LOWPOWER_DIM_PCT          20U     /**< The glass in ASLEEP when no glyphs were handed;
@@ -661,9 +661,9 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
 /** @brief The guard of the download's close: shutting a TLS connection waits
  *         at most one I/O. */
 #define KODE_NET_CLOSE_GUARD_MS       30000U
-/** @brief The least a radio wake for the scheduler's `mqtt` check lasts, counted from the wake's
+/** @brief The least a dark wake for the scheduler's `mqtt` check lasts, counted from the wake's
  *         beginning: what the C5 or the broker holds for the P4 needs this long to flow in once the
- *         sentinel stops (a TCP retransmit, a retained message, the C5's own queue) before the radio owners
+ *         sentinel stops (a TCP retransmit, a retained message, the C5's own queue) before the dark-wake owners
  *         rest again. A first figure from reading the paths, to be measured on the bench. */
 #define KODE_NET_CHECK_DWELL_MS        3000U
 _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,

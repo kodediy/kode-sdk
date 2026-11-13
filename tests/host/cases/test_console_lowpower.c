@@ -206,14 +206,14 @@ TEST_CASE("sleep is not closed by the board waking", "[console_lowpower]")
     TEST_ASSERT_TRUE(replied(">err code=4"));
 }
 
-/* A radio wake is a state that is not where the verb asked either. */
-TEST_CASE("sleep is not closed by a radio wake", "[console_lowpower]")
+/* A dark wake is a state that is not where the verb asked either. */
+TEST_CASE("sleep is not closed by a dark wake", "[console_lowpower]")
 {
     console_up();
     type_line("sleep");
     QF_gc(posted());
 
-    state_changed(KODE_LP_RADIO);
+    state_changed(KODE_LP_DARK);
     TEST_ASSERT_FALSE(replied(">ok"));
     state_changed(KODE_LP_ASLEEP);
     TEST_ASSERT_TRUE(replied(">ok"));

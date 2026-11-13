@@ -2243,22 +2243,22 @@ TEST_CASE("a link that will not come up is tried again at the next AWAKE",
     Mockkdrv_display_Destroy();
 }
 
-/** @brief AO_LowPower says the radio alone is awake: the glass is not. */
+/** @brief AO_LowPower says a dark wake runs: the glass stays asleep. */
 static void state_radio(void)
 {
     LowPowerStateEvt e;
 
     (void)memset(&e, 0, sizeof(e));
     e.super = (QEvt)QEVT_INITIALIZER(LOWPOWER_STATE_SIG);
-    e.state = (uint8_t)KODE_LP_RADIO;
+    e.state = (uint8_t)KODE_LP_DARK;
     e.cause = (uint8_t)KODE_LP_CAUSE_TIMER;
     e.prev  = (uint8_t)KODE_LP_ASLEEP;
     QASM_DISPATCH(AO_Display, &e.super, 0U);
 }
 
-/* A radio wake keeps the glass asleep: no link, no brightness, no repaint
+/* A dark wake keeps the glass asleep: no link, no brightness, no repaint
  * asked, and the AWAKE that follows still restores it. */
-TEST_CASE("STATE(RADIO) leaves the rested glass alone; AWAKE still restores it",
+TEST_CASE("STATE(DARK) leaves the rested glass alone; AWAKE still restores it",
           "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
@@ -2275,8 +2275,8 @@ TEST_CASE("STATE(RADIO) leaves the rested glass alone; AWAKE still restores it",
 
     state_radio();
     (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_RESTORE_RETRY_MS) * 3U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the radio wake drove the glass");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the radio wake asked for a repaint");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the dark wake drove the glass");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the dark wake asked for a repaint");
 
     state_awake(KODE_LP_ASLEEP);
     EXPECT_TRACE(T_LINK_UP, T_BRIGHT);

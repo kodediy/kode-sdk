@@ -620,10 +620,10 @@ TEST_CASE("a top button that will not arm costs a warning, not the round",
     mocks_down();
 }
 
-/* A radio wake keeps the expander's INT armed as the light-sleep wake: the
+/* A dark wake keeps the expander's INT armed as the light-sleep wake: the
  * glass is asleep and BOT must still be able to wake the board. No call is
- * expected on STATE(RADIO); CMock fails an unexpected one. */
-TEST_CASE("STATE(RADIO) leaves INT armed as the light-sleep wake; AWAKE takes it away",
+ * expected on STATE(DARK); CMock fails an unexpected one. */
+TEST_CASE("STATE(DARK) leaves INT armed as the light-sleep wake; AWAKE takes it away",
           "[ioexp_ao][lowpower]")
 {
     ioexp_up_once();
@@ -633,8 +633,8 @@ TEST_CASE("STATE(RADIO) leaves INT armed as the light-sleep wake; AWAKE takes it
     lp_round(AO_IoExp, KODE_LP_ASLEEP);
     lp_expect_answer(false, NULL);
 
-    lp_radio(AO_IoExp);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the radio wake published something");
+    lp_dark(AO_IoExp);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the dark wake published something");
 
     expect_wakes_withdrawn();
     lp_awake(AO_IoExp);

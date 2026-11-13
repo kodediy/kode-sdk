@@ -342,7 +342,7 @@ static void h_lowpower_info(const kverb_t *c, const karg_val_t *v)
 /**
  * @brief The events of this AO's verbs while one holds the console.
  *
- * ASLEEP or OFF answers `sleep` and `power_off`; AWAKE and RADIO do not (a wake
+ * ASLEEP or OFF answers `sleep` and `power_off`; AWAKE and DARK do not (a wake
  * or a round given up, which the refusal explains). A refusal answers only the
  * port that asked. The pacer's tick carries `lowpower_info last=on` to its next
  * slice, or waits out a congested port.

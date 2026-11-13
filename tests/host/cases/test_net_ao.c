@@ -9465,9 +9465,9 @@ TEST_CASE("a join between steps refuses the round to ASLEEP and says so", "[net_
     net_done();
 }
 
-/* ---- A radio wake: the channel's work with the glass asleep -------------------- */
+/* ---- A dark wake: the channel's work with the glass asleep --------------------- */
 
-TEST_CASE("a radio wake with nothing due is done at once, and the next round is the ordinary one",
+TEST_CASE("a dark wake with nothing due is done at once, and the next round is the ordinary one",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -9479,11 +9479,11 @@ TEST_CASE("a radio wake with nothing due is done at once, and the next round is 
     pull_jobs();
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(),
                                    "the renewal is a long way off: the work is done");
     TEST_ASSERT_EQUAL_UINT(jobs, s_nreq);
 
@@ -9491,12 +9491,12 @@ TEST_CASE("a radio wake with nothing due is done at once, and the next round is 
     pull_jobs();
     lp_expect_answer(false, NULL);
     TEST_ASSERT_TRUE_MESSAGE(fake_lowpower_wake_take(&w), "the deadline goes back to AO_LowPower");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "and nothing is said twice");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "and nothing is said twice");
     lp_awake(AO_Net);
     net_done();
 }
 
-TEST_CASE("a radio wake whose renewal is due works through it and is done at its end",
+TEST_CASE("a dark wake whose renewal is due works through it and is done at its end",
           "[net_ao][lowpower]")
 {
     IdSignReqEvt      sq;
@@ -9512,15 +9512,15 @@ TEST_CASE("a radio wake whose renewal is due works through it and is done at its
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
     fake_time_advance_ms(NIGHT_MS);           /* the renewal fell due asleep */
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     pull_jobs();
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(),
                                    "the renewal is due: not done");
     secs(3U);                                 /* the settle, then the challenge */
     TEST_ASSERT_EQUAL_UINT_MESSAGE(jobs + 1U, s_nreq, "the renewal asks the api again");
-    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_dark_done_count());
 
     http_reply(200U, "{\"nonce\":\"v1.connect.second\"}");
     TEST_ASSERT_EQUAL_INT(ID_SIGN_REQ_SIG, (int)radio_take(&sq, sizeof(sq)));
@@ -9528,21 +9528,21 @@ TEST_CASE("a radio wake whose renewal is due works through it and is done at its
     s_drv_state = KDRV_MQTT_UP;
     connect_answer(answer, sizeof(answer));
     http_reply(200U, answer);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(),
                                    "the new session is still being swapped in");
     job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
     job_done(KDRV_NET_JOB_MQTT_START, KODE_OK);
     mqtt_link(KDRV_NET_MQTT_CONNECTED);
 
     TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_UP, chan_now().state);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(),
                                    "the session is up for another renewal: done");
     (void)q;
     lp_awake(AO_Net);
     net_done();
 }
 
-TEST_CASE("a radio wake whose renewal fails is done once it waits out a back-off",
+TEST_CASE("a dark wake whose renewal fails is done once it waits out a back-off",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -9555,16 +9555,16 @@ TEST_CASE("a radio wake whose renewal fails is done once it waits out a back-off
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
     fake_time_advance_ms(NIGHT_MS);
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     secs(3U);
     TEST_ASSERT_EQUAL_UINT(jobs + 1U, s_nreq);
-    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_dark_done_count());
 
     http_reply(503U, "{\"error\":\"channel_unavailable\"}");   /* the api is unreachable */
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(),
                                    "the back-off is longer than the settle: done");
     lp_round(AO_Net, KODE_LP_ASLEEP);
     pull_jobs();
@@ -9574,7 +9574,7 @@ TEST_CASE("a radio wake whose renewal fails is done once it waits out a back-off
     net_done();
 }
 
-TEST_CASE("a round that arrives in a radio wake ends its work: no done is said afterwards",
+TEST_CASE("a round that arrives in a dark wake ends its work: no done is said afterwards",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -9585,22 +9585,22 @@ TEST_CASE("a round that arrives in a radio wake ends its work: no done is said a
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
     fake_time_advance_ms(NIGHT_MS);
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     lp_round(AO_Net, KODE_LP_ASLEEP);          /* the renewal is still due */
     pull_jobs();
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
     secs(3U);
-    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_dark_done_count());
     lp_awake(AO_Net);
     net_done();
 }
 
 /* ---- The scheduler's mqtt check ------------------------------------------------
  * The scheduler hands AO_Net the time of its check (net_check_at()). A round
- * for ASLEEP gives it to AO_LowPower, a radio wake that finds it due waits the
+ * for ASLEEP gives it to AO_LowPower, a dark wake that finds it due waits the
  * dwell, and a check made is told back (sched_check_done()). */
 
 /** @brief The wall clock the cases below start from: 18:37:12 on 2026-10-30, Unix seconds. */
@@ -9624,7 +9624,7 @@ static void chk_prepare(void)
     }
     fake_time_wall_set((uint64_t)CHK_T0 * CHK_US_PER_S);
     (void)fake_lowpower_wake_take(&(LowPowerWakeAtEvt){ 0 });
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 }
 
 /** @brief A fresh AO_Net, offline: no Wi-Fi address, so nothing to listen to. */
@@ -9803,10 +9803,10 @@ TEST_CASE("a client of the user's is something to listen to, with the channel of
     TEST_ASSERT_EQUAL_UINT64(khal_time_us() + (60U * CHK_US_PER_S), w.due_us);
 
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "the dwell is on");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "the dwell is on");
     secs((KODE_NET_CHECK_DWELL_MS / 1000U) + 1U);
-    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_dark_done_count());
     TEST_ASSERT_EQUAL_UINT(1U, chk_told(&passed));
     lp_awake(AO_Net);
     net_done();
@@ -9830,7 +9830,7 @@ TEST_CASE("a session left over without a Wi-Fi address is nothing to listen to",
     chk_give(CHK_T0 + 60);
 
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chk_told(&passed), "no address: no dwell, made at once");
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
     lp_awake(AO_Net);
@@ -9857,7 +9857,7 @@ TEST_CASE("a time given while the board sleeps is told to AO_LowPower at once", 
 }
 
 /* test_net_check_dwell */
-TEST_CASE("a radio wake with the check due is not done before the dwell, and is after it",
+TEST_CASE("a dark wake with the check due is not done before the dwell, and is after it",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -9872,18 +9872,18 @@ TEST_CASE("a radio wake with the check due is not done before the dwell, and is 
     (void)fake_lowpower_wake_take(&w);
 
     chk_clock_to(CHK_T0 + 60);                /* the board slept until it was due */
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "the dwell is on");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "the dwell is on");
     secs((KODE_NET_CHECK_DWELL_MS / 1000U) - 1U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "not before it has passed");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "not before it has passed");
     TEST_ASSERT_EQUAL_UINT(0U, chk_told(&passed));
 
     secs(2U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "once after it");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "once after it");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chk_told(&passed), "and the scheduler is told");
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
     secs(5U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "only once");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "only once");
 
     /* The round that ends the wake finds the time spent: it asks to wake for none of the check's. */
     lp_round(AO_Net, KODE_LP_ASLEEP);
@@ -9905,8 +9905,8 @@ TEST_CASE("a due check with nothing to listen to is made at once", "[net_ao][low
     chk_listening();
     chk_give(CHK_T0 + 60);
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "nothing to wake: done");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "nothing to wake: done");
     TEST_ASSERT_EQUAL_UINT(1U, chk_told(&passed));
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
     lp_awake(AO_Net);
@@ -9917,8 +9917,8 @@ TEST_CASE("a due check with nothing to listen to is made at once", "[net_ao][low
     chk_link(KRADIO_UP);
     chk_give(CHK_T0 + 60);
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "no Wi-Fi: done");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "no Wi-Fi: done");
     TEST_ASSERT_EQUAL_UINT(1U, chk_told(&passed));
     lp_awake(AO_Net);
     net_done();
@@ -9928,8 +9928,8 @@ TEST_CASE("a due check with nothing to listen to is made at once", "[net_ao][low
     chk_link(KRADIO_UP);
     chk_give(CHK_T0 + 60);
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "channel off, no client: done");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "channel off, no client: done");
     TEST_ASSERT_EQUAL_UINT(1U, chk_told(&passed));
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
     lp_awake(AO_Net);
@@ -9937,7 +9937,7 @@ TEST_CASE("a due check with nothing to listen to is made at once", "[net_ao][low
     fake_nvs_reset();
 }
 
-TEST_CASE("a radio wake that finds the check not due is done at once and tells nothing",
+TEST_CASE("a dark wake that finds the check not due is done at once and tells nothing",
           "[net_ao][lowpower]")
 {
     int64_t passed = 0;
@@ -9945,8 +9945,8 @@ TEST_CASE("a radio wake that finds the check not due is done at once and tells n
     chk_listening();
     chk_link(KRADIO_UP);
     chk_give(CHK_T0 + CHK_QUARTER_S);
-    lp_radio(AO_Net);                         /* the channel's time, say, and not the check's */
-    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_radio_done_count());
+    lp_dark(AO_Net);                         /* the channel's time, say, and not the check's */
+    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_dark_done_count());
     TEST_ASSERT_EQUAL_UINT(0U, chk_told(&passed));
     lp_awake(AO_Net);
     net_done();
@@ -10002,7 +10002,7 @@ TEST_CASE("a whole wake with the check due dwells, and a round is busy until the
     secs(2U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chk_told(&passed), "made at the end of the dwell");
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "a whole wake says no radio done");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "a whole wake says no dark done");
     lp_round(AO_Net, KODE_LP_ASLEEP);
     pull_jobs();
     lp_expect_answer(false, NULL);
@@ -10056,7 +10056,7 @@ TEST_CASE("a whole wake with nothing to listen to, or a round with the board awa
     net_done();
 }
 
-TEST_CASE("a round in a radio wake's dwell is busy, and the dwell still ends in one done",
+TEST_CASE("a round in a dark wake's dwell is busy, and the dwell still ends in one done",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -10071,12 +10071,12 @@ TEST_CASE("a round in a radio wake's dwell is busy, and the dwell still ends in 
     (void)fake_lowpower_wake_take(&w);
     chk_clock_to(CHK_T0 + 60);
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     secs(1U);
     lp_round(AO_Net, KODE_LP_ASLEEP);         /* somebody asked early */
     lp_expect_answer(true, "check dwell");
     TEST_ASSERT_EQUAL_UINT(0U, chk_told(&passed));
-    lp_awake(AO_Net);                         /* the busy radio round made it a whole wake */
+    lp_awake(AO_Net);                         /* the busy dark-wake round made it a whole wake */
     secs(KODE_NET_CHECK_DWELL_MS / 1000U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chk_told(&passed), "the dwell kept, and ended once");
     secs(5U);

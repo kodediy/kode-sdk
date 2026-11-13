@@ -57,17 +57,17 @@ static inline void lp_awake(QActive * const ao)
 }
 
 /**
- * @brief Tell @p ao the radio alone is awake: a radio wake, with the glass asleep.
+ * @brief Tell @p ao a dark wake runs: the tick and the lock, with the glass asleep.
  *
  * @param ao The owner under test.
  */
-static inline void lp_radio(QActive * const ao)
+static inline void lp_dark(QActive * const ao)
 {
     LowPowerStateEvt e;
 
     (void)memset(&e, 0, sizeof(e));
     e.super = (QEvt)QEVT_INITIALIZER(LOWPOWER_STATE_SIG);
-    e.state = (uint8_t)KODE_LP_RADIO;
+    e.state = (uint8_t)KODE_LP_DARK;
     e.cause = (uint8_t)KODE_LP_CAUSE_TIMER;
     e.prev  = (uint8_t)KODE_LP_ASLEEP;
     QASM_DISPATCH(ao, &e.super, 0U);

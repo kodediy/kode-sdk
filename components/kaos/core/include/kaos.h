@@ -2908,7 +2908,7 @@ void net_leave_request(void);
 /**
  * @brief Tell AO_Net when the scheduler's `mqtt` entry next falls due.
  *
- * The radio wake that lets held messages in while the board sleeps. AO_Net keeps
+ * The dark wake that lets held messages in while the board sleeps. AO_Net keeps
  * one time, gives AO_LowPower the earlier of it and the channel's deadline, and
  * holds the wake KODE_NET_CHECK_DWELL_MS (an ASLEEP round meanwhile is "check
  * dwell"). Nothing to listen to: passed at once. Each check is told to AO_Scheduler
@@ -4775,7 +4775,7 @@ typedef struct {
     uint32_t wakes_bot;      /**< Wakes from ASLEEP by BOT.                         */
     uint32_t wakes_ble;      /**< Wakes from ASLEEP by a line on BLE.               */
     uint32_t wakes_mqtt;     /**< Wakes from ASLEEP by the Kode channel.            */
-    uint32_t wakes_timer;    /**< Wakes from ASLEEP for an owner's time, radio
+    uint32_t wakes_timer;    /**< Wakes from ASLEEP for an owner's time, dark
                               *   wakes included.                             */
 } lowpower_info_t;
 
@@ -4860,7 +4860,7 @@ const lowpower_sample_t *lowpower_last_sample(const lowpower_last_t *l, uint8_t 
  * Once, from the owner's initial transition; it then subscribes to
  * LOWPOWER_ROUND_SIG and LOWPOWER_STATE_SIG. It rests its device on a round and
  * answers exactly once; restores on STATE(AWAKE), idempotently (it may repeat);
- * ignores KODE_LP_RADIO; arms no QTimeEvt on ASLEEP (the tick is stopped): work
+ * ignores KODE_LP_DARK; arms no QTimeEvt on ASLEEP (the tick is stopped): work
  * due asleep is timed with khal_time_us() and given with lowpower_wake_at().
  *
  * @param ao   The participant's Active Object.
@@ -4871,11 +4871,11 @@ const lowpower_sample_t *lowpower_last_sample(const lowpower_last_t *l, uint8_t 
 uint8_t lowpower_join(QActive *ao, const char *name);
 
 /**
- * @brief Join the rounds like lowpower_join(), and take part in radio wakes.
+ * @brief Join the rounds like lowpower_join(), and take part in dark wakes.
  *
- * A radio wake (from one of these owners' lowpower_wake_at() times) runs the tick
- * for them alone. On STATE(KODE_LP_RADIO) restore as for AWAKE, work, then call
- * lowpower_radio_done() once; when all are done, or after KODE_LOWPOWER_RADIO_MAX_MS,
+ * A dark wake (from one of these owners' lowpower_wake_at() times) runs the tick
+ * for them alone. On STATE(KODE_LP_DARK) restore as for AWAKE, work, then call
+ * lowpower_dark_done() once; when all are done, or after KODE_LOWPOWER_DARK_MAX_MS,
  * a round for ASLEEP goes to them alone. A busy or silent owner, BOT, a console
  * line, a broker message or a cable turns it into a full AWAKE.
  *
@@ -4883,27 +4883,27 @@ uint8_t lowpower_join(QActive *ao, const char *name);
  * @param name Short name for the log and for `lowpower_info`.
  * @return The participant's id; KODE_LOWPOWER_WHO_NONE when the table is full.
  */
-uint8_t lowpower_join_radio(QActive *ao, const char *name);
+uint8_t lowpower_join_dark(QActive *ao, const char *name);
 
 /**
- * @brief Say that the owner's work in a radio wake is finished (posts
- *        LOWPOWER_RADIO_DONE_SIG).
+ * @brief Say that the owner's work in a dark wake is finished (posts
+ *        LOWPOWER_DARK_DONE_SIG).
  *
- * Once for each LOWPOWER_STATE_SIG with state KODE_LP_RADIO. Outside a radio
+ * Once for each LOWPOWER_STATE_SIG with state KODE_LP_DARK. Outside a dark
  * wake it is dropped. Safe from any task.
  *
- * @param who The id lowpower_join_radio() gave.
+ * @param who The id lowpower_join_dark() gave.
  */
-void lowpower_radio_done(uint8_t who);
+void lowpower_dark_done(uint8_t who);
 
 /**
  * @brief Say when the owner's work next needs the board awake (posts
  *        LOWPOWER_WAKE_AT_SIG).
  *
  * Before answering a round for ASLEEP (also taken while asleep). AO_LowPower wakes
- * at the earliest time given (KODE_LP_CAUSE_TIMER), a radio wake for a radio owner;
+ * at the earliest time given (KODE_LP_CAUSE_TIMER), a dark wake for a dark-wake owner;
  * a past time wakes at once. Times are forgotten at each round and wake, so say it
- * every round; a radio wake forgets only radio owners' times.
+ * every round; a dark wake forgets only dark-wake owners' times.
  *
  * @param who    The id lowpower_join() gave.
  * @param due_us khal_time_us() when the work is due; 0 asks for nothing.
@@ -4973,7 +4973,7 @@ bool radio_sleep_last_note(RadioSleepNoteEvt *out);
  * With CONFIG_KODE_LOWPOWER it joins the rounds: it gives the earliest entry
  * minute as a wake time, and after a timer wake's work asks lowpower_request_rest().
  * An entry still running at its minute is skipped. Nothing is posted before
- * sched_system_up(). `mqtt` minutes go to AO_Net (net_check_at()), a radio-only wake.
+ * sched_system_up(). `mqtt` minutes go to AO_Net (net_check_at()), a dark wake.
  */
 
 #define KODE_SCHED_MQTT_NAME     "mqtt"           /**< The built-in entry's name, reserved. */
@@ -5093,7 +5093,7 @@ void sched_line_busy(void);
  * @brief AO_Net made the check it was given the time of: AO_Scheduler gives it
  *        the next. Posts SCHED_CHECK_DONE_SIG.
  *
- * AO_Net's call, after the dwell of a radio wake, or at once when it had
+ * AO_Net's call, after the dwell of a dark wake, or at once when it had
  * nothing to wake or the board was awake. Safe from any task. Without
  * CONFIG_KODE_SCHEDULER it does nothing.
  *

@@ -8981,10 +8981,10 @@ TEST_CASE("asleep nothing is tried, and a wake tries at once from the first wait
     pump();
     retry_asleep();
 
-    /* The tick stops in a real sleep. A radio wake's does run: not for this. */
-    lp_radio(AO_Radio);
+    /* The tick stops in a real sleep. A dark wake's does run: not for this. */
+    lp_dark(AO_Radio);
     retry_wait(700000U);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a sweep inside a radio wake");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a sweep inside a dark wake");
     TEST_ASSERT_TRUE(wifi_state_now().reconnecting);
 
     retry_asleep();
@@ -9842,26 +9842,26 @@ TEST_CASE("a full queue drops a wake note instead of asserting, and a stand-down
     lp_radio_awake();
 }
 
-/* ---- A radio wake: the bus awake, the glass asleep ------------------------------ */
+/* ---- A dark wake: the bus awake, the glass asleep ------------------------------- */
 
-TEST_CASE("a radio wake stops the sentinel and says done when the stop has returned; "
+TEST_CASE("a dark wake stops the sentinel and says done when the stop has returned; "
           "the round that ends it starts the sentinel again",
           "[radio_ao][lowpower]")
 {
     radio_fresh();
     go_up();
     lp_to_asleep();
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Radio);
+    lp_dark(AO_Radio);
     drain();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_SLEEP, running_job());
     TEST_ASSERT_FALSE_MESSAGE(held_req()->on, "the bus is woken for the network");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(),
                                    "not done while the stop is with the worker");
 
     finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "done, once");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "done, once");
     TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
     lp_expect_no_more();
 
@@ -9871,50 +9871,50 @@ TEST_CASE("a radio wake stops the sentinel and says done when the stop has retur
     finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
     lp_expect_answer(false, NULL);
     lp_expect_no_more();
-    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_dark_done_count());
 
     lp_radio_awake();
 }
 
-TEST_CASE("a radio wake with no sentinel armed is done at once", "[radio_ao][lowpower]")
+TEST_CASE("a dark wake with no sentinel armed is done at once", "[radio_ao][lowpower]")
 {
     radio_fresh();
     go_up();
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Radio);
+    lp_dark(AO_Radio);
     drain();
 
     TEST_ASSERT_FALSE(job_held());
-    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_dark_done_count());
 }
 
-TEST_CASE("a radio wake with no link is done at once", "[radio_ao][lowpower]")
+TEST_CASE("a dark wake with no link is done at once", "[radio_ao][lowpower]")
 {
     radio_fresh();
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Radio);
+    lp_dark(AO_Radio);
     drain();
 
-    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_dark_done_count());
 }
 
-TEST_CASE("a whole AWAKE after a radio wake does not say done, and stops nothing twice",
+TEST_CASE("a whole AWAKE after a dark wake does not say done, and stops nothing twice",
           "[radio_ao][lowpower]")
 {
     radio_fresh();
     go_up();
     lp_to_asleep();
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Radio);
+    lp_dark(AO_Radio);
     drain();
     finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
-    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_dark_done_count());
 
     lp_radio_awake();
-    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_dark_done_count());
     TEST_ASSERT_EQUAL_UINT(1U, fake_radio_sleep_stops());
 }
 

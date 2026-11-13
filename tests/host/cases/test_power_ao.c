@@ -730,7 +730,7 @@ static bool lowpower_queue_has(kode_lp_state_t target)
 /** @brief Fill AO_LowPower's queue until only its command margin is free. */
 static void lowpower_fill_to_margin(void)
 {
-    static const QEvt filler = QEVT_INITIALIZER(LOWPOWER_RADIO_DONE_SIG);
+    static const QEvt filler = QEVT_INITIALIZER(LOWPOWER_DARK_DONE_SIG);
 
     for ( uint32_t guard = 0U;
          (POWER_FILL_MAX > guard)
@@ -2581,7 +2581,7 @@ TEST_CASE("a rested AO_Power still answers the minute's dump with the cable as i
     Mockkhal_i2c_Destroy();
 }
 
-/* A radio wake runs the tick while the AO is rested: the ADC is idle, so a
+/* A dark wake runs the tick while the AO is rested: the ADC is idle, so a
  * poll that comes then has nothing true to read. */
 TEST_CASE("a rested AO_Power runs no poll, and the first one after AWAKE does",
           "[power_ao][lowpower]")
@@ -2674,9 +2674,9 @@ TEST_CASE("a control request waiting on the chip refuses the round", "[power_ao]
     Mockkhal_i2c_Destroy();
 }
 
-/* A radio wake is not AWAKE: the ADC stays idle, and the conversion the first
+/* A dark wake is not AWAKE: the ADC stays idle, and the conversion the first
  * poll reads is started by AWAKE alone. */
-TEST_CASE("STATE(RADIO) leaves a rested AO_Power alone; AWAKE still starts a conversion",
+TEST_CASE("STATE(DARK) leaves a rested AO_Power alone; AWAKE still starts a conversion",
           "[power_ao][lowpower]")
 {
     power_up_once();
@@ -2686,15 +2686,15 @@ TEST_CASE("STATE(RADIO) leaves a rested AO_Power alone; AWAKE still starts a con
     s_nwrites = 0U;
     ao_spy_drain();
 
-    lp_radio(AO_Power);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nwrites, "the radio wake wrote a chip");
+    lp_dark(AO_Power);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nwrites, "the dark wake wrote a chip");
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_regs[PMIC][BQ_REG02_ADC] & BQ_CONV_START,
-                                   "the radio wake started a conversion");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the radio wake published something");
+                                   "the dark wake started a conversion");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the dark wake published something");
 
     lp_awake(AO_Power);
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(BQ_CONV_START, s_regs[PMIC][BQ_REG02_ADC] & BQ_CONV_START,
-                                   "AWAKE after the radio wake started no conversion");
+                                   "AWAKE after the dark wake started no conversion");
     ao_spy_drain();
     Mockkhal_i2c_Destroy();
 }

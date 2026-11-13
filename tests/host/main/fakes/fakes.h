@@ -338,7 +338,7 @@ bool fake_lowpower_wake_take(LowPowerWakeAtEvt *out);
  *
  * @return The count.
  */
-unsigned fake_lowpower_radio_done_count(void);
+unsigned fake_lowpower_dark_done_count(void);
 
 /**
  * @brief How many requests to rest (lowpower_request_rest()) reached AO_LowPower since the last ask.

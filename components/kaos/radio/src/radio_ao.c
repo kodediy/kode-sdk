@@ -527,7 +527,7 @@ typedef struct {
     bool     relink_dead;     /**< No more of them until somebody asks.      */
     bool     relink_wake;     /**< One is owed to the board waking.          */
     bool     lp_rest;         /**< A round for the rest has begun, or the
-                               *   board sleeps or is in a radio wake: nothing
+                               *   board sleeps or is in a dark wake: nothing
                                *   this AO starts by itself may hold it up.  */
     bool     lp_slept;        /**< The board has been ASLEEP since last AWAKE. */
 #if CONFIG_KODEOS_WIFI
@@ -713,8 +713,8 @@ typedef struct {
 
 #if CONFIG_KODE_LOWPOWER
     /* The board's rest. */
-    uint8_t  lp_who;             /**< The id lowpower_join_radio() gave.   */
-    bool     lp_radio;           /**< A radio wake is on and this AO has not said it is done. */
+    uint8_t  lp_who;             /**< The id lowpower_join_dark() gave.   */
+    bool     lp_dark;            /**< A dark wake is on and this AO has not said it is done. */
     bool     lp_owed;            /**< A round waits for this AO's answer.  */
     uint32_t lp_round;           /**< That round's number.                 */
     uint8_t  lp_target;          /**< Its target, a kode_lp_state_t.       */
@@ -9491,7 +9491,7 @@ void Radio_ctor(void)
     me->wipe_who   = NULL;
 #if CONFIG_KODE_LOWPOWER
     me->lp_who        = KODE_LOWPOWER_WHO_NONE;
-    me->lp_radio      = false;
+    me->lp_dark       = false;
     me->lp_owed       = false;
     me->lp_round      = 0U;
     me->lp_target     = (uint8_t)KODE_LP_AWAKE;
@@ -10314,10 +10314,10 @@ static void radio_lp_round(Radio * const me, const LowPowerRoundEvt * const r)
     me->lp_round     = r->round;
     me->lp_target    = r->target;
     me->lp_owed      = true;
-    /* A round ends the radio wake's work: cleared here, so the stop that
-     * returns later, whose sleep_done() calls radio_lp_radio_done(), says no
+    /* A round ends the dark wake's work: cleared here, so the stop that
+     * returns later, whose sleep_done() calls radio_lp_dark_done(), says no
      * done for a wake this round ended. */
-    me->lp_radio     = false;
+    me->lp_dark      = false;
     if ( (uint8_t)RADIO_LPJ_STOP_AWAKE == me->lp_job )
     {
         /* Owed: the stop's outcome decides. */
@@ -10369,19 +10369,19 @@ static const char *radio_lp_why_of(kode_status_t rc)
 }
 
 /**
- * @brief Tell AO_LowPower this AO's part of a radio wake is finished.
+ * @brief Tell AO_LowPower this AO's part of a dark wake is finished.
  *
- * Once for each radio wake: the work of this AO in it is the bus being awake,
+ * Once for each dark wake: the work of this AO in it is the bus being awake,
  * and the bus is awake when the sentinel is stopped or was never armed.
  *
  * @param me The AO.
  */
-static void radio_lp_radio_done(Radio * const me)
+static void radio_lp_dark_done(Radio * const me)
 {
-    if ( me->lp_radio )
+    if ( me->lp_dark )
     {
-        me->lp_radio = false;
-        lowpower_radio_done(me->lp_who);
+        me->lp_dark = false;
+        lowpower_dark_done(me->lp_who);
     }
 }
 
@@ -10413,7 +10413,7 @@ static void radio_lp_sleep_done(Radio * const me, kode_status_t rc)
     me->lp_job = (uint8_t)RADIO_LPJ_NONE;
     if ( (uint8_t)RADIO_LPJ_STOP_AWAKE == job )
     {
-        radio_lp_radio_done(me);   /* the bus is as awake as it will get */
+        radio_lp_dark_done(me);   /* the bus is as awake as it will get */
     }
     if ( (uint8_t)RADIO_LPJ_START == job )
     {
@@ -10501,11 +10501,11 @@ static void radio_lp_wake_pay(Radio * const me)
 }
 
 /**
- * @brief LOWPOWER_STATE_SIG: on AWAKE, or on a radio wake, whatever the rest
+ * @brief LOWPOWER_STATE_SIG: on AWAKE, or on a dark wake, whatever the rest
  *        changed comes back.
  *
  * It repeats (an abandoned round publishes it again), so every step looks at
- * what is still to do. A radio wake wants the bus and nothing else of the
+ * what is still to do. A dark wake wants the bus and nothing else of the
  * rest: the sentinel is stopped, and AO_LowPower is told when it is.
  *
  * @param me The AO.
@@ -10513,18 +10513,18 @@ static void radio_lp_wake_pay(Radio * const me)
  */
 static void radio_lp_state(Radio * const me, const LowPowerStateEvt * const s)
 {
-    bool const radio = ((uint8_t)KODE_LP_RADIO == s->state);
+    bool const dark = ((uint8_t)KODE_LP_DARK == s->state);
 
     me->lp_rest = ((uint8_t)KODE_LP_AWAKE != s->state);
     if ( (uint8_t)KODE_LP_ASLEEP == s->state )
     {
         me->lp_slept = true;
     }
-    if ( ((uint8_t)KODE_LP_AWAKE == s->state) || radio )
+    if ( ((uint8_t)KODE_LP_AWAKE == s->state) || dark )
     {
         me->lp_owed     = false;     /* an abandoned round is not answered */
         me->lp_net_seen = false;
-        me->lp_radio    = radio;
+        me->lp_dark     = dark;
         if ( (me->lp_asleep || ((uint8_t)RADIO_LPJ_NONE != me->lp_job))
             && ((uint8_t)KRADIO_UP == me->link) )
         {
@@ -10532,7 +10532,7 @@ static void radio_lp_state(Radio * const me, const LowPowerStateEvt * const s)
         }
         else
         {
-            radio_lp_radio_done(me);
+            radio_lp_dark_done(me);
         }
     }
     if ( (uint8_t)KODE_LP_AWAKE == s->state )
@@ -10620,7 +10620,7 @@ static void radio_lp_link_gone(Radio * const me)
     me->lp_asleep    = false;
     me->lp_job       = (uint8_t)RADIO_LPJ_NONE;
     me->lp_wake_owed = false;
-    radio_lp_radio_done(me);   /* no link, nothing left to wait for */
+    radio_lp_dark_done(me);   /* no link, nothing left to wait for */
     if ( me->lp_owed )
     {
         if ( ((uint8_t)KODE_LP_OFF != me->lp_target) || stop_out )
@@ -10669,7 +10669,7 @@ static QState Radio_initial(Radio * const me, void const * const par)
     radio_knocks_reset();
     kaos_claim(KBSP_RES_C5, me, "AO_Radio");
 #if CONFIG_KODE_LOWPOWER
-    me->lp_who = lowpower_join_radio(&me->super, "radio");
+    me->lp_who = lowpower_join_dark(&me->super, "radio");
     if ( KODE_LOWPOWER_WHO_NONE != me->lp_who )
     {
         QActive_subscribe(&me->super, LOWPOWER_ROUND_SIG);
@@ -12884,7 +12884,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         case WIFI_LOST_SIG: {
             /* Said at once: everything riding on the network has been told
              * nothing until now. Asleep too, because AO_Net would otherwise
-             * keep asking for radio wakes on a network that is not there. */
+             * keep asking for dark wakes on a network that is not there. */
             KLOG_N(TAG, "the network went away");
             me->retry_step = 0U;
             wifi_retry_arm(me);

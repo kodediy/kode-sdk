@@ -2617,7 +2617,7 @@ static QState Power_polling(Power * const me, QEvt const * const e)
         case POWER_POLL_SIG: {
             (void)QTimeEvt_rearm(&me->poll,
                                  KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
-            /* A radio wake runs the tick while the ADC is rested: its
+            /* A dark wake runs the tick while the ADC is rested: its
              * registers are stale and the minute's peek keeps the clock, so
              * there is nothing to read. */
             if ( !power_resting(me) )

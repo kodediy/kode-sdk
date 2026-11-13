@@ -269,9 +269,9 @@ TEST_CASE("the led row refuses the round, and rests once it is over", "[led_mgr]
     rest_down();
 }
 
-/* A radio wake lights nothing: the LED stays dark and the heartbeat stays
+/* A dark wake lights nothing: the LED stays dark and the heartbeat stays
  * stopped until the whole board is AWAKE. */
-TEST_CASE("STATE(RADIO) leaves a rested LED alone; AWAKE still brings it back",
+TEST_CASE("STATE(DARK) leaves a rested LED alone; AWAKE still brings it back",
           "[led_mgr][lowpower]")
 {
     unsigned after_rest;
@@ -282,9 +282,9 @@ TEST_CASE("STATE(RADIO) leaves a rested LED alone; AWAKE still brings it back",
     lp_expect_answer(false, NULL);
     after_rest = s_led_writes;
 
-    lp_radio(AO_LedMgr);
+    lp_dark(AO_LedMgr);
     (void)qf_support_tick(AO_LedMgr, QF_SUPPORT_STEPS(KODE_LED_BLINK_MS) * 3U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(after_rest, s_led_writes, "the radio wake wrote the LED");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(after_rest, s_led_writes, "the dark wake wrote the LED");
 
     lp_awake(AO_LedMgr);
     (void)qf_support_tick(AO_LedMgr, QF_SUPPORT_STEPS(KODE_LED_BLINK_MS) + 2U);

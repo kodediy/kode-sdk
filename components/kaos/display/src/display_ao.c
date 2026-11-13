@@ -1437,7 +1437,7 @@ static void rest_state(Display * const me, const LowPowerStateEvt * const s)
     }
     else
     {
-        /* ASLEEP and RADIO: the round did it all. */
+        /* ASLEEP and DARK: the round did it all. */
     }
 }
 #endif /* CONFIG_KODE_LOWPOWER */
