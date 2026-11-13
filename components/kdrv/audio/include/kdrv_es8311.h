@@ -311,8 +311,14 @@ kode_status_t kdrv_es8311_stream_reset(void);
  * @brief Put frames into the open stream. The writer's call, from its own task.
  *
  * Blocks only while the ring is full, for at most @p ms in all, and never
- * from an Active Object. One writer at a time.
+ * from an Active Object. One writer at a time. The frames go only into stream
+ * @p id: one that ends while the writer waits for room, or gives way to the
+ * next, takes nothing more, and the write answers KODE_DENIED. A write in the
+ * instant the owner ends the stream may still answer KODE_OK: its frames go
+ * with the ring the owner empties, unheard.
  *
+ * @param id       The stream the frames are for, as kdrv_es8311_stream_id()
+ *                 said.
  * @param frames   @p n mono samples, or @p n left-right pairs when
  *                 @p channels is 2; a pair is played as its mean.
  * @param n        How many frames.
@@ -320,10 +326,11 @@ kode_status_t kdrv_es8311_stream_reset(void);
  * @param ms       The longest to wait for room.
  * @param taken    Out: how many frames went in. May be NULL.
  * @return KODE_OK when all @p n went in, KODE_TIMEOUT when @p ms ran out
- *         first (@p taken says how far it got), KODE_DENIED when no stream is
- *         open or an argument is bad.
+ *         first (@p taken says how far it got), KODE_DENIED when stream @p id
+ *         is not the one open (@p taken says how much it took before) or an
+ *         argument is bad.
  */
-kode_status_t kdrv_es8311_stream_write(const int16_t *frames, size_t n,
+kode_status_t kdrv_es8311_stream_write(uint32_t id, const int16_t *frames, size_t n,
                                        uint8_t channels, uint32_t ms,
                                        size_t *taken);
 
@@ -334,6 +341,34 @@ kode_status_t kdrv_es8311_stream_write(const int16_t *frames, size_t n,
  * drains and returns; writes are refused from this call on.
  */
 void kdrv_es8311_stream_end(void);
+
+/**
+ * @brief Which stream takes writes now.
+ *
+ * Every kdrv_es8311_stream_reset() opens a stream with a number of its own,
+ * never 0 and never the one before, and the stream keeps it until
+ * kdrv_es8311_stream_end() or the end of its job. A writer that noted the
+ * number of its stream tells from it whether that stream is still the one
+ * open, or has ended and perhaps given way to another. Two reads, from any
+ * task.
+ *
+ * @return The open stream's number, or 0 while kdrv_es8311_stream_write()
+ *         takes nothing.
+ */
+uint32_t kdrv_es8311_stream_id(void);
+
+/**
+ * @brief How long since a write last put frames into the stream.
+ *
+ * Counted from kdrv_es8311_stream_reset() while nothing has been written, and
+ * from the last kdrv_es8311_stream_write() that put at least one frame in
+ * after that: a write the full ring took nothing of does not count. A read of
+ * one word, from any task; it is the owner's to decide what a long silence
+ * means.
+ *
+ * @return The milliseconds, by khal_time_ms().
+ */
+uint32_t kdrv_es8311_stream_idle_ms(void);
 
 /**
  * @brief Clear a recording's early end, before its job is submitted.

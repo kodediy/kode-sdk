@@ -754,6 +754,12 @@ kode_status_t kode_sys_ir_last(QActive *me);
 /** @brief The frames the stream holds ahead of the speaker (200 ms); it holds the codec from open to close. */
 #define KODE_SYS_AUDIO_STREAM_FRAMES  9600U
 
+/* The canonical value is kqp_config.h's; guarded so a file seeing both has one. */
+#ifndef KODE_SYS_AUDIO_STREAM_IDLE_MS
+/** @brief How long an open stream may go without a write before AO_Audio closes it. */
+#define KODE_SYS_AUDIO_STREAM_IDLE_MS  10000U
+#endif
+
 /** @brief The longest path a recording into a file names, NUL included. */
 #define KODE_SYS_AUDIO_PATH_MAX  96U
 
@@ -824,6 +830,11 @@ kode_status_t kode_sys_audio_record_file(QActive *me, const char *path, uint32_t
 /**
  * @brief Open the stream at KODE_SYS_AUDIO_RATE_HZ; it holds the codec until closed.
  * @note Only @p me writes (kode_sys_audio_stream_write()) and closes the stream it opened.
+ * @note AO_Audio closes a stream that goes KODE_SYS_AUDIO_STREAM_IDLE_MS
+ *       without a write that put frames in, counted from the open while there
+ *       has been none. Nobody is answered: @p me stops being its writer, so
+ *       its next write is KODE_DENIED. A close asked while that close drains
+ *       is answered with it; one asked after it is KODE_DENIED.
  * @param me The asking AO; AUDIO_STREAM_OPEN_RSP_SIG answers it once the stream plays.
  * @return As the requests' rules above.
  */

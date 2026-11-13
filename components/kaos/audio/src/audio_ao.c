@@ -100,6 +100,8 @@ typedef struct {
     QTimeEvt guard;        /**< AUDIO_GUARD_SIG: a job that never answered. */
     uint32_t guard_stale;  /**< Expired guard events still queued.          */
     bool     guard_live;   /**< The guard is armed and unexpired.           */
+    QTimeEvt idle;         /**< AUDIO_STREAM_IDLE_SIG: the open stream's
+                            *   silence is due a reading.                  */
     bool     up;           /**< The codec came up and the worker started.   */
     bool     open;         /**< The device is open.                         */
     bool     opening;      /**< An OPEN job is with the worker, or is owed
@@ -177,6 +179,22 @@ static void audio_guard_start(Audio * const me)
     audio_guard_stop(me);
     QTimeEvt_armX(&me->guard, KQP_TICKS_PER_MS(KODE_AUDIO_GUARD_MS), 0U);
     me->guard_live = true;
+}
+
+/**
+ * @brief Read the stream's silence in @p ms, in place of any reading due.
+ *
+ * An expiry already queued needs no telling apart, unlike the guard's: it
+ * only asks for a reading, and stream_idle_due() judges the stream that is
+ * open by what the driver says of it.
+ *
+ * @param me The AO.
+ * @param ms How long from now, above 0.
+ */
+static void stream_idle_start(Audio * const me, uint32_t ms)
+{
+    (void)QTimeEvt_disarm(&me->idle);
+    QTimeEvt_armX(&me->idle, KQP_TICKS_PER_MS(ms), 0U);
 }
 
 /* ---- The asks: kode_sys's requests, answered to the asking AO --------------
@@ -362,6 +380,7 @@ static void act_end(Audio * const me, kode_status_t rc, uint32_t frames)
 #endif
     if ( ACT_STREAM == me->act )
     {
+        (void)QTimeEvt_disarm(&me->idle);
         atomic_store(&s_audio_stream_asker, 0U);
         me->stream_who = NULL;
     }
@@ -1617,20 +1636,61 @@ static void buf_take(Audio * const me, AudioBufEvt const * const q,
  * @brief The stream job is with the worker: tell whoever opened it.
  *
  * A stream has no end to guard until somebody closes it - it plays for as
- * long as its writer likes - so the guard its submit armed is stopped here,
- * and armed again by the close, around the drain that has to answer.
+ * long as its writer writes - so the guard its submit armed is stopped here,
+ * and armed again by the close, around the drain that has to answer. What
+ * runs instead is the idle count: the frames skip this AO, so it reads the
+ * ring's silence from the driver every KODE_SYS_AUDIO_STREAM_IDLE_MS.
  *
  * @param me The AO.
  */
 static void stream_started(Audio * const me)
 {
     audio_guard_stop(me);
+    stream_idle_start(me, KODE_SYS_AUDIO_STREAM_IDLE_MS);
     if ( NULL != me->stream_who )
     {
         /* Published before the answer, so the opener's first write finds it. */
         atomic_store(&s_audio_stream_asker, me->stream_who->prio);
     }
     wake(me, KODE_OK, 0U);
+}
+
+/**
+ * @brief The idle count ran out: close a stream nobody writes to, or count on.
+ *
+ * A writer that stopped and never closed would hold the codec for good. At
+ * KODE_SYS_AUDIO_STREAM_IDLE_MS without a write the stream ends as a close
+ * ends it - the job plays what the ring still holds, drains and returns - and
+ * its opener stops being its writer at once. Nobody asked, so nobody is
+ * answered: the opener's next write is refused. A stream that was written
+ * meanwhile is read again when the time it has left is up. A close already
+ * draining is left to end by itself, and a reading that arrives with no
+ * stream open - the count of one that has ended - reads nothing.
+ *
+ * @param me The AO.
+ */
+static void stream_idle_due(Audio * const me)
+{
+    uint32_t idle;
+
+    if ( (ACT_STREAM != me->act) || me->wait.busy )
+    {
+        return;
+    }
+    idle = kdrv_es8311_stream_idle_ms();
+    if ( KODE_SYS_AUDIO_STREAM_IDLE_MS > idle )
+    {
+        stream_idle_start(me, KODE_SYS_AUDIO_STREAM_IDLE_MS - idle);
+    }
+    else
+    {
+        KLOG_W(TAG, "the stream went %u ms without a write; it is closed",
+               (unsigned)idle);
+        atomic_store(&s_audio_stream_asker, 0U);
+        kdrv_es8311_stream_end();
+        /* The drain is what has to answer now, as after a close. */
+        audio_guard_start(me);
+    }
 }
 
 /**
@@ -2506,6 +2566,12 @@ static QState Audio_ready(Audio * const me, QEvt const * const e)
         }
 #endif
 
+        case AUDIO_STREAM_IDLE_SIG: {
+            stream_idle_due(me);
+            status = Q_HANDLED();
+            break;
+        }
+
         case AUDIO_GUARD_SIG: {
             if ( 0U < me->guard_stale )
             {
@@ -2560,6 +2626,7 @@ void Audio_ctor(void)
 
     QActive_ctor(&me->super, Q_STATE_CAST(&Audio_initial));
     QTimeEvt_ctorX(&me->guard, &me->super, AUDIO_GUARD_SIG, 0U);
+    QTimeEvt_ctorX(&me->idle, &me->super, AUDIO_STREAM_IDLE_SIG, 0U);
 
     me->guard_stale = 0U;
     me->guard_live  = false;

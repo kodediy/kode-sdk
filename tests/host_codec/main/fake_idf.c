@@ -15,6 +15,7 @@
  * register write. Both count; a case reads them through fake_violations().
  */
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "es8311_codec.h"
@@ -46,6 +47,8 @@ bool         g_fail_dev_new;
 bool         g_fail_vol_curve;
 uint32_t     g_viol_pad;
 uint32_t     g_viol_ctrl;
+bool         g_psram;
+uint32_t     g_time_ms;
 
 static uint8_t s_tx_obj;                 /**< The address is the transmit handle. */
 static uint8_t s_rx_obj;                 /**< The address is the receive handle.  */
@@ -429,12 +432,24 @@ kode_status_t khal_i2c_write_reg(khal_i2c_dev_t dev, uint8_t reg, uint8_t val)
 
 khal_sem_t khal_sem_create(void)
 {
+    static uint8_t sem_obj;   /* its address is the semaphore nobody waits on here */
+
+    if ( g_psram )
+    {
+        return (khal_sem_t)(void *)&sem_obj;
+    }
     return NULL;
 }
+
+void (*g_sem_wait_hook)(void);
 
 bool khal_sem_wait_timeout(khal_sem_t s, uint32_t ms)
 {
     (void)s; (void)ms;
+    if ( NULL != g_sem_wait_hook )
+    {
+        g_sem_wait_hook();
+    }
     return false;
 }
 
@@ -445,8 +460,17 @@ void khal_sem_signal(khal_sem_t s)
 
 void *khal_alloc_psram(size_t align, size_t size)
 {
-    (void)align; (void)size;
+    (void)align;
+    if ( g_psram )
+    {
+        return calloc(1U, size);
+    }
     return NULL;
+}
+
+uint32_t khal_time_ms(void)
+{
+    return g_time_ms;
 }
 
 void khal_delay_ms(uint32_t ms)

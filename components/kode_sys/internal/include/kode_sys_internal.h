@@ -140,6 +140,9 @@ kode_status_t kode_block_audio_record_file(const char *path, uint32_t ms,
 /**
  * @brief Open the stream and wait until it is playing.
  * @note Blocks. Every other sound and a second stream are refused meanwhile.
+ * @note AO_Audio closes it after KODE_SYS_AUDIO_STREAM_IDLE_MS without a write;
+ *       its writes are KODE_DENIED from then on, and the next call that wants
+ *       the audio path has it.
  * @note One task at a time; the opener may hand the stream over before it writes.
  * @param rate_hz  KODE_SYS_AUDIO_RATE_HZ; any other rate is refused.
  * @param channels KODE_SYS_AUDIO_CHANNELS_MONO, or _STEREO for left-right pairs played as their mean.
@@ -158,7 +161,8 @@ kode_status_t kode_block_audio_stream_open(uint32_t rate_hz, uint8_t channels);
  * @param ms     The longest to wait for room in all; 0 takes what fits and returns.
  * @param taken  Out: how many frames went in; may be NULL.
  * @return KODE_OK when all @p n went in. KODE_TIMEOUT when @p ms ran out first
- *         (@p taken says how far). KODE_DENIED when no stream is open.
+ *         (@p taken says how far). KODE_DENIED when no stream is open, or the
+ *         one this call's opener opened has been closed for silence.
  */
 kode_status_t kode_block_audio_stream_write(const int16_t *frames, size_t n,
                                             uint32_t ms, size_t *taken);
@@ -170,6 +174,15 @@ kode_status_t kode_block_audio_stream_write(const int16_t *frames, size_t n,
  *         open; KODE_TIMEOUT when AO_Audio never answered.
  */
 kode_status_t kode_block_audio_stream_close(void);
+
+/**
+ * @brief Whether the stream kode_block_audio_stream_open() opened still takes writes.
+ * @note Never blocks. False once AO_Audio closed it for
+ *       KODE_SYS_AUDIO_STREAM_IDLE_MS without a write, though nobody called
+ *       kode_block_audio_stream_close().
+ * @return true from the open's KODE_OK until its close or AO_Audio's.
+ */
+bool kode_block_audio_stream_is_open(void);
 
 /* ---- Motion: AO_Haptic drives the LRA, AO_Imu reads the QMI8658A and QMC5883P ---- */
 

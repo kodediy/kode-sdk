@@ -809,20 +809,24 @@ bool kode_haptic_add_profile(const char *name, const uint16_t *pattern_ms, uint3
 
 /* ---- Audio ---- */
 
-/* 48 kHz, 16-bit, mono WAV or samples only. Audio calls take turns, and a play or a
+/* 48 kHz, 16-bit, mono WAV or samples only; a stream may also be written as
+ * left-right pairs. Audio calls take turns, and a play or a
  * recording to a file or a buffer keeps its turn to the end. A call that finds the speaker
  * or microphone held waits up to KODE_AUDIO_BUSY_MS, then fails with "audio is
  * busy"; a background recording waits the same, then ends with no frames.
- * kode_audio_set(), kode_audio_get(), kode_audio_play_stop(), kode_audio_is_playing()
- * and kode_audio_record_status() take no turn. A setting lasts this boot. A
- * sound is refused while a recording runs, and a recording while a sound
- * plays in the background. */
+ * kode_audio_set(), kode_audio_get(), kode_audio_play_stop(), kode_audio_is_playing(),
+ * kode_audio_record_status() and kode_audio_stream_write() take no turn. A
+ * setting lasts this boot. A sound is refused while a recording runs, and a
+ * recording while a sound plays in the background. The stream
+ * (kode_audio_stream_open()) is opened and closed apart from its writes, and
+ * while it is open every other sound and recording is refused at once. */
 
 #define KODE_AUDIO_BUSY_MS       5000U   /**< How long a call waits for the audio path.  */
 #define KODE_AUDIO_TONE_MAX_MS   65535U  /**< The longest tone, ms.                      */
 #define KODE_AUDIO_TONE_HZ_MIN   400U    /**< The lowest tone, Hz.                       */
 #define KODE_AUDIO_TONE_HZ_MAX   3400U   /**< The highest tone, Hz.                      */
 #define KODE_AUDIO_RECORD_MAX_MS 30000U  /**< The longest recording, ms.                 */
+#define KODE_AUDIO_STREAM_IDLE_MS 10000U /**< A stream left this long without a write is closed. */
 
 /** @brief What a recording in the background has done. */
 typedef struct {
@@ -881,6 +885,54 @@ bool kode_audio_play_stop(void);
  * @return true when they were heard or kode_audio_play_stop() ended them; false with kode_error() saying why.
  */
 bool kode_audio_play_samples(const int16_t *samples, uint32_t count);
+
+/**
+ * @brief Open the speaker for sound written a piece at a time.
+ *
+ * Blocks until the speaker plays. Waits its turn for it like
+ * kode_audio_play(); refused at once while a sound plays in the background, a
+ * recording runs or the stream is open already. The app has one stream. While
+ * it is open the speaker is its alone: every other sound and recording is
+ * refused at once with "audio is busy: a stream is open". Left
+ * KODE_AUDIO_STREAM_IDLE_MS without a write that put frames in, counted from
+ * the open while there has been none, the stream is closed for the app: the
+ * next write says so, and the other calls have the speaker again.
+ *
+ * @param channels 1 for mono samples, 2 for left-right pairs, played as their mean.
+ * @return true when the stream is open; false with kode_error() saying why.
+ */
+bool kode_audio_stream_open(uint8_t channels);
+
+/**
+ * @brief Write frames to the stream kode_audio_stream_open() opened.
+ *
+ * Blocks only while the stream is full, @p ms at most; it holds
+ * 200 ms of sound. Takes no turn, so the settings and the other calls are not
+ * kept waiting behind a writer. One task writes at a time. Like every call of
+ * this layer it is for tasks, never for an Active Object.
+ *
+ * @param frames 48 kHz 16-bit frames of the kind the stream was opened with; read in place until the call returns.
+ * @param count  How many frames, above 0: samples for mono, pairs for two channels.
+ * @param ms     The longest to wait for room in all; 0 takes what fits and returns.
+ * @param taken  Out, may be NULL: the frames that went in, also on failure.
+ * @return true when all @p count went in. false with kode_error() saying why:
+ *         the stream is full (@p taken says how far it got, and the stream
+ *         stays open), no stream is open, or it was closed for silence. A
+ *         write in the instant the stream closes for silence may still be
+ *         true, its frames unheard; the next write says so.
+ */
+bool kode_audio_stream_write(const int16_t *frames, uint32_t count, uint32_t ms, uint32_t *taken);
+
+/**
+ * @brief Close the stream and wait until what it held has been heard.
+ *
+ * Blocks. A task that never calls it loses the stream after
+ * KODE_AUDIO_STREAM_IDLE_MS without a write.
+ *
+ * @return true when the speaker is free again; false with kode_error() saying
+ *         why, "no stream is open" when it was closed for silence included.
+ */
+bool kode_audio_stream_close(void);
 
 /**
  * @brief Play a tone and wait until it has been heard.

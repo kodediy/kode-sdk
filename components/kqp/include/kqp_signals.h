@@ -1271,6 +1271,12 @@ enum KodeSignals {
                                  *   codec after a quiet spell, and the close
                                  *   it existed for was audible (2026-09-16 -
                                  *   see AO_Audio.md).                      */
+    AUDIO_STREAM_IDLE_SIG,      /**< AO_Audio private one-shot QTimeEvt: time
+                                 *   to read how long the open stream has gone
+                                 *   without a write. At
+                                 *   KODE_SYS_AUDIO_STREAM_IDLE_MS the stream
+                                 *   is closed; short of it the timer counts
+                                 *   what is left.                           */
     IMU_READ_REQ_SIG,           /**< AO_Imu: one sample into the caller's own
                                  *   struct (ImuReadEvt), answered inside the
                                  *   step that receives it; the blocking facade's. */

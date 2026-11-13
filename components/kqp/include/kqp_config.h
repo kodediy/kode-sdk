@@ -1394,6 +1394,17 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         the guard turns that into a named failure instead of a row that
  *         goes silent until the console's budget expires. */
 #define KODE_AUDIO_GUARD_MS       45000U
+/**
+ * @brief How long an open stream may go without a write before AO_Audio
+ *        closes it.
+ *
+ * The stream's frames skip AO_Audio, so a writer that stops and never closes
+ * would hold the codec for good. Ten seconds is longer than any pause a voice
+ * or a game leaves between two sounds, and short enough that a forgotten
+ * stream does not read as a speaker that stopped working. Counted from the
+ * last write that put frames in, or from the open when there was none.
+ */
+#define KODE_SYS_AUDIO_STREAM_IDLE_MS  10000U
 /** @brief Volume at boot. 100 is exactly zero decibels on this board; the
  *         user's volume is attenuation from here and never gain. */
 #define KODE_AUDIO_VOL_DEFAULT      100U
