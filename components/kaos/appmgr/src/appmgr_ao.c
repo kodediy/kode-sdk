@@ -225,7 +225,8 @@ typedef enum {
     KEEP_UNTRIED = 0,
     KEEP_SAVED,              /**< Written to the card now.                    */
     KEEP_THERE,              /**< Its file was already on the card.           */
-    KEEP_FAILED              /**< No card, no memory, no name, or the write failed. */
+    KEEP_FAILED,             /**< No card, no memory, no name, or the write failed. */
+    KEEP_CRC_ONLY            /**< The app the install replaces: no copy, its CRC alone. */
 } keep_res_t;
 
 /** @brief Which way an app an install evicted went (undo_table_t.fate). */
@@ -248,6 +249,14 @@ typedef struct {
     appmgr_undo_rec_t rec[KAPPS_MAX_ENTRIES];    /**< One per victim, the first `count` of them. */
     uint8_t           fate[KAPPS_MAX_ENTRIES];   /**< UNDO_*: what became of each; not in the blob. */
 } undo_table_t;
+
+/** @brief The CRC-32 of each victim's extent, taken by the keep round (PSRAM, like the undo table). */
+typedef struct {
+    uint32_t crc[KAPPS_MAX_ENTRIES];   /**< Of the extent, in the order of keep_seq[]. */
+    bool     ok[KAPPS_MAX_ENTRIES];    /**< crc[] holds that victim's.                 */
+    uint32_t done;                     /**< Bytes of the extent in hand already folded in. */
+    uint32_t run;                      /**< The running CRC of that extent.            */
+} keep_crcs_t;
 
 /* A record is a directory entry and a name with nothing between, and a table
  * has a slot for every entry of the directory: the layout in NVS is this one. */
@@ -399,6 +408,8 @@ typedef struct {
     uint8_t    *keep_buf;                      /**< PSRAM: one victim's extent. */
     uint32_t    keep_len;                      /**< That extent's length.      */
     uint32_t    keep_off;                      /**< Its region offset.         */
+    keep_crcs_t *keep_crcs;                    /**< PSRAM: each victim's CRC, when taken; NULL when none. */
+    bool        keep_hashing;                  /**< The victim in hand's CRC is being taken, in keep_crcs. */
     uint32_t    keep_fill;                     /**< Bytes of it read so far.   */
     char        keep_name[KDRV_SLOT_PROJECT_MAX]; /**< The victim's project name. */
     char        keep_path[KODE_APP_FILE_MAX];  /**< /sdcard/<project>.bin      */
@@ -948,6 +959,11 @@ static void keep_clear(AppMgr * const me)
         khal_free(me->keep_buf);
         me->keep_buf = NULL;
     }
+    if ( NULL != me->keep_crcs )
+    {
+        khal_free(me->keep_crcs);
+        me->keep_crcs = NULL;
+    }
     victims_clear(me);      /* an install that ends owes no folder to anyone */
     undo_clear(me);         /* nor is anything left to give back */
     me->keep_round   = false;
@@ -955,6 +971,7 @@ static void keep_clear(AppMgr * const me)
     me->keep_forced  = false;
     me->keep_writing = false;
     me->keep_stat    = false;
+    me->keep_hashing = false;
     me->keep_moving  = false;
     me->keep_count   = 0U;
     me->keep_idx     = 0U;
@@ -1082,7 +1099,8 @@ static void app_list_page(AppListReqEvt const * const req)
  * Records every victim not yet in the round. Answers true when there is at
  * least one and the install can restart; the caller then abandons the
  * transfer before anything is committed. The app the install replaces is no
- * victim: its new version is the install.
+ * victim to copy, its new version is the install: it is in the round for its
+ * CRC alone (KEEP_CRC_ONLY).
  *
  * @return true to defer the install.
  */
@@ -1095,12 +1113,27 @@ static bool keep_defer(AppMgr * const me, const kapps_dir_t *d,
     {
         return false;    /* one round per install; the console cannot pause */
     }
+    if ( NULL == me->keep_crcs )
+    {
+        /* A dry PSRAM costs the pieces, never the install: undo_note() reads
+         * a victim the round has no CRC for in one step. */
+        /* cppcheck-suppress misra-c2012-11.5 ; a table from a void * allocator */
+        me->keep_crcs = (keep_crcs_t *)khal_realloc_psram(NULL, sizeof(*me->keep_crcs));
+        if ( NULL != me->keep_crcs )
+        {
+            (void)memset(me->keep_crcs, 0, sizeof(*me->keep_crcs));
+        }
+    }
     for ( uint32_t n = 0U; n <= plan->evict_count; ++n )
     {
         uint8_t const idx = plan_victim(plan, n);
-        if ( (KAPPS_NO_VICTIM != idx) && (plan->replaced != idx)
-            && (keep_find(me, d->e[idx].seq) < 0)
-            && (KAPPS_MAX_ENTRIES > me->keep_count) )
+        if ( (KAPPS_NO_VICTIM == idx)
+            || (keep_find(me, d->e[idx].seq) >= 0)
+            || (KAPPS_MAX_ENTRIES <= me->keep_count) )
+        {
+            /* no victim here, one already in the round, or no room to note it */
+        }
+        else if ( plan->replaced != idx )
         {
             me->keep_seq[me->keep_count] = d->e[idx].seq;
             me->keep_res[me->keep_count] = (uint8_t)KEEP_UNTRIED;
@@ -1108,8 +1141,52 @@ static bool keep_defer(AppMgr * const me, const kapps_dir_t *d,
             ++me->keep_count;
             ++fresh;
         }
+        else if ( NULL != me->keep_crcs )
+        {
+            /* The app replaced is evicted like the others and its CRC goes
+             * into the same table: the round takes it, and nothing else. */
+            me->keep_seq[me->keep_count] = d->e[idx].seq;
+            me->keep_res[me->keep_count] = (uint8_t)KEEP_CRC_ONLY;
+            ++me->keep_count;
+            ++fresh;
+        }
+        else
+        {
+            /* the app replaced, and no room for its CRC: undo_note() reads it */
+        }
     }
     return 0U < fresh;
+}
+
+/**
+ * @brief Say what the round about to start is for.
+ *
+ * The app the install replaces is in the round for its CRC alone and is no
+ * app to keep.
+ *
+ * @param me     The AO, with the round's victims noted.
+ * @param before What the round comes before, in the log's words.
+ */
+static void keep_say(const AppMgr * const me, const char *before)
+{
+    uint32_t copies = 0U;
+
+    for ( uint32_t i = 0U; i < me->keep_count; ++i )
+    {
+        if ( (uint8_t)KEEP_CRC_ONLY != me->keep_res[i] )
+        {
+            ++copies;
+        }
+    }
+    if ( 0U < copies )
+    {
+        KLOG_I(TAG, "%lu app(s) to keep on the card before %s",
+               (unsigned long)copies, before);
+    }
+    else
+    {
+        KLOG_I(TAG, "the CRC of the app being replaced is taken before %s", before);
+    }
 }
 
 /**
@@ -1298,15 +1375,26 @@ static void undo_note(AppMgr * const me, const kapps_dir_t *d, uint8_t idx)
         unnamed_label(r->project, sizeof(r->project), d->e[idx].offset);
     }
     /* The digest the next boot checks the image against: of the bytes as they
-     * lie now, before the install's first erase can reach them. Read in one
-     * step, for every victim of the plan: a few tens of ms per MB of images. */
-    uint32_t crc = KHAL_CRC32_INIT;
+     * lie now, before the install's first erase can reach them. The keep round
+     * took it in pieces, the app replaced included; a victim it did not reach
+     * (the terminal's, which cannot pause) is read here in one step, a few tens
+     * of ms per MB. */
+    uint32_t  crc = KHAL_CRC32_INIT;
+    int const k   = keep_find(me, d->e[idx].seq);
 
-    if ( kdrv_apps_extent_crc(d->e[idx].offset, d->e[idx].size, &crc) != KODE_OK )
+    if ( (0 <= k) && (NULL != me->keep_crcs) && me->keep_crcs->ok[k] )
+    {
+        crc = me->keep_crcs->crc[k];
+    }
+    else if ( kdrv_apps_extent_crc(d->e[idx].offset, d->e[idx].size, &crc) != KODE_OK )
     {
         KLOG_W(TAG, "cannot read '%s' to record it; a reset in the middle of "
                     "the install costs it", r->project);
         crc = 0U;
+    }
+    else
+    {
+        /* read in one step: nothing took it before */
     }
     r->crc = crc;
     me->undo->fate[me->undo_count] = (uint8_t)UNDO_STAYS;
@@ -2786,8 +2874,7 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
     if ( keep_defer(me, &dir, &plan) )
     {
         me->keep_pending = true;
-        KLOG_I(TAG, "%lu app(s) to keep on the card before this install",
-               (unsigned long)me->keep_count);
+        keep_say(me, "this install");
         return KODE_ERROR;       /* the decoder stops before the sink opens */
     }
     /* Evictions, loudly and before any flash is touched; the copy is
@@ -3345,6 +3432,7 @@ void AppMgr_ctor(void)
     me->os_target = false;
     me->sink      = NULL;
     me->chunk     = NULL;
+    me->keep_crcs        = NULL;
     me->keep_stale_stat  = 0U;
     me->keep_stale_move  = 0U;
     me->keep_stale_write = 0U;
@@ -4109,9 +4197,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                  * mailbox is a partition, so there is no medium to close. */
                 if ( keep_defer(me, &dir, &plan) )
                 {
-                    KLOG_I(TAG, "%lu app(s) to keep on the card before "
-                                "adopting the mailbox",
-                           (unsigned long)me->keep_count);
+                    keep_say(me, "adopting the mailbox");
                     keep_pause(me);
                     status = Q_TRAN(&AppMgr_keeping);
                     break;
@@ -4540,8 +4626,21 @@ static uint32_t appdir_size_at(const kapps_dir_t *d, uint32_t offset)
 }
 
 /**
+ * @brief Start on the CRC of the victim in hand: a piece a step, from the pacer.
+ * @param me The AO, with its block for the round's CRCs (keep_crcs) had.
+ */
+static void keep_hash_begin(AppMgr * const me)
+{
+    me->keep_hashing    = true;
+    me->keep_crcs->done = 0U;
+    me->keep_crcs->run  = KHAL_CRC32_INIT;
+    (void)QTimeEvt_rearm(&me->pacer, APPMGR_CHUNK_GAP_TICKS);
+}
+
+/**
  * @brief Start on the next untried victim.
- * @return true when one was started (a STAT is out), false when none is left.
+ * @return true when one was started (its CRC is being taken, or a STAT is
+ *         out), false when none is left.
  */
 static bool keep_next(AppMgr * const me)
 {
@@ -4556,7 +4655,17 @@ static bool keep_next(AppMgr * const me)
             me->keep_len = ent->size;
             me->keep_off = ent->offset;
         }
-        if ( (NULL == ent) || (kdrv_apps_desc(ent, &vd, NULL) != KODE_OK) )
+        if ( (uint8_t)KEEP_CRC_ONLY == me->keep_res[me->keep_idx] )
+        {
+            /* The app replaced: no name, no path, no question to the card. */
+            if ( NULL != ent )
+            {
+                keep_hash_begin(me);
+                return true;
+            }
+            ++me->keep_idx;
+        }
+        else if ( (NULL == ent) || (kdrv_apps_desc(ent, &vd, NULL) != KODE_OK) )
         {
             KLOG_W(TAG, "an app with no readable name cannot be kept on the card");
             keep_settle(me, KEEP_FAILED);
@@ -4566,8 +4675,15 @@ static bool keep_next(AppMgr * const me)
             (void)snprintf(me->keep_name, sizeof(me->keep_name), "%s",
                            vd.project);
             card_copy_path(me->keep_path, sizeof(me->keep_path), vd.project);
-            card_stat(me, me->keep_path);
-            me->keep_stat = true;
+            if ( NULL != me->keep_crcs )
+            {
+                keep_hash_begin(me);           /* its CRC first */
+            }
+            else
+            {
+                card_stat(me, me->keep_path);  /* no room for the CRCs: the note reads it */
+                me->keep_stat = true;
+            }
             return true;
         }
     }
@@ -4618,6 +4734,56 @@ static void keep_drop_tmp(AppMgr * const me)
     storage_path_request(&me->super, (uint8_t)STORAGE_PATH_UNLINK, tmp);
 }
 
+/**
+ * @brief Fold the next piece of the victim in hand's extent into its CRC.
+ *
+ * At most APPMGR_UNDO_STEP_BYTES a step, the next one a pacer tick later, as
+ * the recovery at start-up takes the same CRC. After the last piece the card
+ * is asked about the victim, unless it is the app the install replaces, which
+ * ends there. An extent that cannot be read leaves the victim with no CRC:
+ * undo_note() says so when it notes it.
+ *
+ * @param me The AO, with keep_hashing set.
+ * @return true when the victim in hand is done with and the round goes on.
+ */
+static bool keep_hash_step(AppMgr * const me)
+{
+    uint32_t n = me->keep_len - me->keep_crcs->done;
+
+    if ( APPMGR_UNDO_STEP_BYTES < n )
+    {
+        n = APPMGR_UNDO_STEP_BYTES;
+    }
+    if ( kdrv_apps_extent_crc(me->keep_off + me->keep_crcs->done, n,
+                              &me->keep_crcs->run) != KODE_OK )
+    {
+        me->keep_crcs->done = me->keep_len;          /* no CRC: the note reads it again */
+    }
+    else
+    {
+        me->keep_crcs->done += n;
+        if ( me->keep_crcs->done >= me->keep_len )
+        {
+            me->keep_crcs->crc[me->keep_idx] = me->keep_crcs->run;
+            me->keep_crcs->ok[me->keep_idx]  = true;
+        }
+    }
+    if ( me->keep_crcs->done < me->keep_len )
+    {
+        (void)QTimeEvt_rearm(&me->pacer, APPMGR_CHUNK_GAP_TICKS);
+        return false;
+    }
+    me->keep_hashing = false;
+    if ( (uint8_t)KEEP_CRC_ONLY == me->keep_res[me->keep_idx] )
+    {
+        ++me->keep_idx;            /* the app replaced: its CRC is all the round takes */
+        return true;
+    }
+    card_stat(me, me->keep_path);
+    me->keep_stat = true;
+    return false;
+}
+
 /** @brief Every victim tried: cancel (rule 5) or restart. */
 static QState keep_finish(AppMgr * const me)
 {
@@ -4659,10 +4825,12 @@ static QState keep_on(AppMgr * const me)
 /**
  * @brief Copy each victim to the card, one at a time, then restart.
  *
- * Per victim: STAT its path, and when its copy is not there, read its extent
- * in APPMGR_KEEP_CHUNK steps, hand it to AO_Storage to write under a temporary
+ * Per victim: take the CRC of its extent in APPMGR_UNDO_STEP_BYTES steps, STAT
+ * its path, and when its copy is not there, read its extent in
+ * APPMGR_KEEP_CHUNK steps, hand it to AO_Storage to write under a temporary
  * name, and ask AO_Storage to put that file on the app's name. A failure is
- * KEEP_FAILED, and the round goes on.
+ * KEEP_FAILED, and the round goes on. The app the install replaces is in the
+ * round for its CRC alone.
  */
 static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
 {
@@ -4836,6 +5004,14 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
         }
         case APP_FLASH_CHUNK_SIG: {
             status = Q_HANDLED();
+            if ( me->keep_hashing )
+            {
+                if ( keep_hash_step(me) )
+                {
+                    status = keep_on(me);
+                }
+                break;
+            }
             if ( me->keep_writing )
             {
                 /* The heartbeat while AO_Storage writes: the same percent
