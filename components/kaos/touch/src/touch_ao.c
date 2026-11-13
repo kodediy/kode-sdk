@@ -139,6 +139,28 @@ void touch_subscribe(QActive const *who)
     QActive_subscribe(who, TOUCH_EVT_SIG);
 }
 
+void touch_test_inject(int16_t x, int16_t y, bool pressed)
+{
+    TouchEvt *j = NULL;
+
+    /* Only a running test has a judge to tell. A read of one byte the AO
+     * writes: a test that starts or ends under it costs one event at most. */
+    if ( l_touch.test_on )
+    {
+        j = Q_NEW_X(TouchEvt, 0U, TOUCH_INJECT_SIG);
+    }
+    if ( NULL != j )
+    {
+        j->x       = x;
+        j->y       = y;
+        j->pressed = pressed;
+        j->t_ms    = khal_time_ms();
+        j->stale   = false;
+        /* A refused post gives the event back to its pool. */
+        (void)QACTIVE_POST_X(AO_Touch, &j->super, 1U, NULL);
+    }
+}
+
 void touch_test_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(TOUCH_TEST_REQ_SIG);
@@ -998,6 +1020,29 @@ static QState Touch_up(Touch * const me, QEvt const * const e)
                 (void)QTimeEvt_disarm(&me->test_tmo);
                 me->test_on = false;
                 KLOG_N(TAG, "test: cancelled by origin %u", (unsigned)me->test_origin);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case TOUCH_INJECT_SIG: {
+            if ( me->test_on )
+            {
+                TouchEvt const * const j = Q_EVT_CAST(TouchEvt);
+
+                if ( j->pressed )
+                {
+                    me->sum_x += (int32_t)j->x;
+                    me->sum_y += (int32_t)j->y;
+                    ++me->n_samples;
+                }
+                else if ( 0U < me->n_samples )
+                {
+                    test_judge(me);     /* the injected tap lifted */
+                }
+                else
+                {
+                    /* A lift with no press before it. */
+                }
             }
             status = Q_HANDLED();
             break;

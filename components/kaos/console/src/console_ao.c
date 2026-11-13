@@ -70,11 +70,13 @@ KAOS_WEAK void kaos_appmgr_start(void);
 KAOS_WEAK void kaos_radio_start(void);
 KAOS_WEAK void kaos_display_start(void);
 KAOS_WEAK void kaos_net_start(void);
+KAOS_WEAK void kaos_touch_start(void);
 KAOS_WEAK void appdata_request(const char *project, QActive *who);
 KAOS_WEAK kode_status_t appdata_rm_request(const char *project, QActive *who);
 KAOS_WEAK kode_status_t appmgr_appdata_get_request(const char *project,
                                                    const char *url, bool install,
                                                    QActive *who);
+KAOS_WEAK void touch_test_inject(int16_t x, int16_t y, bool pressed);
 KAOS_WEAK const uint8_t *storage_buf(uint8_t idx);
 KAOS_WEAK void storage_close_request(void);
 KAOS_WEAK void storage_desc_request(const char *name, QActive *who);
@@ -2587,6 +2589,12 @@ static void h_touch(Console *me, const kcmd_t *c, const karg_val_t *v)
     /* down/up only: logging every "move" would flood the log. */
     if ( sent && (2U != v[2].u) )
     {
+        /* The panel's owner is an app's choice: the injected sample went out
+         * above either way, and only a linked AO_Touch has a test to tell. */
+        if ( kaos_linked(&kaos_touch_start) )
+        {
+            touch_test_inject((int16_t)v[0].u, (int16_t)v[1].u, (1U != v[2].u));
+        }
         KLOG_I(TAG, "console: injected touch x=%d y=%d state=%s",
                (int)v[0].u, (int)v[1].u, A_TOUCH_STATES[v[2].u]);
     }

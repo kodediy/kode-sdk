@@ -1617,6 +1617,18 @@ void touch_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value
 void touch_test_request(void);
 
 /**
+ * @brief Tell the guided touch test about a finger the console injected.
+ *
+ * The test judges what the panel read, and an injected finger is not read
+ * from the panel: without this a station with nobody at it cannot run the row.
+ *
+ * @param x       Where, in the panel's pixels.
+ * @param y       Where.
+ * @param pressed true while the finger is down; false is its lift.
+ */
+void touch_test_inject(int16_t x, int16_t y, bool pressed);
+
+/**
  * @brief Subscribe @p who to TOUCH_EVT_SIG, AO_Touch's report of the finger.
  *
  * A bare subscription names nobody: this call is what links AO_Touch into an

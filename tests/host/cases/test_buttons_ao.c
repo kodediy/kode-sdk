@@ -1201,6 +1201,58 @@ TEST_CASE("a step nobody answers times out after 20 s and the run moves on",
     Mockkhal_gpio_Destroy();
 }
 
+/* The bench's operator answers the prompts with the console's `btn` verb. A
+ * press injected that way is no edge of a pin, and the row passed over it:
+ * every step ran out its time on a station with nobody at it. The judge now
+ * hears an injection as it hears the pins. */
+TEST_CASE("test_an_injected_press_passes_its_step", "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+    test_starts();
+
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, true));
+    (void)qf_support_pump(AO_Buttons, 4U);
+    TEST_ASSERT_NULL_MESSAGE(next_test_evt(), "an injected press is passed on its release, not before");
+    ao_spy_drain();
+
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, false));
+    (void)qf_support_pump(AO_Buttons, 4U);
+    const ButtonsTestEvt *t = next_test_evt();
+    TEST_ASSERT_NOT_NULL_MESSAGE(t, "the injected release passes the step");
+    TEST_ASSERT_EQUAL_UINT8(BTN_TEST_PASS, t->phase);
+    TEST_ASSERT_EQUAL_UINT8(1U, t->step);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_LEFT, t->button);
+    t = next_test_evt();
+    TEST_ASSERT_NOT_NULL_MESSAGE(t, "and brings the next prompt");
+    TEST_ASSERT_EQUAL_UINT8(BTN_TEST_PROMPT, t->phase);
+    TEST_ASSERT_EQUAL_UINT8(2U, t->step);
+    ao_spy_drain();
+
+    rest_times_out(2U, false);
+
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+/* Outside a run an injection tells the judge nothing: no event of its own
+ * reaches the AO, so nothing a person does at the pad is counted twice. */
+TEST_CASE("test_an_injection_outside_a_run_posts_nothing", "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, true));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_pump(AO_Buttons, 4U), "nothing was posted to the AO");
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, false));
+    (void)qf_support_pump(AO_Buttons, 4U);   /* the pad going idle may post */
+    TEST_ASSERT_NULL(next_test_evt());
+    ao_spy_drain();
+
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
 /* A held button at the start is not a step the operator got wrong, it is a
  * test that cannot begin: BUTTON_BOT and PAD_LEFT held together reset the
  * board in hardware, and step one asks for PAD_LEFT. */

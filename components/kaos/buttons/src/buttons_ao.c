@@ -50,6 +50,8 @@ typedef struct {
 
     /* The guided test, while one is running. */
     bool     test_on;      /**< A run is in progress.                         */
+    uint8_t  test_inject;  /**< What the console's injections hold down, by
+                            *   the board's own button, for the run's judge. */
     uint8_t  test_origin;  /**< Who asked for it: TEST_ORIGIN_AUTOTEST or a client. */
     bool     test_judged;  /**< This step's press has been judged; waiting
                             *   for everything to be released.               */
@@ -335,6 +337,24 @@ bool buttons_inject(uint8_t id, bool pressed)
     {
         return false;
     }
+    /* The test asks for the board's buttons, not for a thumb's: its judge
+     * hears an injection as it hears the pins, so a station with nobody at it
+     * (the bench's operator) can run the row. Only a running row has a judge
+     * to tell. A read of one byte the AO writes: a row that starts or ends
+     * under it costs one event at most. */
+    if ( l_buttons.test_on )
+    {
+        ButtonEvt *j = Q_NEW_X(ButtonEvt, 0U, BUTTONS_INJECT_SIG);
+        if ( NULL != j )
+        {
+            j->id      = id;         /* the board's own button, before the pad's turn */
+            j->pressed = pressed;
+            j->t_ms    = khal_time_ms();
+            /* A refused post gives the event back to its pool: the row then
+             * hears nothing of this press, as of one nobody made. */
+            (void)QACTIVE_POST_X(AO_Buttons, &j->super, 1U, NULL);
+        }
+    }
     ButtonEvt *e = Q_NEW_X(ButtonEvt, 0U, BUTTON_EVT_SIG);
     if ( NULL == e )
     {
@@ -388,6 +408,7 @@ void Buttons_ctor(void)
     me->rot_pending  = 0U;
     s_rot = 0U;   /* the pad as wired */
     me->test_on      = false;
+    me->test_inject  = 0U;
     me->test_origin  = TEST_ORIGIN_AUTOTEST;
     me->test_judged  = false;
     me->test_failed  = false;
@@ -706,6 +727,7 @@ static void test_start(Buttons * const me, uint8_t origin)
         return;
     }
     me->test_on      = true;
+    me->test_inject  = 0U;
     me->test_failed  = false;
     me->test_gaveup  = false;
     me->test_wrong   = 0U;
@@ -1060,6 +1082,22 @@ static QState Buttons_watching(Buttons * const me, QEvt const * const e)
             {
                 rot_apply(me, q);
             }
+            status = Q_HANDLED();
+            break;
+        }
+        case BUTTONS_INJECT_SIG: {
+            ButtonEvt const * const j = Q_EVT_CAST(ButtonEvt);
+            uint8_t const bit = (uint8_t)(1U << j->id);
+
+            if ( j->pressed )
+            {
+                me->test_inject |= bit;
+            }
+            else
+            {
+                me->test_inject &= (uint8_t)~bit;
+            }
+            test_judge(me, (uint8_t)(me->stable | me->test_inject));
             status = Q_HANDLED();
             break;
         }
