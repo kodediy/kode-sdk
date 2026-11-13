@@ -15,6 +15,7 @@
 #include "kapp_cat.h"
 #include "kdrv_apps.h"
 #include "kdrv_kfw.h"
+#include "kdrv_image_check.h"
 #include "kapp_data.h"
 #if CONFIG_KODEOS_BLE_CONSOLE
 #include "kdrv_ble.h"      /* the console's second port: its backlog, before a launch */
@@ -70,6 +71,9 @@
 /* Region bytes read per step while an evicted app is copied out of the
  * region: the same 32 KB the writes use, so a step stays short (rule 5). */
 #define APPMGR_KEEP_CHUNK      (32U * 1024U)
+#define APPMGR_KEEP_TMP_SUFFIX ".tmp"   /**< What a copy's name carries while it is written. */
+#define APPMGR_BYTE_BITS       8U       /**< Bits in a byte: a word read from a chunk shifts by it. */
+#define APPMGR_LOAN_BITS       8U       /**< Bits of to_return: one per buffer a medium can lend. */
 /* Re-publish the percent this often while the card writes a copy. AO_Power
  * takes the LED's orange pulse back after three seconds without a report, and
  * a multi-MB write has none of its own. */
@@ -232,7 +236,8 @@ typedef enum {
     KEEP_UNTRIED = 0,
     KEEP_SAVED,              /**< Written to the card now.                    */
     KEEP_THERE,              /**< Its file was already on the card.           */
-    KEEP_FAILED              /**< No card, no memory, no name, or the write failed. */
+    KEEP_FAILED,             /**< No card, no memory, no name, or the write failed. */
+    KEEP_CRC_ONLY            /**< The app the install replaces: no copy, its CRC alone. */
 } keep_res_t;
 
 /** @brief Which way an app an install evicted went (undo_table_t.fate). */
@@ -255,6 +260,14 @@ typedef struct {
     appmgr_undo_rec_t rec[KAPPS_MAX_ENTRIES];    /**< One per victim, the first `count` of them. */
     uint8_t           fate[KAPPS_MAX_ENTRIES];   /**< UNDO_*: what became of each; not in the blob. */
 } undo_table_t;
+
+/** @brief The CRC-32 of each victim's extent, taken by the keep round (PSRAM, like the undo table). */
+typedef struct {
+    uint32_t crc[KAPPS_MAX_ENTRIES];   /**< Of the extent, in the order of keep_seq[]. */
+    bool     ok[KAPPS_MAX_ENTRIES];    /**< crc[] holds that victim's.                 */
+    uint32_t done;                     /**< Bytes of the extent in hand already folded in. */
+    uint32_t run;                      /**< The running CRC of that extent.            */
+} keep_crcs_t;
 
 /* A record is a directory entry and a name with nothing between, and a table
  * has a slot for every entry of the directory: the layout in NVS is this one. */
@@ -368,6 +381,23 @@ typedef struct {
                               *   host's byte count is the wire's only
                               *   boundary) but no longer written.           */
 
+    /* ---- Reading a file through before an install gives anything up ------
+     * An install from a file that has to give up something installed (it
+     * evicts, or drops the old copy of the app it replaces) stops at its plan
+     * and the file is read through once, by AppMgr_verifying: its chain
+     * against its length and the SHA-256 it carries. A file that does not hold
+     * together ends the install with nothing given up. A file that does starts
+     * the install again from the top with verify_done set, as the keep round
+     * does. A URL and a terminal install cannot be read twice; the mailbox is
+     * verified in place. A .kfw container is not read through: its decoder
+     * places the image, and so evicts, at its header, and compares the digest
+     * only at the end, so a cut container still costs what it gives up. */
+    bool        verify_pending;                /**< appmgr_place() deferred: read the file through first. */
+    bool        verify_done;                   /**< The file was read through, or needs no reading. */
+    bool        verify_restart;                /**< The next FLASH_REQ_SIG goes on with this install. */
+    bool        verify_opened;                 /**< The read-through's own open has answered. */
+    bool        verify_first;                  /**< The next chunk is the file's first. */
+
     /* ---- Keeping victims on the card before an eviction ----------------
      * One round per install: the first plan that names victims abandons the
      * transfer, AppMgr_keeping copies them, and the install starts again
@@ -385,12 +415,14 @@ typedef struct {
     bool        keep_forced;                   /**< Adoption had dst forced.   */
     bool        keep_writing;                  /**< AO_Storage holds keep_buf. */
     bool        keep_stat;                     /**< A STAT is out, unanswered. */
+    bool        keep_moving;                   /**< The copy's replacement of its name is out, unanswered. */
     /* Answers still owed for requests given up on at their deadline.
      * AO_Storage answers in order and its answers carry no path, so the
      * next that many answers of that kind are the abandoned requests', not
      * the victim's in hand. Kept across rounds: a late answer can outlive
      * the install it belonged to. */
     uint8_t     keep_stale_stat;               /**< STATs abandoned, owed.     */
+    uint8_t     keep_stale_move;               /**< Replacements abandoned, owed. */
     uint8_t     keep_stale_write;              /**< Writes abandoned, owed.    */
     uint8_t    *keep_orphan;                   /**< The buffer of the oldest
                                                 *   abandoned write, freed when
@@ -404,6 +436,8 @@ typedef struct {
     uint8_t    *keep_buf;                      /**< PSRAM: one victim's extent. */
     uint32_t    keep_len;                      /**< That extent's length.      */
     uint32_t    keep_off;                      /**< Its region offset.         */
+    keep_crcs_t *keep_crcs;                    /**< PSRAM: each victim's CRC, when taken; NULL when none. */
+    bool        keep_hashing;                  /**< The victim in hand's CRC is being taken, in keep_crcs. */
     uint32_t    keep_fill;                     /**< Bytes of it read so far.   */
     char        keep_name[KDRV_SLOT_PROJECT_MAX]; /**< The victim's project name. */
     char        keep_path[KODE_APP_FILE_MAX];  /**< /sdcard/<project>.bin      */
@@ -566,6 +600,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e);
+static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_busy(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_asking(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_finding(AppMgr * const me, QEvt const * const e);
@@ -966,6 +1001,11 @@ static void keep_clear(AppMgr * const me)
         khal_free(me->keep_buf);
         me->keep_buf = NULL;
     }
+    if ( NULL != me->keep_crcs )
+    {
+        khal_free(me->keep_crcs);
+        me->keep_crcs = NULL;
+    }
     victims_clear(me);      /* an install that ends owes no folder to anyone */
     undo_clear(me);         /* nor is anything left to give back */
     me->keep_round   = false;
@@ -973,6 +1013,11 @@ static void keep_clear(AppMgr * const me)
     me->keep_forced  = false;
     me->keep_writing = false;
     me->keep_stat    = false;
+    me->verify_pending = false;
+    me->verify_done    = false;
+    me->verify_restart = false;
+    me->keep_hashing = false;
+    me->keep_moving  = false;
     me->keep_count   = 0U;
     me->keep_idx     = 0U;
     me->keep_total   = 0U;
@@ -1094,12 +1139,32 @@ static void app_list_page(AppListReqEvt const * const req)
 }
 
 /**
+ * @brief Decide whether the file must be read through before this plan is acted on.
+ *
+ * Only an install that gives something up needs it, and only from a file: a
+ * URL and a terminal install cannot be read twice, and the mailbox is verified
+ * in place.
+ *
+ * @param me   The AO.
+ * @param plan The plan the decoder's header made.
+ * @return true to defer the install.
+ */
+static bool verify_defer(const AppMgr * const me, const kapps_plan_t *plan)
+{
+    bool const file = ((uint8_t)APPMGR_ORIGIN_FILE == me->origin)
+                   || ((uint8_t)APPMGR_ORIGIN_CARD == me->origin);
+
+    return file && !me->verify_done && !me->bypass && (0U < plan->evict_count);
+}
+
+/**
  * @brief Decide whether this plan's victims must be copied first.
  *
  * Records every victim not yet in the round. Answers true when there is at
  * least one and the install can restart; the caller then abandons the
  * transfer before anything is committed. The app the install replaces is no
- * victim: its new version is the install.
+ * victim to copy, its new version is the install: it is in the round for its
+ * CRC alone (KEEP_CRC_ONLY).
  *
  * @return true to defer the install.
  */
@@ -1112,12 +1177,27 @@ static bool keep_defer(AppMgr * const me, const kapps_dir_t *d,
     {
         return false;    /* one round per install; the console cannot pause */
     }
+    if ( NULL == me->keep_crcs )
+    {
+        /* A dry PSRAM costs the pieces, never the install: undo_note() reads
+         * a victim the round has no CRC for in one step. */
+        /* cppcheck-suppress misra-c2012-11.5 ; a table from a void * allocator */
+        me->keep_crcs = (keep_crcs_t *)khal_realloc_psram(NULL, sizeof(*me->keep_crcs));
+        if ( NULL != me->keep_crcs )
+        {
+            (void)memset(me->keep_crcs, 0, sizeof(*me->keep_crcs));
+        }
+    }
     for ( uint32_t n = 0U; n <= plan->evict_count; ++n )
     {
         uint8_t const idx = plan_victim(plan, n);
-        if ( (KAPPS_NO_VICTIM != idx) && (plan->replaced != idx)
-            && (keep_find(me, d->e[idx].seq) < 0)
-            && (KAPPS_MAX_ENTRIES > me->keep_count) )
+        if ( (KAPPS_NO_VICTIM == idx)
+            || (keep_find(me, d->e[idx].seq) >= 0)
+            || (KAPPS_MAX_ENTRIES <= me->keep_count) )
+        {
+            /* no victim here, one already in the round, or no room to note it */
+        }
+        else if ( plan->replaced != idx )
         {
             me->keep_seq[me->keep_count] = d->e[idx].seq;
             me->keep_res[me->keep_count] = (uint8_t)KEEP_UNTRIED;
@@ -1125,8 +1205,52 @@ static bool keep_defer(AppMgr * const me, const kapps_dir_t *d,
             ++me->keep_count;
             ++fresh;
         }
+        else if ( NULL != me->keep_crcs )
+        {
+            /* The app replaced is evicted like the others and its CRC goes
+             * into the same table: the round takes it, and nothing else. */
+            me->keep_seq[me->keep_count] = d->e[idx].seq;
+            me->keep_res[me->keep_count] = (uint8_t)KEEP_CRC_ONLY;
+            ++me->keep_count;
+            ++fresh;
+        }
+        else
+        {
+            /* the app replaced, and no room for its CRC: undo_note() reads it */
+        }
     }
     return 0U < fresh;
+}
+
+/**
+ * @brief Say what the round about to start is for.
+ *
+ * The app the install replaces is in the round for its CRC alone and is no
+ * app to keep.
+ *
+ * @param me     The AO, with the round's victims noted.
+ * @param before What the round comes before, in the log's words.
+ */
+static void keep_say(const AppMgr * const me, const char *before)
+{
+    uint32_t copies = 0U;
+
+    for ( uint32_t i = 0U; i < me->keep_count; ++i )
+    {
+        if ( (uint8_t)KEEP_CRC_ONLY != me->keep_res[i] )
+        {
+            ++copies;
+        }
+    }
+    if ( 0U < copies )
+    {
+        KLOG_I(TAG, "%lu app(s) to keep on the card before %s",
+               (unsigned long)copies, before);
+    }
+    else
+    {
+        KLOG_I(TAG, "the CRC of the app being replaced is taken before %s", before);
+    }
 }
 
 /**
@@ -1315,15 +1439,26 @@ static void undo_note(AppMgr * const me, const kapps_dir_t *d, uint8_t idx)
         unnamed_label(r->project, sizeof(r->project), d->e[idx].offset);
     }
     /* The digest the next boot checks the image against: of the bytes as they
-     * lie now, before the install's first erase can reach them. Read in one
-     * step, for every victim of the plan: a few tens of ms per MB of images. */
-    uint32_t crc = KHAL_CRC32_INIT;
+     * lie now, before the install's first erase can reach them. The keep round
+     * took it in pieces, the app replaced included; a victim it did not reach
+     * (the terminal's, which cannot pause) is read here in one step, a few tens
+     * of ms per MB. */
+    uint32_t  crc = KHAL_CRC32_INIT;
+    int const k   = keep_find(me, d->e[idx].seq);
 
-    if ( kdrv_apps_extent_crc(d->e[idx].offset, d->e[idx].size, &crc) != KODE_OK )
+    if ( (0 <= k) && (NULL != me->keep_crcs) && me->keep_crcs->ok[k] )
+    {
+        crc = me->keep_crcs->crc[k];
+    }
+    else if ( kdrv_apps_extent_crc(d->e[idx].offset, d->e[idx].size, &crc) != KODE_OK )
     {
         KLOG_W(TAG, "cannot read '%s' to record it; a reset in the middle of "
                     "the install costs it", r->project);
         crc = 0U;
+    }
+    else
+    {
+        /* read in one step: nothing took it before */
     }
     r->crc = crc;
     me->undo->fate[me->undo_count] = (uint8_t)UNDO_STAYS;
@@ -2800,11 +2935,17 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
                     "everything", (unsigned long)img_len);
         return KODE_ERROR;
     }
+    if ( verify_defer(me, &plan) )
+    {
+        me->verify_pending = true;
+        KLOG_I(TAG, "the file is to be read through before this install gives "
+                    "anything up");
+        return KODE_ERROR;       /* the decoder stops before the sink opens */
+    }
     if ( keep_defer(me, &dir, &plan) )
     {
         me->keep_pending = true;
-        KLOG_I(TAG, "%lu app(s) to keep on the card before this install",
-               (unsigned long)me->keep_count);
+        keep_say(me, "this install");
         return KODE_ERROR;       /* the decoder stops before the sink opens */
     }
     /* Evictions, loudly and before any flash is touched; the copy is
@@ -2901,6 +3042,29 @@ static void medium_return(AppMgr * const me, uint8_t idx)
     }
 #endif
     storage_next_request(idx);
+}
+
+/**
+ * @brief Hand back every buffer the medium lent since the last pacer tick.
+ *
+ * The pacer's gap is what lets the glass and the log run between two chunks;
+ * one tick returns however many buffers are waiting.
+ *
+ * @param me The AO, in a state that reads the medium.
+ */
+static void loans_return(AppMgr * const me)
+{
+    uint8_t const mask = me->to_return;
+
+    me->pacing    = false;
+    me->to_return = 0U;
+    for ( uint8_t i = 0U; APPMGR_LOAN_BITS > i; ++i )
+    {
+        if ( (mask & (uint8_t)(1U << i)) != 0U )
+        {
+            medium_return(me, i);
+        }
+    }
 }
 
 /**
@@ -3240,7 +3404,7 @@ static bool consume_chunk(AppMgr * const me, const StorageDataEvt *d)
     kode_status_t const wst = xfer_feed(me, buf, d->len);
     if ( KODE_OK != wst )
     {
-        if ( me->keep_pending )
+        if ( me->keep_pending || me->verify_pending )
         {
             return false;        /* deferred, not failed: the caller moves on */
         }
@@ -3392,7 +3556,9 @@ void AppMgr_ctor(void)
     me->os_target = false;
     me->sink      = NULL;
     me->chunk     = NULL;
+    me->keep_crcs        = NULL;
     me->keep_stale_stat  = 0U;
+    me->keep_stale_move  = 0U;
     me->keep_stale_write = 0U;
     me->keep_orphan      = NULL;
     me->ask_who          = NULL;
@@ -3782,11 +3948,12 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             FlashReqEvt const * const req = Q_EVT_CAST(FlashReqEvt);
 
             xfer_reset(me);
-            if ( !me->keep_round )
+            if ( !me->keep_round && !me->verify_restart )
             {
                 keep_clear(me);
                 me->keep_req = *req;   /* what a restart would send again */
             }
+            me->verify_restart = false;
             me->req_who = req->who;    /* owed a verdict, settled below or in AppMgr_opening */
             me->origin = (uint8_t)APPMGR_ORIGIN_FILE;
             if ( (uint8_t)KFW_SRC_HTTP == req->src_kind )
@@ -4167,9 +4334,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                  * mailbox is a partition, so there is no medium to close. */
                 if ( keep_defer(me, &dir, &plan) )
                 {
-                    KLOG_I(TAG, "%lu app(s) to keep on the card before "
-                                "adopting the mailbox",
-                           (unsigned long)me->keep_count);
+                    keep_say(me, "adopting the mailbox");
                     keep_pause(me);
                     status = Q_TRAN(&AppMgr_keeping);
                     break;
@@ -4459,6 +4624,27 @@ static void keep_pause(AppMgr * const me)
     me->keep_idx     = 0U;
 }
 
+static void install_again(AppMgr * const me);
+
+/**
+ * @brief Stop the install at its plan and open its file again, to read it through.
+ *
+ * Nothing was committed: the transfer is abandoned, the file closed and opened
+ * anew for AppMgr_verifying.
+ *
+ * @param me The AO, with verify_pending set.
+ * @return The state to go on in.
+ */
+static QState verify_start(AppMgr * const me)
+{
+    keep_pause(me);
+    me->verify_pending = false;
+    me->verify_opened  = false;
+    me->verify_first   = true;
+    storage_open_request(me->file, &me->super);
+    return Q_TRAN(&AppMgr_verifying);
+}
+
 /** @brief Start the same install again from the top; the round is done. */
 static void keep_restart(AppMgr * const me)
 {
@@ -4471,6 +4657,20 @@ static void keep_restart(AppMgr * const me)
         QACTIVE_POST_LIFO(&me->super, &adopt);
         return;
     }
+    install_again(me);
+}
+
+/**
+ * @brief Start the same install again from the top, ahead of any request
+ *        already queued.
+ *
+ * LIFO: a request already queued must not run between what was done for the
+ * install and the install it was done for. A failure to post ends the install.
+ *
+ * @param me The AO, whose keep_req is the request.
+ */
+static void install_again(AppMgr * const me)
+{
     FlashReqEvt * const r = Q_NEW_X(FlashReqEvt, 0U, FLASH_REQ_SIG);
     if ( NULL == r )
     {
@@ -4482,8 +4682,6 @@ static void keep_restart(AppMgr * const me)
     r->launch   = me->keep_req.launch;
     r->who      = NULL;               /* the verdict was given with the first open */
     (void)snprintf(r->src, sizeof(r->src), "%s", me->keep_req.src);
-    /* LIFO: a request already queued must not run between the copies and
-     * the install they were made for. */
     QACTIVE_POST_LIFO(&me->super, &r->super);
 }
 
@@ -4503,8 +4701,9 @@ static const kapps_entry_t *keep_entry(uint32_t seq)
 }
 
 /**
- * @brief Settle an answer owed to a STAT or a write given up on, if @p e is
- *        one; the caller has checked it is a path or write answer.
+ * @brief Settle an answer owed to a STAT, a replacement or a write given up
+ *        on, if @p e is one; the caller has checked it is a path or write
+ *        answer.
  * @return true when @p e was such a late answer and is now spent.
  */
 static bool keep_owed_answer(AppMgr * const me, QEvt const * const e)
@@ -4516,6 +4715,13 @@ static bool keep_owed_answer(AppMgr * const me, QEvt const * const e)
         && (0U < me->keep_stale_stat) )
     {
         --me->keep_stale_stat;
+        spent = true;
+    }
+    else if ( ((QSignal)STORAGE_PATH_RSP_SIG == e->sig)
+             && ((uint8_t)STORAGE_PAIR_REPLACE == Q_EVT_CAST(StoragePathRspEvt)->op)
+             && (0U < me->keep_stale_move) )
+    {
+        --me->keep_stale_move;
         spent = true;
     }
     else if ( ((QSignal)STORAGE_WRITE_RSP_SIG == e->sig)
@@ -4550,6 +4756,7 @@ static void keep_settle(AppMgr * const me, keep_res_t res)
     }
     me->keep_writing = false;
     me->keep_stat    = false;
+    me->keep_moving  = false;
     (void)QTimeEvt_disarm(&me->idle);    /* the victim's answer deadline */
     ++me->keep_idx;
     if ( progress_pct(me) > me->reported )
@@ -4568,6 +4775,20 @@ static void card_copy_path(char *out, size_t cap, const char *project)
 {
     (void)snprintf(out, cap, KODE_CARD_APP_PREFIX "%s" KODE_CARD_APP_SUFFIX,
                    project);
+}
+
+/**
+ * @brief Write the path a copy of @p project is written to before it is put
+ *        on its name into @p out.
+ * @param out     Receives `/sdcard/<project>.bin.tmp`.
+ * @param cap     Its size in bytes.
+ * @param project The app's project name.
+ */
+static void card_tmp_path(char *out, size_t cap, const char *project)
+{
+    (void)snprintf(out, cap,
+                   KODE_CARD_APP_PREFIX "%s" KODE_CARD_APP_SUFFIX
+                   APPMGR_KEEP_TMP_SUFFIX, project);
 }
 
 /**
@@ -4637,8 +4858,21 @@ static uint32_t appdir_size_at(const kapps_dir_t *d, uint32_t offset)
 }
 
 /**
+ * @brief Start on the CRC of the victim in hand: a piece a step, from the pacer.
+ * @param me The AO, with its block for the round's CRCs (keep_crcs) had.
+ */
+static void keep_hash_begin(AppMgr * const me)
+{
+    me->keep_hashing    = true;
+    me->keep_crcs->done = 0U;
+    me->keep_crcs->run  = KHAL_CRC32_INIT;
+    (void)QTimeEvt_rearm(&me->pacer, APPMGR_CHUNK_GAP_TICKS);
+}
+
+/**
  * @brief Start on the next untried victim.
- * @return true when one was started (a STAT is out), false when none is left.
+ * @return true when one was started (its CRC is being taken, or a STAT is
+ *         out), false when none is left.
  */
 static bool keep_next(AppMgr * const me)
 {
@@ -4653,7 +4887,17 @@ static bool keep_next(AppMgr * const me)
             me->keep_len = ent->size;
             me->keep_off = ent->offset;
         }
-        if ( (NULL == ent) || (kdrv_apps_desc(ent, &vd, NULL) != KODE_OK) )
+        if ( (uint8_t)KEEP_CRC_ONLY == me->keep_res[me->keep_idx] )
+        {
+            /* The app replaced: no name, no path, no question to the card. */
+            if ( NULL != ent )
+            {
+                keep_hash_begin(me);
+                return true;
+            }
+            ++me->keep_idx;
+        }
+        else if ( (NULL == ent) || (kdrv_apps_desc(ent, &vd, NULL) != KODE_OK) )
         {
             KLOG_W(TAG, "an app with no readable name cannot be kept on the card");
             keep_settle(me, KEEP_FAILED);
@@ -4663,11 +4907,112 @@ static bool keep_next(AppMgr * const me)
             (void)snprintf(me->keep_name, sizeof(me->keep_name), "%s",
                            vd.project);
             card_copy_path(me->keep_path, sizeof(me->keep_path), vd.project);
-            card_stat(me, me->keep_path);
-            me->keep_stat = true;
+            if ( NULL != me->keep_crcs )
+            {
+                keep_hash_begin(me);           /* its CRC first */
+            }
+            else
+            {
+                card_stat(me, me->keep_path);  /* no room for the CRCs: the note reads it */
+                me->keep_stat = true;
+            }
             return true;
         }
     }
+    return false;
+}
+
+/** @brief Count an answer given up on, never past the count's end. */
+static void stale_add(uint8_t * const count)
+{
+    if ( UINT8_MAX > *count )
+    {
+        ++*count;
+    }
+}
+
+/**
+ * @brief Ask AO_Storage to put the finished copy on the app's name.
+ *
+ * One request, whatever is on that name: AO_Storage moves it aside, puts the
+ * copy there and removes it, and puts it back when a step fails. One answer,
+ * a path answer of op STORAGE_PAIR_REPLACE; keep_moving says it is awaited.
+ *
+ * @param me The AO, with the copy whole under its temporary name.
+ */
+static void keep_move(AppMgr * const me)
+{
+    char tmp[KODE_APP_FILE_MAX];
+
+    card_tmp_path(tmp, sizeof(tmp), me->keep_name);
+    storage_pair_request(&me->super, (uint8_t)STORAGE_PAIR_REPLACE, tmp, me->keep_path);
+    me->keep_moving = true;
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
+}
+
+/**
+ * @brief Ask the card to remove the victim in hand's temporary.
+ *
+ * Its answer is not waited for: a temporary that stays is overwritten by the
+ * next copy of the app and is never listed as one.
+ *
+ * @param me The AO.
+ */
+static void keep_drop_tmp(AppMgr * const me)
+{
+    char tmp[KODE_APP_FILE_MAX];
+
+    card_tmp_path(tmp, sizeof(tmp), me->keep_name);
+    storage_path_request(&me->super, (uint8_t)STORAGE_PATH_UNLINK, tmp);
+}
+
+/**
+ * @brief Fold the next piece of the victim in hand's extent into its CRC.
+ *
+ * At most APPMGR_UNDO_STEP_BYTES a step, the next one a pacer tick later, as
+ * the recovery at start-up takes the same CRC. After the last piece the card
+ * is asked about the victim, unless it is the app the install replaces, which
+ * ends there. An extent that cannot be read leaves the victim with no CRC:
+ * undo_note() says so when it notes it.
+ *
+ * @param me The AO, with keep_hashing set.
+ * @return true when the victim in hand is done with and the round goes on.
+ */
+static bool keep_hash_step(AppMgr * const me)
+{
+    uint32_t n = me->keep_len - me->keep_crcs->done;
+
+    if ( APPMGR_UNDO_STEP_BYTES < n )
+    {
+        n = APPMGR_UNDO_STEP_BYTES;
+    }
+    if ( kdrv_apps_extent_crc(me->keep_off + me->keep_crcs->done, n,
+                              &me->keep_crcs->run) != KODE_OK )
+    {
+        me->keep_crcs->done = me->keep_len;          /* no CRC: the note reads it again */
+    }
+    else
+    {
+        me->keep_crcs->done += n;
+        if ( me->keep_crcs->done >= me->keep_len )
+        {
+            me->keep_crcs->crc[me->keep_idx] = me->keep_crcs->run;
+            me->keep_crcs->ok[me->keep_idx]  = true;
+        }
+    }
+    if ( me->keep_crcs->done < me->keep_len )
+    {
+        (void)QTimeEvt_rearm(&me->pacer, APPMGR_CHUNK_GAP_TICKS);
+        return false;
+    }
+    me->keep_hashing = false;
+    if ( (uint8_t)KEEP_CRC_ONLY == me->keep_res[me->keep_idx] )
+    {
+        ++me->keep_idx;            /* the app replaced: its CRC is all the round takes */
+        return true;
+    }
+    card_stat(me, me->keep_path);
+    me->keep_stat = true;
     return false;
 }
 
@@ -4699,12 +5044,25 @@ static QState keep_finish(AppMgr * const me)
     return Q_TRAN(&AppMgr_idle);
 }
 
+/** @brief Go on to the next victim after one was settled, or finish the round. */
+static QState keep_on(AppMgr * const me)
+{
+    if ( !keep_next(me) )
+    {
+        return keep_finish(me);
+    }
+    return Q_HANDLED();
+}
+
 /**
  * @brief Copy each victim to the card, one at a time, then restart.
  *
- * Per victim: STAT its path, and when it is not there, read its extent in
- * APPMGR_KEEP_CHUNK steps and hand them to AO_Storage. A failure is
- * KEEP_FAILED, and the round goes on.
+ * Per victim: take the CRC of its extent in APPMGR_UNDO_STEP_BYTES steps, STAT
+ * its path, and when its copy is not there, read its extent in
+ * APPMGR_KEEP_CHUNK steps, hand it to AO_Storage to write under a temporary
+ * name, and ask AO_Storage to put that file on the app's name. A failure is
+ * KEEP_FAILED, and the round goes on. The app the install replaces is in the
+ * round for its CRC alone.
  */
 static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
 {
@@ -4737,7 +5095,6 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
         case APP_RECV_IDLE_SIG: {
             /* AO_Storage dropped a request on a dry pool, or the card never
              * answered: the victim is a failed copy and the round goes on. */
-            status = Q_HANDLED();
             if ( me->keep_writing )
             {
                 KLOG_E(TAG, "the card never answered for '%s'; its buffer is "
@@ -4757,39 +5114,65 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
                     ++me->keep_stale_write;
                 }
             }
+            else if ( me->keep_moving )
+            {
+                KLOG_W(TAG, "nothing answered about '%s' on the card",
+                       me->keep_name);
+                stale_add(&me->keep_stale_move);
+            }
             else if ( me->keep_stat )
             {
                 KLOG_W(TAG, "nothing answered about '%s' on the card",
                        me->keep_name);
-                if ( UINT8_MAX > me->keep_stale_stat )
-                {
-                    ++me->keep_stale_stat;
-                }
+                stale_add(&me->keep_stale_stat);
             }
             else
             {
+                status = Q_HANDLED();
                 break;                               /* a stale expiry */
             }
             keep_settle(me, KEEP_FAILED);
-            if ( !keep_next(me) )
-            {
-                status = keep_finish(me);
-            }
+            status = keep_on(me);
             break;
         }
         case STORAGE_PATH_RSP_SIG: {
             StoragePathRspEvt const * const r = Q_EVT_CAST(StoragePathRspEvt);
             status = Q_HANDLED();
+            if ( keep_owed_answer(me, e) )
+            {
+                break;   /* a STAT or replacement given up on, not this victim's */
+            }
+            if ( (uint8_t)STORAGE_PAIR_REPLACE == r->op )
+            {
+                if ( me->keep_moving )
+                {
+                    (void)QTimeEvt_disarm(&me->idle);
+                    if ( (uint8_t)KODE_OK == r->rc )
+                    {
+                        KLOG_N(TAG, "'%s' kept as %s", me->keep_name, me->keep_path);
+                        keep_settle(me, KEEP_SAVED);
+                    }
+                    else
+                    {
+                        /* The file on the name, if there was one, is as it was. */
+                        KLOG_W(TAG, "'%s' could not be put on its name", me->keep_name);
+                        keep_drop_tmp(me);
+                        keep_settle(me, KEEP_FAILED);
+                    }
+                    status = keep_on(me);
+                }
+                else
+                {
+                    KLOG_D(TAG, "a replacement's answer nobody is waiting for");
+                }
+                break;
+            }
             if ( (uint8_t)STORAGE_PATH_STAT != r->op )
             {
                 /* The answer to the unlink a failed copy asked for: it
                  * settles nothing, least of all the next victim's STAT. */
                 KLOG_D(TAG, "a path answer that is not a stat");
                 break;
-            }
-            if ( keep_owed_answer(me, e) )
-            {
-                break;   /* a STAT given up on, not this victim's */
             }
             if ( !me->keep_stat )
             {
@@ -4820,7 +5203,7 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
                 if ( r->exists )
                 {
                     /* Another file of the name: an older version, or not the
-                     * app at all. The copy truncates it. */
+                     * app at all. The copy replaces it once it is whole. */
                     KLOG_N(TAG, "'%s' is %u bytes and the image is %u; the "
                                 "app is copied over it", me->keep_path,
                            (unsigned)r->size, (unsigned)me->keep_len);
@@ -4853,6 +5236,14 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
         }
         case APP_FLASH_CHUNK_SIG: {
             status = Q_HANDLED();
+            if ( me->keep_hashing )
+            {
+                if ( keep_hash_step(me) )
+                {
+                    status = keep_on(me);
+                }
+                break;
+            }
             if ( me->keep_writing )
             {
                 /* The heartbeat while AO_Storage writes: the same percent
@@ -4895,8 +5286,10 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
                 break;
             }
             me->keep_writing = true;
-            storage_write_all_request(me->keep_path, me->keep_buf,
-                                      me->keep_len, &me->super);
+            char tmp[KODE_APP_FILE_MAX];
+
+            card_tmp_path(tmp, sizeof(tmp), me->keep_name);
+            storage_write_all_request(tmp, me->keep_buf, me->keep_len, &me->super);
             (void)QTimeEvt_rearm(&me->idle,
                                  APPMGR_KEEP_WRITE_TICKS(me->keep_len));
             (void)QTimeEvt_rearm(&me->pacer, APPMGR_KEEP_BEAT_TICKS);
@@ -4917,26 +5310,27 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
                 break;
             }
             (void)QTimeEvt_disarm(&me->pacer);
-            if ( (uint8_t)KODE_OK == w->status )
-            {
-                KLOG_N(TAG, "'%s' kept as %s", me->keep_name, me->keep_path);
-                keep_settle(me, KEEP_SAVED);
-            }
-            else
-            {
-                /* The path was absent when asked about, so whatever is
-                 * there now is this copy's stub (a close that failed leaves
-                 * the file): remove it, or the next round would find it and
-                 * call the app kept. Its answer is not waited for. */
-                storage_path_request(&me->super, (uint8_t)STORAGE_PATH_UNLINK,
-                                     me->keep_path);
-                keep_settle(me, KEEP_FAILED);
-            }
             status = Q_HANDLED();
-            if ( !keep_next(me) )
+            /* The answer says AO_Storage is done with the buffer. */
+            khal_free(me->keep_buf);
+            me->keep_buf     = NULL;
+            me->keep_writing = false;
+            if ( (uint8_t)KODE_OK != w->status )
             {
-                status = keep_finish(me);
+                /* Whatever is under the temporary name is this copy's stub
+                 * (a close that failed leaves the file): remove it. */
+                keep_drop_tmp(me);
+                keep_settle(me, KEEP_FAILED);
+                status = keep_on(me);
+                break;
             }
+            /* The copy is whole under its temporary name. It becomes the
+             * app's copy when it is on the app's name, in one step in
+             * AO_Storage whatever is there: a refusal or a failure leaves the
+             * file that was there on the name. A reset in the middle leaves
+             * it as `<name>.bak` and the copy under its temporary name,
+             * never a cut file on the name. */
+            keep_move(me);
             break;
         }
         case FLASH_REQ_SIG:
@@ -5201,13 +5595,13 @@ static bool card_answer_taken(AppMgr * const me, QEvt const * const e,
 {
     StoragePathRspEvt const * const r = Q_EVT_CAST(StoragePathRspEvt);
 
-    if ( (uint8_t)STORAGE_PATH_STAT != r->op )
+    if ( keep_owed_answer(me, e) )
+    {
+        return false;            /* a STAT or replacement given up on, not this question's */
+    }
+    if ( ((uint8_t)STORAGE_PATH_STAT != r->op) || (!*stat) )
     {
         return false;
-    }
-    if ( keep_owed_answer(me, e) || (!*stat) )
-    {
-        return false;            /* a STAT given up on, not this question's */
     }
     *stat = false;
     (void)QTimeEvt_disarm(&me->idle);
@@ -5927,8 +6321,8 @@ static const char *request_name(QSignal sig)
  * @brief The parent of every state with work in hand.
  *
  * Answers a question about the next install with `busy`, and settles the late
- * AO_Storage answers owed to a STAT or a write given up on, for every child
- * that does not take them itself.
+ * AO_Storage answers owed to a STAT, a replacement or a write given up on, for
+ * every child that does not take them itself.
  */
 static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
 {
@@ -6448,6 +6842,11 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             uint8_t const idx = d->idx;
             if ( !consume_chunk(me, d) )
             {
+                if ( me->verify_pending )
+                {
+                    status = verify_start(me);
+                    break;
+                }
                 if ( me->keep_pending )
                 {
                     keep_pause(me);
@@ -6472,16 +6871,7 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             break;
         }
         case APP_FLASH_CHUNK_SIG: {
-            me->pacing = false;
-            uint8_t const mask = me->to_return;
-            me->to_return = 0U;
-            for ( uint8_t i = 0U; 8U > i; ++i )
-            {
-                if ( (mask & (uint8_t)(1U << i)) != 0U )
-                {
-                    medium_return(me, i);
-                }
-            }
+            loans_return(me);
             status = Q_HANDLED();
             break;
         }
@@ -6504,6 +6894,213 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             KLOG_W(TAG, "busy writing %s (%u%%); app_cat request denied",
                    me->os_target ? "the kodeOS slot" : "the region",
                    (unsigned)((me->written * 100U) / me->total));
+            app_cat_deny(me);
+            status = Q_HANDLED();
+            break;
+        }
+        default: {
+            status = Q_SUPER(&AppMgr_busy);
+            break;
+        }
+    }
+    return status;
+}
+
+/**
+ * @brief Whether a file's first bytes are a `.kfw` container's.
+ * @param buf The first chunk.
+ * @param len Its length.
+ * @return true for the container's magic.
+ */
+static bool chunk_is_container(const uint8_t *buf, uint16_t len)
+{
+    uint32_t magic = 0U;
+
+    if ( sizeof(magic) > len )
+    {
+        return false;
+    }
+    for ( uint32_t i = 0U; sizeof(magic) > i; ++i )
+    {
+        magic |= (uint32_t)buf[i] << (APPMGR_BYTE_BITS * i);   /* little-endian, as the container's */
+    }
+    return KFW_MAGIC == magic;
+}
+
+/**
+ * @brief End the read-through: the file does not hold together, nothing was given up.
+ * @param me  The AO.
+ * @param why The log's phrase.
+ * @return AppMgr_idle.
+ */
+static QState verify_fail(AppMgr * const me, const char *why)
+{
+    kdrv_image_check_abort();
+    flash_fail(me, why, KFAIL_WRITE);
+    return Q_TRAN(&AppMgr_idle);
+}
+
+/**
+ * @brief The file reads through whole, or needs no reading: go on with the install.
+ * @param me The AO.
+ * @return AppMgr_idle.
+ */
+static QState verify_resume(AppMgr * const me)
+{
+    me->verify_done    = true;
+    me->verify_restart = true;
+    medium_close(me);
+    install_again(me);        /* a failed post calls flash_fail() itself */
+    return Q_TRAN(&AppMgr_idle);
+}
+
+/**
+ * @brief Read the file through once, then start the install again.
+ *
+ * The chunks are the install's own, one buffer at a time, paced like
+ * AppMgr_flashing's; they are fed to kdrv_image_check and written nowhere.
+ * A .kfw container is not read through: its first bytes tell it apart and it
+ * is left to its decoder, which places the image (and so evicts) at its header
+ * and compares the digest only at the end.
+ */
+static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
+{
+    QState status;
+    switch ( e->sig )
+    {
+        case Q_ENTRY_SIG: {
+            QTimeEvt_armX(&me->idle, APPMGR_OPEN_TICKS, 0U);
+            (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            status = Q_HANDLED();
+            break;
+        }
+        case Q_EXIT_SIG: {
+            (void)QTimeEvt_disarm(&me->idle);
+            (void)QTimeEvt_disarm(&me->beat);
+            (void)QTimeEvt_disarm(&me->pacer);
+            me->pacing    = false;
+            me->to_return = 0U;
+            kdrv_image_check_abort();
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BEAT_SIG: {
+            /* The read makes no report of its own: say the same percent again. */
+            beat_say(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_CANCEL_REQ_SIG: {
+            status = verify_fail(me, "the person went back");
+            break;
+        }
+        case APP_RECV_IDLE_SIG: {
+            status = verify_fail(me, "the medium stopped sending");
+            break;
+        }
+        case STORAGE_OPEN_RSP_SIG: {
+            StorageOpenRspEvt const * const rsp = Q_EVT_CAST(StorageOpenRspEvt);
+
+            if ( ((uint8_t)KODE_OK != rsp->status)
+                || (kdrv_image_check_begin(rsp->size) != KODE_OK) )
+            {
+                status = verify_fail(me, "the file could not be read through; "
+                                         "nothing was given up");
+                break;
+            }
+            me->verify_opened = true;
+            (void)QTimeEvt_rearm(&me->idle, APPMGR_CHUNK_TICKS);
+            medium_read(me);
+            medium_read(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case STORAGE_DATA_SIG: {
+            StorageDataEvt const * const d = Q_EVT_CAST(StorageDataEvt);
+
+            if ( !me->verify_opened )
+            {
+                /* The install's own second read, asked before it was stopped
+                 * at its plan: AO_Storage serves it while the first reader is
+                 * still open, ahead of the close and the open this state
+                 * asked for, so its chunk (or its end of file) lands here
+                 * before the open's answer. It is nobody's: AO_Storage's close
+                 * takes every buffer back, and a NEXT would only start a read
+                 * on the reader that is opened next. */
+                KLOG_D(TAG, "a chunk of the first reader, before the file was opened again");
+                status = Q_HANDLED();
+                break;
+            }
+            if ( (uint8_t)KODE_OK != d->status )
+            {
+                status = verify_fail(me, "read from storage failed");
+                break;
+            }
+            if ( d->eof )
+            {
+                if ( kdrv_image_check_end() != KODE_OK )
+                {
+                    status = verify_fail(me, "the file is cut or damaged; "
+                                             "nothing was given up");
+                    break;
+                }
+                KLOG_I(TAG, "'%s' reads through whole", me->file);
+                status = verify_resume(me);
+                break;
+            }
+            const uint8_t * const buf = medium_buf(me, d->idx);
+            if ( NULL == buf )
+            {
+                status = verify_fail(me, "storage handed back a buffer that "
+                                         "does not exist");
+                break;
+            }
+            if ( me->verify_first )
+            {
+                me->verify_first = false;
+                if ( chunk_is_container(buf, d->len) )
+                {
+                    KLOG_I(TAG, "'%s' is a container: it is not read through", me->file);
+                    kdrv_image_check_abort();
+                    status = verify_resume(me);
+                    break;
+                }
+            }
+            if ( kdrv_image_check_feed(buf, d->len) != KODE_OK )
+            {
+                status = verify_fail(me, "the file is cut or damaged; "
+                                         "nothing was given up");
+                break;
+            }
+            (void)QTimeEvt_rearm(&me->idle, APPMGR_CHUNK_TICKS);
+            /* The buffer goes back after the pacer's gap, as AppMgr_flashing's
+             * does: the glass and the log run between two chunks. */
+            me->to_return |= (uint8_t)(1U << d->idx);
+            if ( !me->pacing )
+            {
+                me->pacing = true;
+                QTimeEvt_armX(&me->pacer, APPMGR_CHUNK_GAP_TICKS, 0U);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_FLASH_CHUNK_SIG: {
+            loans_return(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case FLASH_REQ_SIG:
+        case APP_RUN_REQ_SIG:
+        case APP_ERASE_REQ_SIG:
+        case APP_LIST_REQ_SIG:
+        case APP_RECV_REQ_SIG: {
+            KLOG_W(TAG, "busy reading '%s' through; request ignored", me->file);
+            busy_deny(e);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_CAT_REQ_SIG: {
+            KLOG_W(TAG, "busy reading '%s' through; app_cat request denied", me->file);
             app_cat_deny(me);
             status = Q_HANDLED();
             break;

@@ -100,6 +100,7 @@ set(srcs
     "apps/src/kdrv_slot_crash.c"
     "apps/src/kdrv_apps.c"
     "apps/src/kdrv_kfw.c"
+    "apps/src/kdrv_image_check.c"
     "apps/src/kapp_desc.c"
     "apps/src/kapp_cat.c"
     "apps/src/kapp_data.c"

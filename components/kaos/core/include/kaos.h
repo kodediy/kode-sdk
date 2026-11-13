@@ -3042,6 +3042,16 @@ typedef enum {
                              *   32 KB chunk per step paced by a QTimeEvt, so
                              *   lower AOs keep running. Answered once at the
                              *   end; a failed copy leaves no destination.   */
+    STORAGE_PAIR_REPLACE,   /**< Put @p src on @p dst, which may be taken: the
+                             *   file there goes to `<dst>.bak` first, is put
+                             *   back if a step fails and is unlinked when the
+                             *   copy is in place, all in one step with one
+                             *   answer. Same volume only. @p src stays where it
+                             *   was when the replacement fails. A `<dst>.bak`
+                             *   already there is removed. A reset between the
+                             *   steps leaves the file that was there as
+                             *   `<dst>.bak` and @p src where it was, never a
+                             *   cut file on @p dst.                           */
 } storage_pair_op_t;
 
 /**
@@ -3060,18 +3070,22 @@ typedef enum {
 void storage_path_request(QActive *who, uint8_t op, const char *path);
 
 /**
- * @brief Ask AO_Storage to move or copy @p src to @p dst.
+ * @brief Ask AO_Storage to move or copy @p src to @p dst, or to replace @p dst by it.
  *
  * Answered once with StoragePathRspEvt; `rc` says how it went. On KODE_ERROR,
  * `exists` true means the source was checked afterwards and is missing.
  * MOVE waits for a transfer in flight like storage_path_request()'s deletes.
  * MOVE: KODE_DENIED malformed, no volume, two volumes, or a transfer that outlasted
- * the wait; KODE_ERROR no mount or rename failed. COPY: KODE_DENIED malformed, no volume, same file, or a transfer in
+ * the wait; KODE_ERROR no mount or rename failed. REPLACE waits for a transfer in
+ * flight as MOVE does and is refused as it is, and with KODE_DENIED when a folder
+ * is on @p dst; KODE_ERROR when a step failed, the file on @p dst then as it was
+ * unless it would not go back, which the log says with both names. COPY: KODE_DENIED malformed, no volume, same file, or a transfer in
  * flight; KODE_ERROR otherwise. COPY answers at its end: size deadlines for it.
  *
  * @param who Where the response is posted. NULL is served and not answered for
- *            MOVE; refused for COPY, whose only sign of life is @p who.
- * @param op  storage_pair_op_t: STORAGE_PAIR_MOVE or STORAGE_PAIR_COPY.
+ *            MOVE and REPLACE; refused for COPY, whose only sign of life is @p who.
+ * @param op  storage_pair_op_t: STORAGE_PAIR_MOVE, _COPY or _REPLACE. The answer's
+ *            `op` is the same.
  * @param src Absolute, normalised, virtual. Copied into the event.
  * @param dst Absolute, normalised, virtual. Copied into the event.
  */

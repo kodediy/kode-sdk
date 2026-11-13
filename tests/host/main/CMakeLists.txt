@@ -183,6 +183,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/klog/src/klog.c"
     "${SDK_DIR}/components/kdrv/apps/src/kdrv_apps.c"
     "${SDK_DIR}/components/kdrv/apps/src/kdrv_kfw.c"
+    "${SDK_DIR}/components/kdrv/apps/src/kdrv_image_check.c"
     "${SDK_DIR}/components/kdrv/mirror/src/kmirror_proto.c"
     "${SDK_DIR}/components/kdrv/ir/src/knec.c"
     "${SDK_DIR}/components/kdrv/audio/src/kes_fields.c"

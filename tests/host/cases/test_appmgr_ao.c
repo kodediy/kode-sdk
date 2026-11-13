@@ -1093,6 +1093,8 @@ static void rm_rsp(const char *project, kode_status_t st);
 static void wipe_rsp(const char *project, kode_status_t st, uint8_t fs_files,
                      uint8_t sd_files, uint8_t left);
 static void        answer_stat(bool exists, uint8_t rc);
+static const QEvt *storage_take_patient(enum_t sig);
+static unsigned    klog_count(const char *needle);
 static void        answer_copy_of(uint32_t bytes);
 
 /* Fix 2: adoption plans and evicts BEFORE the copy, and the copy is what the
@@ -1155,7 +1157,7 @@ TEST_CASE("a mailbox image that fails verification does not evict an app for roo
      * directory entry may name nothing the round can read, in which case it
      * restarts at once - pump that too. */
     (void)qf_support_pump(AO_AppMgr, 8U);
-    const QEvt *s = storage_take(STORAGE_PATH_REQ_SIG);
+    const QEvt *s = storage_take_patient(STORAGE_PATH_REQ_SIG);
     if ( NULL != s )
     {
         QF_gc(s);
@@ -2468,6 +2470,9 @@ TEST_CASE("an install's end that finds the pool dry still arrives, unnamed, "
  * copy runs in a fraction of a second.
  */
 
+/** @brief The bytes of a victim's extent one step folds into its CRC, as appmgr_ao.c has it. */
+#define KEEP_HASH_STEP_BYTES (512U * 1024U)
+
 /** @brief The QP ticks between a heartbeat and the next, as appmgr_ao.c has it. */
 #define APPMGR_KEEP_BEAT_TICKS (1000U / 10U)
 
@@ -2526,9 +2531,13 @@ static void storage_buffers(void)
     kbsp_release(KBSP_RES_FATFS, AO_Storage);
 }
 
+/** @brief How many read-throughs of an install's file this case has answered; see read_through_asked(). */
+static unsigned s_rt_handled;
+
 /** @brief The start of every keep case: a fresh AppMgr and a fresh Storage. */
 static void keep_fresh(void)
 {
+    s_rt_handled = 0U;
     keep_put_dir_back();
     recv_fresh();
     storage_buffers();
@@ -2566,26 +2575,19 @@ static const QEvt *storage_take(enum_t sig)
     return NULL;
 }
 
-/** @brief Take an event of @p sig out of AO_Storage's queue, or fail. */
-static void storage_expect(enum_t sig, const char *what)
-{
-    const QEvt * const e = storage_take(sig);
-
-    TEST_ASSERT_NOT_NULL_MESSAGE(e, what);
-    QF_gc(e);
-}
 
 /** @brief What AO_Storage's queue held, by kind; see storage_tally(). */
 typedef struct {
     unsigned open;    /**< STORAGE_OPEN_REQ_SIG   */
     unsigned path;    /**< STORAGE_PATH_REQ_SIG   */
     unsigned write;   /**< STORAGE_WRITE_REQ_SIG  */
+    unsigned pair;    /**< STORAGE_PAIR_REQ_SIG   */
 } storage_seen_t;
 
 /** @brief Count what AO_Storage's queue holds, and empty it. */
 static storage_seen_t storage_tally(void)
 {
-    storage_seen_t seen = { 0U, 0U, 0U };
+    storage_seen_t seen = { 0U, 0U, 0U, 0U };
     const QEvt    *e    = NULL;
 
     while ( xQueueReceive(AO_Storage->eQueue, &e, 0U) == pdTRUE )
@@ -2601,6 +2603,10 @@ static storage_seen_t storage_tally(void)
         if ( (enum_t)e->sig == STORAGE_WRITE_REQ_SIG )
         {
             ++seen.write;
+        }
+        if ( (enum_t)e->sig == STORAGE_PAIR_REQ_SIG )
+        {
+            ++seen.pair;
         }
         QF_gc(e);
     }
@@ -2626,6 +2632,37 @@ static const QEvt *storage_wait_for(enum_t sig, unsigned max_ticks)
         }
     }
     return NULL;
+}
+
+/**
+ * @brief The ticks a victim's CRC may take before AO_Storage is asked about it:
+ *        more than the pieces of the largest extent.
+ */
+#define KEEP_HASH_WAIT_TICKS 200U
+
+/**
+ * @brief Take AO_Storage's next event of @p sig, ticking for it when it is not
+ *        queued yet: a victim is looked for once its CRC is taken.
+ * @return The event (the caller QF_gc()s it), or NULL when none came.
+ */
+static const QEvt *storage_take_patient(enum_t sig)
+{
+    const QEvt * const e = storage_take(sig);
+
+    if ( NULL != e )
+    {
+        return e;
+    }
+    return storage_wait_for(sig, KEEP_HASH_WAIT_TICKS);
+}
+
+/** @brief Take an event of @p sig out of AO_Storage's queue, ticking for it, or fail. */
+static void storage_expect(enum_t sig, const char *what)
+{
+    const QEvt * const e = storage_take_patient(sig);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, what);
+    QF_gc(e);
 }
 
 /** @brief Did klog capture a line holding @p needle this case? */
@@ -2686,6 +2723,46 @@ static void answer_write(uint8_t st, uint32_t len)
     w.written = len;
     w.medium  = (uint8_t)KDRV_MEDIUM_SD;
     QASM_DISPATCH(AO_AppMgr, &w.super, 0U);
+}
+
+/** @brief Take AO_Storage's next path request and check what it asks. */
+static void path_req_expect(uint8_t op, const char *path, const char *what)
+{
+    const QEvt * const e = storage_take_patient(STORAGE_PATH_REQ_SIG);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, what);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(op, ((StoragePathEvt const *)e)->op, what);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(path, ((StoragePathEvt const *)e)->path, what);
+    QF_gc(e);
+}
+
+/** @brief Take AO_Storage's next replacement request and check what it asks. */
+static void pair_req_expect(const char *src, const char *dst, const char *what)
+{
+    const QEvt * const e = storage_take(STORAGE_PAIR_REQ_SIG);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, what);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)STORAGE_PAIR_REPLACE,
+                                    ((StoragePairEvt const *)e)->op, what);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(src, ((StoragePairEvt const *)e)->src, what);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(dst, ((StoragePairEvt const *)e)->dst, what);
+    QF_gc(e);
+}
+
+/** @brief Answer AppMgr's replacement of its name by a finished copy. */
+static void answer_replace(uint8_t rc)
+{
+    answer_path((uint8_t)STORAGE_PAIR_REPLACE, rc, false, false, 0U);
+}
+
+/** @brief Answer a copy's write as done, and the replacement of its name that follows. */
+static void answer_write_landed(uint32_t len)
+{
+    answer_write((uint8_t)KODE_OK, len);
+    const QEvt * const mv = storage_take(STORAGE_PAIR_REQ_SIG);
+    TEST_ASSERT_NOT_NULL_MESSAGE(mv, "the finished copy was never put on its name");
+    QF_gc(mv);
+    answer_replace((uint8_t)KODE_OK);
 }
 
 /** @brief Answer the open of the install's source file. */
@@ -2769,6 +2846,70 @@ static void answer_eof(void)
  * @param project The project name the image carries.
  * @return The image's length.
  */
+/** @brief What AO_AppMgr logs when an install is stopped at its plan to have its file read through. */
+#define READ_THROUGH_SAID "to be read through before this install gives anything up"
+
+/**
+ * @brief Whether an install was stopped at its plan to have its file read
+ *        through, and the case has not answered for it yet.
+ *
+ * An install that gives something up reads its file through once, in
+ * AppMgr_verifying, before it goes on; the case answers that round after the
+ * first pass's data.
+ */
+static bool read_through_asked(void)
+{
+    unsigned const n = klog_count(READ_THROUGH_SAID);
+
+    if ( n < s_rt_handled )
+    {
+        s_rt_handled = 0U;      /* the log started over: a new case */
+    }
+    if ( n == s_rt_handled )
+    {
+        return false;
+    }
+    s_rt_handled = n;
+    return true;
+}
+
+/**
+ * @brief Answer the read-through of a file: it is opened again and read to its end.
+ *
+ * Then the install starts again from the top, and the case answers the open
+ * and the first bytes of that pass as it answered them of the first.
+ *
+ * @param src       The file's bytes.
+ * @param whole     How many of them the read-through is given.
+ * @param first     How many the restarted pass is given.
+ * @param open_size The size the medium says the file has.
+ * @param medium    The medium.
+ */
+static void read_through(const uint8_t *src, uint32_t whole, uint32_t first,
+                         uint32_t open_size, uint8_t medium)
+{
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the file was not opened again to be read through");
+    answer_open(open_size, medium);
+    answer_data_bytes(src, whole);
+    answer_eof();
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after the file was read through");
+    answer_open(open_size, medium);
+    answer_data_bytes(src, first);
+}
+
+/** @brief As read_through() for a container: its first bytes end the read, which its decoder checks. */
+static void read_through_container(const uint8_t *src, uint32_t len, uint8_t medium)
+{
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the file was not opened again to be read through");
+    answer_open(len, medium);
+    answer_data_bytes(src, len);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after the container was seen");
+    answer_open(len, medium);
+    answer_data_bytes(src, len);
+}
+
 static uint32_t begin_install(uint8_t medium, const char *project)
 {
     uint32_t const len = image_named(project);
@@ -2777,6 +2918,10 @@ static uint32_t begin_install(uint8_t medium, const char *project)
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(len, medium);
     answer_data(len);
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, len, medium);
+    }
     return len;
 }
 
@@ -3085,6 +3230,8 @@ TEST_CASE("a write whose medium goes quiet is abandoned, not waited on forever",
     ao_spy_subscribe(APP_FLASH_FAIL_SIG);
 
     (void)begin_install((uint8_t)KDRV_MEDIUM_FS, "new");   /* then silence */
+    TEST_ASSERT_FALSE_MESSAGE(klog_has(READ_THROUGH_SAID),
+        "an install that gives nothing up read its file through first");
     run_ticks(APPMGR_OPEN_DEADLINE_TICKS - 50U);
     TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "gave up before the deadline");
 
@@ -3104,6 +3251,319 @@ TEST_CASE("a write whose medium goes quiet is abandoned, not waited on forever",
     keep_end();
 }
 
+/* An install from a file that has to give up something installed reads the
+ * file through first: its chain against its length and the SHA-256 it carries.
+ * A file that is cut costs nothing that was installed. */
+TEST_CASE("an install whose file is cut is refused before it gives anything up",
+          "[appmgr_ao][verify]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+    uint32_t const len = image_named("new");
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);                          /* the plan: "old" is in the way */
+    TEST_ASSERT_TRUE_MESSAGE(klog_has(READ_THROUGH_SAID),
+        "the install did not stop at its plan to read the file through");
+    TEST_ASSERT_TRUE(old_installed());
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the file was not opened again to be read through");
+
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len - 16U);                    /* the file stops inside its image */
+    answer_eof();
+    (void)qf_support_pump(AO_AppMgr, 8U);
+
+    unsigned fails = 0U;
+    for ( const QEvt *ev = ao_spy_take(); NULL != ev; ev = ao_spy_take() )
+    {
+        if ( (int)ev->sig == APP_FLASH_FAIL_SIG )
+        {
+            ++fails;
+        }
+    }
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "a cut file was not refused");
+    TEST_ASSERT_TRUE(klog_has("nothing was given up"));
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "a cut file cost an installed app");
+    storage_seen_t const seen = storage_tally();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.path,
+        "the card was asked about an app that was never going to be evicted");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.write, "a copy was written for a cut file");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.open, "a cut file started the install again");
+    keep_end();
+}
+
+/* The case seen on a board: a file cut short of its image, of an app that was
+ * already installed and with no room for both. The old copy made room, the
+ * write took its time, and the last check failed with the app gone. */
+TEST_CASE("a cut file of an app already installed leaves the installed version alone",
+          "[appmgr_ao][verify]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    uint32_t const len = image_named("old");
+
+    ask_flash_dst("old.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has(READ_THROUGH_SAID),
+        "an install that drops the old copy of its app did not read its file through");
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the file was not opened again to be read through");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len - 16U);
+    answer_eof();
+    (void)qf_support_pump(AO_AppMgr, 8U);
+
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "the old copy was given up for a file that is cut");
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("makes room for its new version"),
+        "the old copy made room before the file was known to be whole");
+    ao_spy_drain();
+    keep_end();
+}
+
+/** @brief An image with its SHA-256 appended, good or one bit off; returns the file's length. */
+static uint32_t image_named_hashed(const char *project, bool good)
+{
+    uint32_t const len = image_named(project);
+    esp_image_header_t header;
+
+    TEST_ASSERT_TRUE(sizeof(s_named_img) >= (len + 32U));
+    (void)memcpy(&header, s_named_img, sizeof(header));
+    header.hash_appended = 1U;
+    (void)memcpy(s_named_img, &header, sizeof(header));
+    kfw_sha256(s_named_img, len, &s_named_img[len]);
+    if ( !good )
+    {
+        s_named_img[len] ^= 0x01U;
+    }
+    return len + 32U;
+}
+
+/**
+ * @brief Deliver a read of the install's first reader that AO_Storage served
+ *        after the install was stopped at its plan.
+ *
+ * AppMgr_opening primes two reads; the plan stops the install on the first
+ * chunk, and the close and the open of the read-through queue behind the
+ * second read in AO_Storage's FIFO. That read is served while the first reader
+ * is open, so its chunk (or its end of file) reaches AppMgr before the open's
+ * answer.
+ */
+static void stale_data(uint8_t idx, bool eof)
+{
+    StorageDataEvt d;
+
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DATA_SIG);
+    d.idx    = idx;
+    d.len    = 16U;
+    d.eof    = eof;
+    d.status = (uint8_t)KODE_OK;
+    if ( eof )
+    {
+        d.len = 0U;
+    }
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+}
+
+/**
+ * @brief Bring an install on a full region to its read-through: stopped at its
+ *        plan, the file asked for again.
+ * @return The image's length.
+ */
+static uint32_t dry_pass_begins(uint32_t file_len)
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(file_len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(file_len);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has(READ_THROUGH_SAID),
+        "the install did not stop at its plan to read the file through");
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the file was not opened again to be read through");
+    return file_len;
+}
+
+/** @brief The end of a case whose read-through refused the file: one failure, nothing given up. */
+static void dry_pass_refused(const char *why)
+{
+    unsigned fails = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (int)e->sig == APP_FLASH_FAIL_SIG )
+        {
+            ++fails;
+        }
+    }
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "the read-through's end was not one failure");
+    TEST_ASSERT_TRUE(klog_has(why));
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an installed app was given up for a file refused");
+    storage_seen_t const seen = storage_tally();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.path, "the card was asked about an app that was never to be evicted");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.write, "a copy was written for a file refused");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.open, "a file refused started the install again");
+    keep_end();
+}
+
+/* On the board the install's own second read is served ahead of the close and
+ * the open of the read-through, so its chunk and its end of file land in
+ * AppMgr_verifying before the open's answer. They are nobody's. */
+TEST_CASE("reads of the first reader that land before the read-through's open are ignored",
+          "[appmgr_ao][verify]")
+{
+    uint32_t const len = image_named("new");
+
+    (void)dry_pass_begins(len);
+    stale_data(1U, false);                     /* the second primed read */
+    stale_data(1U, true);                      /* and the end of a file of one chunk */
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("nothing was given up"),
+        "a read of the first reader ended the read-through");
+
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);
+    answer_eof();
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    TEST_ASSERT_TRUE(klog_has("reads through whole"));
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after the read-through");
+    TEST_ASSERT_TRUE(old_installed());
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+    let_the_open_expire();
+    keep_end();
+}
+
+/* The same the other way round: when the read-through ends, the reads it had
+ * primed are served ahead of the close and the open of the pass that follows,
+ * so a chunk or an end of file of the read-through's reader lands in
+ * AppMgr_opening before the open's answer. They are nobody's there either. */
+TEST_CASE("reads of the read-through's reader that land before the next pass's open are ignored",
+          "[appmgr_ao][verify]")
+{
+    uint32_t const len = image_named("new");
+
+    (void)dry_pass_begins(len);
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);
+    answer_eof();
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    TEST_ASSERT_TRUE(klog_has("reads through whole"));
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after the read-through");
+
+    stale_data(1U, false);                     /* the read-through's second read */
+    stale_data(1U, true);                      /* and its second end of file */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_count(APP_FLASH_FAIL_SIG),
+        "a read of the read-through's reader ended the install");
+
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);                          /* the pass goes on to its plan: the round */
+    storage_expect(STORAGE_PATH_REQ_SIG, "the install did not go on to its victim after the stale reads");
+    TEST_ASSERT_TRUE(old_installed());
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+    answer_copy_of(old_bytes());
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    let_the_open_expire();
+    keep_end();
+}
+
+TEST_CASE("the person going back during the read-through ends it with nothing given up",
+          "[appmgr_ao][verify]")
+{
+    static const QEvt cancel = QEVT_INITIALIZER(APP_CANCEL_REQ_SIG);
+    uint32_t const    len    = image_named("new");
+
+    (void)dry_pass_begins(len);
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    QASM_DISPATCH(AO_AppMgr, &cancel, 0U);
+    dry_pass_refused("the person went back");
+}
+
+TEST_CASE("a read error during the read-through ends it with nothing given up",
+          "[appmgr_ao][verify]")
+{
+    StorageDataEvt d;
+    uint32_t const len = image_named("new");
+
+    (void)dry_pass_begins(len);
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DATA_SIG);
+    d.status = (uint8_t)KODE_ERROR;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    dry_pass_refused("read from storage failed");
+}
+
+TEST_CASE("a file that is never opened again ends the read-through at its deadline",
+          "[appmgr_ao][verify]")
+{
+    uint32_t const len = image_named("new");
+
+    (void)dry_pass_begins(len);
+    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);
+    dry_pass_refused("the medium stopped sending");
+}
+
+TEST_CASE("a file that stops arriving during the read-through ends it at its deadline",
+          "[appmgr_ao][verify]")
+{
+    uint32_t const len = image_named("new");
+
+    (void)dry_pass_begins(len);
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len / 2U);                     /* and then nothing */
+    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);
+    dry_pass_refused("the medium stopped sending");
+}
+
+/* The hash the image carries is judged through AO_AppMgr: a bit off in it
+ * ends the read-through at the chunk that completes it, and the right one
+ * lets the install go on. */
+TEST_CASE("an image whose SHA-256 does not match is refused with nothing given up",
+          "[appmgr_ao][verify]")
+{
+    uint32_t const len = image_named_hashed("new", false);
+
+    (void)dry_pass_begins(len);
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);
+    dry_pass_refused("nothing was given up");
+}
+
+TEST_CASE("an image whose SHA-256 matches is read through and the install goes on",
+          "[appmgr_ao][verify]")
+{
+    uint32_t const len = image_named_hashed("new", true);
+
+    (void)dry_pass_begins(len);
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);
+    answer_eof();
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    TEST_ASSERT_TRUE(klog_has("reads through whole"));
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after the read-through");
+    TEST_ASSERT_TRUE(old_installed());
+
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+    let_the_open_expire();
+    keep_end();
+}
+
 /* The whole round on the happy path: the plan wants "old" gone, it is not on
  * the card, so it is read out of the region and written there, and only then
  * does the install start again and evict it. */
@@ -3116,7 +3576,7 @@ TEST_CASE("a victim missing from the card is written there before it goes",
     (void)begin_install((uint8_t)KDRV_MEDIUM_FS, "new");   /* the plan defers */
 
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "nothing may be evicted yet");
-    const QEvt *stat = storage_take(STORAGE_PATH_REQ_SIG);
+    const QEvt *stat = storage_take_patient(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the victim's path was never asked about");
     TEST_ASSERT_EQUAL_UINT8((uint8_t)STORAGE_PATH_STAT,
                             ((StoragePathEvt const *)stat)->op);
@@ -3126,13 +3586,24 @@ TEST_CASE("a victim missing from the card is written there before it goes",
     answer_stat(false, (uint8_t)KODE_OK);
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);   /* the read, 32 KB a tick */
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the copy never reached AO_Storage");
-    TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin", ((StorageWriteEvt const *)wr)->name);
+    TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin.tmp", ((StorageWriteEvt const *)wr)->name);
     TEST_ASSERT_EQUAL_UINT32(old_bytes(), ((StorageWriteEvt const *)wr)->len);
     QF_gc(wr);
     TEST_ASSERT_TRUE(old_installed());
     TEST_ASSERT_TRUE(klog_has("keeping 'old' on the card before it is evicted"));
 
+    /* The write landed under its temporary name: the copy is not its app's
+     * until it is put on the app's name, and nothing may start before. */
     answer_write((uint8_t)KODE_OK, old_bytes());
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    pair_req_expect("/sdcard/old.bin.tmp", "/sdcard/old.bin",
+                    "the finished copy was not put on its name");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_tally().open,
+        "the install started again with the copy still under its temporary name");
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("'old' kept as"),
+        "the copy was called kept before it was on its name");
+
+    answer_replace((uint8_t)KODE_OK);
     /* The restart is the same request, posted to itself. */
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG,
@@ -3141,6 +3612,81 @@ TEST_CASE("a victim missing from the card is written there before it goes",
 
     let_the_open_expire();
     keep_end();
+}
+
+/* Since #115 the CRC of every victim goes into the table the install writes
+ * before it evicts. Taken in one step it kept every Active Object below
+ * AO_AppMgr from running for about 70 ms per MB: it is taken in pieces, one a
+ * tick, as the recovery at start-up takes the same CRCs. */
+TEST_CASE("a victim's CRC is taken in pieces before it is looked for on the card",
+          "[appmgr_ao][keep]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    uint32_t const pieces = (old_bytes() + KEEP_HASH_STEP_BYTES - 1U)
+                            / KEEP_HASH_STEP_BYTES;
+    (void)begin_install((uint8_t)KDRV_MEDIUM_FS, "new");   /* the plan defers */
+
+    TEST_ASSERT_NULL_MESSAGE(storage_take(STORAGE_PATH_REQ_SIG),
+        "the victim was looked for with its CRC not taken yet");
+    run_ticks(pieces - 2U);
+    TEST_ASSERT_NULL_MESSAGE(storage_take(STORAGE_PATH_REQ_SIG),
+        "the CRC was taken in bigger pieces than the recovery takes it in");
+    const QEvt *stat = storage_wait_for(STORAGE_PATH_REQ_SIG, 4U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the victim was never looked for after its CRC");
+    QF_gc(stat);
+    TEST_ASSERT_TRUE(old_installed());
+
+    answer_copy_of(old_bytes());
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
+    let_the_open_expire();
+    keep_end();
+}
+
+/* A replacement the card refuses or fails leaves the file on the name where
+ * it was: the copy is no copy, its temporary is unlinked, and an install from
+ * elsewhere goes on without it. */
+static void keep_replacement_fails(uint8_t rc)
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    (void)begin_install((uint8_t)KDRV_MEDIUM_FS, "new");
+    storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
+    answer_copy_of(old_bytes() / 2U);                 /* an older file is in the way */
+    const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the copy never reached AO_Storage");
+    QF_gc(wr);
+
+    answer_write((uint8_t)KODE_OK, old_bytes());
+    pair_req_expect("/sdcard/old.bin.tmp", "/sdcard/old.bin",
+                    "the finished copy was not put on its name");
+    answer_replace(rc);
+    path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/old.bin.tmp",
+                    "the temporary that could not be put on its name was left on the card");
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("'old' kept as"),
+        "a copy that never reached its name was called kept");
+    TEST_ASSERT_TRUE(klog_has("could not be put on its name"));
+    TEST_ASSERT_TRUE(old_installed());
+
+    let_the_open_expire();
+    keep_end();
+}
+
+TEST_CASE("a replacement the card refuses is a failed copy, and its temporary is unlinked",
+          "[appmgr_ao][keep]")
+{
+    keep_replacement_fails((uint8_t)KODE_DENIED);
+}
+
+TEST_CASE("a replacement that fails is a failed copy, and its temporary is unlinked",
+          "[appmgr_ao][keep]")
+{
+    keep_replacement_fails((uint8_t)KODE_ERROR);
 }
 
 TEST_CASE("a victim already on the card is not copied again",
@@ -3186,12 +3732,22 @@ TEST_CASE("a file of the victim's name at another length is copied over, not tak
         "the file of another length went unsaid");
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the app was not copied over the file of another length");
-    TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin", ((StorageWriteEvt const *)wr)->name);
+    TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin.tmp", ((StorageWriteEvt const *)wr)->name);
     TEST_ASSERT_EQUAL_UINT32(old_bytes(), ((StorageWriteEvt const *)wr)->len);
     QF_gc(wr);
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "nothing may be evicted before its copy lands");
 
+    /* FAT renames onto no name that is taken: AO_Storage takes the older
+     * file out of the way in the one request, so AppMgr asks for nothing
+     * else, and only once the whole copy is in the temporary. */
     answer_write((uint8_t)KODE_OK, old_bytes());
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_seen_t const seen = storage_tally();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.pair,
+        "the finished copy was not put on its name in one request");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.path,
+        "the older file was dealt with outside the one request");
+    answer_replace((uint8_t)KODE_OK);
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after the copy");
     TEST_ASSERT_TRUE(klog_has("'old' kept as /sdcard/old.bin"));
@@ -3218,7 +3774,7 @@ TEST_CASE("the file of another length is said with its bytes and the image's",
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the app was not copied");
     QF_gc(wr);
-    answer_write((uint8_t)KODE_OK, old_bytes());
+    answer_write_landed(old_bytes());
     (void)qf_support_pump(AO_AppMgr, 8U);
     let_the_open_expire();
     keep_end();
@@ -3245,6 +3801,8 @@ TEST_CASE("a failed copy cancels an install read from the card, and evicts nothi
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the copy never reached AO_Storage");
     QF_gc(wr);
     answer_write((uint8_t)KODE_ERROR, 0U);
+    path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/old.bin.tmp",
+                    "the stub of the failed write was left on the card");
     run_ticks(4U);
 
     for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
@@ -3676,6 +4234,11 @@ TEST_CASE("an install from a medium that fails part-way gives back the apps it d
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(UNDO_IMG_LEN, (uint8_t)KDRV_MEDIUM_FS);
     answer_data_bytes(s_undo_img, sizeof(s_named_img));
+    if ( read_through_asked() )
+    {
+        read_through(s_undo_img, UNDO_IMG_LEN, sizeof(s_named_img), UNDO_IMG_LEN,
+                     (uint8_t)KDRV_MEDIUM_FS);
+    }
     for ( unsigned victim = 0U; 3U > victim; ++victim )
     {
         storage_expect(STORAGE_PATH_REQ_SIG, "a victim's path was never asked about");
@@ -4199,6 +4762,94 @@ TEST_CASE("an install that evicts records its victims and their CRCs in NVS befo
 
     run_ticks(APPMGR_RECV_IDLE_DEADLINE_TICKS + 50U);      /* the host never sends */
     (void)log_saw(CONSOLE_RAW_END_SIG);
+    keep_end();
+}
+
+/* The terminal's install never enters the keep round, so the case above
+ * compares the table's CRCs with nothing the round took. An install from a
+ * file with the region full does: "old" fills it, 27 pieces of 512 KB, and the
+ * table the second pass writes must carry the CRC of its extent as it lay. */
+TEST_CASE("the table of an install from a file carries the CRCs the keep round took in pieces",
+          "[appmgr_ao][reset][keep]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    uint32_t const want = extent_crc(KAPPS_DATA_OFF, old_bytes());
+    uint32_t const len  = begin_install((uint8_t)KDRV_MEDIUM_FS, "new");
+
+    storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
+    answer_copy_of(old_bytes());                       /* already on the card */
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
+    TEST_ASSERT_FALSE_MESSAGE(table_in_nvs(),
+        "the table was written before the second pass evicted anything");
+
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);                                  /* the plan: the table, then the eviction */
+    uint8_t blob[APPMGR_UNDO_HDR_LEN + (APPMGR_UNDO_MAX * APPMGR_UNDO_REC_LEN)];
+    size_t  blob_len = sizeof(blob);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        khal_nvs_get_blob(APPMGR_UNDO_NS, APPMGR_UNDO_KEY, blob, &blob_len));
+    TEST_ASSERT_EQUAL_UINT(APPMGR_UNDO_HDR_LEN + APPMGR_UNDO_REC_LEN, blob_len);
+    appmgr_undo_rec_t rec;
+    (void)memcpy(&rec, &blob[APPMGR_UNDO_HDR_LEN], sizeof(rec));
+    TEST_ASSERT_EQUAL_STRING("old", rec.project);
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(want, rec.crc,
+        "the CRC the keep round took in pieces is not its extent's");
+
+    answer_eof();                                      /* ends the write: nothing armed */
+    run_ticks(4U);
+    keep_end();
+}
+
+/* The app an install replaces is no victim to copy, but it is evicted like one
+ * when there is no room for both versions, and its CRC goes into the same
+ * table. Updating a big app from a file is the common case: its CRC is taken
+ * by the round in pieces too, with no question to the card and no copy. */
+TEST_CASE("the CRC of the app an install replaces is taken in pieces, with no copy and no question to the card",
+          "[appmgr_ao][reset][keep]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    uint32_t const want   = extent_crc(KAPPS_DATA_OFF, old_bytes());
+    uint32_t const pieces = (old_bytes() + KEEP_HASH_STEP_BYTES - 1U)
+                            / KEEP_HASH_STEP_BYTES;
+    uint32_t const len    = begin_install((uint8_t)KDRV_MEDIUM_FS, "old");   /* over itself */
+
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("to keep on the card"),
+        "the app the install replaces was counted as an app to keep");
+    TEST_ASSERT_TRUE(klog_has("the CRC of the app being replaced is taken before this install"));
+    TEST_ASSERT_FALSE_MESSAGE(table_in_nvs(), "the table was written before the CRC was taken");
+    run_ticks(pieces - 2U);
+    storage_seen_t const seen = storage_tally();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.open,
+        "the CRC of the app replaced was taken in bigger pieces than the recovery takes it in");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.path,
+        "the card was asked about the app the install replaces");
+    const QEvt *again = storage_wait_for(STORAGE_OPEN_REQ_SIG, 6U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(again, "the install did not start again after the CRC");
+    QF_gc(again);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_tally().write,
+        "the app the install replaces was copied to the card");
+    TEST_ASSERT_TRUE(old_installed());
+
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);                                  /* the plan: the table, then the old copy goes */
+    TEST_ASSERT_TRUE(klog_has("makes room for its new version"));
+    uint8_t blob[APPMGR_UNDO_HDR_LEN + (APPMGR_UNDO_MAX * APPMGR_UNDO_REC_LEN)];
+    size_t  blob_len = sizeof(blob);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        khal_nvs_get_blob(APPMGR_UNDO_NS, APPMGR_UNDO_KEY, blob, &blob_len));
+    appmgr_undo_rec_t rec;
+    (void)memcpy(&rec, &blob[APPMGR_UNDO_HDR_LEN], sizeof(rec));
+    TEST_ASSERT_EQUAL_STRING("old", rec.project);
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(want, rec.crc,
+        "the CRC the round took of the app replaced is not its extent's");
+
+    answer_eof();                                      /* ends the write: nothing armed */
+    run_ticks(4U);
     keep_end();
 }
 
@@ -4997,7 +5648,7 @@ TEST_CASE("a request while copies run is refused", "[appmgr_ao][keep]")
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
     TEST_ASSERT_NOT_NULL(wr);
     QF_gc(wr);
-    answer_write((uint8_t)KODE_OK, old_bytes());
+    answer_write_landed(old_bytes());
     (void)qf_support_pump(AO_AppMgr, 8U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, storage_tally().open,
         "the restart was not the one install it should have been");
@@ -5027,6 +5678,10 @@ TEST_CASE("a restarted install that fails clears the round", "[appmgr_ao][keep]"
     storage_expect(STORAGE_OPEN_REQ_SIG, "the next install never asked for its file");
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, len, (uint8_t)KDRV_MEDIUM_FS);
+    }
     TEST_ASSERT_TRUE_MESSAGE(old_installed(),
         "the next install evicted at once: the last one's round was still held");
     storage_expect(STORAGE_PATH_REQ_SIG,
@@ -5085,7 +5740,7 @@ TEST_CASE("the bar does not go quiet while the card writes", "[appmgr_ao][keep]"
     TEST_ASSERT_TRUE_MESSAGE(2U <= beats,
         "the bar and the LED pulse went quiet for three seconds");
 
-    answer_write((uint8_t)KODE_OK, old_bytes());
+    answer_write_landed(old_bytes());
     (void)qf_support_pump(AO_AppMgr, 8U);
     let_the_open_expire();
     keep_end();
@@ -5180,13 +5835,17 @@ TEST_CASE("two victims: one already kept, one copied, one bar",
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(5U * mb, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, 5U * mb, (uint8_t)KDRV_MEDIUM_FS);
+    }
 
-    const QEvt *stat = storage_take(STORAGE_PATH_REQ_SIG);
+    const QEvt *stat = storage_take_patient(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL(stat);
     TEST_ASSERT_EQUAL_STRING("/sdcard/first.bin", ((StoragePathEvt const *)stat)->path);
     QF_gc(stat);
     answer_copy_of(3U * mb);
-    stat = storage_take(STORAGE_PATH_REQ_SIG);
+    stat = storage_take_patient(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the second victim was not looked for");
     TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin", ((StoragePathEvt const *)stat)->path);
     QF_gc(stat);
@@ -5204,10 +5863,10 @@ TEST_CASE("two victims: one already kept, one copied, one bar",
 
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the second victim was not copied");
-    TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin", ((StorageWriteEvt const *)wr)->name);
+    TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin.tmp", ((StorageWriteEvt const *)wr)->name);
     TEST_ASSERT_EQUAL_UINT32(3U * mb, ((StorageWriteEvt const *)wr)->len);
     QF_gc(wr);
-    answer_write((uint8_t)KODE_OK, 3U * mb);
+    answer_write_landed(3U * mb);
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
     TEST_ASSERT_TRUE(seq_installed(1U));
@@ -5339,6 +5998,10 @@ TEST_CASE("a late write answer settles nothing", "[appmgr_ao][keep]")
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(5U * mb, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, 5U * mb, (uint8_t)KDRV_MEDIUM_FS);
+    }
     storage_expect(STORAGE_PATH_REQ_SIG, "the first victim was not looked for");
     answer_stat(false, (uint8_t)KODE_OK);
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
@@ -5347,7 +6010,7 @@ TEST_CASE("a late write answer settles nothing", "[appmgr_ao][keep]")
 
     /* Never answered: past the deadline the second victim's STAT is out. */
     run_ticks(KEEP_WRITE_DEADLINE_TICKS(3U * mb) + 50U);
-    const QEvt *stat = storage_take(STORAGE_PATH_REQ_SIG);
+    const QEvt *stat = storage_take_patient(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the round did not go on to the second victim");
     TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin", ((StoragePathEvt const *)stat)->path);
     QF_gc(stat);
@@ -5402,11 +6065,15 @@ TEST_CASE("a late STAT answer is not taken for the next victim's",
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(5U * mb, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, 5U * mb, (uint8_t)KDRV_MEDIUM_FS);
+    }
     storage_expect(STORAGE_PATH_REQ_SIG, "the first victim was not looked for");
 
     /* Never answered in time: past the deadline the second STAT is out. */
     run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);
-    const QEvt *stat = storage_take(STORAGE_PATH_REQ_SIG);
+    const QEvt *stat = storage_take_patient(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the round did not go on to the second victim");
     TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin", ((StoragePathEvt const *)stat)->path);
     QF_gc(stat);
@@ -5420,7 +6087,7 @@ TEST_CASE("a late STAT answer is not taken for the next victim's",
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the second victim was not copied");
     QF_gc(wr);
-    answer_write((uint8_t)KODE_OK, 3U * mb);
+    answer_write_landed(3U * mb);
     (void)qf_support_pump(AO_AppMgr, 8U);
     TEST_ASSERT_TRUE(klog_has("'second' kept as /sdcard/second.bin"));
 
@@ -5599,7 +6266,7 @@ TEST_CASE("adoption over a full region keeps the victim first",
 
     QASM_DISPATCH(AO_AppMgr, &adopt, 0U);
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "nothing may be evicted yet");
-    const QEvt *stat = storage_take(STORAGE_PATH_REQ_SIG);
+    const QEvt *stat = storage_take_patient(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the victim's path was never asked about");
     TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin", ((StoragePathEvt const *)stat)->path);
     QF_gc(stat);
@@ -5613,7 +6280,7 @@ TEST_CASE("adoption over a full region keeps the victim first",
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "evicted before its copy landed");
     TEST_ASSERT_FALSE(boot_run_request(&off, &size, &mode));
 
-    answer_write((uint8_t)KODE_OK, old_bytes());
+    answer_write_landed(old_bytes());
     run_ticks(8U);                       /* the LIFO adopt, then the copy */
 
     TEST_ASSERT_TRUE(klog_has("'old' kept as /sdcard/old.bin"));
@@ -5656,7 +6323,7 @@ TEST_CASE("an adoption's round publishes no progress, heartbeats included",
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_count(APP_FLASH_PROGRESS_SIG),
         "a heartbeat of the copy reached the glass");
 
-    answer_write((uint8_t)KODE_OK, old_bytes());
+    answer_write_landed(old_bytes());
     run_ticks(8U);
     TEST_ASSERT_TRUE(klog_has("'old' kept as /sdcard/old.bin"));
     TEST_ASSERT_TRUE(boot_run_request(&off, &size, &mode));
@@ -5733,17 +6400,6 @@ static void three_apps(void)
     plant_app(dir.e[2].offset, "tail");
 }
 
-/** @brief Take AO_Storage's next path request and check what it asks. */
-static void path_req_expect(uint8_t op, const char *path, const char *what)
-{
-    const QEvt * const e = storage_take(STORAGE_PATH_REQ_SIG);
-
-    TEST_ASSERT_NOT_NULL_MESSAGE(e, what);
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(op, ((StoragePathEvt const *)e)->op, what);
-    TEST_ASSERT_EQUAL_STRING_MESSAGE(path, ((StoragePathEvt const *)e)->path, what);
-    QF_gc(e);
-}
-
 /* The mailbox plans with the container's decoded length, the one the decoder
  * plans with on its first chunk. Planned with the container's own few bytes,
  * the walk named the first victim only, the round copied that one, and the
@@ -5773,7 +6429,7 @@ TEST_CASE("a deflated container is planned for its image, so every victim is kep
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the first victim was not copied");
     QF_gc(wr);
-    answer_write((uint8_t)KODE_OK, 3U * mb);
+    answer_write_landed(3U * mb);
 
     /* The second victim is looked for with the first one's copy done and
      * nothing evicted yet. */
@@ -5784,10 +6440,10 @@ TEST_CASE("a deflated container is planned for its image, so every victim is kep
     answer_stat(false, (uint8_t)KODE_OK);
     wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the second victim was not copied");
-    TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin", ((StorageWriteEvt const *)wr)->name);
+    TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin.tmp", ((StorageWriteEvt const *)wr)->name);
     QF_gc(wr);
     TEST_ASSERT_TRUE_MESSAGE(seq_installed(2U), "evicted before its copy landed");
-    answer_write((uint8_t)KODE_OK, 3U * mb);
+    answer_write_landed(3U * mb);
     run_ticks(8U);                       /* the LIFO adopt: the second pass */
 
     TEST_ASSERT_TRUE(klog_has("evicting 'first'"));
@@ -5833,7 +6489,7 @@ TEST_CASE("a plan that changes under an adoption is deferred from inside it",
     QASM_DISPATCH(AO_AppMgr, &adopt, 0U);     /* room to spare: no victim */
     TEST_ASSERT_FALSE(klog_has("before adopting the mailbox"));
     put_old(old_bytes());                     /* and now "old" is in the way */
-    const QEvt *stat = storage_wait_for(STORAGE_PATH_REQ_SIG, 10U);
+    const QEvt *stat = storage_take_patient(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the decoder's victim was never asked about");
     TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin", ((StoragePathEvt const *)stat)->path);
     QF_gc(stat);
@@ -5879,7 +6535,7 @@ TEST_CASE("a copy whose write failed is unlinked, so no later round calls it kep
     QF_gc(wr);
 
     answer_write((uint8_t)KODE_ERROR, 0U);
-    path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/old.bin",
+    path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/old.bin.tmp",
                     "the stub of the failed write was left on the card");
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
@@ -5887,6 +6543,55 @@ TEST_CASE("a copy whose write failed is unlinked, so no later round calls it kep
     /* The unlink's answer reaches the restarted install and means nothing. */
     answer_path((uint8_t)STORAGE_PATH_UNLINK, (uint8_t)KODE_OK, false, false, 0U);
     TEST_ASSERT_TRUE(old_installed());
+    let_the_open_expire();
+    keep_end();
+}
+
+/* The replacement is a question to the card like the STAT: a card that never
+ * answers it does not hold the install, and the answer that comes late is
+ * nobody's - least of all the next victim's STAT. */
+TEST_CASE("a replacement nobody answers fails the copy, and its late answer is not taken for the next victim's STAT",
+          "[appmgr_ao][keep]")
+{
+    uint32_t const mb  = 0x100000U;
+    uint32_t const len = image_named("new");
+
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    three_apps();
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(5U * mb, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, 5U * mb, (uint8_t)KDRV_MEDIUM_FS);
+    }
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the first victim was not looked for");
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the first victim was not copied");
+    QF_gc(wr);
+    answer_write((uint8_t)KODE_OK, 3U * mb);
+    pair_req_expect("/sdcard/first.bin.tmp", "/sdcard/first.bin",
+                    "the finished copy was not put on its name");
+
+    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);          /* the replacement is never answered */
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/second.bin",
+                    "the round did not go on to the second victim");
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("'first' kept as"),
+        "a replacement nobody answered was called a kept copy");
+
+    answer_replace((uint8_t)KODE_OK);         /* the first's, late: the second's STAT is out */
+    TEST_ASSERT_NULL_MESSAGE(storage_wait_for(STORAGE_WRITE_REQ_SIG, 150U),
+        "a late answer to a replacement was taken for the second victim's STAT");
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("'first' kept as"),
+        "a late answer to a replacement was taken for a copy that landed");
+
+    answer_copy_of(THREE_APP_LEN);         /* the round ends properly */
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
     let_the_open_expire();
     keep_end();
 }
@@ -5908,6 +6613,14 @@ TEST_CASE("an unlink's answer settles nothing while the next victim's STAT is ou
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(5U * mb, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, 5U * mb, (uint8_t)KDRV_MEDIUM_FS);
+    }
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, 5U * mb, (uint8_t)KDRV_MEDIUM_FS);
+    }
     path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
                     "the first victim was not looked for");
     answer_stat(false, (uint8_t)KODE_OK);
@@ -5916,7 +6629,7 @@ TEST_CASE("an unlink's answer settles nothing while the next victim's STAT is ou
     QF_gc(wr);
 
     answer_write((uint8_t)KODE_ERROR, 0U);
-    path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/first.bin",
+    path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/first.bin.tmp",
                     "the stub of the failed write was left on the card");
     path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/second.bin",
                     "the round did not go on to the second victim");
@@ -5991,13 +6704,17 @@ TEST_CASE("a second plan that names a new victim evicts it uncopied, with a warn
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);    /* small: "first" is enough */
     answer_data(len);
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, len, (uint8_t)KDRV_MEDIUM_FS);
+    }
     path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
                     "the first victim was not looked for");
     answer_stat(false, (uint8_t)KODE_OK);
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the first victim was not copied");
     QF_gc(wr);
-    answer_write((uint8_t)KODE_OK, 3U * mb);
+    answer_write_landed(3U * mb);
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
 
@@ -6036,10 +6753,10 @@ TEST_CASE("a slot victim without a namesake is copied, then evicted after the wr
     answer_stat(false, (uint8_t)KODE_OK);
     const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 100U);
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the slot's victim was not copied");
-    TEST_ASSERT_EQUAL_STRING("/sdcard/a00.bin", ((StorageWriteEvt const *)wr)->name);
+    TEST_ASSERT_EQUAL_STRING("/sdcard/a00.bin.tmp", ((StorageWriteEvt const *)wr)->name);
     QF_gc(wr);
     TEST_ASSERT_TRUE_MESSAGE(seq_installed(1U), "evicted before its copy landed");
-    answer_write((uint8_t)KODE_OK, 4096U);
+    answer_write_landed(4096U);
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
     TEST_ASSERT_TRUE_MESSAGE(seq_installed(1U), "evicted before the image was written");
@@ -6119,7 +6836,7 @@ TEST_CASE("a heartbeat queued behind the last answer reaches the adoption safely
     TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the copy never reached AO_Storage");
     QF_gc(wr);
 
-    answer_write((uint8_t)KODE_OK, old_bytes());   /* the adopt goes in front */
+    answer_write_landed(old_bytes());   /* the adopt goes in front */
     QACTIVE_POST(AO_AppMgr, &beat, NULL);          /* the heartbeat, behind it */
     run_ticks(8U);
 
@@ -6775,6 +7492,10 @@ TEST_CASE("the late answer to a question's lost STAT is settled where it lands, 
     answer_copy_of(old_bytes());
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);                                       /* "old" must go */
+    if ( read_through_asked() )
+    {
+        read_through(s_named_img, len, len, len, (uint8_t)KDRV_MEDIUM_FS);
+    }
 
     /* Keeping asks the card about "old" and its own answer is what comes
      * next: it counts. Eaten as the late one, the round would sit out its
@@ -8110,6 +8831,8 @@ TEST_CASE("an evicted app kept on the card keeps its folder",
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
     answer_data_bytes(s_cont, len);
+    TEST_ASSERT_TRUE_MESSAGE(read_through_asked(), "the install was not stopped at its plan");
+    read_through_container(s_cont, len, (uint8_t)KDRV_MEDIUM_FS);
     storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
     answer_copy_of(old_bytes());          /* already on the card */
     (void)qf_support_pump(AO_AppMgr, 8U);
@@ -8127,6 +8850,40 @@ TEST_CASE("an evicted app kept on the card keeps its folder",
     TEST_ASSERT_FALSE_MESSAGE(storage_has_for(APPDATA_RM_REQ_SIG, "old"),
         "a kept app lost its folder");
     TEST_ASSERT_EQUAL_UINT(1U, spy_ends().flash_done);
+    tidy_end_case();
+}
+
+/* A container is not read through, and the second read primed for it is
+ * served ahead of the close and the open of the pass that follows: its chunk
+ * lands in AppMgr_opening before the open's answer, and is nobody's. */
+TEST_CASE("a container's second read that lands before the next pass's open is ignored",
+          "[appmgr_ao][verify]")
+{
+    tidy_begin_case();
+    region_full_of_old();
+    uint32_t const len = container_named("fresh", true, false);
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data_bytes(s_cont, len);
+    TEST_ASSERT_TRUE_MESSAGE(read_through_asked(), "the install was not stopped at its plan");
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the file was not opened again to be read through");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data_bytes(s_cont, len);
+    TEST_ASSERT_TRUE(klog_has("is a container: it is not read through"));
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after the container was seen");
+
+    stale_data(1U, false);                     /* the second read primed for the container */
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data_bytes(s_cont, len);
+    storage_expect(STORAGE_PATH_REQ_SIG, "the install did not go on to its victim after the stale read");
+    TEST_ASSERT_TRUE(old_installed());
+
+    answer_copy_of(old_bytes());
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    let_the_open_expire();
     tidy_end_case();
 }
 
