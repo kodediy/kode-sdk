@@ -1661,8 +1661,9 @@ static kode_status_t link_down(void)
     /* The video ends in the vertical blanking (on_vsync()). A board that sees
      * no vsync in time goes on regardless: a dark line is less harm than a
      * glass that never rests. */
-    s_video_stopped  = false;
-    s_video_stop_ask = true;
+    s_video_stopped  = s_video_owed;   /* owed, it never started: nothing to stop */
+    s_video_stop_ask = !s_video_owed;
+    s_video_owed     = false;
     for ( uint32_t waited = 0U; !s_video_stopped; ++waited )
     {
         if ( LINK_STOP_WAIT_MS <= waited )
@@ -1775,11 +1776,24 @@ static kode_status_t link_up(void)
     {
         KLOG_W(TAG, "link up: the full window was not written");
     }
-    esp_err_t err = esp_lcd_new_panel_dpi(s_bus, &dpi_cfg, &s_panel);
+    /* A panel that is awake shows its memory, the last picture and the hour
+     * written over it. Video started on the new, empty framebuffers would
+     * write black into that memory, and the glass taken dark to hide it is a
+     * blink on every wake from the ASLEEP rest. So the scan-out waits for the
+     * renderer's first whole frame, as it does after a restart with the glass
+     * kept lit (video_begin()), and the brightness is left alone. A panel
+     * that slept (OFF) has no picture to keep: it starts black and dark. */
+    bool const keeps = !s_asleep;
+    esp_err_t  err   = esp_lcd_new_panel_dpi(s_bus, &dpi_cfg, &s_panel);
+
     if ( ESP_OK != err )
     {
         KLOG_E(TAG, "dpi panel: %s", esp_err_to_name(err));
         s_panel = NULL;
+    }
+    else if ( keeps )
+    {
+        MIPI_DSI_BRIDGE.dpi_rsv_dpi_data.dpi_rsv_data = DSI_UNDERFLOW_BLACK;
     }
     else
     {
@@ -1789,9 +1803,12 @@ static kode_status_t link_up(void)
             KLOG_E(TAG, "dpi init: %s", esp_err_to_name(err));
         }
     }
-    if ( ESP_OK == err )
+    if ( (ESP_OK == err) && !keeps )
     {
         link_watch();
+    }
+    if ( ESP_OK == err )
+    {
         err = link_events_on();
     }
     if ( ESP_OK != err )
@@ -1808,12 +1825,6 @@ static kode_status_t link_up(void)
 
     link_frames_reset();
     s_fb_epoch = s_fb_epoch + 1U;
-    s_ready = true;
-    /* The scan-out is black until the renderer's first frame, so the panel
-     * goes dark with it and lights at that frame, as after the bring-up. */
-    kode_status_t const dark = brightness_write(0U);
-    s_held     = true;
-    s_held_pct = s_last_pct;
     s_up_ms    = khal_time_ms();
 #if CONFIG_KODEOS_SCREENSHOT
     shown_rows(0, (int32_t)KBSP_LCD_V_RES);
@@ -1821,13 +1832,33 @@ static kode_status_t link_up(void)
     KLOG_D(TAG, "link up: framebuffers 0x%08lx and 0x%08lx, epoch %lu",
            (unsigned long)(uintptr_t)s_fb[0], (unsigned long)(uintptr_t)s_fb[1],
            (unsigned long)s_fb_epoch);
-    if ( KODE_OK == dark )
+    if ( keeps )
     {
-        KLOG_D(TAG, "link up: video scanning black, brightness 0");
+        /* Nothing is scanned until the first frame, which goes to fb 0 itself:
+         * the engine starts there, always. */
+        s_back       = 0U;
+        s_video_owed = true;
+        s_held       = false;
+        s_ready      = true;
+        KLOG_D(TAG, "link up: the panel keeps its picture; video from the first frame");
     }
     else
     {
-        KLOG_W(TAG, "link up: video scanning black, brightness 0 not written");
+        s_ready = true;
+        /* The scan-out is black until the renderer's first frame, so the panel
+         * goes dark with it and lights at that frame, as after the bring-up. */
+        kode_status_t const dark = brightness_write(0U);
+
+        s_held     = true;
+        s_held_pct = s_last_pct;
+        if ( KODE_OK == dark )
+        {
+            KLOG_D(TAG, "link up: video scanning black, brightness 0");
+        }
+        else
+        {
+            KLOG_W(TAG, "link up: video scanning black, brightness 0 not written");
+        }
     }
     return KODE_OK;
 }
