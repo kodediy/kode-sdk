@@ -181,6 +181,41 @@ kode_status_t kdrv_slot_write(const void *data, size_t len)
     return KODE_OK;
 }
 
+/**
+ * @brief Tell whether the image in the slot is the project that is running.
+ *
+ * The slot is where this firmware's own update goes, and the next boot hands
+ * the board to whatever it holds. esp_ota_end() accepts any image built for
+ * the chip, an app's included, so the project's name is what tells an update
+ * from something else.
+ *
+ * @return KODE_OK; KODE_ERROR when the slot's description cannot be read or
+ *         names another project.
+ */
+static kode_status_t slot_is_ours(void)
+{
+    const esp_partition_t * const p   = slot_part();
+    const esp_app_desc_t  * const run = esp_app_get_description();
+    esp_app_desc_t                desc;
+
+    if ( (NULL == p) || (NULL == run)
+        || (esp_ota_get_partition_description(p, &desc) != ESP_OK) )
+    {
+        KLOG_E(TAG, "the image written has no description to read; "
+                    "it is not an update");
+        return KODE_ERROR;
+    }
+    if ( strncmp(desc.project_name, run->project_name,
+                 sizeof(desc.project_name)) != 0 )
+    {
+        KLOG_E(TAG, "the image written is '%.*s', not %s; it is not an update",
+               (int)sizeof(desc.project_name), desc.project_name,
+               run->project_name);
+        return KODE_ERROR;
+    }
+    return KODE_OK;
+}
+
 kode_status_t kdrv_slot_end(void)
 {
     if ( 0 == s_ota )
@@ -194,7 +229,7 @@ kode_status_t kdrv_slot_end(void)
         KLOG_E(TAG, "esp_ota_end: %s", esp_err_to_name(err));
         return KODE_ERROR;
     }
-    return KODE_OK;
+    return slot_is_ours();
 }
 
 void kdrv_slot_abort(void)
@@ -251,7 +286,7 @@ static kode_status_t slot_sink_write(void *ctx, const void *data, size_t len)
  * @brief Close the slot's OTA session and verify what was written.
  * @param ctx Unused.
  * @return KODE_OK; KODE_DENIED with no session open; KODE_ERROR when
- *         esp_ota_end() refuses the image.
+ *         kdrv_slot_end() refuses the image.
  */
 static kode_status_t slot_sink_end(void *ctx)
 {
