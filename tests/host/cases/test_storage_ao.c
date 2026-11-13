@@ -733,6 +733,186 @@ TEST_CASE("mv that meets a transfer waits for it and runs when it ends",
     TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "src.bin"));
 }
 
+/* ---- A replacement: a file put on a name that may be taken ------------------
+ * FatFs renames onto no name that is there. AO_Storage moves the file on the
+ * name to `<name>.bak`, puts the new one on it and unlinks the backup, and
+ * puts the original back when a step fails: one request, one answer, and the
+ * file on the name is the old one or the new one at every answer. The host's
+ * rename overwrites, as POSIX does, so what is checked is the order of the
+ * steps and what stays where when one fails. */
+
+/** @brief Ask for the replacement and take its answer's `rc`; the answer's op must be the request's. */
+static int replace_answer(const char *src, const char *dst)
+{
+    storage_pair_request(ao_spy(), (uint8_t)STORAGE_PAIR_REPLACE, src, dst);
+    (void)qf_support_pump(AO_Storage, 8U);
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the replacement went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)STORAGE_PAIR_REPLACE,
+                            ((const StoragePathRspEvt *)e)->op);
+    int const rc = (int)((const StoragePathRspEvt *)e)->rc;
+    ao_spy_drain();
+    return rc;
+}
+
+TEST_CASE("a replacement of a free name is the one rename", "[storage_ao][replace]")
+{
+    storage_fresh();
+    make_file("new.tmp", 9U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, replace_answer("/storage/new.tmp", "/storage/app.bin"));
+    TEST_ASSERT_EQUAL_INT(9, (int)fs_size("app.bin"));
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size("new.tmp"));
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size("app.bin.bak"));
+}
+
+TEST_CASE("a replacement of a taken name puts the copy there and leaves no backup",
+          "[storage_ao][replace]")
+{
+    storage_fresh();
+    make_file("app.bin", 5U);
+    make_file("new.tmp", 9U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, replace_answer("/storage/new.tmp", "/storage/app.bin"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(9, (int)fs_size("app.bin"), "the old file is still on the name");
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size("new.tmp"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size("app.bin.bak"), "the backup was left behind");
+}
+
+/** @brief Whether a captured log line holds @p words. */
+static bool replace_said(const char *words)
+{
+    bool found = false;
+
+    for ( unsigned i = 0U; (!found) && (fake_klog_count() > i); ++i )
+    {
+        const char * const line = fake_klog_line(i);
+        found = (NULL != line) && (strstr(line, words) != NULL);
+    }
+    return found;
+}
+
+TEST_CASE("a backup already on the card is removed by a replacement, and said",
+          "[storage_ao][replace]")
+{
+    storage_fresh();
+    make_file("app.bin", 5U);
+    make_file("app.bin.bak", 3U);
+    make_file("new.tmp", 9U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, replace_answer("/storage/new.tmp", "/storage/app.bin"));
+    TEST_ASSERT_EQUAL_INT(9, (int)fs_size("app.bin"));
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size("app.bin.bak"));
+    TEST_ASSERT_TRUE_MESSAGE(replace_said("app.bin.bak' was there and is removed"),
+        "a backup that was on the card went without a word");
+}
+
+/* What a reset between the two renames leaves: the name free, the file that
+ * was there as its backup and the copy under its own name. The next
+ * replacement of the name puts its copy there and takes the backup away. */
+TEST_CASE("a replacement after one a reset cut puts its copy on the name and removes the backup",
+          "[storage_ao][replace]")
+{
+    storage_fresh();
+    make_file("app.bin.bak", 5U);
+    make_file("new.tmp", 9U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, replace_answer("/storage/new.tmp", "/storage/app.bin"));
+    TEST_ASSERT_EQUAL_INT(9, (int)fs_size("app.bin"));
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size("new.tmp"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size("app.bin.bak"),
+        "the backup of the replacement that was cut stayed an orphan");
+    TEST_ASSERT_TRUE(replace_said("app.bin.bak' was there and is removed"));
+}
+
+TEST_CASE("a replacement of a name a folder is on is refused, and the folder stays",
+          "[storage_ao][replace]")
+{
+    struct stat st;
+    char        path[512];
+
+    storage_fresh();
+    fake_media_put_fs_dir("app.bin");
+    make_file("new.tmp", 9U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, replace_answer("/storage/new.tmp", "/storage/app.bin"));
+    (void)snprintf(path, sizeof(path), "%s/app.bin", fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, stat(path, &st));
+    TEST_ASSERT_TRUE_MESSAGE(S_ISDIR(st.st_mode), "the folder was moved off its name");
+    TEST_ASSERT_EQUAL_INT(9, (int)fs_size("new.tmp"));
+    TEST_ASSERT_EQUAL_INT(-1, (int)fs_size("app.bin.bak"));
+}
+
+TEST_CASE("a replacement whose copy is missing leaves the file on the name as it was",
+          "[storage_ao][replace]")
+{
+    storage_fresh();
+    make_file("app.bin", 5U);
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, replace_answer("/storage/new.tmp", "/storage/app.bin"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(5, (int)fs_size("app.bin"),
+        "the file on the name was lost with the copy");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size("app.bin.bak"),
+        "the file was left under its backup name");
+}
+
+TEST_CASE("a replacement that cannot move the file aside leaves both files where they were",
+          "[storage_ao][replace]")
+{
+    storage_fresh();
+    make_file("app.bin", 5U);
+    make_file("new.tmp", 9U);
+    fake_media_put_fs_dir("app.bin.bak");        /* a name no file can be moved onto */
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, replace_answer("/storage/new.tmp", "/storage/app.bin"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(5, (int)fs_size("app.bin"),
+        "the file on the name changed with its first step failing");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(9, (int)fs_size("new.tmp"),
+        "the copy was lost with the first step failing");
+}
+
+TEST_CASE("a replacement that meets a transfer waits for it and runs when it ends",
+          "[storage_ao][replace][turn]")
+{
+    storage_fresh();
+    hold_reader();
+    make_file("app.bin", 5U);
+    make_file("new.tmp", 9U);
+
+    storage_pair_request(ao_spy(), (uint8_t)STORAGE_PAIR_REPLACE,
+                         "/storage/new.tmp", "/storage/app.bin");
+    (void)qf_support_pump(AO_Storage, 8U);
+    TEST_ASSERT_NULL(ao_spy_take());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(5, (int)fs_size("app.bin"),
+        "the replacement ran over the transfer");
+
+    release_reader();
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the replacement never ran");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_EQUAL_INT(9, (int)fs_size("app.bin"));
+}
+
+TEST_CASE("a replacement is refused when the transfer outlasts its wait, and both files stay",
+          "[storage_ao][replace][turn]")
+{
+    storage_fresh();
+    hold_reader();
+    make_file("app.bin", 5U);
+    make_file("new.tmp", 9U);
+
+    storage_pair_request(ao_spy(), (uint8_t)STORAGE_PAIR_REPLACE,
+                         "/storage/new.tmp", "/storage/app.bin");
+    wait_out_turn();
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the replacement went unanswered");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)STORAGE_PAIR_REPLACE, ((const StoragePathRspEvt *)e)->op);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, (int)((const StoragePathRspEvt *)e)->rc);
+    TEST_ASSERT_EQUAL_INT(5, (int)fs_size("app.bin"));
+    TEST_ASSERT_EQUAL_INT(9, (int)fs_size("new.tmp"));
+}
+
 TEST_CASE("a text write that meets a transfer waits for it and lands when it ends",
           "[storage_ao][turn]")
 {

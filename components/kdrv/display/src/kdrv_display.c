@@ -97,6 +97,8 @@ _Static_assert(KDRV_DISPLAY_CACHE_LINE == CONFIG_CACHE_L2_CACHE_LINE_SIZE,
  * full after BRIGHT_FIFO_WAIT_MS is reported rather than entered. */
 #define BRIGHT_GAP_MS          20U
 #define BRIGHT_FIFO_WAIT_MS    50U
+/** Words a DCS read drains after its answer, at most: far more than any answer to a one-byte read leaves. */
+#define PANEL_READ_DRAIN_MAX   64U
 
 /* DCS commands the panel takes outside the init table. The names are IDF's
  * (esp_lcd_panel_commands.h); the casts are the driver's, which wants bytes. */
@@ -1917,9 +1919,19 @@ static kode_status_t panel_read1(uint8_t cmd, uint8_t *val)
     }
     uint32_t const w = mipi_dsi_host_ll_gen_read_payload_fifo(&MIPI_DSI_HOST);
 
-    while ( !mipi_dsi_host_ll_gen_is_read_fifo_empty(&MIPI_DSI_HOST) )
+    /* Whatever else the panel sent, at most a FIFO's worth: a FIFO that
+     * never reads empty is a host that is not there (an emulator without a
+     * DSI host reads its flags as 0), and the byte asked for is in hand. */
+    for ( uint32_t i = 0U;
+          (PANEL_READ_DRAIN_MAX > i) && !mipi_dsi_host_ll_gen_is_read_fifo_empty(&MIPI_DSI_HOST);
+          ++i )
     {
         (void)mipi_dsi_host_ll_gen_read_payload_fifo(&MIPI_DSI_HOST);
+    }
+    if ( !mipi_dsi_host_ll_gen_is_read_fifo_empty(&MIPI_DSI_HOST) )
+    {
+        KLOG_W(TAG, "DSI read FIFO still not empty after %u words: the host "
+                    "does not answer", (unsigned)PANEL_READ_DRAIN_MAX);
     }
     *val = (uint8_t)(w & GRAM_BYTE_MASK);
     return KODE_OK;
