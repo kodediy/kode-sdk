@@ -33,6 +33,21 @@
 /** @brief The tag of a zone being set: the zone's own record, not a line of the boot. */
 #define ZONE_TAG "kaos.zone"
 
+/**
+ * @brief The hold of the bottom button that means home in this build.
+ *
+ * An app built with the home hold goes home on the long one, and the ordinary
+ * hold of the same press is the app's own. Everything else - kodeOS, and an
+ * app that switched the home hold off - goes home on the ordinary one. Both
+ * carry a ButtonHoldEvt.
+ */
+/* cppcheck-suppress misra-c2012-20.9 ; sdkconfig.h leaves an option that is off undefined, and #if reads it as 0 */
+#if CONFIG_KODEOS_HOME_HOLD
+#define BOOT_HOME_ON_SIG  BUTTON_HOME_HOLD_SIG
+#else
+#define BOOT_HOME_ON_SIG  BUTTON_HOLD_SIG
+#endif
+
 /** @brief The leave step that waits for AO_Net's answer. */
 #define BOOT_LEAVE_STEP_NET     0U
 /** @brief The leave step that waits for AO_Radio's answer. */
@@ -565,10 +580,11 @@ static QState Boot_initial(Boot * const me, void const * const par)
     }
 #endif
 
-    /* The hold has ONE owner in both roles: this AO hears it and publishes
-     * HOME_SIG, and whoever draws the screen answers that. What differs is
-     * only what AO_Boot does afterwards - in an app, reset. */
-    QActive_subscribe(&me->super, BUTTON_HOLD_SIG);
+    /* The hold that means home has ONE owner in both roles: this AO hears
+     * it and publishes HOME_SIG, and whoever draws the screen answers that.
+     * What differs is which hold it is (BOOT_HOME_ON_SIG) and what AO_Boot
+     * does afterwards - in an app, reset. */
+    QActive_subscribe(&me->super, BOOT_HOME_ON_SIG);
 
 #if CONFIG_KODEOS_HOME_HOLD
     me->home_deferred = false;
@@ -927,6 +943,7 @@ static bool reset_refuses(QEvt const * const e)
         KLOG_N(TAG, "busy with a factory reset; this request is dropped");
         break;
     case BUTTON_HOLD_SIG:
+    case BUTTON_HOME_HOLD_SIG:
         KLOG_D(TAG, "busy with a factory reset; this button hold is dropped");
         break;
     case BOOT_NVS_SET_SIG:
@@ -1533,7 +1550,7 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case BUTTON_HOLD_SIG: {
+        case BOOT_HOME_ON_SIG: {
             ButtonHoldEvt const * const h = Q_EVT_CAST(ButtonHoldEvt);
             if ( (uint8_t)KDRV_BTN_BOT == h->id )
             {
@@ -1744,6 +1761,7 @@ static QState Boot_leaving(Boot * const me, QEvt const * const e)
         }
 #endif
         case BUTTON_HOLD_SIG:
+        case BUTTON_HOME_HOLD_SIG:
         case BOOT_HOME_DEFER_SIG:
         case BOOT_HOME_GRACE_SIG: {
             /* The board is already on its way: a second hold must not arm a

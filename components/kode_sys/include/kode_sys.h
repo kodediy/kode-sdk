@@ -550,11 +550,14 @@ kode_status_t kode_sys_exp_power(bool on);
 kode_status_t kode_sys_exit_to_os(void);
 
 /*
- * With CONFIG_KODEOS_HOME_HOLD (on by default in an app) holding BOT publishes
- * HOME_SIG and resets the board KODE_SYS_HOME_GRACE_MS later, as
- * kode_sys_exit_to_os() does. An app with something to save defers from its
- * HOME_SIG handler, writes, then resets; the wait is capped at
- * KODE_SYS_HOME_DEFER_MAX_MS from the hold.
+ * With CONFIG_KODEOS_HOME_HOLD (on by default in an app) holding BOT for
+ * KODE_HOME_HOLD_MS publishes HOME_SIG and resets the board
+ * KODE_SYS_HOME_GRACE_MS later, as kode_sys_exit_to_os() does. The ordinary
+ * hold of the same press, KODE_BUTTON_HOLD_MS in, is BUTTON_HOLD_SIG and the
+ * app's own. An app with something to save defers from its HOME_SIG handler,
+ * writes, then resets; the wait is capped at KODE_SYS_HOME_DEFER_MAX_MS from
+ * HOME_SIG. Without the option HOME_SIG goes out at the ordinary hold and
+ * nothing resets.
  */
 
 /**

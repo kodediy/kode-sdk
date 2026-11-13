@@ -59,6 +59,7 @@ static void cli(const char *line)
     ao_spy_subscribe(TOUCH_EVT_SIG);
     ao_spy_subscribe(BUTTON_EVT_SIG);
     ao_spy_subscribe(BUTTON_HOLD_SIG);
+    ao_spy_subscribe(BUTTON_HOME_HOLD_SIG);
     ao_spy_subscribe(BUTTON_DOUBLE_SIG);
     type_line(line);
 }
@@ -281,8 +282,16 @@ TEST_CASE("btn hold publishes the bottom button's hold and answers ok",
 
     ButtonHoldEvt const * const h = (ButtonHoldEvt const *)ev;
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_BOT, h->id);
+
+    /* A thumb that holds the bottom button to go home passes both
+     * thresholds, so the word publishes both: the hold, then the home hold. */
+    const QEvt * const far = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(far, "the home hold never landed");
+    TEST_ASSERT_EQUAL(BUTTON_HOME_HOLD_SIG, far->sig);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_BOT,
+                            ((ButtonHoldEvt const *)far)->id);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
-        "one hold is one event");
+        "a bottom hold is those two events");
     TEST_ASSERT_TRUE(replied(">ok"));
     TEST_ASSERT_TRUE_MESSAGE(replied("console: injected btn bot hold"),
         "an injected hold must be findable in the log, as a press is");
@@ -299,6 +308,8 @@ TEST_CASE("btn hold names the top button when the top button is held",
 
     ButtonHoldEvt const * const h = (ButtonHoldEvt const *)ev;
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_TOP, h->id);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+        "the top button has no home hold");
     TEST_ASSERT_TRUE(replied(">ok"));
 }
 

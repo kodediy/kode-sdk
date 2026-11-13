@@ -908,6 +908,20 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  */
 #define KODE_BUTTON_HOLD_MS     600U
 /**
+ * @brief How long the bottom button must stay pressed to be the home hold.
+ *
+ * Counted from the press, on the clock that counted KODE_BUTTON_HOLD_MS:
+ * AO_Buttons publishes BUTTON_HOME_HOLD_SIG when it fires, and in an app
+ * built with CONFIG_KODEOS_HOME_HOLD that is the gesture that goes home to
+ * kodeOS. Three seconds is long enough that an app can spend the ordinary
+ * hold of the same button on something of its own, and well short of the 16 s
+ * at which the PMIC cuts the board's supply on this button (its QON pin). An
+ * app that defers adds KODE_SYS_HOME_DEFER_MAX_MS at most to it.
+ */
+#define KODE_HOME_HOLD_MS       3000U
+_Static_assert(KODE_HOME_HOLD_MS > KODE_BUTTON_HOLD_MS,
+               "the home hold is the hold, held on");
+/**
  * @brief How soon after the first press's release the top button's second
  * press must be confirmed to make a double.
  *
@@ -921,16 +935,21 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 /**
  * @brief How long AO_Boot waits after announcing home before it resets.
  *
- * A held bottom button always comes home (CONFIG_KODEOS_HOME_HOLD), and the
- * hold goes out as HOME_SIG before the reset so an app can hear it. This is
- * what that hearing is worth: 200 ms (200 QP ticks), long enough for an AO one
- * step below AO_Boot to run its handler and write a file, short enough that
- * the gesture still feels like the button did it. An app that needs more says
- * so with kode_sys_home_defer().
+ * A bottom button held KODE_HOME_HOLD_MS always comes home
+ * (CONFIG_KODEOS_HOME_HOLD), and the hold goes out as HOME_SIG before the
+ * reset so an app can hear it. This is what that hearing is worth: 200 ms
+ * (200 QP ticks), long enough for an AO one step below AO_Boot to run its
+ * handler and write a file, short enough that the gesture still feels like
+ * the button did it. An app that needs more says so with
+ * kode_sys_home_defer().
  */
 #define KODE_SYS_HOME_GRACE_MS      200U
 /**
- * @brief The longest a deferral can hold the board, from the hold itself.
+ * @brief The longest a deferral can hold the board, from HOME_SIG.
+ *
+ * Counted from the home hold, so a board whose app defers resets
+ * KODE_HOME_HOLD_MS + KODE_SYS_HOME_DEFER_MAX_MS after the press at the
+ * latest, plus the leave.
  *
  * The grace is for saving state, not for thinking. An app that asks for a
  * moment and never calls kode_sys_home_now() is reset anyway when this expires,

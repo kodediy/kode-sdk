@@ -2835,8 +2835,10 @@ static void h_swipe(Console *me, const kcmd_t *c, const karg_val_t *v)
  * A press or a release goes through buttons_inject(), so a polling app sees
  * it too. A hold or a double is published here: an injected press never
  * starts AO_Buttons' hold clock or double detector, and neither changes a
- * button's state. Only the top and bottom buttons hold and only the top one
- * doubles; any other id is refused (`>err code=3 msg=id`).
+ * button's state. The bottom button's hold publishes BUTTON_HOLD_SIG and then
+ * BUTTON_HOME_HOLD_SIG, as a thumb that holds it to go home does. Only the top
+ * and bottom buttons hold and only the top one doubles; any other id is
+ * refused (`>err code=3 msg=id`).
  */
 static void h_btn(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
@@ -2858,6 +2860,16 @@ static void h_btn(Console *me, const kcmd_t *c, const karg_val_t *v)
             ev->id = id;
             QACTIVE_PUBLISH(&ev->super, &me->super);
             ok = true;
+        }
+        if ( ok && ((uint8_t)KDRV_BTN_BOT == id) )
+        {
+            /* A thumb that holds the bottom button to go home passes both of
+             * AO_Buttons' thresholds, so the word publishes both holds. */
+            static const ButtonHoldEvt home = {
+                .super = QEVT_INITIALIZER(BUTTON_HOME_HOLD_SIG),
+                .id    = (uint8_t)KDRV_BTN_BOT };
+
+            QACTIVE_PUBLISH(&home.super, &me->super);
         }
     }
     else if ( A_BTN_DOUBLE == v[1].u )

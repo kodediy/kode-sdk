@@ -1429,8 +1429,17 @@ TEST_CASE("the build really has the home hold compiled in", "[boot_ao]")
     TEST_PASS();
 }
 
-/** @brief The bottom button held, exactly as AO_Buttons publishes it. */
+/** @brief The bottom button held to the home hold, exactly as AO_Buttons publishes it. */
 static void hold_bot(void)
+{
+    ButtonHoldEvt h;
+    h.super = (QEvt)QEVT_INITIALIZER(BUTTON_HOME_HOLD_SIG);
+    h.id    = (uint8_t)KDRV_BTN_BOT;
+    QASM_DISPATCH(AO_Boot, &h.super, 0U);
+}
+
+/** @brief The bottom button's ordinary hold, the one an app keeps for itself. */
+static void hold_bot_short(void)
 {
     ButtonHoldEvt h;
     h.super = (QEvt)QEVT_INITIALIZER(BUTTON_HOLD_SIG);
@@ -1491,6 +1500,33 @@ TEST_CASE("a held bottom button announces home and leaves after the grace",
     answer_net_left();
     finish_leave();
     TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+
+    ao_spy_drain();
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+/* Home is the long hold. The ordinary one, KODE_BUTTON_HOLD_MS into the same
+ * press, is the app's own to use: it announces nothing and arms no grace. */
+TEST_CASE("the bottom button's ordinary hold is not home in an app", "[boot_ao]")
+{
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    ao_spy_drain();
+    ao_spy_subscribe(HOME_SIG);
+
+    hold_bot_short();
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(HOME_SIG, e->sig,
+                                      "the ordinary hold announces no home");
+    }
+    TEST_ASSERT_FALSE_MESSAGE(boot_home_pending(), "and arms no grace");
+    (void)qf_support_tick(AO_Boot, QF_SUPPORT_STEPS(KODE_SYS_HOME_DEFER_MAX_MS));
+    TEST_ASSERT_EQUAL_UINT(0U, fake_system_restarts());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, mailbox_take(AO_Net, NULL),
+        "nothing began to leave");
 
     ao_spy_drain();
     Mockkdrv_slot_Verify();
@@ -3031,6 +3067,11 @@ TEST_CASE("a button hold during a reset is dropped at debug level",
     hold_bot();
     TEST_ASSERT_TRUE_MESSAGE(klog_has("this button hold is dropped"),
         "at debug");
+    /* kodeOS, built without the home hold, hears the ordinary one: the same. */
+    fake_klog_reset();
+    hold_bot_short();
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("this button hold is dropped"),
+        "the ordinary hold too");
     TEST_ASSERT_EQUAL_INT(-1, mailbox_sig(AO_Radio));
 
     answer_find(false, 0U, 0U, false, true);      /* ends the case */
@@ -3601,6 +3642,47 @@ TEST_CASE("a reset with no asker or no end is not posted", "[boot_ao][reset]")
     TEST_ASSERT_EQUAL_INT(0, (int)ao_spy_count());
     TEST_ASSERT_EQUAL_INT(-1, mailbox_sig(AO_AppMgr));
     reset_down();
+}
+
+/* ---- The home hold, as it arrives on the bus --------------------------------- */
+
+/* What AO_Buttons publishes is what AO_Boot must hear: the home hold reaches
+ * its queue, and the ordinary hold of the same press does not. */
+TEST_CASE("AO_Boot hears the home hold on the bus, not the ordinary hold",
+          "[boot_ao]")
+{
+    static const ButtonHoldEvt far = { .super = QEVT_INITIALIZER(BUTTON_HOME_HOLD_SIG),
+                                       .id    = (uint8_t)KDRV_BTN_BOT };
+    static const ButtonHoldEvt near = { .super = QEVT_INITIALIZER(BUTTON_HOLD_SIG),
+                                        .id    = (uint8_t)KDRV_BTN_BOT };
+    const QEvt *e;
+
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    queue_drained(AO_Boot);
+
+    QACTIVE_PUBLISH(&near.super, NULL);
+    TEST_ASSERT_NULL_MESSAGE(mailbox_event(AO_Boot),
+        "the ordinary hold is not AO_Boot's in an app");
+
+    QACTIVE_PUBLISH(&far.super, NULL);
+    e = mailbox_event(AO_Boot);
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the home hold reaches AO_Boot");
+    TEST_ASSERT_EQUAL_INT((int)BUTTON_HOME_HOLD_SIG, (int)e->sig);
+    QASM_DISPATCH(AO_Boot, e, 0U);
+    QF_gc(e);
+    TEST_ASSERT_TRUE_MESSAGE(boot_home_pending(), "and it arms the grace");
+
+    /* The grace runs out and the leave ends in the reset, which ends the case. */
+    (void)qf_support_tick(AO_Boot, QF_SUPPORT_STEPS(KODE_SYS_HOME_GRACE_MS));
+    TEST_ASSERT_EQUAL_INT((int)NET_LEAVE_REQ_SIG, mailbox_take(AO_Net, NULL));
+    answer_net_left();
+    finish_leave();
+    TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+
+    ao_spy_drain();
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
 }
 
 /* ---- The app's store, written for an Active Object -------------------------

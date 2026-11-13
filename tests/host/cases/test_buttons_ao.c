@@ -75,6 +75,7 @@ static void buttons_up_once(void)
     ao_spy_drain();
     ao_spy_subscribe(BUTTON_EVT_SIG);
     ao_spy_subscribe(BUTTON_HOLD_SIG);
+    ao_spy_subscribe(BUTTON_HOME_HOLD_SIG);
     ao_spy_subscribe(BUTTON_DOUBLE_SIG);
     ao_spy_subscribe(BTN_STATE_SIG);
     ao_spy_subscribe(BTN_TEST_SIG);
@@ -1596,7 +1597,21 @@ static void bot_confirmed_down(void)
     ao_spy_drain();
 }
 
-TEST_CASE("the bottom button held past the threshold publishes one hold",
+/** @brief Steps of the hold clock's second count: from the hold to the home hold. */
+#define HOME_STEPS  QF_SUPPORT_STEPS(KODE_HOME_HOLD_MS - KODE_BUTTON_HOLD_MS)
+
+/** @brief Let the bottom button go, confirmed, and drop its ButtonEvt from the spy. */
+static void bot_confirmed_up(void)
+{
+    feed(ALL_UP, true);
+    settle_fires();
+    feed(ALL_UP, true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ao_spy_count(), "the release itself");
+    TEST_ASSERT_EQUAL(BUTTON_EVT_SIG, ao_spy_next_sig());
+    ao_spy_drain();
+}
+
+TEST_CASE("the bottom button held publishes one hold, then one home hold",
           "[buttons_ao]")
 {
     buttons_up_once();
@@ -1619,14 +1634,151 @@ TEST_CASE("the bottom button held past the threshold publishes one hold",
     TEST_ASSERT_EQUAL_UINT((unsigned)KDRV_BTN_BOT, h->id);
     ao_spy_drain();
 
+    /* The same clock counts on, so the home hold is KODE_HOME_HOLD_MS from
+     * the press and not from the hold. */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_tick(AO_Buttons, HOME_STEPS - 1U),
+                                   "not a home hold until its own threshold");
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Buttons, 1U));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ao_spy_count(), "one home hold");
+    TEST_ASSERT_EQUAL(BUTTON_HOME_HOLD_SIG, ao_spy_next_sig());
+    ao_spy_drain();
+
+    /* Held on, the button says nothing more. */
+    TEST_ASSERT_EQUAL_UINT(0U, qf_support_tick(AO_Buttons,
+                                               QF_SUPPORT_STEPS(KODE_HOME_HOLD_MS)));
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
     /* The release is an ordinary edge, and there is no second hold. */
+    bot_confirmed_up();
+    TEST_ASSERT_EQUAL_UINT(0U, qf_support_tick(AO_Buttons,
+                                               QF_SUPPORT_STEPS(KODE_HOME_HOLD_MS)));
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+/* A thumb that lets go a moment short of the home hold has held, and no more:
+ * an app keeps the bottom button's hold for itself up to that moment. */
+TEST_CASE("a bottom button let go short of the home hold never publishes it",
+          "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    bot_confirmed_down();
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Buttons,
+                                               QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS)));
+    TEST_ASSERT_EQUAL(BUTTON_HOLD_SIG, ao_spy_next_sig());
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT(0U, qf_support_tick(AO_Buttons, HOME_STEPS - 1U));
+
+    bot_confirmed_up();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_tick(AO_Buttons, HOME_STEPS),
+                                   "the release stopped the clock");
+    /* Even a stray expiry is no home hold: the button is no longer down. */
+    QASM_DISPATCH(AO_Buttons, &HOLD_TMO, 0U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+/* Each press is timed from its own start: what an earlier press had counted
+ * is gone with its release. */
+TEST_CASE("a bottom button pressed again times its home hold from the new press",
+          "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    bot_confirmed_down();
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS));
+    (void)qf_support_tick(AO_Buttons, HOME_STEPS - 1U);
+    ao_spy_drain();
+    bot_confirmed_up();
+
+    bot_confirmed_down();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(
+        0U,
+        qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS) - 1U),
+        "the new press is not a home hold a tick after it began");
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Buttons, 1U));
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    TEST_ASSERT_EQUAL(BUTTON_HOLD_SIG, ao_spy_next_sig());
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT(0U, qf_support_tick(AO_Buttons, HOME_STEPS - 1U));
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Buttons, 1U));
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    TEST_ASSERT_EQUAL(BUTTON_HOME_HOLD_SIG, ao_spy_next_sig());
+    ao_spy_drain();
+
+    bot_confirmed_up();
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+/* The clock's event can wait in the queue behind a release and a new press.
+ * It is the old press's: the new one is timed whole, and holds once. */
+TEST_CASE("an expiry left over from an earlier press is not a hold of the new one",
+          "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    bot_confirmed_down();
+    QASM_DISPATCH(AO_Buttons, &HOLD_TMO, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+                                   "the clock is still counting this press");
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(
+        0U,
+        qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS) - 1U),
+        "and it counts the whole threshold");
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Buttons, 1U));
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    TEST_ASSERT_EQUAL(BUTTON_HOLD_SIG, ao_spy_next_sig());
+    ao_spy_drain();
+
+    bot_confirmed_up();
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+/* The guided test asks for presses. A bottom button already held past its hold
+ * when the run starts must not go home in the middle of it. */
+TEST_CASE("a guided test stops the home hold's count", "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    bot_confirmed_down();
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS));
+    ao_spy_drain();
+
+    buttons_test_request();
+    (void)qf_support_pump(AO_Buttons, 4U);
+    ao_spy_drain();
+    (void)qf_support_tick(AO_Buttons, HOME_STEPS);
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(BUTTON_HOME_HOLD_SIG, e->sig,
+                                      "no home hold during a guided test");
+    }
+
     feed(ALL_UP, true);
     settle_fires();
     feed(ALL_UP, true);
-    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
-    TEST_ASSERT_EQUAL(BUTTON_EVT_SIG, ao_spy_next_sig());
+    ao_spy_drain();
+    for ( uint32_t i = 0U; SEQ_LEN >= i; ++i )
+    {
+        (void)qf_support_tick(AO_Buttons, STEP_TICKS);
+    }
     ao_spy_drain();
 
+    settle();
     Mockkhal_gpio_Verify();
     Mockkhal_gpio_Destroy();
 }
@@ -1691,6 +1843,13 @@ TEST_CASE("the top button held publishes one hold with the top id",
     TEST_ASSERT_EQUAL(BUTTON_HOLD_SIG, h->super.sig);
     TEST_ASSERT_EQUAL_UINT((unsigned)KDRV_BTN_TOP, h->id);
     ao_spy_drain();
+
+    /* Home is the bottom button's: the top one's clock stops at its hold. */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(
+        0U,
+        qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_HOME_HOLD_MS)),
+        "the top button has no home hold");
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 
     settle();
     Mockkhal_gpio_Verify();

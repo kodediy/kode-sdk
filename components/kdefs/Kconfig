@@ -38,17 +38,13 @@ menu "Kode Dot"
             defaults set the real name.
 
     config KODEOS_HOME_HOLD
-        bool "Holding BOT for 600 ms returns to kodeOS"
+        bool "Holding BOT for 3 s returns to kodeOS"
         default y
         depends on KODEOS_BOOT_ROLE_APP
         help
-            Holding the bottom button reboots into kodeOS, even from a hung
-            app. An app that must save first calls kode_sys_home_defer() from
-            its HOME_SIG handler, then kode_sys_home_now() when it is done.
-            AO_Boot waits KODE_SYS_HOME_GRACE_MS for the deferral and
-            KODE_SYS_HOME_DEFER_MAX_MS at most, then reboots anyway.
-
-            If unsure, say Y.
+            Holding the bottom button 3 s reboots into kodeOS, even from a hung
+            app; an app may put it off with kode_sys_home_defer(). Without it
+            nothing reboots on the button.
 
     config KODE_LOWPOWER
         bool "AO_LowPower: the AWAKE, ASLEEP and OFF states"

@@ -146,6 +146,14 @@ enum KodeSignals {
                                  *   the button is still down. The console's
                                  *   `btn ... state=hold` publishes it on
                                  *   request.                                 */
+    BUTTON_HOME_HOLD_SIG,       /**< AO_Buttons: the bottom button has been
+                                 *   down for KODE_HOME_HOLD_MS (ButtonHoldEvt,
+                                 *   @c id always KDRV_BTN_BOT). Once per
+                                 *   press, after that press's
+                                 *   BUTTON_HOLD_SIG and while the button is
+                                 *   still down. The console's
+                                 *   `btn id=bot state=hold` publishes it on
+                                 *   request.                                 */
     BUTTON_DOUBLE_SIG,          /**< AO_Buttons: the top button was pressed
                                  *   twice in quick succession
                                  *   (ButtonDoubleEvt). Published right after
@@ -158,7 +166,10 @@ enum KodeSignals {
                                  *   whoever draws: kgui's launcher in kodeOS,
                                  *   an app's own AO in an app - where it also
                                  *   means the board is about to reset unless
-                                 *   kode_sys_home_defer() says otherwise.       */
+                                 *   kode_sys_home_defer() says otherwise.
+                                 *   With CONFIG_KODEOS_HOME_HOLD it follows
+                                 *   BUTTON_HOME_HOLD_SIG; without, the bottom
+                                 *   button's BUTTON_HOLD_SIG.                */
     IOEXP_INPUT_SIG,            /**< AO_IoExp: what the expander's eight pins
                                  *   read (IoexpInputEvt). Every read of the
                                  *   input register goes out here - on the
@@ -2972,14 +2983,17 @@ typedef struct {
                          *   unsigned subtraction of two stamps. */
 } ButtonEvt;
 
-/** @brief The top or the bottom button is being held (BUTTON_HOLD_SIG).
+/** @brief The top or the bottom button is being held (BUTTON_HOLD_SIG,
+ *        BUTTON_HOME_HOLD_SIG).
  *
- * Published once per press, KODE_BUTTON_HOLD_MS after the debounce
- * confirmed it and only if the button is still down at that moment. The
- * release that follows arrives as the usual ButtonEvt. The console's
- * `btn id=top|bot state=hold` publishes the same event on request, with no
- * press before it and no release after it: a host reproducing a thumb sends
- * the press, the hold and the release. */
+ * BUTTON_HOLD_SIG is published once per press, KODE_BUTTON_HOLD_MS after the
+ * debounce confirmed it and only if the button is still down at that moment.
+ * The bottom button, held on, publishes BUTTON_HOME_HOLD_SIG once more,
+ * KODE_HOME_HOLD_MS after the same confirmation. The release that follows
+ * arrives as the usual ButtonEvt. The console's `btn id=top|bot state=hold`
+ * publishes the same events on request, with no press before them and no
+ * release after: a host reproducing a thumb sends the press, the hold and
+ * the release. */
 typedef struct {
     QEvt    super;
     uint8_t id;        /**< kdrv_button_t: KDRV_BTN_TOP or KDRV_BTN_BOT. */

@@ -1717,7 +1717,8 @@ void ioexp_test_request(void);
 /* ---- AO_Buttons: owner of the six push-buttons --------------------------
  * Five are bits of AO_IoExp's publish, the sixth is GPIO35. Two equal samples
  * KODE_SYS_BUTTON_SETTLE_MS apart move a button; BUTTON_EVT_SIG goes out on change.
- * Top and bottom publish BUTTON_HOLD_SIG after KODE_BUTTON_HOLD_MS; top publishes
+ * Top and bottom publish BUTTON_HOLD_SIG after KODE_BUTTON_HOLD_MS, and bottom,
+ * held on, BUTTON_HOME_HOLD_SIG after KODE_HOME_HOLD_MS; top publishes
  * BUTTON_DOUBLE_SIG for a second press within KODE_BUTTON_DOUBLE_MS of the first's
  * release (not after a hold).
  */
