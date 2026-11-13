@@ -2366,13 +2366,10 @@ static kode_status_t gram_settle(void)
  * @brief Send @p count pixels as RAMWR then RAMWRC packets into the window
  *        already set.
  *
- * What the CO5300 takes into its memory over a command write is not what the
- * video carries: each pixel goes low byte first with its fields in BGR order,
- * red in the low five bits (measured on the DVT). Sent as the RGB565 LVGL
- * keeps, red and blue trade places on the glass: white, black and a neutral
- * grey read the same, and the clock's warm Light Grey comes out a cold white.
- * So red and blue are swapped here, and callers hand over plain RGB565.
- * The window walks itself, so a packet need not end on a row.
+ * Over a command write the CO5300 takes each pixel low byte first with its
+ * fields in BGR order, red in the low five bits, which is not the order the
+ * video carries. Callers hand over the RGB565 LVGL keeps, and red and blue are
+ * swapped here. The window walks itself, so a packet need not end on a row.
  *
  * @return KODE_OK; KODE_TIMEOUT when a FIFO did not make room.
  */
