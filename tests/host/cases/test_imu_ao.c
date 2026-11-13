@@ -1563,9 +1563,10 @@ TEST_CASE("a die temperature that is not a room's fails step 3", "[imu_ao]")
 }
 
 /* ---- The magnetometer row ------------------------------------------------------
- * Identity, a self-test shift that is logged and not judged - the datasheet
- * gives the procedure and no threshold - and the field at rest, which is a
- * reading rather than a verdict. The whole row runs inside one step.
+ * Identity, a self-test shift judged against a floor an axis that works clears
+ * many times over - the datasheet gives the procedure and no threshold - and
+ * the field at rest, which is a reading rather than a verdict. The whole row
+ * runs inside one step.
  */
 
 TEST_CASE("the mag row names the part, logs its shift and reports the field",
@@ -1582,6 +1583,14 @@ TEST_CASE("the mag row names the part, logs its shift and reports the field",
         TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_QMC5883P_CHIP_ID, r->a);
     }
     {
+        const MagTestEvt * const r = mag_record(2U, (uint8_t)MAG_TEST_ST);
+
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)MAG_TF_PASS, r->flags);
+        TEST_ASSERT_INT32_WITHIN(1, 300, (0 > r->a) ? -r->a : r->a);
+        TEST_ASSERT_INT32_WITHIN(1, 300, (0 > r->b) ? -r->b : r->b);
+        TEST_ASSERT_INT32_WITHIN(1, 300, (0 > r->c) ? -r->c : r->c);
+    }
+    {
         const MagTestEvt * const r = mag_record(3U, (uint8_t)MAG_TEST_FIELD);
 
         TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, r->flags,
@@ -1594,9 +1603,28 @@ TEST_CASE("the mag row names the part, logs its shift and reports the field",
     (void)mag_record(0U, (uint8_t)MAG_TEST_DONE);
     expect_verdict("mag", true);
 
-    /* Read, and never judged: a threshold nobody has measured on a known-good
-     * board would condemn parts for nothing. */
-    TEST_ASSERT_TRUE(logged("a reading, not judged"));
+    imu_down();
+}
+
+/* An axis the stimulus does not move is a dead one: the part still names
+ * itself and still converts, which is all the row used to ask of it. */
+TEST_CASE("an axis that does not move under the self-test fails the mag row",
+          "[imu_ao]")
+{
+    bus_up(true, true);
+    imu_up();
+    s_mag_st_add[1] = 20;
+
+    mag_row_req();
+    (void)mag_record(1U, (uint8_t)MAG_TEST_WHOAMI);
+    {
+        const MagTestEvt * const r = mag_record(2U, (uint8_t)MAG_TEST_ST);
+
+        TEST_ASSERT_EQUAL_UINT8(0U, r->flags);
+        TEST_ASSERT_INT32_WITHIN(1, 20, (0 > r->b) ? -r->b : r->b);
+    }
+    (void)mag_record(0U, (uint8_t)MAG_TEST_DONE);
+    expect_verdict("mag", false);
     imu_down();
 }
 
@@ -1613,9 +1641,11 @@ TEST_CASE("a part that identifies itself and then gives no conversion fails",
 
     mag_row_req();
     (void)mag_record(1U, (uint8_t)MAG_TEST_WHOAMI);
+    /* The self-test is the first thing to ask the part for a conversion. */
+    (void)mag_record(2U, (uint8_t)MAG_TEST_ST);
     (void)mag_record(0U, (uint8_t)MAG_TEST_DONE);
     expect_verdict("mag", false);
-    TEST_ASSERT_TRUE(logged("gave no conversion"));
+    TEST_ASSERT_TRUE(logged("the self-test could not be run"));
     imu_down();
 }
 
