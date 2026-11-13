@@ -2220,14 +2220,26 @@ TEST_CASE("put writes app.json and icon.k64 into the internal folder",
 
 /* A data folder may arrive before its app, and nothing bounds how many do but
  * the partition: a new folder is refused when it would leave the partition
- * under its floor, where Kody's pack is staged beside the one in use. */
+ * under its floor, where Kody's pack is staged beside the one in use.
+ *
+ * What a put is charged is what it weighs on the volume: the bytes of its json
+ * and of its icon, each rounded up to the volume's cluster, and one cluster
+ * more for the folder itself when it is new; a replacement writes its pair
+ * beside the old one, so it is charged the pair and nothing for the folder.
+ * The fake volume's cluster is 4096 bytes. */
+#define CL         4096U                          /**< The fake volume's cluster. */
+#define FLOOR_B    ((uint64_t)KODE_APPDATA_FREE_MIN_BYTES)
+#define PAIR_64    (CL + KAPP_ICON_HALF_BYTES)    /**< json 1 cluster, icon 3.    */
+#define PAIR_128   (CL + KAPP_ICON_BYTES)         /**< json 1 cluster, icon 12.   */
+#define NEW_64     (PAIR_64 + CL)                 /**< 20 KB.                     */
+#define NEW_128    (PAIR_128 + CL)                /**< 56 KB.                     */
+
 TEST_CASE("put refuses a new folder that would leave the partition under its floor",
-          "[storage_ao][appdata]")
+          "[storage_ao][appdata][room]")
 {
     storage_fresh();
     fake_psram_reset();
-    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FREE_MIN_BYTES
-                           + (uint64_t)KODE_APPDATA_FOLDER_BYTES - 1U);
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_128 - 1U);
 
     ask_appdata_put("demo", KAPP_ICON_BYTES);
     drain_write();
@@ -2239,12 +2251,11 @@ TEST_CASE("put refuses a new folder that would leave the partition under its flo
 }
 
 TEST_CASE("put takes a new folder that leaves the partition at its floor",
-          "[storage_ao][appdata]")
+          "[storage_ao][appdata][room]")
 {
     storage_fresh();
     fake_psram_reset();
-    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FREE_MIN_BYTES
-                           + (uint64_t)KODE_APPDATA_FOLDER_BYTES);
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_128);
 
     ask_appdata_put("demo", KAPP_ICON_BYTES);
     drain_write();
@@ -2253,41 +2264,197 @@ TEST_CASE("put takes a new folder that leaves the partition at its floor",
     assert_put_bufs_freed();
 }
 
-/* The new files are written beside the old ones, so a replacement needs the
- * room of one more folder - but not the floor a new folder must leave. */
-TEST_CASE("put replaces a folder that is there when the new files fit beside the old",
-          "[storage_ao][appdata]")
+TEST_CASE("put takes a 64 px folder for what it weighs, not what a 128 px one does",
+          "[storage_ao][appdata][room]")
 {
     storage_fresh();
     fake_psram_reset();
-    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
-    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FOLDER_BYTES);
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_64);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
+        "a 64 px folder was charged the room of a 128 px one");
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("put refuses a 64 px folder one cluster short of its weight",
+          "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_64 - 1U);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("put refuses a 128 px folder with the room a 64 px one takes",
+          "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)NEW_64);
+
+    ask_appdata_put("demo", KAPP_ICON_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+}
+
+/* A json shorter than a cluster takes the whole cluster, so the rounding is
+ * of each file and not of the sum. */
+TEST_CASE("put charges a folder with no icon its json's cluster and the folder's",
+          "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(FLOOR_B + (uint64_t)(2U * CL));
 
     ask_appdata_put("demo", 0U);
     drain_write();
 
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+}
+
+TEST_CASE("the charge follows the volume's cluster", "[storage_ao][appdata][room]")
+{
+    /* 512-byte clusters: 512 + 12288 + 512, where 4096-byte ones take 20480. */
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_cluster(512U);
+    fake_media_set_fs_free(FLOOR_B + 13312U);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    assert_put_bufs_freed();
+
+    /* 8192-byte clusters: 8192 + 16384 + 8192, one byte over what is free. */
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_cluster(8192U);
+    fake_media_set_fs_free(FLOOR_B + 32768U - 1U);
+
+    ask_appdata_put("other", KAPP_ICON_HALF_BYTES);
+    drain_write();
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    assert_put_bufs_freed();
+}
+
+/* With 180 KB free, which is what a bench board had left: two 64 px folders
+ * fit above the floor, and not one 128 px folder. */
+TEST_CASE("180 KB free takes two 64 px folders and no 128 px one",
+          "[storage_ao][appdata][room]")
+{
+    uint64_t free_b = 180ULL * 1024ULL;
+    unsigned taken  = 0U;
+
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(free_b);
+    ask_appdata_put("big", KAPP_ICON_BYTES);
+    drain_write();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_NO_RESOURCES, take_put_status(),
+        "a 128 px folder fits in 180 KB");
+
+    for ( unsigned i = 0U; 4U > i; ++i )
+    {
+        char project[8];
+
+        (void)snprintf(project, sizeof(project), "p%u", i);
+        fake_media_set_fs_free(free_b);
+        ask_appdata_put(project, KAPP_ICON_HALF_BYTES);
+        drain_write();
+        if ( KODE_OK != take_put_status() )
+        {
+            break;
+        }
+        ++taken;
+        free_b -= (uint64_t)NEW_64;
+    }
+    TEST_ASSERT_EQUAL_UINT(2U, taken);
+}
+
+/* The new files are written beside the old ones, so a replacement needs the
+ * room of its own pair - the clusters of its temporaries - and neither the
+ * folder's cluster nor the floor a new folder must leave. */
+TEST_CASE("put replaces a folder that is there when its pair fits beside the old",
+          "[storage_ao][appdata][room]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
+    fake_media_set_fs_free((uint64_t)PAIR_64);
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, take_put_status(),
-        "a replacement needs no more than the room of a folder");
+        "a replacement needs no more than its own temporaries");
     assert_put_bufs_freed();
     TEST_ASSERT_EQUAL_INT((int)(sizeof(PUT_JSON) - 1U),
                           (int)fs_size(".kode/appsdata/demo/app.json"));
 }
 
-TEST_CASE("put refuses a replacement that does not fit beside the old files, "
-          "and leaves them", "[storage_ao][appdata]")
+TEST_CASE("put refuses a replacement whose pair does not fit beside the old "
+          "files, and leaves them", "[storage_ao][appdata][room]")
 {
     storage_fresh();
     fake_psram_reset();
     fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
-    fake_media_set_fs_free((uint64_t)KODE_APPDATA_FOLDER_BYTES - 1U);
+    fake_media_set_fs_free((uint64_t)PAIR_64 - 1U);
 
-    ask_appdata_put("demo", 0U);
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
     drain_write();
 
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
     assert_put_bufs_freed();
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, (int)fs_size(".kode/appsdata/demo/app.json"),
         "a refused replacement touched the old app.json");
+}
+
+/* The refusal says what it weighed: what the put needs, what the volume has
+ * free beyond what it keeps back, and what it keeps. */
+TEST_CASE("the refusal of a new folder says the three numbers",
+          "[storage_ao][appdata][room][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_fs_free(FLOOR_B + 12U * 1024U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    TEST_ASSERT_TRUE_MESSAGE(log_says("the data folder of 'demo' was not written: "
+        "it needs 20 KB and the internal volume has 12 KB free beyond the "
+        "128 KB it keeps"), "the refusal does not carry its three numbers");
+}
+
+TEST_CASE("the refusal of a replacement says what it needs beside the old files",
+          "[storage_ao][appdata][room][say]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", "{}", 2U);
+    fake_media_set_fs_free(8U * 1024U);
+    fake_klog_reset();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
+    TEST_ASSERT_TRUE(log_says("the data folder of 'demo' was not written: "
+        "it needs 16 KB beside the old files and the internal volume has "
+        "8 KB free"));
 }
 
 TEST_CASE("put without an icon writes app.json only and removes an old icon",
@@ -2814,7 +2981,8 @@ TEST_CASE("a put for want of room says how much a folder needs",
     drain_write();
 
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, take_put_status());
-    assert_said_once("demo", "was not written: a new folder must leave 128 KB free");
+    assert_said_once("demo", "was not written: it needs 8 KB and the internal "
+                             "volume has 0 KB free beyond the 128 KB it keeps");
 }
 
 TEST_CASE("a put on a partition that will not mount says so",

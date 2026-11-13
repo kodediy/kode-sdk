@@ -768,15 +768,13 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
                                        *   included.                        */
 /* An app's data folder (app.json and icon.k64) may reach the internal
  * partition before its app does, so nothing bounds how many there are but the
- * partition itself. A new one is refused when it would leave less than the
+ * partition itself. A put is charged what it weighs on the volume: its json
+ * and its icon, each in whole clusters, and the folder's own cluster when the
+ * folder is new; a replacement writes its pair beside the old one and is
+ * charged the pair. A new folder is refused when it would leave less than the
  * floor free: Kody's pack is staged beside the one in use when it updates. */
-#define KODE_APPDATA_CLUSTER_BYTES  4096U          /**< The internal FAT's allocation unit. */
-#define KODE_APPDATA_FOLDER_BYTES   ((2U + (KODE_APP_ICON_BYTES / KODE_APPDATA_CLUSTER_BYTES)) \
-                                     * KODE_APPDATA_CLUSTER_BYTES)
-                                      /**< What one data folder takes at most: the
-                                       *   directory's cluster, app.json's, and
-                                       *   the clusters of a 128x128 icon (a
-                                       *   64x64 one takes a quarter of them). */
+#define KODE_APPDATA_CLUSTER_BYTES  4096U          /**< The internal FAT's allocation unit the charge assumes when the
+                                       *   driver cannot say: what the volume is formatted with. */
 #define KODE_APPDATA_FREE_MIN_BYTES (128U * 1024U) /**< What a new data folder
                                        *   must leave free on the internal
                                        *   partition.                       */

@@ -53,7 +53,7 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 _Static_assert(sizeof(APPDATA_ICON_TMP) <= KAPP_DATA_ICON_MAX,
                "a temporary's name fits where an icon's path does");
 #define STORAGE_ICON_TRIES  (KODE_STORAGE_TURN_MS / KODE_STORAGE_ICON_RETRY_MS) /**< Pauses a folder read waits for the icon pool: what fits in the bound. */
-#define APPDATA_WHY_MAX     80U   /**< The words saying why a put was refused, terminator included. */
+#define APPDATA_WHY_MAX     128U   /**< The words saying why a put was refused, terminator included. */
 #define APPDATA_WHY_WRITE   "a file would not write"   /**< Why a put failed while writing a file. */
 #define APPDATA_WHY_PLACE   "the new files would not go in place"   /**< Why a put failed putting them in place. */
 #define APPDATA_TOP_DIR     "/storage/.kode"  /**< The tree's first level, internal. */
@@ -2675,35 +2675,77 @@ static void appdata_put_finish(Storage * const me, kode_status_t rc,
     }
 }
 
+/** @brief What a put weighs on the internal partition, and what is free for it. */
+typedef struct {
+    bool     there;  /**< The folder is there already: a replacement.          */
+    uint32_t need;   /**< Bytes it takes: its files in whole clusters, and for a
+                      *   new folder the folder's own cluster.                  */
+    uint32_t keep;   /**< Bytes a new folder must leave free: the floor; 0 for a
+                      *   replacement.                                          */
+    uint64_t avail;  /**< Bytes free on the volume, 0 when it cannot say.       */
+} AppDataRoom;
+
 /**
- * @brief Whether the internal partition has room for the folder at @p folder.
+ * @brief Round a size up to whole clusters: what a file of that size takes.
  *
- * The new files are written beside the old ones and put in their place, so a
- * folder that is there needs the room of one more, KODE_APPDATA_FOLDER_BYTES.
- * A new one must leave KODE_APPDATA_FREE_MIN_BYTES free besides: a data folder
- * may arrive before its app, and nothing else bounds how many do.
- *
- * @param folder The folder's path on the internal partition, mounted.
- * @param[out] there Whether the folder is there already.
- * @return false when the partition cannot take the put.
+ * @param len     The file's bytes; 0 takes nothing.
+ * @param cluster The volume's allocation unit, not 0.
+ * @return The bytes the file takes.
  */
-static bool appdata_room(const char *folder, bool *there)
+static uint32_t appdata_clusters(uint32_t len, uint32_t cluster)
+{
+    return ((len + (cluster - 1U)) / cluster) * cluster;
+}
+
+/**
+ * @brief Whether the internal partition has room for a put, and what it
+ *        weighs.
+ *
+ * A put is charged what it takes on the volume: the bytes of its app.json and
+ * of its icon, each rounded up to the volume's cluster. A new folder is
+ * charged one cluster more, its own, and must leave KODE_APPDATA_FREE_MIN_BYTES
+ * free besides: a data folder may arrive before its app, and nothing else
+ * bounds how many do. A folder that is there is replaced by writing the new
+ * pair beside the old, so it is charged the pair, which is the room of its
+ * temporaries, and no floor.
+ *
+ * @param folder   The folder's path on the internal partition, mounted.
+ * @param json_len Bytes of the app.json the put carries.
+ * @param icon_len Bytes of the icon.k64 it carries: 0 for none.
+ * @param[out] r   What the put weighs and what is free.
+ * @return false when the partition cannot take the put; true when it can, or
+ *         cannot say and the write decides.
+ */
+static bool appdata_room(const char *folder, uint32_t json_len,
+                         uint32_t icon_len, AppDataRoom *r)
 {
     kdrv_stat_t    st;
-    uint64_t       total = 0U;
-    uint64_t       freeb = 0U;
-    uint32_t       least = KODE_APPDATA_FOLDER_BYTES;
-    bool           room  = true;
+    uint64_t       total   = 0U;
+    uint64_t       freeb   = 0U;
+    uint32_t       cluster = kdrv_storage_cluster_bytes(KDRV_MEDIUM_FS);
+    bool           known;
+    bool           room    = true;
 
-    *there = (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists;
-    if ( !*there )
+    if ( 0U == cluster )
     {
-        least += KODE_APPDATA_FREE_MIN_BYTES;
+        cluster = KODE_APPDATA_CLUSTER_BYTES;
     }
-    if ( (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK)
-        && ((uint64_t)least > freeb) )
+    r->there = (kdrv_storage_stat(folder, &st) == KODE_OK) && st.exists;
+    r->need  = appdata_clusters(json_len, cluster)
+             + appdata_clusters(icon_len, cluster);
+    r->keep  = 0U;
+    if ( !r->there )
     {
-        room = false;
+        r->need += cluster;
+        r->keep  = KODE_APPDATA_FREE_MIN_BYTES;
+    }
+    known    = (kdrv_storage_usage(KDRV_MEDIUM_FS, &total, &freeb) == KODE_OK);
+    r->avail = freeb;
+    if ( known )
+    {
+        uint64_t const want = (uint64_t)r->need + (uint64_t)r->keep;
+
+        room = (want <= freeb);
     }
     return room;
 }
@@ -2726,7 +2768,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     const char   *why = "it is not a name or a size a data folder takes";
     kode_status_t rc = KODE_DENIED;
     bool          no_turn = false;
-    bool          there   = false;
+    AppDataRoom   weight  = { false, 0U, 0U, 0U };
 
     if ( busy(me) )
     {
@@ -2746,20 +2788,32 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         why = "the internal partition would not mount";
         rc  = KODE_ERROR;
     }
-    else if ( !appdata_room(folder, &there) )
+    else if ( !appdata_room(folder, req->json_len, req->icon_len, &weight) )
     {
-        uint32_t const floor_kb = KODE_APPDATA_FREE_MIN_BYTES / APPDATA_KB;
-        uint32_t const folder_kb = KODE_APPDATA_FOLDER_BYTES / APPDATA_KB;
+        uint32_t const need_kb = (weight.need + (APPDATA_KB - 1U)) / APPDATA_KB;
 
-        if ( there )
+        if ( weight.there )
         {
-            (void)snprintf(room, sizeof(room), "the new files need %lu KB free "
-                           "beside the old ones", (unsigned long)folder_kb);
+            (void)snprintf(room, sizeof(room), "it needs %lu KB beside the old "
+                           "files and the internal volume has %lu KB free",
+                           (unsigned long)need_kb,
+                           (unsigned long)(weight.avail / APPDATA_KB));
         }
         else
         {
-            (void)snprintf(room, sizeof(room), "a new folder must leave %lu KB "
-                           "free", (unsigned long)floor_kb);
+            /* What is free beyond what a new folder keeps: the number to set
+             * beside what it needs. */
+            uint64_t spare = 0U;
+
+            if ( weight.avail > (uint64_t)weight.keep )
+            {
+                spare = weight.avail - (uint64_t)weight.keep;
+            }
+            (void)snprintf(room, sizeof(room), "it needs %lu KB and the "
+                           "internal volume has %lu KB free beyond the %lu KB "
+                           "it keeps", (unsigned long)need_kb,
+                           (unsigned long)(spare / APPDATA_KB),
+                           (unsigned long)(weight.keep / APPDATA_KB));
         }
         why = room;
         rc  = KODE_NO_RESOURCES;
@@ -2785,7 +2839,7 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     me->g_buf      = req->buf;
     me->g_json_len = req->json_len;
     me->g_icon_len = req->icon_len;
-    me->g_fresh    = !there;
+    me->g_fresh    = !weight.there;
 
     rc = appdata_put_mkdir(APPDATA_TOP_DIR);
     if ( KODE_OK == rc )

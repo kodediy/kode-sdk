@@ -22,6 +22,10 @@ static bool s_fs_mounted;
 #define FAKE_FS_FREE_BYTES  (8ULL * 1024ULL * 1024ULL)
 static uint64_t s_fs_free = FAKE_FS_FREE_BYTES;
 
+/* What kdrv_fs_cluster_bytes() says: the board's, a 4 KB wear-levelling sector. */
+#define FAKE_FS_CLUSTER_BYTES  4096U
+static uint32_t s_fs_cluster = FAKE_FS_CLUSTER_BYTES;
+
 /* The failure knob and the call count of kdrv_fs_mount(); fake_media_reset()
  * puts both back. */
 static bool     s_fs_mount_fails;
@@ -109,6 +113,7 @@ void fake_media_reset(void)
      * partition instead of what it named. */
     s_fs_mounted = true;
     s_fs_free = FAKE_FS_FREE_BYTES;
+    s_fs_cluster = FAKE_FS_CLUSTER_BYTES;
     s_fs_mount_fails = false;
     s_fs_mount_calls = 0U;
     (void)kdrv_sd_mount();
@@ -265,6 +270,22 @@ bool kdrv_fs_mounted(void)
 const char *kdrv_fs_mount_point(void)
 {
     return s_fs_mounted ? s_fs_dir : NULL;
+}
+
+uint32_t kdrv_fs_cluster_bytes(void)
+{
+    uint32_t bytes = 0U;
+
+    if ( s_fs_mounted )
+    {
+        bytes = s_fs_cluster;
+    }
+    return bytes;
+}
+
+void fake_media_set_fs_cluster(uint32_t bytes)
+{
+    s_fs_cluster = bytes;
 }
 
 kode_status_t kdrv_fs_usage(uint64_t *total, uint64_t *free_bytes)

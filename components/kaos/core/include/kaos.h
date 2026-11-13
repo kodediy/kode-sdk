@@ -3482,9 +3482,12 @@ typedef struct {
  * (KODE_STORAGE_TURN_MS). Always answered with an AppDataPutRspEvt: KODE_OK;
  * KODE_DENIED bad name, length, NULL buffer or busy (AppDataPutRspEvt.busy tells
  * the last apart); KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when
- * a new folder would leave the partition under KODE_APPDATA_FREE_MIN_BYTES, or a
- * folder that is there has not KODE_APPDATA_FOLDER_BYTES free for the new files
- * beside the old.
+ * the put does not fit. It is charged what it weighs on the volume: its app.json
+ * and its icon, each rounded up to the volume's cluster (kdrv_storage_cluster_bytes()).
+ * A new folder is charged one cluster more, its own, and must leave
+ * KODE_APPDATA_FREE_MIN_BYTES free besides; a folder that is there is charged
+ * only that pair, the room of the temporaries it is written under beside the old
+ * files. The refusal is told in the log with the numbers.
  *
  * @param project  The app's project name, as the binary declares it.
  * @param buf      app.json then icon.k64, one allocation from khal_alloc_psram()

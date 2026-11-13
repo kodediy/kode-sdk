@@ -56,6 +56,17 @@ const char *kdrv_storage_mount_point(kdrv_medium_t m);
 /** @brief Total and free bytes on @p m. */
 kode_status_t kdrv_storage_usage(kdrv_medium_t m, uint64_t *total, uint64_t *free_bytes);
 
+/**
+ * @brief The allocation unit of @p m's volume: what a file of one byte takes.
+ *
+ * The internal partition answers; the card has no caller that needs it yet and
+ * answers 0, as a volume that is not mounted does.
+ *
+ * @param m The medium.
+ * @return The cluster size in bytes, or 0 when it is not known.
+ */
+uint32_t kdrv_storage_cluster_bytes(kdrv_medium_t m);
+
 /** @brief Log what @p m is - for the console's `sd info` / `fs info`. */
 void kdrv_storage_dump(kdrv_medium_t m);
 

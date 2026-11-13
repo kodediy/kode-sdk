@@ -97,6 +97,17 @@ kode_status_t kdrv_storage_usage(kdrv_medium_t m, uint64_t *total,
                                  : kdrv_fs_usage(total, free_bytes);
 }
 
+uint32_t kdrv_storage_cluster_bytes(kdrv_medium_t m)
+{
+    uint32_t bytes = 0U;
+
+    if ( KDRV_MEDIUM_FS == m )
+    {
+        bytes = kdrv_fs_cluster_bytes();
+    }
+    return bytes;
+}
+
 void kdrv_storage_dump(kdrv_medium_t m)
 {
     if ( KDRV_MEDIUM_SD == m )

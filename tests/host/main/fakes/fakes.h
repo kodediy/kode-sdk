@@ -592,6 +592,10 @@ const char *fake_media_fs_dir(void);
  *         fake_media_reset() puts back its 8 MB. */
 void fake_media_set_fs_free(uint64_t free_bytes);
 
+/** @brief The allocation unit the internal partition reports from now on;
+ *         fake_media_reset() puts back the board's 4096. */
+void fake_media_set_fs_cluster(uint32_t bytes);
+
 /**
  * @brief Does @p name exist under @p dir?
  * @param dir  One of the two directories above.
