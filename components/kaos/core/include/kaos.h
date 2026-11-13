@@ -2746,7 +2746,11 @@ QEvt const *mqtt_down_evt(void);
  *
  * Fire-and-forget, like appmgr_flash_request(): queued in the client's
  * outbox and reported in '!' lines. A payload longer than
- * KODE_MQTT_PAYLOAD_MAX is cut to it.
+ * KODE_MQTT_PAYLOAD_MAX is cut to it. AO_Net answers with MQTT_STATE_SIG:
+ * no error when the client took it, KDRV_MQTT_ERR_REFUSED when no client is
+ * up, KDRV_MQTT_ERR_NO_NET with no address, KDRV_MQTT_ERR_BUSY while the Kode
+ * channel holds the client. mqtt_sub_request() and mqtt_unsub_request() are
+ * answered the same way.
  *
  * @param topic The topic.
  * @param data  The payload.

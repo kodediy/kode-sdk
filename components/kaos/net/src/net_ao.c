@@ -1278,6 +1278,13 @@ static void mqtt_publish_taken(void)
     mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_NONE);
 }
 
+/** @brief Close an mqtt_pub, mqtt_sub or mqtt_unsub the client did not take:
+ *         there is no broker to take it to. */
+static void mqtt_publish_refused(void)
+{
+    mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_REFUSED);
+}
+
 #if CONFIG_KODEOS_CHANNEL
 /** @brief Refuse an MQTT request because the Kode channel holds the client.
  *
@@ -7140,10 +7147,11 @@ static QState Net_online(Net * const me, QEvt const * const e)
 #endif
             if ( me->busy )
             {
-                /* Another network job holds the worker: refused. */
+                /* Another network job holds the worker: refused, and answered
+                 * busy as the channel's refusal is. The client's own reason
+                 * is left alone: it did not start, and did not fail. */
                 net_say_busy("mqtt_up");
-                me->err = (uint8_t)KDRV_MQTT_ERR_REFUSED;
-                mqtt_publish_state(me);
+                mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
             }
             else if ( (uint8_t)MQTT_IDLE != me->phase )
             {
@@ -7191,8 +7199,11 @@ static QState Net_online(Net * const me, QEvt const * const e)
             }
             else if ( me->busy )
             {
+                /* Answered busy, as the channel's refusal is: the console
+                 * closes `mqtt_down` on the answer, and the client's own
+                 * state would read as a stop that worked. */
                 net_say_busy("mqtt_down");
-                mqtt_publish_state(me);
+                mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
             }
             else
             {
@@ -7223,12 +7234,17 @@ static QState Net_online(Net * const me, QEvt const * const e)
                 break;
             }
 #endif
+            /* Either answer closes the verb. */
             if ( kdrv_net_mqtt_publish(p->topic, p->data, p->len, false)
                     != KODE_OK )
             {
                 KLOG_W(TAG, "publish to '%s' refused: no broker", p->topic);
+                mqtt_publish_refused();
             }
-            mqtt_publish_taken();   /* closes the verb: busy or ok */
+            else
+            {
+                mqtt_publish_taken();
+            }
             status = Q_HANDLED();
             break;
         }
@@ -7245,12 +7261,13 @@ static QState Net_online(Net * const me, QEvt const * const e)
             if ( kdrv_net_mqtt_subscribe(t->topic) != KODE_OK )
             {
                 KLOG_W(TAG, "subscribe to '%s' refused: no broker", t->topic);
+                mqtt_publish_refused();
             }
             else
             {
                 KLOG_N(TAG, "subscribed to '%s'", t->topic);
+                mqtt_publish_taken();
             }
-            mqtt_publish_taken();
             status = Q_HANDLED();
             break;
         }
@@ -7270,8 +7287,12 @@ static QState Net_online(Net * const me, QEvt const * const e)
             {
                 KLOG_W(TAG, "unsubscribe from '%s' refused: no broker",
                        t->topic);
+                mqtt_publish_refused();
             }
-            mqtt_publish_taken();
+            else
+            {
+                mqtt_publish_taken();
+            }
             status = Q_HANDLED();
             break;
         }

@@ -297,6 +297,35 @@ static int post_write_checked(esp_http_client_handle_t client, const char *buffe
     return len;
 }
 
+/* A server that takes the connection and hangs up before a status line: the
+ * client reports no headers and a status of -1. That is no answer, and a GET
+ * must say so instead of reporting a status nobody sent. */
+TEST_CASE("a GET hung up on before its headers is an error with no status", "[kdrv_net]")
+{
+    static int                     token;
+    kdrv_net_req_t                 req;
+    kdrv_net_http_result_t         res;
+    esp_http_client_handle_t const h = (esp_http_client_handle_t)&token;
+
+    Mockesp_http_client_Init();
+    esp_http_client_init_ExpectAnyArgsAndReturn(h);
+    esp_http_client_open_ExpectAndReturn(h, 0, ESP_OK);
+    esp_http_client_fetch_headers_ExpectAndReturn(h, (int64_t)-1);
+    esp_http_client_close_ExpectAndReturn(h, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(h, ESP_OK);
+
+    (void)memset(&req, 0, sizeof(req));
+    req.type = KDRV_NET_JOB_HTTP_GET;
+    (void)strcpy(req.url, "http://example.invalid/");
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_net_run(&req));
+    kdrv_net_http_result(&res);
+    TEST_ASSERT_EQUAL_UINT16(0U, res.status);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
 /* The whole exchange, against the mocked client, in the order the server sees
  * it: the header, the length, the body, then the answer read to its end. A
  * POST that sent its headers without the length, or wrote the body before
