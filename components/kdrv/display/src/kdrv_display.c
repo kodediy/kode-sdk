@@ -215,7 +215,8 @@ static esp_lcd_panel_io_handle_t s_io;
 static bool                     s_brought_up;
 /* s_keep_lit: this firmware is leaving the frame on the glass, and the restart
  * must not reset the panel; written here, read by the restart's handler.
- * s_video_owed: a resume is waiting for its first frame to start the scan-out. */
+ * s_video_owed: the panel shows its memory and the scan-out waits for the first
+ * whole frame, after a resume or a link that came up over a panel awake. */
 static volatile bool            s_keep_lit;
 static bool                     s_rail_was_off;  /* This boot powered the panel: see panel_power_on(). */
 static bool                     s_video_owed;
@@ -1741,13 +1742,19 @@ static kode_status_t window_whole(void)
  *
  * The same rail, bus and control IO as the bring-up, then a plain video panel
  * of the same timing - not the CO5300 object, whose init would read the ID and
- * send the table - started with the generic init, which only turns the scan-out
- * on. The panel is told nothing but a brightness of 0.
+ * send the table. The framebuffers are new: black, and possibly at other
+ * addresses than before.
  *
- * The framebuffers are new: black, and possibly at other addresses than
- * before. The link comes back in the state the bring-up leaves, dark until the
- * first frame, and that first frame lights the panel at the last level asked
- * for (hold_release()).
+ * Over a panel that is awake nothing is written to the panel and the scan-out
+ * is left owed (s_video_owed): the glass goes on showing its memory at the
+ * brightness it has, and the first whole frame starts the video
+ * (video_begin()). No hold stands, so a brightness asked for meanwhile is
+ * written at once.
+ *
+ * Over a panel that sleeps the generic init turns the scan-out on at once and
+ * the panel is told a brightness of 0. The link comes back in the state the
+ * bring-up leaves, dark until the first frame, and that first frame lights the
+ * panel at the last level asked for (hold_release()).
  *
  * @return KODE_OK; KODE_DENIED before the bring-up; KODE_ERROR when a part
  *         refused (the link is left down, nothing standing).
@@ -2008,7 +2015,7 @@ static esp_err_t panel_resume(uint8_t percent)
 }
 
 /**
- * @brief Start the scan-out a resume left waiting, on the first whole frame.
+ * @brief Start the scan-out left owed (s_video_owed), on the first whole frame.
  *
  * Called by the flush paths once the frame has been handed to esp_lcd.
  * esp_lcd_panel_init() starts the DPI on fb 0, always, so the frame has to be

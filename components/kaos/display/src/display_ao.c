@@ -1028,7 +1028,9 @@ static void rest_restore(Display * const me)
         }
         if ( ok )
         {
-            /* Kept by the driver until the first frame lights the glass. */
+            /* Over a panel that stayed awake the driver writes it at once,
+             * onto the picture the glass kept; over one that slept it keeps it
+             * until the first frame lights the glass. */
             (void)kdrv_display_brightness(s_state_evt.bright);
             me->have_glyphs  = false;
             me->rest         = REST_AWAKE;
