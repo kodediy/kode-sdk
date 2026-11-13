@@ -8147,6 +8147,12 @@ static QState console_own(Console * const me, QEvt const * const e)
                                   console_quote(q, sizeof(q), g->project), icon);
                     console_reply(">ok");
                 }
+                else if ( (uint8_t)APPDATA_GET_BUSY == g->why )
+                {
+                    /* The one refusal that asking again cures: the code every
+                     * other verb gives a busy answer. */
+                    console_reply_err(KCLI_ERR_BUSY, ad_get_word(g->why));
+                }
                 else
                 {
                     console_reply_err(KCLI_ERR_REJECT, ad_get_word(g->why));
