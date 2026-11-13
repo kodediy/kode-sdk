@@ -773,6 +773,22 @@ kode_status_t kdrv_apps_verify(uint32_t offset, uint32_t size, uint32_t *img_len
     return KODE_OK;
 }
 
+kode_status_t kdrv_apps_build_id(const kapps_entry_t *e, uint8_t *out)
+{
+    uint8_t head[KAPP_DESC_OFF];
+
+    if ( (NULL == s_part) || (NULL == e) || (NULL == out) )
+    {
+        return KODE_DENIED;
+    }
+    if ( esp_partition_read(s_part, e->offset, head, sizeof(head)) != ESP_OK )
+    {
+        (void)memset(out, 0, KAPP_BUILD_LEN);
+        return KODE_ERROR;
+    }
+    return kapp_build_id(head, sizeof(head), out);
+}
+
 kode_status_t kdrv_apps_erase_header(uint32_t offset)
 {
     if ( NULL == s_part )

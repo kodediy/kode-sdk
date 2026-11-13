@@ -151,6 +151,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_heard.c"
     "${SDK_DIR}/components/kaos/appmgr/src/appmgr_ao.c"
     "${SDK_DIR}/components/kaos/appmgr/src/appmgr_outcome.c"
+    "${SDK_DIR}/components/kaos/appmgr/src/appmgr_backup.c"
     "${SDK_DIR}/components/kaos/autotest/src/autotest_ao.c"
     "${SDK_DIR}/components/kaos/autotest/src/autotest_psram.c"
     "${SDK_DIR}/components/kaos/scheduler/src/sched_cron.c"
@@ -331,7 +332,7 @@ idf_component_register(
                  "${SDK_DIR}/components/kode_sys/src"
                  # console_fs.h is private to the component
                  "${SDK_DIR}/components/kaos/console/src"
-                 # appmgr_outcome.h is private to the component
+                 # appmgr_outcome.h and appmgr_backup.h are private to the component
                  "${SDK_DIR}/components/kaos/appmgr/src"
                  "${SDK_DIR}/components/kaos/core/src"
                  "${SDK_DIR}/components/kaos/autotest/src"

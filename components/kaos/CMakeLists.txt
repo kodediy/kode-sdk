@@ -63,7 +63,8 @@ set(priv_incs
     "scheduler/src")
 
 if(CONFIG_KODEOS_APPMGR)
-    list(APPEND srcs "appmgr/src/appmgr_ao.c")
+    list(APPEND srcs "appmgr/src/appmgr_ao.c"
+                     "appmgr/src/appmgr_backup.c")
     # The record of the last install of each kind, told to the port that asked.
     list(APPEND srcs "appmgr/src/appmgr_outcome.c")
 endif()

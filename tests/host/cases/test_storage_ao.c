@@ -4766,6 +4766,51 @@ TEST_CASE("a manifest read that waits past the bound is refused as it is during 
     TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "a manifest was answered twice");
 }
 
+/* The answer carries the image's build id: what tells a card's file apart
+ * from another build of the same app at the same length. */
+TEST_CASE("a manifest read answers with the image's build id",
+          "[storage_ao][appdata][read]")
+{
+    static uint8_t prefix[KAPP_PREFIX_LEN];
+    esp_app_desc_t desc;
+    uint8_t        want[KAPP_BUILD_LEN];
+
+    storage_fresh();
+    (void)memset(prefix, 0xFF, sizeof(prefix));
+    (void)memset(&desc, 0, sizeof(desc));
+    desc.magic_word = ESP_APP_DESC_MAGIC_WORD;
+    (void)snprintf(desc.project_name, sizeof(desc.project_name), "%s", "demo");
+    (void)memset(desc.app_elf_sha256, 0x7E, sizeof(desc.app_elf_sha256));
+    (void)memcpy(&prefix[KAPP_IDF_DESC_OFF], &desc, sizeof(desc));
+    fake_media_put_fs_path("demo.bin", prefix, sizeof(prefix));
+
+    storage_desc_request("demo.bin", ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+
+    const StorageDescRspEvt *r = take_desc();
+    (void)memset(want, 0x7E, sizeof(want));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(want, r->build, KAPP_BUILD_LEN);
+}
+
+/* A path names its volume: the file read is that one, and not the namesake a
+ * bare name's search finds first. */
+TEST_CASE("a manifest read by path reads that file and no namesake",
+          "[storage_ao][appdata][read]")
+{
+    storage_fresh();
+    put_sd_image("demo.bin", "oncard");
+    put_fs_image("demo.bin", "inside");
+
+    storage_desc_request("/storage/demo.bin", ao_spy());
+    (void)qf_support_pump(AO_Storage, 8U);
+
+    const StorageDescRspEvt *r = take_desc();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_STRING("inside", r->project);
+    TEST_ASSERT_EQUAL_STRING("/storage/demo.bin", r->name);
+}
+
 TEST_CASE("a manifest read and a folder read wait in one line, in order",
           "[storage_ao][appdata][read]")
 {
@@ -9084,4 +9129,82 @@ TEST_CASE("a clear takes the data folder and the image the card got first",
         "the reset left the folder the card got");
     TEST_ASSERT_FALSE_MESSAGE(on_sd("demo.bin"),
         "the reset left the image the card got");
+}
+
+/* ---- The card comes and goes: STORAGE_CARD_SIG ------------------------------- */
+
+/** @brief The spy's next STORAGE_CARD_SIG, past whatever came before it; NULL when none. */
+static const StorageCardEvt *take_card(void)
+{
+    const QEvt *e = ao_spy_take();
+
+    while ( (NULL != e) && (STORAGE_CARD_SIG != (enum_t)e->sig) )
+    {
+        e = ao_spy_take();
+    }
+    return (const StorageCardEvt *)e;
+}
+
+TEST_CASE("a card that mounts is published once, and one that goes is published",
+          "[storage_ao][card]")
+{
+    storage_fresh();
+    card_out();
+    ao_spy_subscribe(STORAGE_CARD_SIG);
+    ao_spy_drain();
+
+    ask_mount_job();
+    TEST_ASSERT_TRUE(run_sd_job());
+    const StorageCardEvt *c = take_card();
+    TEST_ASSERT_NOT_NULL_MESSAGE(c, "the mount was not published");
+    TEST_ASSERT_TRUE(c->mounted);
+
+    /* Mounted already: another mount changes nothing and says nothing. */
+    ask_mount_job();
+    (void)run_sd_job();
+    TEST_ASSERT_NULL_MESSAGE(take_card(), "a card already told was published again");
+
+    TEST_ASSERT_TRUE(storage_request_answered(KDRV_MEDIUM_SD, STORAGE_OP_UNMOUNT,
+                                              ao_spy()));
+    (void)qf_support_pump(AO_Storage, 4U);
+    TEST_ASSERT_TRUE(run_sd_job());
+    c = take_card();
+    TEST_ASSERT_NOT_NULL_MESSAGE(c, "the card's going was not published");
+    TEST_ASSERT_FALSE(c->mounted);
+}
+
+TEST_CASE("a mount that finds no card publishes nothing", "[storage_ao][card]")
+{
+    storage_fresh();
+    card_out();
+    fake_media_set_sd_present(false);
+    ao_spy_subscribe(STORAGE_CARD_SIG);
+    ao_spy_drain();
+
+    ask_mount_job();
+    (void)run_sd_job();
+    const StorageCardEvt * const c = take_card();
+    fake_media_set_sd_present(true);
+    TEST_ASSERT_NULL_MESSAGE(c, "a card that is not there was published");
+}
+
+/* A script mounts the card again inside one call, and may have formatted it:
+ * the mount told before is not this one, though the card never read as gone. */
+TEST_CASE("a card a script mounted again is published as mounted again",
+          "[storage_ao][card]")
+{
+    sd_script_fresh();
+    ask_mount_job();
+    (void)run_sd_job();
+    ao_spy_subscribe(STORAGE_CARD_SIG);
+    ao_spy_drain();
+    TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
+
+    ask_sd_verify();
+    run_sd_script();
+
+    const StorageCardEvt * const c = take_card();
+    TEST_ASSERT_NOT_NULL_MESSAGE(c, "the card a script mounted again went untold");
+    TEST_ASSERT_TRUE(c->mounted);
+    kdrv_storage_unmount(KDRV_MEDIUM_SD);
 }

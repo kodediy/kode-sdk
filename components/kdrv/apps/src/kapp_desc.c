@@ -28,6 +28,8 @@ _Static_assert(KAPP_IDF_DATE_MAX == sizeof(((esp_app_desc_t *)NULL)->date),
                "KAPP_IDF_DATE_MAX is the size of esp_app_desc_t.date");
 _Static_assert(KAPP_IDF_TIME_MAX == sizeof(((esp_app_desc_t *)NULL)->time),
                "KAPP_IDF_TIME_MAX is the size of esp_app_desc_t.time");
+_Static_assert(KAPP_BUILD_LEN == sizeof(((esp_app_desc_t *)NULL)->app_elf_sha256),
+               "KAPP_BUILD_LEN is the size of esp_app_desc_t.app_elf_sha256");
 
 /**
  * @brief True when @p s holds a terminator inside its @p max bytes.
@@ -106,6 +108,33 @@ kode_status_t kapp_desc_parse(const uint8_t *prefix, size_t len,
     return KODE_OK;
 }
 
+/**
+ * @brief Copy the IDF descriptor out of an image's prefix, and check it.
+ *
+ * The one place the descriptor is read: kapp_idf_desc() and kapp_build_id()
+ * both start here. Static, so esp_app_desc_t stays out of kapp_desc.h.
+ *
+ * @param prefix The image's first bytes; may be NULL.
+ * @param len    How many bytes @p prefix holds.
+ * @param desc   Out: the descriptor, valid when KODE_OK is answered.
+ * @return KODE_OK, or KODE_ERROR for a short or NULL prefix and for one with
+ *         no IDF descriptor at its offset.
+ */
+static kode_status_t idf_desc_read(const uint8_t *prefix, size_t len,
+                                   esp_app_desc_t *desc)
+{
+    if ( (NULL == prefix) || ((KAPP_IDF_DESC_OFF + sizeof(esp_app_desc_t)) > len) )
+    {
+        return KODE_ERROR;
+    }
+    (void)memcpy(desc, &prefix[KAPP_IDF_DESC_OFF], sizeof(*desc));
+    if ( ESP_APP_DESC_MAGIC_WORD != desc->magic_word )
+    {
+        return KODE_ERROR;   /* no IDF descriptor at this offset */
+    }
+    return KODE_OK;
+}
+
 /* Deliberately its own read rather than a helper shared with
  * kdrv_apps_desc(): that one fills five fields of kdrv_slot_desc_t from an
  * already-open partition, this one fills the caller's buffers from a
@@ -141,16 +170,10 @@ kode_status_t kapp_idf_desc(const uint8_t *prefix, size_t len,
     {
         build_time[0] = '\0';
     }
-    if ( (NULL == prefix) || ((KAPP_IDF_DESC_OFF + sizeof(esp_app_desc_t)) > len) )
+    esp_app_desc_t desc;
+    if ( KODE_OK != idf_desc_read(prefix, len, &desc) )
     {
         return KODE_ERROR;
-    }
-
-    esp_app_desc_t desc;
-    (void)memcpy(&desc, &prefix[KAPP_IDF_DESC_OFF], sizeof(desc));
-    if ( ESP_APP_DESC_MAGIC_WORD != desc.magic_word )
-    {
-        return KODE_ERROR;   /* no IDF descriptor at this offset */
     }
 
     if ( (NULL != project) && (0U < project_max) )
@@ -175,6 +198,23 @@ kode_status_t kapp_idf_desc(const uint8_t *prefix, size_t len,
         (void)snprintf(build_time, build_time_max, "%.*s",
                        (int)sizeof(desc.time), desc.time);
     }
+    return KODE_OK;
+}
+
+kode_status_t kapp_build_id(const uint8_t *prefix, size_t len, uint8_t *out)
+{
+    esp_app_desc_t desc;
+
+    if ( NULL == out )
+    {
+        return KODE_ERROR;
+    }
+    (void)memset(out, 0, KAPP_BUILD_LEN);
+    if ( KODE_OK != idf_desc_read(prefix, len, &desc) )
+    {
+        return KODE_ERROR;
+    }
+    (void)memcpy(out, desc.app_elf_sha256, KAPP_BUILD_LEN);
     return KODE_OK;
 }
 

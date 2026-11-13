@@ -431,3 +431,52 @@ TEST_CASE("any part of the descriptor read may be left out", "[kapp_desc]")
                       NULL, 0U, time_of_day, sizeof(time_of_day)));
     TEST_ASSERT_EQUAL_STRING("21:14:03", time_of_day);
 }
+
+/* ---- The build id ---------------------------------------------------------- */
+
+/** @brief Lay an IDF descriptor whose ELF digest is all @p fill in s_prefix. */
+static void put_idf_build(uint8_t fill)
+{
+    esp_app_desc_t desc;
+
+    (void)memset(s_prefix, 0xFF, sizeof(s_prefix));
+    (void)memset(&desc, 0, sizeof(desc));
+    desc.magic_word = ESP_APP_DESC_MAGIC_WORD;
+    (void)memset(desc.app_elf_sha256, (int)fill, sizeof(desc.app_elf_sha256));
+    (void)memcpy(&s_prefix[KAPP_IDF_DESC_OFF], &desc, sizeof(desc));
+}
+
+/* What tells one build of an app from another of the same length. */
+TEST_CASE("an image's build id is the ELF digest of its descriptor", "[kapp_desc]")
+{
+    uint8_t id[KAPP_BUILD_LEN];
+    uint8_t want[KAPP_BUILD_LEN];
+
+    put_idf_build(0xA5U);
+    (void)memset(want, 0xA5, sizeof(want));
+    (void)memset(id, 0, sizeof(id));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kapp_build_id(s_prefix, KAPP_DESC_OFF, id));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(want, id, KAPP_BUILD_LEN);
+}
+
+TEST_CASE("a prefix with no descriptor has no build id, and the id is zeroed",
+          "[kapp_desc]")
+{
+    uint8_t       id[KAPP_BUILD_LEN];
+    uint8_t const zero[KAPP_BUILD_LEN] = { 0U };
+
+    (void)memset(s_prefix, 0xFF, sizeof(s_prefix));
+    (void)memset(id, 0x11, sizeof(id));
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kapp_build_id(s_prefix, sizeof(s_prefix), id));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(zero, id, KAPP_BUILD_LEN);
+}
+
+TEST_CASE("a prefix cut inside the descriptor has no build id", "[kapp_desc]")
+{
+    uint8_t id[KAPP_BUILD_LEN];
+
+    put_idf_build(0x3CU);
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kapp_build_id(s_prefix, KAPP_DESC_OFF - 1U, id));
+}

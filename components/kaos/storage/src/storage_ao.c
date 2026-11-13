@@ -126,6 +126,8 @@ _Static_assert(sizeof(AppDataPutRspEvt) <= sizeof(ConsoleLineEvt),
  * budget counts the same block. */
 _Static_assert(KODE_APP_ICON_BYTES == KAPP_ICON_BYTES,
                "KODE_APP_ICON_BYTES twins KAPP_ICON_BYTES");
+_Static_assert(KODE_APP_BUILD_LEN == KAPP_BUILD_LEN,
+               "KODE_APP_BUILD_LEN twins KAPP_BUILD_LEN");
 
 /* A listing publishes at most one page plus its end marker at once, all
  * medium-tier events, so the pool must outlive that burst. */
@@ -364,6 +366,10 @@ typedef struct {
     uint32_t       w_tag;                      /**< The writer's number, for its answer. */
     bool           w_yields;                   /**< The write gives way to a download. */
     char           w_name[KODE_APP_FILE_MAX];  /**< Kept for the retry.       */
+
+    /* The card's mount, as STORAGE_CARD_SIG last told it. */
+    bool           card_told;                  /**< A mounted card was the last news. */
+    bool           card_fresh;                 /**< A call mounted the card again: the mount told is not this one. */
     QTimeEvt       w_pacer;             /**< 10 ms between chunks.             */
 
     /* The card test. One chunk per step, paced by its own timer for the same
@@ -6582,6 +6588,10 @@ static void sd_job_done(Storage * const me, KqpWorkerDoneEvt const * const e)
     }
     me->sdj.busy    = false;
     me->sdj.expired = false;
+    if ( (SD_OP_REMOUNT == me->sdj.op) || (SD_OP_FORMAT == me->sdj.op) )
+    {
+        me->card_fresh = true;   /* another mount, or another filesystem */
+    }
     if ( late )
     {
         KLOG_W(TAG, "the call to the card returned after its deadline "
@@ -7714,6 +7724,8 @@ void Storage_ctor(void)
     QActive_ctor(&me->super, Q_STATE_CAST(&Storage_initial));
     me->reader = NULL;
     me->writer = NULL;
+    me->card_told  = false;
+    me->card_fresh = false;
     me->t_phase = 0U;
     me->c_who  = NULL;
     me->p_who  = NULL;
@@ -8266,13 +8278,25 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             {
                 KLOG_D(TAG, "busy; manifest of '%s' refused", req->name);
             }
-            else if ( kdrv_storage_open(req->name, &size, &medium) == KODE_OK )
+            else
             {
-                /* Read and close inside this one step. The reader slot is
-                 * deliberately not taken: nothing outside this case can leave
-                 * the file open, so nothing outside it can strand the system. */
-                st = kdrv_storage_read(prefix, sizeof(prefix), &got);
-                (void)kdrv_storage_close();
+                /* A path names its volume; a bare name is searched for. */
+                if ( '/' == req->name[0] )
+                {
+                    st = kdrv_storage_open_path(req->name, &size);
+                }
+                else
+                {
+                    st = kdrv_storage_open(req->name, &size, &medium);
+                }
+                if ( KODE_OK == st )
+                {
+                    /* Read and close inside this one step. The reader slot is
+                     * deliberately not taken: nothing outside this case can leave
+                     * the file open, so nothing outside it can strand the system. */
+                    st = kdrv_storage_read(prefix, sizeof(prefix), &got);
+                    (void)kdrv_storage_close();
+                }
             }
 
             StorageDescRspEvt *rsp = Q_NEW_X(StorageDescRspEvt, 0U,
@@ -8282,6 +8306,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 (void)memset(rsp->project, 0, sizeof(rsp->project));
                 (void)memset(rsp->display, 0, sizeof(rsp->display));
                 (void)memset(rsp->category, 0, sizeof(rsp->category));
+                (void)memset(rsp->build, 0, sizeof(rsp->build));
                 (void)snprintf(rsp->name, sizeof(rsp->name), "%s", req->name);
                 rsp->status = (uint8_t)st;
 
@@ -8289,6 +8314,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 {
                     (void)kapp_project_name(prefix, got, rsp->project,
                                             sizeof(rsp->project));
+                    (void)kapp_build_id(prefix, got, rsp->build);
                     kapp_desc_t man;
                     if ( kapp_desc_parse(prefix, got, &man) == KODE_OK )
                     {
@@ -8887,6 +8913,7 @@ static bool card_refuse(Storage * const me, QEvt const * const e)
                 (void)memset(rsp->project, 0, sizeof(rsp->project));
                 (void)memset(rsp->display, 0, sizeof(rsp->display));
                 (void)memset(rsp->category, 0, sizeof(rsp->category));
+                (void)memset(rsp->build, 0, sizeof(rsp->build));
                 (void)snprintf(rsp->name, sizeof(rsp->name), "%s", req->name);
                 rsp->status = (uint8_t)KODE_DENIED;
                 QACTIVE_POST(req->who, &rsp->super, &me->super);
@@ -9242,6 +9269,42 @@ static void read_expired(Storage * const me)
 }
 
 /**
+ * @brief Publish STORAGE_CARD_SIG when the card's mount is not the one last told.
+ *
+ * A card that mounts, one mounted again by a single call, and one that is
+ * mounted no more. Run at the end of every event served. While a call to the
+ * card is out the driver's answer is the worker's to change, so it is read
+ * when the call has returned.
+ *
+ * @param me The AO.
+ */
+static void card_note(Storage * const me)
+{
+    if ( !me->sdj.busy )
+    {
+        bool const now = kdrv_storage_mounted(KDRV_MEDIUM_SD);
+
+        if ( (now != me->card_told) || (now && me->card_fresh) )
+        {
+            StorageCardEvt *ev = Q_NEW_X(StorageCardEvt, 0U, STORAGE_CARD_SIG);
+
+            if ( NULL != ev )
+            {
+                ev->mounted    = now;
+                me->card_told  = now;
+                me->card_fresh = false;
+                QACTIVE_PUBLISH(&ev->super, &me->super);
+            }
+            /* else: told at the next event served, the news still owed. */
+        }
+        else
+        {
+            me->card_fresh = false;
+        }
+    }
+}
+
+/**
  * @brief The only state: hold what needs the card while a call to it is out,
  *        hold what writes or reads a data folder while a transfer is in
  *        flight, serve the rest.
@@ -9310,6 +9373,7 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
         {
             card_pump(me);
             wait_pump(me);
+            card_note(me);
         }
     }
     return status;

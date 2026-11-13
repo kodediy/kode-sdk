@@ -190,6 +190,15 @@ kode_status_t kdrv_apps_desc(const kapps_entry_t *e, kdrv_slot_desc_t *out,
                              kapp_desc_t *manifest);
 
 /**
+ * @brief Read an installed app's build id out of its image header.
+ * @param e   The directory entry naming the image.
+ * @param out KAPP_BUILD_LEN bytes; zeroed when the image has no descriptor.
+ * @return KODE_OK; KODE_DENIED before init or for a NULL argument; KODE_ERROR
+ *         when the extent cannot be read or holds no descriptor.
+ */
+kode_status_t kdrv_apps_build_id(const kapps_entry_t *e, uint8_t *out);
+
+/**
  * @brief Verify the image found at @p offset within @p size bytes.
  * @param img_len Optional (may be NULL): the real image length taken from
  *                its header - the extent (or the mailbox) is usually larger

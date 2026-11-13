@@ -1261,6 +1261,46 @@ TEST_CASE("a descriptor field with no NUL is read with its width", "[apps_region
     TEST_ASSERT_EQUAL_STRING("", out.date);
 }
 
+/* The build id is the ELF digest IDF stamps in the descriptor: what tells one
+ * build of an app from another of the same length. */
+TEST_CASE("an installed image's build id is read from its descriptor", "[apps_region]")
+{
+    static uint8_t prefix[KAPP_PREFIX_LEN];
+    esp_app_desc_t desc;
+    kapps_entry_t  e = { .offset = KAPPS_DATA_OFF, .size = 0x1000U,
+                         .seq = 1U, .flags = KAPPS_ENTRY_VALID };
+    uint8_t        id[KAPP_BUILD_LEN];
+    uint8_t        want[KAPP_BUILD_LEN];
+
+    apps_ready();
+    (void)memset(prefix, 0xFF, sizeof(prefix));
+    (void)memset(&desc, 0, sizeof(desc));
+    desc.magic_word = ESP_APP_DESC_MAGIC_WORD;
+    (void)memset(desc.app_elf_sha256, 0x5A, sizeof(desc.app_elf_sha256));
+    (void)memcpy(&prefix[KAPP_IDF_DESC_OFF], &desc, sizeof(desc));
+    kdrv_apps_write_abort();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(e.offset, sizeof(prefix)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(prefix, sizeof(prefix)));
+    kdrv_apps_write_abort();
+
+    (void)memset(want, 0x5A, sizeof(want));
+    (void)memset(id, 0, sizeof(id));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_build_id(&e, id));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(want, id, KAPP_BUILD_LEN);
+}
+
+TEST_CASE("an entry pointing at nothing has no build id", "[apps_region]")
+{
+    kapps_entry_t e = { .offset = KAPPS_DATA_OFF, .size = 0x1000U,
+                        .seq = 1U, .flags = KAPPS_ENTRY_VALID };
+    uint8_t       id[KAPP_BUILD_LEN];
+
+    apps_ready();
+    plant_desc(e.offset, "ghost", false);
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_apps_build_id(&e, id));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_apps_build_id(NULL, id));
+}
+
 /* Erased flash is not an image, and neither is one whose descriptor magic is
  * wrong. Both must be errors rather than a struct full of whatever was there:
  * the strings go straight into a listing an operator reads. */

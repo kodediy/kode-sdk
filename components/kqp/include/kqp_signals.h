@@ -354,6 +354,8 @@ enum KodeSignals {
     STORAGE_INFO_SIG,           /**< AO_Storage: one medium's mount state and
                                  *   usage, in answer to STORAGE_OP_INFO
                                  *   (StorageInfoEvt).                        */
+    STORAGE_CARD_SIG,           /**< AO_Storage: the card was mounted, or is
+                                 *   mounted no more (StorageCardEvt).        */
     STORAGE_TEST_SIG,           /**< AO_Storage: one phase of the card test
                                  *   (StorageTestEvt) - what it did and what
                                  *   it measured. The console prints it.      */
@@ -2817,6 +2819,7 @@ typedef struct {
     char    project[32];                         /**< esp_app_desc_t.project_name. */
     char    display[KODE_APP_DISPLAY_MAX];       /**< Empty when unmanifested.   */
     char    category[KODE_APP_CATEGORY_MAX];     /**< Empty when none is named.  */
+    uint8_t build[KODE_APP_BUILD_LEN];           /**< The image's build id; zero when it has none. */
     uint8_t status;                              /**< kode_status_t of the read. */
 } StorageDescRspEvt;
 
@@ -6818,6 +6821,18 @@ typedef struct {
     uint32_t free_kb;
     uint32_t card_mb;       /**< The card's own capacity; 0 when unknown.    */
 } StorageInfoEvt;
+
+/**
+ * @brief The card's mount changed (STORAGE_CARD_SIG).
+ *
+ * Published when a card is mounted, the same one again or another, and when
+ * the mounted card is mounted no more. What was known of its files is to be
+ * asked again.
+ */
+typedef struct {
+    QEvt super;
+    bool mounted;           /**< A card is mounted now.                      */
+} StorageCardEvt;
 
 /**
  * @brief Read, write or dump one field of the card (STORAGE_FIELD_REQ_SIG).

@@ -797,6 +797,7 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 #define KODE_APP_PROJECT_MAX    32U   /**< == KDRV_SLOT_PROJECT_MAX: a
                                        *   project name, terminator
                                        *   included.                        */
+#define KODE_APP_BUILD_LEN      32U   /**< == KAPP_BUILD_LEN: an image's build id. */
 /* An app's data folder (app.json and icon.k64) may reach the internal
  * partition before its app does, so nothing bounds how many there are but the
  * partition itself. A put is charged what it weighs on the volume: its json

@@ -43,6 +43,8 @@ extern "C" {
 #define KAPP_IDF_DATE_MAX   16U
 /** @brief Bytes of esp_app_desc_t.time, terminator included: "21:14:03". */
 #define KAPP_IDF_TIME_MAX   16U
+/** @brief Bytes of an image's build id: esp_app_desc_t.app_elf_sha256, the digest of its ELF. */
+#define KAPP_BUILD_LEN      32U
 
 /**
  * @brief What an app declares about itself.
@@ -117,6 +119,19 @@ kode_status_t kapp_idf_desc(const uint8_t *prefix, size_t len,
                             char *version, size_t version_max,
                             char *build_date, size_t build_date_max,
                             char *build_time, size_t build_time_max);
+
+/**
+ * @brief An image's build id, from its prefix: the ELF digest IDF stamps in it.
+ *
+ * Two builds of an app differ in it even at the same length, so it is what
+ * says a file is the image an app was installed from.
+ *
+ * @param prefix The first bytes of an image; at least KAPP_DESC_OFF of them.
+ * @param len    How many bytes @p prefix holds.
+ * @param out    KAPP_BUILD_LEN bytes; zeroed when there is no id.
+ * @return KODE_OK when IDF's descriptor was found at its fixed offset.
+ */
+kode_status_t kapp_build_id(const uint8_t *prefix, size_t len, uint8_t *out);
 
 /**
  * @brief The chip an ESP image was built for, from its header.
