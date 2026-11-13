@@ -183,9 +183,9 @@ typedef struct {
  * @param depth The ring's length: the queue holds one request more.
  * @param sig   The bound's signal.
  */
-static void wait_init(StorageWait * const w, QActive * const ao,
-                      QEvtPtr * const ring, uint_fast16_t const depth,
-                      enum_t const sig)
+static void storage_wait_init(StorageWait * const w, QActive * const ao,
+                              QEvtPtr * const ring, uint_fast16_t const depth,
+                              enum_t const sig)
 {
     QEQueue_init(&w->q, ring, depth);
     w->live  = false;
@@ -197,7 +197,7 @@ static void wait_init(StorageWait * const w, QActive * const ao,
  * @brief Start the bound, unless a request that waits has started it.
  * @param w The wait.
  */
-static void wait_arm(StorageWait * const w)
+static void storage_wait_arm(StorageWait * const w)
 {
     if ( !w->live )
     {
@@ -214,14 +214,14 @@ static void wait_arm(StorageWait * const w)
  * @param e  The request.
  * @return true when it was kept; false when the wait is full.
  */
-static bool wait_hold(QActive * const ao, StorageWait * const w,
-                      QEvt const * const e)
+static bool storage_wait_hold(QActive const * const ao, StorageWait * const w,
+                              QEvt const * const e)
 {
     bool const held = QActive_defer(ao, &w->q, e);
 
     if ( held )
     {
-        wait_arm(w);
+        storage_wait_arm(w);
     }
     return held;
 }
@@ -230,7 +230,7 @@ static bool wait_hold(QActive * const ao, StorageWait * const w,
  * @brief End the bound, because nothing that waited is left.
  * @param w The wait.
  */
-static void wait_stop(StorageWait * const w)
+static void storage_wait_stop(StorageWait * const w)
 {
     if ( w->live )
     {
@@ -250,7 +250,7 @@ static void wait_stop(StorageWait * const w)
  * @param w The wait.
  * @return true when the bound has passed for what waits now.
  */
-static bool wait_due(StorageWait * const w)
+static bool storage_wait_due(StorageWait * const w)
 {
     bool due = false;
 
@@ -2429,11 +2429,11 @@ static void appdata_put_say(const char *project, kode_status_t rc, bool icon,
  * @param who     The asker.
  * @param project The project the put was for.
  * @param rc      The outcome.
- * @param busy    The put got no turn within KODE_STORAGE_TURN_MS: the answer
+ * @param no_turn The put got no turn within KODE_STORAGE_TURN_MS: the answer
  *                is KODE_DENIED and the same put may be asked again.
  */
 static void appdata_put_answer(QActive *who, const char *project,
-                               kode_status_t rc, bool busy)
+                               kode_status_t rc, bool no_turn)
 {
     AppDataPutRspEvt *rsp = Q_NEW_X(AppDataPutRspEvt, 0U, APPDATA_PUT_RSP_SIG);
     if ( NULL == rsp )
@@ -2443,7 +2443,7 @@ static void appdata_put_answer(QActive *who, const char *project,
     }
     (void)snprintf(rsp->project, sizeof(rsp->project), "%s", project);
     rsp->rc   = rc;
-    rsp->busy = busy;
+    rsp->busy = no_turn;
     QACTIVE_POST(who, &rsp->super, NULL);
 }
 
@@ -2508,8 +2508,10 @@ static kode_status_t appdata_put_mkdir(const char *path)
  */
 static bool appdata_file_path(char *out, const char *folder, const char *name)
 {
-    return snprintf(out, APPDATA_PATH_MAX, "%s/%s", folder, name)
-        < (int)APPDATA_PATH_MAX;
+    size_t const cap = APPDATA_PATH_MAX;
+    int const    n   = snprintf(out, cap, "%s/%s", folder, name);
+
+    return (0 <= n) && ((size_t)n < cap);
 }
 
 /**
@@ -2610,22 +2612,22 @@ static void appdata_put_sweep(const char *folder)
     AppDataRmList * const list = &l_appdata_list;
     char                  sub[KAPP_DATA_ICON_MAX];
     char                  path[APPDATA_PATH_MAX];
-    bool                  all = appdata_rm_files(folder, list, sub, sizeof(sub),
-                                                 true);
+    bool                  gone = appdata_rm_files(folder, list, sub,
+                                                  sizeof(sub), true);
 
     if ( '\0' != sub[0] )
     {
         if ( appdata_file_path(path, folder, sub) )
         {
-            all = appdata_rm_files(path, list, NULL, 0U, false) && all;
-            all = (kdrv_storage_rmdir(path) == KODE_OK) && all;
+            gone = appdata_rm_files(path, list, NULL, 0U, false) && gone;
+            gone = (kdrv_storage_rmdir(path) == KODE_OK) && gone;
         }
         else
         {
-            all = false;
+            gone = false;
         }
     }
-    if ( !all )
+    if ( !gone )
     {
         KLOG_W(TAG, "the old files of '%s' did not all go", folder);
     }
@@ -4124,7 +4126,6 @@ static const QEvt s_recv_ack_evt   = QEVT_INITIALIZER(RECV_ACK_SIG);
 static const QEvt s_recv_done_evt  = QEVT_INITIALIZER(RECV_DONE_SIG);
 static const QEvt s_recv_fail_evt  = QEVT_INITIALIZER(RECV_FAIL_SIG);
 static const QEvt s_recv_stall_evt = QEVT_INITIALIZER(RECV_STALL_SIG);
-static const QEvt s_recv_busy_evt  = QEVT_INITIALIZER(RECV_BUSY_SIG);
 
 /* Posted to AO_Log, and only ever an abort: a transfer that reached its
  * byte count has left raw mode already. */
@@ -4230,9 +4231,11 @@ static void recv_deny(QActive *who)
  */
 static void recv_busy(QActive *who)
 {
+    static const QEvt busy_evt = QEVT_INITIALIZER(RECV_BUSY_SIG);
+
     if ( NULL != who )
     {
-        QACTIVE_POST(who, &s_recv_busy_evt, NULL);
+        QACTIVE_POST(who, &busy_evt, NULL);
     }
 }
 
@@ -5989,9 +5992,9 @@ void Storage_ctor(void)
     (void)memset(&me->worker, 0, sizeof(me->worker));
     (void)memset(&me->sdj, 0, sizeof(me->sdj));
     QEQueue_init(&me->deferq, me->defer_sto, Q_DIM(me->defer_sto));
-    wait_init(&me->turn, &me->super, NULL, 0U, STORAGE_TURN_TO_SIG);
-    wait_init(&me->reads, &me->super, me->read_sto, Q_DIM(me->read_sto),
-              STORAGE_READ_TO_SIG);
+    storage_wait_init(&me->turn, &me->super, NULL, 0U, STORAGE_TURN_TO_SIG);
+    storage_wait_init(&me->reads, &me->super, me->read_sto, Q_DIM(me->read_sto),
+                      STORAGE_READ_TO_SIG);
     QTimeEvt_ctorX(&me->read_retry, &me->super, STORAGE_READ_RETRY_SIG, 0U);
     me->read_pause = false;
     me->read_final = false;
@@ -6348,18 +6351,18 @@ static void icon_pieces_give(AppDataIconEvt **ic)
  */
 static bool icon_pieces_take(AppDataIconEvt **ic)
 {
-    bool all = true;
+    bool taken = true;
 
     for ( uint8_t s = 0U; KODE_APP_ICON_PIECES > s; ++s )
     {
         ic[s] = Q_NEW_X(AppDataIconEvt, 0U, APPDATA_ICON_SIG);
-        all   = all && (NULL != ic[s]);
+        taken = taken && (NULL != ic[s]);
     }
-    if ( !all )
+    if ( !taken )
     {
         icon_pieces_give(ic);
     }
-    return all;
+    return taken;
 }
 
 /**
@@ -7345,7 +7348,7 @@ static bool turn_wanted(QEvt const * const e)
  */
 static bool turn_hold(Storage * const me, QEvt const * const e)
 {
-    bool const held = wait_hold(&me->super, &me->turn, e);
+    bool const held = storage_wait_hold(&me->super, &me->turn, e);
 
     if ( held )
     {
@@ -7366,7 +7369,7 @@ static bool turn_hold(Storage * const me, QEvt const * const e)
  */
 static bool read_hold(Storage * const me, QEvt const * const e)
 {
-    bool const held = wait_hold(&me->super, &me->reads, e);
+    bool const held = storage_wait_hold(&me->super, &me->reads, e);
 
     if ( held )
     {
@@ -7397,13 +7400,13 @@ static void wait_pump(Storage * const me)
     }
     if ( QActive_recall(&me->super, &me->turn.q) )
     {
-        wait_stop(&me->turn);
+        storage_wait_stop(&me->turn);
     }
     else if ( !me->read_pause && QActive_recall(&me->super, &me->reads.q) )
     {
         if ( QEQueue_isEmpty(&me->reads.q) )
         {
-            wait_stop(&me->reads);
+            storage_wait_stop(&me->reads);
         }
     }
     else
@@ -7423,7 +7426,7 @@ static void wait_pump(Storage * const me)
  */
 static void turn_expired(Storage * const me)
 {
-    if ( wait_due(&me->turn) )
+    if ( storage_wait_due(&me->turn) )
     {
         QEvt const * const held = QEQueue_get(&me->turn.q,
                                               (uint_fast8_t)me->super.prio);
@@ -7447,7 +7450,7 @@ static void turn_expired(Storage * const me)
  */
 static void read_expired(Storage * const me)
 {
-    if ( wait_due(&me->reads) )
+    if ( storage_wait_due(&me->reads) )
     {
         QEvt const *held = QEQueue_get(&me->reads.q,
                                        (uint_fast8_t)me->super.prio);

@@ -6,6 +6,7 @@
 #include "kdrv_storage.h"
 
 #include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -649,6 +650,28 @@ kode_status_t kdrv_storage_rmdir(const char *path)
     return KODE_OK;
 }
 
+/**
+ * @brief Whether two names are the same but for the case of their letters.
+ *
+ * FAT does not tell such names apart, so a rename between them is the same
+ * object under another spelling, which FatFs allows.
+ *
+ * @param a A name.
+ * @param b Another.
+ * @return true when they are equal ignoring case; also when they are equal.
+ */
+static bool same_name_in_case(const char *a, const char *b)
+{
+    size_t i = 0U;
+
+    while ( ('\0' != a[i]) && ('\0' != b[i])
+           && (tolower((unsigned char)a[i]) == tolower((unsigned char)b[i])) )
+    {
+        ++i;
+    }
+    return ('\0' == a[i]) && ('\0' == b[i]);
+}
+
 kode_status_t kdrv_storage_rename(const char *from, const char *to)
 {
     if ( (NULL == from) || (NULL == to) )
@@ -688,13 +711,11 @@ kode_status_t kdrv_storage_rename(const char *from, const char *to)
     /* FatFs refuses a rename onto a name that is there (FR_EXIST) and the
      * VFS passes it on, where POSIX's rename() replaces the target. Said
      * here, so a caller that forgot to remove the target fails on the host as
-     * it does on the board. The same object under a name that only differs in
-     * case is no other object: FatFs renames it. */
-    struct stat taken;
-    struct stat moving;
-    if ( (0 == stat(real_to, &taken))
-        && !((0 == stat(real_from, &moving)) && (taken.st_dev == moving.st_dev)
-             && (taken.st_ino == moving.st_ino)) )
+     * it does on the board. A name that only differs in case is the same
+     * object: FAT does not tell the two apart, and FatFs renames it. */
+    kdrv_stat_t taken;
+    if ( (kdrv_storage_stat(to, &taken) == KODE_OK) && taken.exists
+        && !same_name_in_case(from, to) )
     {
         return KODE_ERROR;
     }
