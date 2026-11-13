@@ -39,8 +39,19 @@ static bool s_present  = true;
 static bool s_no_volume; /**< A card answers, with no FAT volume on it. */
 static bool s_fail_writes;
 static bool s_fail_reads;
+static bool s_fail_wide_writes;   /**< Writes fail while the mount is wider than one line. */
+static bool s_fail_wide_reads;    /**< Reads fail while the mount is wider than one line.  */
+static bool     s_reads_limited;  /**< Reads fail once s_reads_left have passed.           */
+static unsigned s_reads_left;     /**< Reads that still succeed while limited.             */
+static uint8_t  s_fail_mount_width; /**< The width the failing mounts ask for.             */
+static unsigned s_fail_mount_left;  /**< How many more mounts of it fail.                  */
 static bool s_fail_format;
 static uint32_t s_read_ms;    /**< What one raw read is made to cost.        */
+
+/** @brief The serial the first card of the run carries; each later one has the next. */
+#define SD_SERIAL_FIRST  0xDEAD0000U
+
+static uint32_t s_serial_next = SD_SERIAL_FIRST;   /**< Not reset: no two cards of a run share one. */
 
 static khal_sdmmc_card_t s_card;      /**< What the next mount reports.      */
 static khal_sdmmc_card_t s_live;      /**< What the current mount reported.  */
@@ -52,6 +63,15 @@ static bool     s_hosted;
 static unsigned s_mounts;
 static uint8_t  s_last_width;
 static uint32_t s_last_khz;
+static unsigned s_raw_writes;
+
+/** @brief Calls the trace keeps. */
+#define SD_TRACE_MAX  256U
+/** @brief Characters of one traced call, the terminator included. */
+#define SD_TRACE_LEN  40U
+
+static char     s_trace[SD_TRACE_MAX][SD_TRACE_LEN];
+static unsigned s_trace_count;
 
 /* ---- The directory ------------------------------------------------------- */
 
@@ -207,6 +227,7 @@ void fake_sdmmc_reset(void)
 
     (void)memset(s_store, 0, sizeof(s_store));
     default_card(&s_card);
+    fake_sdmmc_fresh_card();
     (void)memset(&s_live, 0, sizeof(s_live));
 
     s_mounted     = false;
@@ -216,6 +237,12 @@ void fake_sdmmc_reset(void)
     s_no_volume   = false;
     s_fail_writes = false;
     s_fail_reads  = false;
+    s_fail_wide_writes = false;
+    s_fail_wide_reads  = false;
+    s_reads_limited    = false;
+    s_reads_left       = 0U;
+    s_fail_mount_width = 0U;
+    s_fail_mount_left  = 0U;
     s_fail_format = false;
     s_read_ms     = 0U;
     s_max_width   = 4U;
@@ -225,6 +252,8 @@ void fake_sdmmc_reset(void)
     s_mounts      = 0U;
     s_last_width  = 0U;
     s_last_khz    = 0U;
+    s_raw_writes  = 0U;
+    s_trace_count = 0U;
 }
 
 const char *fake_sdmmc_dir(void)
@@ -256,6 +285,12 @@ void fake_sdmmc_default_card(khal_sdmmc_card_t *out)
     default_card(out);
 }
 
+void fake_sdmmc_fresh_card(void)
+{
+    s_card.serial = s_serial_next;
+    ++s_serial_next;
+}
+
 void fake_sdmmc_set_max_width(uint8_t width)
 {
     s_max_width = width;
@@ -279,6 +314,28 @@ void fake_sdmmc_fail_writes(bool fail)
 void fake_sdmmc_fail_reads(bool fail)
 {
     s_fail_reads = fail;
+}
+
+void fake_sdmmc_fail_reads_after(unsigned ok)
+{
+    s_reads_limited = true;
+    s_reads_left    = ok;
+}
+
+void fake_sdmmc_fail_wide_writes(bool fail)
+{
+    s_fail_wide_writes = fail;
+}
+
+void fake_sdmmc_fail_wide_reads(bool fail)
+{
+    s_fail_wide_reads = fail;
+}
+
+void fake_sdmmc_fail_mounts(uint8_t width, unsigned n)
+{
+    s_fail_mount_width = width;
+    s_fail_mount_left  = n;
 }
 
 void fake_sdmmc_set_read_ms(uint32_t ms)
@@ -339,6 +396,56 @@ uint8_t fake_sdmmc_last_width(void)
 uint32_t fake_sdmmc_last_khz(void)
 {
     return s_last_khz;
+}
+
+unsigned fake_sdmmc_raw_writes(void)
+{
+    return s_raw_writes;
+}
+
+void fake_sdmmc_trace_reset(void)
+{
+    s_trace_count = 0U;
+    s_raw_writes  = 0U;
+}
+
+unsigned fake_sdmmc_trace_count(void)
+{
+    return s_trace_count;
+}
+
+const char *fake_sdmmc_trace_line(unsigned idx)
+{
+    if ( (idx >= s_trace_count) || (SD_TRACE_MAX <= idx) )
+    {
+        return NULL;
+    }
+    return s_trace[idx];
+}
+
+void fake_sdmmc_trace_note(const char *what)
+{
+    if ( SD_TRACE_MAX > s_trace_count )
+    {
+        (void)snprintf(s_trace[s_trace_count], SD_TRACE_LEN, "%s", what);
+    }
+    ++s_trace_count;
+}
+
+/** @brief Trace one call of the seam: its name and, when it has one, its number. */
+static void trace_call(const char *name, uint32_t arg, bool has_arg)
+{
+    char line[SD_TRACE_LEN];
+
+    if ( has_arg )
+    {
+        (void)snprintf(line, sizeof(line), "%s %lu", name, (unsigned long)arg);
+    }
+    else
+    {
+        (void)snprintf(line, sizeof(line), "%s", name);
+    }
+    fake_sdmmc_trace_note(line);
 }
 
 /* ---- khal_sdmmc ---------------------------------------------------------- */
@@ -422,6 +529,7 @@ kode_status_t khal_sdmmc_mount(uint8_t width, uint32_t max_khz,
         return KODE_DENIED;
     }
     ++s_mounts;
+    trace_call("mount", (uint32_t)width, true);
     if ( s_refuse || s_deny )
     {
         return KODE_DENIED;
@@ -429,6 +537,11 @@ kode_status_t khal_sdmmc_mount(uint8_t width, uint32_t max_khz,
     s_last_width = width;
     s_last_khz   = max_khz;
 
+    if ( (0U < s_fail_mount_left) && (width == s_fail_mount_width) )
+    {
+        --s_fail_mount_left;
+        return KODE_TIMEOUT;
+    }
     kode_status_t const st = identify(width, max_khz);
 
     if ( KODE_OK != st )
@@ -445,6 +558,7 @@ kode_status_t khal_sdmmc_mount(uint8_t width, uint32_t max_khz,
 
 void khal_sdmmc_unmount(void)
 {
+    trace_call("unmount", 0U, false);
     s_mounted = false;
 }
 
@@ -552,15 +666,24 @@ kode_status_t khal_sdmmc_read_sectors(uint32_t first, uint32_t count, void *dst)
     {
         return KODE_DENIED;
     }
+    trace_call("read", first, true);
     /* Charged before the failure check, so a case can make a read both slow
      * and doomed if it wants to. */
     if ( 0U != s_read_ms )
     {
         fake_time_advance_ms(s_read_ms);
     }
-    if ( s_fail_reads )
+    if ( s_fail_reads || (s_fail_wide_reads && (1U < s_live.bus_width)) )
     {
         return KODE_ERROR;
+    }
+    if ( s_reads_limited )
+    {
+        if ( 0U == s_reads_left )
+        {
+            return KODE_ERROR;
+        }
+        --s_reads_left;
     }
     if ( (first + count) > s_live.sectors )
     {
@@ -590,7 +713,8 @@ kode_status_t khal_sdmmc_write_sectors(uint32_t first, uint32_t count,
     {
         return KODE_DENIED;
     }
-    if ( s_fail_writes )
+    trace_call("write", first, true);
+    if ( s_fail_writes || (s_fail_wide_writes && (1U < s_live.bus_width)) )
     {
         return KODE_ERROR;
     }
@@ -598,6 +722,7 @@ kode_status_t khal_sdmmc_write_sectors(uint32_t first, uint32_t count,
     {
         return KODE_ERROR;
     }
+    ++s_raw_writes;
     const uint8_t *in = (const uint8_t *)src;
 
     for ( uint32_t i = 0U; i < count; ++i )
