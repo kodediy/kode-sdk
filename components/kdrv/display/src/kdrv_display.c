@@ -1662,6 +1662,10 @@ static kode_status_t link_down(void)
     /* The video ends in the vertical blanking (on_vsync()). A board that sees
      * no vsync in time goes on regardless: a dark line is less harm than a
      * glass that never rests. */
+    if ( s_video_owed )
+    {
+        KLOG_D(TAG, "link down: the video was still owed, nothing to stop");
+    }
     s_video_stopped  = s_video_owed;   /* owed, it never started: nothing to stop */
     s_video_stop_ask = !s_video_owed;
     s_video_owed     = false;
@@ -2070,11 +2074,11 @@ static esp_err_t video_begin(uint8_t *shown)
     s_flipping = false;
     if ( ESP_OK != err )
     {
-        KLOG_E(TAG, "resume: the scan-out would not start (%s)", esp_err_to_name(err));
+        KLOG_E(TAG, "the scan-out would not start on the first frame (%s)", esp_err_to_name(err));
     }
     else
     {
-        KLOG_I(TAG, "resume: video from the first frame, %lu ms after the panel was up",
+        KLOG_I(TAG, "video from the first frame, %lu ms after the link came up",
                (unsigned long)(khal_time_ms() - s_up_ms));
     }
     return err;
