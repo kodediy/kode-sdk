@@ -476,6 +476,8 @@ typedef struct {
     uint8_t  pos;           /**< The place of that row in the run, from 1.   */
     bool     step_fail;     /**< A step of the row in flight was answered,
                              *   and answered no.                             */
+    bool     step_card;     /**< The final station's own card refused the
+                             *   megabyte or did not give it back.          */
     bool     step_timeout;  /**< A step of it was never answered.            */
     bool     step_absent;   /**< The card's first step found no card.        */
     uint8_t  tally[AUTOTEST_ROW_STATES]; /**< Rows ended so far, by state.   */
@@ -781,7 +783,8 @@ static void row_close(Autotest *me, const krow_t *t, uint8_t state)
 /**
  * @brief How an owner's verdict reads, given what the row's steps said.
  *
- * An owner answers pass or fail. A fail with a step unanswered and none
+ * An owner answers pass or fail. A pass of the card row whose write or
+ * read-back failed at the final station is a fail. A fail with a step unanswered and none
  * answered no was never judged (nobody pressed TOP): a timeout. A card row
  * that found no card is skipped, where the row says an empty slot is no fault.
  *
@@ -794,9 +797,13 @@ static uint8_t verdict_state(const Autotest *me, const krow_t *t, bool ok)
 {
     uint8_t state = AUTOTEST_ROW_FAIL;
 
-    if ( ok )
+    if ( ok && !me->step_card )
     {
         state = AUTOTEST_ROW_PASS;
+    }
+    else if ( ok )
+    {
+        /* The slot passed and the station's card did not: a failure there. */
     }
     else if ( me->step_absent && ((t->flags & KROW_F_SKIP_NO_CARD) != 0U) )
     {
@@ -983,6 +990,7 @@ static void autotest_walk(Autotest *me)
 
             me->pos += 1U;
             me->step_fail    = false;
+            me->step_card    = false;
             me->step_timeout = false;
             me->step_absent  = false;
             if ( KROW_ASYNC == t->kind )
@@ -1087,6 +1095,7 @@ void Autotest_ctor(void)
     me->row          = NULL;
     me->pos          = 0U;
     me->step_fail    = false;
+    me->step_card    = false;
     me->step_timeout = false;
     me->step_absent  = false;
 #if CONFIG_KODE_LOWPOWER
@@ -1285,6 +1294,16 @@ static void step_note(Autotest *me, QEvt const * const e)
                 && (SD_TEST_STEPS == t->total) && (0U == t->capacity_mb) )
             {
                 me->step_absent = true;
+            }
+            /* At the final station the card is the station's own, a good one:
+             * a megabyte it will not take, or does not give back the same, is
+             * the slot's to answer for there. Anywhere else it stays what the
+             * owner says it is, a bad card in a good slot. */
+            if ( (AUTOTEST_CLIENT_TEST_DOT == me->client) && !t->ok
+                && (SD_TEST_STEPS == t->total)
+                && ((SD_TEST_WRITE == t->phase) || (SD_TEST_VERIFY == t->phase)) )
+            {
+                me->step_card = true;
             }
             break;
         }
