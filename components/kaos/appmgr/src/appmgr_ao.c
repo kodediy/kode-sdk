@@ -4248,8 +4248,14 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
         case LOWPOWER_ROUND_SIG: {
             /* Idle: no image is being written, kept, received or launched;
              * a card waiting for its install is the one thing in hand. */
+            const char *why = NULL;
+
+            if ( me->held )
+            {
+                why = "install announced";
+            }
             lowpower_ready(me->lp_who, Q_EVT_CAST(LowPowerRoundEvt)->round,
-                           me->held, me->held ? "install announced" : NULL);
+                           me->held, why);
             status = Q_HANDLED();
             break;
         }
