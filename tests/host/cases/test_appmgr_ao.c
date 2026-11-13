@@ -1093,6 +1093,7 @@ static void rm_rsp(const char *project, kode_status_t st);
 static void wipe_rsp(const char *project, kode_status_t st, uint8_t fs_files,
                      uint8_t sd_files, uint8_t left);
 static void        answer_stat(bool exists, uint8_t rc);
+static void        answer_copy_of(uint32_t bytes);
 
 /* Fix 2: adoption plans and evicts BEFORE the copy, and the copy is what the
  * crypto verify judges - so without a source check a torn upload (headers
@@ -1158,7 +1159,7 @@ TEST_CASE("a mailbox image that fails verification does not evict an app for roo
     if ( NULL != s )
     {
         QF_gc(s);
-        answer_stat(true, (uint8_t)KODE_OK);
+        answer_copy_of(dir.e[0].size);
     }
     run_ticks(4U);
     TEST_ASSERT_TRUE_MESSAGE(boot_run_request(&off, &size, &mode),
@@ -2641,8 +2642,8 @@ static bool klog_has(const char *needle)
     return false;
 }
 
-/** @brief Answer a path request of kind @p op the way AO_Storage would. */
-static void answer_path(uint8_t op, uint8_t rc, bool exists, bool is_dir)
+/** @brief Answer a path request of kind @p op the way AO_Storage would; @p size is a STAT's file length. */
+static void answer_path(uint8_t op, uint8_t rc, bool exists, bool is_dir, uint32_t size)
 {
     StoragePathRspEvt r;
 
@@ -2652,13 +2653,26 @@ static void answer_path(uint8_t op, uint8_t rc, bool exists, bool is_dir)
     r.rc     = rc;
     r.exists = exists;
     r.is_dir = is_dir;
+    r.size   = size;
     QASM_DISPATCH(AO_AppMgr, &r.super, 0U);
 }
 
-/** @brief Answer AppMgr's STAT: the path is there or it is not. */
+/**
+ * @brief Answer AppMgr's STAT when nothing is there, or the STAT failed.
+ *
+ * A file that is there has a length, and whether it is a victim's copy
+ * depends on it: that answer is answer_copy_of()'s.
+ */
 static void answer_stat(bool exists, uint8_t rc)
 {
-    answer_path((uint8_t)STORAGE_PATH_STAT, rc, exists, false);
+    TEST_ASSERT_FALSE_MESSAGE(exists, "a file that is there has a length: answer_copy_of()");
+    answer_path((uint8_t)STORAGE_PATH_STAT, rc, exists, false, 0U);
+}
+
+/** @brief Answer AppMgr's STAT: a file of @p bytes bytes is where the copy would be. */
+static void answer_copy_of(uint32_t bytes)
+{
+    answer_path((uint8_t)STORAGE_PATH_STAT, (uint8_t)KODE_OK, true, false, bytes);
 }
 
 /** @brief Answer AppMgr's whole-buffer write. */
@@ -3138,7 +3152,7 @@ TEST_CASE("a victim already on the card is not copied again",
     (void)begin_install((uint8_t)KDRV_MEDIUM_FS, "new");
     storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
 
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(old_bytes());
     run_ticks(50U);                           /* the restart, and then some */
 
     storage_seen_t const seen = storage_tally();
@@ -3149,6 +3163,63 @@ TEST_CASE("a victim already on the card is not copied again",
     TEST_ASSERT_TRUE(klog_has("'old' is already on the card"));
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "the copy round evicts nothing");
 
+    let_the_open_expire();
+    keep_end();
+}
+
+/* A file of the victim's name is its copy only when it is as long as the image:
+ * an older version of the app, kept by an earlier eviction, or another file, is
+ * something else, and evicting the app on its account would lose it. */
+TEST_CASE("a file of the victim's name at another length is copied over, not taken for its copy",
+          "[appmgr_ao][keep]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    (void)begin_install((uint8_t)KDRV_MEDIUM_FS, "new");
+    storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
+
+    answer_copy_of(old_bytes() / 2U);          /* an older version, half as long */
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("is already on the card"),
+        "a file of another length was taken for the app's copy");
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("/sdcard/old.bin' is "),
+        "the file of another length went unsaid");
+    const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the app was not copied over the file of another length");
+    TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin", ((StorageWriteEvt const *)wr)->name);
+    TEST_ASSERT_EQUAL_UINT32(old_bytes(), ((StorageWriteEvt const *)wr)->len);
+    QF_gc(wr);
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "nothing may be evicted before its copy lands");
+
+    answer_write((uint8_t)KODE_OK, old_bytes());
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after the copy");
+    TEST_ASSERT_TRUE(klog_has("'old' kept as /sdcard/old.bin"));
+
+    let_the_open_expire();
+    keep_end();
+}
+
+/* The NOTICE says both lengths, so the card is not rewritten in silence. */
+TEST_CASE("the file of another length is said with its bytes and the image's",
+          "[appmgr_ao][keep]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    (void)begin_install((uint8_t)KDRV_MEDIUM_FS, "new");
+    storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
+
+    answer_copy_of(1234U);
+    char want[96];
+    (void)snprintf(want, sizeof(want), "/sdcard/old.bin' is 1234 bytes and the image is %u",
+                   (unsigned)old_bytes());
+    TEST_ASSERT_TRUE_MESSAGE(klog_has(want), "the lengths of the two files were not told");
+    const QEvt *wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the app was not copied");
+    QF_gc(wr);
+    answer_write((uint8_t)KODE_OK, old_bytes());
+    (void)qf_support_pump(AO_AppMgr, 8U);
     let_the_open_expire();
     keep_end();
 }
@@ -4944,7 +5015,7 @@ TEST_CASE("a restarted install that fails clears the round", "[appmgr_ao][keep]"
     region_full_of_old();
     uint32_t const len = begin_install((uint8_t)KDRV_MEDIUM_FS, "new");
     storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(old_bytes());
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
 
@@ -4961,7 +5032,7 @@ TEST_CASE("a restarted install that fails clears the round", "[appmgr_ao][keep]"
     storage_expect(STORAGE_PATH_REQ_SIG,
                    "the next install did not start a round of its own");
 
-    answer_stat(true, (uint8_t)KODE_OK);      /* and ends it, so nothing is armed */
+    answer_copy_of(old_bytes());      /* and ends it, so nothing is armed */
     (void)qf_support_pump(AO_AppMgr, 8U);
     let_the_open_expire();
     keep_end();
@@ -5021,6 +5092,9 @@ TEST_CASE("the bar does not go quiet while the card writes", "[appmgr_ao][keep]"
 }
 
 /** @brief A directory of 64 tiny apps, "a00" (seq 1) to "a63" (seq 64). */
+/** @brief The length of each of region_of_tiny_apps()'s apps. */
+#define TINY_APP_LEN  4096U
+
 static void region_of_tiny_apps(void)
 {
     keep_hold_dir();
@@ -5031,7 +5105,7 @@ static void region_of_tiny_apps(void)
         char name[8];
         (void)snprintf(name, sizeof(name), "a%02u", (unsigned)i);
         dir.e[i].offset = KAPPS_DATA_OFF + (i * KAPPS_ALIGN);
-        dir.e[i].size   = 4096U;
+        dir.e[i].size   = TINY_APP_LEN;
         dir.e[i].seq    = i + 1U;
         dir.e[i].flags  = KAPPS_ENTRY_VALID;
         plant_app(dir.e[i].offset, name);
@@ -5111,7 +5185,7 @@ TEST_CASE("two victims: one already kept, one copied, one bar",
     TEST_ASSERT_NOT_NULL(stat);
     TEST_ASSERT_EQUAL_STRING("/sdcard/first.bin", ((StoragePathEvt const *)stat)->path);
     QF_gc(stat);
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(3U * mb);
     stat = storage_take(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the second victim was not looked for");
     TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin", ((StoragePathEvt const *)stat)->path);
@@ -5285,7 +5359,7 @@ TEST_CASE("a late write answer settles nothing", "[appmgr_ao][keep]")
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_tally().open,
         "a late answer ended the round with a victim's STAT still out");
 
-    answer_stat(true, (uint8_t)KODE_OK);           /* the round ends properly */
+    answer_copy_of(3U * mb);           /* the round ends properly */
     (void)qf_support_pump(AO_AppMgr, 8U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, storage_tally().open,
         "the install did not start again");
@@ -5337,7 +5411,7 @@ TEST_CASE("a late STAT answer is not taken for the next victim's",
     TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin", ((StoragePathEvt const *)stat)->path);
     QF_gc(stat);
 
-    answer_stat(true, (uint8_t)KODE_OK);           /* the first one's, late */
+    answer_copy_of(3U * mb);           /* the first one's, late */
     (void)qf_support_pump(AO_AppMgr, 8U);
     TEST_ASSERT_FALSE_MESSAGE(klog_has("'second' is already on the card"),
         "the late answer was taken for the second victim");
@@ -5375,7 +5449,7 @@ static void next_install_keeps(void)
     storage_expect(STORAGE_PATH_REQ_SIG,
                    "the install after the adoption did not look for its victim: "
                    "the adoption's round was still standing");
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(old_bytes());
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG,
                    "the install did not start again after its round");
@@ -5631,6 +5705,9 @@ TEST_CASE("adoption goes on when the victim cannot be kept",
 
 /** @brief Three apps that fill the region: "first" and "second" of 3 MB, then
  *         "tail" up to its end. A 5 MB image has to evict the first two. */
+/** @brief The length of the first two apps of three_apps(). */
+#define THREE_APP_LEN  (3U * 0x100000U)
+
 static void three_apps(void)
 {
     uint32_t const mb = 0x100000U;
@@ -5768,7 +5845,7 @@ TEST_CASE("a plan that changes under an adoption is deferred from inside it",
     TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_pending_present(NULL, NULL),
                              "the mailbox must be left where it was");
 
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(old_bytes());
     run_ticks(8U);
     TEST_ASSERT_TRUE_MESSAGE(klog_has("evicting 'old'"), "the second pass did not evict");
     /* The fake inflater yields no image: the adoption fails before its write
@@ -5808,7 +5885,7 @@ TEST_CASE("a copy whose write failed is unlinked, so no later round calls it kep
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
 
     /* The unlink's answer reaches the restarted install and means nothing. */
-    answer_path((uint8_t)STORAGE_PATH_UNLINK, (uint8_t)KODE_OK, false, false);
+    answer_path((uint8_t)STORAGE_PATH_UNLINK, (uint8_t)KODE_OK, false, false, 0U);
     TEST_ASSERT_TRUE(old_installed());
     let_the_open_expire();
     keep_end();
@@ -5846,13 +5923,13 @@ TEST_CASE("an unlink's answer settles nothing while the next victim's STAT is ou
 
     /* An answer that says "not there", as a STAT's would: if it settled the
      * STAT the second victim would be read out and written. */
-    answer_path((uint8_t)STORAGE_PATH_UNLINK, (uint8_t)KODE_OK, false, false);
+    answer_path((uint8_t)STORAGE_PATH_UNLINK, (uint8_t)KODE_OK, false, false, 0U);
     TEST_ASSERT_NULL_MESSAGE(storage_wait_for(STORAGE_WRITE_REQ_SIG, 150U),
         "an unlink's answer was taken for the second victim's STAT");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_tally().open,
         "an unlink's answer ended the round with a STAT still out");
 
-    answer_stat(true, (uint8_t)KODE_OK);         /* the round ends properly */
+    answer_copy_of(THREE_APP_LEN);         /* the round ends properly */
     (void)qf_support_pump(AO_AppMgr, 8U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, storage_tally().open,
         "the install did not start again");
@@ -5871,7 +5948,7 @@ TEST_CASE("a folder where the copy would go is a failed copy, not a kept one",
     uint32_t const len = begin_install((uint8_t)KDRV_MEDIUM_FS, "new");
     storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
 
-    answer_path((uint8_t)STORAGE_PATH_STAT, (uint8_t)KODE_OK, true, true);
+    answer_path((uint8_t)STORAGE_PATH_STAT, (uint8_t)KODE_OK, true, true, 0U);
     (void)qf_support_pump(AO_AppMgr, 8U);
 
     storage_seen_t const seen = storage_tally();
@@ -6227,7 +6304,7 @@ TEST_CASE("two victims come in the order they would go, one with a copy on "
     collect_answer(&a);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, a.entries,
         "an app was reported before the card said whether it had a copy");
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(THREE_APP_LEN);
     stat_expect("/sdcard/second.bin", "the second victim's copy was not looked for");
     answer_stat(false, (uint8_t)KODE_OK);
     collect_answer(&a);
@@ -6279,13 +6356,15 @@ TEST_CASE("a card that is absent, fails, or holds a folder there reads as no "
         uint8_t rc;
         bool    exists;
         bool    is_dir;
+        bool    whole;     /* the file is as long as the image, when there is one */
         bool    on_card;
     } rows[] = {
-        { (uint8_t)KODE_OK,     true,  false, true  },   /* the file is there  */
-        { (uint8_t)KODE_OK,     false, false, false },   /* nothing there      */
-        { (uint8_t)KODE_ERROR,  false, false, false },   /* no card            */
-        { (uint8_t)KODE_ERROR,  true,  false, false },   /* it did not say     */
-        { (uint8_t)KODE_OK,     true,  true,  false },   /* a folder, no copy  */
+        { (uint8_t)KODE_OK,     true,  false, true,  true  },   /* the file is there, whole */
+        { (uint8_t)KODE_OK,     true,  false, false, false },   /* a file of another length */
+        { (uint8_t)KODE_OK,     false, false, false, false },   /* nothing there      */
+        { (uint8_t)KODE_ERROR,  false, false, false, false },   /* no card            */
+        { (uint8_t)KODE_ERROR,  true,  false, true,  false },   /* it did not say     */
+        { (uint8_t)KODE_OK,     true,  true,  false, false },   /* a folder, no copy  */
     };
 
     Mockkdrv_slot_Init();
@@ -6299,8 +6378,14 @@ TEST_CASE("a card that is absent, fails, or holds a folder there reads as no "
         (void)memset(&a, 0, sizeof(a));
         ask_evict(0x10000U);
         stat_expect("/sdcard/old.bin", "the victim's copy was not looked for");
+        uint32_t file_len = old_bytes() - KAPPS_ALIGN;     /* not the image's length */
+
+        if ( rows[i].whole )
+        {
+            file_len = old_bytes();
+        }
         answer_path((uint8_t)STORAGE_PATH_STAT, rows[i].rc, rows[i].exists,
-                    rows[i].is_dir);
+                    rows[i].is_dir, file_len);
         collect_answer(&a);
 
         TEST_ASSERT_EQUAL_UINT(1U, a.entries);
@@ -6379,7 +6464,14 @@ TEST_CASE("a long list is cut at the cap, and the end counts every victim",
 
         (void)snprintf(path, sizeof(path), "/sdcard/a%02u.bin", i);
         stat_expect(path, "a listed victim's copy was not looked for");
-        answer_stat((i % 2U) == 0U, (uint8_t)KODE_OK);
+        if ( (i % 2U) == 0U )
+        {
+            answer_copy_of(TINY_APP_LEN);
+        }
+        else
+        {
+            answer_stat(false, (uint8_t)KODE_OK);
+        }
     }
     collect_answer(&a);
 
@@ -6445,7 +6537,7 @@ TEST_CASE("a STAT nobody answers is no copy, and its late answer is not "
     (void)memset(&a, 0, sizeof(a));
     ask_evict(0x10000U);                           /* idle again: not busy */
     stat_expect("/sdcard/old.bin", "the second question never asked the card");
-    answer_stat(true, (uint8_t)KODE_OK);           /* the first STAT's, late */
+    answer_copy_of(old_bytes());           /* the first STAT's, late */
     collect_answer(&a);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, a.entries,
         "a late answer was taken for the next victim's");
@@ -6528,7 +6620,7 @@ TEST_CASE("a question while apps are being kept on the card is answered busy",
     storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
     busy_expect("keeping");
 
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(old_bytes());
     run_ticks(50U);
     (void)storage_tally();
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "the question moved the install on");
@@ -6569,7 +6661,7 @@ TEST_CASE("a second question while the card is being asked is answered busy, "
     TEST_ASSERT_EQUAL_UINT(1U, a.ends);
     TEST_ASSERT_TRUE(a.end.busy);
 
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(old_bytes());
     collect_answer(&a);
     TEST_ASSERT_EQUAL_UINT(1U, a.entries);
     TEST_ASSERT_EQUAL_STRING("old", a.name[0]);
@@ -6680,7 +6772,7 @@ TEST_CASE("the late answer to a question's lost STAT is settled where it lands, 
     len = image_named("new");
     ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(old_bytes());
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);                                       /* "old" must go */
 
@@ -6688,7 +6780,7 @@ TEST_CASE("the late answer to a question's lost STAT is settled where it lands, 
      * next: it counts. Eaten as the late one, the round would sit out its
      * whole deadline. */
     stat_expect("/sdcard/old.bin", "the victim's copy was not looked for");
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(old_bytes());
     run_ticks(50U);
     TEST_ASSERT_TRUE_MESSAGE(klog_has("'old' is already on the card"),
         "keeping's answer was taken for the question's late one");
@@ -6762,7 +6854,7 @@ TEST_CASE("once the card lets a STAT go, the victims still to report are not "
     answer_stat(false, (uint8_t)KODE_OK);                   /* the late one */
     collect_answer(&a);
     TEST_ASSERT_EQUAL_UINT(0U, a.entries);
-    answer_stat(true, (uint8_t)KODE_OK);                    /* first's own */
+    answer_copy_of(THREE_APP_LEN);                    /* first's own */
     stat_expect("/sdcard/second.bin", "the second victim's copy was not looked for");
     answer_stat(false, (uint8_t)KODE_OK);
     collect_answer(&a);
@@ -6857,7 +6949,7 @@ TEST_CASE("the install's own app is left out of a list of several, and the "
 
     ask_evict_as(5U * 0x100000U, "first");         /* first, second go for bytes */
     stat_expect("/sdcard/second.bin", "the other victim's copy was not looked for");
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(THREE_APP_LEN);
     collect_answer(&a);
 
     TEST_ASSERT_EQUAL_UINT(1U, a.entries);
@@ -8019,7 +8111,7 @@ TEST_CASE("an evicted app kept on the card keeps its folder",
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
     answer_data_bytes(s_cont, len);
     storage_expect(STORAGE_PATH_REQ_SIG, "the victim's path was never asked about");
-    answer_stat(true, (uint8_t)KODE_OK);          /* already on the card */
+    answer_copy_of(old_bytes());          /* already on the card */
     (void)qf_support_pump(AO_AppMgr, 8U);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again");
 
@@ -8682,7 +8774,7 @@ TEST_CASE("test_find_missing_asks_the_card", "[appmgr_ao][find]")
     stat_expect("/sdcard/welcome.bin", "the card was not asked for the missing app");
     TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "answered before the card did");
 
-    answer_stat(true, (uint8_t)KODE_OK);
+    answer_copy_of(KAPPS_ALIGN);          /* a file of the name, whatever its length */
     AppFindRspEvt const rsp = find_answer();
     TEST_ASSERT_FALSE(rsp.busy);
     TEST_ASSERT_FALSE(rsp.installed);

@@ -4463,14 +4463,52 @@ static void card_stat(AppMgr * const me, const char *path)
 }
 
 /**
- * @brief Does a STAT's answer say a copy is on the card?
+ * @brief Does a STAT's answer say a file of the name is on the card?
  * @param r The answer.
  * @return true for a file that is there; false for no card, a failed STAT,
  *         nothing at the path, or a folder where the file would be.
  */
-static bool card_has_copy(const StoragePathRspEvt *r)
+static bool card_has_file(const StoragePathRspEvt *r)
 {
     return ((uint8_t)KODE_OK == r->rc) && r->exists && !r->is_dir;
+}
+
+/**
+ * @brief Does a STAT's answer say the card holds a copy of an installed image?
+ *
+ * A file of the app's name is its copy only at the image's length. An older
+ * version of the app, kept by an earlier eviction, or another file of that
+ * name, is something else: the app evicted on its account would be lost.
+ *
+ * @param r         The answer.
+ * @param image_len The installed image's length in bytes.
+ * @return true for a file that is there and as long as the image.
+ */
+static bool card_has_copy(const StoragePathRspEvt *r, uint32_t image_len)
+{
+    return card_has_file(r) && (r->size == image_len);
+}
+
+/**
+ * @brief The length of the installed image that lies at @p offset.
+ *
+ * @param d      The directory.
+ * @param offset The extent's region-relative offset.
+ * @return The entry's size in bytes, 0 when no live entry lies there.
+ */
+static uint32_t appdir_size_at(const kapps_dir_t *d, uint32_t offset)
+{
+    uint32_t size = 0U;
+
+    for ( uint32_t i = 0U; i < d->count; ++i )
+    {
+        if ( ((d->e[i].flags & KAPPS_ENTRY_VALID) != 0U) && (d->e[i].offset == offset) )
+        {
+            size = d->e[i].size;
+            break;
+        }
+    }
+    return size;
 }
 
 /**
@@ -4635,7 +4673,7 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
             }
             me->keep_stat = false;
             (void)QTimeEvt_disarm(&me->idle);
-            if ( card_has_copy(r) )
+            if ( card_has_copy(r, me->keep_len) )
             {
                 KLOG_I(TAG, "'%s' is already on the card", me->keep_name);
                 keep_settle(me, KEEP_THERE);
@@ -4644,7 +4682,7 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
             {
                 keep_settle(me, KEEP_FAILED);   /* no card, or it will not mount */
             }
-            else if ( r->exists )
+            else if ( r->exists && r->is_dir )
             {
                 /* A folder of that name is no copy, and a file cannot be
                  * written over it. */
@@ -4654,6 +4692,14 @@ static QState AppMgr_keeping(AppMgr * const me, QEvt const * const e)
             }
             else
             {
+                if ( r->exists )
+                {
+                    /* Another file of the name: an older version, or not the
+                     * app at all. The copy truncates it. */
+                    KLOG_N(TAG, "'%s' is %u bytes and the image is %u; the "
+                                "app is copied over it", me->keep_path,
+                           (unsigned)r->size, (unsigned)me->keep_len);
+                }
                 /* Not zeroed: every byte is read from the region before it
                  * is written, and clearing up to 13 MB is no step (rule 5). */
                 /* cppcheck-suppress misra-c2012-11.5 ; a byte buffer from a void * allocator */
@@ -5914,7 +5960,9 @@ static QState AppMgr_asking(AppMgr * const me, QEvt const * const e)
             if ( card_answer_taken(me, e, &me->ask_stat) )
             {
                 evict_entry(me->ask_who, me->ask_name,
-                            card_has_copy(Q_EVT_CAST(StoragePathRspEvt)));
+                            card_has_copy(Q_EVT_CAST(StoragePathRspEvt),
+                                          appdir_size_at(kdrv_apps_dir(),
+                                                         me->ask_off[me->ask_idx])));
                 ++me->ask_idx;
                 if ( !evict_next(me) )
                 {
@@ -5975,8 +6023,10 @@ static QState AppMgr_finding(AppMgr * const me, QEvt const * const e)
             status = Q_HANDLED();
             if ( card_answer_taken(me, e, &me->find_stat) )
             {
+                /* By name alone: the app is not installed, so there is no
+                 * image whose length the file could be held to. */
                 find_reply(me->find_who, me->find_name, NULL,
-                           card_has_copy(Q_EVT_CAST(StoragePathRspEvt)), false);
+                           card_has_file(Q_EVT_CAST(StoragePathRspEvt)), false);
                 me->find_who = NULL;
                 status = Q_TRAN(&AppMgr_idle);
             }
