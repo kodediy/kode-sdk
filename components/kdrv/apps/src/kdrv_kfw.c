@@ -550,6 +550,34 @@ static uint16_t target_chip(kfw_target_t t)
     return chip;
 }
 
+/**
+ * @brief How long a raw image says its first segment is.
+ *
+ * The one fact about an image's size its first bytes hold: the first
+ * segment's header follows the image header at once, and its length is how
+ * many bytes of the file that segment takes.
+ *
+ * @param prefix  The first bytes of the image.
+ * @param len     How many bytes @p prefix holds.
+ * @param seg_len The first segment's declared length in bytes; left alone
+ *                when the read is refused.
+ * @return true when the prefix starts with the ESP image magic and holds the
+ *         first segment's header.
+ */
+static bool raw_first_seg(const uint8_t *prefix, size_t len, uint32_t *seg_len)
+{
+    esp_image_segment_header_t seg;
+
+    if ( ((sizeof(esp_image_header_t) + sizeof(seg)) > len)
+        || (KFW_ESP_MAGIC != prefix[0]) )
+    {
+        return false;
+    }
+    (void)memcpy(&seg, &prefix[sizeof(esp_image_header_t)], sizeof(seg));
+    *seg_len = seg.data_len;
+    return true;
+}
+
 kode_status_t kfw_feed(const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
@@ -590,6 +618,24 @@ kode_status_t kfw_feed(const void *data, size_t len)
                         KLOG_E(TAG, "that image was built for chip id 0x%04x, "
                                     "not this target's 0x%04x", (unsigned)chip,
                                (unsigned)target_chip(s_kfw.want));
+                        s_kfw.st = KFW_ST_DEAD;
+                        return KODE_ERROR;
+                    }
+                    /* A file cut short inside its first segment is refused
+                     * here for the same reason: the header says how long that
+                     * segment is and the source how long the file is. A cut
+                     * further on, or a source of no stated length, is the
+                     * end's to judge. */
+                    uint32_t seg0 = 0U;
+                    if ( (0U != s_kfw.src_len)
+                        && raw_first_seg(p, len, &seg0)
+                        && (((uint64_t)sizeof(esp_image_header_t)
+                             + (uint64_t)sizeof(esp_image_segment_header_t)
+                             + (uint64_t)seg0) > (uint64_t)s_kfw.src_len) )
+                    {
+                        KLOG_E(TAG, "that image's first segment is %u bytes and "
+                                    "the file holds %u: it was cut short",
+                               (unsigned)seg0, (unsigned)s_kfw.src_len);
                         s_kfw.st = KFW_ST_DEAD;
                         return KODE_ERROR;
                     }

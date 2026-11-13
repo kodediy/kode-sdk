@@ -22,6 +22,7 @@
 #include "Mockesp_event.h"
 
 #include "esp_app_desc.h"   /* to lay IDF's descriptor in a test image */
+#include "esp_app_format.h" /* and its image and segment headers */
 
 #include "ao_spy.h"
 #include "ask_support.h"
@@ -2651,6 +2652,14 @@ static void make_image(uint16_t chip, const char *project, const char *version)
     s_img[0]  = 0xE9U;                       /* ESP_IMAGE_HEADER_MAGIC */
     s_img[12] = (uint8_t)(chip & 0xFFU);
     s_img[13] = (uint8_t)(chip >> 8);
+    /* Its first segment is the descriptor and no more: a length that fits
+     * the file, which is what the decoder holds a raw image to. */
+    esp_image_segment_header_t seg;
+
+    (void)memset(&seg, 0, sizeof(seg));
+    seg.load_addr = 0x40000000U;
+    seg.data_len  = (uint32_t)sizeof(d);
+    (void)memcpy(&s_img[sizeof(esp_image_header_t)], &seg, sizeof(seg));
     (void)memset(&d, 0, sizeof(d));
     d.magic_word = ESP_APP_DESC_MAGIC_WORD;
     (void)snprintf(d.project_name, sizeof(d.project_name), "%s", project);

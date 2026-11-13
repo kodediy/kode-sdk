@@ -2116,9 +2116,8 @@ TEST_CASE("install dst=os writes the inactive slot, touches no directory, and "
     {
         payload[i] = (uint8_t)((i * 5U) + 1U);
     }
-    payload[0] = KFW_ESP_MAGIC;   /* a bare image: straight to the sink */
-    payload[12] = (uint8_t)ESP_CHIP_ID_ESP32P4;   /* its chip_id: this one */
-    payload[13] = 0U;
+    TEST_ASSERT_TRUE(sizeof(payload) >= CHAIN_MIN_LEN);
+    image_chain(payload);         /* a bare image: straight to the sink */
 
     Mockkdrv_slot_Init();
     recv_fresh();
