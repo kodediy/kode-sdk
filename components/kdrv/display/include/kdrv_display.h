@@ -355,8 +355,9 @@ kode_status_t kdrv_display_reset_low(void);
  *
  * The CO5300 takes a window that starts on an even column and an even row and
  * is an even number of columns and rows wide: @p x, @p y, @p w and @p h are
- * all even, and anything else is refused rather than rounded. A pixel is sent
- * low byte first, the order LVGL keeps RGB565 in.
+ * all even, and anything else is refused rather than rounded. A pixel is
+ * RGB565 as LVGL keeps it; the driver puts it in the order the panel's memory
+ * takes (BGR, low byte first).
  *
  * After the pixels the panel's window is set back to the whole glass, because
  * the video scan-out streams a full frame through it: a window left on the

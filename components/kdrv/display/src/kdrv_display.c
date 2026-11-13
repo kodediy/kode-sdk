@@ -169,6 +169,9 @@ _Static_assert(KDRV_DISPLAY_CACHE_LINE == CONFIG_CACHE_L2_CACHE_LINE_SIZE,
  * window follows (gram_settle()). */
 #define GRAM_CHUNK_PX          64U
 #define GRAM_BYTES_PER_PX      2U
+#define GRAM_BLUE_MASK         0x001FU  /**< RGB565's blue: its low five bits.  */
+#define GRAM_GREEN_MASK        0x07E0U  /**< Its green: the six in the middle.  */
+#define GRAM_RED_SHIFT         11U      /**< Its red starts at this bit.        */
 #define GRAM_WORD_BYTES        4U
 #define GRAM_PKT_BYTES         (1U + (GRAM_CHUNK_PX * GRAM_BYTES_PER_PX))
 #define GRAM_PKT_WORDS         ((GRAM_PKT_BYTES + GRAM_WORD_BYTES - 1U) / GRAM_WORD_BYTES)
@@ -2332,8 +2335,12 @@ static kode_status_t gram_settle(void)
  * @brief Send @p count pixels as RAMWR then RAMWRC packets into the window
  *        already set.
  *
- * Low byte first, the order LVGL keeps RGB565 in and the DPI path sends it
- * in: a pixel of white or black reads the same either way, a grey does not.
+ * What the CO5300 takes into its memory over a command write is not what the
+ * video carries: each pixel goes low byte first with its fields in BGR order,
+ * red in the low five bits (measured on the DVT). Sent as the RGB565 LVGL
+ * keeps, red and blue trade places on the glass: white, black and a neutral
+ * grey read the same, and the clock's warm Light Grey comes out a cold white.
+ * So red and blue are swapped here, and callers hand over plain RGB565.
  * The window walks itself, so a packet need not end on a row.
  *
  * @return KODE_OK; KODE_TIMEOUT when a FIFO did not make room.
@@ -2356,10 +2363,14 @@ static kode_status_t gram_pixels(const uint16_t *rgb565, size_t count)
         pkt[0] = cmd;
         for ( size_t i = 0U; i < k; ++i )
         {
-            uint16_t const p = rgb565[done + i];
+            uint16_t const p    = rgb565[done + i];
+            uint16_t const blue = (uint16_t)(p & GRAM_BLUE_MASK);
+            uint16_t const red  = (uint16_t)(p >> GRAM_RED_SHIFT);
+            uint16_t const q    = (uint16_t)((uint16_t)(blue << GRAM_RED_SHIFT)
+                                             | (uint16_t)(p & GRAM_GREEN_MASK) | red);
 
-            pkt[1U + (GRAM_BYTES_PER_PX * i)] = (uint8_t)(p & GRAM_BYTE_MASK);
-            pkt[2U + (GRAM_BYTES_PER_PX * i)] = (uint8_t)(p >> GRAM_BYTE_BITS);
+            pkt[1U + (GRAM_BYTES_PER_PX * i)] = (uint8_t)(q & GRAM_BYTE_MASK);
+            pkt[2U + (GRAM_BYTES_PER_PX * i)] = (uint8_t)(q >> GRAM_BYTE_BITS);
         }
         st   = gram_send(pkt, 1U + (GRAM_BYTES_PER_PX * k));
         cmd  = DCS_RAMWRC;
