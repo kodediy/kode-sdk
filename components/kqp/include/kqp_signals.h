@@ -586,6 +586,9 @@ enum KodeSignals {
                                  *   three owns the transfer.                 */
     APP_RECV_IDLE_SIG,          /**< AO_AppMgr private QTimeEvt: no chunk for
                                  *   KODE_RECV_IDLE_MS - the host is gone.    */
+    APP_BACKUP_TMO_SIG,         /**< AO_AppMgr private QTimeEvt, one-shot: the
+                                 *   wait, the pace or the deadline of the
+                                 *   copy to the card in hand.                */
     APP_RECV_LAUNCH_SIG,        /**< AO_AppMgr private QTimeEvt: the drain
                                  *   delay after a successful install is
                                  *   over - boot it (AppMgr_launching).       */

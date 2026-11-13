@@ -14,6 +14,7 @@
 #include "kaos_claim.h"
 #include "kapp_cat.h"
 #include "kdrv_apps.h"
+#include "appmgr_backup.h"
 #include "kdrv_kfw.h"
 #include "kdrv_image_check.h"
 #include "kapp_data.h"
@@ -73,6 +74,10 @@
 /* Region bytes read per step while an evicted app is copied out of the
  * region: the same 32 KB the writes use, so a step stays short (rule 5). */
 #define APPMGR_KEEP_CHUNK      (32U * 1024U)
+/* The wait before an idle AO_AppMgr copies apps to the card, and the pause
+ * between one app and the next. */
+#define APPMGR_BACKUP_IDLE_TICKS KQP_TICKS_PER_MS(KODE_APP_BACKUP_IDLE_MS)
+#define APPMGR_BACKUP_GAP_TICKS  KQP_TICKS_PER_MS(KODE_APP_BACKUP_GAP_MS)
 #define APPMGR_KEEP_TMP_SUFFIX ".tmp"   /**< What a copy's name carries while it is written. */
 #define APPMGR_BYTE_BITS       8U       /**< Bits in a byte: a word read from a chunk shifts by it. */
 #define APPMGR_LOAN_BITS       8U       /**< Bits of to_return: one per buffer a medium can lend. */
@@ -446,6 +451,15 @@ typedef struct {
     bool        keep_hashing;                  /**< The victim in hand's CRC is being taken, in keep_crcs. */
     uint32_t    keep_fill;                     /**< Bytes of it read so far.   */
     char        keep_name[KDRV_SLOT_PROJECT_MAX]; /**< The victim's project name. */
+
+    /* ---- Copies to the card ahead of an eviction (AppMgr_backing) ------
+     * An idle AO copies its apps to the card one at a time, oldest first,
+     * so an install finds the copy of what it evicts already made. Only the
+     * one-shot is here, because the tick reads it: the rest is in PSRAM. */
+    QTimeEvt    bk_tmo;                        /**< APP_BACKUP_TMO_SIG: the wait, the pace or the deadline of the step in hand. */
+    bool        bk_live;                       /**< bk_tmo is armed and its expiry not yet seen. */
+    uint8_t     bk_stale;                      /**< Expiries of bk_tmo still queued from an earlier arming. */
+    struct appmgr_bk *bk;                      /**< PSRAM: the copies' state; NULL when there was no memory for it. */
     char        keep_path[KODE_APP_FILE_MAX];  /**< /sdcard/<project>.bin      */
     FlashReqEvt keep_req;                      /**< The request to restart.    */
 
@@ -597,6 +611,28 @@ typedef struct {
                                     *   no card is held.                       */
 } AppMgr;
 
+/**
+ * @brief The copies' state, in PSRAM: only this AO's own steps read it.
+ *
+ * A late answer of a request given up on is counted in the AO's keep_stale_*
+ * fields: AO_Storage's answers carry no path.
+ */
+struct appmgr_bk {
+    appmgr_backup_t table;                 /**< What is known of each app's copy. */
+    bool        on;                        /**< The AO is in AppMgr_backing. */
+    bool        nocard;                    /**< No card answers: nothing is tried until one mounts. */
+    uint8_t     step;                      /**< backup_step_t: what the app in hand waits for. */
+    uint32_t    seq;                       /**< The app in hand, by install number. */
+    uint32_t    off;                       /**< Its region offset.            */
+    uint32_t    len;                       /**< Its image's length.           */
+    uint32_t    fill;                      /**< Bytes of it read so far.      */
+    uint32_t    owed_ticks;                /**< How long its write has waited for an abandoned one's answer. */
+    uint8_t    *buf;                       /**< PSRAM: its image, for the write. */
+    uint8_t     build[KAPP_BUILD_LEN];     /**< Its build id.                 */
+    char        name[KDRV_SLOT_PROJECT_MAX]; /**< Its project name.           */
+    char        path[KODE_APP_FILE_MAX];   /**< Its copy's path on the card.  */
+};
+
 static AppMgr l_appMgr;
 QActive * const AO_AppMgr = &l_appMgr.super;
 
@@ -635,6 +671,13 @@ static bool          keep_owed_answer(AppMgr * const me, QEvt const * const e);
 static QState        evict_ask(AppMgr * const me, QEvt const * const e);
 static QState        find_ask(AppMgr * const me, QEvt const * const e);
 static QState        keep_only_ask(AppMgr * const me, QEvt const * const e);
+static void          backup_init(AppMgr * const me);
+static void          backup_schedule(AppMgr * const me);
+static void          backup_stop(AppMgr * const me);
+static bool          backup_tick(AppMgr * const me);
+static bool          backup_wanted(const AppMgr * const me);
+static void          backup_card(AppMgr * const me, const StorageCardEvt * const c);
+static QState AppMgr_backing(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_launching(AppMgr * const me, QEvt const * const e);
 
@@ -3653,6 +3696,10 @@ void AppMgr_ctor(void)
     QTimeEvt_ctorX(&me->undo_tmo, &me->super, APP_UNDO_STEP_SIG, 0U);
     QTimeEvt_ctorX(&me->answer, &me->super, APP_RECV_LAUNCH_SIG, 0U);
     QTimeEvt_ctorX(&me->tidy, &me->super, APP_TIDY_TIMEOUT_SIG, 0U);
+    QTimeEvt_ctorX(&me->bk_tmo, &me->super, APP_BACKUP_TMO_SIG, 0U);
+    me->bk_live   = false;
+    me->bk_stale  = 0U;
+    me->bk        = NULL;     /* a used AO's block is the heap's now */
     me->writing   = false;
     me->pacing    = false;
     me->to_return = 0U;
@@ -3749,6 +3796,7 @@ static QState AppMgr_initial(AppMgr * const me, void const * const par)
         KLOG_E(TAG, "no PSRAM for the chunk buffer; installs over the wire "
                     "and the mailbox are off");
     }
+    backup_init(me);
 
     /* The mailbox: if the host left an image at the fixed address, adopt it.
      * Posted to self rather than done here - a multi-MB flash copy has no
@@ -3911,6 +3959,62 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
     QState status;
     switch ( e->sig )
     {
+        case Q_ENTRY_SIG: {
+            /* What an install, an erase or an eviction removed is known no
+             * more; what is left to copy starts after the wait. */
+            if ( NULL != me->bk )
+            {
+                appmgr_backup_prune(&me->bk->table, kdrv_apps_dir());
+            }
+            backup_schedule(me);
+            if ( 0U < me->hold_left )
+            {
+                /* A fetch that announced an install ended on the way here. */
+                (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case Q_EXIT_SIG: {
+            backup_stop(me);
+            /* Whatever else takes this AO out of idle - a question about the
+             * card, an adoption - is not the install the card waited for:
+             * one that was took the card over below. The requests that
+             * publish on their way in end the hold in their own case. */
+            hold_end(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BACKUP_TMO_SIG: {
+            /* The wait is over and nothing came: see to the copies. */
+            if ( backup_tick(me) && backup_wanted(me) )
+            {
+                status = Q_TRAN(&AppMgr_backing);
+            }
+            else
+            {
+                status = Q_HANDLED();
+            }
+            break;
+        }
+        case STORAGE_CARD_SIG: {
+            backup_card(me, Q_EVT_CAST(StorageCardEvt));
+            if ( (NULL == me->bk) || (!me->bk->on) )
+            {
+                backup_schedule(me);
+                status = Q_HANDLED();
+            }
+            else if ( me->bk->nocard )
+            {
+                /* The card went with an app in hand: its copy is given up. */
+                status = Q_TRAN(&AppMgr_idle);
+            }
+            else
+            {
+                status = Q_HANDLED();
+            }
+            break;
+        }
         case APP_RECV_REQ_SIG: {
             AppRecvReqEvt const * const req = Q_EVT_CAST(AppRecvReqEvt);
             bool const to_os      = ((uint8_t)KFW_TARGET_OS == req->dst);
@@ -4481,15 +4585,6 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             status = Q_TRAN(&AppMgr_adopting);
             break;
         }
-        case Q_ENTRY_SIG: {
-            if ( 0U < me->hold_left )
-            {
-                /* A fetch that announced an install ended on the way here. */
-                (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
-            }
-            status = Q_HANDLED();
-            break;
-        }
         case APP_BEAT_SIG: {
             /* Only the held card's: a beat queued behind another state's
              * last disarm has nothing to say here. Each beat says the card
@@ -4510,15 +4605,6 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             {
                 /* No card is held. */
             }
-            status = Q_HANDLED();
-            break;
-        }
-        case Q_EXIT_SIG: {
-            /* Whatever else takes this AO out of idle - a question about the
-             * card, an adoption - is not the install the card waited for:
-             * one that was took the card over below. The requests that
-             * publish on their way in end the hold in their own case. */
-            hold_end(me);
             status = Q_HANDLED();
             break;
         }
@@ -5188,6 +5274,693 @@ static QState keep_on(AppMgr * const me)
         return keep_finish(me);
     }
     return Q_HANDLED();
+}
+
+/* ---- Copies to the card ahead of an eviction ----------------------------------
+ * Background work under AppMgr_idle: every request is still idle's, and
+ * leaving the state gives up the copy in hand. One app at a time, oldest
+ * first: a STAT of its name on the card, the build id of a file of its
+ * length, and when the card has no copy the image is read out of the region
+ * and written under a temporary name, then put on the app's name. Nothing is
+ * shown while it runs.
+ */
+
+/** @brief What the copy in hand waits for; the one-shot's meaning goes with it. */
+typedef enum {
+    BK_WAIT = 0,   /**< No app in hand: the wait before the next one.          */
+    BK_STAT,       /**< The card's answer about the app's name.                */
+    BK_DESC,       /**< The build id of the file of its length.                */
+    BK_READ,       /**< The next piece of the image out of the region.         */
+    BK_WRITE,      /**< AO_Storage's write of the copy's temporary.            */
+    BK_MOVE        /**< AO_Storage putting the finished copy on the app's name. */
+} backup_step_t;
+
+/**
+ * @brief Arm the one-shot for the step in hand.
+ * @param me    The AO.
+ * @param ticks How long, in QP ticks.
+ */
+static void backup_arm(AppMgr * const me, uint32_t ticks)
+{
+    if ( kqp_timer_stale(&me->bk_tmo, me->bk_live) )
+    {
+        stale_add(&me->bk_stale);
+    }
+    QTimeEvt_armX(&me->bk_tmo, ticks, 0U);
+    me->bk_live = true;
+}
+
+/**
+ * @brief Stop the one-shot; an expiry already queued is counted and dropped.
+ * @param me The AO.
+ */
+static void backup_stop(AppMgr * const me)
+{
+    if ( kqp_timer_stale(&me->bk_tmo, me->bk_live) )
+    {
+        stale_add(&me->bk_stale);
+    }
+    me->bk_live = false;
+}
+
+/**
+ * @brief Take an expiry of the one-shot.
+ * @param me The AO.
+ * @return true when it is the arming in force; false for one stopped or armed again since.
+ */
+static bool backup_tick(AppMgr * const me)
+{
+    bool fresh = false;
+
+    if ( 0U < me->bk_stale )
+    {
+        --me->bk_stale;
+    }
+    else if ( me->bk_live )
+    {
+        me->bk_live = false;
+        fresh       = true;
+    }
+    else
+    {
+        /* an expiry of an arming that was stopped */
+    }
+    return fresh;
+}
+
+/**
+ * @brief Whether there is a copy to see to and a card to ask.
+ * @param me The AO.
+ * @return true when an installed app is unseen or has no copy, and a card may answer.
+ */
+static bool backup_wanted(const AppMgr * const me)
+{
+    return (NULL != me->bk) && (!me->bk->nocard)
+        && (appmgr_backup_next(&me->bk->table, kdrv_apps_dir()) != NULL);
+}
+
+/**
+ * @brief Start the wait of an idle AO before its copies, or stop it when there are none.
+ * @param me The AO, idle with no app in hand.
+ */
+static void backup_schedule(AppMgr * const me)
+{
+    if ( backup_wanted(me) )
+    {
+        backup_arm(me, APPMGR_BACKUP_IDLE_TICKS);
+    }
+    else
+    {
+        backup_stop(me);
+    }
+}
+
+/**
+ * @brief STORAGE_CARD_SIG: what was known of the copies was true of another mount.
+ *
+ * An image in hand, being read or kept for a write refused as busy, is let go
+ * on a mount: the app is asked about again on the card now in.
+ *
+ * @param me The AO.
+ * @param c  The card's news.
+ */
+static void backup_card(AppMgr * const me, const StorageCardEvt * const c)
+{
+    if ( NULL != me->bk )
+    {
+        appmgr_backup_reset(&me->bk->table);
+        me->bk->nocard = !c->mounted;
+        if ( me->bk->on && ((uint8_t)BK_READ == me->bk->step) )
+        {
+            /* An image read for the last mount, or kept for a write the card
+             * refused as busy: let go, and the app asked about again after
+             * the pause. */
+            khal_free(me->bk->buf);
+            me->bk->buf  = NULL;
+            me->bk->step = (uint8_t)BK_WAIT;
+            backup_arm(me, APPMGR_BACKUP_GAP_TICKS);
+        }
+    }
+}
+
+/**
+ * @brief Take the PSRAM the copies' state lives in and listen for the card's news.
+ *
+ * With no memory for it nothing is copied to the card ahead of an eviction.
+ *
+ * @param me The AO, in its initial transition.
+ */
+static void backup_init(AppMgr * const me)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() hands back an untyped block aligned for any type */
+    me->bk = (struct appmgr_bk *)khal_alloc_psram(sizeof(uint32_t), sizeof(*me->bk));
+    if ( NULL == me->bk )
+    {
+        KLOG_E(TAG, "no PSRAM for the state of the copies; apps are not "
+                    "copied to the card ahead of an eviction");
+    }
+    else
+    {
+        (void)memset(me->bk, 0, sizeof(*me->bk));   /* every app unseen, BK_WAIT */
+        QActive_subscribe(&me->super, STORAGE_CARD_SIG);
+    }
+}
+
+/**
+ * @brief Ask the card to remove the temporary a failed copy left of the app in hand.
+ *
+ * Its answer is not waited for: a temporary that stays is written over by the
+ * app's next copy and is never taken for one.
+ *
+ * @param me The AO.
+ */
+static void backup_drop_tmp(AppMgr * const me)
+{
+    char tmp[KODE_APP_FILE_MAX];
+
+    card_tmp_path(tmp, sizeof(tmp), me->bk->name);
+    storage_path_request(&me->super, (uint8_t)STORAGE_PATH_UNLINK, tmp);
+}
+
+/**
+ * @brief Give up the app in hand: what AO_Storage still owes is counted, the write is ended.
+ *
+ * A write in flight is abandoned, and its buffer is kept until AO_Storage has
+ * answered for it. What is known of the app stays as it was.
+ *
+ * @param me The AO.
+ */
+static void backup_release(AppMgr * const me)
+{
+    switch ( (backup_step_t)me->bk->step )
+    {
+        case BK_STAT: {
+            stale_add(&me->keep_stale_stat);
+            break;
+        }
+        case BK_MOVE: {
+            stale_add(&me->keep_stale_move);
+            break;
+        }
+        case BK_WRITE: {
+            storage_write_abandon_request(&me->super);
+            /* Not freed: the write's data stays valid until its answer. The
+             * oldest such buffer is freed when that answer comes. */
+            if ( NULL == me->keep_orphan )
+            {
+                me->keep_orphan = me->bk->buf;
+            }
+            me->bk->buf = NULL;
+            stale_add(&me->keep_stale_write);
+            break;
+        }
+        default: {
+            /* A build id's answer names its file, and a read is this AO's own. */
+            break;
+        }
+    }
+    if ( NULL != me->bk->buf )
+    {
+        khal_free(me->bk->buf);
+        me->bk->buf = NULL;
+    }
+    me->bk->step = (uint8_t)BK_WAIT;
+    backup_stop(me);
+}
+
+/**
+ * @brief The app in hand is seen to: note what is known and pause before the next.
+ * @param me    The AO.
+ * @param state What is known of its copy now.
+ */
+static void backup_settle(AppMgr * const me, appmgr_backup_state_t state)
+{
+    appmgr_backup_set(&me->bk->table, me->bk->seq, state);
+    if ( NULL != me->bk->buf )
+    {
+        khal_free(me->bk->buf);
+        me->bk->buf = NULL;
+    }
+    me->bk->step = (uint8_t)BK_WAIT;
+    backup_arm(me, APPMGR_BACKUP_GAP_TICKS);
+}
+
+/**
+ * @brief A step of the app in hand could not be made for now: the app stays
+ *        unseen, and is seen to again after the pause.
+ *
+ * Nothing that passes makes an app SKIPPED, so an install never evicts it
+ * without its copy while a good card is in: KODE_DENIED is AO_Storage busy
+ * with another asker's file or its queue of held requests full, the PSRAM
+ * may be free at the next try, and a replacement that failed is made again
+ * from its STAT.
+ *
+ * @param me  The AO.
+ * @param why What stopped the step, for the log.
+ */
+static void backup_later(AppMgr * const me, const char *why)
+{
+    KLOG_I(TAG, "'%s' is seen to again after the pause: %s", me->bk->name, why);
+    if ( NULL != me->bk->buf )
+    {
+        khal_free(me->bk->buf);
+        me->bk->buf = NULL;
+    }
+    me->bk->step = (uint8_t)BK_WAIT;
+    backup_arm(me, APPMGR_BACKUP_GAP_TICKS);
+}
+
+/**
+ * @brief Take the next app in hand and ask the card about it.
+ *
+ * An app whose image has no name or no build id cannot have a copy told from
+ * another file: it is skipped, and the one after it is taken.
+ *
+ * @param me The AO, with no app in hand.
+ * @return true when a STAT is out; false when no app is left to see to.
+ */
+static bool backup_begin(AppMgr * const me)
+{
+    bool begun = false;
+    bool more  = !me->bk->nocard;
+
+    /* One pass at most over the apps: each turn either begins or skips one. */
+    for ( uint32_t turn = 0U; (turn < KAPPS_MAX_ENTRIES) && more && (!begun); ++turn )
+    {
+        const kapps_entry_t * const ent = appmgr_backup_next(&me->bk->table, kdrv_apps_dir());
+        kdrv_slot_desc_t            vd;
+
+        if ( NULL == ent )
+        {
+            more = false;
+        }
+        else if ( (kdrv_apps_desc(ent, &vd, NULL) != KODE_OK)
+                 || (kdrv_apps_build_id(ent, me->bk->build) != KODE_OK) )
+        {
+            KLOG_W(TAG, "an app with no readable name cannot be copied to the card");
+            appmgr_backup_set(&me->bk->table, ent->seq, APPMGR_BACKUP_SKIPPED);
+        }
+        else
+        {
+            me->bk->seq = ent->seq;
+            me->bk->off = ent->offset;
+            me->bk->len = ent->size;
+            (void)snprintf(me->bk->name, sizeof(me->bk->name), "%s", vd.project);
+            card_copy_path(me->bk->path, sizeof(me->bk->path), vd.project);
+            storage_path_request(&me->super, (uint8_t)STORAGE_PATH_STAT, me->bk->path);
+            me->bk->step = (uint8_t)BK_STAT;
+            backup_arm(me, APPMGR_OPEN_TICKS);
+            begun = true;
+        }
+    }
+    return begun;
+}
+
+/**
+ * @brief The card has no copy of the app in hand: start reading its image.
+ * @param me The AO.
+ */
+static void backup_copy(AppMgr * const me)
+{
+    /* Not zeroed: every byte is read from the region before it is written. */
+    /* cppcheck-suppress misra-c2012-11.5 ; a byte buffer from a void * allocator */
+    me->bk->buf = (uint8_t *)khal_realloc_psram(NULL, me->bk->len);
+    if ( NULL == me->bk->buf )
+    {
+        backup_later(me, "no memory for its image");
+    }
+    else
+    {
+        me->bk->owed_ticks = 0U;
+        me->bk->fill       = 0U;
+        me->bk->step = (uint8_t)BK_READ;
+        backup_arm(me, APPMGR_CHUNK_GAP_TICKS);
+    }
+}
+
+/**
+ * @brief Whether the copy's write waits for an abandoned write's answer.
+ *
+ * The abandoned write's buffer is AO_Storage's until that answer, and one is
+ * held at a time: the next write is asked for once it is freed. AO_Storage
+ * ends an abandoned write at its next chunk, so an answer that has not come
+ * after KODE_APPMGR_OPEN_MS was dropped on a dry pool: the write is done
+ * with, and its buffer is freed.
+ *
+ * @param me The AO, with the image in hand read.
+ * @return true while the write waits.
+ */
+static bool backup_write_owed(AppMgr * const me)
+{
+    bool owed = false;
+
+    if ( 0U < me->keep_stale_write )
+    {
+        me->bk->owed_ticks += APPMGR_BACKUP_GAP_TICKS;
+        if ( me->bk->owed_ticks < APPMGR_OPEN_TICKS )
+        {
+            owed = true;
+        }
+        else
+        {
+            KLOG_W(TAG, "the answer to an abandoned write never came; its buffer is freed");
+            me->keep_stale_write = 0U;
+            khal_free(me->keep_orphan);
+            me->keep_orphan = NULL;
+        }
+    }
+    if ( !owed )
+    {
+        me->bk->owed_ticks = 0U;
+    }
+    return owed;
+}
+
+/**
+ * @brief Read the next piece of the image in hand; after the last, ask for the write.
+ * @param me The AO, with the image's buffer allocated.
+ */
+static void backup_read_step(AppMgr * const me)
+{
+    uint32_t n = me->bk->len - me->bk->fill;
+
+    if ( APPMGR_KEEP_CHUNK < n )
+    {
+        n = APPMGR_KEEP_CHUNK;
+    }
+    if ( (0U < n)
+        && (kdrv_apps_read(me->bk->off + me->bk->fill, &me->bk->buf[me->bk->fill], n) != KODE_OK) )
+    {
+        KLOG_W(TAG, "'%s' could not be read out of the region", me->bk->name);
+        backup_settle(me, APPMGR_BACKUP_SKIPPED);
+    }
+    else
+    {
+        me->bk->fill += n;
+        if ( me->bk->fill < me->bk->len )
+        {
+            backup_arm(me, APPMGR_CHUNK_GAP_TICKS);
+        }
+        else if ( backup_write_owed(me) )
+        {
+            backup_arm(me, APPMGR_BACKUP_GAP_TICKS);   /* read again with nothing left: the wait */
+        }
+        else
+        {
+            char tmp[KODE_APP_FILE_MAX];
+
+            card_tmp_path(tmp, sizeof(tmp), me->bk->name);
+            storage_write_yield_request(tmp, me->bk->buf, me->bk->len, &me->super,
+                                        KODE_STORAGE_TAG_NONE);
+            me->bk->step = (uint8_t)BK_WRITE;
+            backup_arm(me, APPMGR_KEEP_WRITE_TICKS(me->bk->len));
+        }
+    }
+}
+
+/**
+ * @brief The card's answer about the name of the app in hand.
+ * @param me The AO.
+ * @param r  The STAT's answer.
+ * @return The QP status: a transition to idle when no card answers.
+ */
+static QState backup_on_stat(AppMgr * const me, const StoragePathRspEvt * const r)
+{
+    QState status = Q_HANDLED();
+
+    backup_stop(me);
+    if ( (uint8_t)KODE_DENIED == r->rc )
+    {
+        backup_later(me, "the card is busy");
+    }
+    else if ( (uint8_t)KODE_OK != r->rc )
+    {
+        /* No card, or one that will not mount. */
+        KLOG_I(TAG, "no card to copy the apps to");
+        me->bk->nocard = true;
+        me->bk->step   = (uint8_t)BK_WAIT;
+        status = Q_TRAN(&AppMgr_idle);
+    }
+    else if ( r->exists && r->is_dir )
+    {
+        KLOG_W(TAG, "'%s' on the card is a folder; '%s' cannot be copied there",
+               me->bk->path, me->bk->name);
+        backup_settle(me, APPMGR_BACKUP_SKIPPED);
+    }
+    else if ( card_has_copy(r, me->bk->len) )
+    {
+        /* A file of the image's length: its build id says whose it is. */
+        storage_desc_request(me->bk->path, &me->super);
+        me->bk->step = (uint8_t)BK_DESC;
+        backup_arm(me, APPMGR_OPEN_TICKS);
+    }
+    else
+    {
+        backup_copy(me);
+    }
+    return status;
+}
+
+/**
+ * @brief The build id of the file of the app's length.
+ * @param me The AO.
+ * @param d  The answer, for the path of the app in hand.
+ */
+static void backup_on_desc(AppMgr * const me, const StorageDescRspEvt * const d)
+{
+    backup_stop(me);
+    if ( (uint8_t)KODE_DENIED == d->status )
+    {
+        backup_later(me, "the card is busy");
+    }
+    else if ( ((uint8_t)KODE_OK == d->status)
+             && appmgr_backup_same(me->bk->len, d->build, me->bk->len, me->bk->build) )
+    {
+        KLOG_D(TAG, "'%s' has its copy on the card", me->bk->name);
+        backup_settle(me, APPMGR_BACKUP_COPIED);
+    }
+    else
+    {
+        KLOG_N(TAG, "'%s' is another build of '%s'; the app is copied over it",
+               me->bk->path, me->bk->name);
+        backup_copy(me);
+    }
+}
+
+/**
+ * @brief AO_Storage's answer to the write of the copy's temporary.
+ * @param me The AO.
+ * @param w  The answer.
+ */
+static void backup_on_write(AppMgr * const me, const StorageWriteRspEvt * const w)
+{
+    backup_stop(me);
+    if ( (uint8_t)KODE_DENIED == w->status )
+    {
+        /* Refused before the file was opened, or cut to give way to a
+         * download: nothing of it stays on the card. The image read stays in
+         * hand and only the write is asked again after the pause, so a long
+         * download costs the copy a refused request a pause, not a read of
+         * the region. A request, or a card mounted again, gives it up. */
+        KLOG_I(TAG, "'%s' is written again after the pause: the card is busy",
+               me->bk->name);
+        me->bk->step = (uint8_t)BK_READ;    /* read whole: the next step asks the write */
+        backup_arm(me, APPMGR_BACKUP_GAP_TICKS);
+    }
+    else
+    {
+        /* The answer says AO_Storage is done with the buffer. */
+        khal_free(me->bk->buf);
+        me->bk->buf = NULL;
+        if ( (uint8_t)KODE_OK != w->status )
+        {
+            KLOG_W(TAG, "'%s' could not be copied to the card: %lu of %lu bytes written",
+                   me->bk->name, (unsigned long)w->written, (unsigned long)me->bk->len);
+            backup_drop_tmp(me);
+            backup_settle(me, APPMGR_BACKUP_SKIPPED);
+        }
+        else
+        {
+            char tmp[KODE_APP_FILE_MAX];
+
+            card_tmp_path(tmp, sizeof(tmp), me->bk->name);
+            storage_pair_request(&me->super, (uint8_t)STORAGE_PAIR_REPLACE, tmp, me->bk->path);
+            me->bk->step = (uint8_t)BK_MOVE;
+            backup_arm(me, APPMGR_OPEN_TICKS);
+        }
+    }
+}
+
+/**
+ * @brief AO_Storage's answer to putting the finished copy on the app's name.
+ * @param me The AO.
+ * @param r  The answer.
+ */
+static void backup_on_move(AppMgr * const me, const StoragePathRspEvt * const r)
+{
+    backup_stop(me);
+    if ( (uint8_t)KODE_OK == r->rc )
+    {
+        KLOG_N(TAG, "'%s' copied to %s", me->bk->name, me->bk->path);
+        backup_settle(me, APPMGR_BACKUP_COPIED);
+    }
+    else if ( (uint8_t)KODE_DENIED == r->rc )
+    {
+        /* The temporary stays: the copy made again writes over it. */
+        backup_later(me, "the card is busy");
+    }
+    else
+    {
+        /* The temporary may be gone, or cut: the copy is made again from its
+         * STAT, never given up while the card is in. */
+        KLOG_W(TAG, "the copy of '%s' could not be put on its name", me->bk->name);
+        backup_drop_tmp(me);
+        backup_later(me, "its copy is made again");
+    }
+}
+
+/**
+ * @brief Background work of an idle AO: copy the apps to the card, one at a time.
+ *
+ * A request idle answers by doing something to the region or the card first
+ * gives up the copy in hand, so the write's abandon reaches AO_Storage ahead
+ * of whatever the request asks of it.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return The QP status.
+ */
+static QState AppMgr_backing(AppMgr * const me, QEvt const * const e)
+{
+    QState status;
+    switch ( e->sig )
+    {
+        case Q_ENTRY_SIG: {
+            me->bk->on   = true;
+            me->bk->step = (uint8_t)BK_WAIT;
+            if ( !backup_begin(me) )
+            {
+                /* Nothing could be begun: the next tick leaves the state,
+                 * which an entry action cannot. */
+                backup_arm(me, 1U);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case Q_EXIT_SIG: {
+            backup_release(me);
+            me->bk->on = false;
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BACKUP_TMO_SIG: {
+            status = Q_HANDLED();
+            if ( !backup_tick(me) )
+            {
+                /* an expiry of an arming that was stopped or replaced */
+            }
+            else if ( (uint8_t)BK_WAIT == me->bk->step )
+            {
+                if ( !backup_begin(me) )
+                {
+                    status = Q_TRAN(&AppMgr_idle);
+                }
+            }
+            else if ( (uint8_t)BK_READ == me->bk->step )
+            {
+                backup_read_step(me);
+            }
+            else
+            {
+                /* The step's deadline: AO_Storage dropped the request on a dry
+                 * pool, or the card never answered. */
+                KLOG_W(TAG, "the card did not answer about '%s'; no copy is made "
+                            "until a card mounts", me->bk->name);
+                me->bk->nocard = true;
+                status = Q_TRAN(&AppMgr_idle);
+            }
+            break;
+        }
+        case STORAGE_PATH_RSP_SIG: {
+            StoragePathRspEvt const * const r = Q_EVT_CAST(StoragePathRspEvt);
+
+            status = Q_HANDLED();
+            if ( keep_owed_answer(me, e) )
+            {
+                /* a STAT or a replacement given up on, not the one in hand */
+            }
+            else if ( ((uint8_t)STORAGE_PATH_STAT == r->op)
+                     && ((uint8_t)BK_STAT == me->bk->step) )
+            {
+                status = backup_on_stat(me, r);
+            }
+            else if ( ((uint8_t)STORAGE_PAIR_REPLACE == r->op)
+                     && ((uint8_t)BK_MOVE == me->bk->step) )
+            {
+                backup_on_move(me, r);
+            }
+            else
+            {
+                KLOG_D(TAG, "a path answer no copy is waiting for");
+            }
+            break;
+        }
+        case STORAGE_DESC_RSP_SIG: {
+            StorageDescRspEvt const * const d = Q_EVT_CAST(StorageDescRspEvt);
+
+            if ( ((uint8_t)BK_DESC == me->bk->step) && (strcmp(d->name, me->bk->path) == 0) )
+            {
+                backup_on_desc(me, d);
+            }
+            else
+            {
+                KLOG_D(TAG, "a build id no copy is waiting for");
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case STORAGE_WRITE_RSP_SIG: {
+            if ( keep_owed_answer(me, e) )
+            {
+                /* a write given up on, not the one in hand */
+            }
+            else if ( (uint8_t)BK_WRITE == me->bk->step )
+            {
+                backup_on_write(me, Q_EVT_CAST(StorageWriteRspEvt));
+            }
+            else
+            {
+                KLOG_D(TAG, "an answer to a write no copy is waiting for");
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_RECV_REQ_SIG:
+        case FLASH_REQ_SIG:
+        case APP_RUN_REQ_SIG:
+        case APP_ERASE_REQ_SIG:
+        case APPDATA_GET_REQ_SIG:
+        case APP_FIND_REQ_SIG:
+        case APP_KEEP_ONLY_REQ_SIG:
+        case APP_EVICT_REQ_SIG:
+        case APP_ADOPT_SIG:
+#if CONFIG_KODE_LOWPOWER
+        case LOWPOWER_ROUND_SIG:
+#endif
+        {
+            /* Idle's to answer, once the copy in hand is given up. Should
+             * idle stay, the copies go on after the pause. */
+            backup_release(me);
+            backup_arm(me, APPMGR_BACKUP_GAP_TICKS);
+            status = Q_SUPER(&AppMgr_idle);
+            break;
+        }
+        default: {
+            status = Q_SUPER(&AppMgr_idle);
+            break;
+        }
+    }
+    return status;
 }
 
 /**
@@ -6467,6 +7240,12 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
     QState status;
     switch ( e->sig )
     {
+        case STORAGE_CARD_SIG: {
+            /* The copies start again from idle, with what this says. */
+            backup_card(me, Q_EVT_CAST(StorageCardEvt));
+            status = Q_HANDLED();
+            break;
+        }
         case STORAGE_PATH_RSP_SIG:
         case STORAGE_WRITE_RSP_SIG: {
             (void)keep_owed_answer(me, e);

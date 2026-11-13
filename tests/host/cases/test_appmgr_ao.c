@@ -38,6 +38,12 @@
 #include "appmgr_outcome.h"
 
 /**
+ * @brief Whether the next appmgr_make() leaves AO_AppMgr listening to the
+ *        card's news on the bus. Only the case about that listening sets it.
+ */
+static bool s_card_on_bus;
+
+/**
  * @brief Construct and start AO_AppMgr over what the board holds, and leave what its
  *        initial transition posted in its queue.
  */
@@ -49,6 +55,12 @@ static void appmgr_make(void)
     (void)ao_spy();
     ao_spy_drain();
 
+    /* A case that fails stops where it is, and can leave a time event of the
+     * AO armed - the wait of a copy to the card among them. The constructor
+     * below would make QF's list of time events a cycle there, and the next
+     * tick would never return. */
+    qf_support_disarm_timers(AO_AppMgr);
+    qf_support_reap_timers();
     AppMgr_ctor();
     qf_support_give_queue(AO_AppMgr);
 
@@ -75,6 +87,23 @@ static void appmgr_make(void)
         s_registered = true;
     }
     QASM_INIT(AO_AppMgr, (void *)0, 0U);
+
+    /* A subscription lasts as long as the binary, and the files after this
+     * one run AO_Storage for real: its news would fill a queue nobody reads.
+     * The cases here give AO_AppMgr the card's news by hand. */
+    if ( !s_card_on_bus )
+    {
+        QActive_unsubscribe(AO_AppMgr, STORAGE_CARD_SIG);
+    }
+
+    /* No card, as AO_Storage says it: nothing is copied to one behind a
+     * case's back. The cases about those copies mount theirs. */
+    StorageCardEvt gone;
+
+    (void)memset(&gone, 0, sizeof(gone));
+    gone.super   = (QEvt)QEVT_INITIALIZER(STORAGE_CARD_SIG);
+    gone.mounted = false;
+    QASM_DISPATCH(AO_AppMgr, &gone.super, 0U);
 }
 
 /** @brief Put AO_AppMgr back to idle. */
@@ -760,8 +789,9 @@ TEST_CASE("a file name too long for the buffer is refused, not shortened",
  *
  * @param offset Region-relative offset of the image, a multiple of KAPPS_ALIGN.
  * @param project The project name the descriptor should carry.
+ * @param build   The byte its build id is made of.
  */
-static void plant_app(uint32_t offset, const char *project)
+static void plant_app_built(uint32_t offset, const char *project, uint8_t build)
 {
     static uint8_t prefix[KAPP_PREFIX_LEN];
     esp_app_desc_t desc;
@@ -769,6 +799,7 @@ static void plant_app(uint32_t offset, const char *project)
     (void)memset(prefix, 0xFF, sizeof(prefix));
     (void)memset(&desc, 0, sizeof(desc));
     desc.magic_word = ESP_APP_DESC_MAGIC_WORD;
+    (void)memset(desc.app_elf_sha256, (int)build, sizeof(desc.app_elf_sha256));
     (void)snprintf(desc.project_name, sizeof(desc.project_name), "%s", project);
     (void)snprintf(desc.version, sizeof(desc.version), "%s", "0.0.1");
     (void)snprintf(desc.date, sizeof(desc.date), "%s", "Jan  1 2026");
@@ -781,6 +812,12 @@ static void plant_app(uint32_t offset, const char *project)
                           kdrv_apps_write_begin(offset, sizeof(prefix)));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(prefix, sizeof(prefix)));
     kdrv_apps_write_abort();
+}
+
+/** @brief plant_app_built() with a build id of zeros. */
+static void plant_app(uint32_t offset, const char *project)
+{
+    plant_app_built(offset, project, 0U);
 }
 
 /** @brief Drain AO_Boot's queue, returning the first BOOT_APP_RUN_SIG in it. */
@@ -12504,4 +12541,551 @@ TEST_CASE("an image that is not one is kept as failed for corrupt, not write",
     TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_CORRUPT, got.why,
         "a bad image was reported as a write that failed");
+}
+
+/* ---- Copies to the card ahead of an eviction (AppMgr_backing) ------------------
+ * An idle AO_AppMgr copies its apps to the card one at a time, oldest first,
+ * so that an install finds the copy of what it evicts already made. */
+
+/** @brief Steps of the wait before the first copy, and of the pause between two apps. */
+#define BACKUP_WAIT_STEPS   QF_SUPPORT_STEPS(KODE_APP_BACKUP_IDLE_MS)
+#define BACKUP_GAP_STEPS    QF_SUPPORT_STEPS(KODE_APP_BACKUP_GAP_MS)
+/** @brief A few steps either side of a wait's end. */
+#define BACKUP_SLACK_STEPS  5U
+/** @brief The byte the build id of the case's first app is made of. */
+#define BACKUP_BUILD        0x42U
+
+static const char *const s_backup_names[] = { "first", "second" };
+
+/** @brief Tell AO_AppMgr the card's mount changed, as AO_Storage publishes it. */
+static void card_event(bool mounted)
+{
+    StorageCardEvt c;
+
+    (void)memset(&c, 0, sizeof(c));
+    c.super   = (QEvt)QEVT_INITIALIZER(STORAGE_CARD_SIG);
+    c.mounted = mounted;
+    QASM_DISPATCH(AO_AppMgr, &c.super, 0U);
+}
+
+/** @brief A fresh AO_AppMgr over @p n one-page apps, "first" the oldest, and a card just mounted. */
+static void backup_fresh(unsigned n)
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    small_apps(n, s_backup_names);
+    plant_app_built(KAPPS_DATA_OFF, "first", BACKUP_BUILD);
+    (void)storage_tally();
+    card_event(true);
+}
+
+/**
+ * @brief The end of every case here: the card goes, so the copy in hand is
+ *        given up and nothing of it is left armed for the next case.
+ */
+static void backup_end(void)
+{
+    card_event(false);
+    keep_end();
+}
+
+/** @brief Let the wait before the first copy pass. */
+static void backup_wait(void)
+{
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_SLACK_STEPS);
+}
+
+/** @brief Answer the build id asked of @p name: a file made by the build @p build. */
+static void answer_desc(const char *name, uint8_t build)
+{
+    StorageDescRspEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DESC_RSP_SIG);
+    r.status = (uint8_t)KODE_OK;
+    (void)snprintf(r.name, sizeof(r.name), "%s", name);
+    (void)memset(r.build, (int)build, sizeof(r.build));
+    QASM_DISPATCH(AO_AppMgr, &r.super, 0U);
+}
+
+/** @brief Take the write of "first"'s copy off AO_Storage's queue, after a STAT that found nothing. */
+static void backup_to_the_write(void)
+{
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the oldest app was not asked about");
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 100U);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the app with nothing on the card was not copied");
+    TEST_ASSERT_EQUAL_STRING("/sdcard/first.bin.tmp", ((StorageWriteEvt const *)wr)->name);
+    TEST_ASSERT_EQUAL_UINT32(KAPPS_ALIGN, ((StorageWriteEvt const *)wr)->len);
+    TEST_ASSERT_TRUE_MESSAGE(((StorageWriteEvt const *)wr)->yields,
+                             "the copy's write does not give way to a download");
+    QF_gc(wr);
+}
+
+/** @brief Whether AO_Storage was asked nothing: no path, no write, no replacement. */
+static bool storage_quiet(void)
+{
+    storage_seen_t const seen = storage_tally();
+
+    return (0U == seen.path) && (0U == seen.write) && (0U == seen.pair) && (0U == seen.open);
+}
+
+/**
+ * @brief Whether AO_Storage is asked about @p path within @p ticks.
+ *
+ * Every other path asked meanwhile is dropped unanswered.
+ */
+static bool path_asked_within(const char *path, unsigned ticks)
+{
+    bool hit = false;
+
+    for ( unsigned i = 0U; (i < ticks) && (!hit); ++i )
+    {
+        run_ticks(1U);
+        for ( const QEvt *e = storage_take(STORAGE_PATH_REQ_SIG); NULL != e;
+              e = storage_take(STORAGE_PATH_REQ_SIG) )
+        {
+            hit = hit || (0 == strcmp(path, ((StoragePathEvt const *)e)->path));
+            QF_gc(e);
+        }
+    }
+    return hit;
+}
+
+/** @brief The steps in which the app refused is asked about again: the pause, and some. */
+#define BACKUP_AGAIN_STEPS  (BACKUP_GAP_STEPS + BACKUP_SLACK_STEPS)
+
+/* AO_Storage answers DENIED while it is busy with another asker's file: the
+ * card is there, and the copy is tried again after the pause. */
+TEST_CASE("a STAT that AO_Storage refuses as busy is asked again after the pause",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the oldest app was not asked about");
+    answer_stat(false, (uint8_t)KODE_DENIED);
+    TEST_ASSERT_TRUE_MESSAGE(path_asked_within("/sdcard/first.bin", BACKUP_AGAIN_STEPS),
+        "a busy card was taken for no card");
+    backup_end();
+}
+
+/** @brief Times in a row a copy's write is refused as busy, as a long download does. */
+#define BACKUP_BUSY_ROUNDS  5U
+
+/* A write that gives way is refused for as long as a download runs: the image
+ * read stays in hand, and only the write is asked again after each pause. */
+TEST_CASE("a copy's write that AO_Storage refuses as busy is asked again after the pause, "
+          "with the image kept", "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_to_the_write();
+    unsigned const allocs = fake_psram_alloc_count();
+    unsigned const frees  = fake_psram_free_count();
+
+    for ( unsigned i = 0U; i < BACKUP_BUSY_ROUNDS; ++i )
+    {
+        answer_write((uint8_t)KODE_DENIED, 0U);
+        run_ticks(BACKUP_GAP_STEPS - BACKUP_SLACK_STEPS);
+        TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "the write was asked again before the pause");
+        const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 2U * BACKUP_SLACK_STEPS);
+        TEST_ASSERT_NOT_NULL_MESSAGE(wr, "an app whose write was refused as busy was given up");
+        TEST_ASSERT_EQUAL_STRING("/sdcard/first.bin.tmp", ((StorageWriteEvt const *)wr)->name);
+        TEST_ASSERT_EQUAL_UINT32(KAPPS_ALIGN, ((StorageWriteEvt const *)wr)->len);
+        TEST_ASSERT_TRUE(((StorageWriteEvt const *)wr)->yields);
+        QF_gc(wr);
+        TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "the card was asked about the app again");
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(allocs, fake_psram_alloc_count(),
+                                   "the image was read into a new buffer");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(frees, fake_psram_free_count(), "the image read was let go");
+    TEST_ASSERT_EQUAL_UINT(0U, klog_count_of("could not be copied"));
+
+    answer_write((uint8_t)KODE_OK, KAPPS_ALIGN);
+    storage_expect(STORAGE_PAIR_REQ_SIG, "the copy written at last was not put on its name");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(frees + 1U, fake_psram_free_count(),
+                                   "the image was not let go once written");
+    backup_end();
+}
+
+TEST_CASE("the image kept for a busy write is let go for a request, and for a card mounted again",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_to_the_write();
+    unsigned frees = fake_psram_free_count();
+
+    answer_write((uint8_t)KODE_DENIED, 0U);
+    card_event(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(frees + 1U, fake_psram_free_count(),
+                                   "a card mounted again kept the image read for the last");
+    TEST_ASSERT_TRUE_MESSAGE(path_asked_within("/sdcard/first.bin", BACKUP_AGAIN_STEPS),
+        "the card mounted again was not asked about the app");
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 100U);
+    TEST_ASSERT_NOT_NULL(wr);
+    QF_gc(wr);
+
+    frees = fake_psram_free_count();
+    answer_write((uint8_t)KODE_DENIED, 0U);
+    (void)storage_tally();
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(frees + 1U, fake_psram_free_count(),
+                                   "a request kept the image read for the copy");
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the request was not served");
+    let_the_open_expire();
+    backup_end();
+}
+
+TEST_CASE("a copy's replacement that AO_Storage refuses as busy is made again after the pause",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_to_the_write();
+    answer_write((uint8_t)KODE_OK, KAPPS_ALIGN);
+    const QEvt * const mv = storage_take(STORAGE_PAIR_REQ_SIG);
+    TEST_ASSERT_NOT_NULL(mv);
+    QF_gc(mv);
+    answer_replace((uint8_t)KODE_DENIED);
+    TEST_ASSERT_TRUE_MESSAGE(path_asked_within("/sdcard/first.bin", BACKUP_AGAIN_STEPS),
+        "an app whose replacement was refused as busy was given up");
+    backup_end();
+}
+
+/** @brief Times a copy finds no PSRAM in a row, more than any count of tries. */
+#define BACKUP_NOMEM_ROUNDS  5U
+
+/* The PSRAM may be free at the next try: an app is never given up for it, so
+ * an install never evicts it without its copy while the card is in. */
+TEST_CASE("a copy that finds no PSRAM is tried again after every pause, and made once there is room",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_wait();
+    for ( unsigned i = 0U; i < BACKUP_NOMEM_ROUNDS; ++i )
+    {
+        path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                        "the app with no room for its copy was given up");
+        fake_psram_refuse_after(0U, 1U);
+        answer_stat(false, (uint8_t)KODE_OK);
+        run_ticks(BACKUP_AGAIN_STEPS);
+    }
+    TEST_ASSERT_TRUE(klog_has("no memory for its image"));
+    TEST_ASSERT_EQUAL_UINT(0U, klog_count_of("could not be copied"));
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the app with no room for its copy was given up");
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 100U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the copy was not made once there was room");
+    QF_gc(wr);
+    backup_end();
+}
+
+/* The temporary may be gone or cut when its move fails: the copy is made
+ * again from its STAT, never given up while the card is in. */
+TEST_CASE("a copy whose move fails is made again after the pause",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_to_the_write();
+    answer_write((uint8_t)KODE_OK, KAPPS_ALIGN);
+    const QEvt * const mv = storage_take(STORAGE_PAIR_REQ_SIG);
+    TEST_ASSERT_NOT_NULL(mv);
+    QF_gc(mv);
+    answer_replace((uint8_t)KODE_ERROR);
+    TEST_ASSERT_TRUE_MESSAGE(path_asked_within("/sdcard/first.bin", BACKUP_AGAIN_STEPS),
+        "an app whose move failed was given up");
+    TEST_ASSERT_EQUAL_UINT(0U, klog_count_of("could not be copied"));
+    backup_end();
+}
+
+
+/* One abandoned write at a time holds its buffer: a copy's own write waits
+ * for that answer, and takes it as lost once a write's answer is overdue. */
+TEST_CASE("a second write abandoned while the first one's answer is lost leaks no buffer",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    unsigned const held = fake_psram_alloc_count() - fake_psram_free_count();
+
+    backup_to_the_write();
+    card_event(false);                          /* write A abandoned; its answer never comes */
+    card_event(true);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the app was not asked about again");
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG,
+                                             QF_SUPPORT_STEPS(KODE_APPMGR_OPEN_MS)
+                                             + BACKUP_GAP_STEPS + BACKUP_SLACK_STEPS);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the copy waited for ever on a lost answer");
+    QF_gc(wr);
+    card_event(false);                          /* write B abandoned */
+    answer_write((uint8_t)KODE_ERROR, 0U);      /* B's answer: its buffer is done with */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(held, fake_psram_alloc_count() - fake_psram_free_count(),
+        "a buffer of an abandoned write was never freed");
+    keep_end();
+}
+
+/* AO_Storage publishes the card's news: AO_AppMgr is on the bus for it. */
+TEST_CASE("the card's news on the bus reaches AO_AppMgr", "[appmgr_ao][backup]")
+{
+    StorageCardEvt *c = NULL;
+
+    Mockkdrv_slot_Init();
+    s_card_on_bus = true;
+    keep_fresh();
+    s_card_on_bus = false;
+    small_apps(1U, s_backup_names);
+    (void)storage_tally();
+
+    c = Q_NEW_X(StorageCardEvt, 0U, STORAGE_CARD_SIG);
+    TEST_ASSERT_NOT_NULL(c);
+    c->mounted = true;
+    QACTIVE_PUBLISH(&c->super, ao_spy());
+    backup_wait();
+    QActive_unsubscribe(AO_AppMgr, STORAGE_CARD_SIG);
+
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "a card published as mounted was not asked about the app");
+    backup_end();
+}
+
+TEST_CASE("an idle AO_AppMgr asks the card about its oldest app once the wait has passed",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(2U);
+
+    run_ticks(BACKUP_WAIT_STEPS - BACKUP_SLACK_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "the card was asked before the wait had passed");
+
+    run_ticks(2U * BACKUP_SLACK_STEPS);
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the oldest app was not asked about");
+    backup_end();
+}
+
+TEST_CASE("an app whose copy is on the card is not copied",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the app was not asked about");
+
+    answer_copy_of(KAPPS_ALIGN);
+    const QEvt * const d = storage_take(STORAGE_DESC_REQ_SIG);
+    TEST_ASSERT_NOT_NULL_MESSAGE(d, "a file of the app's length was not asked its build id");
+    TEST_ASSERT_EQUAL_STRING("/sdcard/first.bin", ((StorageDescReqEvt const *)d)->name);
+    QF_gc(d);
+
+    answer_desc("/sdcard/first.bin", BACKUP_BUILD);
+    TEST_ASSERT_TRUE(klog_has("'first' has its copy on the card"));
+
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "an app with its copy was seen to again");
+    backup_end();
+}
+
+/* A new version of an app can be as long as the one before: the card's file
+ * is the copy only with the build id of the image installed. */
+TEST_CASE("a file of the app's length made by another build is copied over",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the app was not asked about");
+    answer_copy_of(KAPPS_ALIGN);
+    storage_expect(STORAGE_DESC_REQ_SIG, "the file was not asked its build id");
+
+    answer_desc("/sdcard/first.bin", (uint8_t)(BACKUP_BUILD + 1U));
+    const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 100U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "another build's file was taken for the app's copy");
+    TEST_ASSERT_EQUAL_STRING("/sdcard/first.bin.tmp", ((StorageWriteEvt const *)wr)->name);
+    QF_gc(wr);
+
+    answer_write((uint8_t)KODE_OK, KAPPS_ALIGN);
+    pair_req_expect("/sdcard/first.bin.tmp", "/sdcard/first.bin",
+                    "the finished copy was not put on the app's name");
+    answer_replace((uint8_t)KODE_OK);
+    TEST_ASSERT_TRUE(klog_has("'first' copied to /sdcard/first.bin"));
+
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "an app just copied was seen to again");
+    backup_end();
+}
+
+TEST_CASE("an app with nothing on the card is copied, and the next one waits for the pause",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(2U);
+    backup_to_the_write();
+
+    answer_write((uint8_t)KODE_OK, KAPPS_ALIGN);
+    pair_req_expect("/sdcard/first.bin.tmp", "/sdcard/first.bin",
+                    "the finished copy was not put on the app's name");
+    answer_replace((uint8_t)KODE_OK);
+
+    run_ticks(BACKUP_GAP_STEPS - BACKUP_SLACK_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "the next app was seen to with no pause");
+    run_ticks(2U * BACKUP_SLACK_STEPS);
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/second.bin",
+                    "the next app was not asked about after the pause");
+    backup_end();
+}
+
+/* A request for AO_AppMgr never waits for a copy: the write is given up
+ * before the request is served, so AO_Storage has let go of its file by the
+ * time the request's own open reaches it. */
+TEST_CASE("a request ends the copy in hand: the write is abandoned before the request's open",
+          "[appmgr_ao][backup]")
+{
+    const QEvt *e = NULL;
+
+    backup_fresh(1U);
+    backup_to_the_write();
+    (void)storage_tally();
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+
+    TEST_ASSERT_EQUAL_INT(pdTRUE, (int)xQueueReceive(AO_Storage->eQueue, &e, 0U));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(STORAGE_WRITE_ABANDON_REQ_SIG, (int)e->sig,
+        "the request reached AO_Storage ahead of the copy's abandon");
+    TEST_ASSERT_EQUAL_PTR(AO_AppMgr, ((StorageWriteAbandonEvt const *)e)->who);
+    QF_gc(e);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the request was not served");
+
+    /* The abandoned write's answer comes later and belongs to nobody. */
+    answer_write((uint8_t)KODE_ERROR, 0U);
+    TEST_ASSERT_FALSE_MESSAGE(klog_has("copied to"), "an abandoned copy was called done");
+
+    let_the_open_expire();
+    backup_end();
+}
+
+TEST_CASE("a copy the card refuses is not tried again until a card mounts",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_to_the_write();
+
+    answer_write((uint8_t)KODE_ERROR, 1024U);
+    path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/first.bin.tmp",
+                    "the half copy was left on the card");
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "a copy the card refused was tried again");
+
+    card_event(true);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "another card was not asked about the app");
+    backup_end();
+}
+
+TEST_CASE("with no card the first answer ends the copies until one mounts",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(2U);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the app was not asked about");
+
+    answer_stat(false, (uint8_t)KODE_ERROR);             /* no card, or it will not mount */
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "the card that is not there was asked again");
+
+    card_event(true);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the card that mounted was not asked");
+    backup_end();
+}
+
+/* What is known of the apps was true of the card that was mounted. */
+TEST_CASE("a card that goes stops the copies, and one that mounts has every app asked about again",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the app was not asked about");
+    answer_copy_of(KAPPS_ALIGN);
+    storage_expect(STORAGE_DESC_REQ_SIG, "the file was not asked its build id");
+    answer_desc("/sdcard/first.bin", BACKUP_BUILD);
+    (void)storage_tally();
+
+    card_event(false);
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "a card that is gone was asked");
+
+    card_event(true);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the app's copy was taken for granted on another card");
+    backup_end();
+}
+
+TEST_CASE("a card that never answers stops the copies, and its late answer starts none",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the app was not asked about");
+
+    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + BACKUP_SLACK_STEPS);
+    TEST_ASSERT_TRUE(klog_has("the card did not answer about 'first'"));
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "a card that does not answer was asked again");
+
+    answer_stat(false, (uint8_t)KODE_OK);                 /* the first STAT's, late */
+    run_ticks(BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "a late answer started a copy");
+    backup_end();
+}
+
+/* The copies' state is PSRAM taken once at the AO's start. With none for it
+ * nothing is copied ahead of an eviction, and every request is served as before. */
+TEST_CASE("no PSRAM for the copies' state makes no copy and refuses nothing",
+          "[appmgr_ao][backup]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    fake_psram_refuse_after(1U, 1U);          /* the chunk buffer, then the state */
+    AppMgr_ctor();
+    QASM_INIT(AO_AppMgr, (void *)0, 0U);
+    small_apps(1U, s_backup_names);
+    (void)storage_tally();
+    card_event(true);
+
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "a copy was begun with no state to keep");
+    TEST_ASSERT_TRUE(klog_has("no PSRAM for the state of the copies"));
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "a request was not served");
+    let_the_open_expire();
+    backup_end();
+}
+
+/* A copy never keeps the board awake: the round is answered ready, and the
+ * write in hand is given up so that AO_Storage can rest too. */
+TEST_CASE("a round of rest gives up the copy in hand and is answered ready",
+          "[appmgr_ao][backup][lowpower]")
+{
+    backup_fresh(1U);
+    backup_to_the_write();
+    (void)storage_tally();
+
+    lp_round(AO_AppMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    lp_expect_no_more();
+    storage_expect(STORAGE_WRITE_ABANDON_REQ_SIG, "the copy's write was left running");
+
+    answer_write((uint8_t)KODE_ERROR, 0U);
+    backup_end();
 }

@@ -119,3 +119,74 @@ TEST_CASE("a file is an app's copy only at its length and with its build id",
     TEST_ASSERT_FALSE_MESSAGE(appmgr_backup_same(4096U, file, 4096U, image),
                               "another build was taken for the copy");
 }
+
+/* ---- The table against the directory --------------------------------------- */
+
+/** @brief A directory of @p n live apps with install numbers @p seqs. */
+static void dir_with(kapps_dir_t *d, const uint32_t *seqs, uint32_t n)
+{
+    (void)memset(d, 0, sizeof(*d));
+    d->count = n;
+    for ( uint32_t i = 0U; i < n; ++i )
+    {
+        d->e[i].offset = KAPPS_DATA_OFF + (i * KAPPS_ALIGN);
+        d->e[i].size   = KAPPS_ALIGN;
+        d->e[i].seq    = seqs[i];
+        d->e[i].flags  = KAPPS_ENTRY_VALID;
+    }
+}
+
+/* The copies are made oldest first: the oldest is the first an install evicts. */
+TEST_CASE("the next app to see to is the oldest one unseen",
+          "[appmgr_backup]")
+{
+    static kapps_dir_t   dir;
+    static const uint32_t seqs[] = { 30U, 10U, 20U };
+
+    dir_with(&dir, seqs, 3U);
+    appmgr_backup_reset(&s_table);
+    TEST_ASSERT_EQUAL_UINT32(10U, appmgr_backup_next(&s_table, &dir)->seq);
+
+    appmgr_backup_set(&s_table, 10U, APPMGR_BACKUP_COPIED);
+    TEST_ASSERT_EQUAL_UINT32(20U, appmgr_backup_next(&s_table, &dir)->seq);
+
+    appmgr_backup_set(&s_table, 20U, APPMGR_BACKUP_SKIPPED);
+    TEST_ASSERT_EQUAL_UINT32(30U, appmgr_backup_next(&s_table, &dir)->seq);
+
+    appmgr_backup_set(&s_table, 30U, APPMGR_BACKUP_COPIED);
+    TEST_ASSERT_NULL_MESSAGE(appmgr_backup_next(&s_table, &dir),
+                             "an app copied or skipped was offered again");
+}
+
+TEST_CASE("an entry that is not live is never the next app", "[appmgr_backup]")
+{
+    static kapps_dir_t    dir;
+    static const uint32_t seqs[] = { 5U, 6U };
+
+    dir_with(&dir, seqs, 2U);
+    dir.e[0].flags = 0U;
+    appmgr_backup_reset(&s_table);
+
+    TEST_ASSERT_EQUAL_UINT32(6U, appmgr_backup_next(&s_table, &dir)->seq);
+}
+
+/* An app erased or evicted is not in the directory: what was known of it goes. */
+TEST_CASE("pruning drops the apps the directory no longer holds", "[appmgr_backup]")
+{
+    static kapps_dir_t    dir;
+    static const uint32_t seqs[] = { 2U, 4U };
+
+    dir_with(&dir, seqs, 2U);
+    appmgr_backup_reset(&s_table);
+    for ( uint32_t seq = 1U; 5U >= seq; ++seq )
+    {
+        appmgr_backup_set(&s_table, seq, APPMGR_BACKUP_COPIED);
+    }
+
+    appmgr_backup_prune(&s_table, &dir);
+
+    TEST_ASSERT_EQUAL_UINT32(2U, s_table.count);
+    TEST_ASSERT_EQUAL_INT(APPMGR_BACKUP_COPIED, appmgr_backup_get(&s_table, 2U));
+    TEST_ASSERT_EQUAL_INT(APPMGR_BACKUP_COPIED, appmgr_backup_get(&s_table, 4U));
+    TEST_ASSERT_EQUAL_INT(APPMGR_BACKUP_UNSEEN, appmgr_backup_get(&s_table, 5U));
+}

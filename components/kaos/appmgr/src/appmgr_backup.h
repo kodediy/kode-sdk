@@ -66,6 +66,21 @@ void appmgr_backup_set(appmgr_backup_t *t, uint32_t seq, appmgr_backup_state_t s
 void appmgr_backup_forget(appmgr_backup_t *t, uint32_t seq);
 
 /**
+ * @brief Drop every app the directory no longer holds.
+ * @param t The table.
+ * @param d The directory.
+ */
+void appmgr_backup_prune(appmgr_backup_t *t, const kapps_dir_t *d);
+
+/**
+ * @brief The oldest installed app that is unseen.
+ * @param t The table.
+ * @param d The directory.
+ * @return Its entry in @p d; NULL when every app is copied or skipped.
+ */
+const kapps_entry_t *appmgr_backup_next(const appmgr_backup_t *t, const kapps_dir_t *d);
+
+/**
  * @brief Whether a file on the card is the copy of an installed image.
  * @param file_len    The file's length in bytes.
  * @param file_build  The build id read from the file; KAPP_BUILD_LEN bytes.

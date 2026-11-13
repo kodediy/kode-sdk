@@ -82,6 +82,62 @@ void appmgr_backup_forget(appmgr_backup_t *t, uint32_t seq)
     }
 }
 
+/**
+ * @brief The live entry of @p d installed as @p seq.
+ * @param d   The directory.
+ * @param seq The install number.
+ * @return The entry; NULL when no live entry has it.
+ */
+static const kapps_entry_t *backup_entry(const kapps_dir_t *d, uint32_t seq)
+{
+    const kapps_entry_t *found = NULL;
+
+    for ( uint32_t i = 0U; (i < d->count) && (NULL == found); ++i )
+    {
+        if ( ((d->e[i].flags & KAPPS_ENTRY_VALID) != 0U) && (d->e[i].seq == seq) )
+        {
+            found = &d->e[i];
+        }
+    }
+    return found;
+}
+
+void appmgr_backup_prune(appmgr_backup_t *t, const kapps_dir_t *d)
+{
+    uint32_t i = 0U;
+
+    while ( i < t->count )
+    {
+        if ( NULL == backup_entry(d, t->seq[i]) )
+        {
+            /* The last one takes this place: it is looked at next. */
+            appmgr_backup_forget(t, t->seq[i]);
+        }
+        else
+        {
+            ++i;
+        }
+    }
+}
+
+const kapps_entry_t *appmgr_backup_next(const appmgr_backup_t *t, const kapps_dir_t *d)
+{
+    const kapps_entry_t *next = NULL;
+
+    for ( uint32_t i = 0U; i < d->count; ++i )
+    {
+        if ( (d->e[i].flags & KAPPS_ENTRY_VALID) != 0U )
+        {
+            appmgr_backup_state_t const state = appmgr_backup_get(t, d->e[i].seq);
+            if ( (APPMGR_BACKUP_UNSEEN == state) && ((NULL == next) || (d->e[i].seq < next->seq)) )
+            {
+                next = &d->e[i];
+            }
+        }
+    }
+    return next;
+}
+
 bool appmgr_backup_same(uint32_t file_len, const uint8_t *file_build,
                         uint32_t image_len, const uint8_t *image_build)
 {
