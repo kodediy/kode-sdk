@@ -112,6 +112,13 @@ size_t khal_task_list(khal_task_info_t *out, size_t max, size_t *total);
 uint32_t khal_task_stack_free(void);
 
 /**
+ * @brief Change the calling task's priority.
+ * @param priority The FreeRTOS priority to run at from here on.
+ * @return The priority the task had, to give it back with.
+ */
+uint32_t khal_task_priority_set(uint32_t priority);
+
+/**
  * @brief The name of the running task. Safe from a critical section.
  * @return The name, or NULL before the scheduler runs.
  */
