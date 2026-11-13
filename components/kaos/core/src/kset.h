@@ -73,10 +73,10 @@
 #define KSET_SLEEP_AFTER_SECS  { 30U, KSET_S_MIN, 2U * KSET_S_MIN, \
                                  5U * KSET_S_MIN, 10U * KSET_S_MIN, KSET_S_NEVER }
 /** The times asleep `off_after` offers. */
-#define KSET_OFF_AFTER_WORDS   { "1h", "6h", "24h", "3d", "7d", "never" }
-/** The seconds of each, 1 h being KODE_LOWPOWER_OFF_AFTER_DEF_S. */
-#define KSET_OFF_AFTER_SECS    { KSET_S_HOUR, 6U * KSET_S_HOUR, KSET_S_DAY, \
-                                 3U * KSET_S_DAY, 7U * KSET_S_DAY, KSET_S_NEVER }
+#define KSET_OFF_AFTER_WORDS   { "20m", "1h", "6h", "24h", "7d", "never" }
+/** The seconds of each, 20 min being KODE_LOWPOWER_OFF_AFTER_DEF_S. */
+#define KSET_OFF_AFTER_SECS    { 20U * KSET_S_MIN, KSET_S_HOUR, 6U * KSET_S_HOUR, \
+                                 KSET_S_DAY, 7U * KSET_S_DAY, KSET_S_NEVER }
 
 /** The ages `chan_keep` offers. */
 #define KSET_CHAN_KEEP_WORDS   { "1h", "6h", "1d", "3d", "7d", "never" }
