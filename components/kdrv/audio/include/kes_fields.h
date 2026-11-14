@@ -36,7 +36,7 @@ typedef enum {
     KDRV_ES_MCLK_MULT,    /**< Fixed.                                        */
     /* Settings, applied at the next open. */
     KDRV_ES_VOL,          /**< 0 to 100. 100 is the speaker's cap,
-                           *   KDRV_ES8311_OUT_DB_X10_MAX, not full scale. */
+                           *   KDRV_ES8311_OUT_DB_X10_MAX: full scale.     */
     KDRV_ES_MIC_DB,       /**< 0 to 42, rounded down to a 6 dB step.         */
     KDRV_ES_OUT_MUTE,     /**< Mute the DAC.                                 */
     KDRV_ES_IN_MUTE,      /**< Mute the ADC.                                 */
@@ -52,7 +52,7 @@ typedef enum {
     KDRV_ES_HPSW,         /**< 0x13[4]. The codec layer forces 1 at open.    */
     KDRV_ES_DAC2ADC,      /**< 0x44. Must read KDRV_ES8311_DAC2ADC_OFF.      */
     KDRV_ES_DRC_EN,       /**< 0x34[7]. Off, and read only: it levels toward
-                           *   -6 dBFS, which is above the speaker's cap.    */
+                           *   -6 dBFS whatever the volume is.               */
     KDRV_ES_RAMPRATE,     /**< 0x37[7:4]. Sets how long a tone must settle.  */
     /* The raw registers, so a bad divider is visible without a scope. */
     KDRV_ES_REG00, KDRV_ES_REG01, KDRV_ES_REG02, KDRV_ES_REG03,

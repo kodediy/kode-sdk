@@ -224,8 +224,8 @@ TEST_CASE("audio field= asks for that field and answers a record",
     answer_field(FIELD_OP_GET, (uint16_t)KDRV_ES_DAC_VOL_DB,
                  KDRV_ES8311_OUT_DB_X10_MAX, KODE_OK);
     TEST_ASSERT_TRUE_MESSAGE(
-        replied(">|chip=audio field=\"dac_vol_db\" value=-110"),
-        "volume 100 reads the speaker's cap, not full scale");
+        replied(">|chip=audio field=\"dac_vol_db\" value=0"),
+        "volume 100 reads full scale");
     TEST_ASSERT_TRUE(replied(">ok"));
 }
 
