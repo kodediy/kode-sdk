@@ -242,6 +242,12 @@ kode_status_t khal_console_dock_release(void)
     if ( s_dock_up )
     {
         s_dock_up = false;
+        /* The CDC port first: tinyusb_driver_uninstall() takes the stack down
+         * and leaves the port's own object where it was, so the next
+         * tinyusb_cdcacm_init() found it "not in the state expected" and the
+         * second take of a boot was refused (the station's second loop: "dock
+         * port not available: CDC: ESP_ERR_INVALID_STATE"). */
+        (void)tinyusb_cdcacm_deinit((int)TINYUSB_CDC_ACM_0);
         (void)tinyusb_driver_uninstall();
     }
     {
