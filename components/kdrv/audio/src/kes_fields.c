@@ -100,8 +100,9 @@ typedef struct {
  *
  * The component's own law: register / 2 - 95.5 decibels, over the full byte.
  * So 0xBF is exactly zero, and anything above it is digital gain the DAC does
- * not have the headroom for. Volume 100 sits lower still, at the speaker's cap
- * (KDRV_ES8311_OUT_DB_X10_MAX), which the driver's volume curve applies.
+ * not have the headroom for. Volume 100 is the speaker's cap
+ * (KDRV_ES8311_OUT_DB_X10_MAX, full scale), which the driver's volume curve
+ * applies.
  */
 #define VOL_DB_X10_MIN   (-955)
 #define VOL_DB_X10_MAX     320
@@ -138,7 +139,7 @@ static const row_t FIELDS[KDRV_ES_FIELD_MAX] = {
     [KDRV_ES_HPSW]         = FBIT("hpsw",   REG_SYS_13,  4U, F_RW),
     [KDRV_ES_DAC2ADC]      = BYTE("dac2adc", REG_DAC2ADC),
     /* Read only, like 0x32 and 0x34 below: the compressor levels toward
-     * -6 dBFS, which is above the speaker's cap, and the driver's volume
+     * -6 dBFS whatever the volume is, and the driver's volume
      * curve is the one path to the output that is allowed to move it. */
     [KDRV_ES_DRC_EN]       = FBIT("drc_en", REG_DRC,     7U, F_RO),
     [KDRV_ES_RAMPRATE]     = ROW("ramprate", "steps", 0, 15, 1U,

@@ -354,7 +354,7 @@ static kode_status_t do_close(void);
  *
  * Every volume anybody sets passes through this curve - the field table, a
  * tone, an app - so it is the one place the cap can live and be obeyed by
- * all of them. Two points: the layer's own fifty-decibel span, moved down so
+ * all of them. Two points: the layer's own fifty-decibel span, placed so
  * that its top is KDRV_ES8311_OUT_DB_X10_MAX. Volume 100 is the cap, and
  * every volume under it sits as far under the cap as the same volume sits
  * under full scale on the layer's own curve. The layer interpolates in floats
