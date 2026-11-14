@@ -194,3 +194,64 @@ TEST_CASE("krfid: a frame round-trips through the decoder to the same id", "[krf
     int n = gen_bits(fr, 13, 3000, 400, 6, 0, 0);
     expect_id(id, n, 32);
 }
+
+/* Manchester samples with a different width for a high and a low half-bit, as a
+ * strongly coupled tag gives: the envelope's high level is cut short and its low
+ * level stretched, with the bit period unchanged. */
+static int gen_asym(const uint8_t id[5], int hi_len, int lo_len, int hi, int lo, int reps)
+{
+    uint8_t fr[64];
+    build_frame(id, fr);
+    int n = 0;
+    for ( int rep = 0; rep < reps; rep++ )
+    {
+        for ( int b = 0; 64 > b; b++ )
+        {
+            int const first_hi = fr[b];   /* bit 1 -> [hi,lo], bit 0 -> [lo,hi] */
+            for ( int h = 0; 2 > h; h++ )
+            {
+                int const is_hi = (0 == h) ? first_hi : !first_hi;
+                int const len = is_hi ? hi_len : lo_len;
+                for ( int k = 0; k < len && WIN_MAX > n; k++ )
+                {
+                    win[n++] = (uint16_t)(is_hi ? hi : lo);
+                }
+            }
+        }
+    }
+    return n;
+}
+
+TEST_CASE("krfid: RF/64 at 80 kHz with 17-sample highs and 24-sample lows decodes", "[krfid_em4100]")
+{
+    /* A tag close to the coil (peak-to-peak ~1450): the smallest corroborated
+     * run is the 17-sample high, so the estimate is 17 and a double low (48)
+     * rounds to 3 half-bits instead of 2. The true width is ~20. */
+    uint8_t got[5];
+    krfid_em4100_diag_t d;
+    int n = gen_asym(ID_A, 17, 24, 1900, 450, 3);
+    int r = krfid_em4100_decode(win, n, 80000, &work, got, &d);
+    TEST_ASSERT_EQUAL_INT(0, r);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(ID_A, got, 5);
+    TEST_ASSERT_EQUAL_INT(64, d.bitrate_div);
+}
+
+TEST_CASE("krfid: the same asymmetric RF/64 window decodes for another id and 16/25", "[krfid_em4100]")
+{
+    uint8_t got[5];
+    krfid_em4100_diag_t d;
+    int n = gen_asym(ID_B, 16, 25, 1900, 450, 3);
+    TEST_ASSERT_EQUAL_INT(0, krfid_em4100_decode(win, n, 80000, &work, got, &d));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(ID_B, got, 5);
+    TEST_ASSERT_EQUAL_INT(64, d.bitrate_div);
+}
+
+TEST_CASE("krfid: a window of noise with a strong swing is not read as a tag", "[krfid_em4100]")
+{
+    /* The sweep tries many widths; none may turn noise into a frame, whose
+     * parity checks have to hold. */
+    uint8_t got[5];
+    krfid_em4100_diag_t d;
+    for ( int i = 0; 6000 > i; i++ ) win[i] = (uint16_t)(1700 + noise(700));
+    TEST_ASSERT_NOT_EQUAL(0, krfid_em4100_decode(win, 6000, 80000, &work, got, &d));
+}

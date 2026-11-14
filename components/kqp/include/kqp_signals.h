@@ -899,6 +899,8 @@ enum KodeSignals {
     TOUCH_TEST_TMO_SIG,         /**< AO_Touch private one-shot QTimeEvt: the
                                  *   operator did not tap the target a step
                                  *   showed in time.                          */
+    TOUCH_INJECT_SIG,           /**< AO_Touch private: a console injection moved
+                                 *   the finger, for the test's judge (a TouchEvt). */
     DISPLAY_MIRROR_TICK_SIG,    /**< AO_Display private: one-shot, re-armed
                                  *   after every pass - the mirror's own
                                  *   pacer, paired with the credit window
@@ -932,6 +934,9 @@ enum KodeSignals {
     BUTTONS_PAD_IDLE_SIG,       /**< AO_Buttons private: an injected release
                                  *   left the pad idle; a turn that waited for
                                  *   it may apply now.                        */
+    BUTTONS_INJECT_SIG,         /**< AO_Buttons private: a console injection moved
+                                 *   a button, for the test's judge (a ButtonEvt
+                                 *   with the board's own button in `id`). */
     IOEXP_INT_SIG,              /**< AO_IoExp private: the TCA6408A's INT line
                                  *   went low - an input changed since the
                                  *   register was last read. Posted from the

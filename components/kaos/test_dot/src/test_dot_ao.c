@@ -13,6 +13,7 @@
 #include "kaos.h"
 #include "kaos_claim.h"
 #include "kaos_start.h"
+#include "kbsp.h"
 #include "kdrv_buttons.h"
 #include "kdrv_wifi.h"
 #include "khal_nvs.h"
@@ -1898,7 +1899,11 @@ _Static_assert(sizeof(TD_RADIO_TIME_WORST) <= KODE_FUNCTION_REC_MAX, "the longes
 
 /**
  * @brief Whether the C5's card passes: an ESP32-C5 running Kode's slave at this image's
- *        esp-hosted version, with its data lines up.
+ *        esp-hosted version, on the bus the board is made for.
+ *
+ * Any width used to pass, and a link that had fallen back to one data line or to a slower
+ * clock (a data line that does not reach the C5) left the station as a good card. The
+ * production `c5` row has always asked for the board's own width and clock.
  *
  * @param e AO_Radio's answer to the radio check.
  * @return true when the card, the chip, the slave, the version and the SDIO width all pass.
@@ -1906,7 +1911,8 @@ _Static_assert(sizeof(TD_RADIO_TIME_WORST) <= KODE_FUNCTION_REC_MAX, "the longes
 static bool radio_card_ok(RadioProbeEvt const *e)
 {
     return e->card && (RADIO_PROBE_CHIP_C5 == e->chip) && e->kode && (e->fw[0] == e->host[0])
-           && (e->fw[1] == e->host[1]) && (e->fw[2] == e->host[2]) && (0U < e->sdio_width);
+           && (e->fw[1] == e->host[1]) && (e->fw[2] == e->host[2])
+           && ((uint8_t)KBSP_C5_SDIO_WIDTH == e->sdio_width) && ((uint32_t)KBSP_C5_SDIO_KHZ == e->sdio_khz);
 }
 
 /**

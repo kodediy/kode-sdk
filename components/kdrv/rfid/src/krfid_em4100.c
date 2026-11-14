@@ -68,17 +68,114 @@ static int parse_frame(const uint8_t *bit, int nb, int s, int inv, uint8_t id[5]
     return 0;
 }
 
+/* The sweep of trial half-bit widths, in tenths of a sample at SWEEP_REF_HZ
+ * (the 80 kHz the front-end is sampled at) and scaled with the sample rate.
+ * At RF/64 the theoretical half-bit is 20.5 samples there; 14 to 24 covers
+ * the widths the estimator in decode() was seen to miss by 3 or more. */
+#define SWEEP_REF_HZ 80000
+#define SWEEP_LO10   140
+#define SWEEP_HI10   240
+#define SWEEP_STEP10 5
+
+/**
+ * @brief Snap a half-bit width to the RF/16, RF/32 or RF/64 bit rate.
+ * @param hb        Half-bit width in samples.
+ * @param sample_hz Sampling rate, 0 if unknown.
+ * @return 16, 32 or 64; 0 when @p sample_hz is unknown.
+ */
+static int snap_div(int hb, uint32_t sample_hz)
+{
+    if ( 0U == sample_hz )
+    {
+        return 0;
+    }
+    /* bit period = 2*half-bit; RF/div = 125kHz * bit_period. */
+    int const div = (int)((250000.0 * hb) / (double)sample_hz + 0.5);
+    if ( 24 > div )
+    {
+        return 16;
+    }
+    if ( 48 > div )
+    {
+        return 32;
+    }
+    return 64;
+}
+
+/**
+ * @brief Rebuild the half-bit stream from the run lengths at one trial width
+ *        and search it for a valid frame.
+ * @param work    The decoder's scratch space; its @c run array holds the runs.
+ * @param nr      Number of runs.
+ * @param first   Level of the first run.
+ * @param cand10  The trial half-bit width, in tenths of a sample.
+ * @param[out] id 5-byte ID on success.
+ * @param[out] d  Phase, polarity and frame start on success.
+ * @return 0 and @p id on success; -2 when no frame is found at this width.
+ */
+static int find_frame(krfid_em4100_work_t *work, int nr, int first, int cand10,
+                      uint8_t id[5], krfid_em4100_diag_t *d)
+{
+    int const *const s_run = work->run;
+    uint8_t *const s_hb  = work->hb;
+    uint8_t *const s_bit = work->bit;
+
+    int nh = 0, lvl = first;
+    for ( int i = 0; i < nr && MAXN > nh; i++ )
+    {
+        int c = (s_run[i] * 20 + cand10) / (2 * cand10);  /* round(run / cand) */
+        if ( 1 > c ) c = 1;
+        if ( 8 < c ) c = 8;                        /* cap gaps so a glitch can't run away */
+        for ( int k = 0; k < c && MAXN > nh; k++ ) s_hb[nh++] = lvl;
+        lvl ^= 1;
+    }
+
+    /* --- 5. Manchester decode + frame search over both phases and polarities --- */
+    for ( int phase = 0; 2 > phase; phase++ )
+    {
+        int nb = 0;
+        for ( int i = phase; i + 1 < nh; i += 2 )
+        {
+            int a = s_hb[i], b = s_hb[i + 1];
+            uint8_t decoded;
+            if ( 1 == a && 0 == b )
+            {
+                decoded = 1;
+            }
+            else if ( 0 == a && 1 == b )
+            {
+                decoded = 0;
+            }
+            else
+            {
+                decoded = 2;
+            }
+            s_bit[nb++] = decoded;
+        }
+        for ( int inv = 0; 2 > inv; inv++ )
+        {
+            for ( int s = 0; s + 64 <= nb; s++ )
+            {
+                if ( parse_frame(s_bit, nb, s, inv, id) == 0 )
+                {
+                    d->phase = phase; d->inverted = inv; d->frame_start_bit = s;
+                    return 0;
+                }
+            }
+        }
+    }
+    return -2;
+}
+
 int krfid_em4100_decode(const uint16_t *samples, int n, uint32_t sample_hz,
                         krfid_em4100_work_t *work,
                         uint8_t id[5], krfid_em4100_diag_t *diag)
 {
-    /* The four stages' arrays, by the names the pipeline below knows them by.
+    /* The stages' arrays, by the names the pipeline below knows them by.
      * They are the caller's: 84 KB is too much to hold as statics, which land
      * in internal RAM whether or not a tag is ever read. */
     uint8_t *const s_dig = work->dig;
     int     *const s_run = work->run;
-    uint8_t *const s_hb  = work->hb;
-    uint8_t *const s_bit = work->bit;
 
     krfid_em4100_diag_t d;
     memset(&d, 0, sizeof d);
@@ -131,70 +228,33 @@ int krfid_em4100_decode(const uint16_t *samples, int n, uint32_t sample_hz,
     }
     if ( 0 == hb ) return -2;
     d.halfbit_samples = hb;
-    /* bit period = 2*half-bit; RF/div = 125kHz * bit_period. Snap to 16/32/64. */
-    if ( sample_hz )
-    {
-        int div = (int)((250000.0 * hb) / (double)sample_hz + 0.5);
-        if ( 24 > div )
-        {
-            d.bitrate_div = 16;
-        }
-        else if ( 48 > div )
-        {
-            d.bitrate_div = 32;
-        }
-        else
-        {
-            d.bitrate_div = 64;
-        }
-    }
+    d.bitrate_div = snap_div(hb, sample_hz);
     if ( diag ) *diag = d;
     if ( 5 > hb || 40 < hb ) return -2;           /* implausible timing -> not a tag */
 
-    /* --- 4. rebuild the half-bit level stream --- */
-    int nh = 0, lvl = first;
-    for ( int i = 0; i < nr && MAXN > nh; i++ )
+    /* --- 4. rebuild the stream and search for a frame, first with the width
+     *        that was measured, then with a sweep of trial widths --- */
+    if ( 0 == find_frame(work, nr, first, hb * 10, id, &d) )
     {
-        int c = (s_run[i] * 2 + hb) / (2 * hb);  /* round(run / hb) */
-        if ( 1 > c ) c = 1;
-        if ( 8 < c ) c = 8;                        /* cap gaps so a glitch can't run away */
-        for ( int k = 0; k < c && MAXN > nh; k++ ) s_hb[nh++] = lvl;
-        lvl ^= 1;
+        if ( diag ) *diag = d;
+        return 0;
     }
-
-    /* --- 5. Manchester decode + frame search over both phases and polarities --- */
-    for ( int phase = 0; 2 > phase; phase++ )
+    int const scale = sample_hz ? (int)sample_hz : SWEEP_REF_HZ;
+    int const lo10 = (SWEEP_LO10 * scale) / SWEEP_REF_HZ;
+    int const hi10 = (SWEEP_HI10 * scale) / SWEEP_REF_HZ;
+    for ( int cand10 = lo10; hi10 >= cand10; cand10 += SWEEP_STEP10 )
     {
-        int nb = 0;
-        for ( int i = phase; i + 1 < nh; i += 2 )
+        if ( cand10 == (hb * 10) )
         {
-            int a = s_hb[i], b = s_hb[i + 1];
-            uint8_t decoded;
-            if ( 1 == a && 0 == b )
-            {
-                decoded = 1;
-            }
-            else if ( 0 == a && 1 == b )
-            {
-                decoded = 0;
-            }
-            else
-            {
-                decoded = 2;
-            }
-            s_bit[nb++] = decoded;
+            continue;        /* already tried */
         }
-        for ( int inv = 0; 2 > inv; inv++ )
+        if ( 0 == find_frame(work, nr, first, cand10, id, &d) )
         {
-            for ( int s = 0; s + 64 <= nb; s++ )
+            if ( NULL != diag )
             {
-                if ( parse_frame(s_bit, nb, s, inv, id) == 0 )
-                {
-                    d.phase = phase; d.inverted = inv; d.frame_start_bit = s;
-                    if ( diag ) *diag = d;
-                    return 0;
-                }
+                *diag = d;
             }
+            return 0;
         }
     }
     return -2;                                   /* tag present, but no clean frame */

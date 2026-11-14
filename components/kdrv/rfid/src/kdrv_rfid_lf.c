@@ -932,13 +932,17 @@ static kode_status_t job_read(uint32_t ms, uint8_t id[5], uint8_t *rf_div)
     return rc;
 }
 
+/** @brief The most windows a clone reads back before calling the copy bad. */
+#define RFID_CLONE_VERIFY_WINDOWS 4
+
 /**
- * @brief Run one CLONE job: boost, write, read one window back to verify, drop.
+ * @brief Run one CLONE job: boost, write, read back to verify, drop.
  *
  * @param src    The 5-byte ID to program.
  * @param id     Out: what the verify read decoded, for the AO to compare.
  * @param rf_div Out: the bit rate the read-back came at, 0 when none.
- * @return KODE_OK when the read-back decoded; the carrier's error when the
+ * @return KODE_OK when one of the first RFID_CLONE_VERIFY_WINDOWS read-back
+ *         windows decoded; the carrier's error when the
  *         field would not come up; the clone's error otherwise.
  */
 static kode_status_t job_clone(const uint8_t src[5], uint8_t id[5],
@@ -955,8 +959,17 @@ static kode_status_t job_clone(const uint8_t src[5], uint8_t id[5],
     rc = kdrv_rfid_lf_clone(src);
     if ( KODE_OK == rc )
     {
-        (void)memset(&d, 0, sizeof(d));
-        rc = kdrv_rfid_lf_read_window(id, &d);
+        /* The first window after a write is flat while the front end settles,
+         * so a read-back gets a few windows before the copy is called bad. */
+        for ( int w = 0; RFID_CLONE_VERIFY_WINDOWS > w; w++ )
+        {
+            (void)memset(&d, 0, sizeof(d));
+            rc = kdrv_rfid_lf_read_window(id, &d);
+            if ( KODE_TIMEOUT != rc )
+            {
+                break;
+            }
+        }
         if ( KODE_OK == rc )
         {
             *rf_div = (uint8_t)d.bitrate_div;

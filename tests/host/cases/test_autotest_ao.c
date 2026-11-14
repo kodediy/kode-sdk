@@ -443,6 +443,25 @@ static void sd_identify_failed(uint32_t capacity_mb, uint8_t total)
     (void)qf_support_pump(AO_Autotest, 64U);
 }
 
+/**
+ * @brief One later phase of the card row, as AO_Storage publishes it.
+ *
+ * @param phase SD_TEST_WRITE or SD_TEST_VERIFY.
+ * @param ok    How it went.
+ */
+static void sd_phase(uint8_t phase, bool ok)
+{
+    StorageTestEvt * const e = Q_NEW(StorageTestEvt, STORAGE_TEST_SIG);
+
+    (void)memset(((uint8_t *)e) + sizeof(QEvt), 0, sizeof(*e) - sizeof(QEvt));
+    e->phase       = phase;
+    e->total       = SD_TEST_STEPS;
+    e->ok          = ok;
+    e->capacity_mb = 29819U;
+    QACTIVE_PUBLISH(&e->super, (void *)0);
+    (void)qf_support_pump(AO_Autotest, 64U);
+}
+
 /** @brief The card's first step, as AO_Storage publishes it with no card. */
 static void sd_no_card(void)
 {
@@ -483,6 +502,63 @@ static void row_passes(const char *name, const char *answer)
     expect_row(name, AUTOTEST_ROW_RUNNING);
     verdict(answer, true);
     expect_row(name, AUTOTEST_ROW_PASS);
+}
+
+/* The final station's card is its own and a good one. A megabyte it refuses,
+ * or gives back changed, fails the row there even though the slot's own
+ * phases passed; for any other client the owner's verdict stands. */
+TEST_CASE("a card that will not take the write fails the row at the final station only",
+          "[autotest]")
+{
+    up();
+    qf_support_give_queue(AO_Storage);
+
+    autotest_run_request(AUTOTEST_CLIENT_TEST_DOT, AUTOTEST_G_NONE, "sd");
+    (void)qf_support_pump(AO_Autotest, 64U);
+    TEST_ASSERT_EQUAL(AUTOTEST_TAKEN, take_begin()->status);
+    expect_row("sd", AUTOTEST_ROW_RUNNING);
+    sd_phase(SD_TEST_WRITE, false);
+    verdict("sd", true);
+    expect_row("sd", AUTOTEST_ROW_FAIL);
+    (void)expect_end();
+
+    autotest_run_request(AUTOTEST_CLIENT_TEST_DOT, AUTOTEST_G_NONE, "sd");
+    (void)qf_support_pump(AO_Autotest, 64U);
+    TEST_ASSERT_EQUAL(AUTOTEST_TAKEN, take_begin()->status);
+    expect_row("sd", AUTOTEST_ROW_RUNNING);
+    sd_phase(SD_TEST_WRITE, true);
+    sd_phase(SD_TEST_VERIFY, false);
+    verdict("sd", true);
+    expect_row("sd", AUTOTEST_ROW_FAIL);
+    (void)expect_end();
+
+    autotest_run_request(AUTOTEST_CLIENT_TEST_DOT, AUTOTEST_G_NONE, "sd");
+    (void)qf_support_pump(AO_Autotest, 64U);
+    TEST_ASSERT_EQUAL(AUTOTEST_TAKEN, take_begin()->status);
+    expect_row("sd", AUTOTEST_ROW_RUNNING);
+    sd_phase(SD_TEST_WRITE, true);
+    sd_phase(SD_TEST_VERIFY, true);
+    verdict("sd", true);
+    expect_row("sd", AUTOTEST_ROW_PASS);
+    (void)expect_end();
+
+    run(AUTOTEST_G_NONE, "sd");
+    TEST_ASSERT_EQUAL(AUTOTEST_TAKEN, take_begin()->status);
+    expect_row("sd", AUTOTEST_ROW_RUNNING);
+    sd_phase(SD_TEST_WRITE, false);
+    verdict("sd", true);
+    expect_row("sd", AUTOTEST_ROW_PASS);
+    (void)expect_end();
+
+    {
+        const QEvt *e = NULL;
+
+        while ( xQueueReceive(AO_Storage->eQueue, &e, 0U) == pdTRUE )
+        {
+            QF_gc(e);
+        }
+    }
+    done();
 }
 
 /* The first block as the owner of a unit runs it: nobody at the glass, the

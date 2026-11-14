@@ -1077,6 +1077,54 @@ TEST_CASE("test_two_targets", "[touch_ao]")
     mock_down();
 }
 
+/* The bench's operator taps the targets with the console's `touch` verb. A
+ * finger injected that way is not read from the panel, so the test never
+ * summed it and every step ran out its time. It is summed and judged at its
+ * lift, the way a tap read from the panel is. */
+TEST_CASE("test_two_targets_tapped_by_the_console", "[touch_ao]")
+{
+    touch_armed();
+    /* The injection is posted with a margin, which the heap queue another
+     * file's fake may have left this AO reads as always full. */
+    qf_support_margin_queue(AO_Touch);
+
+    touch_test_request();
+    serve();
+    expect_prompt(1U);
+
+    for ( uint8_t n = 1U; TP_TOTAL >= n; ++n )
+    {
+        int16_t const x = TARGET_X[n - 1U];
+        int16_t const y = TARGET_Y[n - 1U];
+        /* Two lines of the console: the AO runs between them. */
+        touch_test_inject(x, y, true);
+        serve();
+        touch_test_inject(x, y, false);
+        serve();
+        expect_outcome(TP_TEST_PASS, n, x, y);
+        if ( TP_TOTAL > n )
+        {
+            expect_prompt((uint8_t)(n + 1U));
+        }
+    }
+    expect_done(true);
+    ao_spy_drain();
+    mock_down();
+}
+
+/* With no test running an injected finger is the app's business alone:
+ * nothing is posted to the AO for it. */
+TEST_CASE("test_an_injected_finger_outside_a_test_posts_nothing", "[touch_ao]")
+{
+    touch_armed();
+
+    touch_test_inject(100, 100, true);
+    touch_test_inject(100, 100, false);
+    TEST_ASSERT_EQUAL_UINT(0U, (unsigned)uxQueueMessagesWaiting(AO_Touch->eQueue));
+    ao_spy_drain();
+    mock_down();
+}
+
 /* A test that passed leaves nothing behind in the store: it proves the panel
  * answers, it does not calibrate it. */
 TEST_CASE("test_no_calibration_written", "[touch_ao]")
