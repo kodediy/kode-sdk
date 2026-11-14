@@ -13,7 +13,6 @@
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
-#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -57,11 +56,12 @@ _Static_assert((KBSP_SPI_NFC > (uint32_t)SPI1_HOST)
 #define KDRV_ST25_T2T_READ_LEN  16U
 /** @brief A Type-2 block. */
 #define KDRV_ST25_T2T_BLOCK_LEN 4U
-/** @brief The longest transfer this port normalises; RFAL asks for less. */
-#define KDRV_ST25_SPI_BUF     300U
-/** @brief The SPI buffer size rounded up to the P4's 64-byte cache line, so
- *         its allocation is a whole number of lines for DMA. */
-#define KDRV_ST25_SPI_DMA_SZ  ((KDRV_ST25_SPI_BUF + 63U) & ~((size_t)63U))
+/** @brief The most the SPI peripheral carries in one transaction without
+ *         DMA: its own buffer, 64 bytes. A longer transfer goes out in pieces
+ *         of this, under the one chip-select RFAL already holds. */
+#define KDRV_ST25_SPI_CHUNK   64U
+_Static_assert(KDRV_ST25_SPI_CHUNK <= (uint32_t)SOC_SPI_MAXIMUM_BUFFER_SIZE,
+               "a piece must fit the SPI peripheral's own buffer");
 /* The identity the park accepts is the one RFAL's own check accepts. */
 _Static_assert(KDRV_ST25R3916_IC_TYPE_MASK == ST25R3916_REG_IC_IDENTITY_ic_type_mask,
                "the type field is RFAL's");
@@ -85,8 +85,6 @@ uint8_t globalCommProtectCnt;
 
 static spi_device_handle_t  s_spi;
 static SemaphoreHandle_t    s_spi_lock;  /**< One SPI transaction at a time. */
-static uint8_t             *s_tx_buf;    /**< 64-aligned PSRAM DMA scratch.  */
-static uint8_t             *s_rx_buf;    /**< 64-aligned PSRAM DMA scratch.  */
 static SemaphoreHandle_t    s_comm;      /**< Recursive: RFAL nests it.     */
 static SemaphoreHandle_t    s_worker;    /**< Recursive, and independent.   */
 static SemaphoreHandle_t    s_irq_sem;   /**< The ISR wakes the servicer.   */
@@ -119,66 +117,43 @@ void rfal_port_spi_deselect(void)
 
 void rfal_port_spi_txrx(const uint8_t *tx, uint8_t *rx, uint16_t len)
 {
-    /* Every transfer goes through this file's own buffers, in both
-     * directions, and that is not belt-and-braces: it is what the chip
-     * driver's calling convention costs on this SoC.
+    /* No DMA on this bus, and that is not thrift: it is what makes a read
+     * mean what the chip said.
+     *
+     * This port used to hand ESP-IDF buffers in PSRAM with
+     * SPI_TRANS_DMA_USE_PSRAM, because RFAL asks for odd lengths (a byte of
+     * address, a byte of answer, a UID's worth) that the P4's cache-line rule
+     * makes ESP-IDF bounce, and the internal DMA pool they would be bounced
+     * from runs at nearly zero free bytes on this board. That path shares the
+     * PSRAM's own bus, and now and then a read came back holding something
+     * the chip never sent: a register that read 0x00 or 0x67 where it held
+     * 0x07, an identity of 0x00, an oscillator "not stable" that was, a FIFO
+     * with no tag in it. ESP-IDF raised neither of its flags for it
+     * (SPI_TRANS_DMA_RX_FAIL, SPI_TRANS_DMA_TX_FAIL). At the end-of-line
+     * station it showed as a reader that stopped seeing its tag for the rest
+     * of a boot, about once in ten boots, with nothing in the log.
+     *
+     * Without DMA the peripheral takes a transaction from its own 64-byte
+     * buffer, filled and emptied by the CPU: no DMA memory of either kind, no
+     * bounce, no cache to keep in step. A transfer longer than that goes out
+     * in pieces. That is safe here and only here: the chip-select is a pin
+     * this port drives by hand (rfal_port_spi_select()), held across every
+     * call RFAL makes for one access, so the chip sees one unbroken access
+     * however many transactions carry it.
      *
      * ST calls this in three shapes - rx NULL for a write, tx NULL for a
      * read, and tx == rx for a transceive (st25r3916_com.c:282, without
-     * ST25R_COM_SINGLETXRX ever being defined) - and the buffers it hands
-     * over are its own stack, unaligned as often as not. ESP-IDF's SPI
-     * master then bounce-buffers whatever is not DMA-capable, and the copy
-     * back on the way out reads from a buffer it never allocated when the
-     * receive side had nothing to allocate: memcpy from address zero, a load
-     * access fault inside spi_master.c. It survives the first transfer of a
-     * boot and fails afterwards, which is what made it look like a
-     * once-per-boot problem in the driver above rather than a buffer
-     * problem here.
-     *
-     * The buffers are ours, 64-byte-aligned, and in PSRAM (allocated once at
-     * init). Why PSRAM and not internal RAM is the part that is easy to get
-     * wrong. The P4's data cache makes ESP-IDF require the transfer LENGTH to
-     * be cache-line-aligned as well as the address (spi_common.c: need_malloc
-     * gains `(addr | len) & (align - 1)`), and RFAL asks for odd lengths - a
-     * two-byte register write, a UID's worth of read - that no address
-     * alignment can fix without clocking padding bytes into the chip's
-     * registers. So a short transfer is bounced whatever we do; the only
-     * choice is which pool the bounce comes from. With the buffer in PSRAM
-     * and SPI_TRANS_DMA_USE_PSRAM set, ESP-IDF draws that transient bounce
-     * from PSRAM (MALLOC_CAP_SPIRAM) instead of the internal DMA pool, which
-     * on this board runs at nearly zero free bytes and is what a mounted SD
-     * card is already fighting for. An aligned internal buffer would move the
-     * bounce back onto that scarce pool for exactly these odd lengths, so it
-     * is not the cheaper option it looks like.
+     * ST25R_COM_SINGLETXRX ever being defined). A read clocks zeros out.
      */
-    if ( (NULL == s_spi) || (NULL == s_spi_lock)
-        || (NULL == s_tx_buf) || (NULL == s_rx_buf) || (0U == len) )
+    static uint8_t s_tx_buf[KDRV_ST25_SPI_CHUNK];   /* One piece out. */
+    static uint8_t s_rx_buf[KDRV_ST25_SPI_CHUNK];   /* One piece in.  */
+    uint16_t       done = 0U;
+    bool           failed = false;
+
+    if ( (NULL == s_spi) || (NULL == s_spi_lock) || (0U == len) )
     {
         return;
     }
-    if ( (uint16_t)KDRV_ST25_SPI_BUF < len )
-    {
-        KLOG_E(TAG, "SPI transfer of %u bytes is longer than this port carries",
-               (unsigned)len);
-        return;
-    }
-
-    if ( NULL != tx )
-    {
-        (void)memcpy(s_tx_buf, tx, len);
-    }
-    else
-    {
-        (void)memset(s_tx_buf, 0, len);
-    }
-
-    spi_transaction_t t;
-    (void)memset(&t, 0, sizeof(t));
-    t.length    = (size_t)len * 8U;
-    t.rxlength  = (size_t)len * 8U;   /* Said, not left to be inferred. */
-    t.tx_buffer = s_tx_buf;
-    t.rx_buffer = s_rx_buf;
-    t.flags     = SPI_TRANS_DMA_USE_PSRAM;  /* Keep any bounce off internal. */
 
     /* One transaction at a time, and this lock is not ST's.
      *
@@ -186,28 +161,52 @@ void rfal_port_spi_txrx(const uint8_t *tx, uint8_t *rx, uint16_t len)
      * (host->cur_trans_buf holds a pointer to the caller's
      * spi_transaction_t), so two tasks inside spi_device_polling_transmit()
      * at once leave the second's descriptor there and the first tears down
-     * against it - a copy-back through a pointer belonging to a transaction
-     * that has already finished.
-     *
-     * Two tasks is exactly what this port has: AO_Nfc pumping RFAL's worker,
-     * and the interrupt servicer above it reading the chip's status
-     * registers. ST's own protection brackets a chip-select, not a
-     * transaction, and it is not enough here.
+     * against it. Two tasks is exactly what this port has: AO_Nfc pumping
+     * RFAL's worker, and the interrupt servicer above it reading the chip's
+     * status registers. The pieces of one transfer and the two buffers they
+     * share are under it as well.
      */
     (void)xSemaphoreTakeRecursive(s_spi_lock, portMAX_DELAY);
-    esp_err_t err = spi_device_polling_transmit(s_spi, &t);
+    while ( (done < len) && !failed )
+    {
+        uint16_t piece = (uint16_t)(len - done);
+
+        if ( (uint16_t)KDRV_ST25_SPI_CHUNK < piece )
+        {
+            piece = (uint16_t)KDRV_ST25_SPI_CHUNK;
+        }
+        if ( NULL != tx )
+        {
+            (void)memcpy(s_tx_buf, &tx[done], piece);
+        }
+        else
+        {
+            (void)memset(s_tx_buf, 0, piece);
+        }
+
+        spi_transaction_t t;
+        (void)memset(&t, 0, sizeof(t));
+        t.length    = (size_t)piece * 8U;
+        t.rxlength  = (size_t)piece * 8U;   /* Said, not left to be inferred. */
+        t.tx_buffer = s_tx_buf;
+        t.rx_buffer = s_rx_buf;
+
+        if ( spi_device_polling_transmit(s_spi, &t) != ESP_OK )
+        {
+            KLOG_E(TAG, "SPI transfer of %u bytes failed at byte %u",
+                   (unsigned)len, (unsigned)done);
+            failed = true;
+        }
+        else
+        {
+            if ( NULL != rx )
+            {
+                (void)memcpy(&rx[done], s_rx_buf, piece);
+            }
+            done = (uint16_t)(done + piece);
+        }
+    }
     (void)xSemaphoreGiveRecursive(s_spi_lock);
-
-    if ( ESP_OK != err )
-    {
-        KLOG_E(TAG, "SPI transfer of %u bytes failed", (unsigned)len);
-        return;
-    }
-
-    if ( NULL != rx )
-    {
-        (void)memcpy(rx, s_rx_buf, len);
-    }
 }
 
 bool rfal_port_irq_pin_high(void)
@@ -403,11 +402,11 @@ static kode_status_t spi_open(void)
         .sclk_io_num     = KBSP_PIN_SPI_CLK,
         .quadwp_io_num   = -1,
         .quadhd_io_num   = -1,
-        .max_transfer_sz = 4096,
     };
-    /* DMA is required: without it IDF caps a transfer at 64 bytes and longer FIFO accesses fail. */
+    /* No DMA: a transaction is then 64 bytes at most, and rfal_port_spi_txrx()
+     * sends a longer access in pieces and says why. */
     esp_err_t err = spi_bus_initialize(KDRV_ST25_SPI_HOST, &bus,
-                                       SPI_DMA_CH_AUTO);
+                                       SPI_DMA_DISABLED);
     if ( (ESP_OK != err) && (ESP_ERR_INVALID_STATE != err) )
     {
         KLOG_E(TAG, "SPI2 would not initialise");
@@ -442,10 +441,6 @@ static void servicer_release(void)
         vTaskDelete(s_irq_task);
         s_irq_task = NULL;
     }
-    heap_caps_free(s_tx_buf);
-    heap_caps_free(s_rx_buf);
-    s_tx_buf = NULL;
-    s_rx_buf = NULL;
 }
 
 kode_status_t kdrv_st25r3916_init(void)
@@ -468,24 +463,6 @@ kode_status_t kdrv_st25r3916_init(void)
 
     if ( spi_open() != KODE_OK )
     {
-        return KODE_ERROR;
-    }
-
-    /* The SPI port's DMA scratch, allocated once and kept for the life of the
-     * reader: 64-byte-aligned and in PSRAM, sized to a whole number of cache
-     * lines. rfal_port_spi_txrx explains why PSRAM and not internal RAM. This
-     * exists before any SPI transfer RFAL makes below. */
-    s_tx_buf = heap_caps_aligned_alloc(64U, KDRV_ST25_SPI_DMA_SZ,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    s_rx_buf = heap_caps_aligned_alloc(64U, KDRV_ST25_SPI_DMA_SZ,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    if ( (NULL == s_tx_buf) || (NULL == s_rx_buf) )
-    {
-        KLOG_E(TAG, "no PSRAM for the reader's SPI buffers");
-        heap_caps_free(s_tx_buf);
-        heap_caps_free(s_rx_buf);
-        s_tx_buf = NULL;
-        s_rx_buf = NULL;
         return KODE_ERROR;
     }
 
