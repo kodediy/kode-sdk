@@ -458,11 +458,20 @@ static bool wifi_scan_keep(const kode_sys_wifi_ap_t *ap, void *ctx)
 static void wifi_scan_fail(kode_status_t rc)
 {
     const uint32_t seconds = KODE_WIFI_SCAN_MS / KODE_MS_PER_S;
+    uint8_t        parts   = 0U;
 
     switch ( rc )
     {
     case KODE_DENIED:
-        wifi_fail(rc);
+        (void)kode_block_rest_answers(NULL, &parts, NULL, NULL);
+        if ( 0U != (parts & KODE_SYS_REST_RADIO) )
+        {
+            kode_err_set("kode_wifi_scan: the radio is at rest; kode_rest_end() first");
+        }
+        else
+        {
+            wifi_fail(rc);
+        }
         break;
     case KODE_NO_RESOURCES:
         kode_err_set("the radio is busy with another scan, its search for a network, "

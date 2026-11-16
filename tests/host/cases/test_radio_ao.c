@@ -9627,6 +9627,169 @@ TEST_CASE("a round meets a busy link, a starting link and no link",
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
 }
 
+/* ---- An app's rest of the radio: the C5 asleep between wakes, the board awake ---- */
+
+/** @brief An app puts the radio away: the sentinel is started and the round answered ready. */
+static void lp_radio_part_rests(void)
+{
+    lp_part_round(AO_Radio, KODE_LP_PART_RADIO);
+    drain();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_SLEEP, running_job());
+    finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
+    lp_expect_answer(false, NULL);
+    lp_expect_no_more();
+}
+
+/** @brief The one end of @p sig the spy holds, copied; whatever else it holds is read and dropped. */
+static WifiScanEndEvt rest_end_take(QSignal sig)
+{
+    WifiScanEndEvt end;
+    unsigned       ends = 0U;
+    const QEvt    *e;
+
+    (void)memset(&end, 0, sizeof(end));
+    while ( (e = ao_spy_take()) != NULL )
+    {
+        if ( sig == e->sig )
+        {
+            end = *(const WifiScanEndEvt *)(const void *)e;
+            ++ends;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ends, "one end for the request, no more");
+    ao_spy_drain();
+    return end;
+}
+
+TEST_CASE("while an app rests the radio a Wi-Fi scan is refused at once and runs nothing; "
+          "once the rest ends it runs", "[radio_ao][lowpower][ask]")
+{
+    kdrv_wifi_ap_t rows[KDRV_WIFI_SCAN_MAX];
+    ScanWaiter     w;
+    WifiScanEndEvt end;
+    scan_seen_t    s;
+    uint8_t        gen = 0U;
+
+    radio_fresh();
+    go_up();
+    lp_radio_part_rests();
+    ao_spy_drain();
+    unsigned const submits = job_submits();
+
+    /* The console's listing: an end that says rest, with the request's generation. */
+    TEST_ASSERT_TRUE(wifi_scan_request(&gen));
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a sweep went to a C5 asleep between wakes");
+    end = rest_end_take((QSignal)WIFI_SCAN_END_SIG);
+    TEST_ASSERT_TRUE_MESSAGE(end.rest, "the end does not say the radio rests");
+    TEST_ASSERT_FALSE(end.ok);
+    TEST_ASSERT_FALSE(end.busy);
+    TEST_ASSERT_FALSE(end.cut);
+    TEST_ASSERT_EQUAL_UINT8(0U, end.count);
+    TEST_ASSERT_EQUAL_UINT8(gen, end.gen);
+
+    /* An AO's scan: denied, which stays true until the rest ends. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_wifi_scan(ao_spy()));
+    pump();
+    TEST_ASSERT_EQUAL_INT(-1, running_job());
+    s = scan_take_spy();
+    TEST_ASSERT_EQUAL_UINT(1U, s.ends);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_DENIED, s.end->rc);
+    TEST_ASSERT_EQUAL_UINT(0U, s.entries + s.bus_ends);
+    ao_spy_drain();
+
+    /* A task's scan: answered in its waiter, the same way. */
+    (void)memset(&w, 0, sizeof(w));
+    w.done = khal_sem_create();
+    w.rows = rows;
+    w.cap  = (uint8_t)KDRV_WIFI_SCAN_MAX;
+    wifi_scan_request_wait(&w, 5U);
+    pump();
+    TEST_ASSERT_EQUAL_UINT32(5U, w.ack);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, w.rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(submits, job_submits(), "a refused scan handed the worker a job");
+
+    /* The rest over, the sweep goes to the C5. */
+    lp_radio_awake();
+    TEST_ASSERT_TRUE(wifi_scan_request(NULL));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    ao_spy_drain();
+}
+
+TEST_CASE("while an app rests the radio a BLE listen is refused at once and runs nothing; "
+          "once the rest ends it runs", "[radio_ao][lowpower][ble_ask]")
+{
+    kdrv_ble_dev_t rows[KDRV_BLE_SCAN_MAX];
+    ScanWaiter     w;
+    WifiScanEndEvt end;
+    ble_seen_t     s;
+    uint8_t        gen = 0U;
+
+    ble_on_up();
+    lp_radio_part_rests();
+    ao_spy_drain();
+    unsigned const submits = job_submits();
+
+    TEST_ASSERT_TRUE(ble_scan_request(BLE_ASK_MS, &gen));
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a listen went to a C5 asleep between wakes");
+    end = rest_end_take((QSignal)BLE_SCAN_END_SIG);
+    TEST_ASSERT_TRUE_MESSAGE(end.rest, "the end does not say the radio rests");
+    TEST_ASSERT_FALSE(end.ok);
+    TEST_ASSERT_FALSE(end.busy);
+    TEST_ASSERT_EQUAL_UINT8(gen, end.gen);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, ble_scan_ask(ao_spy(), BLE_ASK_MS));
+    pump();
+    TEST_ASSERT_EQUAL_INT(-1, running_job());
+    s = ble_take_spy();
+    TEST_ASSERT_EQUAL_UINT(1U, s.ends);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_DENIED, s.end->rc);
+    TEST_ASSERT_EQUAL_UINT(0U, s.entries + s.bus_ends);
+    ao_spy_drain();
+
+    (void)memset(&w, 0, sizeof(w));
+    w.done = khal_sem_create();
+    w.rows = rows;
+    w.cap  = (uint8_t)KDRV_BLE_SCAN_MAX;
+    ble_scan_request_wait(&w, 6U, BLE_ASK_MS);
+    pump();
+    TEST_ASSERT_EQUAL_UINT32(6U, w.ack);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, w.rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(submits, job_submits(), "a refused listen handed the worker a job");
+
+    lp_radio_awake();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, ble_scan_ask(ao_spy(), BLE_ASK_MS));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_SCAN, running_job());
+    finish(KDRV_RADIO_JOB_BLE_SCAN, KODE_ERROR);
+    ao_spy_drain();
+    ble_case_end();
+}
+
+TEST_CASE("a round answered with no link leaves scans to a link that comes up awake",
+          "[radio_ao][lowpower]")
+{
+    radio_fresh();
+
+    lp_part_round(AO_Radio, KODE_LP_PART_RADIO);
+    drain();
+    lp_expect_answer(false, NULL);      /* no link: nothing to rest */
+    TEST_ASSERT_EQUAL_UINT(0U, fake_radio_sleep_starts());
+
+    go_up();
+    ao_spy_drain();
+    TEST_ASSERT_TRUE(wifi_scan_request(NULL));
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(),
+                                  "refused for a rest no sentinel holds");
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    lp_radio_awake();
+    ao_spy_drain();
+}
+
 TEST_CASE("AWAKE while the start is still with the worker stops the sentinel as it returns",
           "[radio_ao][lowpower]")
 {

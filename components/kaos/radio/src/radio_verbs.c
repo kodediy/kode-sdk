@@ -69,12 +69,13 @@ static uint8_t s_scan_gen;
 /**
  * @brief Whether a refusal is another request's, not the console's.
  *
- * AO_Radio answers a scan it has no time for with an end that says busy and
- * carries that request's generation: with the console's own listing in
- * flight, somebody else's refusal passes on the bus.
+ * AO_Radio answers a scan it has no time for, or one an app's rest of the
+ * radio turns away, with an end that says busy or rest and carries that
+ * request's generation: with the console's own listing in flight, somebody
+ * else's refusal passes on the bus.
  *
  * @param gen The end's generation.
- * @return true for a busy end that names a request other than the console's.
+ * @return true for a refusal that names a request other than the console's.
  */
 static bool scan_busy_foreign(uint8_t gen)
 {
@@ -120,6 +121,7 @@ static bool scan_gen_stale(uint8_t gen)
 #define RADIO_V_FRAMES_MS_MAX   10000U  /**< wifi_frames: the longest window.                                 */
 #define RADIO_V_HEARD_MS_MIN      100U    /**< ble_heard: the shortest window.                                 */
 #define RADIO_V_HEARD_MS_MAX      10000U  /**< ble_heard: the longest window.                                  */
+#define RADIO_V_AT_REST  "\"radio: at rest\""  /**< wifi_scan, ble_scan: the refusal while an app rests the radio, quoted. */
 
 /** @brief RADIO_V_ID: the records' word, `id` or `csr`. */
 static const char *s_radio_id_rec;
@@ -1808,7 +1810,7 @@ static bool radio_answer(QEvt const *e)
         case WIFI_SCAN_END_SIG: {
             if ( (RADIO_V_WIFI_SCAN == s_radio_kind)
                 && (scan_gen_stale(Q_EVT_CAST(WifiScanEndEvt)->gen)
-                    || (Q_EVT_CAST(WifiScanEndEvt)->busy
+                    || ((Q_EVT_CAST(WifiScanEndEvt)->busy || Q_EVT_CAST(WifiScanEndEvt)->rest)
                         && scan_busy_foreign(Q_EVT_CAST(WifiScanEndEvt)->gen))) )
             {
                 /* The end of the listing before this command's, or somebody
@@ -1820,6 +1822,10 @@ static bool radio_answer(QEvt const *e)
                 if ( end->ok )
                 {
                     console_reply(">ok");
+                }
+                else if ( end->rest )
+                {
+                    console_reply_err(KCLI_ERR_BUSY, RADIO_V_AT_REST);
                 }
                 else if ( end->busy )
                 {
@@ -1968,7 +1974,7 @@ static bool radio_answer(QEvt const *e)
         case BLE_SCAN_END_SIG: {
             if ( (RADIO_V_BLE_SCAN == s_radio_kind)
                 && (scan_gen_stale(Q_EVT_CAST(WifiScanEndEvt)->gen)
-                    || (Q_EVT_CAST(WifiScanEndEvt)->busy
+                    || ((Q_EVT_CAST(WifiScanEndEvt)->busy || Q_EVT_CAST(WifiScanEndEvt)->rest)
                         && scan_busy_foreign(Q_EVT_CAST(WifiScanEndEvt)->gen))) )
             {
                 /* The end of the listing before this command's, or somebody
@@ -1980,6 +1986,10 @@ static bool radio_answer(QEvt const *e)
                 if ( end->ok )
                 {
                     console_reply(">ok");
+                }
+                else if ( end->rest )
+                {
+                    console_reply_err(KCLI_ERR_BUSY, RADIO_V_AT_REST);
                 }
                 else if ( end->busy )
                 {

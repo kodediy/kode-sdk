@@ -2171,7 +2171,8 @@ void radio_boot_release(void);
  * publishes WIFI_SCAN_AGAIN_SIG, and the one end closes both; a newer Wi-Fi
  * request (a scan, a join, Wi-Fi switched) ends it in turn, and its end says
  * @c cut. It waits for a join; behind a Bluetooth listen, the board's own
- * round, a row or an install it is answered @c busy.
+ * round, a row or an install it is answered @c busy. While an app rests the
+ * radio (KODE_LP_PART_RADIO) it is answered @c rest at once and ends nothing.
  *
  * Every entry and end of the listing carries the generation of the newest
  * request it answers. A listener that waits for its own request skips the
@@ -2430,8 +2431,9 @@ void ble_start_request(void);
  * The newest Bluetooth request wins, as wifi_scan_request() says of Wi-Fi: a
  * listen cut for a newer listen publishes nothing and the one end closes both;
  * cut for Bluetooth switched or an asked listen, its end says @c cut and lists
- * no device. Behind a Wi-Fi sweep it is answered @c busy. Entries and ends
- * carry the request's generation, as the Wi-Fi listing's do.
+ * no device. Behind a Wi-Fi sweep it is answered @c busy; while an app rests
+ * the radio, @c rest. Entries and ends carry the request's generation, as the
+ * Wi-Fi listing's do.
  *
  * @param ms  How long to listen; 0 for KODE_BLE_SCAN_MS.
  * @param gen Out: this request's generation; NULL when the caller reads none.

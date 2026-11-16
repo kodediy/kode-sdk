@@ -339,6 +339,18 @@ TEST_CASE("a scan the C5 had no time for is answered busy, code 4, not rejected"
     TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
 }
 
+/** @brief Close a listing an app's rest of the radio turned away, the way AO_Radio does. */
+static void end_rest(enum_t sig, uint8_t gen)
+{
+    WifiScanEndEvt end;
+
+    (void)memset(&end, 0, sizeof(end));
+    end.super = (QEvt)QEVT_INITIALIZER(sig);
+    end.rest  = true;
+    end.gen   = gen;
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+}
+
 TEST_CASE("ble_scan ms= posts that length, and none posts the default",
           "[console_scan]")
 {
@@ -1149,6 +1161,27 @@ TEST_CASE("the end and the networks of the listing before a wifi_scan are not ta
     end.gen = gen;
     QASM_DISPATCH(AO_Console, &end.super, 0U);
     TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+TEST_CASE("a scan refused while an app rests the radio says so, code 4, and only its own closes it",
+          "[console_scan]")
+{
+    uint8_t gen;
+
+    console_up();
+    type_line("wifi_scan");
+    gen = posted_scan_gen();
+    fake_klog_reset();
+    end_rest(WIFI_SCAN_END_SIG, (uint8_t)(gen + 1U));
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "somebody else's refusal closed the command");
+    end_rest(WIFI_SCAN_END_SIG, gen);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=\"radio: at rest\""));
+
+    type_line("ble_scan");
+    gen = posted_scan_gen();
+    fake_klog_reset();
+    end_rest(BLE_SCAN_END_SIG, gen);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=\"radio: at rest\""));
 }
 
 /** @brief The sequence of the last line end AO_Net was told; set by net_ends(). */

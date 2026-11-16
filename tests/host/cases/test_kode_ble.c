@@ -64,7 +64,9 @@ bool seam_ble_hid_keys(uint8_t modifiers, const uint8_t *keys);
 bool seam_ble_pair_open(void);
 const char *seam_event_ble_pair_code(void);
 const char *seam_event_ble_pair_done(void);
+static uint16_t seam_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, const char **why);
 
+#define kode_block_rest_answers     seam_rest_answers
 #define kode_sys_ble_enabled        seam_enabled
 #define kode_sys_ble_set_name       seam_set_name
 #define kode_sys_ble_set_data       seam_set_data
@@ -102,6 +104,7 @@ const char *seam_event_ble_pair_done(void);
 #define kode_event_ble_pair_code    seam_event_ble_pair_code
 #define kode_event_ble_pair_done    seam_event_ble_pair_done
 #include "kode_ble.c"
+#undef kode_block_rest_answers
 #undef kode_sys_ble_hid_select
 #undef kode_sys_ble_hid_ready
 #undef kode_sys_ble_hid_mouse
@@ -162,6 +165,19 @@ static uint32_t              s_seam_hid_calls;           /**< HID doors and pair
 static uint8_t               s_seam_hid_kinds;           /**< The kinds the last select named.  */
 static uint8_t               s_seam_hid_rep[8];          /**< The last report's arguments.      */
 static bool                  s_seam_hid_keys_null;       /**< The last keyboard report had no keys. */
+static uint8_t               s_seam_rest_parts;          /**< The parts an app's rest holds.   */
+
+static uint16_t seam_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, const char **why)
+{
+    (void)rc;
+    (void)open;
+    (void)why;
+    if ( NULL != parts )
+    {
+        *parts = s_seam_rest_parts;
+    }
+    return 0U;
+}
 
 static bool seam_enabled(void)
 {
@@ -333,6 +349,7 @@ static void fresh(void)
     s_seam_hid_calls     = 0U;
     s_seam_hid_kinds     = 0U;
     s_seam_hid_keys_null = false;
+    s_seam_rest_parts    = 0U;
     (void)memset(s_seam_hid_rep, 0, sizeof(s_seam_hid_rep));
     seam_scan_script(NULL, 0U, KODE_OK);
 }
@@ -478,6 +495,23 @@ TEST_CASE("a listen that fails says why and returns -1", "[kode_ble]")
     seam_scan_script(rssi, 2U, KODE_OK);
     TEST_ASSERT_EQUAL_INT(2, seam_ble_scan(out, 4U, SEAM_LISTEN_MS));
     TEST_ASSERT_EQUAL_STRING("", kode_error());
+}
+
+TEST_CASE("a listen denied while an app rests the radio says the rest, not Settings", "[kode_ble]")
+{
+    static const int8_t rssi[1] = { -50 };
+    kode_ble_device_t   out[1];
+
+    fresh();
+    s_seam_rest_parts = (uint8_t)(KODE_SYS_REST_RADIO | KODE_SYS_REST_SOUND);
+    seam_scan_script(rssi, 1U, KODE_DENIED);
+    TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 1U, SEAM_LISTEN_MS));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: the radio is at rest; kode_rest_end() first", kode_error());
+
+    /* Another part at rest is no reason: Settings is. */
+    s_seam_rest_parts = (uint8_t)KODE_SYS_REST_SOUND;
+    TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 1U, SEAM_LISTEN_MS));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: Bluetooth is off in Settings", kode_error());
 }
 
 /* ---- The app's own service ---------------------------------------------------- */

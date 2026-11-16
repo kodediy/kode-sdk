@@ -245,10 +245,21 @@ static bool ble_scan_keep(const kode_sys_ble_device_t *dev, void *ctx)
  */
 static void ble_scan_fail(kode_status_t rc, uint32_t ms)
 {
+    uint8_t parts = 0U;
+
     switch ( rc )
     {
     case KODE_DENIED:
-        kode_err_set("kode_ble_scan: Bluetooth is off in Settings");
+        /* AO_Radio refuses for the rest before it looks at Settings. */
+        (void)kode_block_rest_answers(NULL, &parts, NULL, NULL);
+        if ( 0U != (parts & KODE_SYS_REST_RADIO) )
+        {
+            kode_err_set("kode_ble_scan: the radio is at rest; kode_rest_end() first");
+        }
+        else
+        {
+            kode_err_set("kode_ble_scan: Bluetooth is off in Settings");
+        }
         break;
     case KODE_NO_RESOURCES:
         kode_err_set("kode_ble_scan: the radio is busy with another scan, its search for a "

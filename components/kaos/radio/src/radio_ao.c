@@ -723,6 +723,11 @@ typedef struct {
     uint8_t  lp_job;             /**< RADIO_LPJ_*: the sentinel job in the worker. */
     bool     lp_asleep;          /**< The sentinel is armed: the bus is down
                                   *   between wakes.                       */
+    bool     lp_app;             /**< The round in hand is an app's rest of
+                                  *   the radio (LowPowerRoundEvt.parts).  */
+    bool     lp_part;            /**< The radio rests for an app: its round
+                                  *   was answered ready, and no AWAKE has
+                                  *   come since (radio_part_rests()).     */
     bool     lp_wake_owed;       /**< AWAKE came while a job was out: the
                                   *   sentinel is stopped as it returns.    */
     bool     lp_net_expected;    /**< AO_Net joined the rounds: OFF waits for it. */
@@ -2924,6 +2929,30 @@ static void radio_publish(Radio * const me, kradio_link_t link)
 }
 
 #if RADIO_ASKS
+/**
+ * @brief Whether an app's rest has the radio (KODE_LP_PART_RADIO).
+ *
+ * The sentinel then keeps the bus down between wakes while the board stays
+ * AWAKE: a scan, Wi-Fi or Bluetooth, fails on a C5 that sleeps between wakes,
+ * so it is refused at once instead, with the rest as its reason. What a wake
+ * serves goes on: the station's traffic, a join, the advert, a stream.
+ *
+ * @param me The AO.
+ * @return true from the ready answer to the app's round until the AWAKE that
+ *         ends the rest, while the sentinel holds the bus: a round answered
+ *         with no link, or a link that came back, leaves the C5 awake.
+ */
+static bool radio_part_rests(Radio const * const me)
+{
+/* cppcheck-suppress misra-c2012-20.9 ; sdkconfig.h leaves an option that is off undefined, and #if reads it as 0 */
+#if CONFIG_KODE_LOWPOWER
+    return me->lp_part && me->lp_asleep;
+#else
+    (void)me;
+    return false;
+#endif
+}
+
 /* ---- The asked scan ------------------------------------------------------
  * One slot for both kinds, the Wi-Fi sweep and the BLE listen: the channel
  * carries one job, so two asked scans could never run together anyway, and
@@ -3041,7 +3070,7 @@ static void scan_ask_ao_answer(uint8_t kind, QActive *who, ScanRspEvt *rsp, uint
  * @brief Refuse an asked scan at once, in its own shape.
  * @param e  The RADIO_SCAN_ASK_SIG.
  * @param rc KODE_NO_RESOURCES, the radio is busy, ask again; KODE_DENIED,
- *           Bluetooth is off in Settings.
+ *           an app rests the radio or Bluetooth is off in Settings.
  */
 static void scan_ask_refuse(QEvt const * const e, kode_status_t rc)
 {
@@ -3060,9 +3089,10 @@ static void scan_ask_refuse(QEvt const * const e, kode_status_t rc)
 /**
  * @brief Refuse an asked BLE listen with Bluetooth off in Settings, in any state.
  *
- * Read before anything else that refuses an asked scan, so the asker is told
- * KODE_DENIED, which stays true, and never KODE_NO_RESOURCES for a listen
- * that asking again would only get refused once more.
+ * Read before anything else that refuses an asked scan, an app's rest of the
+ * radio aside (scan_ask_take()), so the asker is told KODE_DENIED, which
+ * stays true, and never KODE_NO_RESOURCES for a listen that asking again
+ * would only get refused once more.
  *
  * @param me The AO.
  * @param e  The RADIO_SCAN_ASK_SIG.
@@ -3145,7 +3175,8 @@ static uint8_t scan_other(uint8_t kind)
  * The newest scan of a radio wins: the scan of that radio before it, a
  * listing or an asked one, running or waiting, ends here and its asker is
  * told. Behind a scan of the other radio it is refused, as it is behind the
- * board's own round, owed or running.
+ * board's own round, owed or running. While an app rests the radio it is
+ * refused KODE_DENIED and ends nothing.
  *
  * @param me The AO.
  * @param e  The RADIO_SCAN_ASK_SIG.
@@ -3155,6 +3186,15 @@ static bool scan_ask_take(Radio * const me, QEvt const * const e)
 {
     ScanAskEvt const * const a = Q_EVT_CAST(ScanAskEvt);
 
+    /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the board can rest */
+    if ( radio_part_rests(me) )
+    {
+        /* KODE_DENIED, which stays true until the app ends its rest: asking
+         * again before that is refused once more. */
+        KLOG_N(TAG, "an app rests the radio; a %s is refused", scan_ask_name(a->kind));
+        scan_ask_refuse(e, KODE_DENIED);
+        return false;
+    }
     if ( scan_ask_refuse_off(me, e) )
     {
         return false;
@@ -3498,6 +3538,7 @@ static void wifi_publish_scan_end(Radio const * const me, uint8_t count, bool ok
         e->ok    = ok;
         e->busy  = false;
         e->cut   = false;
+        e->rest  = false;
         e->gen   = me->scan_gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
@@ -3523,6 +3564,33 @@ static void wifi_publish_scan_busy(Radio * const me, uint8_t gen)
         e->ok    = false;
         e->busy  = true;
         e->cut   = false;
+        e->rest  = false;
+        e->gen   = gen;
+        QACTIVE_PUBLISH(&e->super, &me->super);
+    }
+    (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
+}
+
+/**
+ * @brief Publish the end of a Wi-Fi scan refused while an app rests the radio.
+ *
+ * Nothing was started: the asker is told to ask again once the rest is over
+ * (the console answers `radio: at rest`, code 4). It carries the refused
+ * request's generation, as wifi_publish_scan_busy() does.
+ *
+ * @param me  The AO.
+ * @param gen The refused request's generation.
+ */
+static void wifi_publish_scan_rest(Radio * const me, uint8_t gen)
+{
+    WifiScanEndEvt *e = Q_NEW_X(WifiScanEndEvt, 0U, WIFI_SCAN_END_SIG);
+    if ( NULL != e )
+    {
+        e->count = 0U;
+        e->ok    = false;
+        e->busy  = false;
+        e->cut   = false;
+        e->rest  = true;
         e->gen   = gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
@@ -3547,6 +3615,7 @@ static void wifi_publish_scan_cut(Radio * const me, uint8_t count)
         e->ok    = false;
         e->busy  = false;
         e->cut   = true;
+        e->rest  = false;
         e->gen   = me->scan_gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
@@ -3572,6 +3641,7 @@ static void wifi_publish_scan_again(Radio * const me, uint8_t count)
         e->ok    = false;
         e->busy  = false;
         e->cut   = true;
+        e->rest  = false;
         e->gen   = me->scan_gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
@@ -3802,6 +3872,7 @@ static void wifi_publish_saved(Radio * const me, bool ok)
         end->ok    = ok;
         end->busy  = false;
         end->cut   = false;
+        end->rest  = false;
         end->gen   = (uint8_t)KQP_SCAN_GEN_NONE;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
@@ -4444,6 +4515,7 @@ static void ble_publish_scan(Radio const * const me)
         end->ok    = true;
         end->busy  = false;
         end->cut   = false;
+        end->rest  = false;
         end->gen   = me->ble_scan_gen;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
@@ -4459,6 +4531,7 @@ static void ble_publish_scan_end(Radio const * const me, bool ok)
         end->ok    = ok;
         end->busy  = false;
         end->cut   = false;
+        end->rest  = false;
         end->gen   = me->ble_scan_gen;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
@@ -4479,6 +4552,29 @@ static void ble_publish_scan_busy(Radio * const me, uint8_t gen)
         end->ok    = false;
         end->busy  = true;
         end->cut   = false;
+        end->rest  = false;
+        end->gen   = gen;
+        QACTIVE_PUBLISH(&end->super, &me->super);
+    }
+    (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
+}
+
+/**
+ * @brief Publish the end of a BLE scan refused while an app rests the radio (see wifi_publish_scan_rest()).
+ *
+ * @param me  The AO.
+ * @param gen The refused request's generation.
+ */
+static void ble_publish_scan_rest(Radio * const me, uint8_t gen)
+{
+    WifiScanEndEvt *end = Q_NEW_X(WifiScanEndEvt, 0U, BLE_SCAN_END_SIG);
+    if ( NULL != end )
+    {
+        end->count = 0U;
+        end->ok    = false;
+        end->busy  = false;
+        end->cut   = false;
+        end->rest  = true;
         end->gen   = gen;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
@@ -4502,6 +4598,7 @@ static void ble_publish_scan_cut(Radio * const me)
         end->ok    = false;
         end->busy  = false;
         end->cut   = true;
+        end->rest  = false;
         end->gen   = me->ble_scan_gen;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
@@ -9524,6 +9621,8 @@ void Radio_ctor(void)
     me->lp_target     = (uint8_t)KODE_LP_AWAKE;
     me->lp_job        = (uint8_t)RADIO_LPJ_NONE;
     me->lp_asleep     = false;
+    me->lp_app        = false;
+    me->lp_part       = false;
     me->lp_wake_owed  = false;
     me->lp_net_expected = false;
     me->lp_net_seen   = false;
@@ -10112,6 +10211,9 @@ static bool radio_lp_net_clear(Radio const * const me, uint32_t round)
 /**
  * @brief Answer the round in hand, once.
  *
+ * Ready to an app's round, the radio rests for the app from here until the
+ * AWAKE that ends it.
+ *
  * @param me   The AO.
  * @param busy true to refuse.
  * @param why  The reason, or NULL.
@@ -10121,6 +10223,10 @@ static void radio_lp_answer(Radio * const me, bool busy, const char *why)
     if ( me->lp_owed )
     {
         me->lp_owed = false;
+        if ( me->lp_app && !busy )
+        {
+            me->lp_part = true;
+        }
         lowpower_ready(me->lp_who, me->lp_round, busy, why);
     }
 }
@@ -10359,8 +10465,11 @@ static void radio_lp_round(Radio * const me, const LowPowerRoundEvt * const r)
     else
     {
         /* An app's rest of the radio: the C5 sleeps between wakes and the
-         * board stays awake, so nothing is held back as for a board at rest. */
+         * board stays awake, so nothing this AO starts by itself is held back
+         * as for a board at rest. A scan, which fails on a C5 asleep between
+         * wakes, is refused once it rests (radio_part_rests()). */
     }
+    me->lp_app       = (0U != r->parts);
     me->lp_round     = r->round;
     me->lp_target    = r->target;
     me->lp_owed      = true;
@@ -10566,6 +10675,7 @@ static void radio_lp_state(Radio * const me, const LowPowerStateEvt * const s)
     bool const dark = ((uint8_t)KODE_LP_DARK == s->state);
 
     me->lp_rest = ((uint8_t)KODE_LP_AWAKE != s->state);
+    me->lp_part = false;   /* the app's rest is over, or the board's has it */
     if ( (uint8_t)KODE_LP_ASLEEP == s->state )
     {
         me->lp_slept = true;
@@ -10668,6 +10778,7 @@ static void radio_lp_link_gone(Radio * const me)
                           || ((uint8_t)RADIO_LPJ_STOP_AWAKE == me->lp_job);
 
     me->lp_asleep    = false;
+    me->lp_part      = false;  /* no sentinel: the link that comes back is awake */
     me->lp_job       = (uint8_t)RADIO_LPJ_NONE;
     me->lp_wake_owed = false;
     radio_lp_dark_done(me);   /* no link, nothing left to wait for */
@@ -12990,7 +13101,15 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         case WIFI_SCAN_REQ_SIG: {
             uint8_t const gen = Q_EVT_CAST(WifiScanReqEvt)->gen;
 
-            if ( !scan_can_take(me, (uint8_t)KQP_SCAN_WIFI) )
+            /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the board can rest */
+            if ( radio_part_rests(me) )
+            {
+                /* The C5 sleeps between wakes: a sweep fails on it. Nothing
+                 * in flight is ended for a request that cannot run. */
+                KLOG_I(TAG, "an app rests the radio; wifi_scan is refused");
+                wifi_publish_scan_rest(me, gen);
+            }
+            else if ( !scan_can_take(me, (uint8_t)KQP_SCAN_WIFI) )
             {
                 /* A job that is neither cut nor waited for holds the channel.
                  * A listing that is alive keeps its own generation. */
@@ -13328,7 +13447,14 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             {
                 ms = KODE_BLE_SCAN_MS;
             }
-            if ( !scan_can_take(me, (uint8_t)KQP_SCAN_BLE) )
+            /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the board can rest */
+            if ( radio_part_rests(me) )
+            {
+                /* As a Wi-Fi scan: a listen fails on a C5 asleep between wakes. */
+                KLOG_I(TAG, "an app rests the radio; ble_scan is refused");
+                ble_publish_scan_rest(me, gen);
+            }
+            else if ( !scan_can_take(me, (uint8_t)KQP_SCAN_BLE) )
             {
                 /* A job that is neither cut nor waited for holds the channel.
                  * A listing that is alive keeps its own generation. */

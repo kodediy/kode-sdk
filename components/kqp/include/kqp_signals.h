@@ -4851,6 +4851,10 @@ typedef struct {
                          *   255 to 1. A listener that waits for its own
                          *   request skips an end older than it.
                          *   KQP_SCAN_GEN_NONE: not told.                    */
+    bool    rest;       /**< true: not started, an app's rest has the radio
+                         *   (ok and busy are false, count 0); ask again
+                         *   once the rest ends. @c gen is the refused
+                         *   request's, as with @c busy.                     */
 } WifiScanEndEvt;
 
 /** @brief ScanAskEvt.kind: the Wi-Fi sweep; the rows are kdrv_wifi_ap_t. */
