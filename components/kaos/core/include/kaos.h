@@ -3765,7 +3765,7 @@ typedef struct {
  * inside is removed once the new one reads back as written; a folder on the
  * card is never moved inside. A new folder goes to a card that took the write
  * check and has room for it, and stays there; a card that then will not take
- * the write is not chosen again this boot (kdrv_sd_write_failed()) and is
+ * the write is not chosen again while it is in (kdrv_sd_write_failed()) and is
  * mounted again, leaves none of the folder behind, and the folder goes
  * inside. With no such card, or a full one,
  * it goes inside and the log says why; when the internal partition has no room
@@ -3887,7 +3887,7 @@ void storage_close_request(void);
  * or close fails on one medium is removed there and tried once on the other: on
  * the card only when it took the write check, and not at all when what landed
  * on the card would not go, which a read of the name would find first. A card
- * it failed on is not chosen again this boot (kdrv_sd_write_failed()) and is
+ * it failed on is not chosen again while it is in (kdrv_sd_write_failed()) and is
  * mounted again once the write is over. A name starting with '/' goes to the
  * volume it names only, and is refused with KODE_NO_RESOURCES, nothing
  * written, when that volume says it has less room than @p len.

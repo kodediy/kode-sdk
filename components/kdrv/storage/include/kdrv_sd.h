@@ -242,7 +242,7 @@ bool kdrv_sd_mounted_everyday(void);
  * The check is kdrv_sd_mount()'s: one sector read and written back as it was,
  * which proves the way a write goes and not that the card keeps it.
  *
- * @return true for the card that took the check this boot (on four lines, or
+ * @return true for the card that took the check since it went in (on four lines, or
  *         on one after it took none on four), while it is mounted and until
  *         kdrv_sd_write_failed(); false with nothing mounted, for a card that
  *         took no write, for one whose check could not be made, and for a card
@@ -254,8 +254,9 @@ bool kdrv_sd_took_write(void);
  * @brief Tell the driver that a write of a file on the mounted card failed.
  *
  * The card is no longer counted as one that takes a write until the boot ends
- * (kdrv_sd_took_write() says false, a remount of it included), and its next
- * mount is on one line. Said once at NOTICE; nothing when the card was not
+ * or a mount finds the slot empty (kdrv_sd_took_write() says false, a remount
+ * of it included), and its next mount is on one line. A card put back after
+ * the slot was found empty is judged afresh. Said once at NOTICE; nothing when the card was not
  * counted as one.
  *
  * @return true when this call took the card's word back; false when there was

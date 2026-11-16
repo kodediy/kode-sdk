@@ -1203,7 +1203,7 @@ TEST_CASE("a card mounted with the check off after one that took it does not "
 
 /* A card that took the check and then failed a write of a file is not chosen
  * again this boot, and goes to one line at its next mount. */
-TEST_CASE("a write that failed takes the card's word back until the boot ends",
+TEST_CASE("a write that failed takes the card's word back while it stays in",
           "[kdrv_sd]")
 {
     ready_one_mount();
@@ -1265,6 +1265,52 @@ TEST_CASE("another card after a failed write is judged afresh and takes writes",
     TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
     TEST_ASSERT_TRUE_MESSAGE(kdrv_sd_took_write(),
                              "a new card carried the old card's failure");
+}
+
+/* A slot found empty forgets what it knew of the card that was in it: the same
+ * card put back, taken out in the middle of a write that failed, is judged
+ * afresh and takes writes again. */
+TEST_CASE("a card taken out after a failed write is judged afresh when it comes back",
+          "[kdrv_sd]")
+{
+    ready_one_mount();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE(kdrv_sd_write_failed());
+
+    kdrv_sd_unmount();
+    fake_sdmmc_set_present(false);
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+
+    fake_sdmmc_set_present(true);
+    fake_sdmmc_trace_reset();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_sd_took_write(),
+                             "the card put back carried the failure of before");
+    trace_is_n(0U, "mount", 4U);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(4, field(KDRV_SD_BUS_WIDTH),
+                                    "the card put back stayed on one line");
+}
+
+/* A card that stays in is the card judged: mounted again, it is asked nothing,
+ * so a card that fails writes is checked once while it is in. */
+TEST_CASE("a card that takes no write and stays in is not checked again at its next mounts",
+          "[kdrv_sd]")
+{
+    fake_sdmmc_fail_writes(true);
+    ready_one_mount();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+
+    for ( unsigned i = 0U; 3U > i; ++i )
+    {
+        kdrv_sd_unmount();
+        fake_sdmmc_trace_reset();
+        TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_sdmmc_raw_writes(),
+                                       "a card that stays in was checked again");
+        TEST_ASSERT_FALSE(kdrv_sd_took_write());
+    }
+    fake_sdmmc_fail_writes(false);
 }
 
 TEST_CASE("the card's cluster is told while it is mounted", "[kdrv_sd]")

@@ -60,7 +60,7 @@ _Static_assert((SD_PROBE_TAG_COUNT + SD_OTHER_HOLDS) <= KODE_LOG_HOLD_MAX,
 
 /** @brief What the last card judged took on four lines. */
 typedef enum {
-    SD_VERDICT_NONE = 0,   /**< No card has been judged since the boot.       */
+    SD_VERDICT_NONE = 0,   /**< No card judged since the boot or the empty slot. */
     SD_VERDICT_FOUR,       /**< It took a write there: four lines it is.      */
     SD_VERDICT_ONE         /**< It took none: one line it is.                 */
 } sd_verdict_t;
@@ -80,7 +80,7 @@ static card_id_t    s_judged;   /**< Who s_verdict is about; valid with a verdic
 
 /** @brief What the last card proved by a write on the lines it stands on. */
 typedef enum {
-    SD_PROOF_NONE = 0,   /**< No card has been asked since the boot.          */
+    SD_PROOF_NONE = 0,   /**< No card asked since the boot or the empty slot. */
     SD_PROOF_TOOK,       /**< It took the write, and no write of a file on it
                           *   has failed since.                               */
     SD_PROOF_REFUSED     /**< It took none, or a write of a file on it failed. */
@@ -565,8 +565,8 @@ bool kdrv_sd_write_failed(void)
          * unable to bring it up there again: the next mount is on one. */
         s_verdict = SD_VERDICT_ONE;
     }
-    KLOG_N(TAG, "a write on the card failed; until the boot ends it is not "
-                "counted as a card that takes a write");
+    KLOG_N(TAG, "a write on the card failed; until it comes out or the boot "
+                "ends it is not counted as a card that takes a write");
     return true;
 }
 
@@ -879,6 +879,15 @@ static kode_status_t card_up(void)
 
     kode_status_t const st = card_mount();
 
+    if ( KODE_TIMEOUT == st )
+    {
+        /* An empty slot: what was known of the card that was in it goes with
+         * it, so a card put back is judged afresh, the one taken out in the
+         * middle of a write included. A card that stays in never answers so,
+         * and is judged once while it is in. */
+        s_proof   = SD_PROOF_NONE;
+        s_verdict = SD_VERDICT_NONE;
+    }
     if ( KODE_OK == st )
     {
         s_missing  = false;

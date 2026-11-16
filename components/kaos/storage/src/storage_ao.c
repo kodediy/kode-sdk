@@ -3437,7 +3437,7 @@ static void appdata_put_unshadow(const Storage * const me)
  * removes is removed with the AO free.
  *
  * A failed put on the card tells the driver (card_write_failed()), so the
- * card is not chosen again this boot, and the card is mounted again once the
+ * card is not chosen again while it is in, and it is mounted again once the
  * put is over (card_remount_owed()). A failed put leaves the folder that was
  * there as it was, less the temporaries; a folder the put made is taken away
  * again. A new folder the card would not write starts again inside
@@ -5912,7 +5912,7 @@ static kode_status_t write_open(const char *name, kdrv_medium_t first,
  *
  * A bare name only: a path names its volume. A bare name that failed on the
  * card tells the driver first (card_write_failed()), so the card is not
- * chosen again this boot. One that failed inside goes on on the card only when
+ * chosen again while it is in. One that failed inside goes on on the card only when
  * the card took a write. The payload is still whole in memory.
  *
  * @param me The AO, with the failed write's stub already discarded.
@@ -5972,7 +5972,7 @@ static bool write_elsewhere(Storage * const me)
  * than one chunk and the cluster it may start is full, which is no fault of
  * the card: the write is told KODE_NO_RESOURCES and the card keeps its word.
  * Any other failure there is the card's, as for a bare name: the card is not
- * chosen again this boot, and is mounted again once the write is over.
+ * chosen again while it is in, and is mounted again once the write is over.
  * A counterfeit card claims room it does not have, so its failure stays its
  * own. Any other write to a path tells only its writer.
  *
@@ -6552,8 +6552,8 @@ static void card_write_failed(Storage * const me)
  * A card that fails a write may leave FATFS holding sectors it can never
  * flush, and every later read of the volume comes back empty. An unmount and
  * a mount, one call on the card's worker, give the reads back. The card stays
- * one that took no write (kdrv_sd_took_write()) until the boot ends or another
- * card comes in.
+ * one that took no write (kdrv_sd_took_write()) until the boot ends or a mount
+ * finds the slot empty.
  *
  * @param me The AO.
  */
