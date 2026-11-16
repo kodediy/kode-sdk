@@ -220,6 +220,27 @@ kode_status_t kdrv_ble_set_cb(kdrv_ble_cb_t cb)
     return KODE_OK;
 }
 
+/** @brief The hear hook AO_Radio installed; installed once per binary, so not part of s_b. */
+static kdrv_ble_hear_cb_t s_hear_cb;
+
+kode_status_t kdrv_ble_set_hear_cb(kdrv_ble_hear_cb_t cb)
+{
+    if ( NULL == cb )
+    {
+        return KODE_DENIED;
+    }
+    s_hear_cb = cb;
+    return KODE_OK;
+}
+
+void fake_ble_hear_note(kdrv_ble_hear_note_t note)
+{
+    if ( NULL != s_hear_cb )
+    {
+        s_hear_cb(note);
+    }
+}
+
 kode_status_t kdrv_ble_start(void)
 {
     ++s_b.starts;

@@ -1058,6 +1058,9 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
         case KDRV_RADIO_JOB_BLE_SCAN:
             *rc = radio_answer(kdrv_ble_scan(req->len));
             break;
+        case KDRV_RADIO_JOB_BLE_HEAR:
+            *rc = radio_answer(kdrv_ble_hear(req->on));
+            break;
         case KDRV_RADIO_JOB_BLE_UNPAIR:
             *rc = radio_answer(kdrv_ble_unpair());
             break;

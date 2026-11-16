@@ -177,6 +177,8 @@ if(CONFIG_KODEOS_RADIO)
         list(APPEND srcs "radio/src/kdrv_ble_bonds.c")
         # The scan response's packing, pure C.
         list(APPEND srcs "radio/src/kdrv_ble_adv.c")
+        # The advertisements heard: a record and the ring that hands them on.
+        list(APPEND srcs "radio/src/kdrv_ble_heard.c")
         # The app's own service: its rules, values and ring, pure C.
         list(APPEND srcs "radio/src/kdrv_ble_app.c")
         # Which advertisement a find waits for, pure C.

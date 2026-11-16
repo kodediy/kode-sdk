@@ -99,6 +99,8 @@ typedef enum {
                                   *   whose name starts with req.ssid and stop
                                   *   at the first; read it with
                                   *   kdrv_radio_probe_result().            */
+    KDRV_RADIO_JOB_BLE_HEAR,     /**< Start or stop a passive scan with no
+                                  *   end (req.on): kdrv_ble_hear().      */
 #if CONFIG_KODE_LOWPOWER
     KDRV_RADIO_JOB_SLEEP,        /**< Start (req.on) or stop the sleep
                                   *   sentinel. The owner's worker runs it
@@ -167,7 +169,8 @@ typedef struct {
                               *   J3's supply on (true) or off.
                               *   AMP: the amplifier on (true) or off.
                               *   SLEEP: start the sentinel (true) or stop it.
-                              *   BLE_START: set the scan response first. */
+                              *   BLE_START: set the scan response first.
+                              *   BLE_HEAR: start or stop the scan.         */
     bool             wants_wifi; /**< CONNECT: this boot wants Wi-Fi, so a C5
                               *   parked by the last firmware may be kept
                               *   running instead of reset.                  */

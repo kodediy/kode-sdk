@@ -878,6 +878,16 @@ void fake_ble_adv_end(void);
 /** @brief How many times kdrv_ble_start() has been called since the reset. */
 unsigned fake_ble_starts(void);
 
+/**
+ * @brief NimBLE's host task tells the hear hook @p note; nothing when none was installed.
+ *
+ * The hook is installed once per binary by AO_Radio's initial transition and
+ * stays across fake_ble_reset().
+ *
+ * @param note KDRV_BLE_HEAR_RECORD or KDRV_BLE_HEAR_ENDED.
+ */
+void fake_ble_hear_note(kdrv_ble_hear_note_t note);
+
 /** @brief Declare the app's service kdrv_ble_app_declared() finds, NULL for
  *         none; it stays across fake_ble_reset(), so a case that sets one
  *         puts NULL back. fake_ble_central(true) counts a link

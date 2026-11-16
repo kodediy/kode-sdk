@@ -41,6 +41,7 @@ extern void ble_store_config_init(void);
 #include "kdrv_c5svc.h"
 #include "kode_wire.h"
 #endif
+#include "kdrv_ble_heard.h"   /* the ring kdrv_ble_hear()'s scan feeds */
 #include "kdrv_ble_app.h"     /* the app's own service: its rules, values and ring */
 #include "kdrv_ble_bonds.h"   /* the count of bonded peers, read with no lock */
 #include "kdrv_ble_find.h"    /* kdrv_ble_scan_find(): which advert is the one */
@@ -56,6 +57,13 @@ extern void ble_store_config_init(void);
  * sdkconfig.board says so; a project that does not read it stops here. */
 #if !CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL
 #error "NimBLE's host memory must come from PSRAM on the Kode Dot: read sdk/components/kbsp/sdkconfig.board before your own sdkconfig defaults (CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y)"
+#endif
+
+/* A scan and kdrv_ble_hear() read legacy reports (BLE_GAP_EVENT_DISC, 31
+ * bytes of payload). With extended advertising NimBLE reports through
+ * another event, and both would hear nothing and say nothing. */
+#ifdef CONFIG_BT_NIMBLE_EXT_ADV
+#error "kdrv_ble reads legacy advertising reports: build with CONFIG_BT_NIMBLE_EXT_ADV=n"
 #endif
 
 #define TAG "kdrv.ble"
@@ -217,6 +225,9 @@ static struct {
     uint16_t           conn;        /**< BLE_HS_CONN_HANDLE_NONE when idle. */
     uint32_t           links;       /**< Connections opened since boot; wraps. */
     bool               secure;      /**< The last link got encrypted, by a bond or a pairing. */
+    bool               hearing;     /**< kdrv_ble_hear() has a passive scan
+                                     *   running; written by the worker, read
+                                     *   by the host task.                   */
     uint16_t           adv_itvl;    /**< The next advert's interval (0.625 ms units); 0 until planned. */
     uint32_t           adv_ms;      /**< How long it stays on the air, ms; 0 for no end. */
     bool               adv_hidden;  /**< The next advert hides the board and no
@@ -318,6 +329,20 @@ kode_status_t kdrv_ble_set_cb(kdrv_ble_cb_t cb)
         return KODE_DENIED;
     }
     s_ble.cb = cb;
+    return KODE_OK;
+}
+
+/* The hear hook: written once, by kdrv_ble_set_hear_cb() before the
+ * first start, and read from NimBLE's host task like s_ble.cb is. */
+static kdrv_ble_hear_cb_t s_hear_cb;
+
+kode_status_t kdrv_ble_set_hear_cb(kdrv_ble_hear_cb_t cb)
+{
+    if ( NULL == cb )
+    {
+        return KODE_DENIED;
+    }
+    s_hear_cb = cb;
     return KODE_OK;
 }
 
@@ -2452,6 +2477,9 @@ static void ble_on_reset(int reason)
      * is what actually recovers. */
     KLOG_W(TAG, "controller reset (reason %d)", reason);
     s_ble.synced = false;
+    /* The stack reported the scan's end before this callback, and the hook
+     * was told then; the flag is cleared again in case it did not. */
+    s_ble.hearing = false;
     pulse_train_end();
     ble_set_state(KDRV_BLE_IDLE);
 }
@@ -2564,6 +2592,22 @@ static void ble_find_check(const struct ble_gap_disc_desc *d)
                             f.name_len) )
     {
         (void)xEventGroupSetBits(s_ble.bits, BLE_BIT_SCAN_DONE);
+    }
+}
+
+/** Keep one heard advertisement for the stream, and tell the hook. */
+static void ble_hear_record(const struct ble_gap_disc_desc *d)
+{
+    kdrv_ble_heard_t rec;
+
+    kdrv_ble_heard_make(d->addr.val, d->addr.type, d->event_type, d->rssi, d->data,
+                        d->length_data, &rec);
+    /* Taken or counted as a drop: the owner reads both in the ring's counts,
+     * so either way it is told that something was heard. */
+    (void)kdrv_ble_heard_feed(&rec);
+    if ( NULL != s_hear_cb )
+    {
+        s_hear_cb(KDRV_BLE_HEAR_RECORD);
     }
 }
 
@@ -2821,13 +2865,30 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             {
                 ble_find_check(&event->disc);
             }
+            else if ( s_ble.hearing )
+            {
+                ble_hear_record(&event->disc);
+            }
             else
             {
                 ble_record(&event->disc);
             }
             break;
         case BLE_GAP_EVENT_DISC_COMPLETE:
-            (void)xEventGroupSetBits(s_ble.bits, BLE_BIT_SCAN_DONE);
+            if ( s_ble.hearing )
+            {
+                /* The stack ended a scan that was asked to have no end:
+                 * nobody waits on the scan's bit, the owner is told. */
+                s_ble.hearing = false;
+                if ( NULL != s_hear_cb )
+                {
+                    s_hear_cb(KDRV_BLE_HEAR_ENDED);
+                }
+            }
+            else
+            {
+                (void)xEventGroupSetBits(s_ble.bits, BLE_BIT_SCAN_DONE);
+            }
             break;
         case BLE_GAP_EVENT_CONNECT:
             /* The connection ends the advert, a pulse or a pause of its train,
@@ -3489,6 +3550,9 @@ kode_status_t kdrv_ble_quiet(void)
     }
 
     ble_adv_halt();
+    /* Cleared first: the cancel may complete the scan on this very call, and
+     * a passive scan that is ended on purpose says nothing to its hook. */
+    s_ble.hearing = false;
     (void)ble_gap_disc_cancel();
 
     if ( BLE_HS_CONN_HANDLE_NONE != s_ble.conn )
@@ -3517,6 +3581,7 @@ kode_status_t kdrv_ble_stop(void)
     }
 
     ble_adv_halt();
+    s_ble.hearing = false;   /* first, as in kdrv_ble_quiet() */
     (void)ble_gap_disc_cancel();
 #if CONFIG_KODEOS_BLE_CONSOLE
     app_quiet();
@@ -3553,6 +3618,7 @@ void kdrv_ble_forget(void)
     pulse_train_end();
     s_ble.up     = false;
     s_ble.synced = false;
+    s_ble.hearing = false;   /* the link is gone with its scan; no hook, as above */
     s_ble.count  = 0U;
     s_ble.state  = KDRV_BLE_OFF;
     s_ble.conn   = BLE_HS_CONN_HANDLE_NONE;
@@ -3938,8 +4004,25 @@ kode_status_t kdrv_ble_conn_calm(bool rest)
     return rc;
 }
 
+/**
+ * @brief Give the host's one scan to the scan that is about to start.
+ *
+ * The owner ended its stream before it sent the job, so the hook is told
+ * nothing: the flag is cleared before the cancel, as kdrv_ble_hear(false)
+ * does.
+ */
+static void ble_hear_yield(void)
+{
+    if ( s_ble.hearing )
+    {
+        s_ble.hearing = false;
+        (void)ble_gap_disc_cancel();
+    }
+}
+
 kode_status_t kdrv_ble_scan(uint32_t ms)
 {
+    ble_hear_yield();
     kode_status_t const rc = kdrv_ble_start();
     if ( KODE_OK != rc )
     {
@@ -4049,6 +4132,7 @@ kode_status_t kdrv_ble_scan_find(const char *name, uint32_t max_ms,
     {
         return KODE_DENIED;
     }
+    ble_hear_yield();
     *found = false;
     if ( !kdrv_ble_find_begin(&s_find, name) )
     {
@@ -4088,6 +4172,67 @@ kode_status_t kdrv_ble_scan_find(const char *name, uint32_t max_ms,
     {
         *dev   = s_find.dev;
         *found = true;
+    }
+    return KODE_OK;
+}
+
+/** @brief Scan interval of kdrv_ble_hear(), 0.625 ms units: 10 ms. */
+#define BLE_HEAR_ITVL         16U
+
+/** @brief A window of the whole interval: the radio listens all the time. */
+#define BLE_HEAR_WINDOW_FULL  BLE_HEAR_ITVL
+
+/** @brief A window of half the interval: the other half is left to Wi-Fi and to a BLE link. */
+/* cppcheck-suppress misra-c2012-2.5 ; the other value BLE_HEAR_WINDOW takes, kept by name */
+#define BLE_HEAR_WINDOW_HALF  (BLE_HEAR_ITVL / 2U)
+
+/** @brief Scan window of kdrv_ble_hear(): BLE_HEAR_WINDOW_FULL or BLE_HEAR_WINDOW_HALF. */
+#define BLE_HEAR_WINDOW       BLE_HEAR_WINDOW_FULL
+
+kode_status_t kdrv_ble_hear(bool on)
+{
+    if ( !on )
+    {
+        if ( s_ble.hearing )
+        {
+            /* Cleared before the cancel, so the completion it provokes is
+             * not taken for the stack ending the passive scan by itself. */
+            s_ble.hearing = false;
+            (void)ble_gap_disc_cancel();
+        }
+        return KODE_OK;
+    }
+
+    /* Never brings the stack up: this scan is the owner's, asked once the
+     * radio is already in the state it wants. A scan or a find that runs
+     * holds the one scan the controller has. */
+    if ( !s_ble.up || !s_ble.synced || s_ble.hearing || (0 != ble_gap_disc_active()) )
+    {
+        return KODE_DENIED;
+    }
+
+    struct ble_gap_disc_params params;
+    (void)memset(&params, 0, sizeof(params));
+    /* Passive, the opposite of kdrv_ble_scan() and kdrv_ble_scan_find(). Those
+     * are active because a name hides in the scan response and the listing is
+     * useless without it. This scan only receives: a scan request is a
+     * packet the board would send, and a stream of what is on the air has no
+     * business transmitting. */
+    params.passive           = 1;
+    params.filter_duplicates = 0;   /* every packet is a record: the app counts them */
+    params.itvl              = BLE_HEAR_ITVL;
+    params.window            = BLE_HEAR_WINDOW;
+
+    /* Set before the scan starts: the first report can reach the host task
+     * before ble_gap_disc() returns. */
+    s_ble.hearing = true;
+    int const rc_n = ble_gap_disc(s_ble.own_addr_type, BLE_HS_FOREVER, &params,
+                                  &ble_gap_event, NULL);
+    if ( 0 != rc_n )
+    {
+        s_ble.hearing = false;
+        KLOG_E(TAG, "ble_gap_disc (hear): %d", rc_n);
+        return KODE_ERROR;
     }
     return KODE_OK;
 }

@@ -474,6 +474,44 @@ void kdrv_ble_scan_abort(bool on);
 kode_status_t kdrv_ble_scan_find(const char *name, uint32_t max_ms,
                                  kdrv_ble_dev_t *dev, bool *found);
 
+/** @brief What the hear hook is told. */
+typedef enum {
+    KDRV_BLE_HEAR_RECORD = 0,  /**< A record was offered to the ring: kdrv_ble_heard_feed() took it or counted it. */
+    KDRV_BLE_HEAR_ENDED        /**< The stack ended the scan by itself (DISC_COMPLETE while hearing).              */
+} kdrv_ble_hear_note_t;
+
+/**
+ * @brief Told when kdrv_ble_hear()'s scan hears an advertisement or ends.
+ *
+ * Called from NimBLE's host task. Post a static event and return - the same
+ * contract kdrv_ble_cb_t has.
+ */
+typedef void (*kdrv_ble_hear_cb_t)(kdrv_ble_hear_note_t note);
+
+/**
+ * @brief Install the hear hook. Before the first start.
+ * @param cb The hook; NULL is refused.
+ * @return KODE_OK; KODE_DENIED for NULL.
+ */
+kode_status_t kdrv_ble_set_hear_cb(kdrv_ble_hear_cb_t cb);
+
+/**
+ * @brief Start or stop a passive scan with no end. Worker only; does not block.
+ *
+ * Every advertisement heard goes into the ring of kdrv_ble_heard.h, which
+ * kdrv_ble_heard_init() must have made first, and the hook is told. Interval
+ * and window are equal, so the controller listens all the time. Never brings
+ * the stack up. A stop with none running is KODE_OK. kdrv_ble_scan() and
+ * kdrv_ble_scan_find() take the host's one scan from it as they start, and
+ * kdrv_ble_quiet() and kdrv_ble_stop() end it too; none of them tells the
+ * hook: AO_Radio ends its stream before it asks for them.
+ *
+ * @param on true to start, false to stop.
+ * @return KODE_OK; KODE_DENIED (the stack is down, or a scan, a find or this
+ *         scan already runs); KODE_ERROR when NimBLE refuses the scan.
+ */
+kode_status_t kdrv_ble_hear(bool on);
+
 /** @brief How many devices the last scan kept. */
 uint8_t kdrv_ble_scan_count(void);
 
