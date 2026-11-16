@@ -429,8 +429,27 @@ const char *kdrv_ble_name(void);
  * Fills this driver's result table; read it with kdrv_ble_scan_count() and
  * kdrv_ble_scan_get() afterwards. A device that advertises repeatedly is
  * reported once, with the strongest signal seen.
+ *
+ * @param ms How long to listen.
+ * @return KODE_OK when the listen ran its time; KODE_DENIED when
+ *         kdrv_ble_scan_abort() cut it short, the table holding what it had
+ *         heard; the stack's own status when it would not start.
  */
 kode_status_t kdrv_ble_scan(uint32_t ms);
+
+/**
+ * @brief Ask the listen that is running (if any) to end now, or take the
+ *        request back.
+ *
+ * For a newer request that needs the radio. It sets a flag and wakes the
+ * listen's wait: the worker cancels the discovery and kdrv_ble_scan() returns
+ * KODE_DENIED. While the flag is set every listen that starts ends before it
+ * listens, so whoever set it clears it (@p on false) once the listen it was
+ * for has ended. kdrv_ble_scan_find() is not cut. AO_Radio only.
+ *
+ * @param on true to ask for the stop, false to take the request back.
+ */
+void kdrv_ble_scan_abort(bool on);
 
 /**
  * @brief Listen for ONE advertiser by its local name and stop as soon as it

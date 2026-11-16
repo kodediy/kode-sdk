@@ -14,6 +14,7 @@ static struct {
     bool             synced;
     bool             fail_start;
     bool             fail_scan;
+    bool             scan_abort;   /* kdrv_ble_scan_abort(): a listen ends cut */
     kdrv_ble_state_t state;
     uint8_t          addr[6];
     kdrv_ble_cb_t    cb;
@@ -368,6 +369,11 @@ kode_status_t kdrv_ble_advertise(bool on)
     return KODE_OK;
 }
 
+void kdrv_ble_scan_abort(bool on)
+{
+    s_b.scan_abort = on;
+}
+
 kode_status_t kdrv_ble_scan(uint32_t ms)
 {
     kode_status_t const rc = kdrv_ble_start();
@@ -378,6 +384,10 @@ kode_status_t kdrv_ble_scan(uint32_t ms)
     if ( KODE_OK != rc )
     {
         return rc;
+    }
+    if ( s_b.scan_abort )
+    {
+        return KODE_DENIED;
     }
     if ( s_b.fail_scan )
     {

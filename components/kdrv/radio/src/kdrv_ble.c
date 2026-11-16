@@ -65,6 +65,8 @@ extern void ble_store_config_init(void);
 
 #define BLE_BIT_SYNCED      (1U << 0)
 #define BLE_BIT_SCAN_DONE   (1U << 1)
+/** @brief The owner asked the listen in flight to end (kdrv_ble_scan_abort()). */
+#define BLE_BIT_SCAN_ABORT  (1U << 2)
 
 /** How long past a scan's duration its completion is waited for, ms. */
 #define BLE_SCAN_MARGIN_MS  2000U
@@ -2539,6 +2541,10 @@ static void ble_take_fields(kdrv_ble_dev_t * const dev,
  * scan starts, offered to by the host task while it runs. */
 static kdrv_ble_find_t s_find;
 
+/** @brief Set by kdrv_ble_scan_abort(): the listen in flight ends now, and one
+ *         that starts ends before it listens. */
+static volatile bool s_scan_abort;
+
 /** Is this advertisement (or scan response) the one kdrv_ble_scan_find() wants? */
 static void ble_find_check(const struct ble_gap_disc_desc *d)
 {
@@ -3957,6 +3963,13 @@ kode_status_t kdrv_ble_scan(uint32_t ms)
     }
     s_ble.count = 0U;
     (void)xEventGroupClearBits(s_ble.bits, BLE_BIT_SCAN_DONE);
+    /* The stop's own bit is not cleared here: one asked from now on is
+     * still set when the wait below begins, and ends it. */
+    if ( s_scan_abort )
+    {
+        KLOG_N(TAG, "scan: ended before it listened, as its owner asked");
+        return KODE_DENIED;
+    }
 
     struct ble_gap_disc_params params;
     (void)memset(&params, 0, sizeof(params));
@@ -3983,9 +3996,22 @@ kode_status_t kdrv_ble_scan(uint32_t ms)
     /* The duration plus a margin: the completion arrives on the host task,
      * and waiting for it rather than for the clock is what makes the job's
      * answer mean "the scan is over". */
-    EventBits_t const bits = xEventGroupWaitBits(s_ble.bits, BLE_BIT_SCAN_DONE,
+    EventBits_t const bits = xEventGroupWaitBits(s_ble.bits,
+                                                 BLE_BIT_SCAN_DONE | BLE_BIT_SCAN_ABORT,
                                                  pdTRUE, pdFALSE,
                                                  pdMS_TO_TICKS(ms + BLE_SCAN_MARGIN_MS));
+    if ( (bits & BLE_BIT_SCAN_ABORT) != 0U )
+    {
+        /* Judged by the bit the wait woke on, not by the flag: the owner may
+         * take the request back before this line runs, and the discovery
+         * would then go on with nobody waiting for it. A cancelled discovery
+         * reports no completion, and the next listen clears the completion's
+         * bit before it starts: nothing of this one reaches it. */
+        (void)ble_gap_disc_cancel();
+        KLOG_N(TAG, "scan: ended early with %u device(s), as its owner asked",
+               (unsigned)s_ble.count);
+        return KODE_DENIED;
+    }
     if ( (bits & BLE_BIT_SCAN_DONE) == 0U )
     {
         (void)ble_gap_disc_cancel();
@@ -3994,6 +4020,26 @@ kode_status_t kdrv_ble_scan(uint32_t ms)
 
     KLOG_N(TAG, "scan: %u device(s)", (unsigned)s_ble.count);
     return KODE_OK;
+}
+
+void kdrv_ble_scan_abort(bool on)
+{
+    s_scan_abort = on;
+    if ( NULL == s_ble.bits )
+    {
+        /* No stack yet, so no listen to knock on: the flag is enough. */
+    }
+    else if ( on )
+    {
+        /* A bit of its own: the completion's would end a wait it was never
+         * meant for. */
+        (void)xEventGroupSetBits(s_ble.bits, BLE_BIT_SCAN_ABORT);
+    }
+    else
+    {
+        /* Taken back: a knock nobody read must not end the next listen. */
+        (void)xEventGroupClearBits(s_ble.bits, BLE_BIT_SCAN_ABORT);
+    }
 }
 
 kode_status_t kdrv_ble_scan_find(const char *name, uint32_t max_ms,
