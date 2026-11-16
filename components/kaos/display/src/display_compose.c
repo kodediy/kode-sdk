@@ -119,8 +119,10 @@ static bool compose_post(display_compose_ask_t *ask, display_compose_t const *jo
 /**
  * @brief Wait for the answer to tag @p gen, and for no other.
  *
- * A wait that ran out leaves a signal owed: it wakes the next wait, which
- * finds a foreign tag and goes on for what is left of its own time.
+ * Only a pass that outlived its asker (KODE_IO_ERROR) leaves a signal owed:
+ * it wakes the next wait, which finds a foreign tag and goes on for what is
+ * left of its own time. A request given up before AO_Display took it is
+ * never answered.
  *
  * @param ask        The asker's state.
  * @param gen        The tag.
