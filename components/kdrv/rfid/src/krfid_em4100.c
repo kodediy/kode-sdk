@@ -72,10 +72,10 @@ static int parse_frame(const uint8_t *bit, int nb, int s, int inv, uint8_t id[5]
  * (the 80 kHz the front-end is sampled at) and scaled with the sample rate.
  * At RF/64 the theoretical half-bit is 20.5 samples there; 14 to 24 covers
  * the widths the estimator in decode() was seen to miss by 3 or more. */
-#define SWEEP_REF_HZ 80000
-#define SWEEP_LO10   140
-#define SWEEP_HI10   240
-#define SWEEP_STEP10 5
+#define SWEEP_REF_HZ 80000  /**< The sample rate the trial widths are given at, Hz. */
+#define SWEEP_LO10   140    /**< The narrowest trial half-bit, tenths of a sample.  */
+#define SWEEP_HI10   240    /**< The widest trial half-bit, tenths of a sample.     */
+#define SWEEP_STEP10 5      /**< From one trial width to the next, tenths of a sample. */
 
 /**
  * @brief Snap a half-bit width to the RF/16, RF/32 or RF/64 bit rate.
@@ -239,7 +239,11 @@ int krfid_em4100_decode(const uint16_t *samples, int n, uint32_t sample_hz,
         if ( diag ) *diag = d;
         return 0;
     }
-    int const scale = sample_hz ? (int)sample_hz : SWEEP_REF_HZ;
+    int scale = SWEEP_REF_HZ;
+    if ( 0U != sample_hz )
+    {
+        scale = (int)sample_hz;
+    }
     int const lo10 = (SWEEP_LO10 * scale) / SWEEP_REF_HZ;
     int const hi10 = (SWEEP_HI10 * scale) / SWEEP_REF_HZ;
     for ( int cand10 = lo10; hi10 >= cand10; cand10 += SWEEP_STEP10 )

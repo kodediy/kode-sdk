@@ -933,7 +933,7 @@ static kode_status_t job_read(uint32_t ms, uint8_t id[5], uint8_t *rf_div)
 }
 
 /** @brief The most windows a clone reads back before calling the copy bad. */
-#define RFID_CLONE_VERIFY_WINDOWS 4
+#define RFID_CLONE_VERIFY_WINDOWS 4U
 
 /**
  * @brief Run one CLONE job: boost, write, read back to verify, drop.
@@ -961,7 +961,7 @@ static kode_status_t job_clone(const uint8_t src[5], uint8_t id[5],
     {
         /* The first window after a write is flat while the front end settles,
          * so a read-back gets a few windows before the copy is called bad. */
-        for ( int w = 0; RFID_CLONE_VERIFY_WINDOWS > w; w++ )
+        for ( uint8_t w = 0U; (uint8_t)RFID_CLONE_VERIFY_WINDOWS > w; ++w )
         {
             (void)memset(&d, 0, sizeof(d));
             rc = kdrv_rfid_lf_read_window(id, &d);
