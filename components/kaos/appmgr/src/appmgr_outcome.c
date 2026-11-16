@@ -349,10 +349,12 @@ static void inst_watch(bool ask)
  *
  * The cable and the scheduler are told as the line is written. On the
  * channel or BLE, up: a running record goes plain, a final one confirmed,
- * unless a confirmed line is out there, its own earlier state's included, in
- * which case it waits for that one's answer. Not known to be up: the command
- * in flight still gets its line, and the record stays owed. Before a jump a
- * final one goes plain and stays owed: no answer could arrive before the reset.
+ * unless a confirmed line is out there, its own earlier state's included: then
+ * it goes plain and stays owed, and is told confirmed once that one is
+ * answered. A final record is never kept silent while its port is up. Not
+ * known to be up: the command in flight still gets its line, and the record
+ * stays owed. Before a jump a final one goes plain and stays owed: no answer
+ * could arrive before the reset.
  *
  * @param kind  APPMGR_INST_APP or APPMGR_INST_OS.
  * @param live  The command it answers is in flight.
@@ -391,7 +393,7 @@ static void inst_tell(uint8_t kind, bool live, bool jumps)
         }
         else
         {
-            /* The line out answers first; this one follows it. */
+            say = true;   /* heard now; confirmed after the line out answers */
         }
     }
     else
@@ -433,9 +435,10 @@ static void inst_flush(uint8_t src)
  * @brief A port answered its confirmed line, or lost it.
  *
  * Delivered: a record still at the install and state that line said is told
- * and kept, and whatever is owed there goes next. Not delivered (the port went
- * down, or dropped the line): the record stays owed until the port comes up
- * again.
+ * and kept, and whatever is owed there goes next. Not delivered: the record
+ * stays owed until the port comes up again. A port still up lost the line on
+ * the way (AO_Log or the channel's ring had no room): it is said again at
+ * once, plain, so the host hears it with no clock of its own.
  *
  * @param src KODE_CONSOLE_SRC_* of the port.
  * @param ok  Whether the line was delivered.
@@ -460,6 +463,16 @@ static void inst_answered(uint8_t src, bool ok)
             if ( ok )
             {
                 delivered = true;
+            }
+            else if ( inst_port_up(src) )
+            {
+#if CONFIG_KODEOS_CONSOLE
+                inst_say(k, r, src, r->pct, false);
+#endif
+            }
+            else
+            {
+                /* Down: told when it comes up. */
             }
         }
     }
@@ -593,10 +606,11 @@ void appmgr_inst_taken(void)
     r->layout = (uint8_t)APPMGR_INST_LAYOUT;
     r->state  = (uint8_t)APPMGR_INST_RUNNING;
     r->src    = s_inst->pending_src;
-    s_inst->pending = (uint8_t)APPMGR_INST_KINDS;
-    s_inst->open     = kind;
-    s_inst->why      = (uint8_t)APPMGR_WHY_NONE;
-    s_inst->said_pct = 0U;
+    s_inst->pending    = (uint8_t)APPMGR_INST_KINDS;
+    s_inst->sent[kind] = false;   /* an answer still due is the old record's */
+    s_inst->open       = kind;
+    s_inst->why        = (uint8_t)APPMGR_WHY_NONE;
+    s_inst->said_pct   = 0U;
     inst_tell(kind, true, false);   /* the answer to the command that asked */
 }
 
