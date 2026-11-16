@@ -34,6 +34,7 @@
 #include "lowpower_cases.h"
 #include "miniz.h"
 #include "qf_support.h"
+#include "appmgr_outcome.h"
 
 /**
  * @brief Construct and start AO_AppMgr over what the board holds, and leave what its
@@ -4736,11 +4737,14 @@ static void start_up(void)
 static unsigned s_dir_count_at_write;
 static unsigned s_writes_seen;
 
-/** @brief Run inside every NVS write the fake is asked for. */
+/** @brief Run inside every NVS write the fake is asked for: the table's are counted. */
 static void note_directory_at_write(void)
 {
-    s_dir_count_at_write = kdrv_apps_dir()->count;
-    ++s_writes_seen;
+    if ( strcmp(fake_nvs_set_key(), APPMGR_UNDO_KEY) == 0 )
+    {
+        s_dir_count_at_write = kdrv_apps_dir()->count;
+        ++s_writes_seen;
+    }
 }
 
 TEST_CASE("an install that evicts records its victims and their CRCs in NVS before the "
@@ -4928,20 +4932,23 @@ TEST_CASE("an install that evicts nothing writes nothing to NVS, and one whose t
     empty.count = 0U;
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
 
+    s_writes_seen = 0U;
+    fake_nvs_set_hook(&note_directory_at_write);
     ask_recv_named(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len), false, "new");
     raw_armed(true);
     feed(s_named_img, (uint16_t)len);
     tidy_settle();
+    fake_nvs_set_hook(NULL);
     TEST_ASSERT_TRUE(named_installed("new"));
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_nvs_set_count(),
-        "an install with no victim wrote NVS");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_writes_seen,
+        "an install with no victim wrote the table to NVS");
     TEST_ASSERT_FALSE(table_in_nvs());
 
     region_of_victims();
     undo_image("new2");
-    fake_nvs_fail_next_set();
     ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
                    false, "new2");
+    fake_nvs_fail_next_set();   /* the table's write, after the record's */
     raw_armed(true);
     TEST_ASSERT_TRUE_MESSAGE(klog_has("cannot record the apps this install evicts"),
         "a table that could not be written went unsaid");
@@ -11076,4 +11083,161 @@ TEST_CASE("the fetch's request carries whether an install follows",
     TEST_ASSERT_TRUE(((AppDataGetReqEvt const *)e)->install);
     QF_gc(e);
     fetch_end();
+}
+
+/* ---- The install records -------------------------------------------------
+ * AO_AppMgr numbers each install it takes and keeps the last of each kind in
+ * NVS, so a host that was not listening can still ask how it ended.
+ */
+
+/** @brief One stored record; a missing one reads as zeros. */
+static appmgr_inst_rec_t inst_read(const char *key)
+{
+    appmgr_inst_rec_t r;
+    size_t            len = sizeof(r);
+
+    if ( khal_nvs_get_blob(APPMGR_UNDO_NS, key, &r, &len) != KODE_OK )
+    {
+        (void)memset(&r, 0, sizeof(r));
+    }
+    return r;
+}
+
+/** @brief The highest number either stored record carries. */
+static uint32_t inst_last_id(void)
+{
+    appmgr_inst_rec_t const app = inst_read(APPMGR_INST_KEY_APP);
+    appmgr_inst_rec_t const os  = inst_read(APPMGR_INST_KEY_OS);
+    uint32_t                id  = app.id;
+
+    if ( os.id > id )
+    {
+        id = os.id;
+    }
+    return id;
+}
+
+/* The record is numbered and kept the moment the install is taken, and the
+ * same number ends it: a host that saw the first can match the second. */
+TEST_CASE("an install it takes is numbered and kept, running then installed",
+          "[appmgr_ao][install_rec]")
+{
+    kapps_dir_t saved;
+    uint32_t    len;
+    uint32_t    before;
+
+    len = image_named("notes");
+    recv_fresh();
+    saved  = *kdrv_apps_dir();
+    before = inst_last_id();
+
+    ask_recv(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len), false);
+    appmgr_inst_rec_t const taken = inst_read(APPMGR_INST_KEY_APP);
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+    appmgr_inst_rec_t const ended = inst_read(APPMGR_INST_KEY_APP);
+
+    tidy_settle();   /* no install left tidying for the next case */
+    run_ticks(2U);   /* and its disarmed deadlines out of QF's list */
+    ao_spy_drain();
+    kode_status_t const restored = kdrv_apps_dir_commit(&saved);
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(before + 1U, taken.id,
+        "the next number, kept when the install is taken");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_RUNNING, taken.state);
+    TEST_ASSERT_EQUAL_UINT8(KODE_CONSOLE_SRC_SERIAL, taken.src);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(taken.id, ended.id, "one install, one number");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_INSTALLED, ended.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_NONE, ended.why);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_PCT_DONE, ended.pct);
+    TEST_ASSERT_EQUAL_STRING("notes", ended.name);
+    TEST_ASSERT_EQUAL_STRING("0.0.1", ended.version);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, restored);
+}
+
+/* A reset in the middle leaves the record running; the next start knows no
+ * install is running any more, and says the reset ended it. */
+TEST_CASE("an install a reset cut is kept as a failure for reset",
+          "[appmgr_ao][install_rec]")
+{
+    appmgr_inst_rec_t r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.id     = 41U;
+    r.layout = (uint8_t)APPMGR_INST_LAYOUT;
+    r.state  = (uint8_t)APPMGR_INST_RUNNING;
+    r.src    = (uint8_t)KODE_CONSOLE_SRC_NET;
+    fake_nvs_seed(APPMGR_UNDO_NS, APPMGR_INST_KEY_APP, &r, sizeof(r));
+
+    appmgr_fresh();
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+
+    TEST_ASSERT_EQUAL_UINT32(41U, got.id);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_RESET, got.why);
+}
+
+/* The record says why in the words a host can act on: an image the region
+ * cannot hold is `no_room`, not a write that failed. A container's header is
+ * where the image's length is first known. */
+TEST_CASE("an install too big for the region is kept as failed for no_room",
+          "[appmgr_ao][install_rec]")
+{
+    uint8_t   buf[KFW_HDR_LEN + 16U];
+    kfw_hdr_t h;
+
+    (void)memset(buf, 0xA5, sizeof(buf));
+    (void)memset(&h, 0, sizeof(h));
+    h.magic       = KFW_MAGIC;
+    h.hdr_version = (uint16_t)KFW_HDR_VERSION;
+    h.hdr_len     = (uint16_t)KFW_HDR_LEN;
+    h.target      = (uint8_t)KFW_TARGET_APP;
+    h.comp        = (uint8_t)KFW_COMP_DEFLATE;
+    h.payload_len = 16U;
+    h.image_len   = kdrv_apps_region_size() + 1U;
+    (void)snprintf(h.name, sizeof(h.name), "%s", "huge");
+    h.crc = kfw_crc32(&h, offsetof(kfw_hdr_t, crc));
+    (void)memcpy(buf, &h, sizeof(h));
+
+    recv_fresh();
+    ask_recv_named((uint32_t)sizeof(buf), khal_crc32(KHAL_CRC32_INIT, buf, sizeof(buf)),
+                   false, "huge");
+    raw_armed(true);
+    feed(buf, (uint16_t)sizeof(buf));
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+
+    run_ticks(2U);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_NO_ROOM, got.why,
+        "an image the region cannot hold");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("huge", got.name,
+        "the name the host gave is kept with the failure");
+}
+
+/* An image built for another chip is refused by the decoder before anything
+ * is placed; the record names that, not a failed write. */
+TEST_CASE("an image for another chip is kept as failed for wrong_board",
+          "[appmgr_ao][install_rec]")
+{
+    esp_image_header_t h;
+    uint32_t const     len = image_named("other");
+
+    (void)memcpy(&h, s_named_img, sizeof(h));
+    h.chip_id = ESP_CHIP_ID_ESP32;
+    (void)memcpy(s_named_img, &h, sizeof(h));
+
+    recv_fresh();
+    ask_recv(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len), false);
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+
+    run_ticks(2U);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_WRONG_BOARD, got.why,
+        "an image for another chip");
 }

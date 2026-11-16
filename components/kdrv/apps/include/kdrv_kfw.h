@@ -324,6 +324,15 @@ bool kfw_busy(void);
 uint32_t kfw_produced(void);
 
 /**
+ * @brief Whether the session refused its image as another chip's or another
+ *        target's.
+ *
+ * Read after kfw_feed() refused a chunk, to tell an image for some other
+ * board from one that could not be written. A new kfw_begin() clears it.
+ */
+bool kfw_foreign(void);
+
+/**
  * @brief Parse, refuse and decode, checked by hand: the console's `test kfw`.
  *
  * It lives here rather than in the console for the reason

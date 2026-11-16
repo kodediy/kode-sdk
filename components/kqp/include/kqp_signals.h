@@ -2288,6 +2288,10 @@ typedef struct {
     uint8_t  src_kind;                 /**< kfw_src_t, as a plain integer.  */
     uint8_t  dst_kind;                 /**< kfw_target_t, likewise.         */
     bool     launch;                   /**< Boot it once written.           */
+    uint8_t  asker_src;                /**< KODE_CONSOLE_SRC_* of the command
+                                        *   that asked, kept in the install's
+                                        *   record; KODE_LOG_SRC_NONE when no
+                                        *   command did.                    */
     QActive *who;                      /**< Where AO_AppMgr's verdict is
                                         *   posted (AppReqRspEvt), or NULL
                                         *   for none.                       */

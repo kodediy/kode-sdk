@@ -75,8 +75,9 @@ static void h_app_run(const kverb_t *c, const karg_val_t *v)
     if ( console_is_bin(v[0].s) )
     {
         /* Flash, then boot it. */
-        posted = appmgr_image_ask((uint8_t)KFW_SRC_FS, v[0].s,
-                                  (uint8_t)KFW_TARGET_APP, true, AO_Console);
+        posted = appmgr_image_ask_from((uint8_t)KFW_SRC_FS, v[0].s,
+                                       (uint8_t)KFW_TARGET_APP, true,
+                                       AO_Console, console_src());
     }
     else
     {

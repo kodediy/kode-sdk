@@ -396,6 +396,7 @@ static struct {
     uint32_t                ad_fill;    /**< Block header or body bytes seen so far. */
     bool                    ad_skip;    /**< The block's bytes are stepped over, not kept. */
     bool                    ad_dropped; /**< A block was there and was not believed: not the same as none. */
+    bool                    foreign;    /**< The image was refused as another chip's or target's. */
 } s_kfw;
 
 bool kfw_busy(void)
@@ -406,6 +407,11 @@ bool kfw_busy(void)
 uint32_t kfw_produced(void)
 {
     return s_kfw.produced;
+}
+
+bool kfw_foreign(void)
+{
+    return s_kfw.foreign;
 }
 
 /**
@@ -623,6 +629,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                         KLOG_E(TAG, "that image was built for chip id 0x%04x, "
                                     "not this target's 0x%04x", (unsigned)chip,
                                (unsigned)target_chip(s_kfw.want));
+                        s_kfw.foreign = true;
                         s_kfw.st = KFW_ST_DEAD;
                         return KODE_ERROR;
                     }
@@ -687,6 +694,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                     KLOG_E(TAG, "the container is for target %u, but %u was "
                                 "asked for", (unsigned)s_kfw.hdr.target,
                            (unsigned)s_kfw.want);
+                    s_kfw.foreign = true;
                     s_kfw.st = KFW_ST_DEAD;
                     return KODE_ERROR;
                 }

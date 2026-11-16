@@ -25,6 +25,7 @@ static fake_nvs_rec_t s_rec[FAKE_NVS_RECORDS];
 static bool           s_fail_next_set;
 static unsigned       s_sets;   /**< Writes asked for since the reset. */
 static void         (*s_set_hook)(void); /**< Run inside every write, or NULL. */
+static const char    *s_set_key = "";      /**< The key of the write in progress. */
 
 /**
  * @brief Find a record by namespace and key.
@@ -82,6 +83,11 @@ void fake_nvs_set_hook(void (*hook)(void))
 unsigned fake_nvs_set_count(void)
 {
     return s_sets;
+}
+
+const char *fake_nvs_set_key(void)
+{
+    return s_set_key;
 }
 
 void fake_nvs_seed(const char *ns, const char *key,
@@ -146,7 +152,9 @@ kode_status_t khal_nvs_set_blob(const char *ns, const char *key,
     s_sets += 1U;
     if ( NULL != s_set_hook )
     {
+        s_set_key = key;
         s_set_hook();
+        s_set_key = "";
     }
     if ( s_fail_next_set )
     {

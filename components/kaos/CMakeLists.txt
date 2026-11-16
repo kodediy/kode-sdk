@@ -64,6 +64,8 @@ set(priv_incs
 
 if(CONFIG_KODEOS_APPMGR)
     list(APPEND srcs "appmgr/src/appmgr_ao.c")
+    # The record of the last install of each kind, kept in NVS.
+    list(APPEND srcs "appmgr/src/appmgr_outcome.c")
 endif()
 if(CONFIG_KODEOS_NFC)
     # AO_Nfc. Off, the reader is the app's: nothing here starts or parks it.

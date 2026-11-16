@@ -88,8 +88,9 @@ KAOS_WEAK void storage_path_request(QActive *who, uint8_t op, const char *path);
 KAOS_WEAK void storage_read_request(void);
 KAOS_WEAK void storage_write_all_request(const char *name, const void *data,
                                          uint32_t len, QActive *who);
-KAOS_WEAK bool appmgr_image_ask(uint8_t src_kind, const char *src,
-                                uint8_t dst_kind, bool launch, QActive *who);
+KAOS_WEAK bool appmgr_image_ask_from(uint8_t src_kind, const char *src,
+                                     uint8_t dst_kind, bool launch,
+                                     QActive *who, uint8_t asker);
 KAOS_WEAK void appmgr_list_page(uint16_t skip, QActive *who);
 KAOS_WEAK void appmgr_list_request(QActive *who);
 KAOS_WEAK bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
@@ -1956,7 +1957,7 @@ static void h_install(Console *me, const kcmd_t *c, const karg_val_t *v)
     }
     cmd_begin(me, KCLI_INSTALL, c->verb);
     console_extend(KCLI_INSTALL_MS);
-    if ( !appmgr_image_ask(kind, spec, dst, run, &me->super) )
+    if ( !appmgr_image_ask_from(kind, spec, dst, run, &me->super, me->src) )
     {
         /* Nothing was posted, so nobody will answer. */
         console_reply_err(KCLI_ERR_REJECT, c->verb);

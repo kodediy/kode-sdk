@@ -4012,6 +4012,23 @@ bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
                       bool launch, QActive *who);
 
 /**
+ * @brief appmgr_image_ask() for a console command: the install's record names
+ *        the port it came on.
+ *
+ * @param src_kind kfw_src_t as a plain integer.
+ * @param src      File name for fs/sd, URL for http, ignored otherwise.
+ * @param dst_kind kfw_target_t as a plain integer.
+ * @param launch   Boot the image once it is written and verified.
+ * @param who      Where the verdict is posted.
+ * @param asker    KODE_CONSOLE_SRC_* of the command that asked, kept in the
+ *                 install's record.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_image_ask_from(uint8_t src_kind, const char *src, uint8_t dst_kind,
+                           bool launch, QActive *who, uint8_t asker);
+
+/**
  * @brief appmgr_run_request(), asking AO_AppMgr for its verdict.
  *
  * AO_AppMgr posts @p who one APP_REQ_RSP_SIG: taken when an installed app has

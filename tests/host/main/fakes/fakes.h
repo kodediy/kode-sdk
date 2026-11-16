@@ -730,6 +730,9 @@ unsigned fake_nvs_set_count(void);
  *         what another task would see while the store is being written. */
 void fake_nvs_set_hook(void (*hook)(void));
 
+/** @brief The key of the write a hook is run inside; "" outside one. */
+const char *fake_nvs_set_key(void);
+
 /** @brief How many lines reached the capture sink. */
 unsigned fake_klog_count(void);
 

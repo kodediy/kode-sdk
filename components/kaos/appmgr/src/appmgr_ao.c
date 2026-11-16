@@ -28,6 +28,8 @@
 #include "kaos_claim.h"
 #include "kverbs.h"
 
+#include "appmgr_outcome.h"
+
 #define TAG               "kaos.appmgr"
 #define APPMGR_PROGRESS   (10U)          /* log every N percent; see progress_report() */
 /* Idle time between chunks. AppMgr outranks the GUI, so without a gap it
@@ -600,6 +602,7 @@ QActive * const AO_AppMgr = &l_appMgr.super;
 
 static QState AppMgr_initial(AppMgr * const me, void const * const par);
 static QState AppMgr_idle(AppMgr * const me, QEvt const * const e);
+static unsigned progress_pct(const AppMgr * const me);
 static QState AppMgr_opening(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_adopting(AppMgr * const me, QEvt const * const e);
@@ -830,6 +833,7 @@ static FlashReqEvt *flash_req_new(uint8_t src_kind, const char *src,
         e->dst_kind = dst_kind;
         e->launch   = launch;
         e->who      = who;
+        e->asker_src = KODE_LOG_SRC_NONE;
         e->src[0]   = '\0';
         if ( NULL != src )
         {
@@ -861,6 +865,13 @@ QEvt const *appmgr_image_evt(uint8_t src_kind, const char *src,
 bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
                       bool launch, QActive *who)
 {
+    return appmgr_image_ask_from(src_kind, src, dst_kind, launch, who,
+                                 KODE_LOG_SRC_NONE);
+}
+
+bool appmgr_image_ask_from(uint8_t src_kind, const char *src, uint8_t dst_kind,
+                           bool launch, QActive *who, uint8_t asker)
+{
     FlashReqEvt * const e = flash_req_new(src_kind, src, dst_kind, launch, who);
 
     if ( NULL == e )
@@ -868,6 +879,7 @@ bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
         KLOG_E(TAG, "out of events; flash request dropped");
         return false;
     }
+    e->asker_src = asker;
     QACTIVE_POST(AO_AppMgr, &e->super, NULL);
     return true;
 }
@@ -2221,6 +2233,11 @@ static void flash_fail(AppMgr * const me, const char *why, kfail_t reason)
         QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_KEEP
     };
     KLOG_E(TAG, "install failed: %s", why);
+    if ( KFAIL_KEEP == reason )
+    {
+        appmgr_inst_why(APPMGR_WHY_KEEP);
+    }
+    appmgr_inst_failed((uint32_t)progress_pct(me));   /* before the cleanup forgets the counts */
     flash_cleanup(me);
     req_settle(me, APP_REQ_REFUSED);   /* an install that never began: its asker is owed an answer */
     undo_restore(me);        /* the apps its write never reached come back */
@@ -2247,6 +2264,16 @@ static void flash_fail(AppMgr * const me, const char *why, kfail_t reason)
  */
 static void flash_done_publish(AppMgr * const me, const char *name)
 {
+    kapps_dir_t const * const d   = kdrv_apps_dir();
+    int const                 idx = appmgr_find_idx(d, name);
+    kdrv_slot_desc_t          desc;
+    const char               *version = "";
+
+    if ( (0 <= idx) && (kdrv_apps_desc(&d->e[idx], &desc, NULL) == KODE_OK) )
+    {
+        version = desc.version;
+    }
+    appmgr_inst_installed(name, version);   /* kept before the end is published */
     keep_clear(me);          /* the install ends here; so does its round */
     AppFlashDoneEvt *ev = Q_NEW_X(AppFlashDoneEvt, 0U, APP_FLASH_DONE_SIG);
     if ( NULL != ev )
@@ -2922,6 +2949,7 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
         {
             KLOG_E(TAG, "%lu bytes will not fit the kodeOS slot (%lu bytes)",
                    (unsigned long)img_len, (unsigned long)kdrv_slot_size());
+            appmgr_inst_why(APPMGR_WHY_NO_ROOM);
             return KODE_ERROR;
         }
         me->dst_offset = kdrv_slot_address();
@@ -2938,6 +2966,7 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
     {
         KLOG_E(TAG, "%lu bytes will not fit the region even after evicting "
                     "everything", (unsigned long)img_len);
+        appmgr_inst_why(APPMGR_WHY_NO_ROOM);
         return KODE_ERROR;
     }
     if ( verify_defer(me, &plan) )
@@ -3164,6 +3193,7 @@ static void flash_finish(AppMgr * const me)
 
     if ( KODE_OK != st )
     {
+        appmgr_inst_why(APPMGR_WHY_CORRUPT);
         flash_fail(me, "the written image did not verify", KFAIL_WRITE);
         return;
     }
@@ -3181,6 +3211,7 @@ static void flash_finish(AppMgr * const me)
         }
         KLOG_N(TAG, "install complete (%u bytes)", (unsigned)me->written);
         me->os_target = false;      /* back to idle before AO_Boot resets us */
+        appmgr_inst_rebooting();
         boot_os_switch_request();   /* AO_Boot selects otadata and resets */
         return;
     }
@@ -3280,6 +3311,7 @@ static void project_note(AppMgr * const me, const char *name)
     if ( (NULL != name) && (strcmp(me->project, name) != 0) )
     {
         (void)snprintf(me->project, sizeof(me->project), "%s", name);
+        appmgr_inst_named(name);
         if ( me->writing && !me->os_target )
         {
             progress_publish(me, me->reported);
@@ -3383,6 +3415,7 @@ static bool consume_chunk(AppMgr * const me, const StorageDataEvt *d)
 {
     if ( (uint8_t)KODE_OK != d->status )
     {
+        appmgr_inst_why(APPMGR_WHY_CUT);
         flash_fail(me, "read from storage failed", KFAIL_WRITE);
         return false;
     }
@@ -3390,6 +3423,7 @@ static bool consume_chunk(AppMgr * const me, const StorageDataEvt *d)
     {
         if ( me->written < me->total )
         {
+            appmgr_inst_why(APPMGR_WHY_CUT);
             flash_fail(me, "the file ended early", KFAIL_WRITE);
             return false;
         }
@@ -3418,6 +3452,11 @@ static bool consume_chunk(AppMgr * const me, const StorageDataEvt *d)
         {
             return false;        /* deferred, not failed: the caller moves on */
         }
+        if ( kfw_foreign() )
+        {
+            appmgr_inst_why(APPMGR_WHY_WRONG_BOARD);
+        }
+        appmgr_inst_why(APPMGR_WHY_WRITE);   /* unless a cause was noted first */
         flash_fail(me, me->os_target ? "write to the kodeOS slot failed"
                                       : "write to the region failed",
                    KFAIL_WRITE);
@@ -3664,6 +3703,7 @@ static QState AppMgr_initial(AppMgr * const me, void const * const par)
     /* A table in NVS is an install a reset cut: its apps are looked at before
      * anything is served, the adoption included. */
     (void)khal_nvs_init();
+    appmgr_inst_init();
     bool const recovering = undo_recover_begin(me);
     if ( kdrv_apps_pending_present(&img_len, NULL) )
     {
@@ -3945,6 +3985,9 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             raw->size = req->size;
             raw->who  = &me->super;
             raw->src  = req->src;
+            appmgr_inst_prepare((uint8_t)KFW_SRC_SERIAL, req->dst, req->src);
+            appmgr_inst_taken();
+            appmgr_inst_named(req->name);   /* the host read it from the image */
             QACTIVE_POST(AO_Log, &raw->super, &me->super);
             status = Q_TRAN(&AppMgr_receiving);
             break;
@@ -3962,6 +4005,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             {
                 keep_clear(me);
                 me->keep_req = *req;   /* what a restart would send again */
+                appmgr_inst_prepare(req->src_kind, req->dst_kind, req->asker_src);
             }
             me->verify_restart = false;
             me->req_who = req->who;    /* owed a verdict, settled below or in AppMgr_opening */
@@ -4113,6 +4157,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 me->net_held = true;
                 /* The download's own failures are asynchronous: the verdict
                  * is that it has begun, not that it will end well. */
+                appmgr_inst_taken();   /* numbered before the verdict */
                 req_settle(me, APP_REQ_TAKEN);
             }
             else
@@ -4483,6 +4528,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
             break;
         }
         case APP_CANCEL_REQ_SIG: {
+            appmgr_inst_why(APPMGR_WHY_CANCELLED);
             flash_fail(me, "the person went back", KFAIL_WRITE);
             status = Q_TRAN(&AppMgr_idle);
             break;
@@ -4498,6 +4544,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
              * and the keep round: the states are mutually exclusive and each
              * disarms it on the way out. */
             KLOG_E(TAG, "'%s' was never answered; giving up on it", me->file);
+            appmgr_inst_why(APPMGR_WHY_CUT);
             flash_fail(me, "the medium did not answer", KFAIL_WRITE);
             status = Q_TRAN(&AppMgr_idle);
             break;
@@ -4514,6 +4561,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
                                 ? "'%s' did not come back from the server"
                                 : "'%s' is not on the SD card nor in the "
                                   "internal storage", me->file);
+                    appmgr_inst_why(APPMGR_WHY_MISSING);
                     req_settle(me, APP_REQ_MISSING);   /* a URL's was settled when it opened */
                     flash_fail(me, me->from_net ? "the server said no"
                                                 : "file not found",
@@ -4551,6 +4599,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
                 status = Q_TRAN(&AppMgr_idle);
                 break;
             }
+            appmgr_inst_taken();   /* numbered before the verdict */
             req_settle(me, APP_REQ_TAKEN);   /* the file is open and the write has begun */
 
             me->writing     = true;
@@ -4694,6 +4743,7 @@ static void install_again(AppMgr * const me)
     r->dst_kind = me->keep_req.dst_kind;
     r->launch   = me->keep_req.launch;
     r->who      = NULL;               /* the verdict was given with the first open */
+    r->asker_src = me->keep_req.asker_src;
     (void)snprintf(r->src, sizeof(r->src), "%s", me->keep_req.src);
     QACTIVE_POST_LIFO(&me->super, &r->super);
 }
@@ -5037,6 +5087,7 @@ static QState keep_finish(AppMgr * const me)
     if ( me->keep_cancel )
     {
         me->keep_cancel = false;
+        appmgr_inst_why(APPMGR_WHY_CANCELLED);
         flash_fail(me, "the person went back", KFAIL_WRITE);
         return Q_TRAN(&AppMgr_idle);
     }
@@ -6840,12 +6891,14 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             break;
         }
         case APP_CANCEL_REQ_SIG: {
+            appmgr_inst_why(APPMGR_WHY_CANCELLED);
             flash_fail(me, "the person went back", KFAIL_WRITE);
             status = Q_TRAN(&AppMgr_idle);
             break;
         }
         case APP_RECV_IDLE_SIG: {
             /* The deadline timer AppMgr_opening shares; see there. */
+            appmgr_inst_why(APPMGR_WHY_CUT);
             flash_fail(me, "the medium stopped sending", KFAIL_WRITE);
             status = Q_TRAN(&AppMgr_idle);
             break;
@@ -6950,6 +7003,7 @@ static bool chunk_is_container(const uint8_t *buf, uint16_t len)
 static QState verify_fail(AppMgr * const me, const char *why)
 {
     kdrv_image_check_abort();
+    appmgr_inst_why(APPMGR_WHY_CORRUPT);
     flash_fail(me, why, KFAIL_WRITE);
     return Q_TRAN(&AppMgr_idle);
 }
@@ -7320,6 +7374,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
             if ( KODE_OK != st )
             {
                 ok = false;
+                appmgr_inst_why(APPMGR_WHY_CORRUPT);
                 KLOG_E(TAG, "install failed: the written image did not verify");
             }
         }
@@ -7346,6 +7401,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
         }
         KLOG_N(TAG, "install dst=os complete (%u bytes); switching to the "
                     "new kodeOS", (unsigned)me->written);
+        appmgr_inst_rebooting();
         QACTIVE_PUBLISH(&s_recv_done_evt, &me->super);
         return Q_TRAN(&AppMgr_launching);
     }
@@ -7379,6 +7435,11 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
         }
     }
 
+    if ( stalled )
+    {
+        appmgr_inst_why(APPMGR_WHY_STALLED);
+    }
+    appmgr_inst_failed((uint32_t)progress_pct(me));   /* before the counts are reset */
     me->os_target = false;
     me->bypass    = false;
     undo_restore(me);   /* the apps its write never reached come back */
@@ -7456,6 +7517,7 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                 KLOG_E(TAG, "install failed: %lu bytes will not fit even "
                             "after evicting everything",
                             (unsigned long)me->total);
+                appmgr_inst_why(APPMGR_WHY_NO_ROOM);
                 QACTIVE_POST(AO_Log, &s_raw_end_evt, &me->super);
                 status = recv_close(me, false, false);
                 break;
@@ -7529,6 +7591,11 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                     && (xfer_feed(me, me->chunk, me->recv_fill) != KODE_OK) )
                 {
                     me->recv_ok = false;
+                    if ( kfw_foreign() )
+                    {
+                        appmgr_inst_why(APPMGR_WHY_WRONG_BOARD);
+                    }
+                    appmgr_inst_why(APPMGR_WHY_WRITE);   /* unless a cause was noted first */
                     KLOG_E(TAG, "install: write failed at %u/%u bytes; "
                                 "draining the rest of the transfer",
                            (unsigned)me->recv_wire, (unsigned)me->recv_size);
@@ -7555,6 +7622,7 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
             bool const crc_ok = (me->recv_crc == me->recv_want);
             if ( me->recv_ok && !crc_ok )
             {
+                appmgr_inst_why(APPMGR_WHY_CORRUPT);
                 KLOG_E(TAG, "install failed: CRC mismatch (got 0x%08lx, "
                             "wanted 0x%08lx)",
                        (unsigned long)me->recv_crc, (unsigned long)me->recv_want);
