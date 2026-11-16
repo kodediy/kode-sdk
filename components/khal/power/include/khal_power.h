@@ -106,6 +106,18 @@ kode_status_t khal_power_wake_arm(uint32_t gpio, bool level_high,
 void khal_power_wake_rearm(uint32_t gpio);
 
 /**
+ * @brief Let a wake line go: no interrupt, no wake source, and its place free
+ *        for another pin.
+ *
+ * For a line armed for one rest and not wanted after it. The pin is left an
+ * input with the pull the arming gave it. Nothing happens on a pin that was
+ * never armed. Not from interrupt context.
+ *
+ * @param gpio The P4 GPIO number given to khal_power_wake_arm().
+ */
+void khal_power_wake_disarm(uint32_t gpio);
+
+/**
  * @brief The light-sleep accounting so far.
  * @param out Receives the numbers; zeros before khal_power_init().
  */

@@ -379,6 +379,23 @@ void khal_power_wake_rearm(uint32_t gpio)
     (void)gpio_intr_enable(pin);
 }
 
+void khal_power_wake_disarm(uint32_t gpio)
+{
+    wake_line_t *const line = wake_find(gpio);
+
+    if ( NULL == line )
+    {
+        return;
+    }
+    gpio_num_t const pin = (gpio_num_t)gpio;
+    /* The interrupt first: its handler reads the line it is about to lose. */
+    (void)gpio_intr_disable(pin);
+    (void)gpio_wakeup_disable(pin);
+    (void)gpio_isr_handler_remove(pin);
+    line->cb   = NULL;
+    line->used = false;
+}
+
 void khal_power_stats(khal_power_stats_t *out)
 {
     unsigned int before;
