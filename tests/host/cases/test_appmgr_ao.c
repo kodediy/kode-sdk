@@ -11653,15 +11653,22 @@ TEST_CASE("an image that is not one is kept as failed for corrupt, not write",
 
 static const char *const s_backup_names[] = { "first", "second" };
 
-/** @brief Tell AO_AppMgr the card's mount changed, as AO_Storage publishes it. */
-static void card_event(bool mounted)
+/** @brief Tell AO_AppMgr the card's news, as AO_Storage publishes it. */
+static void card_news(bool mounted, bool rested)
 {
     StorageCardEvt c;
 
     (void)memset(&c, 0, sizeof(c));
     c.super   = (QEvt)QEVT_INITIALIZER(STORAGE_CARD_SIG);
     c.mounted = mounted;
+    c.rested  = rested;
     QASM_DISPATCH(AO_AppMgr, &c.super, 0U);
+}
+
+/** @brief Tell AO_AppMgr the card's mount changed, as AO_Storage publishes it. */
+static void card_event(bool mounted)
+{
+    card_news(mounted, false);
 }
 
 /** @brief A fresh AO_AppMgr over @p n one-page apps, "first" the oldest, and a card just mounted. */
@@ -12345,6 +12352,86 @@ static void new_evicts_old(void)
     answer_eof();
     run_ticks(4U);
     TEST_ASSERT_FALSE_MESSAGE(old_installed(), "the app the plan evicts is still installed");
+}
+
+/* ---- An install and a card at rest for an app ---------------------------------
+ * A card an app's rest put away is in: an install that would evict an app with
+ * no copy is refused for now, and the copy's first request brings the card
+ * back. Nothing else wakes it.
+ */
+
+/** @brief What AO_AppMgr says when an install wakes the card at rest to copy "old". */
+#define WAKE_SAID "an install wakes the card from its rest to copy 'old' first"
+
+/** @brief With the card at rest, install "new" over "old": refused for now, and "old"'s STAT asked. */
+static void install_waits_for_the_rested_card(void)
+{
+    busy_fresh();
+    card_news(false, true);                    /* an app's rest puts the card away */
+    uint32_t const len = image_named("new");
+
+    ask_install_from((uint8_t)KFW_SRC_FS, "new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len);                          /* the plan: "old" has to go */
+    verdicts_t const v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_BUSY, v.first,
+        "an install that evicts an app with no copy went on with the card at rest");
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app with no copy was evicted with the card at rest");
+
+    const QEvt * const e = storage_wait_for(STORAGE_PATH_REQ_SIG, BACKUP_SLACK_STEPS);
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the copy the install waits for did not ask the card at rest");
+    TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin", ((StoragePathEvt const *)e)->path);
+    QF_gc(e);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, klog_count_of(WAKE_SAID), "the card's wake was not said once");
+}
+
+TEST_CASE("an install during a card's rest is refused for now and asks for its victim's copy",
+          "[appmgr_ao][backup][rest]")
+{
+    install_waits_for_the_rested_card();
+
+    card_news(true, false);                    /* AO_Storage brings it back for the STAT */
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt * const w = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(w, "the app the install waits for was not copied");
+    QF_gc(w);
+    answer_write_landed(old_bytes());
+    TEST_ASSERT_TRUE(klog_has("'old' copied to /sdcard/old.bin"));
+    TEST_ASSERT_EQUAL_UINT(1U, klog_count_of(WAKE_SAID));
+    backup_end();
+}
+
+TEST_CASE("a card's rest with no install asks the card nothing",
+          "[appmgr_ao][backup][rest]")
+{
+    LowPowerWakeAtEvt w;
+
+    backup_fresh(1U);
+    (void)fake_lowpower_wake_take(&w);
+    card_news(false, true);
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "the card at rest was woken for a copy no install waits for");
+
+    lp_round(AO_AppMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_FALSE_MESSAGE(fake_lowpower_wake_take(&w),
+        "a dark wake was asked to copy onto a card at rest");
+    backup_end();
+}
+
+TEST_CASE("a card gone at the wake lets the install evict as with no card",
+          "[appmgr_ao][backup][rest]")
+{
+    install_waits_for_the_rested_card();
+
+    card_news(false, false);                   /* the wake found no card */
+    ao_spy_drain();
+    new_evicts_old();
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("evicting 'old' to make room; no copy kept"),
+        "the eviction with no card was not warned about");
+    backup_end();
 }
 
 /* An install number is handed out again once its app is gone: what was known

@@ -607,6 +607,8 @@ struct appmgr_bk {
     appmgr_backup_t table;                 /**< What is known of each app's copy. */
     bool        on;                        /**< The AO is in AppMgr_backing. */
     bool        nocard;                    /**< No card answers: nothing is tried until one mounts. */
+    bool        away;                      /**< The card is at rest for an app, still in: only an
+                                            *   install that waits for a copy wakes it. */
     bool        rest;                      /**< The board rests: no copy is begun outside a dark wake. */
     bool        lp_dark;                   /**< A dark wake is on and this AO has not said it is done. */
     bool        dark_off;                  /**< A dark wake's end cut a copy: no other is asked for until AWAKE. */
@@ -5334,12 +5336,17 @@ static bool backup_tick(AppMgr * const me)
 
 /**
  * @brief Whether there is a copy to see to and a card to ask.
+ *
+ * A card at rest for an app is asked only for the copy an install waits for:
+ * the idle copies and the dark wake leave it at rest.
+ *
  * @param me The AO.
  * @return true when an installed app is unseen, and a card may answer.
  */
 static bool backup_wanted(const AppMgr * const me)
 {
     return (NULL != me->bk) && (!me->bk->nocard)
+        && ((!me->bk->away) || me->bk->front_on)
         && (appmgr_backup_next(&me->bk->table, kdrv_apps_dir()) != NULL);
 }
 
@@ -5424,9 +5431,10 @@ static bool backup_owed(appmgr_backup_state_t state)
  * @brief Whether this plan evicts an app whose copy the card could still take.
  *
  * Such an install is refused for now: the first such app goes to the front
- * of the copies, and the asker asks again. An app the card has, one whose
- * copy could not be made, and every app when no card answers, are evicted
- * as the plan says. The app the install replaces is not lost by it.
+ * of the copies, and the asker asks again. A card at rest for an app counts
+ * as in: the copy's first request brings it back. An app the card has, one
+ * whose copy could not be made, and every app when no card answers, are
+ * evicted as the plan says. The app the install replaces is not lost by it.
  *
  * @param me   The AO.
  * @param d    The directory the plan was made on.
@@ -5497,7 +5505,9 @@ static void adopt_wait(AppMgr * const me)
  * @brief STORAGE_CARD_SIG: what was known of the copies was true of another mount.
  *
  * An image in hand, being read or kept for a write refused as busy, is let go
- * on a mount: the app is asked about again on the card now in.
+ * on a mount: the app is asked about again on the card now in. A card at rest
+ * for an app is in, put away: what was known of it is forgotten all the same,
+ * since a card can be changed while its supply is off.
  *
  * @param me The AO.
  * @param c  The card's news.
@@ -5507,7 +5517,8 @@ static void backup_card(AppMgr * const me, const StorageCardEvt * const c)
     if ( NULL != me->bk )
     {
         appmgr_backup_reset(&me->bk->table);
-        me->bk->nocard    = !c->mounted;
+        me->bk->nocard    = (!c->mounted) && (!c->rested);
+        me->bk->away      = c->rested;
         me->bk->full_told = false;
         if ( me->bk->nocard )
         {
@@ -5784,8 +5795,9 @@ static bool backup_begin(AppMgr * const me)
                 ent = NULL;
             }
         }
-        if ( NULL == ent )
+        if ( (NULL == ent) && (!me->bk->away) )
         {
+            /* At rest for an app, the card is woken for an install's app alone. */
             ent = appmgr_backup_next(&me->bk->table, kdrv_apps_dir());
         }
         if ( NULL == ent )
@@ -5805,6 +5817,11 @@ static bool backup_begin(AppMgr * const me)
             me->bk->len = ent->size;
             (void)snprintf(me->bk->name, sizeof(me->bk->name), "%s", vd.project);
             card_copy_path(me->bk->path, sizeof(me->bk->path), vd.project);
+            if ( me->bk->away )
+            {
+                KLOG_N(TAG, "an install wakes the card from its rest to copy '%s' first",
+                       vd.project);
+            }
             storage_path_request(&me->super, (uint8_t)STORAGE_PATH_STAT, me->bk->path);
             me->bk->step = (uint8_t)BK_STAT;
             backup_arm(me, APPMGR_OPEN_TICKS);

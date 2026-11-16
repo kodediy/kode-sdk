@@ -6906,13 +6906,18 @@ typedef struct {
 /**
  * @brief The card's mount changed (STORAGE_CARD_SIG).
  *
- * Published when a card is mounted, the same one again or another, and when
- * the mounted card is mounted no more. What was known of its files is to be
- * asked again.
+ * Published when a card is mounted, the same one again or another, when the
+ * mounted card is mounted no more, and when a card an app's rest put away is
+ * no longer taken to be in (its wake found none). A change of either field is
+ * published. What was known of its files is to be asked again: a card can be
+ * changed while its supply is off.
  */
 typedef struct {
     QEvt super;
     bool mounted;           /**< A card is mounted now.                      */
+    bool rested;            /**< Not mounted because an app's rest put it
+                             *   away, and still in as far as is known: the
+                             *   next request that needs it brings it back. */
 } StorageCardEvt;
 
 /**

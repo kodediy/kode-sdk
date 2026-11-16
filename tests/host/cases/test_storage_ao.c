@@ -7346,6 +7346,97 @@ TEST_CASE("the card comes back on the worker, and the write waits for it", "[sto
     expect_written_on(KDRV_MEDIUM_SD);
 }
 
+/**
+ * @brief Whether the last STORAGE_CARD_SIG the spy holds said @p mounted and
+ *        @p rested, the spy drained; false when it holds none.
+ */
+static bool card_last_said(bool mounted, bool rested)
+{
+    bool seen = false;
+    bool m    = false;
+    bool r    = false;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( STORAGE_CARD_SIG == (enum_t)e->sig )
+        {
+            seen = true;
+            m    = ((const StorageCardEvt *)e)->mounted;
+            r    = ((const StorageCardEvt *)e)->rested;
+        }
+    }
+    return seen && (mounted == m) && (rested == r);
+}
+
+/* AO_AppMgr tells a card put away from a card that is gone: the rest is
+ * published as a card at rest, the wake as a card mounted, and a wake that
+ * finds no card as a card that is not there. */
+TEST_CASE("an app's rest of the card is published as a card at rest, and its wake as mounted",
+          "[storage_ao][lowpower][card]")
+{
+    static const uint8_t payload[64] = { 0x42U };
+
+    storage_fresh();
+    card_out();
+    fake_media_set_sd_present(true);
+    ao_spy_subscribe(STORAGE_CARD_SIG);
+    ask_mount_job();
+    TEST_ASSERT_TRUE(run_sd_job());
+    TEST_ASSERT_TRUE_MESSAGE(card_last_said(true, false), "the card's mount was not told");
+
+    lp_part_round(AO_Storage, KODE_LP_PART_CARD);
+    TEST_ASSERT_TRUE(run_sd_job());
+    TEST_ASSERT_TRUE_MESSAGE(card_last_said(false, true), "the card's rest was not published as a card at rest");
+
+    post_write("shot.bmp", payload, sizeof(payload));
+    settle_card();
+    drain_write();
+    TEST_ASSERT_TRUE_MESSAGE(card_last_said(true, false), "the card's wake was not published as mounted");
+    QActive_unsubscribe(ao_spy(), STORAGE_CARD_SIG);
+}
+
+TEST_CASE("a wake that finds no card is published as no card, not at rest",
+          "[storage_ao][lowpower][card]")
+{
+    static const uint8_t payload[64] = { 0x42U };
+
+    storage_fresh();
+    card_out();
+    fake_media_set_sd_present(true);
+    ao_spy_subscribe(STORAGE_CARD_SIG);
+    ask_mount_job();
+    TEST_ASSERT_TRUE(run_sd_job());
+    TEST_ASSERT_TRUE_MESSAGE(card_last_said(true, false), "the card's mount was not told");
+    lp_part_round(AO_Storage, KODE_LP_PART_CARD);
+    TEST_ASSERT_TRUE(run_sd_job());
+    TEST_ASSERT_TRUE(card_last_said(false, true));
+
+    fake_media_set_sd_present(false);           /* taken out while its supply was off */
+    post_write("shot.bmp", payload, sizeof(payload));
+    settle_card();
+    drain_write();
+    fake_media_set_sd_present(true);
+    TEST_ASSERT_TRUE_MESSAGE(card_last_said(false, false),
+        "a card the wake did not find was still told as at rest");
+    QActive_unsubscribe(ao_spy(), STORAGE_CARD_SIG);
+}
+
+TEST_CASE("a rest with no card in the slot publishes nothing", "[storage_ao][lowpower][card]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(false);
+    TEST_ASSERT_NULL(kdrv_storage_probe(KDRV_MEDIUM_SD));
+    ao_spy_subscribe(STORAGE_CARD_SIG);
+    ao_spy_drain();
+
+    lp_part_round(AO_Storage, KODE_LP_PART_CARD);
+    TEST_ASSERT_TRUE(run_sd_job());
+    fake_media_set_sd_present(true);
+    bool const told = card_last_said(false, true);
+    QActive_unsubscribe(ao_spy(), STORAGE_CARD_SIG);
+    TEST_ASSERT_FALSE_MESSAGE(told, "a rest with no card was told as a card at rest");
+}
+
 /* A slot that held no card was not forgotten as tried: nothing is probed
  * again, and the write goes inside as it did before the rest. */
 TEST_CASE("after a rest with no card in the slot a bare name still goes inside", "[storage_ao][lowpower][first]")
