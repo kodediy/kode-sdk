@@ -355,6 +355,28 @@ kode_status_t kdrv_display_panel_sleep(bool sleep);
 kode_status_t kdrv_display_reset_low(void);
 
 /**
+ * @brief Start a panel cold whose supply went while it slept and has come back.
+ *
+ * The way back from kdrv_display_reset_low() without a boot, for an app's
+ * rest. The caller has seen the supply come back and has waited out the
+ * rail's rise, 20 ms. With the link down: pulses the reset line (the touch
+ * controller's too), then brings the command path up for long enough to load
+ * the init table, less its sleep-out and display-on. The panel is
+ * left as a link down over a sleeping panel leaves it: in sleep-in, the line
+ * high. kdrv_display_link_set(true) and kdrv_display_panel_sleep(false) then
+ * wake it as they wake a panel that only slept. Its memory is empty: the
+ * first frame after the wake paints it whole. Blocks about 50 ms.
+ * AO_Display's thread only.
+ *
+ * @return KODE_OK with the panel loaded and asleep; KODE_DENIED before
+ *         kdrv_display_init(), with the link up, or for a panel that is not
+ *         asleep; KODE_TIMEOUT when the command FIFO did not drain;
+ *         KODE_ERROR when the command path or a command was refused. After a
+ *         failure the call may be repeated.
+ */
+kode_status_t kdrv_display_panel_cold(void);
+
+/**
  * @brief Write a rectangle of RGB565 straight into the panel's memory, with
  *        the link down.
  *

@@ -2190,6 +2190,67 @@ kode_status_t kdrv_display_reset_low(void)
     return st;
 }
 
+/**
+ * @brief Send the init table again, less the commands that wake the panel.
+ *
+ * @return KODE_OK; KODE_TIMEOUT when the FIFO did not drain; KODE_ERROR when
+ *         a command was refused.
+ */
+static kode_status_t init_table_load(void)
+{
+    kode_status_t st = KODE_OK;
+
+    for ( size_t i = 0U; ((sizeof(s_init_cmds) / sizeof(s_init_cmds[0])) > i) && (KODE_OK == st); i++ )
+    {
+        const co5300_lcd_init_cmd_t *const c = &s_init_cmds[i];
+
+        if ( (DCS_SLPOUT == (uint8_t)c->cmd) || (DCS_DISPON == (uint8_t)c->cmd) )
+        {
+            /* The wake's own: kdrv_display_panel_sleep(false) sends them. */
+        }
+        else if ( !cmd_fifo_room(BRIGHT_FIFO_WAIT_MS) )
+        {
+            st = KODE_TIMEOUT;
+        }
+        else if ( esp_lcd_panel_io_tx_param(s_io, c->cmd, c->data, c->data_bytes) != ESP_OK )
+        {
+            st = KODE_ERROR;
+        }
+        else if ( 0U != c->delay_ms )
+        {
+            khal_delay_ms(c->delay_ms);
+        }
+        else
+        {
+            /* Sent, with no wait of its own. */
+        }
+    }
+    return st;
+}
+
+kode_status_t kdrv_display_panel_cold(void)
+{
+    kode_status_t st;
+
+    if ( !s_brought_up || s_ready || !s_asleep )
+    {
+        return KODE_DENIED;
+    }
+    (void)khal_gpio_output(KBSP_PIN_DSP_TP_RST, true);
+    panel_reset_cold();
+    if ( cmd_path_up() != ESP_OK )
+    {
+        return KODE_ERROR;
+    }
+    st = init_table_load();
+    if ( cmd_path_down() != ESP_OK )
+    {
+        KLOG_W(TAG, "cold start: the command path would not come down");
+    }
+    reset_line_reclaim();
+    return st;
+}
+
 /** @brief One parameterless DCS command, behind the FIFO's bounded wait. */
 static kode_status_t panel_command(uint8_t cmd)
 {
