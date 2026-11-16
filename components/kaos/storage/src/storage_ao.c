@@ -4322,8 +4322,8 @@ static void answer_path_stat(QActive *who, uint8_t op, const char *path)
  * every later open on /sdcard reading length 0, and the log must say a write
  * was tried. A spare line is cheap. Keep it here, in the card's owner, not in
  * the driver or the console: writes nobody typed (`install dst=app`) pass
- * through here too. The data folders, which kodeOS places itself, call
- * warn_if_unproven_card() instead.
+ * through here too. The data folders and the apps' copies, which kodeOS places
+ * itself, call warn_if_unproven_card() instead.
  *
  * @param verb What is about to be attempted, as an operator would name it -
  *             "mkdir", "rm", "mv", "write". It goes on the wire verbatim, so
@@ -4343,8 +4343,8 @@ static void warn_if_card(const char *verb, const char *path)
  * @brief warn_if_card() for a change kodeOS makes on the card by its own
  *        choice: said only when the card has not proved it takes a write.
  *
- * On a card that has, a data folder is where it belongs, and a line for each
- * would bury the log.
+ * On a card that has, a data folder or an app's copy is where it belongs, and
+ * a line for each would bury the log.
  *
  * @param verb As warn_if_card() takes it.
  * @param path As warn_if_card() takes it.
@@ -4495,7 +4495,9 @@ static void answer_pair_move(QActive *who, uint8_t op, const char *src,
  * original back. One dispatch step, one answer. A reset between the two
  * renames leaves the name free, the original as `<dst>.bak` and @p src where it
  * was: the next replacement of the name puts its copy there and removes that
- * backup. A `<dst>.bak` that is there is removed, and said.
+ * backup. A `<dst>.bak` that is there is removed, and said. Its one asker is
+ * AO_AppMgr putting an app's copy on its name, a file kodeOS places itself, so
+ * the card is said only while it has not proved it takes a write.
  */
 static void answer_pair_replace(QActive *who, uint8_t op, const char *src,
                                 const char *dst)
@@ -4504,7 +4506,7 @@ static void answer_pair_replace(QActive *who, uint8_t op, const char *src,
     kdrv_stat_t   st   = { .exists = false, .is_dir = false, .size = 0U };
     kode_status_t rc;
 
-    warn_if_card("replace", dst);
+    warn_if_unproven_card("replace", dst);
     int const wrote = snprintf(bak, sizeof(bak), "%s" STORAGE_REPLACE_BAK, dst);
     if ( (0 > wrote) || ((size_t)wrote >= sizeof(bak)) )
     {

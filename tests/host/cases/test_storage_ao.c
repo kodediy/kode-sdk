@@ -8250,6 +8250,48 @@ TEST_CASE("a request that waits for a copy is served as soon as a download cuts 
 /** @brief The card's word taken back by a download, as the download module does. */
 void storage_bare_failed(void);
 
+/* ---- A replacement on the card says the card's warning as kodeOS's own --------
+ * AO_AppMgr alone asks for a replacement: it puts the copy of an app on its
+ * name. Like a data folder, a copy is said only while the card has not proved
+ * it takes a write, not once per app on every card. */
+
+/** @brief Put an old copy and its finished replacement on the card, with the log empty. */
+static void card_copy_ready(void)
+{
+    static const char OLD[] = "old";
+    static const char NEW[] = "the new copy";
+
+    fake_media_put_sd_path("app.bin", OLD, sizeof(OLD));
+    fake_media_put_sd_path("app.bin.tmp", NEW, sizeof(NEW));
+    fake_klog_reset();
+}
+
+TEST_CASE("a replacement on a card that took a write says no card warning",
+          "[storage_ao][replace][card]")
+{
+    storage_fresh();
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    card_copy_ready();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, replace_answer("/sdcard/app.bin.tmp", "/sdcard/app.bin"));
+    TEST_ASSERT_FALSE_MESSAGE(log_says("on the card:"),
+        "an app's copy on a card that took a write was warned about");
+}
+
+TEST_CASE("a replacement on a card that took no write warns before it is made",
+          "[storage_ao][replace][card]")
+{
+    storage_fresh();
+    storage_bare_failed();
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+    card_copy_ready();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, replace_answer("/sdcard/app.bin.tmp", "/sdcard/app.bin"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, log_count("replace on the card: /sdcard/app.bin"),
+        "a copy on a card that took no write went without its warning");
+    settle_card();                             /* the remount the failure owes */
+}
+
 /* A remount owed while the copy held the handle waits for the download that
  * cut the copy to be taken: a remount begun first would refuse it. */
 TEST_CASE("a remount owed during a copy goes after the download that cuts it, which is taken",
