@@ -1901,12 +1901,12 @@ _Static_assert(sizeof(TD_RADIO_TIME_WORST) <= KODE_FUNCTION_REC_MAX, "the longes
  * @brief Whether the C5's card passes: an ESP32-C5 running Kode's slave at this image's
  *        esp-hosted version, on the bus the board is made for.
  *
- * Any width used to pass, and a link that had fallen back to one data line or to a slower
- * clock (a data line that does not reach the C5) left the station as a good card. The
- * production `c5` row has always asked for the board's own width and clock.
+ * A link that fell back to one data line or to a slower clock (a data line that does not
+ * reach the C5) fails, as it does in the production `c5` row.
  *
  * @param e AO_Radio's answer to the radio check.
- * @return true when the card, the chip, the slave, the version and the SDIO width all pass.
+ * @return true when the card, the chip, the slave, the version and the SDIO width and clock
+ *         all pass.
  */
 static bool radio_card_ok(RadioProbeEvt const *e)
 {

@@ -120,18 +120,15 @@ void rfal_port_spi_txrx(const uint8_t *tx, uint8_t *rx, uint16_t len)
     /* No DMA on this bus, and that is not thrift: it is what makes a read
      * mean what the chip said.
      *
-     * This port used to hand ESP-IDF buffers in PSRAM with
-     * SPI_TRANS_DMA_USE_PSRAM, because RFAL asks for odd lengths (a byte of
-     * address, a byte of answer, a UID's worth) that the P4's cache-line rule
-     * makes ESP-IDF bounce, and the internal DMA pool they would be bounced
-     * from runs at nearly zero free bytes on this board. That path shares the
-     * PSRAM's own bus, and now and then a read came back holding something
-     * the chip never sent: a register that read 0x00 or 0x67 where it held
-     * 0x07, an identity of 0x00, an oscillator "not stable" that was, a FIFO
-     * with no tag in it. ESP-IDF raised neither of its flags for it
-     * (SPI_TRANS_DMA_RX_FAIL, SPI_TRANS_DMA_TX_FAIL). At the end-of-line
-     * station it showed as a reader that stopped seeing its tag for the rest
-     * of a boot, about once in ten boots, with nothing in the log.
+     * RFAL asks for odd lengths (a byte of address, a byte of answer, a
+     * UID's worth) that the P4's cache-line rule makes ESP-IDF bounce, and
+     * the internal DMA pool runs at nearly zero free bytes on this board, so
+     * the only DMA open here is from PSRAM (SPI_TRANS_DMA_USE_PSRAM). That
+     * path shares the PSRAM's own bus and can return bytes the chip never
+     * sent, with neither SPI_TRANS_DMA_RX_FAIL nor SPI_TRANS_DMA_TX_FAIL
+     * raised. RFAL acts on every byte it reads, so one such read is a status
+     * bit that never comes, an oscillator "not stable" that is, or a FIFO
+     * with no tag in it.
      *
      * Without DMA the peripheral takes a transaction from its own 64-byte
      * buffer, filled and emptied by the CPU: no DMA memory of either kind, no
