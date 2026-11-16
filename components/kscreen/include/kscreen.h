@@ -182,6 +182,145 @@ void kscreen_park(kscreen_t *s, uint32_t seq);
  */
 kode_status_t kscreen_set_rotation(kscreen_t *s, lv_display_rotation_t rot);
 
+/* ---- Composing with the pixel accelerator -----------------------------------
+ * Whole pictures moved by the P4's accelerator instead of drawn by LVGL: the
+ * frame on the glass copied, a picture scaled, dimmed or laid over another,
+ * and the result shown by an LVGL object. AO_Display owns the accelerator;
+ * each call below asks it for one pass and returns when the pixels are there,
+ * as the render pass waits for a flush. Call them from the owner's thread
+ * only, after kscreen_open() has succeeded. The app's sdkconfig.defaults says
+ * CONFIG_KODE_COMPOSE=y; without it every pass is refused. So is a pass asked
+ * while the glass is asleep: the renderer is parked then, and composes again
+ * once it is told to repaint.
+ *
+ * A call returns only when no pass of its own can still write a picture.
+ * KODE_TIMEOUT says the pass never started and never will: the pictures may
+ * be deleted. A pass that had started when the time ran out is waited for,
+ * two seconds more at most, and its own answer returned. The one exception
+ * is KODE_IO_ERROR, an accelerator that stopped answering in the middle of a
+ * pass: the pictures of that call are not deleted.
+ */
+
+#define KSCREEN_SCALE_ONE  16U   /**< The same size: a scale is in sixteenths. */
+#define KSCREEN_SCALE_MIN  1U    /**< The smallest scale, one sixteenth. */
+#define KSCREEN_SCALE_MAX  256U  /**< The largest scale, sixteen times. */
+
+/**
+ * @brief A picture the accelerator reads and writes: RGB565 in PSRAM.
+ *
+ * @c buf is LVGL's own view of it, for the owner to use as any draw buffer -
+ * an image's source, a canvas, a snapshot's target. Its rows follow one
+ * another with no padding; a picture reshaped so that they no longer do is
+ * refused by every call below.
+ */
+typedef struct {
+    lv_draw_buf_t buf;  /**< The pixels and their size; kscreen's to set. */
+} kscreen_pic_t;
+
+/**
+ * @brief Take a picture of @p w by @p h pixels, black.
+ *
+ * No side is longer than the glass's longer one, 502 pixels: a pass on the
+ * largest picture is about one pass over a full frame.
+ *
+ * @param w Width in pixels, 1 to 502.
+ * @param h Height in pixels, 1 to 502.
+ * @return The picture, or NULL, logged, for a size out of range or when PSRAM
+ *         could not give it.
+ */
+kscreen_pic_t *kscreen_pic_create(uint16_t w, uint16_t h);
+
+/**
+ * @brief Give a picture back. No object may still show it.
+ * @param pic The picture; NULL does nothing.
+ */
+void kscreen_pic_delete(kscreen_pic_t *pic);
+
+/**
+ * @brief Copy the frame on the glass into @p dst, as the glass shows it.
+ *
+ * On a turned glass the copy is turned with it, in the same pass.
+ *
+ * @param s   The renderer, open.
+ * @param dst A picture the size of the glass as it is turned: 410 by 502
+ *            upright or at 180 degrees, 502 by 410 at 90 or 270.
+ * @return KODE_OK; KODE_DENIED before kscreen_open() has succeeded, for a
+ *         picture of another size, with the glass asleep or in a build
+ *         without CONFIG_KODE_COMPOSE;
+ *         KODE_NO_RESOURCES on a panel with a single framebuffer, with the
+ *         link down, with no accelerator or with no room in AO_Display's
+ *         queue; KODE_TIMEOUT when AO_Display did not take the request in
+ *         500 ms; KODE_ERROR when the accelerator refused; KODE_IO_ERROR
+ *         when a pass it started never ended. The same for every call below,
+ *         each failure logged.
+ */
+kode_status_t kscreen_pic_grab(const kscreen_t *s, kscreen_pic_t *dst);
+
+/**
+ * @brief Paint an area of @p dst one colour.
+ * @param dst    The picture.
+ * @param area   The area, inside the picture; NULL is all of it.
+ * @param colour The colour.
+ * @return As kscreen_pic_grab(); KODE_DENIED for an area outside the picture.
+ */
+kode_status_t kscreen_pic_fill(kscreen_pic_t *dst, const lv_area_t *area, lv_color_t colour);
+
+/**
+ * @brief Copy an area of @p src into @p dst, scaled. At KSCREEN_SCALE_ONE it is a copy.
+ *
+ * The accelerator scales in sixteenths and rounds a size down: 410 pixels at
+ * 15 are 384. Nothing is clipped: the scaled area must fit @p dst.
+ *
+ * @param dst        The picture written; never @p src.
+ * @param x          Column of @p dst the area's left edge lands on.
+ * @param y          Row of @p dst the area's top edge lands on.
+ * @param src        The picture read.
+ * @param from       The area of @p src; NULL is all of it.
+ * @param sixteenths The scale, KSCREEN_SCALE_MIN to KSCREEN_SCALE_MAX.
+ * @return As kscreen_pic_grab(); KODE_DENIED for a scale out of range or a
+ *         result that is empty or does not fit.
+ */
+kode_status_t kscreen_pic_scale(kscreen_pic_t *dst, int32_t x, int32_t y, const kscreen_pic_t *src,
+                                const lv_area_t *from, uint16_t sixteenths);
+
+/**
+ * @brief Lay an area of @p fg over @p dst, at an opacity.
+ *
+ * @param dst  The picture under it, changed in place; never @p fg.
+ * @param x    Column of @p dst the area's left edge lands on.
+ * @param y    Row of @p dst the area's top edge lands on.
+ * @param fg   The picture laid over.
+ * @param from The area of @p fg; NULL is all of it.
+ * @param opa  LV_OPA_TRANSP leaves @p dst as it is, LV_OPA_COVER replaces it.
+ * @return As kscreen_pic_grab(); KODE_DENIED for an area that does not fit.
+ */
+kode_status_t kscreen_pic_blend(kscreen_pic_t *dst, int32_t x, int32_t y, const kscreen_pic_t *fg,
+                                const lv_area_t *from, lv_opa_t opa);
+
+/**
+ * @brief Write @p src into @p dst, dimmed towards black. Two passes.
+ *
+ * @param dst   The picture written; never @p src.
+ * @param src   The picture read, the same size.
+ * @param level LV_OPA_COVER is @p src as it is, LV_OPA_TRANSP is black.
+ * @return As kscreen_pic_grab(); KODE_DENIED, with nothing painted, for
+ *         pictures of two sizes or for one picture given twice.
+ */
+kode_status_t kscreen_pic_dim(kscreen_pic_t *dst, const kscreen_pic_t *src, lv_opa_t level);
+
+/**
+ * @brief An LVGL object that shows @p pic: LVGL copies its rows into the frame as it draws.
+ *
+ * An image object the size of the picture, placed and layered as any other.
+ * After composing into @p pic, lv_obj_invalidate() it. Delete it before the
+ * picture.
+ *
+ * @param parent The object it goes on.
+ * @param pic    The picture shown.
+ * @return The object, or NULL when LVGL had no memory for it.
+ */
+lv_obj_t *kscreen_frame_create(lv_obj_t *parent, const kscreen_pic_t *pic);
+
 #if CONFIG_KODE_TEST_DOT
 /**
  * @brief Show what AO_TestDot asks for: an E5 screen or a pattern, over

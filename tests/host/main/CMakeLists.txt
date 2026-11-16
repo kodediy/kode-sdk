@@ -16,6 +16,8 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/khal/exp/src/khal_exp.c"
     "${SDK_DIR}/components/khal/identity/src/khal_identity_esp.c"
     "${SDK_DIR}/components/kdrv/compose/src/kdrv_compose_check.c"
+    # kscreen's arithmetic for a composed picture: no LVGL in it.
+    "${SDK_DIR}/components/kscreen/src/kscreen_geom.c"
     "${SDK_DIR}/components/kdrv/led/src/kdrv_led.c"
     "${SDK_DIR}/components/kdrv/power/src/kdrv_bq25896.c"
     "${SDK_DIR}/components/kdrv/power/src/kdrv_cw2217.c"
@@ -302,6 +304,8 @@ idf_component_register(
                  "${SDK_DIR}/components/kbsp/board/include"
                  "${SDK_DIR}/components/kbsp/owners/include"
                  "${SDK_DIR}/components/kbsp/exp/include"
+                 # kscreen_geom.h is private to the component
+                 "${SDK_DIR}/components/kscreen/src"
                  "${SDK_DIR}/components/kui/core/include"
                  "${SDK_DIR}/components/kui/drag/include"
                  "${SDK_DIR}/components/kui/glass/include"
