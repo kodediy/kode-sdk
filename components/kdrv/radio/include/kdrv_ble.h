@@ -75,10 +75,11 @@ typedef enum {
 } kdrv_ble_state_t;
 
 /**
- * @brief Told when a connection comes or goes.
+ * @brief Told when a connection comes or goes, or the count of bonds moves.
  *
- * Called from NimBLE's host task. Post an event and return - the same
- * contract the console reader's byte callback has.
+ * Called from the task that changed the BLE state or the bond store:
+ * NimBLE's host task, or the radio worker. Post an event and return - the
+ * same contract the console reader's byte callback has.
  */
 typedef void (*kdrv_ble_cb_t)(kdrv_ble_state_t state);
 
@@ -818,7 +819,15 @@ uint16_t kdrv_ble_console_retry(void);
 /** @brief Lines the ring has refused since the central attached. */
 uint16_t kdrv_ble_console_tx_drop(void);
 
-/** @brief How many peers the bond store holds. */
+/**
+ * @brief How many peers the bond store holds.
+ *
+ * The count the last change of the store left: it takes no lock and never
+ * waits for a store write. When the count moves, the state callback
+ * (kdrv_ble_set_cb()) is called.
+ *
+ * @return The bonded peers; 0 while the stack is down.
+ */
 uint8_t kdrv_ble_bonds(void);
 
 /**

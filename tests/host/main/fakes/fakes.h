@@ -852,6 +852,9 @@ bool fake_ble_adv_pulsed(void);
 /** @brief Set the count of bonded peers kdrv_ble_bonds() reports. */
 void fake_ble_set_bonds(uint8_t n);
 
+/** @brief The store changed, as the driver tells it: the count is set and, when it moved, the state callback is called. */
+void fake_ble_bonds_changed(uint8_t n);
+
 /** @brief How many times kdrv_ble_conn_calm() was asked for the rest set
  *         (@p rest) or the awake one since the reset. */
 unsigned fake_ble_conn_calls(bool rest);

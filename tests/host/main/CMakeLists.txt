@@ -29,6 +29,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_adv.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_app.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_find.c"
+    "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_bonds.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_radio_note.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_radio_sleep_policy.c"
     "${SDK_DIR}/components/kdrv/storage/src/kdrv_storage.c"

@@ -1597,10 +1597,11 @@ enum KodeSignals {
     BLE_STATE_REQ_SIG,          /**< AO_Radio: publish BLE_STATE_SIG now. A
                                  *   question, with no effect of its own.    */
     BLE_LINK_SIG,               /**< AO_Radio, from the driver's callback: a
-                                 *   central arrived or left. Publishes like
-                                 *   the question above AND restores the
-                                 *   advertising invariant, which is why the
-                                 *   two are not one signal.                 */
+                                 *   central arrived or left, or the count of
+                                 *   bonds moved. Publishes like the question
+                                 *   above AND restores the advertising
+                                 *   invariant, which is why the two are not
+                                 *   one signal. A knock: one waits at a time. */
     BLE_PAIR_TAKE_SIG,          /**< AO_Radio to itself, from the driver's
                                  *   callback: collect the pairing record and
                                  *   publish it. Never leaves that AO, and

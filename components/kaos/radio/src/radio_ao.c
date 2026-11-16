@@ -378,11 +378,6 @@ typedef struct {
     bool     ble_adv_pulsed;  /**< It goes on the air in pulses.                */
     uint8_t  ble_refused;     /**< KQP_BLE_REFUSED_*: what the next BLE state
                                *   says of the request it answers.           */
-    bool     ble_store_away;  /**< A DISCONNECT job is with the worker, which
-                               *   takes NimBLE's store down with the link:
-                               *   ble_bonds_seen stands for the count from the
-                               *   submit until the worker is back.            */
-    uint8_t  ble_bonds_seen;  /**< The bond count the last BLE state published. */
     char     ble_name[KQP_BLE_NAME_MAX]; /**< The name the last BLE state
                                *   published; "" before the first.          */
     bool     ble_linked;      /**< A central was on, as BLE_LINK_SIG last saw it. */
@@ -4121,27 +4116,6 @@ static bool auto_hint_try(Radio * const me, uint8_t channel, int8_t rssi, uint8_
 static void ble_app_link_edges(Radio * const me);
 static void ble_app_link_publish(Radio * const me, bool connected);
 
-/**
- * @brief The boards bonded, as NimBLE's store counts them.
- *
- * Read from the store except while the worker takes the link down: the
- * teardown frees the store's lock under this AO. The count the last state
- * published (ble_bonds_seen) stands for it until the worker is back.
- *
- * @param me The AO.
- * @return The bond count.
- */
-static uint8_t radio_ble_bonds(Radio const * const me)
-{
-    uint8_t n = me->ble_bonds_seen;
-
-    if ( !me->ble_store_away )
-    {
-        n = kdrv_ble_bonds();
-    }
-    return n;
-}
-
 /** @brief Publish what the BLE half is doing, then the link's edges for the app's service. */
 static void ble_publish_state(Radio * const me)
 {
@@ -4165,8 +4139,9 @@ static void ble_publish_state(Radio * const me)
         e->tx_drop = kdrv_ble_console_tx_drop();
         e->backlog = kdrv_ble_console_backlog();
         e->retry   = kdrv_ble_console_retry();
-        me->ble_bonds_seen = radio_ble_bonds(me);
-        e->bonds   = me->ble_bonds_seen;
+        /* The driver's own count, which takes no lock: this AO never waits
+         * behind a store write, and a count that moves knocks (BLE_LINK_SIG). */
+        e->bonds   = kdrv_ble_bonds();
         e->hidden    = me->ble_adv_hidden;
         e->pair_open = me->ble_pair_open;
         if ( !me->busy )
@@ -5007,12 +4982,6 @@ static bool radio_submit_req(Radio * const me, const kdrv_radio_req_t *req)
     me->winflight = true;
     me->wreplied  = false;
     me->wdrop     = false;
-#if CONFIG_KODEOS_BLE
-    if ( KDRV_RADIO_JOB_DISCONNECT == req->type )
-    {
-        me->ble_store_away = true;
-    }
-#endif
     radio_guard_start(me, req);
     me->busy = true;
     return true;
@@ -5244,11 +5213,6 @@ static bool radio_outcome(Radio * const me, QEvt const * const e)
             me->wreplied  = false;
             me->wdrop     = false;
 #if CONFIG_KODEOS_BLE
-            /* The store is gone, or was never touched, once the worker is back. */
-            if ( KDRV_RADIO_JOB_DISCONNECT == me->jobs->wreq.type )
-            {
-                me->ble_store_away = false;
-            }
             /* What the app notified while the job ran waits for this. */
             kdrv_ble_app_kick();
 #endif
@@ -7349,7 +7313,7 @@ static bool radio_ble_always_visible(Radio const * const me)
 static bool radio_ble_pair_shows(Radio const * const me)
 {
     /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the role always advertises */
-    return me->ble_pair_open && !radio_ble_always_visible(me) && (radio_ble_bonds(me) > 0U);
+    return me->ble_pair_open && !radio_ble_always_visible(me) && (kdrv_ble_bonds() > 0U);
 }
 
 /**
@@ -7365,7 +7329,7 @@ static bool radio_ble_pair_shows(Radio const * const me)
 static bool radio_ble_hidden(Radio const * const me)
 {
     /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the role always advertises */
-    return !radio_ble_always_visible(me) && !me->ble_pair_open && (radio_ble_bonds(me) > 0U);
+    return !radio_ble_always_visible(me) && !me->ble_pair_open && (kdrv_ble_bonds() > 0U);
 }
 
 /**
@@ -7579,7 +7543,7 @@ static bool radio_ble_adv_reconcile(Radio * const me)
                  * for. */
                 me->ble_fast_owed  = false;
                 me->ble_fast_until = now;
-                if ( me->ble_asked || (radio_ble_bonds(me) > 0U) )
+                if ( me->ble_asked || (kdrv_ble_bonds() > 0U) )
                 {
                     me->ble_fast_until = now + RADIO_BLE_FAST_MS;
                 }

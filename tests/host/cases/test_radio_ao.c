@@ -10774,7 +10774,7 @@ TEST_CASE("Pair new device that waits for the link is dropped when Bluetooth is 
     ble_adv_case_end();
 }
 
-/* ---- The bond count and the store a teardown frees ---------------------------------- */
+/* ---- The bond count: the driver's, read with no lock ------------------------------ */
 
 /** @brief The bond count of the next BLE state in the spy; fails the case if none. */
 static uint8_t take_bonds(void)
@@ -10790,8 +10790,24 @@ static uint8_t take_bonds(void)
     }
 }
 
-TEST_CASE("a BLE state published while the worker takes the link down keeps the count and "
-          "does not read NimBLE's store", "[radio_ao]")
+/** @brief The bond count of the last BLE state in the spy; fails the case if none. */
+static uint8_t take_last_bonds(void)
+{
+    const BleStateEvt *last = NULL;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)BLE_STATE_SIG == e->sig )
+        {
+            last = (const BleStateEvt *)e;
+        }
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(last, "no BLE state was published");
+    return last->bonds;
+}
+
+TEST_CASE("a BLE state carries the driver's count of bonds, with the worker taking the link down or back",
+          "[radio_ao][ble_bonds]")
 {
     radio_fresh();
     fake_ble_reset();
@@ -10806,43 +10822,58 @@ TEST_CASE("a BLE state published while the worker takes the link down keeps the 
     dispatch(RADIO_DOWN_REQ_SIG);
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
 
-    /* The store is gone under the worker: a read would see none. */
+    /* The stack went down under the worker: the driver's count is what it
+     * answers then, and reading it takes no lock of the store's. */
     fake_ble_set_bonds(0U);
     dispatch(BLE_STATE_REQ_SIG);
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(2U, take_bonds(), "the store was read during the teardown");
-    ao_spy_drain();
-
-    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
-    dispatch(BLE_STATE_REQ_SIG);
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, take_bonds(), "the count is read again once the worker is back");
-    c5_case_end();
-}
-
-TEST_CASE("the same when the link is lost and the teardown is the AO's own, not radio_down's",
-          "[radio_ao]")
-{
-    radio_fresh();
-    fake_ble_reset();
-    fake_ble_set_bonds(3U);
-    go_up();
-    ao_spy_subscribe(BLE_STATE_SIG);
-
-    dispatch(BLE_STATE_REQ_SIG);
-    TEST_ASSERT_EQUAL_UINT8(3U, take_bonds());
-    ao_spy_drain();
-
-    fake_radio_drop_link();
-    pump();
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
-
-    fake_ble_set_bonds(0U);
-    dispatch(BLE_STATE_REQ_SIG);
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(3U, take_bonds(), "the store was read during the teardown");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, take_bonds(), "not the driver's count during the teardown");
     ao_spy_drain();
 
     finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
     dispatch(BLE_STATE_REQ_SIG);
     TEST_ASSERT_EQUAL_UINT8(0U, take_bonds());
+    c5_case_end();
+}
+
+TEST_CASE("a bond count that moves has the state published again with the new count, the link up or down",
+          "[radio_ao][ble_bonds]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_set_bonds(0U);
+    ao_spy_subscribe(BLE_STATE_SIG);
+    ao_spy_drain();
+
+    /* The link down. */
+    fake_ble_bonds_changed(1U);
+    pump();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1U, take_last_bonds(), "the count that moved with the link down was not told");
+
+    /* The link up, the board on the air. */
+    go_up();
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+    ao_spy_drain();
+
+    fake_ble_bonds_changed(2U);
+    pump();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(2U, take_last_bonds(), "the count that moved with the link up was not told");
+
+    /* A change that leaves the count as it was tells nobody. */
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    ao_spy_drain();
+    radio_queue_flush();
+    fake_ble_bonds_changed(2U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, uxQueueMessagesWaiting(AO_Radio->eQueue),
+                                   "a count that stood was told");
+
+    /* The AO outlives the case: BLE goes back off, as every case that started it leaves it. */
+    ble_adv_case_end();
     c5_case_end();
 }
 

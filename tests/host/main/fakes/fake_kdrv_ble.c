@@ -274,6 +274,17 @@ void fake_ble_set_bonds(uint8_t n)
     s_b.bonds = n;
 }
 
+void fake_ble_bonds_changed(uint8_t n)
+{
+    bool const moved = s_b.bonds != n;
+
+    s_b.bonds = n;
+    if ( moved && (NULL != s_b.cb) )
+    {
+        s_b.cb(s_b.state);
+    }
+}
+
 uint16_t fake_ble_adv_itvl(void)
 {
     return s_b.adv_itvl;

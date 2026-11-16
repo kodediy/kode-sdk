@@ -42,6 +42,7 @@ extern void ble_store_config_init(void);
 #include "kode_wire.h"
 #endif
 #include "kdrv_ble_app.h"     /* the app's own service: its rules, values and ring */
+#include "kdrv_ble_bonds.h"   /* the count of bonded peers, read with no lock */
 #include "kdrv_ble_find.h"    /* kdrv_ble_scan_find(): which advert is the one */
 #include "khal_sync.h"
 #include "khal_system.h"
@@ -1965,14 +1966,22 @@ kode_status_t kdrv_ble_mirror_write(const uint8_t *data, size_t len)
 
 /* ---- NimBLE callbacks (host task) --------------------------------------- */
 
+#if CONFIG_KODEOS_BLE_CONSOLE
+static ble_store_write_fn  *s_store_write;    /**< NimBLE's own, wrapped. */
+static ble_store_delete_fn *s_store_delete;   /**< NimBLE's own, wrapped. */
+#endif
+
 #if CONFIG_KODEOS_BLE_CONSOLE_PAIRING
 /* ---- The bond store keeps tokens; the keys live on the C5 -----------------
  * kdrv_ble_tokens.h says what a token is. Every write of a bond record moves
  * its LTK (and the peer's IRK) to the C5 first and stores tokens in their
  * place; a write the C5 does not take fails, so the pairing fails and a key
  * never lands in this chip's NVS. Every delete tells the C5 to forget them.
- * Both run on NimBLE's host task, at pairing and unpairing only, outside
- * ble_hs_lock, and block there for one KODE round trip per key.
+ * Both run on the task that changes the store (NimBLE's host task at a
+ * pairing, the radio worker at an unpairing), inside ble_hs_lock, which
+ * NimBLE takes around its store callbacks, and block there for one KODE
+ * round trip per key. Whoever needs the store meanwhile waits for them, which
+ * is why the count of bonds is kept apart (kdrv_ble_bonds.h).
  *
  * NimBLE drops what the write returns (ble_sm_persist_keys()), so a refused
  * key does not fail the pairing by itself: the write records the peer, and
@@ -1981,10 +1990,8 @@ kode_status_t kdrv_ble_mirror_write(const uint8_t *data, size_t len)
 /** @brief How long the C5 has to take a key. */
 #define BLE_KEY_PUT_MS  3000U
 
-static ble_store_write_fn  *s_store_write;    /**< NimBLE's own, wrapped. */
 static bool                 s_key_refused;    /**< A key was not kept...  */
 static ble_addr_t           s_key_refused_peer; /**< ...for this peer.    */
-static ble_store_delete_fn *s_store_delete;   /**< NimBLE's own, wrapped. */
 
 /** @brief kbt_put_t: one key to the C5's BTKEYS service. */
 static kode_status_t ble_key_put(const uint8_t tok[16], const uint8_t key[16])
@@ -2087,20 +2094,6 @@ static int ble_store_delete_c5(int obj_type, const union ble_store_key *key)
         (void)memset(&v, 0, sizeof(v));
     }
     return s_store_delete(obj_type, key);
-}
-
-/** @brief Install the two wrappers, once per stock set of callbacks. */
-static void ble_store_hook(void)
-{
-    /* Not at ble_store_config_init(): ble_hs_pvcy re-runs it before sync and
-     * puts the stock callbacks back (ble_hs_pvcy.c:337, found in spike B). */
-    if ( ble_hs_cfg.store_write_cb != &ble_store_write_c5 )
-    {
-        s_store_write  = ble_hs_cfg.store_write_cb;
-        s_store_delete = ble_hs_cfg.store_delete_cb;
-        ble_hs_cfg.store_write_cb  = &ble_store_write_c5;
-        ble_hs_cfg.store_delete_cb = &ble_store_delete_c5;
-    }
 }
 
 /** @brief Bonds one start can move to tokens: as many as the store keeps,
@@ -2273,6 +2266,128 @@ static void ble_forget_lost_key(const ble_addr_t *peer, int reason)
 }
 #endif /* CONFIG_KODEOS_BLE_CONSOLE_PAIRING */
 
+#if CONFIG_KODEOS_BLE_CONSOLE
+/* ---- The count of bonded peers ---------------------------------------------
+ * NimBLE calls the store's write and delete callbacks inside its host lock,
+ * and a write may hold it for a round trip to the C5 per key. Whoever asks
+ * how many peers are bonded must not wait behind that, so both callbacks are
+ * wrapped: each counts the peers after its change, inside the same hold of
+ * the lock, and kdrv_ble_bonds.h keeps the count for readers. */
+
+/** @brief The count of bonds moved: whoever watches the BLE state reads it again. */
+static void ble_bonds_tell(void)
+{
+    if ( NULL != s_ble.cb )
+    {
+        s_ble.cb(s_ble.state);
+    }
+}
+
+/* The count below reads the store through ble_store_read(), which takes the
+ * host lock again under the task that holds it. The lock is recursive, but a
+ * host built with its debug checks asserts on the second take. */
+#if CONFIG_BT_NIMBLE_DEBUG
+#error "the bond count is made inside NimBLE's host lock, which its debug build asserts on: leave CONFIG_BT_NIMBLE_DEBUG off"
+#endif
+
+/**
+ * @brief Count the peers after a change of the store, inside the hold of the
+ *        host lock that made the change.
+ *
+ * The count takes the lock again for each record it reads, which the task
+ * that holds it may do.
+ */
+static void ble_bonds_recount(void)
+{
+    int n = 0;
+
+    if ( ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &n) != 0 )
+    {
+        KLOG_W(TAG, "the bond store could not be counted; the last count stands");
+    }
+    else if ( kdrv_ble_bonds_changed((uint8_t)n) )
+    {
+        ble_bonds_tell();
+    }
+    else
+    {
+        /* A key written over the same peer's: the count stands. */
+    }
+}
+
+/**
+ * @brief Count the peers outside the host lock: at sync, when no change of
+ *        the store is this task's own.
+ *
+ * A change that comes while the peers are counted makes this count an old
+ * one, and the keeper drops it for the change's own.
+ */
+static void ble_bonds_count(void)
+{
+    uint32_t const ticket = kdrv_ble_bonds_begin();
+    int            n      = 0;
+
+    if ( ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &n) != 0 )
+    {
+        KLOG_W(TAG, "the bond store could not be counted; the last count stands");
+    }
+    else if ( kdrv_ble_bonds_settle(ticket, (uint8_t)n) )
+    {
+        ble_bonds_tell();
+    }
+    else
+    {
+        /* The count kept already was this one, or a change left a newer. */
+    }
+}
+
+/** @brief ble_hs_cfg.store_write_cb: the write, then the count it leaves. */
+static int ble_store_write_counted(int obj_type, const union ble_store_value *val)
+{
+#if CONFIG_KODEOS_BLE_CONSOLE_PAIRING
+    int const err = ble_store_write_c5(obj_type, val);
+#else
+    int const err = s_store_write(obj_type, val);
+#endif
+
+    if ( BLE_STORE_OBJ_TYPE_PEER_SEC == obj_type )
+    {
+        ble_bonds_recount();
+    }
+    return err;
+}
+
+/** @brief ble_hs_cfg.store_delete_cb: the delete, then the count it leaves. */
+static int ble_store_delete_counted(int obj_type, const union ble_store_key *key)
+{
+#if CONFIG_KODEOS_BLE_CONSOLE_PAIRING
+    int const err = ble_store_delete_c5(obj_type, key);
+#else
+    int const err = s_store_delete(obj_type, key);
+#endif
+
+    if ( BLE_STORE_OBJ_TYPE_PEER_SEC == obj_type )
+    {
+        ble_bonds_recount();
+    }
+    return err;
+}
+
+/** @brief Install the two wrappers, once per stock set of callbacks. */
+static void ble_store_hook(void)
+{
+    /* Not at ble_store_config_init(): ble_hs_pvcy re-runs it before sync and
+     * puts the stock callbacks back (ble_hs_pvcy.c:337, found in spike B). */
+    if ( ble_hs_cfg.store_write_cb != &ble_store_write_counted )
+    {
+        s_store_write  = ble_hs_cfg.store_write_cb;
+        s_store_delete = ble_hs_cfg.store_delete_cb;
+        ble_hs_cfg.store_write_cb  = &ble_store_write_counted;
+        ble_hs_cfg.store_delete_cb = &ble_store_delete_counted;
+    }
+}
+#endif /* CONFIG_KODEOS_BLE_CONSOLE */
+
 /** @brief The first and the last handle an attribute can have: Service
  *         Changed over this range says the whole table may be new. */
 #define BLE_ATT_HANDLE_FIRST  0x0001U
@@ -2298,9 +2413,13 @@ static void ble_on_sync(void)
             s_ble.addr[i] = a[5U - i];
         }
     }
-#if CONFIG_KODEOS_BLE_CONSOLE_PAIRING
+#if CONFIG_KODEOS_BLE_CONSOLE
     ble_store_hook();
+#if CONFIG_KODEOS_BLE_CONSOLE_PAIRING
     ble_migrate_old_keys();
+#endif
+    /* What the store holds at this start, after the old keys have moved. */
+    ble_bonds_count();
 #endif
     /* A bonded peer keeps the attribute table it found on its last visit,
      * and the table is not the same from one firmware to the next: kodeOS
@@ -3448,16 +3567,16 @@ uint8_t kdrv_ble_bonds(void)
      * has run reaches structures that do not exist yet. AO_Radio publishes
      * the BLE state with the link down as a matter of course - that is how
      * every ble_* verb is answered when the C5 is off - so this has to be
-     * safe to call at any time, not merely when the stack happens to be up. */
-    int n = 0;
+     * safe to call at any time, not merely when the stack happens to be up.
+     * It reads the count the last change of the store left and takes no
+     * lock: a store write holds NimBLE's for a round trip to the C5. */
+    uint8_t n = 0U;
+
     if ( s_ble.up )
     {
-        if ( ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &n) != 0 )
-        {
-            n = 0;
-        }
+        n = kdrv_ble_bonds_kept();
     }
-    return (uint8_t)n;
+    return n;
 }
 
 kode_status_t kdrv_ble_unpair(void)

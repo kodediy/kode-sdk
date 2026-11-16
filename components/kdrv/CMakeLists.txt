@@ -173,6 +173,8 @@ if(CONFIG_KODEOS_RADIO)
     if(CONFIG_KODEOS_BLE)
         list(APPEND srcs "radio/src/kdrv_ble.c")
         list(APPEND srcs "radio/src/kdrv_ble_tokens.c")
+        # The count of bonded peers, kept for readers that take no lock, pure C.
+        list(APPEND srcs "radio/src/kdrv_ble_bonds.c")
         # The scan response's packing, pure C.
         list(APPEND srcs "radio/src/kdrv_ble_adv.c")
         # The app's own service: its rules, values and ring, pure C.
