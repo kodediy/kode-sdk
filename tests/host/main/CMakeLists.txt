@@ -58,6 +58,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi_frames.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_scan.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_ble.c"
+    "${SDK_DIR}/components/kode_sys/src/kode_sys_ble_heard.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_power.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_exp.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_exp_power.c"
@@ -138,9 +139,11 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kaos/radio/src/radio_frames.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_knock.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_knocks.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_heard.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5svc.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_frames.c"
+    "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_heard.c"
     "${SDK_DIR}/components/kaos/appmgr/src/appmgr_ao.c"
     "${SDK_DIR}/components/kaos/autotest/src/autotest_ao.c"
     "${SDK_DIR}/components/kaos/autotest/src/autotest_psram.c"
@@ -320,7 +323,7 @@ idf_component_register(
                  "${SDK_DIR}/components/kaos/core/src"
                  "${SDK_DIR}/components/kaos/autotest/src"
                  "${SDK_DIR}/components/kaos/net/src"
-                 # radio_knock.h and radio_knocks.h are private to the component
+                 # radio_knock.h, radio_knocks.h and radio_heard.h are private to the component
                  "${SDK_DIR}/components/kaos/radio/src"
                  "${SDK_DIR}/components/kaos/scheduler/src"
                  "${SDK_DIR}/components/kaos/display/src"

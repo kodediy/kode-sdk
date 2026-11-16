@@ -315,6 +315,13 @@ _Static_assert((sizeof(WifiFrameEvt) > KQP_BLOCK_SMALL) && (sizeof(WifiFrameEvt)
 /* The longest key and the longest value of the app's store, in one event. */
 _Static_assert(sizeof(BootNvsSetEvt) <= KQP_BLOCK_MEDIUM,
                "BootNvsSetEvt must fit the medium pool");
+/* The BLE advertisement events: an advertisement is taken with
+ * KQP_HEARD_POOL_MARGIN against the medium tier, an answer with none. Each is
+ * pinned to its tier for the reason above. */
+_Static_assert(sizeof(BleHeardStateEvt) <= KQP_BLOCK_SMALL,
+               "BleHeardStateEvt must fit the small pool");
+_Static_assert((sizeof(BleHeardEvt) > KQP_BLOCK_SMALL) && (sizeof(BleHeardEvt) <= KQP_BLOCK_MEDIUM),
+               "BleHeardEvt must land in the medium pool");
 _Static_assert(sizeof(StoragePathEvt) <= KQP_BLOCK_MEDIUM,
                "StoragePathEvt must fit the medium pool");
 _Static_assert(sizeof(StoragePathRspEvt) <= KQP_BLOCK_SMALL,

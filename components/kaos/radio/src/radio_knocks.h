@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file radio_knocks.h
- * @brief Package-private: the three knocks other tasks reach AO_Radio with.
+ * @brief Package-private: the knocks other tasks reach AO_Radio with.
  *
- * The lost link, the BLE state and the pairing note come from the radio
- * worker, esp-hosted's tasks and NimBLE's host task; the pairing note also
- * from AO_Radio's own thread, when it refuses a pairing. Each is a knock
+ * The lost link, the BLE state, the pairing note and the advertisements a
+ * stream heard come from the radio worker, esp-hosted's tasks and NimBLE's
+ * host task; the pairing note also from AO_Radio's own thread, when it
+ * refuses a pairing. Each is a knock
  * (radio_knock.h): one static event, posted with KQP_RADIO_KNOCK_MARGIN, that
  * a full queue owes and never loses.
  */
@@ -22,6 +23,7 @@ typedef enum {
     RADIO_KNOCK_LOST = 0,   /**< RADIO_LINK_LOST_SIG: the link to the C5 is gone; carries the first loss's kode_status_t. */
     RADIO_KNOCK_BLE,        /**< BLE_LINK_SIG: the BLE state or the bond count moved; the driver keeps both. */
     RADIO_KNOCK_PAIR,       /**< BLE_PAIR_TAKE_SIG: a pairing moved; the driver keeps the record. */
+    RADIO_KNOCK_HEARD,      /**< RADIO_HEARD_KNOCK_SIG: advertisements wait in the stream's ring, or the stack ended its scan. */
     RADIO_KNOCK_COUNT       /**< How many there are. */
 } radio_knock_id_t;
 

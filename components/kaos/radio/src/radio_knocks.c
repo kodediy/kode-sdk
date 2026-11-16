@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file radio_knocks.c
- * @brief AO_Radio's three knocks: their events, the queue they go to and the line a refusal logs.
+ * @brief AO_Radio's knocks: their events, the queue they go to and the line a refusal logs.
  */
 #include "radio_knocks.h"
 
@@ -15,7 +15,7 @@
 
 /* What a knock does to AO_Radio's queue: it stops KQP_RADIO_KNOCK_MARGIN
  * slots short of the end, and one event of each knock waits at a time, so
- * the three never fill the queue and never assert on a full one. That is
+ * together they never fill the queue and never assert on a full one. That is
  * all the margin says. The slots it leaves are not kept for anybody: the
  * requests other Active Objects post with no margin (the Wi-Fi doors and the
  * scan requests keep KQP_RADIO_POST_MARGIN of their own), the AO's posts to
@@ -47,13 +47,15 @@ static radio_knock_t s_knock[RADIO_KNOCK_COUNT];
 void radio_knocks_reset(void)
 {
     /* Each knock's event, and its way into AO_Radio's queue by radio_knock_id_t. */
-    static const QEvt lost_evt = QEVT_INITIALIZER(RADIO_LINK_LOST_SIG);
-    static const QEvt ble_evt  = QEVT_INITIALIZER(BLE_LINK_SIG);
-    static const QEvt pair_evt = QEVT_INITIALIZER(BLE_PAIR_TAKE_SIG);
+    static const QEvt lost_evt  = QEVT_INITIALIZER(RADIO_LINK_LOST_SIG);
+    static const QEvt ble_evt   = QEVT_INITIALIZER(BLE_LINK_SIG);
+    static const QEvt pair_evt  = QEVT_INITIALIZER(BLE_PAIR_TAKE_SIG);
+    static const QEvt heard_evt = QEVT_INITIALIZER(RADIO_HEARD_KNOCK_SIG);
     static const radio_knock_door_t door[RADIO_KNOCK_COUNT] = {
-        [RADIO_KNOCK_LOST] = { &knocks_post, &knocks_room, &lost_evt },
-        [RADIO_KNOCK_BLE]  = { &knocks_post, &knocks_room, &ble_evt  },
-        [RADIO_KNOCK_PAIR] = { &knocks_post, &knocks_room, &pair_evt },
+        [RADIO_KNOCK_LOST]  = { &knocks_post, &knocks_room, &lost_evt  },
+        [RADIO_KNOCK_BLE]   = { &knocks_post, &knocks_room, &ble_evt   },
+        [RADIO_KNOCK_PAIR]  = { &knocks_post, &knocks_room, &pair_evt  },
+        [RADIO_KNOCK_HEARD] = { &knocks_post, &knocks_room, &heard_evt },
     };
 
     for ( uint32_t i = 0U; (uint32_t)RADIO_KNOCK_COUNT > i; ++i )
@@ -66,9 +68,10 @@ void radio_knocks_post(radio_knock_id_t id, uint8_t arg)
 {
     /* What each knock is called in the log, by radio_knock_id_t. */
     static const char * const name[RADIO_KNOCK_COUNT] = {
-        [RADIO_KNOCK_LOST] = "the lost link",
-        [RADIO_KNOCK_BLE]  = "the BLE state",
-        [RADIO_KNOCK_PAIR] = "the pairing note",
+        [RADIO_KNOCK_LOST]  = "the lost link",
+        [RADIO_KNOCK_BLE]   = "the BLE state",
+        [RADIO_KNOCK_PAIR]  = "the pairing note",
+        [RADIO_KNOCK_HEARD] = "the BLE advertisements",
     };
 
     if ( !radio_knock_post(&s_knock[id], arg) )

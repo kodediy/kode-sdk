@@ -2166,6 +2166,71 @@ TEST_CASE("the c5 row skips the BLE start when the stack is already up",
     TEST_ASSERT_TRUE(take_verdict());
 }
 
+/** @brief The guard of the loop that ends the jobs Bluetooth's start leaves behind. */
+#define ROW_BLE_SETTLE_MAX  16U
+
+TEST_CASE("the c5 row's BLE listen ends an advertisement stream, and the row passes",
+          "[radio_ao]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_nvs_reset();
+    go_up();
+
+    /* Bluetooth on in Settings and the board on the air, and a stream for the second asker. */
+    dispatch(BLE_START_REQ_SIG);
+    finish_ble_start();
+    for ( uint32_t guard = 0U; (ROW_BLE_SETTLE_MAX > guard) && job_held(); ++guard )
+    {
+        if ( KDRV_RADIO_JOB_BLE_ADV == (kdrv_radio_job_t)running_job() )
+        {
+            finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+        }
+        else
+        {
+            finish_whatever_runs();
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(-1, running_job());
+    ao_spy_other_drain();
+    TEST_ASSERT_TRUE(ble_heard_request(ao_spy_other(), true));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_HEAR, running_job());
+    finish(KDRV_RADIO_JOB_BLE_HEAR, KODE_OK);
+    ao_spy_other_drain();
+    fake_klog_reset();
+
+    /* The row is not refused for the stream, which goes on until the row needs the host's scan. */
+    ask_row();
+    TEST_ASSERT_FALSE_MESSAGE(logged("test c5: FAIL"), "the row was refused for the stream");
+    finish_info();
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_other_take(), "the stream ended before the row's listen");
+    finish_scan(3U, -52);
+
+    /* The row's listen is the newer order: the asker is told, and the row runs it. */
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_SCAN, running_job());
+    const QEvt * const e = ao_spy_other_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the stream's asker was not told");
+    TEST_ASSERT_EQUAL_INT((int)BLE_HEARD_STATE_SIG, (int)e->sig);
+    TEST_ASSERT_FALSE(((const BleHeardStateEvt *)(const void *)e)->on);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KBLE_HEARD_CANCELLED, ((const BleHeardStateEvt *)(const void *)e)->why);
+    QF_gc(e);
+    finish_ble_scan(2U, -60);
+    TEST_ASSERT_TRUE(take_verdict());
+
+    /* Bluetooth off again, for the cases that follow. */
+    dispatch(BLE_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    fake_nvs_reset();
+    fake_ble_reset();
+    ao_spy_other_drain();
+}
+
 TEST_CASE("the c5 row fails when the C5's BT controller will not start",
           "[radio_ao]")
 {
@@ -12305,6 +12370,8 @@ typedef enum {
     MUTE_BLE_ADV,        /**< The advert. */
     MUTE_BLE_SCAN,       /**< An asked BLE listen. */
     MUTE_BLE_RSP,        /**< The scan response. */
+    MUTE_BLE_HEAR_START, /**< The start of a BLE advertisement stream. */
+    MUTE_BLE_HEAR_STOP,  /**< Its stop. */
     MUTE_C5_BEGIN,       /**< A C5 update's session. */
     MUTE_C5_WRITE,       /**< A C5 update's chunk. */
     MUTE_JOBS
@@ -12315,7 +12382,8 @@ static const char *const s_mute_name[MUTE_JOBS] = {
     "a listed scan", "an asked join", "the round's sweep", "the round's join, readying",
     "the round's join, waiting", "the round's probe", "a leave", "a signal reading",
     "the c5 row's info", "the BLE start", "the advert", "an asked BLE listen",
-    "the scan response", "an update's session", "an update's chunk" };
+    "the scan response", "a stream's start", "a stream's stop", "an update's session",
+    "an update's chunk" };
 
 /**
  * @brief Get the job of @p which to the radio worker, with the link up.
@@ -12428,6 +12496,20 @@ static int mute_job_reach(mute_job_t which)
             ble_on_up();
             ble_rsp_ask("Dot-7", rsp, sizeof(rsp));
             want = (int)KDRV_RADIO_JOB_BLE_RSP;
+            break;
+        }
+        case MUTE_BLE_HEAR_START:
+        case MUTE_BLE_HEAR_STOP: {
+            ble_on_up();
+            (void)ble_heard_request(ao_spy_other(), true);
+            pump();
+            want = (int)KDRV_RADIO_JOB_BLE_HEAR;
+            if ( MUTE_BLE_HEAR_STOP == which )
+            {
+                finish(KDRV_RADIO_JOB_BLE_HEAR, KODE_OK);
+                (void)ble_heard_request(ao_spy_other(), false);
+                pump();
+            }
             break;
         }
         case MUTE_C5_BEGIN:

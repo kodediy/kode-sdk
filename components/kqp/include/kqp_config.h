@@ -1877,8 +1877,8 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
 /* ---- Request doors: queue depths, and the post margin each leaves free (half a queue) ---- */
 /* AO_Radio's queue: a scan knock and a KODE answer, posted from other tasks,
  * leave KQP_RADIO_DROP_MARGIN slots free and are refused past it. The BLE
- * state, the pairing note and the lost link leave KQP_RADIO_KNOCK_MARGIN and
- * are owed past it: posted again once there is room, never lost. Neither
+ * state, the pairing note, the lost link and the knock of the BLE
+ * advertisement stream leave KQP_RADIO_KNOCK_MARGIN and are owed past it: posted again once there is room, never lost. Neither
  * margin reserves the slots it leaves. The Wi-Fi doors and the two scan
  * requests (wifi_scan_request(), ble_scan_request()) leave
  * KQP_RADIO_POST_MARGIN and tell their caller when they could not post. The
@@ -1889,7 +1889,7 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
 #define KQP_POWER_QUEUE_LEN     8U    /**< Events AO_Power buffers.           */
 #define KQP_RADIO_POST_MARGIN   8U    /**< Slots a Wi-Fi door, a scan request or a link ask leaves free. */
 #define KQP_RADIO_DROP_MARGIN   2U    /**< Slots a post that may be refused, a scan knock or a KODE answer, leaves free. */
-#define KQP_RADIO_KNOCK_MARGIN  2U    /**< Slots a post that is owed when refused leaves free: the BLE state, the pairing note, the lost link. */
+#define KQP_RADIO_KNOCK_MARGIN  2U    /**< Slots a post that is owed when refused leaves free: the BLE state, the pairing note, the lost link, the advertisements heard. */
 #define KQP_POWER_POST_MARGIN   4U    /**< Slots a power door leaves free.    */
 _Static_assert((KQP_RADIO_POST_MARGIN * 2U) == KQP_RADIO_QUEUE_LEN,
                "the radio door margin is half of AO_Radio's queue");
@@ -1914,6 +1914,13 @@ _Static_assert((KQP_FRAMES_POOL_MARGIN > 0U) && (KQP_FRAMES_POOL_MARGIN < KQP_SM
                "a tick leaves some of the small tier free, and the tier has more than that");
 _Static_assert(KQP_FRAMES_POOL_MARGIN < KQP_MEDIUM_POOL_COUNT,
                "a frame leaves some of the medium tier free, and the tier has more than that");
+#define KQP_HEARD_MARGIN        4U    /**< The fewest slots a BLE advertisement leaves free in its asker's queue, which is half of it when that is more: room for its own traffic and the answer to a stop. */
+#define KQP_HEARD_ANSWER_MARGIN 0U    /**< Slots a BLE advertisement stream's answer leaves free: 0 only asks that there be one. */
+#define KQP_HEARD_POOL_MARGIN   16U   /**< Blocks a BLE advertisement (the medium tier) leaves free in its tier, for every other AO's events; kqp.c pins the event to its tier. */
+_Static_assert(KQP_HEARD_MARGIN > 0U,
+               "an advertisement leaves some of its asker's queue free for the answer to a stop");
+_Static_assert((KQP_HEARD_POOL_MARGIN > 0U) && (KQP_HEARD_POOL_MARGIN < KQP_MEDIUM_POOL_COUNT),
+               "an advertisement leaves some of the medium tier free, and the tier has more than that");
 #define KQP_NET_MQTT_MARGIN     12U   /**< Slots inbound MQTT leaves free in AO_Net's queue: an identity answer's room, KODE_ID_PARTS_MAX parts and the end. */
 #define KQP_NET_LINK_MARGIN     0U    /**< Slots an MQTT link event leaves free in AO_Net's queue: it yields last of all. */
 #define KQP_NET_WAKE_MARGIN     1U    /**< Slots the channel's ring wake leaves free in AO_Net's queue. */

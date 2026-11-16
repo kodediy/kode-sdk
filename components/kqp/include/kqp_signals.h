@@ -1594,6 +1594,21 @@ enum KodeSignals {
                                  *   with a margin from esp-hosted's thread):
                                  *   a batch of frames waits in kdrv_frames'
                                  *   ring.                                    */
+    BLE_HEARD_REQ_SIG,          /**< AO_Radio: start or stop telling an AO about
+                                 *   the BLE advertisements the stack hears
+                                 *   (BleHeardReqEvt), ble_heard_request().
+                                 *   Answered to the asker in every state,
+                                 *   always, with BLE_HEARD_STATE_SIG.       */
+    BLE_HEARD_STATE_SIG,        /**< To the asker: listening or not, why, and
+                                 *   the totals (BleHeardStateEvt). Posted,
+                                 *   never published.                        */
+    BLE_HEARD_SIG,              /**< To the asker: one advertisement heard
+                                 *   (BleHeardEvt). Posted, never published. */
+    RADIO_HEARD_KNOCK_SIG,      /**< AO_Radio private (a static event from
+                                 *   NimBLE's host task, owed when the queue
+                                 *   has no room): kdrv_ble_heard's ring holds
+                                 *   records, or the stack ended the stream's
+                                 *   scan.                                   */
     WIFI_JOIN_REQ_SIG,          /**< AO_Radio: join WifiJoinEvt's network
                                  *   and remember it if it works.            */
     WIFI_LEAVE_REQ_SIG,         /**< AO_Radio: leave, and keep the stored
@@ -4879,6 +4894,64 @@ typedef struct {
                                             *   at 10, privacy their bit 4),
                                             *   then the name's element.         */
 } WifiFrameEvt;
+
+/** @brief Bytes of an advertisement's payload (kdrv_ble_heard.h's KDRV_BLE_HEARD_DATA_MAX); radio_heard.c asserts the two equal. */
+#define KBLE_HEARD_DATA_MAX     31U
+
+/** @brief Bytes of an advertiser's address (kdrv_ble_heard.h's KDRV_BLE_HEARD_ADDR_LEN); radio_heard.c asserts the two equal. */
+#define KBLE_HEARD_ADDR_LEN     6U
+
+#define KBLE_HEARD_RSSI_NONE    127 /**< BleHeardEvt.rssi: the controller gave no level. */
+
+#define KBLE_HEARD_ADDR_PUBLIC  0U  /**< BleHeardEvt.addr_type: a public address. */
+#define KBLE_HEARD_ADDR_RANDOM  1U  /**< BleHeardEvt.addr_type: a random address. */
+
+#define KBLE_HEARD_PDU_CONN     0U  /**< BleHeardEvt.pdu: ADV_IND, connectable and scannable. */
+#define KBLE_HEARD_PDU_DIRECT   1U  /**< BleHeardEvt.pdu: ADV_DIRECT_IND.                     */
+#define KBLE_HEARD_PDU_SCAN     2U  /**< BleHeardEvt.pdu: ADV_SCAN_IND, scannable only.       */
+#define KBLE_HEARD_PDU_NONCONN  3U  /**< BleHeardEvt.pdu: ADV_NONCONN_IND.                    */
+#define KBLE_HEARD_PDU_SCAN_RSP 4U  /**< BleHeardEvt.pdu: SCAN_RSP; a passive stream hears none. */
+#define KBLE_HEARD_PDU_OTHER    5U  /**< BleHeardEvt.pdu: anything else the stack reports.    */
+
+/** @brief Why an advertisement stream is, or is not, listening (BleHeardStateEvt.why). */
+typedef enum {
+    KBLE_HEARD_OK = 0,      /**< Listening, or stopped as asked.                                       */
+    KBLE_HEARD_NO_LINK,     /**< The C5 link is down, or went down under the stream.                   */
+    KBLE_HEARD_BLE_OFF,     /**< Bluetooth is off in Settings or its stack is not up, or went off.     */
+    KBLE_HEARD_BUSY,        /**< Something that is not cut holds the radio: a Wi-Fi scan, a row, an update. */
+    KBLE_HEARD_MEMORY,      /**< No room for the ring.                                                 */
+    KBLE_HEARD_REFUSED,     /**< The stack refused the scan, or ended it by itself.                    */
+    KBLE_HEARD_RESTING,     /**< The board is going to rest.                                           */
+    KBLE_HEARD_CANCELLED    /**< Ended early: a newer Bluetooth request took its place.                */
+} kble_heard_why_t;
+
+/** @brief BLE_HEARD_REQ_SIG: start or stop, and who to tell. */
+typedef struct {
+    QEvt     super;
+    QActive *who;       /**< Where every answer goes.                       */
+    bool     on;        /**< true to listen, false to stop.                 */
+} BleHeardReqEvt;
+
+/** @brief BLE_HEARD_STATE_SIG: the answer to every request, and the end of a stream. */
+typedef struct {
+    QEvt     super;
+    bool     on;        /**< Listening now.                                          */
+    uint8_t  why;       /**< kble_heard_why_t.                                       */
+    uint32_t heard;     /**< Advertisements heard since the start.                   */
+    uint32_t dropped;   /**< Not handed over since the start: the ring's, the queue's, the pool's. */
+} BleHeardStateEvt;
+
+/** @brief BLE_HEARD_SIG: one advertisement, as the stack reported it. */
+typedef struct {
+    QEvt     super;
+    uint8_t  addr[KBLE_HEARD_ADDR_LEN]; /**< As printed.                                   */
+    uint8_t  addr_type;                 /**< KBLE_HEARD_ADDR_PUBLIC or _RANDOM.            */
+    int8_t   rssi;                      /**< dBm; KBLE_HEARD_RSSI_NONE when not measured.  */
+    uint8_t  pdu;                       /**< KBLE_HEARD_PDU_*.                             */
+    uint8_t  len;                       /**< Bytes in data.                                */
+    uint8_t  data[KBLE_HEARD_DATA_MAX]; /**< The payload as on the air; zeros past len.    */
+    uint32_t dropped;                   /**< The stream's dropped total at this hand-over. */
+} BleHeardEvt;
 
 /** @brief Bytes of a network name in the radio check: 32 characters and the terminator. */
 #define RADIO_PROBE_SSID_BYTES  33U

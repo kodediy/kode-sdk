@@ -145,6 +145,10 @@ if(CONFIG_KODEOS_RADIO)
     list(APPEND srcs "radio/src/radio_knock.c")
     # The three knocks other tasks reach AO_Radio with.
     list(APPEND srcs "radio/src/radio_knocks.c")
+    # The BLE advertisement door: the same, for what the host stack hears.
+    if(CONFIG_KODEOS_BLE)
+        list(APPEND srcs "radio/src/radio_heard.c")
+    endif()
     if(CONFIG_KODEOS_CONSOLE)
         list(APPEND srcs "radio/src/radio_verbs.c")
     endif()

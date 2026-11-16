@@ -1623,6 +1623,54 @@ typedef ScanRspEvt kode_sys_ble_scan_answer_t;
  */
 kode_status_t kode_sys_ble_scan(QActive *me, uint32_t ms);
 
+/* ---- Bluetooth advertisements, AO_Radio: hearing every one around ----
+ * The host stack can listen passively, with no end, and say what it hears:
+ * one record per advertisement, as the stack reported it (the advertiser's
+ * address and its kind, the level and the payload as on the air). Nothing is
+ * sent, no device is connected to and none is listed once: a device that
+ * advertises ten times a second is ten records. The radio listens all the
+ * time while the stream is on, so a BLE console goes slower meanwhile.
+ * AO_Radio posts the records to @p me, never publishes them, the first
+ * after the answer that says on, and keeps half of its queue free
+ * (KQP_HEARD_MARGIN slots at least, so @p me needs a queue longer than
+ * that): what does not fit is dropped and counted in the next record's
+ * @c dropped and in the stream's last answer, never asserted. It never
+ * brings Bluetooth up: with it off in Settings, or its stack down, the
+ * answer is KBLE_HEARD_BLE_OFF.
+ *
+ * One AO listens at a time, and the newest Bluetooth request wins, as it
+ * does between two listens (kode_sys_ble_scan()). A start ends the listen
+ * somebody asked for, whose answer says KODE_CANCELLED, and another AO's
+ * request takes the stream. A newer listen ends the stream in turn, and it
+ * is told KBLE_HEARD_CANCELLED at once. A Wi-Fi request ends nothing of it.
+ * Behind what is not cut (a Wi-Fi scan somebody asked for, the board's own
+ * round, an install, an update) a start is answered KBLE_HEARD_BUSY: ask
+ * again. Bluetooth switched off, the board's rest, a C5 update and the link
+ * going end the stream too, each with its reason. A stream that was ended
+ * does not come back by itself: ask again. For an Active Object only: a
+ * task has no such call. Without CONFIG_KODEOS_BLE the request is refused at
+ * once with KODE_DENIED.
+ */
+
+/* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
+/** @brief Answers every request and ends every stream (BLE_HEARD_STATE_SIG): @c on, @c why (kble_heard_why_t), @c heard since the start and @c dropped. A stop the worker could not take is @c on with @c why KBLE_HEARD_BUSY: ask again. A stop asked again while the first is still being served shares its answer. */
+typedef BleHeardStateEvt kode_sys_ble_heard_state_t;
+
+/* cppcheck-suppress misra-c2012-2.3 ; a record's name for the apps that read it, never used inside the SDK */
+/** @brief One advertisement heard (BLE_HEARD_SIG): @c addr, @c addr_type (KBLE_HEARD_ADDR_*), @c rssi (KBLE_HEARD_RSSI_NONE when not measured), @c pdu (KBLE_HEARD_PDU_*), @c len, @c data and @c dropped, the stream's total so far. */
+typedef BleHeardEvt kode_sys_ble_heard_t;
+
+/**
+ * @brief Start or stop hearing every BLE advertisement around. Passive: nothing is sent.
+ * @param me The asking AO; the two signals above come to it, the answer
+ *           always, in every state of the link.
+ * @param on true to listen, false to stop.
+ * @return As the requests' rules of this header: KODE_DENIED without
+ *         CONFIG_KODEOS_BLE or for a NULL @p me, KODE_NO_RESOURCES when the
+ *         request could not be posted, KODE_OK.
+ */
+kode_status_t kode_sys_ble_heard(QActive *me, bool on);
+
 /* =========================================================================
  * Immediate calls
  *

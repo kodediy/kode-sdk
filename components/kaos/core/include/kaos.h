@@ -2208,6 +2208,42 @@ void wifi_scan_request_wait(ScanWaiter *wait, uint32_t gen);
 bool wifi_frames_request(QActive *who, bool on, uint8_t channel);
 
 /**
+ * @brief Ask AO_Radio to start or stop telling @p who about BLE advertisements.
+ *
+ * Posts and returns. Always answered to @p who with BLE_HEARD_STATE_SIG, in
+ * every state of the link: with it down the answer is KBLE_HEARD_NO_LINK. A
+ * stop asked again while the first is still being served shares its answer.
+ * While on, @p who gets one BLE_HEARD_SIG per advertisement handed over, the
+ * first of them after the answer that says on. All of them are posted to
+ * @p who, never published, and leave half of its queue free (KQP_HEARD_MARGIN
+ * slots at least): what its queue or the pool has no room for is counted in
+ * the next one's @c dropped. Passive: nothing is sent. Never brings Bluetooth
+ * up: with it off in Settings, or its stack down, the answer is
+ * KBLE_HEARD_BLE_OFF.
+ *
+ * The newest Bluetooth request wins, as ble_scan_request() says of a listen.
+ * A start ends the Bluetooth listen somebody asked for, running or waiting,
+ * whose asker is told then, and goes when the worker is back; another
+ * asker's start takes the stream. A newer listen ends the stream in turn,
+ * and so do the radio check's name find and the production row's scan as
+ * they start: @p who is told KBLE_HEARD_CANCELLED at once. A Wi-Fi request
+ * ends nothing of it. Behind what is not cut (a Wi-Fi scan somebody asked
+ * for, the board's own round, the radio check, the production row, an
+ * install, an update) a start is answered KBLE_HEARD_BUSY. Bluetooth
+ * switched off, the board's rest, a C5 update and the link going end the
+ * stream too, each with its reason. A stream that was ended does not come
+ * back by itself: @p who asks again. Exists only in a build with
+ * CONFIG_KODEOS_BLE, as the other ble_* doors do.
+ *
+ * @param who Where the answers go. Never NULL.
+ * @param on  true to listen, false to stop.
+ * @return true when the request was posted; false when the event pool was dry
+ *         or AO_Radio's queue is within KQP_RADIO_CMD_MARGIN of full, and then
+ *         nothing answers.
+ */
+bool ble_heard_request(QActive *who, bool on);
+
+/**
  * @brief Ask AO_Radio to join @p ssid.
  *
  * Answered with WIFI_STATE_SIG: got-ip, or the refusal. Passwords live in the C5's

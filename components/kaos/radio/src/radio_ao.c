@@ -39,6 +39,9 @@
 
 #include "radio_frames.h"
 #include "radio_knocks.h"
+#ifdef CONFIG_KODEOS_BLE
+#include "radio_heard.h"
+#endif
 
 #define TAG "kaos.radio"
 
@@ -109,6 +112,7 @@ typedef enum {
     RADIO_OUT_AMP_DONE,
     RADIO_OUT_WIFI_PROBE_DONE,  /**< One channel of the radio check was heard. */
     RADIO_OUT_BLE_FIND_DONE,    /**< The radio check's BLE listen ended.      */
+    RADIO_OUT_BLE_HEAR_DONE,    /**< The advertisement stream's scan started or stopped. */
 #if CONFIG_KODE_LOWPOWER
     RADIO_OUT_SLEEP_DONE,       /**< The sentinel was started or stopped.    */
 #endif
@@ -149,6 +153,8 @@ enum {
 #define RADIO_LP_WHY_FAILED    "radio sleep failed"  /**< The sentinel could not be made.        */
 #define RADIO_LP_WHY_DEAF      "c5 would not wake"   /**< The C5 did not answer the stop.        */
 #define RADIO_LP_WHY_FRAMES    "frames"              /**< A Wi-Fi frames stream was on, or ends. */
+/* cppcheck-suppress misra-c2012-2.5 ; used below, in a region cppcheck reads under CONFIG_KODE_LOWPOWER, whose macro uses it does not record */
+#define RADIO_LP_WHY_HEARD     "heard"               /**< A BLE advertisement stream was on, or ends. */
 
 /** @brief Free places AO_Radio's queue keeps for work that matters more than
  *         a wake note (see radio_sleep_note()). */
@@ -643,6 +649,9 @@ typedef struct {
     uint8_t *svc_buf[KODE_SVC_COUNT];  /**< The answer's payload.          */
     bool     info_asked;               /**< INFO went out on this link.    */
     RadioFrames frames;                /**< The Wi-Fi frames door: its asker and its request. */
+#ifdef CONFIG_KODEOS_BLE
+    RadioHeard  heard;                 /**< The BLE advertisement door: its asker and its hear job. */
+#endif
 
     /* Across a jump. A park is asked by AO_Boot before it restarts the
      * board; an adoption is what the next firmware does with a C5 the last
@@ -1152,6 +1161,7 @@ enum {
 
 #if RADIO_ASKS
 static void radio_scan_replace(Radio * const me, uint8_t kind, bool listing);
+static void radio_heard_stream_cancel(Radio * const me);
 static bool scan_alive(Radio const * const me, uint8_t kind);
 
 /**
@@ -1503,6 +1513,23 @@ bool ble_scan_request(uint32_t ms, uint8_t *gen)
         posted = QACTIVE_POST_X(AO_Radio, &e->super, KQP_RADIO_POST_MARGIN, NULL);
     }
     return posted;
+}
+
+bool ble_heard_request(QActive *who, bool on)
+{
+    if ( NULL == who )
+    {
+        return false;
+    }
+    BleHeardReqEvt *const e = Q_NEW_X(BleHeardReqEvt, 0U, BLE_HEARD_REQ_SIG);
+    if ( NULL == e )
+    {
+        return false;
+    }
+    e->who = who;
+    e->on  = on;
+    /* A refused post gives the event back to the pool: nothing answers then. */
+    return QACTIVE_POST_X(AO_Radio, &e->super, KQP_RADIO_CMD_MARGIN, who);
 }
 
 /**
@@ -3144,6 +3171,10 @@ static bool scan_ask_take(Radio * const me, QEvt const * const e)
         return false;
     }
     radio_scan_replace(me, a->kind, false);
+    if ( (uint8_t)KQP_SCAN_BLE == a->kind )
+    {
+        radio_heard_stream_cancel(me);   /* the newest Bluetooth request has the radio */
+    }
     me->ask_scan = (uint8_t)SCAN_ASK_OWED;
     me->ask_kind = a->kind;
     me->ask_ms   = a->ms;
@@ -4879,11 +4910,36 @@ static bool scan_join_running(Radio const * const me)
 }
 
 /**
+ * @brief Whether the job with the worker starts or stops the BLE advertisement stream.
+ *
+ * It ends in milliseconds, and the stream is a Bluetooth request like a
+ * listen: a newer one waits for the job instead of being answered busy.
+ *
+ * @param me   The AO.
+ * @param kind KQP_SCAN_WIFI or KQP_SCAN_BLE: the radio of the request that waits.
+ * @return true for a Bluetooth request behind a hear job.
+ */
+static bool scan_hear_on_worker(Radio const * const me, uint8_t kind)
+{
+    bool on = false;
+
+#ifdef CONFIG_KODEOS_BLE
+    on = ((uint8_t)KQP_SCAN_BLE == kind) && me->winflight && (NULL != me->jobs)
+         && (KDRV_RADIO_JOB_BLE_HEAR == me->jobs->wreq.type);
+#else
+    (void)me;
+    (void)kind;
+#endif
+    return on;
+}
+
+/**
  * @brief Whether a listing of @p kind is taken now, to start or to wait.
  * @param me   The AO.
  * @param kind KQP_SCAN_WIFI or KQP_SCAN_BLE.
  * @return true when the channel is free, or the job with the worker is a scan
- *         of that radio or a join; false behind a job that is not cut and is
+ *         of that radio, a join or a job of the BLE advertisement stream;
+ *         false behind a job that is not cut and is
  *         not waited for (a scan of the other radio, a row, an install), and
  *         with the board's own round owed, which would refuse it as it starts.
  */
@@ -4893,7 +4949,7 @@ static bool scan_can_take(Radio const * const me, uint8_t kind)
 
     if ( me->busy && !scan_round_owed(me) )
     {
-        can = scan_on_worker(me, kind) || scan_join_running(me);
+        can = scan_on_worker(me, kind) || scan_join_running(me) || scan_hear_on_worker(me, kind);
     }
     return can;
 }
@@ -5495,6 +5551,7 @@ static radio_out_t radio_out_of(kdrv_radio_job_t type)
         case KDRV_RADIO_JOB_AMP:          out = RADIO_OUT_AMP_DONE;          break;
         case KDRV_RADIO_JOB_WIFI_PROBE:   out = RADIO_OUT_WIFI_PROBE_DONE;   break;
         case KDRV_RADIO_JOB_BLE_FIND:     out = RADIO_OUT_BLE_FIND_DONE;     break;
+        case KDRV_RADIO_JOB_BLE_HEAR:     out = RADIO_OUT_BLE_HEAR_DONE;     break;
 #if CONFIG_KODE_LOWPOWER
         case KDRV_RADIO_JOB_SLEEP:        out = RADIO_OUT_SLEEP_DONE;        break;
 #endif
@@ -5519,6 +5576,18 @@ static bool radio_job_ends_frames(kdrv_radio_job_t type)
     return (KDRV_RADIO_JOB_WIFI_STOP == type) || (KDRV_RADIO_JOB_WIFI_PREPARE == type)
            || (KDRV_RADIO_JOB_WIFI_JOIN == type) || (KDRV_RADIO_JOB_WIFI_ADOPT == type);
 }
+
+#ifdef CONFIG_KODEOS_BLE
+/**
+ * @brief Whether a job starts a scan of its own on the host stack, which has one.
+ * @param type The job.
+ * @return true for a job a BLE advertisement stream gives the scan to.
+ */
+static bool radio_job_takes_scan(kdrv_radio_job_t type)
+{
+    return (KDRV_RADIO_JOB_BLE_SCAN == type) || (KDRV_RADIO_JOB_BLE_FIND == type);
+}
+#endif
 
 /**
  * @brief Submit a job that needs arguments, marking the AO busy.
@@ -5574,6 +5643,16 @@ static bool radio_submit_req(Radio * const me, const kdrv_radio_req_t *req)
          * goes with it, so a stream ends here, told before the job runs. */
         (void)radio_frames_end(&me->frames, KWIFI_FRAMES_WIFI_OFF);
     }
+#ifdef CONFIG_KODEOS_BLE
+    if ( radio_job_takes_scan(req->type) )
+    {
+        /* The host has one scan and this job starts its own: a stream that
+         * is still on ends here, told before the job runs, and the job's
+         * own start cancels the stream's scan. A listen somebody asked for
+         * ended it already, when it was taken. */
+        radio_heard_cancel(&me->heard);
+    }
+#endif
     me->jobs->wreq = *req;
     if ( kqp_worker_submit(&me->worker, &radio_job_run, &me->jobs->wreq,
                           RADIO_JOB_SIG, &seq) != KODE_OK )
@@ -5597,6 +5676,111 @@ static bool radio_submit(Radio * const me, kdrv_radio_job_t job)
     (void)memset(&req, 0, sizeof(req));
     req.type = job;
     return radio_submit_req(me, &req);
+}
+
+#ifdef CONFIG_KODEOS_BLE
+/**
+ * @brief How the advertisement door sends a hear job: to the radio worker, when it is free.
+ * @param ctx This AO, as radio_heard_init() was given it.
+ * @param on  true to start the passive scan, false to stop it.
+ * @return KODE_OK when the worker has it; KODE_NO_RESOURCES when the worker
+ *         is inside another job; KODE_ERROR when it would not take it.
+ */
+static kode_status_t radio_hear_submit(void *ctx, bool on)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; radio_heard_init() was given this AO as the context */
+    Radio * const    me = (Radio *)ctx;
+    kode_status_t    rc = KODE_OK;
+    kdrv_radio_req_t req;
+
+    if ( me->busy )
+    {
+        rc = KODE_NO_RESOURCES;
+    }
+    else
+    {
+        (void)memset(&req, 0, sizeof(req));
+        req.type = KDRV_RADIO_JOB_BLE_HEAR;
+        req.on   = on;
+        if ( !radio_submit_req(me, &req) )
+        {
+            rc = KODE_ERROR;
+        }
+    }
+    return rc;
+}
+
+/**
+ * @brief Start the stream that waits for the worker, if it can start.
+ *
+ * As an asked scan that waits (scan_ask_start()): behind a row, an install
+ * or an update that took the channel meanwhile it is never owed, and its
+ * asker is told busy.
+ *
+ * @param me The AO.
+ * @return true when the start's job is with the worker.
+ */
+static bool radio_heard_owed_start(Radio * const me)
+{
+    bool started = false;
+
+    if ( !radio_heard_waits(&me->heard) )
+    {
+        /* Nothing waits. */
+    }
+    else if ( scan_ask_blocked(me) )
+    {
+        (void)radio_heard_end(&me->heard, KBLE_HEARD_BUSY);
+    }
+    else if ( scan_channel_free(me) )
+    {
+        started = radio_heard_settle(&me->heard);
+    }
+    else
+    {
+        /* The channel is not free yet: the next job that ends pays it. */
+    }
+    return started;
+}
+#endif
+
+#if RADIO_ASKS
+/**
+ * @brief A listen somebody asked for was taken: the BLE advertisement stream
+ *        ends for it, in a build that has one.
+ *
+ * The newest request of a radio wins (radio_scan_replace()), and the stream
+ * is a Bluetooth request like a listen: its asker is told
+ * KBLE_HEARD_CANCELLED at once.
+ *
+ * @param me The AO.
+ */
+static void radio_heard_stream_cancel(Radio * const me)
+{
+#ifdef CONFIG_KODEOS_BLE
+    radio_heard_cancel(&me->heard);
+#else
+    (void)me;
+#endif
+}
+#endif /* RADIO_ASKS */
+
+/**
+ * @brief End the asker's BLE advertisement stream, in a build that has one.
+ * @param me  The AO.
+ * @param why What the asker is told.
+ * @return true while the stream's scan may still be on (radio_heard_end());
+ *         false in a build without Bluetooth.
+ */
+static bool radio_heard_stream_end(Radio * const me, kble_heard_why_t why)
+{
+#ifdef CONFIG_KODEOS_BLE
+    return radio_heard_end(&me->heard, why);
+#else
+    (void)me;
+    (void)why;
+    return false;
+#endif
 }
 
 /**
@@ -7814,6 +7998,14 @@ static void radio_settle(Radio * const me)
     {
         return;
     }
+#ifdef CONFIG_KODEOS_BLE
+    /* A stream that ended a listen waits for the worker as the listen that
+     * replaces one does. */
+    if ( radio_heard_owed_start(me) )
+    {
+        return;
+    }
+#endif
 #endif
     /* After the services and before the row: an image already verified in
      * PSRAM has a host blocked on the wire behind it, and the row has a
@@ -9279,6 +9471,9 @@ void Radio_ctor(void)
     }
     me->info_asked = false;
     radio_frames_init(&me->frames, &radio_frames_send, me);
+#ifdef CONFIG_KODEOS_BLE
+    radio_heard_init(&me->heard, &radio_hear_submit, me);
+#endif
     me->park_phase  = (uint8_t)PARK_IDLE;
     me->park_target = 0U;
     me->adopt        = false;
@@ -10040,11 +10235,22 @@ static void radio_lp_decide(Radio * const me, uint32_t round, bool off)
         const char * const why = radio_lp_busy_why(me);
 
         /* A stream keeps the C5 listening and wakes this chip at every
-         * batch: an ASLEEP round ends it, and is busy until its STOP is
-         * answered. OFF holds the C5 in reset, which ends it anyway. */
-        if ( (!off) && radio_frames_end(&me->frames, KWIFI_FRAMES_RESTING) )
+         * batch or advertisement: an ASLEEP round ends it, and is busy until
+         * its STOP is answered. OFF holds the C5 in reset, which ends a
+         * frames stream anyway. An advertisement stream is ended for both:
+         * its asker is told the board rests, and the round is busy only
+         * until the stream's scan has stopped. Both streams are ended,
+         * whichever answers the round. */
+        bool const frames_on = (!off) && radio_frames_end(&me->frames, KWIFI_FRAMES_RESTING);
+        bool const heard_on  = radio_heard_stream_end(me, KBLE_HEARD_RESTING);
+
+        if ( frames_on )
         {
             radio_lp_answer(me, true, RADIO_LP_WHY_FRAMES);
+        }
+        else if ( heard_on )
+        {
+            radio_lp_answer(me, true, RADIO_LP_WHY_HEARD);
         }
         else if ( NULL != why )
         {
@@ -10476,6 +10682,7 @@ static QState Radio_initial(Radio * const me, void const * const par)
      * same one AO_AppMgr uses to write the apps region. */
 #if CONFIG_KODEOS_BLE
     (void)kdrv_ble_set_cb(&radio_on_ble);
+    (void)kdrv_ble_set_hear_cb(&radio_heard_note);
     (void)kdrv_ble_app_set_write_cb(&radio_on_ble_write);
     (void)kdrv_ble_app_set_taken_cb(&radio_on_ble_taken);
     /* The Battery service reports AO_Power's charge: its readings are heard
@@ -10723,6 +10930,20 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#ifdef CONFIG_KODEOS_BLE
+        case BLE_HEARD_REQ_SIG: {
+            /* The advertisements come from the C5's controller, and the link is down. */
+            radio_heard_refuse(Q_EVT_CAST(BleHeardReqEvt), KBLE_HEARD_NO_LINK);
+            status = Q_HANDLED();
+            break;
+        }
+        case RADIO_HEARD_KNOCK_SIG: {
+            /* A record from a link that is gone: nobody is left to hand it to. */
+            radio_heard_drop();
+            status = Q_HANDLED();
+            break;
+        }
+#endif
 #if RADIO_ASKS
         case RADIO_SCAN_ASK_SIG: {
             /* The link is on its way down: the scan would bring it back up
@@ -11748,6 +11969,55 @@ static void radio_say_busy(const char *what, const char *how)
     }
 }
 
+#ifdef CONFIG_KODEOS_BLE
+/**
+ * @brief Why a start of the advertisement stream is turned away before the door sees it.
+ *
+ * Bluetooth off in Settings or its stack not up; the board on its way to
+ * rest; and what a Bluetooth listen is answered busy behind, because none of
+ * it is cut: the production row, an install, an update, the board's own
+ * round, the radio check, a Wi-Fi scan somebody asked for, and a job that is
+ * neither a Bluetooth listen, a join nor the stream's own. A Bluetooth listen
+ * in flight is not in the list: the start ends it (radio_scan_replace()). A
+ * stop is never turned away here, nor is a start while another asker holds
+ * the stream: those are the door's to answer.
+ *
+ * @param me The AO.
+ * @param r  The request.
+ * @return KBLE_HEARD_OK when the door may take it.
+ */
+static kble_heard_why_t radio_heard_why_not(Radio const * const me, BleHeardReqEvt const * const r)
+{
+    kble_heard_why_t why = KBLE_HEARD_OK;
+
+    if ( !r->on )
+    {
+        /* A stop is the door's to answer. */
+    }
+    else if ( (!me->ble_want) || (kdrv_ble_state() == KDRV_BLE_OFF) )
+    {
+        why = KBLE_HEARD_BLE_OFF;
+    }
+    else if ( me->lp_rest )
+    {
+        why = KBLE_HEARD_RESTING;
+    }
+    else if ( scan_ask_blocked(me)
+              || scan_round_owed(me)
+              || ((uint8_t)PB_IDLE != me->pb_phase)
+              || scan_alive(me, (uint8_t)KQP_SCAN_WIFI)
+              || (!scan_can_take(me, (uint8_t)KQP_SCAN_BLE)) )
+    {
+        why = KBLE_HEARD_BUSY;
+    }
+    else
+    {
+        /* Free, or behind what the start ends or waits for. */
+    }
+    return why;
+}
+#endif
+
 /**
  * @brief Radio_up's answer to a job outcome, or to the link being lost.
  *
@@ -12087,6 +12357,12 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             status = Q_HANDLED();
             break;
         }
+        case RADIO_OUT_BLE_HEAR_DONE: {
+            me->busy = false;
+            radio_heard_done(&me->heard, me->jobs->wreq.on, (kode_status_t)job->status);
+            status = Q_HANDLED();
+            break;
+        }
         case RADIO_OUT_BLE_UNPAIR_DONE: {
             me->busy = false;
             if ( me->wiping && ((uint8_t)C5_WIPE_BLE == me->wipe_step) )
@@ -12107,6 +12383,9 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
         case RADIO_OUT_BLE_QUIET_DONE:
         case RADIO_OUT_BLE_STOP_DONE: {
             me->busy = false;
+            /* Quiet and stop end the stream's scan and say nothing: this is
+             * where the door learns it. */
+            radio_heard_quiet(&me->heard);
             ble_publish_state(me);
             if ( (uint8_t)PARK_QUIET == me->park_phase )
             {
@@ -12299,6 +12578,9 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             radio_id_lost(me);
             radio_wipe_lost(me, KODE_SVC_COUNT);
             radio_frames_gone(&me->frames);
+#ifdef CONFIG_KODEOS_BLE
+            radio_heard_gone(&me->heard);
+#endif
 #if CONFIG_KODEOS_WIFI
             /* The C5 boots on the default power save; nothing it held
              * survives the link. */
@@ -12346,6 +12628,35 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#ifdef CONFIG_KODEOS_BLE
+        case BLE_HEARD_REQ_SIG: {
+            BleHeardReqEvt const * const r   = Q_EVT_CAST(BleHeardReqEvt);
+            kble_heard_why_t const       why = radio_heard_why_not(me, r);
+
+            if ( KBLE_HEARD_OK != why )
+            {
+                radio_heard_refuse(r, why);
+            }
+            else
+            {
+                if ( r->on )
+                {
+                    /* The newest Bluetooth request wins: a listen somebody
+                     * asked for ends here, its asker told at once, and the
+                     * start waits for the worker to come back from it. */
+                    radio_scan_replace(me, (uint8_t)KQP_SCAN_BLE, false);
+                }
+                radio_heard_request(&me->heard, r);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case RADIO_HEARD_KNOCK_SIG: {
+            radio_heard_knock(&me->heard);
+            status = Q_HANDLED();
+            break;
+        }
+#endif
         case RADIO_TEST_REQ_SIG: {
             if ( (uint8_t)TEST_IDLE != me->test_phase )
             {
@@ -12976,6 +13287,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             {
                 me->ble_scan_gen = gen;
                 radio_scan_replace(me, (uint8_t)KQP_SCAN_BLE, true);
+                radio_heard_stream_cancel(me);
                 if ( me->busy )
                 {
                     /* The listen before it is leaving the worker, or a join
@@ -12998,6 +13310,10 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         }
         case BLE_STOP_REQ_SIG: {
             radio_flag_set(me, SVC_BLE, false);
+            /* Before anything goes to the worker: the stop of the stream's
+             * scan is the first job, and the quiet that takes Bluetooth down
+             * follows. */
+            (void)radio_heard_end(&me->heard, KBLE_HEARD_BLE_OFF);
             if ( me->busy )
             {
                 /* Refused now, owed from now - the settle takes BLE down as
@@ -13934,10 +14250,19 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
         /* Whoever transitions here has set the phase and the counters -
          * Radio_up's FLASH_REQ_SIG arm at OPENING with the buffer released,
          * RADIO_INSTALL_GO_SIG at BEGIN with the image already staged in it.
-         * The entry only ends a Wi-Fi frames stream: the update owns the
-         * C5 and reboots it. */
+         * The entry ends the streams the update would not survive, a Wi-Fi
+         * frames stream and a BLE advertisement stream: the update owns the
+         * C5 and reboots it. The frames stop goes by the KODE service, which
+         * the update does not use; the BLE stop is a job of the radio worker,
+         * submitted only when the worker is free. On the file or URL path it
+         * is (nothing is in flight until the first chunk is read), and on the
+         * cable (staged) path the worker is held already for the card's
+         * unmount, so no stop is submitted: the asker is told BUSY, the
+         * stream's scan stays on until the C5 reboots, and the knocks it
+         * sends are dropped one at a time (RADIO_HEARD_KNOCK_SIG below). */
         case Q_ENTRY_SIG: {
             (void)radio_frames_end(&me->frames, KWIFI_FRAMES_BUSY);
+            (void)radio_heard_stream_end(me, KBLE_HEARD_BUSY);
             status = Q_HANDLED();
             break;
         }
@@ -13955,6 +14280,30 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
             }
             break;
         }
+#ifdef CONFIG_KODEOS_BLE
+        case BLE_HEARD_REQ_SIG: {
+            BleHeardReqEvt const * const r = Q_EVT_CAST(BleHeardReqEvt);
+
+            if ( r->on )
+            {
+                radio_heard_refuse(r, KBLE_HEARD_BUSY);
+                status = Q_HANDLED();
+            }
+            else
+            {
+                status = Q_SUPER(&Radio_up);   /* a stop is the door's to answer */
+            }
+            break;
+        }
+        case RADIO_HEARD_KNOCK_SIG: {
+            /* The update owns the worker: a record that still comes is
+             * emptied, and the scan the entry could not stop dies with the
+             * C5's reboot. */
+            radio_heard_drop();
+            status = Q_HANDLED();
+            break;
+        }
+#endif
         case STORAGE_CMD_RSP_SIG: {
             switch ( radio_asked(me) )
             {
@@ -14120,6 +14469,13 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
                     }
                     break;
                 }
+#ifdef CONFIG_KODEOS_BLE
+                case RADIO_OUT_BLE_HEAR_DONE: {
+                    /* The stop the entry sent for an advertisement stream. */
+                    radio_heard_done(&me->heard, me->jobs->wreq.on, (kode_status_t)job->status);
+                    break;
+                }
+#endif
                 case RADIO_OUT_C5_WRITE_DONE: {
                     if ( (uint8_t)KODE_OK != job->status )
                     {
