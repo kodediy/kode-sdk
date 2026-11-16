@@ -543,6 +543,46 @@ static void ble_taken_event(const BleAppTakenEvt *t)
     kode_event_push(KODE_EVENT_BLE_TAKEN_NAME, t->name, (int32_t)t->left, NULL);
 }
 
+/* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
+/** @brief Bytes of a pairing's code as text: six digits and a NUL. */
+#define BLE_PAIR_CODE_TEXT  7U
+
+/* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
+/** @brief The first number a pairing's code never reaches: its six digits. */
+#define BLE_PAIR_CODE_END   1000000U
+
+/**
+ * @brief Push "ble_pair_code" for a code to show, or "ble_pair_done" for a
+ *        pairing that ended.
+ *
+ * @param p The pairing: the code is the value and, with its leading zeroes,
+ *          the text; an end's value is 1 when the device is bonded.
+ */
+static void ble_pair_event(const BlePairEvt *p)
+{
+    if ( KODE_SYS_BLE_PAIR_SHOW == p->phase )
+    {
+        char code[BLE_PAIR_CODE_TEXT];
+
+        (void)snprintf(code, sizeof(code), "%06u", (unsigned)(p->passkey % BLE_PAIR_CODE_END));
+        kode_event_push(KODE_EVENT_BLE_PAIR_CODE_NAME, NULL, (int32_t)p->passkey, code);
+    }
+    else if ( KODE_SYS_BLE_PAIR_DONE == p->phase )
+    {
+        int32_t bonded = 0;
+
+        if ( KODE_SYS_BLE_PAIR_OK == p->outcome )
+        {
+            bonded = 1;
+        }
+        kode_event_push(KODE_EVENT_BLE_PAIR_DONE_NAME, NULL, bonded, NULL);
+    }
+    else
+    {
+        /* nothing pending: no event */
+    }
+}
+
 /**
  * @brief Push "ble_connected" or "ble_disconnected" for an edge of the link.
  *
@@ -743,6 +783,11 @@ static QState KodeStandard_running(KodeStandard * const me, QEvt const * const e
         }
         case BLE_APP_TAKEN_SIG: {
             ble_taken_event(Q_EVT_CAST(BleAppTakenEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case BLE_PAIR_SIG: {
+            ble_pair_event(Q_EVT_CAST(BlePairEvt));
             status = Q_HANDLED();
             break;
         }

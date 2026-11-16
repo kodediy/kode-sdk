@@ -225,11 +225,16 @@ kode_buttons_t kode_button_read_all(void);
  * are still queued. A listener or a waiter for any of the four has the radio
  * send them.
  *
+ * ble_pair_code and ble_pair_done: a device is pairing with the board. The
+ * first carries the code to show, as the value and, with its leading zeroes,
+ * as six digits of text; the second says the pairing ended, value 1 when the
+ * device is bonded and 0 when it is not. See kode_ble_pair_open().
+ *
  * An event comes only from an owner the app links, and an app links an owner
- * by naming one of its calls. Ten events have an owner no other call need
+ * by naming one of its calls. Twelve events have an owner no other call need
  * link: ir_received (the infrared), wifi_connected and wifi_lost (the radio,
  * which joins a remembered network by itself), the three touch events (the
- * touch panel) and the four Bluetooth events (the radio). Name those with
+ * touch panel) and the six Bluetooth events (the radio). Name those with
  * KODE_EVENT_IR_RECEIVED, KODE_EVENT_WIFI_CONNECTED, KODE_EVENT_WIFI_LOST, the
  * KODE_EVENT_TOUCH_ constants and the KODE_EVENT_BLE_ constants, which link
  * it. Typed as a string in an app that links no such owner, the event is
@@ -258,6 +263,25 @@ kode_buttons_t kode_button_read_all(void);
 /* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
 /** @brief "ble_taken", naming the radio so the app links it. */
 #define KODE_EVENT_BLE_TAKEN        kode_event_ble_taken()
+
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
+/** @brief "ble_pair_code", naming the radio so the app links it. */
+#define KODE_EVENT_BLE_PAIR_CODE    kode_event_ble_pair_code()
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
+/** @brief "ble_pair_done", naming the radio so the app links it. */
+#define KODE_EVENT_BLE_PAIR_DONE    kode_event_ble_pair_done()
+
+/**
+ * @brief The radio's event name for a pairing's code; what KODE_EVENT_BLE_PAIR_CODE calls.
+ * @return "ble_pair_code".
+ */
+const char *kode_event_ble_pair_code(void);
+
+/**
+ * @brief The radio's event name for a pairing that ended; what KODE_EVENT_BLE_PAIR_DONE calls.
+ * @return "ble_pair_done".
+ */
+const char *kode_event_ble_pair_done(void);
 
 /**
  * @brief The radio's event name for a phone that connected; what KODE_EVENT_BLE_CONNECTED calls.
@@ -1386,6 +1410,124 @@ size_t kode_ble_queue_room(const char *chr);
  *         kode_ble_queue_room(), or the radio not taking it in time.
  */
 bool kode_ble_queue_clear(const char *chr);
+
+/* The board as a Bluetooth mouse and keyboard, which a computer or a phone
+ * pairs with from its own Bluetooth settings, with nothing to install:
+ *
+ *     kode_ble_hid_select(KODE_BLE_HID_MOUSE);       // at the app's start
+ *     ...
+ *     if ( kode_ble_hid_ready() )
+ *     {
+ *         kode_ble_hid_mouse(0, dx, dy, 0);
+ *     }
+ *
+ * Nothing of it exists until the app asks: kode_ble_hid_select() adds the
+ * HID service, with the SDK's own report map, the battery and the device's
+ * information to what the radio serves, and from then on the board
+ * advertises as a mouse or a keyboard. The board takes one link: while a
+ * computer uses it, neither the console nor a phone gets in, and a computer
+ * bonded as a host comes back by itself whenever it sees the board. An app
+ * or a kodeOS that does not ask hangs up on that computer, so the link stays
+ * free for everything else.
+ *
+ * The reports reach only a device that paired with the board while it was a
+ * mouse or a keyboard. The phone paired for the console is never typed at,
+ * and a computer paired as a host never reaches the console: a device has
+ * one use or the other, and changes it by pairing again.
+ *
+ * A computer pairs with a code. The app opens the time to pair with
+ * kode_ble_pair_open() and shows the code ble_pair_code brings; ble_pair_done
+ * says how it ended. The bond is kept, so the computer pairs once.
+ *
+ * A report never waits: it is queued for the link, KODE_BLE_HID_RING_SLOTS
+ * at most, and a full queue fails the call. A keyboard report says which
+ * keys are down now, so the one that lets them go follows it; that one, with
+ * nothing down, never fails for a full queue. kode_ble_hid_tap() and
+ * kode_ble_hid_click() press and let go in one call, which is how a key is
+ * typed. Needs CONFIG_KODEOS_BLE_CONSOLE_PAIRING=y, the default. */
+
+#define KODE_BLE_HID_MOUSE       0x01U  /**< A mouse: three buttons, x, y and a wheel.  */
+#define KODE_BLE_HID_KEYBOARD    0x02U  /**< A keyboard: eight modifiers and six keys.  */
+#define KODE_BLE_HID_KEYS_MAX    6U     /**< Keys one keyboard report holds down.       */
+#define KODE_BLE_HID_KEY_MAX     101U   /**< The last key the board can press, a usage ID. */
+#define KODE_BLE_HID_RING_SLOTS  16U    /**< Reports that wait for the link.            */
+#define KODE_BLE_HID_BUTTONS     0x07U  /**< The mouse's buttons: bit 0 left, 1 right, 2 middle. */
+
+/**
+ * @brief Make the board a Bluetooth mouse, a keyboard, both, or neither.
+ *
+ * The radio reads the choice once, when it registers its table at
+ * Bluetooth's first start in the boot, so make this the app's first call to
+ * the SDK: the choice is then kept before anything starts. Not stored: the
+ * app makes this call at each start. Bluetooth off in Settings is not an
+ * error: the choice is kept for when it comes on.
+ *
+ * @param kinds KODE_BLE_HID_MOUSE, KODE_BLE_HID_KEYBOARD, both, or 0 for neither.
+ * @return true when the choice is kept; false with kode_error() saying why:
+ *         a kind that does not exist, or the table registered already, and
+ *         nothing changes until the next boot. A firmware without the
+ *         pairing HID needs refuses every kind.
+ */
+bool kode_ble_hid_select(uint8_t kinds);
+
+/**
+ * @brief Whether a computer is connected and takes the reports of every kind chosen.
+ * @return true when a report sent now reaches it. Does not wait and sets no error.
+ */
+bool kode_ble_hid_ready(void);
+
+/**
+ * @brief Send one mouse report. Movement and wheel are relative.
+ * @param buttons Bit 0 left, bit 1 right, bit 2 middle; 0 lets them go.
+ * @param dx      Right, -127 to 127.
+ * @param dy      Down, -127 to 127.
+ * @param wheel   Up, -127 to 127.
+ * @return true when it is queued for the link; false with kode_error() saying
+ *         why: Bluetooth off in Settings, the mouse not chosen, no computer
+ *         taking its reports, or the queue full (send it again, or the sum).
+ *         A report of no button and no movement never fails for a full queue.
+ */
+bool kode_ble_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel);
+
+/**
+ * @brief Click: press the mouse's buttons and let them go, both or neither.
+ * @param buttons Bit 0 left, bit 1 right, bit 2 middle; at least one.
+ * @return As kode_ble_hid_mouse(); false for no button too.
+ */
+bool kode_ble_hid_click(uint8_t buttons);
+
+/**
+ * @brief Send one keyboard report: the keys held down now.
+ * @param modifiers The eight modifier bits, left Control first.
+ * @param keys      KODE_BLE_HID_KEYS_MAX usage IDs up to KODE_BLE_HID_KEY_MAX,
+ *                  0 for none; copied. NULL lets every key go.
+ * @return As kode_ble_hid_mouse(), for the keyboard. Letting every key go
+ *         never fails for a full queue.
+ */
+bool kode_ble_hid_keys(uint8_t modifiers, const uint8_t *keys);
+
+/**
+ * @brief Type one key: press it with its modifiers and let it go, both or neither.
+ * @param modifiers The eight modifier bits, left Control first.
+ * @param key       A usage ID, 1 to KODE_BLE_HID_KEY_MAX: 4 is `a`.
+ * @return As kode_ble_hid_mouse(), for the keyboard; false for a key out of
+ *         range too.
+ */
+bool kode_ble_hid_tap(uint8_t modifiers, uint8_t key);
+
+/**
+ * @brief Open the time to pair a new computer or phone: five minutes.
+ *
+ * Only an app that chose a kind with kode_ble_hid_select() pairs a device;
+ * any other app serves the phones bonded in kodeOS. The board shows itself
+ * while the time runs, and the code to show arrives as ble_pair_code. With a
+ * device connected, the time starts when it leaves.
+ *
+ * @return true when the time is asked for; false with kode_error() saying
+ *         why: Bluetooth off in Settings, no kind chosen, or the radio too
+ *         busy to take the request now.
+ */
+bool kode_ble_pair_open(void);
 
 /* ---- HTTP ---- */
 
