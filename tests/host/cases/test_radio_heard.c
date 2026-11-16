@@ -1387,6 +1387,27 @@ TEST_CASE("test_a_timed_out_start_is_stopped_by_the_next_record", "[radio_heard]
     heard_end_case();
 }
 
+TEST_CASE("a start after a timed-out start, with no record to stop it, stops the scan and is busy once",
+          "[radio_heard]")
+{
+    heard_up();
+
+    ask(ao_spy(), true);
+    expect_hear_job(true);
+    finish(KDRV_RADIO_JOB_BLE_HEAR, KODE_TIMEOUT);
+    expect_state(ao_spy(), false, KBLE_HEARD_REFUSED, 0U, 0U);
+
+    /* Nothing is on the air: the start itself sends the stop it waits for. */
+    ask(ao_spy(), true);
+    expect_state(ao_spy(), false, KBLE_HEARD_BUSY, 0U, 0U);
+    expect_hear_job(false);
+    finish(KDRV_RADIO_JOB_BLE_HEAR, KODE_OK);
+    expect_nothing(ao_spy());
+
+    start_stream(ao_spy());
+    heard_end_case();
+}
+
 TEST_CASE("test_a_record_with_no_asker_proves_a_listen_and_stops_it", "[radio_heard]")
 {
     heard_up();

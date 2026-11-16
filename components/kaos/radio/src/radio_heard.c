@@ -254,7 +254,14 @@ static void heard_start(RadioHeard *h, QActive *who)
     }
     if ( h->job || h->scanning )
     {
-        /* A passive scan that was ended is still being stopped. */
+        /* A passive scan that was ended is still being stopped. One that
+         * may be on with no stop sent (a start that timed out, an end the
+         * worker had no room for) is stopped now, so the next start finds it
+         * gone; best effort, as every stop of a scan nobody asks for. */
+        if ( !h->job )
+        {
+            (void)heard_job(h, false);
+        }
         heard_tell(who, false, KBLE_HEARD_BUSY, 0U, 0U);
         return;
     }
@@ -619,7 +626,8 @@ static void heard_stack_ended(RadioHeard *h)
     }
     if ( NULL != who )
     {
-        /* A start still with the worker is answered by its own end: nobody is left to tell. */
+        /* Told now, even with its start still on the worker: that start
+         * comes back to nobody and stops the scan. */
         uint32_t heard;
         uint32_t dropped;
 
