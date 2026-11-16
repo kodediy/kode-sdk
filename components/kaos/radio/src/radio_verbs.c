@@ -47,6 +47,63 @@ typedef enum {
 
 static radio_verb_kind_t s_radio_kind;
 
+#if CONFIG_KODEOS_WIFI
+/** @brief Networks `wifi_scan` has printed since it began, or since its listing started again. */
+static uint16_t s_scan_rows;
+#endif
+
+#if CONFIG_KODEOS_WIFI || CONFIG_KODEOS_BLE
+/** @brief The generation of the scan request that holds the console
+ *         (wifi_scan_request(), ble_scan_request()). */
+static uint8_t s_scan_gen;
+
+/** @brief Generations this far ahead of the console's, or further, are behind
+ *         it: half of what a byte counts. */
+#define RADIO_V_GEN_HALF  128U
+
+/**
+ * @brief Whether a refusal is another request's, not the console's.
+ *
+ * AO_Radio answers a scan it has no time for with an end that says busy and
+ * carries that request's generation: with the console's own listing in
+ * flight, somebody else's refusal passes on the bus.
+ *
+ * @param gen The end's generation.
+ * @return true for a busy end that names a request other than the console's.
+ */
+static bool scan_busy_foreign(uint8_t gen)
+{
+    return ((uint8_t)KQP_SCAN_GEN_NONE != gen)
+           && ((uint8_t)KQP_SCAN_GEN_NONE != s_scan_gen)
+           && (gen != s_scan_gen);
+}
+
+/**
+ * @brief Whether an entry or an end belongs to a listing before the console's request.
+ *
+ * Such a one was published before AO_Radio read the request and is still in
+ * the console's queue: the end of the scan a line has just replaced, or of
+ * somebody else's that ended a moment ago.
+ *
+ * @param gen The event's generation.
+ * @return true for one older than the request; false for the request's own,
+ *         for a newer one (the listing started again for somebody else) and
+ *         for one that carries none.
+ */
+static bool scan_gen_stale(uint8_t gen)
+{
+    bool stale = false;
+
+    if ( ((uint8_t)KQP_SCAN_GEN_NONE != gen) && ((uint8_t)KQP_SCAN_GEN_NONE != s_scan_gen) )
+    {
+        uint8_t const ahead = (uint8_t)(gen - s_scan_gen);
+
+        stale = (RADIO_V_GEN_HALF <= ahead);
+    }
+    return stale;
+}
+#endif
+
 #define RADIO_V_C5_TEXT_MAX   32U  /**< Room for the C5 image's project, version or IDF name. */
 #define RADIO_V_SVC_TEXT_MAX  64U  /**< Room for `info`'s KODE-services words. */
 #define RADIO_V_B64_IN    3U  /**< Bytes base64 takes at a time... */
@@ -364,10 +421,12 @@ static void h_wifi_scan(const kverb_t *c, const karg_val_t *v)
      * and AO_Radio's answer, which always comes, closes the command. */
     console_begin(c->verb);
     s_radio_kind = RADIO_V_WIFI_SCAN;
+    s_scan_rows  = 0U;
+    s_scan_gen   = (uint8_t)KQP_SCAN_GEN_NONE;
     console_unwatched();
     /* With the watchdog disarmed, only the end marker closes the command,
      * and a request AO_Radio's queue had no room for will never have one. */
-    if ( !wifi_scan_request(NULL) )
+    if ( !wifi_scan_request(&s_scan_gen) )
     {
         console_reply_err(KCLI_ERR_BUSY, "busy");
         console_end();
@@ -855,11 +914,12 @@ static void h_ble_scan(const kverb_t *c, const karg_val_t *v)
     }
     console_begin(c->verb);
     s_radio_kind = RADIO_V_BLE_SCAN;
+    s_scan_gen   = (uint8_t)KQP_SCAN_GEN_NONE;
     console_unwatched();
     /* With the watchdog disarmed, only the end marker closes the command,
      * and a request the pool or AO_Radio's queue had no room for will never
      * have one. */
-    if ( !ble_scan_request(ms, NULL) )
+    if ( !ble_scan_request(ms, &s_scan_gen) )
     {
         console_reply_err(KCLI_ERR_BUSY, "busy");
         console_end();
@@ -1212,12 +1272,21 @@ static bool radio_answer(QEvt const *e)
         }
 #if CONFIG_KODEOS_WIFI
         case WIFI_SCAN_ENTRY_SIG: {
-            if ( RADIO_V_WIFI_SCAN == s_radio_kind )
+            if ( (RADIO_V_WIFI_SCAN == s_radio_kind)
+                && scan_gen_stale(Q_EVT_CAST(WifiScanEntryEvt)->gen) )
+            {
+                /* A network of the listing before this command's: not printed. */
+            }
+            else if ( RADIO_V_WIFI_SCAN == s_radio_kind )
             {
                 WifiScanEntryEvt const * const n = Q_EVT_CAST(WifiScanEntryEvt);
                 /* Quoted: an SSID may legitimately contain a space, a quote
                  * or any other byte, and comes back exactly as it is. */
                 char safe[CONSOLE_QUOTED_MAX(sizeof(n->ssid))];
+                if ( (uint16_t)UINT16_MAX > s_scan_rows )
+                {
+                    ++s_scan_rows;
+                }
                 console_reply(">|ssid=%s rssi=%" PRId32 " ch=%" PRIu32 " auth=%" PRIu32 " "
                       "bssid=%02x:%02x:%02x:%02x:%02x:%02x",
                       console_quote(safe, sizeof(safe), n->ssid), (int32_t)n->rssi,
@@ -1232,7 +1301,15 @@ static bool radio_answer(QEvt const *e)
             break;
         }
         case WIFI_SCAN_END_SIG: {
-            if ( RADIO_V_WIFI_SCAN == s_radio_kind )
+            if ( (RADIO_V_WIFI_SCAN == s_radio_kind)
+                && (scan_gen_stale(Q_EVT_CAST(WifiScanEndEvt)->gen)
+                    || (Q_EVT_CAST(WifiScanEndEvt)->busy
+                        && scan_busy_foreign(Q_EVT_CAST(WifiScanEndEvt)->gen))) )
+            {
+                /* The end of the listing before this command's, or somebody
+                 * else's refusal: it closes nothing. */
+            }
+            else if ( RADIO_V_WIFI_SCAN == s_radio_kind )
             {
                 WifiScanEndEvt const * const end = Q_EVT_CAST(WifiScanEndEvt);
                 if ( end->ok )
@@ -1254,6 +1331,29 @@ static bool radio_answer(QEvt const *e)
                     console_reply_err(KCLI_ERR_REJECT, console_verb());
                 }
                 console_end();
+            }
+            else
+            {
+                handled = false;
+            }
+            break;
+        }
+        case WIFI_SCAN_AGAIN_SIG: {
+            if ( (RADIO_V_WIFI_SCAN == s_radio_kind)
+                && scan_gen_stale(Q_EVT_CAST(WifiScanEndEvt)->gen) )
+            {
+                /* A restart of the listing before this command's. */
+            }
+            else if ( RADIO_V_WIFI_SCAN == s_radio_kind )
+            {
+                /* A newer `wifi_scan` from elsewhere: the listing goes on
+                 * with a new sweep. The networks above, if any, were heard
+                 * by the one it ended. */
+                if ( 0U < s_scan_rows )
+                {
+                    console_reply(">|scan=again");
+                }
+                s_scan_rows = 0U;
             }
             else
             {
@@ -1342,7 +1442,12 @@ static bool radio_answer(QEvt const *e)
 #endif
 #if CONFIG_KODEOS_BLE
         case BLE_SCAN_ENTRY_SIG: {
-            if ( RADIO_V_BLE_SCAN == s_radio_kind )
+            if ( (RADIO_V_BLE_SCAN == s_radio_kind)
+                && scan_gen_stale(Q_EVT_CAST(BleScanEvt)->gen) )
+            {
+                /* A device of the listing before this command's: not printed. */
+            }
+            else if ( RADIO_V_BLE_SCAN == s_radio_kind )
             {
                 BleScanEvt const * const d = Q_EVT_CAST(BleScanEvt);
                 char safe[CONSOLE_QUOTED_MAX(sizeof(d->name))];
@@ -1367,7 +1472,15 @@ static bool radio_answer(QEvt const *e)
             break;
         }
         case BLE_SCAN_END_SIG: {
-            if ( RADIO_V_BLE_SCAN == s_radio_kind )
+            if ( (RADIO_V_BLE_SCAN == s_radio_kind)
+                && (scan_gen_stale(Q_EVT_CAST(WifiScanEndEvt)->gen)
+                    || (Q_EVT_CAST(WifiScanEndEvt)->busy
+                        && scan_busy_foreign(Q_EVT_CAST(WifiScanEndEvt)->gen))) )
+            {
+                /* The end of the listing before this command's, or somebody
+                 * else's refusal: it closes nothing. */
+            }
+            else if ( RADIO_V_BLE_SCAN == s_radio_kind )
             {
                 WifiScanEndEvt const * const end = Q_EVT_CAST(WifiScanEndEvt);
                 if ( end->ok )
@@ -1377,6 +1490,11 @@ static bool radio_answer(QEvt const *e)
                 else if ( end->busy )
                 {
                     console_reply_err(KCLI_ERR_BUSY, "busy");
+                }
+                else if ( end->cut )
+                {
+                    /* A newer Bluetooth request ended the listen. */
+                    console_reply_err(KCLI_ERR_REJECT, "stopped");
                 }
                 else
                 {
@@ -1525,6 +1643,66 @@ static bool radio_timeout(void)
     return false;
 }
 
+#if CONFIG_KODEOS_WIFI || CONFIG_KODEOS_BLE
+/**
+ * @brief Whether @p verb is one of @p verbs.
+ * @param verb  The word.
+ * @param verbs The list.
+ * @param n     How many it holds.
+ * @return true when it is.
+ */
+static bool radio_verb_in(const char *verb, const char *const *verbs, size_t n)
+{
+    bool in = false;
+
+    for ( size_t i = 0U; n > i; ++i )
+    {
+        if ( strcmp(verb, verbs[i]) == 0 )
+        {
+            in = true;
+        }
+    }
+    return in;
+}
+
+/**
+ * @brief kverbs_t.replaces: whether a radio line takes the place of the scan
+ *        that holds the console.
+ *
+ * AO_Radio's rule, as the console's lines name it: a newer request of a radio
+ * ends the scan of that radio. `wifi_scan` gives way to a Wi-Fi line and
+ * `ble_scan` to a Bluetooth one; the line's request is what ends the sweep.
+ * `wifi_up` and `ble_up` are not in the lists: AO_Radio ends a scan for one
+ * only when it switches the service on from off, which the console cannot
+ * tell. Every other pair is left alone, and the console answers the line busy.
+ *
+ * @param row The new line's verb.
+ * @return true when the command in flight is a scan the line ends.
+ */
+static bool radio_replaces(const kverb_t *row)
+{
+    bool replaces = false;
+
+#if CONFIG_KODEOS_WIFI
+    if ( (RADIO_V_WIFI_SCAN == s_radio_kind) && (strcmp(console_verb(), "wifi_scan") == 0) )
+    {
+        static const char *const WIFI[] = { "wifi_scan", "wifi_join", "wifi_down" };
+
+        replaces = radio_verb_in(row->verb, WIFI, sizeof(WIFI) / sizeof(WIFI[0]));
+    }
+#endif
+#if CONFIG_KODEOS_BLE
+    if ( (RADIO_V_BLE_SCAN == s_radio_kind) && (strcmp(console_verb(), "ble_scan") == 0) )
+    {
+        static const char *const BLE[] = { "ble_scan", "ble_down" };
+
+        replaces = radio_verb_in(row->verb, BLE, sizeof(BLE) / sizeof(BLE[0]));
+    }
+#endif
+    return replaces;
+}
+#endif
+
 #if CONFIG_KODEOS_BLE
 static const karg_spec_t A_BLE_SCAN[] = {
     { .key = "ms", .required = false, .type = KARG_UINT,
@@ -1609,5 +1787,8 @@ const kverbs_t radio_verbs = {
     .info    = radio_info,
 #if CONFIG_KODEOS_WIFI
     .nowait  = "wifi_scan_stop",
+#endif
+#if CONFIG_KODEOS_WIFI || CONFIG_KODEOS_BLE
+    .replaces = radio_replaces,
 #endif
 };

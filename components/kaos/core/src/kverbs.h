@@ -45,6 +45,7 @@ typedef struct {
     bool (*timeout)(void);                /**< The watchdog fired on one of its verbs; true when the owner closed it. NULL: the timeout error. */
     void (*info)(void);                   /**< Its records in `info`. NULL: none. */
     const char    *nowait;                /**< Its verb that does not wait: a row with no keys, which the console runs while another command is in flight. It answers one line and begins no command. NULL: none. */
+    bool (*replaces)(const struct kverb *row); /**< Whether a line with this verb of its own, arriving from the port that holds the console, takes the place of the command in flight: true when that command is one of its own that the verb ends. The console then validates the line and, if it runs, closes the command in flight with `>err code=5 msg=stopped` first. It answers and closes nothing itself. NULL: none replaces. */
 } kverbs_t;
 
 /**

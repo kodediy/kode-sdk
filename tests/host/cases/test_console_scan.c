@@ -620,11 +620,12 @@ TEST_CASE("a stopped wifi_scan prints its networks and ends stopped, code 5",
     TEST_ASSERT_NULL(line_with("msg=wifi_scan"));
 }
 
-TEST_CASE("any other line while wifi_scan holds the console is still answered busy",
+TEST_CASE("a line that ends no scan is still answered busy while wifi_scan holds the console",
           "[console_scan]")
 {
     static const char *const lines[] = {
-        "wifi_leave", "wifi_scan", "ping", "wifi_scan_stopp"
+        "wifi_leave", "wifi_auto", "wifi_info", "wifi_up", "ble_scan ms=1500", "ble_down",
+        "ping", "wifi_scan_stopp"
     };
 
     console_up();
@@ -726,3 +727,458 @@ TEST_CASE("a BLE verb AO_Radio refuses ends in an error that says why, never in 
     TEST_ASSERT_NOT_NULL(line_with(">ok"));
     (void)posted(BLE_STATE_REQ_SIG);
 }
+
+/* ---- A newer radio line takes the scan's place --------------------------------------
+ * The console runs one command at a time, and a scan holds it for tens of
+ * seconds. The lines whose request ends the sweep in AO_Radio end the command
+ * too: it is closed on its own port, stopped, and the new line runs.
+ */
+
+/** @brief The sequence the Kode channel gives the next line typed from it. */
+static uint8_t s_line_seq;
+
+/** @brief A line from @p src, as its port's reader posts it. */
+static void type_line_from(uint8_t src, const char *text)
+{
+    ConsoleLineEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CONSOLE_LINE_SIG);
+    e.src   = src;
+    e.seq   = s_line_seq;
+    (void)snprintf(e.line, sizeof(e.line), "%s", text);
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief Tell the listeners the listing starts again, the way AO_Radio does. */
+static void listing_again(void)
+{
+    WifiScanEndEvt again;
+
+    (void)memset(&again, 0, sizeof(again));
+    again.super = (QEvt)QEVT_INITIALIZER(WIFI_SCAN_AGAIN_SIG);
+    again.cut   = true;
+    QASM_DISPATCH(AO_Console, &again.super, 0U);
+}
+
+TEST_CASE("a second wifi_scan ends the first, stopped, and holds the console itself",
+          "[console_scan][newest]")
+{
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    list_network("one");
+    fake_klog_reset();
+
+    type_line("wifi_scan");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err code=4 msg=busy"), "the newer scan was turned away");
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(">err code=5 msg=stopped"),
+                                 "the first scan was not told it ended early");
+    TEST_ASSERT_TRUE_MESSAGE(posted(WIFI_SCAN_REQ_SIG), "the newer scan was not asked for");
+
+    /* The new command is in flight: its listing is printed and its end closes it. */
+    fake_klog_reset();
+    listing_again();
+    TEST_ASSERT_NULL_MESSAGE(line_with(">|scan=again"), "a listing with no network yet has nothing to restart");
+    list_network("two");
+    TEST_ASSERT_NOT_NULL(line_with(">|ssid=\"two\""));
+    end_listing(WIFI_SCAN_END_SIG);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+TEST_CASE("wifi_join ends the wifi_scan in flight, stopped, and is asked for",
+          "[console_scan][newest]")
+{
+    WifiStateEvt st;
+
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    fake_klog_reset();
+
+    type_line("wifi_join ssid=\"net\" pass=\"pw12345678\"");
+    TEST_ASSERT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
+    TEST_ASSERT_TRUE_MESSAGE(posted(WIFI_JOIN_REQ_SIG), "the join was not asked for");
+
+    /* The cut sweep's end is not the join's answer; the state is. */
+    fake_klog_reset();
+    end_cut();
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "the scan's end closed the join");
+    (void)memset(&st, 0, sizeof(st));
+    st.super = (QEvt)QEVT_INITIALIZER(WIFI_STATE_SIG);
+    QASM_DISPATCH(AO_Console, &st.super, 0U);
+    (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
+}
+
+TEST_CASE("a second ble_scan ends the first, stopped, and its own length is posted",
+          "[console_scan][newest]")
+{
+    console_up();
+    type_line("ble_scan ms=3000");
+    TEST_ASSERT_EQUAL_UINT32(3000U, posted_ble_ms());
+    fake_klog_reset();
+
+    type_line("ble_scan ms=1500");
+    TEST_ASSERT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
+    TEST_ASSERT_EQUAL_UINT32(1500U, posted_ble_ms());
+
+    fake_klog_reset();
+    end_listing(BLE_SCAN_END_SIG);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+TEST_CASE("a scan of one radio ends no scan of the other: the line is answered busy",
+          "[console_scan][newest]")
+{
+    console_up();
+    type_line("ble_scan ms=3000");
+    TEST_ASSERT_EQUAL_UINT32(3000U, posted_ble_ms());
+    fake_klog_reset();
+
+    type_line("wifi_scan");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with("msg=stopped"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_REQ_SIG));
+
+    type_line("wifi_join ssid=\"net\"");
+    TEST_ASSERT_FALSE_MESSAGE(posted(WIFI_JOIN_REQ_SIG), "a Wi-Fi line ended the Bluetooth listen");
+
+    /* The listen is still the command in flight. */
+    fake_klog_reset();
+    end_listing(BLE_SCAN_END_SIG);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+TEST_CASE("a radio line ends no command but a scan: behind a join it is answered busy",
+          "[console_scan][newest]")
+{
+    WifiStateEvt st;
+
+    console_up();
+    type_line("wifi_join ssid=\"net\" pass=\"pw12345678\"");
+    TEST_ASSERT_TRUE(posted(WIFI_JOIN_REQ_SIG));
+    fake_klog_reset();
+
+    type_line("wifi_scan");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with("msg=stopped"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_REQ_SIG));
+
+    (void)memset(&st, 0, sizeof(st));
+    st.super = (QEvt)QEVT_INITIALIZER(WIFI_STATE_SIG);
+    QASM_DISPATCH(AO_Console, &st.super, 0U);
+    (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
+}
+
+/* A line takes a scan's place only from the port that asked for the scan:
+ * the Kode channel's and the scheduler's wait their turn behind the cable's
+ * command, and another port's is answered busy. */
+TEST_CASE("a wifi_scan from another port ends no scan: it waits its turn or is answered busy",
+          "[console_scan][newest]")
+{
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    fake_klog_reset();
+
+    type_line_from((uint8_t)KODE_CONSOLE_SRC_NET, "wifi_scan");
+    TEST_ASSERT_NULL_MESSAGE(line_with("msg=stopped"), "the channel's line ended the cable's scan");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "the channel's line was refused, not handed back");
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_REQ_SIG));
+
+    type_line_from((uint8_t)KODE_CONSOLE_SRC_SCHED, "wifi_scan");
+    TEST_ASSERT_NULL_MESSAGE(line_with("msg=stopped"), "the scheduler's line ended the cable's scan");
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_REQ_SIG));
+
+    type_line_from((uint8_t)KODE_CONSOLE_SRC_BLE, "wifi_scan");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with("msg=stopped"));
+    TEST_ASSERT_FALSE(posted(WIFI_SCAN_REQ_SIG));
+
+    /* The cable's scan is still the command in flight. */
+    fake_klog_reset();
+    end_listing(WIFI_SCAN_END_SIG);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+/* A listing somebody else's newer wifi_scan started again goes on: the
+ * networks printed so far are marked as the cut sweep's, once. */
+TEST_CASE("a listing that starts again says so behind the networks already printed",
+          "[console_scan][newest]")
+{
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    list_network("one");
+    fake_klog_reset();
+
+    listing_again();
+    TEST_ASSERT_NOT_NULL(line_with(">|scan=again"));
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "the restart closed the command");
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    fake_klog_reset();
+    listing_again();
+    TEST_ASSERT_NULL_MESSAGE(line_with(">|scan=again"), "said twice with nothing printed between");
+    list_network("two");
+    end_listing(WIFI_SCAN_END_SIG);
+    TEST_ASSERT_NOT_NULL(line_with(">|ssid=\"two\""));
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+TEST_CASE("a ble_scan a newer request ended says stopped, code 5",
+          "[console_scan][newest]")
+{
+    WifiScanEndEvt end;
+
+    console_up();
+    type_line("ble_scan ms=3000");
+    TEST_ASSERT_EQUAL_UINT32(3000U, posted_ble_ms());
+    fake_klog_reset();
+
+    (void)memset(&end, 0, sizeof(end));
+    end.super = (QEvt)QEVT_INITIALIZER(BLE_SCAN_END_SIG);
+    end.cut   = true;
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
+    TEST_ASSERT_NULL(line_with("msg=ble_scan"));
+}
+
+/* A line that will not run replaces nothing: the scan gives way only once the
+ * line has been validated. */
+TEST_CASE("a line that is refused ends no scan: the scan goes on and the line gets its own error",
+          "[console_scan][newest]")
+{
+    console_up();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    fake_klog_reset();
+
+    type_line("wifi_join ssid=net");          /* a string typed bare */
+    TEST_ASSERT_NOT_NULL(line_with(">err code=3 msg=ssid"));
+    TEST_ASSERT_NULL_MESSAGE(line_with("msg=stopped"), "a refused line ended the scan");
+    TEST_ASSERT_FALSE(posted(WIFI_JOIN_REQ_SIG));
+
+    fake_klog_reset();
+    type_line("wifi_join");                   /* its required key is missing */
+    TEST_ASSERT_NOT_NULL(line_with(">err"));
+    TEST_ASSERT_NULL(line_with("msg=stopped"));
+    TEST_ASSERT_FALSE(posted(WIFI_JOIN_REQ_SIG));
+
+    fake_klog_reset();
+    list_network("one");
+    end_listing(WIFI_SCAN_END_SIG);
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(">|ssid=\"one\""), "the scan lost the console");
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+
+    /* The same for a listen whose length is out of range. */
+    type_line("ble_scan ms=3000");
+    TEST_ASSERT_EQUAL_UINT32(3000U, posted_ble_ms());
+    fake_klog_reset();
+    type_line("ble_scan ms=1");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=3 msg=ms"));
+    TEST_ASSERT_NULL(line_with("msg=stopped"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, posted_ble_ms());
+    fake_klog_reset();
+    end_listing(BLE_SCAN_END_SIG);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+/** @brief Lines of one burst: more than AO_Radio's queue holds. */
+#define BURST_LINES  (KQP_RADIO_QUEUE_LEN + 8U)
+
+/* A block of lines read in one go, as one BLE write or a paste brings them:
+ * AO_Radio runs below the console and reads none of them meanwhile. */
+TEST_CASE("a burst of wifi_scan lines is answered busy past the margin and never fills the radio's queue",
+          "[console_scan][newest]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+    unsigned const    panics = fake_panic_count();
+
+    console_up();
+    /* The harness gives AO_Radio a deeper queue than the board's: fill it
+     * down to the board's depth, so the margin is met where it would be. */
+    for ( uint32_t guard = 0U;
+         (64U > guard) && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_QUEUE_LEN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    fake_klog_reset();
+    for ( uint32_t i = 0U; BURST_LINES > i; ++i )
+    {
+        type_line("wifi_scan");
+        TEST_ASSERT_TRUE_MESSAGE(uxQueueSpacesAvailable(AO_Radio->eQueue) >= KQP_RADIO_POST_MARGIN,
+                                 "a scan request took a slot kept for the worker and the link");
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(panics, fake_panic_count(), "the burst filled AO_Radio's queue");
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(">err code=4 msg=busy"),
+                                 "a request with no room was not reported");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));   /* also empties the queue */
+
+    /* A refused request holds nothing: the console takes the next command. */
+    fake_klog_reset();
+    type_line("wifi_scan");
+    (void)posted(WIFI_SCAN_REQ_SIG);
+    end_listing(WIFI_SCAN_END_SIG);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+/** @brief The generation of the scan request the console posted; empties AO_Radio's queue. */
+static uint8_t posted_scan_gen(void)
+{
+    const QEvt *e   = NULL;
+    uint8_t     gen = (uint8_t)KQP_SCAN_GEN_NONE;
+
+    while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)WIFI_SCAN_REQ_SIG == e->sig )
+        {
+            gen = ((const WifiScanReqEvt *)(const void *)e)->gen;
+        }
+        if ( (QSignal)BLE_SCAN_REQ_SIG == e->sig )
+        {
+            gen = ((const BleScanReqEvt *)(const void *)e)->gen;
+        }
+        QF_gc(e);
+    }
+    return gen;
+}
+
+/* What AO_Radio published before it read the request is still in the
+ * console's queue when the command begins: the end of the listing before
+ * it, and its networks. Their generation is older, and they are not the
+ * command's. */
+TEST_CASE("the end and the networks of the listing before a wifi_scan are not taken for its own",
+          "[console_scan][newest]")
+{
+    WifiScanEntryEvt n;
+    WifiScanEndEvt   end;
+    uint8_t          gen;
+
+    console_up();
+    type_line("wifi_scan");
+    gen = posted_scan_gen();
+    TEST_ASSERT_NOT_EQUAL((uint8_t)KQP_SCAN_GEN_NONE, gen);
+    fake_klog_reset();
+
+    (void)memset(&n, 0, sizeof(n));
+    n.super = (QEvt)QEVT_INITIALIZER(WIFI_SCAN_ENTRY_SIG);
+    (void)snprintf(n.ssid, sizeof(n.ssid), "%s", "stale");
+    n.gen = (uint8_t)(gen - 1U);
+    QASM_DISPATCH(AO_Console, &n.super, 0U);
+    (void)memset(&end, 0, sizeof(end));
+    end.super = (QEvt)QEVT_INITIALIZER(WIFI_SCAN_END_SIG);
+    end.ok    = true;
+    end.gen   = (uint8_t)(gen - 1U);
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+    TEST_ASSERT_NULL_MESSAGE(line_with("stale"), "a network of the listing before was printed");
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "the end of the listing before closed the command");
+
+    /* Its own, and a newer one's for a listing that started again, are taken. */
+    (void)snprintf(n.ssid, sizeof(n.ssid), "%s", "fresh");
+    n.gen = gen;
+    QASM_DISPATCH(AO_Console, &n.super, 0U);
+    end.gen = (uint8_t)(gen + 1U);
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+    TEST_ASSERT_NOT_NULL(line_with(">|ssid=\"fresh\""));
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+
+    /* A refusal that names another request is not this command's either:
+     * its own listing is in flight while somebody else's scan is turned away. */
+    type_line("wifi_scan");
+    gen = posted_scan_gen();
+    fake_klog_reset();
+    (void)memset(&end, 0, sizeof(end));
+    end.super = (QEvt)QEVT_INITIALIZER(WIFI_SCAN_END_SIG);
+    end.busy  = true;
+    end.gen   = (uint8_t)(gen + 1U);
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "somebody else's refusal closed the command");
+    end.gen = gen;
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+
+    /* The same for a listen. */
+    (void)memset(&end, 0, sizeof(end));
+    end.ok = true;
+    type_line("ble_scan ms=3000");
+    gen = posted_scan_gen();
+    fake_klog_reset();
+    end.super = (QEvt)QEVT_INITIALIZER(BLE_SCAN_END_SIG);
+    end.gen   = (uint8_t)(gen - 1U);
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "the end of the listen before closed the command");
+    end.gen = gen;
+    QASM_DISPATCH(AO_Console, &end.super, 0U);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+/** @brief The sequence of the last line end AO_Net was told; set by net_ends(). */
+static uint8_t s_done_seq;
+
+/** @brief How many line ends AO_Net's mailbox holds; empties it. */
+static unsigned net_ends(void)
+{
+    const QEvt *e = NULL;
+    unsigned    n = 0U;
+
+    qf_support_give_queue(AO_Net);
+    while ( xQueueReceive(AO_Net->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)NET_LINE_DONE_SIG == e->sig )
+        {
+            s_done_seq = ((const NetLineDoneEvt *)(const void *)e)->seq;
+            ++n;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/* A scan outlasts the time AO_Net gives a line, so the channel's next line
+ * can find the channel's own scan in flight. Each of the two lines ends under
+ * its own sequence: the line's error is the line's, and the scan's end the
+ * scan's. */
+TEST_CASE("a channel line behind the channel's scan ends under its own sequence, and the scan under its own",
+          "[console_scan][newest]")
+{
+    WifiStateEvt st;
+
+    console_up();
+    (void)net_ends();
+
+    s_line_seq = 31U;
+    type_line_from((uint8_t)KODE_CONSOLE_SRC_NET, "wifi_scan");
+    TEST_ASSERT_TRUE(posted(WIFI_SCAN_REQ_SIG));
+    TEST_ASSERT_EQUAL_UINT(0U, net_ends());
+
+    /* Refused: the line ends, as itself, and the scan is still out. */
+    fake_klog_reset();
+    s_line_seq = 32U;
+    type_line_from((uint8_t)KODE_CONSOLE_SRC_NET, "wifi_join ssid=net");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=3 msg=ssid"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_ends(), "the refused line was not ended");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(32U, s_done_seq, "the refused line ended as the scan");
+
+    /* Valid: the scan ends under its own sequence, and the join is out. */
+    fake_klog_reset();
+    s_line_seq = 33U;
+    type_line_from((uint8_t)KODE_CONSOLE_SRC_NET, "wifi_join ssid=\"net\"");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
+    TEST_ASSERT_TRUE(posted(WIFI_JOIN_REQ_SIG));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_ends(), "the scan's line was not ended, or the join's was");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(31U, s_done_seq, "the scan ended as the line that took its place");
+
+    /* The join's answer ends the join's line. */
+    (void)memset(&st, 0, sizeof(st));
+    st.super = (QEvt)QEVT_INITIALIZER(WIFI_STATE_SIG);
+    QASM_DISPATCH(AO_Console, &st.super, 0U);
+    (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
+    TEST_ASSERT_EQUAL_UINT(1U, net_ends());
+    TEST_ASSERT_EQUAL_UINT8(33U, s_done_seq);
+    s_line_seq = 0U;
+}
+

@@ -6678,6 +6678,55 @@ static bool console_exec_nowait(const char *verb, char *rest)
 }
 
 /**
+ * @brief Whether a line that arrived with a command in flight would take its place.
+ *
+ * Only a line from the port that holds the console: a line from another one
+ * waits its turn or is answered busy, as any other. And only when the owner
+ * of its verb says the one replaces the other (kverbs_t.replaces). Nothing is
+ * closed here: console_exec() closes the command in flight once the line has
+ * been validated, so a line that is refused replaces nothing.
+ *
+ * @param me   The console.
+ * @param verb The line's first token.
+ * @return true when the line, if valid, takes the place of the command in flight.
+ */
+static bool console_line_replaces(Console const *me, const char *verb)
+{
+    const kverbs_t *owner    = NULL;
+    const kverb_t  *row      = NULL;
+    bool            replaces = false;
+
+    if ( me->src == me->cmd_src )
+    {
+        row = kverbs_find(verb, &owner);
+    }
+    if ( (NULL != row) && (NULL != owner->replaces) )
+    {
+        replaces = owner->replaces(row);
+    }
+    return replaces;
+}
+
+/**
+ * @brief Give the command in flight its sequence back, after a line that
+ *        would have replaced it was refused.
+ *
+ * The line's error went out under the line's own sequence; the command is
+ * still in flight and its end is still to carry its own.
+ *
+ * @param me       The console.
+ * @param replaces The line was one that replaces (console_line_replaces()).
+ * @param seq      The sequence of the command in flight.
+ */
+static void console_seq_back(Console *me, bool replaces, uint8_t seq)
+{
+    if ( replaces )
+    {
+        me->net_seq = seq;
+    }
+}
+
+/**
  * @brief Parse and run one line: split it, find the verb, validate against
  *        its specs, hand the values to the handler.
  *
@@ -6710,7 +6759,12 @@ static void console_exec(Console *me, char *line)
 #endif
         return;
     }
-    if ( ((uint8_t)KCLI_IDLE != me->inflight) && line_handed_back(me->src) )
+    /* A line that would take the place of the command in flight is read
+     * as one that found the console free; the command gives way further
+     * down, once the line is known to be valid. */
+    bool const replaces = ((uint8_t)KCLI_IDLE != me->inflight) && console_line_replaces(me, tok);
+
+    if ( ((uint8_t)KCLI_IDLE != me->inflight) && (!replaces) && line_handed_back(me->src) )
     {
         /* A NET or SCHED line is not refused: its sender holds it and offers
          * it again. Nothing was accepted, so it neither wakes the board nor
@@ -6721,7 +6775,7 @@ static void console_exec(Console *me, char *line)
      * before the busy check, because a refused line is a person at the other
      * end as much as an accepted one. */
     lowpower_input_note(me->src);
-    if ( (uint8_t)KCLI_IDLE != me->inflight )
+    if ( ((uint8_t)KCLI_IDLE != me->inflight) && !replaces )
     {
         /* Busy, whatever else is wrong with the line, unless it is a verb
          * that does not wait. Either answer goes to the NEW line's port; the
@@ -6737,7 +6791,12 @@ static void console_exec(Console *me, char *line)
         return;
     }
     /* Accepted: from here every reply, errors of the line included, goes to
-     * the port that sent it, until the command has closed. */
+     * the port that sent it, until the command has closed. A line that
+     * replaces came from the port the command in flight already answers,
+     * and until it has replaced it the command keeps its sequence: an error
+     * of the line is the line's, and puts the command's back. */
+    uint8_t const running_seq = me->net_seq;
+
     me->cmd_src = me->src;
     me->net_seq = me->line_seq;
     while ( (CONSOLE_TOK_WORD == rc) && (KCLI_MAX_ARGS > argc) )
@@ -6750,6 +6809,7 @@ static void console_exec(Console *me, char *line)
     {
         /* console_token() has already cut the token at its `=`. */
         console_reply_err(KCLI_ERR_VALUE, tok);
+        console_seq_back(me, replaces, running_seq);
         return;
     }
     if ( CONSOLE_TOK_WORD == rc )
@@ -6763,6 +6823,7 @@ static void console_exec(Console *me, char *line)
             *eq = '\0';
         }
         console_reply_err(KCLI_ERR_VALUE, tok);
+        console_seq_back(me, replaces, running_seq);
         return;
     }
 
@@ -6788,8 +6849,24 @@ static void console_exec(Console *me, char *line)
         karg_val_t vals[KCLI_MAX_KEYS];
         if ( cmd_validate(row->args, row->n_args, argc, argv, vals) )
         {
+            if ( replaces )
+            {
+                /* Valid, so it runs: now, and not before, the command in
+                 * flight gives way, told so on the port they share and
+                 * under its own sequence. The word is the one a scan
+                 * somebody else ended answers with: to whoever reads it,
+                 * the listing did not reach its end either way. */
+                me->net_seq = running_seq;
+                console_reply_err(KCLI_ERR_REJECT, "stopped");
+                console_end();
+                me->net_seq = me->line_seq;
+            }
             me->owner = owner;
             row->fn(row, vals);
+        }
+        else
+        {
+            console_seq_back(me, replaces, running_seq);
         }
         return;
     }
@@ -6906,6 +6983,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, WIFI_STATE_SIG);
     QActive_subscribe(&me->super, WIFI_SCAN_ENTRY_SIG);
     QActive_subscribe(&me->super, WIFI_SCAN_END_SIG);
+    QActive_subscribe(&me->super, WIFI_SCAN_AGAIN_SIG);
     QActive_subscribe(&me->super, WIFI_SAVED_ENTRY_SIG);
     QActive_subscribe(&me->super, WIFI_SAVED_END_SIG);
 #endif
