@@ -146,6 +146,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kaos/radio/src/radio_knock.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_knocks.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_heard.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_hid.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5svc.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_frames.c"

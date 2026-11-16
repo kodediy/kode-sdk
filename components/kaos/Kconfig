@@ -274,15 +274,17 @@ menu "kodeOS active objects"
                 If unsure, say Y.
 
         config KODEOS_BLE_PAIRING_PASSKEY
-            bool "Pair with a code: shown on the glass in kodeOS, never in an app"
+            bool "Pair with a code, shown on the glass"
             depends on KODEOS_BLE_CONSOLE_PAIRING
             default y
             help
                 Pairing with a six-digit code shown on the glass, so the bond is
-                authenticated. An app refuses every new pairing; a phone bonded
-                in kodeOS reconnects in the app. The code never reaches a log or
-                the console. Off, pairing is Just Works: encrypted, not
-                authenticated.
+                authenticated. An app refuses every new pairing, and a phone
+                bonded in kodeOS reconnects in it; only an app that serves the
+                HID service pairs a device, in the time it opens, and shows the
+                code itself. The SDK writes the code to no log and to no console:
+                where an app shows it is the app's. Off, pairing is Just Works:
+                encrypted, not authenticated.
 
                 If unsure, say Y.
 

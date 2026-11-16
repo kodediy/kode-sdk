@@ -13,6 +13,8 @@
 #define KSET_KEY_BRIGHT  "bright"   /**< u8, 5..100. Owner: AO_Display.   */
 #define KSET_KEY_WIFI    "wifi"     /**< u8 as bool. Owner: AO_Radio.     */
 #define KSET_KEY_BLE     "ble"      /**< u8 as bool. Owner: AO_Radio.     */
+#define KSET_KEY_BLE_HID "ble_hid"  /**< u8: the kinds of HID device kodeOS
+                                     *   is, 0 for none. Owner: AO_Radio.  */
 #define KSET_KEY_LOG     "log"      /**< u8, a kode_log_lvl_t: the console's
                                   *   global log level. Absent = the
                                   *   build's own (CONFIG_KLOG_DEFAULT_LEVEL).

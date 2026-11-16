@@ -571,6 +571,33 @@ TEST_CASE("wifi_scan_stop on a full radio queue is refused busy and leaves the c
     end_listing(BLE_SCAN_END_SIG);
 }
 
+TEST_CASE("ble_pair on a full radio queue is refused busy and leaves the console free",
+          "[console_scan]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+
+    console_up();
+    for ( uint32_t guard = 0U;
+         (64U > guard)
+         && (uxQueueSpacesAvailable(AO_Radio->eQueue) > KQP_RADIO_POST_MARGIN);
+         ++guard )
+    {
+        QACTIVE_POST(AO_Radio, &filler, NULL);
+    }
+    fake_klog_reset();
+    type_line("ble_pair");
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+    TEST_ASSERT_EQUAL_UINT(KQP_RADIO_POST_MARGIN, uxQueueSpacesAvailable(AO_Radio->eQueue));
+    TEST_ASSERT_FALSE(posted(BLE_PAIR_OPEN_REQ_SIG));   /* also empties the queue */
+
+    fake_klog_reset();
+    type_line("ble_scan ms=1500");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1500U, posted_ble_ms(),
+                                     "the console is free for the next command");
+    end_listing(BLE_SCAN_END_SIG);
+}
+
 TEST_CASE("wifi_scan_stop is taken while wifi_scan holds the console, which keeps its command",
           "[console_scan]")
 {

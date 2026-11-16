@@ -2582,16 +2582,22 @@ void ble_unpair_request(void);
  * With bonds, the board is nameless, not discoverable and refuses new pairings;
  * this lifts that until the time runs out or a device pairs. Answered by
  * BLE_STATE_SIG (`pair_open`); refused, with a log line, while Bluetooth is off.
+ * In an app a device pairs in that time only when the app serves the HID
+ * service (kdrv_ble_hid_select()). Any task: the post leaves
+ * KQP_RADIO_POST_MARGIN of AO_Radio's queue free.
+ *
+ * @return false when AO_Radio's queue had no room; nothing was asked.
  */
-void ble_pair_open_request(void);
+bool ble_pair_open_request(void);
 
 /**
  * @brief Refuse the pairing whose code is currently on the glass.
  *
  * The peer is hung up on rather than left for the security manager's 30 s.
  * Answered by BLE_PAIR_SIG (DONE, REJECTED); nothing in flight, nothing published.
- * Compiled under CONFIG_KODEOS_BLE_PAIRING_PASSKEY (default on). Only kodeOS shows
- * a code; an app refuses new pairings first.
+ * Compiled under CONFIG_KODEOS_BLE_PAIRING_PASSKEY (default on). kodeOS shows a
+ * code, and so does an app that serves the HID service; any other app refuses
+ * new pairings first.
  */
 void ble_pair_reject_request(void);
 
@@ -2757,6 +2763,37 @@ bool radio_probe_request(QActive *who, const radio_probe_t *req);
  * @param on true for the amplifier on.
  */
 void radio_amp_request(bool on);
+
+/**
+ * @brief Subscribe @p who to the pairings: BLE_PAIR_SIG, a code to show and
+ *        how each pairing ended.
+ *
+ * Beside AO_Radio's start, so the call links AO_Radio (tools/check_starts.sh).
+ *
+ * @param who The listening Active Object.
+ */
+void ble_pair_subscribe(QActive const *who);
+
+/**
+ * @brief Send AO_Radio one input report of the HID service, for its host.
+ *
+ * Claims the driver's ring and posts the report; never blocks. The HID
+ * service is served only when asked (kdrv_ble_hid_select()). A report of
+ * zeroes, which lets every key or button go, is never refused for want of
+ * room: with none, the driver owes it to the host and sends it once the
+ * reports of its kind ahead of it have gone.
+ *
+ * @param kind KDRV_BLE_HID_MOUSE or KDRV_BLE_HID_KEYBOARD.
+ * @param data The report, as kdrv_ble_hid_mouse_pack() or kdrv_ble_hid_keys_pack() wrote it.
+ * @param len  Its bytes.
+ * @param tap  true to follow it with a report of zeroes: a key or a button
+ *             pressed and let go, both queued or neither.
+ * @return KODE_OK when queued for the link; KODE_DENIED when that kind is not
+ *         served, no host is subscribed to it or the report is malformed;
+ *         KODE_NO_RESOURCES when the ring, the pool or AO_Radio's queue is
+ *         full: send it again.
+ */
+kode_status_t ble_hid_report_post(uint8_t kind, const uint8_t *data, size_t len, bool tap);
 
 /**
  * @brief Subscribe @p who to the app's own Bluetooth service: BLE_APP_WRITE_SIG,

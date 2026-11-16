@@ -29,6 +29,7 @@
 #include "kdrv_wifi.h"
 #if CONFIG_KODEOS_BLE
 #include "kdrv_ble.h"
+#include "kdrv_ble_hid.h"
 #endif
 #include "kdrv_sd.h"
 #include "kset.h"
@@ -42,6 +43,7 @@
 #ifdef CONFIG_KODEOS_BLE
 #include "radio_heard.h"
 #endif
+#include "radio_hid.h"
 
 #define TAG "kaos.radio"
 
@@ -1659,10 +1661,12 @@ void ble_unpair_request(void)
     QACTIVE_POST(AO_Radio, &evt, NULL);
 }
 
-void ble_pair_open_request(void)
+bool ble_pair_open_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(BLE_PAIR_OPEN_REQ_SIG);
-    QACTIVE_POST(AO_Radio, &evt, NULL);
+
+    /* An app asks from its own task: a full queue refuses, never asserts. */
+    return QACTIVE_POST_X(AO_Radio, &evt, KQP_RADIO_POST_MARGIN, NULL);
 }
 
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
@@ -4774,6 +4778,7 @@ static void ble_publish_pair(Radio * const me)
     {
         /* The new device is in: the board hides again once it leaves. */
         me->ble_pair_open = false;
+        kdrv_ble_hid_pair_window(false);
     }
     QACTIVE_PUBLISH(&ev->super, &me->super);
 }
@@ -6005,6 +6010,7 @@ static bool radio_outcome(Radio * const me, QEvt const * const e)
 #if CONFIG_KODEOS_BLE
             /* What the app notified while the job ran waits for this. */
             kdrv_ble_app_kick();
+            radio_hid_job_end(&me->super);
 #endif
             if ( answers )
             {
@@ -7600,6 +7606,29 @@ static bool radio_ble_battery(Radio const * const me, QEvt const * const e)
 }
 
 /**
+ * @brief Whether the job the worker runs starts or stops the Bluetooth host,
+ *        which a wake-up of the HID service's drain would race.
+ *
+ * Any other job leaves the host as it is, and a report does not wait for it.
+ *
+ * @param me The AO.
+ * @return true while such a job is in flight.
+ */
+static bool radio_ble_host_moving(Radio const * const me)
+{
+    bool moving = false;
+
+    if ( me->winflight )
+    {
+        kdrv_radio_job_t const job = me->jobs->wreq.type;
+
+        moving = (KDRV_RADIO_JOB_BLE_START == job) || (KDRV_RADIO_JOB_BLE_STOP == job)
+                 || (KDRV_RADIO_JOB_DISCONNECT == job);
+    }
+    return moving;
+}
+
+/**
  * @brief BLE_APP_VALUE_REQ_SIG: set, or set and notify, one value of the
  *        app's service, or push on a queue or empty it, in every state, and
  *        answer a blocked task.
@@ -8171,6 +8200,7 @@ static void radio_ble_pair_expire(Radio * const me, uint32_t now)
         && (RADIO_BLE_END_MIN_MS > radio_ms_left(me->ble_pair_until, now)) )
     {
         me->ble_pair_open = false;
+        kdrv_ble_hid_pair_window(false);
         KLOG_N(TAG, "the time to pair a new device is over");
     }
 }
@@ -8202,6 +8232,7 @@ static void radio_ble_pair_start(Radio * const me)
 {
     me->ble_pair_wait  = false;
     me->ble_pair_open  = true;
+    kdrv_ble_hid_pair_window(true);
     me->ble_pair_until = khal_time_ms() + RADIO_BLE_PAIR_MS;
     me->ble_fast_owed  = true;
     me->ble_asked      = true;
@@ -9605,6 +9636,10 @@ void kaos_radio_start(void)
 #endif
 #if CONFIG_KODEOS_BLE
         { .name = KSET_KEY_BLE, .type = KODE_TYPE_BOOL },
+#if !defined(CONFIG_KODEOS_BOOT_ROLE_APP)
+        { .name = KSET_KEY_BLE_HID, .type = KODE_TYPE_ENUM, .enums = RADIO_HID_WORDS,
+          .n_enums = (uint8_t)RADIO_HID_WORDS_N, .wire = true },
+#endif
 #endif
 #if CONFIG_KODEOS_WIFI
         { .name = KSET_KEY_WJOIN, .type = KODE_TYPE_BOOL },
@@ -9615,6 +9650,11 @@ void kaos_radio_start(void)
     kaos_require(KODE_CONFIG_ADD(AO_Radio, KQP_RADIO_CMD_MARGIN, RADIO_CONFIG),
                  "radio settings");
 #endif
+}
+
+void ble_pair_subscribe(QActive const *who)
+{
+    QActive_subscribe(who, BLE_PAIR_SIG);
 }
 
 void ble_app_subscribe(QActive const *who)
@@ -9836,6 +9876,12 @@ static bool radio_config(Radio * const me, QEvt const * const e)
         return false;
     }
     KodeConfigReqEvt const * const r = Q_EVT_CAST(KodeConfigReqEvt);
+#ifdef CONFIG_KODEOS_BLE
+    if ( radio_hid_config(&me->super, r) )
+    {
+        return true;
+    }
+#endif
 #if CONFIG_KODEOS_WIFI
     if ( radio_config_station(me, r) )
     {
@@ -10688,8 +10734,12 @@ static QState Radio_initial(Radio * const me, void const * const par)
     (void)kdrv_ble_set_hear_cb(&radio_heard_note);
     (void)kdrv_ble_app_set_write_cb(&radio_on_ble_write);
     (void)kdrv_ble_app_set_taken_cb(&radio_on_ble_taken);
+    /* Before the battery's question below, and before Bluetooth can start:
+     * the kinds kodeOS stores are read when the GATT table is built. */
+    radio_hid_boot();
     /* The Battery service reports AO_Power's charge: its readings are heard
-     * only when the app asked for it. */
+     * only when the app asked for it, or for the HID service that carries it
+     * (radio_hid_job_end() subscribes for a kind chosen later). */
     if ( kdrv_ble_battery_declared() )
     {
         QActive_subscribe(&me->super, POWER_EVT_SIG);
@@ -11167,6 +11217,10 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
                 status = Q_HANDLED();
             }
             else if ( radio_ble_value(me, e) )
+            {
+                status = Q_HANDLED();
+            }
+            else if ( radio_hid_event(e, radio_ble_host_moving(me)) )
             {
                 status = Q_HANDLED();
             }
@@ -13572,6 +13626,10 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 status = Q_HANDLED();
             }
             else if ( radio_ble_value(me, e) )
+            {
+                status = Q_HANDLED();
+            }
+            else if ( radio_hid_event(e, radio_ble_host_moving(me)) )
             {
                 status = Q_HANDLED();
             }

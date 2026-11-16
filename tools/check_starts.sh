@@ -27,9 +27,10 @@
 #      links the second, and kode_init() starts both.
 #   5. The doors that only publish or subscribe - they name no AO_<Name>, so
 #      checks 1 and 2 cannot see them - sit beside their owner's start:
-#      touch_subscribe() beside kaos_touch_start(), radio_amp_request()
-#      beside kaos_radio_start(). A door of that kind added anywhere else is
-#      a door that links nothing; list it here.
+#      touch_subscribe() beside kaos_touch_start(), radio_amp_request(),
+#      ble_app_subscribe() and ble_pair_subscribe() beside
+#      kaos_radio_start(). A door of that kind added anywhere else is a door
+#      that links nothing; list it here.
 #
 # And, over the image itself, one of two promises:
 #   --all              every Active Object kaos compiled is in the image: a
@@ -162,7 +163,7 @@ for pair in AppMgr:Storage AppMgr:Net Net:Radio Radio:Storage Audio:Radio Audio:
 done
 
 # 5. The doors with no AO pointer in them, beside their start.
-for pair in touch_subscribe:touch radio_amp_request:radio ble_app_subscribe:radio; do
+for pair in touch_subscribe:touch radio_amp_request:radio ble_app_subscribe:radio ble_pair_subscribe:radio; do
     door="${pair%%:*}"
     start="kaos_${pair##*:}_start"
     door_obj="$(awk -v s="$door" '$2 == s { print $1 }' <<< "$kaos_defs")"

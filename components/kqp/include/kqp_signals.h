@@ -1706,6 +1706,12 @@ enum KodeSignals {
                                  *   (BleRspReqEvt). Never stored.           */
     BLE_APP_VALUE_REQ_SIG,      /**< AO_Radio: set or notify a value of the
                                  *   app's own service (BleAppValueReqEvt). */
+    BLE_HID_REPORT_REQ_SIG,     /**< AO_Radio: queue one input report of the
+                                 *   HID service for its host
+                                 *   (BleHidReportEvt). With no report, a
+                                 *   knock (a static event, owed when the
+                                 *   queue has no room): wake the drain for
+                                 *   a report of zeroes owed.                */
     BLE_STOP_REQ_SIG,           /**< AO_Radio: take the BLE stack down.      */
     BLE_STATE_REQ_SIG,          /**< AO_Radio: publish BLE_STATE_SIG now. A
                                  *   question, with no effect of its own.    */
@@ -5302,6 +5308,23 @@ typedef struct {
     QEvt super;
     bool connected;   /**< true: a link began; false: it ended. */
 } BleAppLinkEvt;
+
+#define KQP_BLE_HID_REPORT_MAX  8U   /**< Bytes of the longest HID input report. */
+
+/**
+ * @brief One input report of the HID service for its host (BLE_HID_REPORT_REQ_SIG).
+ *
+ * Its sender holds a slot of the driver's ring for it, and one more for a
+ * tap's second report (kdrv_ble_hid_claim()), which AO_Radio's pushes give back.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t kind;                          /**< The kind of device the report is of. */
+    bool    tap;                           /**< A report of zeroes follows it: what it
+                                            *   pressed is let go.                    */
+    uint8_t len;                           /**< Bytes in @c data.                    */
+    uint8_t data[KQP_BLE_HID_REPORT_MAX];  /**< The report.                          */
+} BleHidReportEvt;
 
 /** @brief A read took the oldest value of a queued characteristic (BLE_APP_TAKEN_SIG). */
 typedef struct {

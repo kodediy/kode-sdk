@@ -158,6 +158,8 @@ if(CONFIG_KODEOS_RADIO)
     # The BLE advertisement door: the same, for what the host stack hears.
     if(CONFIG_KODEOS_BLE)
         list(APPEND srcs "radio/src/radio_heard.c")
+        # The HID door: the reports AO_Radio queues, and kodeOS's stored kinds.
+        list(APPEND srcs "radio/src/radio_hid.c")
     endif()
     if(CONFIG_KODEOS_CONSOLE)
         list(APPEND srcs "radio/src/radio_verbs.c")

@@ -33,6 +33,8 @@
 #include "kaos.h"
 #include "kcli_proto.h"
 #include "kdrv_ble.h"
+#include "kdrv_ble_hid.h"
+#include "kdrv_ble_hid_table.h"
 #include "kdrv_ble_app.h"
 #include "kdrv_c5.h"
 #include "kdrv_c5svc.h"
@@ -8652,6 +8654,382 @@ TEST_CASE("a notification queued while a job runs wakes the host when the job en
     }
 }
 
+/* ---- The HID service's reports ------------------------------------------------ */
+
+/** @brief A boot whose table serves @p kinds, with a host subscribed to all of them. */
+static void hid_serving(uint8_t kinds)
+{
+    kdrv_ble_hid_select_forget();
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)kdrv_ble_hid_select(kinds));
+    TEST_ASSERT_EQUAL_UINT8(kinds, kdrv_ble_hid_fix());
+    if ( 0U != (kinds & KDRV_BLE_HID_MOUSE) )
+    {
+        kdrv_ble_hid_subscribed(KDRV_BLE_HID_MOUSE, true);
+    }
+    if ( 0U != (kinds & KDRV_BLE_HID_KEYBOARD) )
+    {
+        kdrv_ble_hid_subscribed(KDRV_BLE_HID_KEYBOARD, true);
+    }
+}
+
+TEST_CASE("AO_Radio queues an HID report for the host and wakes it", "[radio_ao][ble_hid]")
+{
+    static const uint8_t REP[KDRV_BLE_HID_MOUSE_LEN] = { 0x01U, 0x05U, 0xFBU, 0x00U };
+    uint8_t  kind = 0U;
+    uint8_t  got[KDRV_BLE_HID_REPORT_MAX];
+    uint16_t len  = 0U;
+
+    radio_fresh();
+    hid_serving(KDRV_BLE_HID_MOUSE);
+    unsigned const kicks = fake_ble_hid_kicks();
+
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_MOUSE, REP, sizeof(REP), false));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_ble_hid_queued(), "the door queued it, not AO_Radio");
+    pump();
+    TEST_ASSERT_TRUE(kdrv_ble_hid_peek(&kind, got, &len));
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_HID_MOUSE, kind);
+    TEST_ASSERT_EQUAL_UINT16(sizeof(REP), len);
+    TEST_ASSERT_EQUAL_MEMORY(REP, got, sizeof(REP));
+    TEST_ASSERT_EQUAL_UINT(kicks + 1U, fake_ble_hid_kicks());
+
+    kdrv_ble_hid_select_forget();
+}
+
+TEST_CASE("a tap queues the report and, behind it, the one that lets go", "[radio_ao][ble_hid]")
+{
+    static const uint8_t PRESS[KDRV_BLE_HID_KEYS_LEN] = { 0x02U, 0U, 0x04U, 0U, 0U, 0U, 0U, 0U };
+    static const uint8_t NONE[KDRV_BLE_HID_KEYS_LEN]  = { 0U };
+    uint8_t  kind = 0U;
+    uint8_t  got[KDRV_BLE_HID_REPORT_MAX];
+    uint16_t len  = 0U;
+
+    radio_fresh();
+    hid_serving(KDRV_BLE_HID_KEYBOARD);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, PRESS, sizeof(PRESS), true));
+    pump();
+    TEST_ASSERT_TRUE(kdrv_ble_hid_peek(&kind, got, &len));
+    TEST_ASSERT_EQUAL_MEMORY(PRESS, got, sizeof(PRESS));
+    kdrv_ble_hid_pop(true);
+    TEST_ASSERT_TRUE(kdrv_ble_hid_peek(&kind, got, &len));
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_HID_KEYBOARD, kind);
+    TEST_ASSERT_EQUAL_UINT16(sizeof(NONE), len);
+    TEST_ASSERT_EQUAL_MEMORY(NONE, got, sizeof(NONE));
+    kdrv_ble_hid_pop(true);
+    TEST_ASSERT_FALSE(kdrv_ble_hid_queued());
+
+    kdrv_ble_hid_select_forget();
+}
+
+TEST_CASE("a tap with one slot left is refused whole, and a report still fits",
+          "[radio_ao][ble_hid]")
+{
+    static const uint8_t REP[KDRV_BLE_HID_KEYS_LEN] = { 0U, 0U, 0x04U, 0U, 0U, 0U, 0U, 0U };
+
+    radio_fresh();
+    hid_serving(KDRV_BLE_HID_KEYBOARD);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK,
+                          (int)kdrv_ble_hid_claim(KDRV_BLE_HID_KEYBOARD,
+                                                  (uint8_t)(KDRV_BLE_HID_RING_SLOTS - 1U)));
+    TEST_ASSERT_EQUAL_INT((int)KODE_NO_RESOURCES,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, REP, sizeof(REP), true));
+    pump();
+    TEST_ASSERT_FALSE(kdrv_ble_hid_queued());
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, REP, sizeof(REP), false));
+    pump();
+    TEST_ASSERT_TRUE(kdrv_ble_hid_queued());
+
+    kdrv_ble_hid_select_forget();
+}
+
+TEST_CASE("a report with no host, of a kind not served or malformed is refused and never posted",
+          "[radio_ao][ble_hid]")
+{
+    static const uint8_t REP[KDRV_BLE_HID_KEYS_LEN + 1U] = { 0U };
+
+    radio_fresh();
+    kdrv_ble_hid_select_forget();
+    TEST_ASSERT_EQUAL_INT((int)KODE_DENIED,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_MOUSE, REP, KDRV_BLE_HID_MOUSE_LEN, false));
+    hid_serving(KDRV_BLE_HID_MOUSE);
+    TEST_ASSERT_EQUAL_INT((int)KODE_DENIED,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, REP, KDRV_BLE_HID_KEYS_LEN, false));
+    TEST_ASSERT_EQUAL_INT((int)KODE_DENIED,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_MOUSE, NULL, KDRV_BLE_HID_MOUSE_LEN, false));
+    TEST_ASSERT_EQUAL_INT((int)KODE_DENIED,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_MOUSE, REP, sizeof(REP), false));
+    kdrv_ble_hid_link_reset();
+    TEST_ASSERT_EQUAL_INT((int)KODE_DENIED,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_MOUSE, REP, KDRV_BLE_HID_MOUSE_LEN, false));
+    pump();
+    TEST_ASSERT_FALSE(kdrv_ble_hid_queued());
+
+    kdrv_ble_hid_select_forget();
+}
+
+TEST_CASE("an HID report queued while a job runs wakes the host when the job ends",
+          "[radio_ao][ble_hid]")
+{
+    static const uint8_t REP[KDRV_BLE_HID_MOUSE_LEN] = { 0U, 1U, 1U, 0U };
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    hid_serving(KDRV_BLE_HID_MOUSE);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_TRUE(job_held());
+    unsigned const kicks = fake_ble_hid_kicks();
+
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_MOUSE, REP, sizeof(REP), false));
+    pump();
+    TEST_ASSERT_TRUE(kdrv_ble_hid_queued());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(kicks, fake_ble_hid_kicks(),
+                                   "the host was woken while a worker job held NimBLE");
+    finish_ble_start();
+    TEST_ASSERT_GREATER_THAN_UINT(kicks, fake_ble_hid_kicks());
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+
+    kdrv_ble_hid_select_forget();
+    dispatch(BLE_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
+
+TEST_CASE("the time to pair is told to the driver while it runs, and ends with the device bonded",
+          "[radio_ao][ble_hid]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    hid_serving(KDRV_BLE_HID_KEYBOARD);
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+    TEST_ASSERT_FALSE(kdrv_ble_hid_pair_open());
+
+    dispatch(BLE_PAIR_OPEN_REQ_SIG);
+    pump();
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_ble_hid_pair_open(), "the driver was not told the time runs");
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+
+    fake_ble_pair_show(123456U);
+    pump();
+    fake_ble_pair_end(KDRV_BLE_PAIR_OK);
+    pump();
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_ble_hid_pair_open(), "a bonded device did not end the time");
+
+    kdrv_ble_hid_select_forget();
+    ao_spy_drain();
+    dispatch(BLE_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
+
+TEST_CASE("ble_hid stores the kinds, asks the driver for them and reads them back",
+          "[radio_ao][ble_hid]")
+{
+    const KodeConfigAnsEvt *a;
+    uint8_t                 v = 0xFFU;
+
+    radio_fresh();
+    fake_nvs_reset();
+    kdrv_ble_hid_select_forget();
+
+    a = config_ask(AO_Radio, &(config_ask_t){ .key = KSET_KEY_BLE_HID });
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_STRING("off", a->value);
+    TEST_ASSERT_FALSE(a->stored);
+
+    a = config_ask(AO_Radio, &(config_ask_t){ .key = KSET_KEY_BLE_HID, .set = true,
+                                              .e = (uint8_t)KDRV_BLE_HID_KINDS });
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, a->status);
+    TEST_ASSERT_EQUAL_STRING("both", a->value);
+    TEST_ASSERT_TRUE(a->stored);
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)khal_nvs_get_u8(KSET_NAMESPACE, KSET_KEY_BLE_HID, &v));
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_HID_KINDS, v);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KDRV_BLE_HID_KINDS, kdrv_ble_hid_kinds(),
+                                    "the table is not built yet: the kinds hold this boot");
+
+    /* Once the table is registered a change is stored for the next boot. */
+    (void)kdrv_ble_hid_fix();
+    a = config_ask(AO_Radio, &(config_ask_t){ .key = KSET_KEY_BLE_HID, .set = true,
+                                              .e = (uint8_t)KDRV_BLE_HID_MOUSE });
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_STRING("mouse", a->value);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_HID_KINDS, kdrv_ble_hid_kinds());
+
+    fake_nvs_reset();
+    kdrv_ble_hid_select_forget();
+    ao_spy_drain();
+}
+
+/** @brief Whether AO_Radio hears AO_Power's readings. */
+static bool radio_hears_battery(void)
+{
+    extern QSubscrList *QActive_subscrList_;
+
+    return QPSet_hasElement(&QActive_subscrList_[POWER_EVT_SIG].set, (uint_fast8_t)AO_Radio->prio);
+}
+
+TEST_CASE("AO_Radio hears the battery from the first job that ends with HID served, and "
+          "hands its last reading down", "[radio_ao][ble_hid]")
+{
+    power_reading_t last;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    kdrv_ble_hid_select_forget();
+    QActive_unsubscribe(AO_Radio, POWER_EVT_SIG);
+    fake_ble_battery_declare(false);
+
+    /* A job that ends with no HID served changes nothing. */
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+    TEST_ASSERT_FALSE_MESSAGE(radio_hears_battery(), "a board that never asked hears the battery");
+    TEST_ASSERT_EQUAL_INT16(-1, fake_ble_battery_pct());
+
+    /* The table serves HID: the next job's end is where AO_Radio learns it. */
+    hid_serving(KDRV_BLE_HID_MOUSE);
+    dispatch(BLE_STOP_REQ_SIG);
+    pump();
+    TEST_ASSERT_TRUE_MESSAGE(job_held(), "no job ran to end");
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    bool const    hears  = radio_hears_battery();
+    bool const    read   = power_reading(&last) && last.gauge_ok;
+    int16_t const handed = fake_ble_battery_pct();
+
+    QActive_unsubscribe(AO_Radio, POWER_EVT_SIG);
+    kdrv_ble_hid_select_forget();
+    ao_spy_drain();
+
+    TEST_ASSERT_TRUE(hears);
+    if ( read )
+    {
+        TEST_ASSERT_EQUAL_INT16((int16_t)last.soc_pct, handed);
+    }
+    else
+    {
+        TEST_ASSERT_EQUAL_INT16_MESSAGE(-1, handed, "a level nobody read was handed to the host");
+    }
+}
+
+TEST_CASE("an HID report sent while a Wi-Fi scan is in flight wakes the host at once",
+          "[radio_ao][ble_hid]")
+{
+    static const uint8_t REP[KDRV_BLE_HID_MOUSE_LEN] = { 0U, 3U, 0U, 0U };
+
+    radio_fresh();
+    go_up();
+    hid_serving(KDRV_BLE_HID_MOUSE);
+    ao_spy_drain();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    unsigned const kicks = fake_ble_hid_kicks();
+
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_MOUSE, REP, sizeof(REP), false));
+    pump();
+    TEST_ASSERT_TRUE(kdrv_ble_hid_queued());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(kicks + 1U, fake_ble_hid_kicks(),
+                                   "the report waits for the half minute a scan lasts");
+
+    kdrv_ble_hid_select_forget();
+    finish_scan(1U, -50);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    ao_spy_drain();
+}
+
+TEST_CASE("the report that lets everything go is taken with the ring full, and wakes the host",
+          "[radio_ao][ble_hid]")
+{
+    static const uint8_t UP[KDRV_BLE_HID_KEYS_LEN]    = { 0U };
+    static const uint8_t PRESS[KDRV_BLE_HID_KEYS_LEN] = { 0U, 0U, 0x04U, 0U, 0U, 0U, 0U, 0U };
+    uint8_t  kind = 0U;
+    uint8_t  got[KDRV_BLE_HID_REPORT_MAX];
+    uint16_t len  = 0U;
+
+    radio_fresh();
+    hid_serving(KDRV_BLE_HID_KEYBOARD);
+    /* Every slot spoken for: a press is refused, the letting go is not. */
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK,
+                          (int)kdrv_ble_hid_claim(KDRV_BLE_HID_KEYBOARD,
+                                                  (uint8_t)KDRV_BLE_HID_RING_SLOTS));
+    TEST_ASSERT_EQUAL_INT((int)KODE_NO_RESOURCES,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, PRESS, sizeof(PRESS), false));
+    unsigned const kicks = fake_ble_hid_kicks();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KODE_OK,
+                                  (int)ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, UP, sizeof(UP), false),
+                                  "a key would stay down on the host");
+    pump();
+    TEST_ASSERT_EQUAL_UINT(kicks + 1U, fake_ble_hid_kicks());
+    /* It goes once the reports ahead of it have gone. */
+    TEST_ASSERT_FALSE(kdrv_ble_hid_queued());
+    kdrv_ble_hid_unclaim(KDRV_BLE_HID_KEYBOARD, (uint8_t)KDRV_BLE_HID_RING_SLOTS);
+    TEST_ASSERT_TRUE(kdrv_ble_hid_peek(&kind, got, &len));
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_HID_KEYBOARD, kind);
+    TEST_ASSERT_EQUAL_MEMORY(UP, got, sizeof(UP));
+    kdrv_ble_hid_pop(true);
+
+    /* With no host there is nothing held down, and nothing owed. */
+    kdrv_ble_hid_link_reset();
+    TEST_ASSERT_EQUAL_INT((int)KODE_DENIED,
+                          (int)ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, UP, sizeof(UP), false));
+    kdrv_ble_hid_select_forget();
+}
+
+TEST_CASE("a boot asks the driver for the kinds ble_hid stores, and for none when it stores none",
+          "[radio_ao][ble_hid]")
+{
+    uint8_t const keys = (uint8_t)KDRV_BLE_HID_KEYBOARD;
+
+    radio_fresh();
+    fake_nvs_reset();
+    kdrv_ble_hid_select_forget();
+    radio_reboot();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, kdrv_ble_hid_kinds(), "a board that never asked serves HID");
+
+    fake_nvs_seed(KSET_NAMESPACE, KSET_KEY_BLE_HID, &keys, sizeof(keys));
+    QActive_unsubscribe(AO_Radio, POWER_EVT_SIG);
+    radio_reboot();
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_HID_KEYBOARD, kdrv_ble_hid_kinds());
+    TEST_ASSERT_TRUE_MESSAGE(radio_hears_battery(),
+                             "the stored kinds were read after the battery's question");
+
+    fake_nvs_reset();
+    kdrv_ble_hid_select_forget();
+    QActive_unsubscribe(AO_Radio, POWER_EVT_SIG);
+    radio_reboot();
+    TEST_ASSERT_FALSE(radio_hears_battery());
+    ao_spy_drain();
+}
+
 
 /** @brief A service with one queued characteristic, the log a central drains. */
 static const kdrv_ble_app_char_t s_queue_chars[] = {
@@ -11028,7 +11406,7 @@ TEST_CASE("a BLE request that is refused says why in the state that answers it",
 
     /* Pair new device with Bluetooth off. */
     TEST_ASSERT_FALSE(ble_enabled());
-    ble_pair_open_request();
+    TEST_ASSERT_TRUE(ble_pair_open_request());
     pump();
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_BLE_REFUSED_OFF, take_refused());
     ao_spy_drain();
@@ -11974,6 +12352,49 @@ TEST_CASE("the knocks leave the last slots of the queue to the time events",
 {
     TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
                                      (uint32_t)ask_support_fork_run(&knock_margin_body, NULL),
+                                     "see the child's line above");
+}
+
+/** @brief Child body: a key is let go with the ring and AO_Radio's queue both full; the wake-up is owed, and the host is woken once there is room. */
+static void hid_wake_owed_body(void *arg)
+{
+    static const uint8_t UP[KDRV_BLE_HID_KEYS_LEN] = { 0U };
+
+    (void)arg;
+    radio_fresh();
+    pump();
+    ao_spy_drain();
+    hid_serving(KDRV_BLE_HID_KEYBOARD);
+    board_queue();
+    CHILD_CHECK(KODE_OK == kdrv_ble_hid_claim(KDRV_BLE_HID_KEYBOARD,
+                                              (uint8_t)KDRV_BLE_HID_RING_SLOTS),
+                "the ring was not taken");
+    radio_queue_fill_to(0U);
+    fake_klog_reset();
+    unsigned const kicks = fake_ble_hid_kicks();
+
+    CHILD_CHECK(KODE_OK == ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, UP, sizeof(UP), false),
+                "the letting go was refused");
+    CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused wake-up took a slot");
+    CHILD_CHECK(1U == log_count("no room for the HID wake-up"), "the refusal was not said once");
+    pump();
+    pump();
+    CHILD_CHECK(kicks < fake_ble_hid_kicks(), "the host was never woken for the owed report");
+
+    /* Handled, the knock is free again: the next one is an event of its own. */
+    radio_queue_flush();
+    CHILD_CHECK(KODE_OK == ble_hid_report_post(KDRV_BLE_HID_KEYBOARD, UP, sizeof(UP), false),
+                "the second letting go was refused");
+    CHILD_CHECK(NULL != take_queued(BLE_HID_REPORT_REQ_SIG), "the HID wake-up's knock was left standing");
+    kdrv_ble_hid_unclaim(KDRV_BLE_HID_KEYBOARD, (uint8_t)KDRV_BLE_HID_RING_SLOTS);
+    kdrv_ble_hid_select_forget();
+}
+
+TEST_CASE("a key let go with AO_Radio's queue full owes the wake-up instead of asserting",
+          "[radio_ao][ble_hid][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&hid_wake_owed_body, NULL),
                                      "see the child's line above");
 }
 

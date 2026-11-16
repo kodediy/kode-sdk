@@ -1194,8 +1194,15 @@ static void h_ble_pair(const kverb_t *c, const karg_val_t *v)
 {
     (void)v;
     console_begin(c->verb);
-    s_radio_kind = RADIO_V_BLE;
-    ble_pair_open_request();
+    if ( ble_pair_open_request() )
+    {
+        s_radio_kind = RADIO_V_BLE;
+    }
+    else
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+        console_end();
+    }
 }
 
 /** @brief What `ble_heard` has counted in its window. */

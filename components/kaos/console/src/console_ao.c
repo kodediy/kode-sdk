@@ -5444,6 +5444,11 @@ static void h_config(Console *me, const kcmd_t *c, const karg_val_t *v)
     }
     if ( v[1].present )
     {
+        /* A row may ask for whoever sets it to be at the board. */
+        if ( row->wire && !console_src_allows(CONSOLE_NEED_WIRE) )
+        {
+            return;
+        }
         /* A string value is quoted and every other kind is bare; only the
          * row knows which this one is. */
         bool const want_quoted = (KODE_TYPE_STRING == row->type);
