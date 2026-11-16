@@ -4237,9 +4237,9 @@ kode_status_t kdrv_ble_conn_calm(bool rest)
 /**
  * @brief Give the host's one scan to the scan that is about to start.
  *
- * The owner ended its stream before it sent the job, so the hook is told
+ * The owner ended the stream before it sent the job, so the hook is told
  * nothing: the flag is cleared before the cancel, as kdrv_ble_hear(false)
- * does.
+ * does. A scan, a find and a new start of the stream call it first.
  */
 static void ble_hear_yield(void)
 {
@@ -4433,10 +4433,16 @@ kode_status_t kdrv_ble_hear(bool on)
         return KODE_OK;
     }
 
+    /* A passive scan still running is one the owner already let go of (a
+     * listing ended its stream while the worker was busy, or a start that
+     * timed out): the new start takes its place, so a start asked twice
+     * runs once. */
+    ble_hear_yield();
+
     /* Never brings the stack up: this scan is the owner's, asked once the
      * radio is already in the state it wants. A scan or a find that runs
      * holds the one scan the controller has. */
-    if ( !s_ble.up || !s_ble.synced || s_ble.hearing || (0 != ble_gap_disc_active()) )
+    if ( !s_ble.up || !s_ble.synced || (0 != ble_gap_disc_active()) )
     {
         return KODE_DENIED;
     }

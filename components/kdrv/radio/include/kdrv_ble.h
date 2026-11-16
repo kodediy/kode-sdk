@@ -501,14 +501,15 @@ kode_status_t kdrv_ble_set_hear_cb(kdrv_ble_hear_cb_t cb);
  * Every advertisement heard goes into the ring of kdrv_ble_heard.h, which
  * kdrv_ble_heard_init() must have made first, and the hook is told. Interval
  * and window are equal, so the controller listens all the time. Never brings
- * the stack up. A stop with none running is KODE_OK. kdrv_ble_scan() and
+ * the stack up. A stop with none running is KODE_OK, and a start with this
+ * scan still running starts it again. kdrv_ble_scan() and
  * kdrv_ble_scan_find() take the host's one scan from it as they start, and
  * kdrv_ble_quiet() and kdrv_ble_stop() end it too; none of them tells the
  * hook: AO_Radio ends its stream before it asks for them.
  *
  * @param on true to start, false to stop.
- * @return KODE_OK; KODE_DENIED (the stack is down, or a scan, a find or this
- *         scan already runs); KODE_ERROR when NimBLE refuses the scan.
+ * @return KODE_OK; KODE_DENIED (the stack is down, or a scan or a find
+ *         runs); KODE_ERROR when NimBLE refuses the scan.
  */
 kode_status_t kdrv_ble_hear(bool on);
 
