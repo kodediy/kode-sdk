@@ -674,6 +674,21 @@ static void cable_look(bool on)
     }
 }
 
+/**
+ * @brief A cable came while the cable port was off the bus: ask AO_Log, the
+ *        console's owner, to show the port to the host again.
+ *
+ * A request AO_Log's queue has no room for is said here: the host that gave
+ * the port up keeps it given up until the cable is plugged in again.
+ */
+static void cable_port_show(void)
+{
+    if ( !log_bounce_request() )
+    {
+        KLOG_W(TAG, "AO_Log's queue is full: the cable port is not shown to the host again");
+    }
+}
+
 /* ---- The way down ------------------------------------------------------------- */
 
 /**
@@ -4274,7 +4289,7 @@ static QState LowPower_awake(LowPower * const me, QEvt const * const e)
             {
                 /* It came while the P4 slept, and a host on it may have
                  * given the cable port up. */
-                khal_console_cable();
+                cable_port_show();
             }
             me->cable_check = false;
             me->vbus = Q_EVT_CAST(PowerEvt)->vbus;
@@ -4529,8 +4544,9 @@ static QState LowPower_asleep(LowPower * const me, QEvt const * const e)
             if ( me->vbus )
             {
                 wake_up(me, (uint8_t)KODE_LP_CAUSE_VBUS);
-                /* The cable came while the cable port was off the bus. */
-                khal_console_cable();
+                /* The cable came while the cable port was off the bus; the
+                 * tick runs again for AO_Log's waits. */
+                cable_port_show();
                 status = Q_TRAN(&LowPower_awake);
             }
             else

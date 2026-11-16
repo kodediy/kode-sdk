@@ -823,8 +823,17 @@ void fake_console_feed_byte(int c);
 /** @brief What khal_console_rest() was told last. */
 bool fake_console_resting(void);
 
-/** @brief How many times khal_console_cable() was called since fake_console_reset(). */
-unsigned fake_console_cable_calls(void);
+/** @brief Set the frame count khal_console_frame() reads next; fake_console_reset() makes it 0. */
+void fake_console_set_frame(uint32_t frame);
+
+/** @brief Whether the cable port's pad is on the bus, as khal_console_pad() left it. */
+bool fake_console_pad_on(void);
+
+/** @brief How many times khal_console_pad() took the pad off the bus since fake_console_reset(). */
+unsigned fake_console_pad_offs(void);
+
+/** @brief How many times khal_console_pad() put the pad on the bus since fake_console_reset(). */
+unsigned fake_console_pad_ons(void);
 
 /** @brief What khal_watch_rest() was told last. */
 bool fake_watch_resting(void);

@@ -18,6 +18,7 @@
 #include "fakes.h"
 #include "kaos.h"
 #include "kbsp_owners.h"
+#include "khal_console.h"
 #include "khal_nvs.h"
 #include "khal_time.h"
 #include "kqp.h"
@@ -48,6 +49,10 @@ static void log_bring_up(void)
 
     fake_console_reset();
 
+    /* A case that stopped in the middle of a bounce left its one-shot armed:
+     * built again over it, QF's list of armed time events would run in a cycle. */
+    qf_support_disarm_timers(AO_Log);
+    qf_support_reap_timers();
     Log_ctor();
     qf_support_give_queue(AO_Log);
     AO_Log->prio  = KODE_PRIO_LOG;
@@ -1357,5 +1362,128 @@ TEST_CASE("test_dock_take_back_refused_says_so_and_leaves_the_pins_free",
     TEST_ASSERT_TRUE(a->lent);
     TEST_ASSERT_FALSE_MESSAGE(log_dock_lend_request(NULL, true), "nobody to tell");
     fake_console_dock_take_rc(KODE_OK);
+    log_settle();
+}
+
+/* ---- The cable port shown to a host again (log_bounce_request) ------------- */
+
+/** @brief The host's frame count when a bounce case begins. */
+#define FRAME_AT        0x123U
+
+/** @brief The count a host that keeps the port in use reaches in the wait: a frame a millisecond. */
+#define FRAME_AFTER     (FRAME_AT + KHAL_CONSOLE_FRAME_WAIT_MS)
+
+/** @brief A step of QP time shorter than either wait, to see each one has not ended early. */
+#define BOUNCE_EARLY_MS 10U
+
+/** @brief Ask for a bounce and let AO_Log take the request. */
+static void bounce_ask(void)
+{
+    TEST_ASSERT_TRUE_MESSAGE(log_bounce_request(), "the request was refused");
+    log_run();
+}
+
+/** @brief Let @p ms of QP time pass, AO_Log taking what its one-shot posts. */
+static void log_wait_ms(uint32_t ms)
+{
+    (void)qf_support_tick(AO_Log, QF_SUPPORT_STEPS(ms));
+}
+
+/* A host that keeps the port in use sends a frame every millisecond: the count
+ * moves in the wait, and a working port must not be taken from it. */
+TEST_CASE("a cable port that gets frames stays on the bus, and that is said", "[log_ao]")
+{
+    log_fresh();
+    qf_support_margin_queue(AO_Log);
+    fake_console_set_frame(FRAME_AT);
+
+    bounce_ask();
+    log_wait_ms(KHAL_CONSOLE_FRAME_WAIT_MS - BOUNCE_EARLY_MS);
+    fake_console_set_frame(FRAME_AFTER);
+    log_wait_ms(BOUNCE_EARLY_MS);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_console_pad_offs(), "a port in use left the bus");
+    TEST_ASSERT_TRUE(fake_console_pad_on());
+    TEST_ASSERT_TRUE_MESSAGE(captured_has("it stays on the bus"), "the port left alone was not said");
+    log_settle();
+}
+
+/* A host that gave the port up sends no frame: the pad leaves the bus for its
+ * time and comes back, which the host takes for a new device. */
+TEST_CASE("a cable port with no frames leaves the bus for its time and comes back, and that is said",
+          "[log_ao]")
+{
+    log_fresh();
+    qf_support_margin_queue(AO_Log);
+    fake_console_set_frame(FRAME_AT);
+
+    bounce_ask();
+    log_wait_ms(KHAL_CONSOLE_FRAME_WAIT_MS - BOUNCE_EARLY_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_console_pad_offs(), "off the bus before the wait ended");
+    log_wait_ms(BOUNCE_EARLY_MS);
+    TEST_ASSERT_EQUAL_UINT(1U, fake_console_pad_offs());
+    TEST_ASSERT_FALSE(fake_console_pad_on());
+
+    log_wait_ms(KHAL_CONSOLE_OFF_BUS_MS - BOUNCE_EARLY_MS);
+    TEST_ASSERT_FALSE_MESSAGE(fake_console_pad_on(), "back on the bus before its time");
+    log_wait_ms(BOUNCE_EARLY_MS);
+    TEST_ASSERT_TRUE(fake_console_pad_on());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_console_pad_ons());
+    TEST_ASSERT_TRUE_MESSAGE(captured_has("off the bus for"), "the bounce was not said");
+    log_settle();
+}
+
+/* A cable read twice, or a second wake by one, asks again while the first
+ * bounce runs: one bounce answers both, and the one-shot is never armed twice. */
+TEST_CASE("a bounce request while one runs does nothing, and one after it bounces again",
+          "[log_ao]")
+{
+    log_fresh();
+    qf_support_margin_queue(AO_Log);
+    fake_console_set_frame(FRAME_AT);
+
+    bounce_ask();
+    log_wait_ms(KHAL_CONSOLE_FRAME_WAIT_MS - BOUNCE_EARLY_MS);
+    bounce_ask();                                   /* in the wait for a frame */
+    log_wait_ms(BOUNCE_EARLY_MS);
+    TEST_ASSERT_EQUAL_UINT(1U, fake_console_pad_offs());
+    bounce_ask();                                   /* off the bus */
+    log_wait_ms(KHAL_CONSOLE_OFF_BUS_MS);
+    TEST_ASSERT_EQUAL_UINT(1U, fake_console_pad_ons());
+
+    log_wait_ms(KHAL_CONSOLE_FRAME_WAIT_MS + KHAL_CONSOLE_OFF_BUS_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_console_pad_offs(), "a request in a bounce began another");
+    TEST_ASSERT_EQUAL_UINT(1U, fake_console_pad_ons());
+
+    bounce_ask();
+    log_wait_ms(KHAL_CONSOLE_FRAME_WAIT_MS + KHAL_CONSOLE_OFF_BUS_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, fake_console_pad_offs(), "a request after a bounce was not served");
+    TEST_ASSERT_EQUAL_UINT(2U, fake_console_pad_ons());
+    TEST_ASSERT_TRUE(fake_console_pad_on());
+    log_settle();
+}
+
+/* The request leaves AO_Log's queue the room a request leaves: lines and
+ * bytes keep theirs, and a queue without it refuses the request, never asserts. */
+TEST_CASE("a bounce request is refused within AO_Log's queue margin and posted above it",
+          "[log_ao]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(LOG_FLUSH_REQ_SIG);
+    const QEvt       *e = NULL;
+
+    log_fresh();
+    qf_support_margin_queue(AO_Log);
+    while ( uxQueueSpacesAvailable(AO_Log->eQueue) > KQP_LOG_CMD_MARGIN )
+    {
+        TEST_ASSERT_TRUE(QACTIVE_POST_X(AO_Log, &filler, 0U, NULL));
+    }
+
+    TEST_ASSERT_FALSE(log_bounce_request());
+    TEST_ASSERT_EQUAL_UINT(KQP_LOG_CMD_MARGIN, uxQueueSpacesAvailable(AO_Log->eQueue));
+
+    TEST_ASSERT_TRUE(xQueueReceive(AO_Log->eQueue, &e, 0U) == pdTRUE);
+    QF_gc(e);
+    TEST_ASSERT_TRUE(log_bounce_request());
+    TEST_ASSERT_EQUAL_UINT(KQP_LOG_CMD_MARGIN, uxQueueSpacesAvailable(AO_Log->eQueue));
     log_settle();
 }

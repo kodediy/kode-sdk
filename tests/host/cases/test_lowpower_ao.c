@@ -5325,6 +5325,12 @@ TEST_CASE("kode_rest is refused inside an Active Object, which is named, and pos
 /** @brief The period of the look for a cable, microseconds. */
 #define LOOK_US  ((uint64_t)KODE_LOWPOWER_CABLE_LOOK_MS * 1000ULL)
 
+/** @brief How many requests to show the cable port again AO_Log was posted; its queue is emptied. */
+static unsigned bounces(void)
+{
+    return queued(AO_Log, LOG_BOUNCE_REQ_SIG);
+}
+
 TEST_CASE("asleep, the charger is read every few seconds on a timer of its own; awake, it is not",
           "[lowpower_ao]")
 {
@@ -5348,53 +5354,45 @@ TEST_CASE("asleep, the charger is read every few seconds on a timer of its own; 
 TEST_CASE("a cable the look finds wakes the board and has the cable port shown again, once",
           "[lowpower_ao]")
 {
-    unsigned calls;
-
     lp_up(KODE_OK);
     go_asleep();
-    calls = fake_console_cable_calls();
+    (void)bounces();
 
     charger_reading(false);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "no cable, no wake");
-    TEST_ASSERT_EQUAL_UINT(calls, fake_console_cable_calls());
+    TEST_ASSERT_EQUAL_UINT(0U, bounces());
 
     charger_reading(true);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_VBUS, KODE_LP_ASLEEP);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(),
-                                   "the port was off the bus when the cable came");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, bounces(), "the port was off the bus when the cable came");
     TEST_ASSERT_FALSE(fake_time_periodic_running_at(LOOK_US));
 
     charger_reading(true);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(), "once for one cable");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, bounces(), "once for one cable");
     lp_down();
 }
 
 TEST_CASE("a cable in the first reading after another wake has the cable port shown again",
           "[lowpower_ao]")
 {
-    unsigned calls;
-
     lp_up(KODE_OK);
     go_asleep();
     expander(LEVELS_BOT, CHANGED_BOT);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_ASLEEP);
-    calls = fake_console_cable_calls();
+    (void)bounces();
 
     charger_reading(true);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(),
-                                   "the cable came before the look saw it");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, bounces(), "the cable came before the look saw it");
     lp_down();
 }
 
 TEST_CASE("a cable that comes to a board that is awake leaves the cable port alone",
           "[lowpower_ao]")
 {
-    unsigned calls;
-
     lp_up(KODE_OK);
-    calls = fake_console_cable_calls();
+    (void)bounces();
     charger_reading(true);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls, fake_console_cable_calls(), "the board never slept");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, bounces(), "the board never slept");
     charger_reading(false);
 
     go_asleep();
@@ -5402,7 +5400,7 @@ TEST_CASE("a cable that comes to a board that is awake leaves the cable port alo
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_ASLEEP);
     charger_reading(false);
     charger_reading(true);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls, fake_console_cable_calls(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, bounces(),
                                    "the reading after the wake had no cable: the port was on the bus");
     lp_down();
 }
@@ -5550,16 +5548,14 @@ TEST_CASE("a dark wake keeps the look, and it runs on after", "[lowpower_ao]")
 TEST_CASE("a cable the look finds in a dark wake wakes the board whole, and the look ends",
           "[lowpower_ao]")
 {
-    unsigned calls;
-
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
     dark_wake();
-    calls = fake_console_cable_calls();
+    (void)bounces();
 
     charger_reading(true);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_VBUS, KODE_LP_ASLEEP);
-    TEST_ASSERT_EQUAL_UINT(calls + 1U, fake_console_cable_calls());
+    TEST_ASSERT_EQUAL_UINT(1U, bounces());
     TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "awake for good: no look");
     ao_spy_drain();
     lp_down();
@@ -5604,28 +5600,26 @@ TEST_CASE("a cable the look finds ends the CPU part and has the cable port shown
 {
     lowpower_part_req_t const req = { 0 };
     const LowPowerPartEvt *n;
-    unsigned calls;
 
     rest_up();
     cpu_rest(req);
     ao_spy_drain();
-    calls = fake_console_cable_calls();
+    (void)bounces();
 
     charger_reading(false);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_true, "no cable, no wake");
-    TEST_ASSERT_EQUAL_UINT(calls, fake_console_cable_calls());
+    TEST_ASSERT_EQUAL_UINT(0U, bounces());
 
     charger_reading(true);
     TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
     expect_awake_posted();
     n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_CABLE, n->cause);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(),
-                                   "the port was off the bus when the cable came");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, bounces(), "the port was off the bus when the cable came");
     TEST_ASSERT_FALSE(fake_time_periodic_running_at(LOOK_US));
 
     charger_reading(true);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(), "once for one cable");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, bounces(), "once for one cable");
     lp_down();
 }
 
@@ -5633,17 +5627,35 @@ TEST_CASE("a cable in the first reading after the CPU part ended another way has
           "[lowpower_ao]")
 {
     lowpower_part_req_t const req = { 0 };
-    unsigned calls;
 
     rest_up();
     cpu_rest(req);
     ao_spy_drain();
     expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
     TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
-    calls = fake_console_cable_calls();
+    (void)bounces();
 
     charger_reading(true);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(),
-                                   "the cable came before the look saw it");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, bounces(), "the cable came before the look saw it");
+    lp_down();
+}
+
+/* The request is posted with a margin; AO_Log's queue without room for it
+ * refuses it, and the refusal is said by AO_LowPower, never asserted. */
+TEST_CASE("a cable whose request AO_Log's queue has no room for is said, and the board wakes",
+          "[lowpower_ao]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(LOG_FLUSH_REQ_SIG);
+
+    lp_up(KODE_OK);
+    go_asleep();
+    (void)bounces();
+    TEST_ASSERT_TRUE(qf_support_queue_stuff(AO_Log, &filler));
+
+    charger_reading(true);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_VBUS, KODE_LP_ASLEEP);
+    TEST_ASSERT_TRUE_MESSAGE(log_has("the cable port is not shown to the host again"),
+                             "a refused request was not said");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, bounces(), "a refused request was queued");
     lp_down();
 }

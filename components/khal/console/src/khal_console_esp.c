@@ -15,7 +15,6 @@
 #if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
-#include "esp_timer.h"
 #include "hal/usb_serial_jtag_ll.h"
 #include "soc/usb_serial_jtag_struct.h"
 #elif defined(CONFIG_ESP_CONSOLE_UART)
@@ -42,8 +41,6 @@
 #define READER_TIMEOUT_MS   50U     /**< Longest wait before the reader looks for a raw-mode request. */
 #define READER_DRAIN_CHUNK  64U     /**< Bytes read per pass when discarding input before raw mode. */
 #define READER_REST_MS      1000U   /**< The same wait while the board sleeps: khal_console_rest(). */
-#define CABLE_FRAME_WAIT_US 100000U /**< How long khal_console_cable() waits for a frame from the host: frames come every millisecond. */
-#define CABLE_OFF_BUS_US    300000U /**< How long the cable pad stays off the bus for the host to see the port leave. */
 
 static volatile bool s_reader_rest;   /**< The board sleeps: the reader looks up once a second. */
 
@@ -676,67 +673,33 @@ void khal_console_rest(bool rest)
     s_reader_rest = rest;
 }
 
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
-static esp_timer_handle_t s_cable_timer;   /**< khal_console_cable()'s wait for a frame, then the pad's time off the bus. */
-static uint32_t           s_cable_frame;   /**< The host's frame number when khal_console_cable() was called. */
-static volatile bool      s_cable_off;     /**< The cable pad is off the bus and s_cable_timer puts it back. */
-
-/**
- * @brief Runs in the timer task: the next step of khal_console_cable().
- *
- * After the wait, a frame number that has not moved is a host that is not
- * talking to the port: the pad leaves the bus and the timer is armed again.
- * After the time off the bus, the pad goes back on.
- *
- * @param arg Unused.
- */
-static void cable_step_cb(void *arg)
+kode_status_t khal_console_frame(uint32_t *frame)
 {
-    (void)arg;
-    if ( s_cable_off )
+    kode_status_t rc = KODE_DENIED;
+
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    if ( NULL != frame )
     {
-        s_cable_off = false;
-        usb_serial_jtag_ll_phy_enable_pad(true);
+        *frame = USB_SERIAL_JTAG.fram_num.serial_jtag_sof_frame_index;
+        rc     = KODE_OK;
     }
-    else if ( USB_SERIAL_JTAG.fram_num.val == s_cable_frame )
-    {
-        usb_serial_jtag_ll_phy_enable_pad(false);
-        s_cable_off = true;
-        if ( esp_timer_start_once(s_cable_timer, CABLE_OFF_BUS_US) != ESP_OK )
-        {
-            s_cable_off = false;
-            usb_serial_jtag_ll_phy_enable_pad(true);
-        }
-    }
-    else
-    {
-        /* The host is talking to the port: it stays as it is. */
-    }
+#else
+    (void)frame;
+#endif
+    return rc;
 }
-#endif
 
-void khal_console_cable(void)
+kode_status_t khal_console_pad(bool on)
 {
+    kode_status_t rc = KODE_DENIED;
+
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
-    bool ready = (NULL != s_cable_timer);
-
-    if ( !ready )
-    {
-        const esp_timer_create_args_t args = {
-            .callback = &cable_step_cb,
-            .arg      = NULL,
-            .name     = "khal_cable",
-        };
-
-        ready = (esp_timer_create(&args, &s_cable_timer) == ESP_OK);
-    }
-    /* A step already under way finishes on its own. */
-    if ( ready && (!s_cable_off) && (!esp_timer_is_active(s_cable_timer)) )
-    {
-        s_cable_frame = USB_SERIAL_JTAG.fram_num.val;
-        (void)esp_timer_start_once(s_cable_timer, CABLE_FRAME_WAIT_US);
-    }
+    usb_serial_jtag_ll_phy_enable_pad(on);
+    rc = KODE_OK;
+#else
+    (void)on;
 #endif
+    return rc;
 }
 
 kode_status_t khal_console_start_reader(void (*on_byte)(uint8_t byte), uint32_t prio)

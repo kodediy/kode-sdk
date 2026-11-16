@@ -32,12 +32,20 @@
  * long enough that a streaming host never pays for the round trip. */
 #define KHAL_RAW_READ_MS   200U
 
+/* Where a bounce of the cable port is (log_bounce_request()). */
+#define LOG_BOUNCE_IDLE  0U   /**< None runs.                                            */
+#define LOG_BOUNCE_WAIT  1U   /**< Waiting KHAL_CONSOLE_FRAME_WAIT_MS for a frame.       */
+#define LOG_BOUNCE_OFF   2U   /**< The pad is off the bus for KHAL_CONSOLE_OFF_BUS_MS.   */
+
 typedef struct {
-    QActive super;
-    char    line[KODE_CONSOLE_LINE_MAX];
-    size_t  len;
-    bool    prompt_drawn;   /**< No prompt to erase until the first draw. */
-    bool    overflow;       /**< This line ran past the buffer: refuse it. */
+    QActive  super;
+    char     line[KODE_CONSOLE_LINE_MAX];
+    size_t   len;
+    bool     prompt_drawn;   /**< No prompt to erase until the first draw. */
+    bool     overflow;       /**< This line ran past the buffer: refuse it. */
+    QTimeEvt bounce;         /**< The bounce's one-shot: the wait for a frame, then the time off the bus. */
+    uint32_t bounce_frame;   /**< The host's frame count when the bounce began. */
+    uint8_t  bounce_step;    /**< LOG_BOUNCE_*: where the bounce is. */
 } Log;
 
 static Log l_log;
@@ -628,6 +636,91 @@ static void dock_lend(LogDockReqEvt const * const r)
     }
 }
 
+/* ---- The cable port shown to a host again (log_bounce_request()) ---------- */
+
+bool log_bounce_request(void)
+{
+    static const QEvt evt = QEVT_INITIALIZER(LOG_BOUNCE_REQ_SIG);
+
+    return QACTIVE_POST_X(AO_Log, &evt, KQP_LOG_CMD_MARGIN, NULL);
+}
+
+/**
+ * @brief Begin a bounce: note the host's frame count and wait for the next frame.
+ *
+ * A bounce that runs already covers this request, and finishes on its own. A
+ * console with no cable port has nothing to show.
+ *
+ * @param me The AO.
+ */
+static void bounce_begin(Log * const me)
+{
+    if ( LOG_BOUNCE_IDLE != me->bounce_step )
+    {
+        /* The bounce under way shows the port again, or finds it in use. */
+    }
+    else if ( khal_console_frame(&me->bounce_frame) != KODE_OK )
+    {
+        KLOG_N(TAG, "cable port: this console has none to show the host");
+    }
+    else
+    {
+        me->bounce_step = LOG_BOUNCE_WAIT;
+        QTimeEvt_armX(&me->bounce, KQP_TICKS_PER_MS(KHAL_CONSOLE_FRAME_WAIT_MS), 0U);
+    }
+}
+
+/**
+ * @brief The bounce's one-shot ran out: judge the frames, or put the pad back.
+ *
+ * After the wait, a count that moved is a host that keeps the port in use: the
+ * port stays on the bus. A count that did not is a host that gave the port up,
+ * or none at all: the pad leaves the bus, and comes back when the one-shot runs
+ * out again, which the host takes for a new device.
+ *
+ * @param me The AO.
+ */
+static void bounce_next(Log * const me)
+{
+    uint32_t frame = 0U;
+
+    if ( LOG_BOUNCE_WAIT == me->bounce_step )
+    {
+        me->bounce_step = LOG_BOUNCE_IDLE;
+        if ( (khal_console_frame(&frame) == KODE_OK) && (frame != me->bounce_frame) )
+        {
+            KLOG_N(TAG, "cable port: the host sends frames; it stays on the bus");
+        }
+        else if ( khal_console_pad(false) == KODE_OK )
+        {
+            me->bounce_step = LOG_BOUNCE_OFF;
+            QTimeEvt_armX(&me->bounce, KQP_TICKS_PER_MS(KHAL_CONSOLE_OFF_BUS_MS), 0U);
+        }
+        else
+        {
+            KLOG_W(TAG, "cable port: no frame from the host, and the pad would not leave the bus");
+        }
+    }
+    else if ( LOG_BOUNCE_OFF == me->bounce_step )
+    {
+        me->bounce_step = LOG_BOUNCE_IDLE;
+        if ( khal_console_pad(true) == KODE_OK )
+        {
+            KLOG_N(TAG, "cable port: no frame from the host in %u ms; off the bus for %u ms "
+                        "and back, for the host to find it again",
+                   (unsigned)KHAL_CONSOLE_FRAME_WAIT_MS, (unsigned)KHAL_CONSOLE_OFF_BUS_MS);
+        }
+        else
+        {
+            KLOG_E(TAG, "cable port: the pad would not come back on the bus");
+        }
+    }
+    else
+    {
+        /* No bounce runs: nothing to judge. */
+    }
+}
+
 /**
  * @brief Apply the level stored under the `log` key, if there is one.
  *
@@ -724,9 +817,12 @@ void Log_ctor(void)
 {
     Log * const me = &l_log;
     QActive_ctor(&me->super, Q_STATE_CAST(&Log_initial));
+    QTimeEvt_ctorX(&me->bounce, &me->super, LOG_BOUNCE_TMO_SIG, 0U);
     me->len          = 0U;
     me->prompt_drawn = false;
     me->overflow     = false;
+    me->bounce_frame = 0U;
+    me->bounce_step  = LOG_BOUNCE_IDLE;
 }
 
 #define KODE_QUEUE_LOG_LEN  64U  /**< AO_Log's queue; lines, bytes and requests leave margins. */
@@ -875,7 +971,8 @@ static void handle_byte(Log * const me, uint8_t c)
 }
 
 /**
- * @brief Lines out and bytes in: log lines, console input, raw transfers, the dock and the level.
+ * @brief Lines out and bytes in: log lines, console input, raw transfers, the
+ *        dock, the cable port's bounce and the level.
  *
  * @param me The AO.
  * @param e  The event.
@@ -1046,6 +1143,16 @@ static QState Log_active(Log * const me, QEvt const * const e)
         }
         case LOG_DOCK_REQ_SIG: {
             dock_lend(Q_EVT_CAST(LogDockReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case LOG_BOUNCE_REQ_SIG: {
+            bounce_begin(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case LOG_BOUNCE_TMO_SIG: {
+            bounce_next(me);
             status = Q_HANDLED();
             break;
         }

@@ -4837,6 +4837,23 @@ bool log_dock_lend_request(QActive *who, bool lend);
  */
 bool log_flush_request(void);
 
+/**
+ * @brief Ask AO_Log to show a host the cable port again (LOG_BOUNCE_REQ_SIG).
+ *
+ * For a cable that came while the P4 slept: each light sleep takes the cable
+ * port's pad off the bus, and a host that failed to enumerate it then may have
+ * given the port up for good. AO_Log waits KHAL_CONSOLE_FRAME_WAIT_MS for a
+ * frame from the host. With none, the pad leaves the bus for
+ * KHAL_CONSOLE_OFF_BUS_MS and comes back, which the host takes for a new
+ * device; a port that gets frames is left on the bus. Either way AO_Log says
+ * so at NOTICE. A request while one runs does nothing. The waits run on the
+ * QP tick, so the asker holds the P4 awake.
+ *
+ * @return false when nothing was posted: AO_Log's queue was within
+ *         KQP_LOG_CMD_MARGIN.
+ */
+bool log_bounce_request(void);
+
 /* ---- AO_Console: the command line ---------------------------------------
  * Owns no hardware. It receives whole lines from AO_Log, parses them
  * run-to-completion, and drives everything else by posting the events those

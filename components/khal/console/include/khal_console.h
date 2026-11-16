@@ -6,6 +6,7 @@
 #ifndef KHAL_CONSOLE_H_
 #define KHAL_CONSOLE_H_
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -14,6 +15,16 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define KHAL_CONSOLE_FRAME_WAIT_MS  100U   /**< How long the cable port's owner waits for a frame from the host:
+                                            *   a host that keeps the port in use sends one every millisecond. */
+#define KHAL_CONSOLE_OFF_BUS_MS     300U   /**< How long the cable port's pad stays off the bus for a host to see
+                                            *   the port leave; back on, the host finds a new device. */
+#define KHAL_CONSOLE_FRAME_SPAN_MS  2048U  /**< The span of the frame count khal_console_frame() reads: eleven
+                                            *   bits, one frame a millisecond, then it wraps. */
+
+_Static_assert(KHAL_CONSOLE_FRAME_WAIT_MS < KHAL_CONSOLE_FRAME_SPAN_MS,
+               "a wait shorter than the count's span: a frame in it always moves the count");
 
 /** @brief Install the transport's driver, input verbatim. Call once. */
 void khal_console_init(void);
@@ -32,18 +43,31 @@ void khal_console_init(void);
 void khal_console_rest(bool rest);
 
 /**
- * @brief A cable came while the board slept: show the host the cable port again
- *        when the host is not talking to it.
+ * @brief Read the cable port's frame count: the index of the last
+ *        start-of-frame the host sent it.
  *
- * Asleep, every light sleep takes the port's pad off the bus, so a host that
- * tried to enumerate it then may have given the port up, and it does not try
- * again by itself. When no frame arrives from the host in the next 100 ms,
- * the pad leaves the bus for 300 ms and comes back, which the host sees as a
- * new connection. A port the host is talking to is left alone. Returns at
- * once: the wait and the time off the bus run on a timer of the console's
- * own. A call while an earlier one is under way does nothing.
+ * A host that keeps the port in use sends a frame every millisecond, so two
+ * reads KHAL_CONSOLE_FRAME_WAIT_MS apart that agree mean no frame came between
+ * them. A frame says the host keeps the port in use, not that it talks to it:
+ * a port the host suspended gets none either.
+ *
+ * @param frame Receives the count, which wraps every KHAL_CONSOLE_FRAME_SPAN_MS.
+ * @return KODE_OK; KODE_DENIED for a NULL @p frame, or a console with no cable
+ *         port (a UART).
  */
-void khal_console_cable(void);
+kode_status_t khal_console_frame(uint32_t *frame);
+
+/**
+ * @brief Put the cable port's pad on the bus, or take it off.
+ *
+ * Off, a host sees the port leave; back on, it sees a new device and
+ * enumerates it. Each light sleep of the P4 takes the pad off and puts it
+ * back by itself, so this is for a P4 held awake.
+ *
+ * @param on true to put the pad on the bus, false to take it off.
+ * @return KODE_OK; KODE_DENIED for a console with no cable port (a UART).
+ */
+kode_status_t khal_console_pad(bool on);
 
 /**
  * @brief Start the task that blocks on the console and reports each byte.
