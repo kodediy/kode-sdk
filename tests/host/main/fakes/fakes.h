@@ -693,6 +693,16 @@ bool fake_time_periodic_running(void);
 bool fake_time_periodic_running_at(uint64_t period_us);
 
 /**
+ * @brief How many times khal_timer_periodic() made the timer started with @p period_us.
+ *
+ * Counted since the binary started, as a timer is made once per boot.
+ *
+ * @param period_us Its period, microseconds.
+ * @return 0 when none was started with it.
+ */
+unsigned fake_time_periodic_made_at(uint64_t period_us);
+
+/**
  * @brief Run the periodic timer started with @p period_us once, as the timer task would.
  * @param period_us Its period, microseconds.
  * @return false, and nothing run, when none was started with it or it is stopped.

@@ -29,6 +29,7 @@ typedef struct {
     void    *arg;           /**< Passed to @c cb when a case fires it. */
     uint64_t period_us;     /**< What it was started with. */
     bool     running;       /**< Started and not stopped. */
+    unsigned made;          /**< How many times khal_timer_periodic() made it. */
 } fake_periodic_t;
 
 /* The periodic timers. Not cleared by fake_time_reset(): each is started once
@@ -221,6 +222,7 @@ kode_status_t khal_timer_periodic(void (*cb)(void *), void *arg, uint64_t period
     slot->arg       = arg;
     slot->period_us = period_us;
     slot->running   = true;
+    ++slot->made;
     return KODE_OK;
 }
 
@@ -371,6 +373,18 @@ bool fake_time_periodic_running_at(uint64_t period_us)
     fake_periodic_t const *const slot = periodic_slot_at(period_us);
 
     return (NULL != slot) && slot->running;
+}
+
+unsigned fake_time_periodic_made_at(uint64_t period_us)
+{
+    fake_periodic_t const *const slot = periodic_slot_at(period_us);
+    unsigned made = 0U;
+
+    if ( NULL != slot )
+    {
+        made = slot->made;
+    }
+    return made;
 }
 
 bool fake_time_periodic_fire_at(uint64_t period_us)

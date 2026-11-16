@@ -5407,6 +5407,126 @@ TEST_CASE("a cable that comes to a board that is awake leaves the cable port alo
     lp_down();
 }
 
+/** @brief Leave ASLEEP by the top button. */
+static void leave_by_top(void)
+{
+    static const QEvt top = QEVT_INITIALIZER(LOWPOWER_TOP_SIG);
+
+    feed(&top);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_TOP, KODE_LP_ASLEEP);
+}
+
+/** @brief Leave ASLEEP by a message from the broker. */
+static void leave_by_message(void)
+{
+    MqttMsgEvt m;
+
+    (void)memset(&m, 0, sizeof(m));
+    m.super = (QEvt)QEVT_INITIALIZER(MQTT_MSG_SIG);
+    feed(&m.super);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_MQTT, KODE_LP_ASLEEP);
+}
+
+/** @brief Leave ASLEEP by a console line. */
+static void leave_by_line(void)
+{
+    console_line(KODE_CONSOLE_SRC_BLE);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BLE, KODE_LP_ASLEEP);
+}
+
+/** @brief Leave ASLEEP for an owner's time. */
+static void leave_by_owner_time(void)
+{
+    wake_in(0U, 10U * SECOND_MS);
+    fire_one_shot();
+    expect_timer_wake();
+}
+
+/** @brief The round for OFF that leaving ASLEEP began: both owners ready, then OFF. */
+static void leave_to_off(kode_lp_cause_t cause)
+{
+    uint32_t const round = expect_round(KODE_LP_OFF);
+
+    say_ready(0U, round, false, NULL);
+    say_ready(1U, round, false, NULL);
+    expect_state(KODE_LP_OFF, cause, KODE_LP_ASLEEP);
+    wait_ms(KODE_LOWPOWER_OFF_GRACE_MS + 10U);
+}
+
+/** @brief Leave ASLEEP for OFF at the minute that reaches off_after (an hour). */
+static void leave_by_off_after(void)
+{
+    for ( unsigned minutes = 0U; (ao_spy_count() == 0U) && (100U > minutes); minutes++ )
+    {
+        fire_one_shot();
+        (void)queued(AO_Display, DISPLAY_MINUTE_REQ_SIG);
+        (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+    }
+    leave_to_off(KODE_LP_CAUSE_OFF_AFTER);
+}
+
+/** @brief Leave ASLEEP for OFF on request. */
+static void leave_by_off_request(void)
+{
+    ask(KODE_LP_OFF);
+    leave_to_off(KODE_LP_CAUSE_REQUEST);
+}
+
+/** @brief Leave ASLEEP for AWAKE on request. */
+static void leave_by_awake_request(void)
+{
+    ask(KODE_LP_AWAKE);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_ASLEEP);
+}
+
+/* BOT and a cable have their cases above; these are the rest of ASLEEP's ways
+ * out, each of which takes the lock back. */
+TEST_CASE("every other way out of ASLEEP ends the look for a cable", "[lowpower_ao]")
+{
+    static const struct {
+        const char *name;
+        void      (*leave)(void);
+    } ways[] = {
+        { "the top button",       &leave_by_top },
+        { "a broker's message",   &leave_by_message },
+        { "a console line",       &leave_by_line },
+        { "an owner's time",      &leave_by_owner_time },
+        { "off_after",            &leave_by_off_after },
+        { "a request for OFF",    &leave_by_off_request },
+        { "a request for AWAKE",  &leave_by_awake_request },
+    };
+
+    for ( size_t i = 0U; Q_DIM(ways) > i; i++ )
+    {
+        lp_up(KODE_OK);
+        set_word(KSET_KEY_OFF_AFTER, WORD_1H);
+        go_asleep();
+        (void)queued(AO_Display, DISPLAY_MINUTE_REQ_SIG);
+        (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+        TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), ways[i].name);
+
+        ways[i].leave();
+        TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running_at(LOOK_US), ways[i].name);
+        lp_down();
+    }
+}
+
+/* khal_timer_periodic() makes a new timer at every call: one made again for
+ * the same callback would leave the first running where nothing stops it. */
+TEST_CASE("two sleeps make the look's timer once", "[lowpower_ao]")
+{
+    lp_up(KODE_OK);
+    go_asleep();
+    expander(LEVELS_BOT, CHANGED_BOT);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_ASLEEP);
+
+    sleep_now();
+    TEST_ASSERT_TRUE(fake_time_periodic_running_at(LOOK_US));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_time_periodic_made_at(LOOK_US),
+                                   "the second sleep started the timer again; it made none");
+    lp_down();
+}
+
 /* AO_Power is at rest through a dark wake and polls nothing: the look is the
  * only reading of the charger there is. */
 TEST_CASE("a dark wake keeps the look, and it runs on after", "[lowpower_ao]")

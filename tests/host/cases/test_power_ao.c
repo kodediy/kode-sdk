@@ -693,6 +693,34 @@ TEST_CASE("the ship door posts while the queue has room and refuses within its m
     Mockkhal_i2c_Destroy();
 }
 
+/* AO_LowPower asks for a peek every few seconds while the P4 sleeps: one the
+ * margin turns away is dropped without a word, and the next one asks again. */
+TEST_CASE("a peek within the queue's margin is dropped, and one above it is posted",
+          "[power_ao]")
+{
+    power_up_once();
+    power_flush();
+
+    power_fill_to_margin();
+    power_peek_request();
+    TEST_ASSERT_EQUAL_UINT(KQP_POWER_POST_MARGIN, uxQueueSpacesAvailable(AO_Power->eQueue));
+    TEST_ASSERT_FALSE_MESSAGE(power_queue_has(POWER_PEEK_REQ_SIG), "a dropped peek was queued");
+
+    power_fill_to_margin();
+    {
+        const QEvt *e = NULL;
+
+        TEST_ASSERT_TRUE(xQueueReceive(AO_Power->eQueue, &e, 0U) == pdTRUE);
+        QF_gc(e);
+    }
+    power_peek_request();
+    TEST_ASSERT_EQUAL_UINT(KQP_POWER_POST_MARGIN, uxQueueSpacesAvailable(AO_Power->eQueue));
+    TEST_ASSERT_TRUE(power_queue_has(POWER_PEEK_REQ_SIG));
+
+    power_flush();
+    Mockkhal_i2c_Destroy();
+}
+
 #if CONFIG_KODE_LOWPOWER
 /** @brief Empty AO_LowPower's queue, giving it one first when it has none. */
 static void lowpower_flush(void)
