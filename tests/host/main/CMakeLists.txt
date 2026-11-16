@@ -97,6 +97,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kode/src/kode_rfid.c"
     "${SDK_DIR}/components/kode/src/kode_screen_bright.c"
     "${SDK_DIR}/components/kode/src/kode_screen_sleep.c"
+    "${SDK_DIR}/components/kode/src/kode_rest.c"
     "${SDK_DIR}/components/kode/src/kode_setting.c"
     "${SDK_DIR}/components/kode/src/kode_standard_ao.c"
     "${SDK_DIR}/components/kode/src/kode_system.c"

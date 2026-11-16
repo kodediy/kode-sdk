@@ -489,6 +489,104 @@ kode_status_t kode_sys_power_sleep(void);
  */
 kode_status_t kode_sys_power_off(void);
 
+/* ---- An app's rest, part by part: to AO_LowPower ----
+ * The app names the parts it does not use and AO_LowPower puts them away one
+ * at a time, asking each owner alone. The board stays AWAKE for everything
+ * else: LOWPOWER_STATE_SIG says nothing and the owners that are not named
+ * go on as they were. The parts stay away until kode_sys_rest_end(), until
+ * the board reaches a state of its own, or until a restart. A round of the
+ * board that may be given up asks the owners of those parts last: one that
+ * another owner refuses leaves the rest as it was, and one that goes through
+ * says KODE_LP_PART_TAKEN before it asks them. An order for OFF, and a round
+ * begun while a rest is being arranged, take the rest at once. While a round
+ * runs a request is answered KODE_DENIED, `board: not awake`.
+ *
+ * Both calls are commands. Each one that returns KODE_OK ends in exactly one
+ * LOWPOWER_PART_SIG (LowPowerPartEvt) with what KODE_LP_PART_ANSWER: its rc,
+ * the parts at rest now and, when it did not go through, "part: why". The
+ * parts that had rested before a part refused stay at rest. The same signal
+ * says, unasked, KODE_LP_PART_WOKE when a wake ends the CPU part, and
+ * KODE_LP_PART_TAKEN when the board takes the rest over.
+ *
+ * kode_sys_screen_sleep(false) wakes a glass the rest put to sleep, and its
+ * supply with it: the screen and the panel are then no longer held, and
+ * LowPowerPartEvt::parts says so at the next answer. With the radio at rest
+ * AO_Radio goes on as with the board AWAKE: Wi-Fi joins its network again
+ * and a C5 link that fell is built again; only the C5 sleeps between wakes.
+ */
+
+#define KODE_SYS_REST_SCREEN 0x01U /**< The panel in sleep-in and its link down, as kode_sys_screen_sleep().        */
+#define KODE_SYS_REST_PANEL  0x02U /**< And the panel's supply off: reset low, then the supply. Takes the screen
+                                    *   and the touch with it, whose reset line it shares.                        */
+#define KODE_SYS_REST_TOUCH  0x04U /**< The touch controller in auto-sleep, with no interrupt.                      */
+#define KODE_SYS_REST_SOUND  0x08U /**< The amplifier off and the codec closed, once: the next sound opens them
+                                    *   again, so it is never among the parts held at rest.                        */
+#define KODE_SYS_REST_CARD   0x10U /**< The card unmounted and its supply off, once: the next file on it mounts it
+                                    *   again, so it is never among the parts held at rest.                        */
+#define KODE_SYS_REST_RADIO  0x20U /**< The C5 asleep between wakes, its sessions kept. Needs the sound in the same
+                                    *   request: the amplifier's enable is a line of the C5.                       */
+#define KODE_SYS_REST_CPU    0x40U /**< The P4 light-sleeps when every task is idle. Needs the screen at rest, and
+                                    *   no cable.                                                                  */
+
+/** @brief What ends the CPU part of a rest, besides the buttons. */
+typedef struct {
+    bool     touch;     /**< A touch; refused with the touch or the panel at rest.          */
+    uint8_t  pin;       /**< A position of the expansion header, KODE_SYS_EXP_POS_MIN to
+                         *   KODE_SYS_EXP_POS_MAX; 0 for none. It must be free or an input
+                         *   with no interrupt attached: an output, a PWM, an analog input, a
+                         *   loan or an input somebody listens to refuses the request,
+                         *   `pin: in use`. It becomes an input pulled toward the other level;
+                         *   when the CPU part ends it is free again, or an input with the
+                         *   pull it had.                                                     */
+    bool     pin_level; /**< The level of that position that wakes.                         */
+    uint32_t after_ms;  /**< A time from the answer, in ms; 0 for none.                     */
+} kode_sys_rest_wake_t;
+
+/**
+ * @brief Put the named parts away, in the order sound, card, touch, screen, panel, radio, CPU.
+ *
+ * A request that cannot be is refused whole and nothing moves: no part or an
+ * unknown one, KODE_SYS_REST_RADIO without KODE_SYS_REST_SOUND beside it, and
+ * KODE_SYS_REST_CPU with the screen up, on a cable, with a touch asked as a
+ * wake source while the touch rests, or with a position the header does not
+ * have or that is in use. Asked again while parts rest, it adds the ones that
+ * are missing and takes the new wake sources. It brings no device back, but
+ * any request ends the CPU part, as every request to AO_LowPower does: the P4
+ * sleeps again only when the request names KODE_SYS_REST_CPU.
+ * A request made while another is being arranged is answered KODE_DENIED,
+ * `rest: underway`, and the one in hand goes on to its own answer. One asker
+ * at a time: the answer carries no number, so two of the app's that ask at
+ * once cannot tell their answers apart.
+ *
+ * With KODE_SYS_REST_CPU the system's clock stops, as in the board's ASLEEP:
+ * no Active Object counts time, so work in flight in an owner that was not
+ * named stands still until the wake, and a QTimeEvt of the app's does not
+ * expire. What always ends the CPU part, whatever @p wake says: any button,
+ * a console line, an MQTT message, a request to AO_LowPower, and what the
+ * minute AO_LowPower keeps meanwhile finds - a cable, the cell at its cut
+ * (AO_Power's ship mode), an entry of the scheduler or an owner's time that
+ * has come. That minute also counts `off_after` from the moment the P4 went
+ * to rest and takes the board OFF when it is reached. The other parts stay
+ * away after a wake. Ask again to let the P4 sleep again.
+ *
+ * @param parts A mask of KODE_SYS_REST_*.
+ * @param wake  What ends the CPU part besides the buttons; NULL for nothing
+ *              more. Not read without KODE_SYS_REST_CPU.
+ * @return As the commands' rule above; KODE_DENIED in a build without
+ *         CONFIG_KODE_LOWPOWER, which logs `low power not built`.
+ */
+kode_status_t kode_sys_rest(uint32_t parts, const kode_sys_rest_wake_t *wake);
+
+/**
+ * @brief Bring back what kode_sys_rest() put away: the CPU first, then the radio, the glass and the touch.
+ *
+ * The sound and the card are not held: they come back at their next use.
+ * With nothing at rest the answer is KODE_OK at once.
+ *
+ * @return As kode_sys_rest().
+ */
+kode_status_t kode_sys_rest_end(void);
+
 /* ---- Power: to AO_Power, which owns the PMIC; the outcome shows in its log and in POWER_CTRL_SIG / POWER_EVT_SIG ---- */
 
 #define KODE_SYS_CHARGE_LIMIT_MIN_MA 64U   /**< The smallest fast-charge current, mA: the chip's step.   */

@@ -1618,6 +1618,93 @@ bool kode_power_is_usb_connected(void);
  */
 bool kode_power_off(void);
 
+/* ---- Rest: the parts the app does not use ---- */
+
+/*
+ * The app names the parts it does not use and the board puts them away, one
+ * at a time, while everything else keeps running. They stay away until
+ * kode_rest_end(). The board keeps the last word: when it goes to sleep or
+ * switches off by itself, or the user holds the bottom button to go home,
+ * the rest is over. A sleep the board begins by itself and gives up, because
+ * something is busy, leaves the rest as it was. One task asks at a time: two
+ * that ask at once can each take the other's answer.
+ */
+
+/** @brief The parts kode_rest() can put away. */
+/* cppcheck-suppress misra-c2012-2.4 ; the tag of a public enum: the apps outside this tree name its constants */
+typedef enum {
+    KODE_REST_SCREEN = 1U << 0, /**< The display asleep, as kode_display_sleep(true).                       */
+    KODE_REST_PANEL  = 1U << 1, /**< And the display's supply off. Takes the screen and the touch with it.  */
+    KODE_REST_TOUCH  = 1U << 2, /**< The touch asleep: it reports nothing.                                  */
+    KODE_REST_SOUND  = 1U << 3, /**< The speaker's amplifier and the audio chip off, once: the next sound
+                                 *   brings them back, and kode_rest() asked again puts them away again.   */
+    KODE_REST_CARD   = 1U << 4, /**< The card unmounted and unpowered, once: the next file on it brings it
+                                 *   back, and kode_rest() asked again puts it away again.                 */
+    KODE_REST_RADIO  = 1U << 5, /**< The radio chip asleep; Wi-Fi and Bluetooth keep their connections.
+                                 *   Needs KODE_REST_SOUND with it.                                        */
+    KODE_REST_CPU    = 1U << 6  /**< The processor sleeps whenever the app is waiting. Needs the screen at
+                                 *   rest, and no USB cable.                                               */
+/* cppcheck-suppress misra-c2012-2.3 ; a public enum: an app names the type, and nothing in this tree does */
+} kode_rest_part_t;
+
+/** @brief What wakes the processor from KODE_REST_CPU, besides the buttons. */
+typedef struct {
+    bool     touch;     /**< A touch. Not with KODE_REST_TOUCH or KODE_REST_PANEL.            */
+    uint8_t  pin;       /**< A pin, KODE_PIN_FIRST to KODE_PIN_LAST; 0 for none. It must be free,
+                         *   or an input nothing listens to: a pin with a listener is refused.
+                         *   For the rest it is an input pulled to the other level; afterwards
+                         *   it is what it was, free or an input with the pull it had.            */
+    bool     pin_level; /**< The level of that pin that wakes.                                */
+    uint32_t after_ms;  /**< A time, in ms from the moment kode_rest() returns; 0 for none.   */
+} kode_rest_wake_t;
+
+/** @brief How long kode_rest() and kode_rest_end() wait for the board, in ms. */
+#define KODE_REST_BOUND_MS 24000U
+
+/**
+ * @brief Put the named parts away and keep them away until kode_rest_end().
+ *
+ * Returns once every part named is at rest, which takes up to three seconds a
+ * part. A part that is busy stops the call there: it returns false, the parts
+ * that had rested stay at rest, and kode_error() names the one that did not.
+ * Called again, it adds parts and takes the new wake sources; it also wakes
+ * a processor asleep for KODE_REST_CPU, which sleeps again only when the call
+ * names that part. While another request is being arranged, the console's
+ * included, it returns false at once and says so.
+ *
+ * kode_display_sleep(false) wakes a display the rest put to sleep. From then
+ * the screen is not at rest, and KODE_REST_CPU is refused until it is again.
+ * With the radio at rest Wi-Fi still joins its network again by itself.
+ *
+ * With KODE_REST_CPU the board's own clock stops as well, so the system does
+ * nothing that takes time until a wake: finish file and network work first,
+ * and wait for the wake with kode_event_wait() or a button, not by asking the
+ * board for things. Whatever @p wake says, these always wake it: every
+ * button, a USB cable (seen within a minute), a console line, an MQTT
+ * message, and the battery at the level where the board protects it. And a
+ * processor left asleep for the user's `off_after` time switches the board
+ * off, as a board asleep does. A wake ends only the CPU part: the other parts
+ * stay away, and calling kode_rest() again lets the processor sleep again.
+ * What the rest saves is not a measured figure.
+ *
+ * Needs CONFIG_KODE_LOWPOWER: without it the call is refused and says so.
+ *
+ * @param parts A mask of kode_rest_part_t.
+ * @param wake  What wakes the processor besides the buttons; NULL for nothing more.
+ * @return true when every named part is at rest; false with kode_error() naming the one that is not.
+ */
+bool kode_rest(uint32_t parts, const kode_rest_wake_t *wake);
+
+/**
+ * @brief Bring back what kode_rest() put away.
+ *
+ * The display comes back as kode_display_sleep(false) leaves it. The sound
+ * and the card come back by themselves at their next use.
+ *
+ * @return true when all of it is back; false with kode_error() saying why.
+ */
+bool kode_rest_end(void);
+
 /**
  * @brief Allow or forbid charging the cell. Not stored: the next boot
  *        goes back to the stored `charge` setting (on unless it was set off).

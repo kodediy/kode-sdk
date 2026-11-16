@@ -57,6 +57,24 @@ void kode_block_delay_ms(uint32_t ms);
  */
 uint16_t kode_block_screen_sleep_answers(kode_status_t *rc, const char **why);
 
+/* ---- An app's rest: AO_LowPower's answers to kode_sys_rest() and kode_sys_rest_end() ---- */
+
+/**
+ * @brief How many of the facade's requests for parts AO_LowPower has answered, and how the last one ended.
+ * @note Never blocks: a task, which hears no LOWPOWER_PART_SIG, waits for its
+ *       request by watching the count change. Only answers to the facade's
+ *       own requests are counted: the console's are not. All zero, and never
+ *       changing, without CONFIG_KODE_LOWPOWER.
+ * @param[out] rc    The last answer's status. NULL when not wanted.
+ * @param[out] parts The KODE_SYS_REST_* held at rest now. NULL when not wanted.
+ * @param[out] open  Whether a request, anybody's, is being arranged: one
+ *                   posted now is refused and counted nowhere. NULL when not wanted.
+ * @param[out] why   Why the last one was refused, "part: why", or "" for
+ *                   KODE_OK; a string owned by the system. NULL when not wanted.
+ * @return The count since the boot; it wraps at 65536.
+ */
+uint16_t kode_block_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, const char **why);
+
 /* ---- Infrared: through AO_Ir; without KODEOS_RADIO (the block is on the C5) the calls refuse ---- */
 
 /**

@@ -24,6 +24,10 @@
 #include "khal_console.h"
 #include "khal_exp.h"
 #include "khal_time.h"
+#include "kode.h"
+#include "kode_entry.h"
+#include "kode_sys.h"
+#include "kode_sys_priv.h"
 #include "kode_log.h"
 #include "kqp.h"
 #include "kqp_bsp.h"
@@ -4883,4 +4887,159 @@ TEST_CASE("an input of the header gets its own pull back after the wake", "[lowp
     TEST_ASSERT_EQUAL_INT_MESSAGE(KHAL_GPIO_PULL_UP, info.pulled, "the position kept the wake line's pull");
     TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_release(WAKE_POS));
     lp_down();
+}
+
+/* ---- kode_rest() and kode_rest_end(): a task's wait for the answer ----------------- */
+
+/** @brief AO_LowPower, for a task's wait: take what is in its queue, at each of the task's waits. */
+static void rest_owner_step(void)
+{
+    (void)qf_support_settle(AO_LowPower);
+    /* The hook runs once: the owner goes on answering for the whole wait. */
+    fake_time_delay_hook(&rest_owner_step);
+}
+
+/** @brief AO_LowPower up with no owner joined, the layer up, and the owner answering. */
+static void task_rest_up(void)
+{
+    lp_up(KODE_OK);
+    qf_support_margin_queue(AO_LowPower);
+    atomic_store(&kode_sys_init_once.state, KHAL_ONCE_DONE);
+    fake_time_reset();
+    fake_time_delay_hook(&rest_owner_step);
+}
+
+/** @brief Leave the clock and AO_LowPower as the next case expects them. */
+static void task_rest_down(void)
+{
+    fake_time_delay_hook(NULL);
+    (void)qf_support_settle(AO_LowPower);
+    lp_down();
+}
+
+/* No owner of these parts is in the build, so they are at rest without
+ * asking: what is under test is the call's wait for its own answer. */
+TEST_CASE("kode_rest waits for AO_LowPower and is true once the parts rest; kode_rest_end brings them back",
+          "[lowpower_ao]")
+{
+    task_rest_up();
+
+    TEST_ASSERT_TRUE(kode_rest(KODE_REST_SOUND | KODE_REST_TOUCH | KODE_REST_SCREEN, NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_TOUCH | KODE_LP_PART_SCREEN, parts_read());
+    TEST_ASSERT_LESS_THAN_UINT32(KODE_REST_BOUND_MS, kode_sys_time_ms());
+
+    TEST_ASSERT_TRUE(kode_rest_end());
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    task_rest_down();
+}
+
+TEST_CASE("kode_rest is false at once with the part and the reason when the request cannot be",
+          "[lowpower_ao]")
+{
+    task_rest_up();
+
+    TEST_ASSERT_FALSE(kode_rest(KODE_REST_RADIO, NULL));
+    TEST_ASSERT_EQUAL_STRING("the rest did not begin: radio: needs sound at rest", kode_error());
+    TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(KODE_REST_BOUND_MS, kode_sys_time_ms(),
+                                         "a refusal waited out the whole bound");
+
+    /* A bit above the parts there are is refused by name too. */
+    TEST_ASSERT_FALSE(kode_rest(0x100U | (uint32_t)KODE_REST_SOUND, NULL));
+    TEST_ASSERT_EQUAL_STRING("the rest did not begin: request: no such part", kode_error());
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    task_rest_down();
+}
+
+TEST_CASE("kode_rest is false at once while another request is being arranged, and leaves it alone",
+          "[lowpower_ao]")
+{
+    uint32_t round;
+
+    task_rest_up();
+    TEST_ASSERT_EQUAL_UINT8(0U, lowpower_join(ao_spy(), "touch"));
+    rest_ask(KODE_LP_PART_TOUCH);                /* the console's, its owner still to answer */
+    round = expect_part_round(KODE_LP_PART_TOUCH);
+
+    TEST_ASSERT_FALSE(kode_rest(KODE_REST_SCREEN, NULL));
+    TEST_ASSERT_EQUAL_STRING("the rest did not begin: another request is being arranged", kode_error());
+    TEST_ASSERT_LESS_THAN_UINT32(KODE_REST_BOUND_MS, kode_sys_time_ms());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, queued(AO_LowPower, LOWPOWER_PART_REQ_SIG),
+                                   "the request was posted all the same");
+
+    say_ready(0U, round, false, NULL);           /* the first goes on to its end */
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_TOUCH, parts_read());
+    ao_spy_drain();
+    task_rest_down();
+}
+
+TEST_CASE("kode_rest that nobody answers is false after its bound, and says how long", "[lowpower_ao]")
+{
+    task_rest_up();
+    fake_time_delay_hook(NULL);
+
+    TEST_ASSERT_FALSE(kode_rest(KODE_REST_SOUND, NULL));
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_REST_BOUND_MS, kode_sys_time_ms());
+    TEST_ASSERT_EQUAL_STRING("the rest did not begin in 24000 ms", kode_error());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, queued(AO_LowPower, LOWPOWER_PART_REQ_SIG),
+                                   "the request was posted more than once");
+    task_rest_down();
+}
+
+TEST_CASE("kode_rest hands the wake sources to the CPU part, and kode_rest_end wakes it",
+          "[lowpower_ao]")
+{
+    kode_rest_wake_t const wake = { .after_ms = 2000U };
+
+    task_rest_up();
+
+    /* No display owner in this build: the CPU part needs no screen at rest. */
+    TEST_ASSERT_TRUE(kode_rest(KODE_REST_CPU, &wake));
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_CPU, parts_read());
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, fake_time_once_pending(), "the time, and the minute");
+
+    TEST_ASSERT_TRUE(kode_rest_end());
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    task_rest_down();
+}
+
+/** @brief What kode_rest() answered inside the probe Active Object. */
+typedef struct {
+    bool ok;                      /**< Its answer.               */
+    char error[KODE_ERROR_MAX];   /**< kode_error() right after. */
+} RestFromAo;
+
+/** @brief The longest a case waits for the probe Active Object to run its job. */
+#define REST_PROBE_WAIT_MS 2000U
+
+/** @brief The probe's job: ask for a rest from inside an Active Object. */
+static void rest_from_ao_job(void *ctx)
+{
+    RestFromAo *const r = (RestFromAo *)ctx;
+
+    r->ok = kode_rest(KODE_REST_SOUND, NULL);
+    (void)snprintf(r->error, sizeof(r->error), "%s", kode_error());
+}
+
+/* kode_rest() waits for its answer, and an Active Object never blocks: its
+ * door is kode_sys_rest(), answered with LOWPOWER_PART_SIG. */
+TEST_CASE("kode_rest is refused inside an Active Object, which is named, and posts nothing",
+          "[lowpower_ao]")
+{
+    RestFromAo r = { true, "" };
+
+    task_rest_up();
+    fake_time_delay_hook(NULL);
+
+    TEST_ASSERT_TRUE(probe_ao_run(&rest_from_ao_job, &r, REST_PROBE_WAIT_MS));
+
+    TEST_ASSERT_FALSE(r.ok);
+    TEST_ASSERT_EQUAL_STRING("kode_rest was called from an Active Object (" PROBE_AO_NAME
+                             "); kode.h calls block - call kode_sys_* instead",
+                             r.error);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, queued(AO_LowPower, LOWPOWER_PART_REQ_SIG),
+                                   "a request was posted all the same");
+    task_rest_down();
 }

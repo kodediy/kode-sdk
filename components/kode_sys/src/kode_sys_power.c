@@ -5,12 +5,17 @@
  *        and the board's rest, posted to AO_LowPower.
  */
 #include "kode_sys.h"
+#include "kode_sys_internal.h"
 #include "kode_sys_priv.h"
 
 #include "kaos.h"
 #include "kbsp_cell.h"
 #include "kdrv_bq25896.h"
+#include "kode_log.h"
 #include "sdkconfig.h"
+
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is off, a region cppcheck does not read here */
+#define TAG "kode.sys"
 
 _Static_assert((uint32_t)KDRV_BQ_CHRG_NONE == KODE_SYS_CHARGE_NONE, "charge states follow the PMIC's");
 _Static_assert((uint32_t)KDRV_BQ_CHRG_PRE == KODE_SYS_CHARGE_PRE, "charge states follow the PMIC's");
@@ -47,6 +52,88 @@ kode_status_t kode_sys_power_sleep(void)
 kode_status_t kode_sys_power_off(void)
 {
     return power_rest_post(KODE_LP_OFF);
+}
+
+_Static_assert(KODE_SYS_REST_SCREEN == KODE_LP_PART_SCREEN, "the parts of a rest are AO_LowPower's");
+_Static_assert(KODE_SYS_REST_PANEL == KODE_LP_PART_PANEL, "the parts of a rest are AO_LowPower's");
+_Static_assert(KODE_SYS_REST_TOUCH == KODE_LP_PART_TOUCH, "the parts of a rest are AO_LowPower's");
+_Static_assert(KODE_SYS_REST_SOUND == KODE_LP_PART_SOUND, "the parts of a rest are AO_LowPower's");
+_Static_assert(KODE_SYS_REST_CARD == KODE_LP_PART_CARD, "the parts of a rest are AO_LowPower's");
+_Static_assert(KODE_SYS_REST_RADIO == KODE_LP_PART_RADIO, "the parts of a rest are AO_LowPower's");
+_Static_assert(KODE_SYS_REST_CPU == KODE_LP_PART_CPU, "the parts of a rest are AO_LowPower's");
+
+/**
+ * @brief Ask AO_LowPower for parts, as a command.
+ * @param req What is asked.
+ * @return KODE_OK when AO_LowPower's queue took it; KODE_NO_RESOURCES as the
+ *         commands' rule; KODE_DENIED without CONFIG_KODE_LOWPOWER.
+ */
+static kode_status_t power_part_post(const lowpower_part_req_t *req)
+{
+#ifdef CONFIG_KODE_LOWPOWER
+    return kode_sys_cmd_post(AO_LowPower, lowpower_part_req_evt(req, KODE_LOWPOWER_SRC_APP),
+                             KQP_LOWPOWER_CMD_MARGIN);
+#else
+    /* The build has no AO_LowPower to ask. */
+    (void)req;
+    KLOG_W(TAG, "low power not built: the rest is refused");
+    return KODE_DENIED;
+#endif
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_rest(uint32_t parts, const kode_sys_rest_wake_t *wake)
+{
+    lowpower_part_req_t req = { 0 };
+
+    req.parts = (uint8_t)(parts & (uint32_t)UINT8_MAX);
+    if ( (uint32_t)UINT8_MAX < parts )
+    {
+        /* A bit the event has no room for is asked as a part there is not, so
+         * AO_LowPower refuses the request by name and nothing is dropped. */
+        req.parts |= (uint8_t)~KODE_LP_PART_ALL;
+    }
+    if ( NULL != wake )
+    {
+        req.wake_touch    = wake->touch;
+        req.wake_level    = wake->pin_level;
+        req.wake_pin      = wake->pin;
+        req.wake_after_ms = wake->after_ms;
+    }
+    return power_part_post(&req);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_rest_end(void)
+{
+    lowpower_part_req_t req = { 0 };
+
+    req.end = true;
+    return power_part_post(&req);
+}
+
+uint16_t kode_block_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, const char **why)
+{
+    lowpower_part_last_t last = { 0 };
+
+    lowpower_part_last(&last);
+    if ( NULL != open )
+    {
+        *open = last.open;
+    }
+    if ( NULL != rc )
+    {
+        *rc = (kode_status_t)last.rc;
+    }
+    if ( NULL != parts )
+    {
+        *parts = last.parts;
+    }
+    if ( NULL != why )
+    {
+        *why = lowpower_part_why();
+    }
+    return last.answers;
 }
 
 kode_status_t kode_sys_battery_read(kode_sys_battery_t *out)
