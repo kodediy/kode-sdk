@@ -644,13 +644,13 @@ const char *console_status_word(uint32_t st)
 {
     static const char *const WORDS[] = {
         "ok", "error", "timeout", "denied", "noresources", "iofail",
-        "exists", "notdir", "isdir"
+        "exists", "notdir", "isdir", "cancelled"
     };
-    /* The table is tied to KODE_IS_DIR + 1, so a member inserted before
-     * KODE_IS_DIR stops the build; one appended after it prints error until
-     * it is named here. */
+    /* The table is tied to KODE_CANCELLED + 1, so a member inserted before
+     * KODE_CANCELLED stops the build; one appended after it prints error
+     * until it is named here. */
     _Static_assert((sizeof(WORDS) / sizeof(WORDS[0]))
-                   == ((size_t)KODE_IS_DIR + 1U),
+                   == ((size_t)KODE_CANCELLED + 1U),
                    "one status word per kode_status_t");
     const char *w = "error";
 

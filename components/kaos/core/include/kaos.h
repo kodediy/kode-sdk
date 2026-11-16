@@ -2116,8 +2116,24 @@ void radio_boot_release(void);
  *
  * Answered on the bus: one WIFI_SCAN_ENTRY_SIG per network, then WIFI_SCAN_END_SIG,
  * even with no link (ok=false), so silence never stands for "no networks".
+ * The newest Wi-Fi request wins: this one ends a Wi-Fi scan somebody asked for
+ * that is in flight, and starts when the worker is back. Behind a listing it
+ * publishes WIFI_SCAN_AGAIN_SIG, and the one end closes both; a newer Wi-Fi
+ * request (a scan, a join, Wi-Fi switched) ends it in turn, and its end says
+ * @c cut. It waits for a join; behind a Bluetooth listen, the board's own
+ * round, a row or an install it is answered @c busy.
+ *
+ * Every entry and end of the listing carries the generation of the newest
+ * request it answers. A listener that waits for its own request skips the
+ * ones older than its generation: they are a listing before it, still in its
+ * queue.
+ *
+ * @param gen Out: this request's generation; NULL when the caller reads none.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full, and then
+ *         nothing was asked and nothing answers.
  */
-void wifi_scan_request(void);
+bool wifi_scan_request(uint8_t *gen);
 
 /**
  * @brief Ask AO_Radio to end the listing in flight before its last channel.
@@ -2139,8 +2155,13 @@ bool wifi_scan_stop_request(void);
  * Brings the link up if needed. Entries are POSTED to @p who as WIFI_SCAN_ENTRY_SIG
  * while its queue keeps KODE_STORAGE_LIST_FREE_SLOTS free, then one
  * WIFI_SCAN_RSP_SIG (no margin, refusals included): the count, rc (KODE_OK;
- * KODE_ERROR failed or link lost; KODE_NO_RESOURCES radio busy with another scan,
- * a BLE listen, the row or an install: ask again) and whether entries were dropped.
+ * KODE_ERROR failed or link lost; KODE_NO_RESOURCES radio busy with a Bluetooth
+ * listen, the board's own round, the row or an install: ask again;
+ * KODE_CANCELLED a newer Wi-Fi request took its place) and whether entries were
+ * dropped. It ends the Wi-Fi scan somebody asked for before it, running or
+ * waiting, whose asker is told then. An asker that scans again at every answer
+ * waits for its own end first: asked again at once after KODE_CANCELLED, it
+ * ends the scan that replaced it, and neither ever finishes.
  *
  * @param who The asking AO.
  * @return KODE_OK when posted; KODE_DENIED for a NULL or unstarted @p who,
@@ -2320,12 +2341,19 @@ void ble_start_request(void);
  *
  * Answered on the bus: one BLE_SCAN_ENTRY_SIG per device (once, at its strongest),
  * then BLE_SCAN_END_SIG. A length out of range gets `ok = false` and no scan.
+ * The newest Bluetooth request wins, as wifi_scan_request() says of Wi-Fi: a
+ * listen cut for a newer listen publishes nothing and the one end closes both;
+ * cut for Bluetooth switched or an asked listen, its end says @c cut and lists
+ * no device. Behind a Wi-Fi sweep it is answered @c busy. Entries and ends
+ * carry the request's generation, as the Wi-Fi listing's do.
  *
- * @param ms How long to listen; 0 for KODE_BLE_SCAN_MS.
- * @return true when the request was posted, false when the pool was dry (logged,
- *         nothing answers).
+ * @param ms  How long to listen; 0 for KODE_BLE_SCAN_MS.
+ * @param gen Out: this request's generation; NULL when the caller reads none.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full, and then
+ *         nothing was asked and nothing answers.
  */
-bool ble_scan_request(uint32_t ms);
+bool ble_scan_request(uint32_t ms, uint8_t *gen);
 
 /**
  * @brief Ask for the listen ble_scan_request() runs, for an AO; the door
@@ -2333,8 +2361,10 @@ bool ble_scan_request(uint32_t ms);
  *
  * Posts and answers as wifi_scan_ask() (BLE_SCAN_ENTRY_SIG, then BLE_SCAN_RSP_SIG),
  * sharing its one slot. rc: KODE_OK; KODE_ERROR failed or link lost; KODE_DENIED
- * Bluetooth off; KODE_NO_RESOURCES radio busy, ask again. The autojoin round on a
- * cold link with Wi-Fi on makes the first listen nearly always busy.
+ * Bluetooth off; KODE_NO_RESOURCES radio busy (a Wi-Fi scan, the round, the row,
+ * an install), ask again; KODE_CANCELLED a newer Bluetooth request took its
+ * place. The autojoin round on a cold link with Wi-Fi on makes the first listen
+ * nearly always busy.
  *
  * @param who The asking AO.
  * @param ms  How long to listen, KODE_BLE_SCAN_MIN_MS..KODE_BLE_SCAN_MAX_MS.

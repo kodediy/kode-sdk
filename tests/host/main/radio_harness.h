@@ -264,8 +264,19 @@ static void dispatch_evt(const QEvt *e)
 
 static void dispatch(enum_t sig)
 {
-    QEvt e = QEVT_INITIALIZER(sig);
-    dispatch_evt(&e);
+    if ( (enum_t)WIFI_SCAN_REQ_SIG == sig )
+    {
+        /* The one bare request with a field of its own: its generation. */
+        WifiScanReqEvt r = { QEVT_INITIALIZER(WIFI_SCAN_REQ_SIG), (uint8_t)KQP_SCAN_GEN_NONE };
+
+        dispatch_evt(&r.super);
+    }
+    else
+    {
+        QEvt e = QEVT_INITIALIZER(sig);
+
+        dispatch_evt(&e);
+    }
 }
 
 /** @brief Whether a job is inside the radio worker, waiting to be ended. */

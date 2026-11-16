@@ -9,6 +9,19 @@ Optional: CONFIG_KODEOS_RADIO
 
 Docs: https://docs.kode.diy/sdk/kaos/radio
 
+Scans
+-----
+
+One scan somebody asked for is alive per radio, running or waiting: the listing on the bus (`wifi_scan_request()`, `ble_scan_request()`, the console's `wifi_scan` and `ble_scan`) or an asked scan (`wifi_scan_ask()`, `ble_scan_ask()` and the blocking pair, which `kode_sys` and `kode.h` wrap). The newest request of a radio wins: a Wi-Fi scan, a join, Wi-Fi switched off, or on from off, end the Wi-Fi scan in flight, and a Bluetooth listen or Bluetooth switched ends the listen. A request of one radio ends no scan of the other.
+
+The asker of the scan that ended is answered at that moment: an asked scan with `rc` `KODE_CANCELLED`, a listing with an end that says `cut`. A Wi-Fi listing ended by a newer `wifi_scan` says `WIFI_SCAN_AGAIN_SIG` instead and the new sweep's end closes it. An asker that scans again at every answer waits for its own end first, or two of them never let a sweep finish.
+
+The two listing doors post with `KQP_RADIO_POST_MARGIN` and return false when AO_Radio's queue is that close to full. Each request takes a generation that its listing's entries and ends carry, so a listener skips what belongs to a listing before its own.
+
+On the console a valid line from the port that asked for a scan takes the scan's place (`wifi_scan`, `wifi_join`, `wifi_down` behind `wifi_scan`; `ble_scan`, `ble_down` behind `ble_scan`), and the scan is closed first with `>err code=5 msg=stopped`.
+
+An update of the C5's firmware, a join in flight, the board's own round, the production row and the radio check are not cut. The page linked above says what each request is answered behind them.
+
 Wi-Fi frames
 ------------
 

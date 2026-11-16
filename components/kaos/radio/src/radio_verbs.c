@@ -365,7 +365,13 @@ static void h_wifi_scan(const kverb_t *c, const karg_val_t *v)
     console_begin(c->verb);
     s_radio_kind = RADIO_V_WIFI_SCAN;
     console_unwatched();
-    wifi_scan_request();
+    /* With the watchdog disarmed, only the end marker closes the command,
+     * and a request AO_Radio's queue had no room for will never have one. */
+    if ( !wifi_scan_request(NULL) )
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+        console_end();
+    }
 }
 
 /**
@@ -851,10 +857,11 @@ static void h_ble_scan(const kverb_t *c, const karg_val_t *v)
     s_radio_kind = RADIO_V_BLE_SCAN;
     console_unwatched();
     /* With the watchdog disarmed, only the end marker closes the command,
-     * and a request the pool dropped will never have one. */
-    if ( !ble_scan_request(ms) )
+     * and a request the pool or AO_Radio's queue had no room for will never
+     * have one. */
+    if ( !ble_scan_request(ms, NULL) )
     {
-        console_reply_err(KCLI_ERR_REJECT, c->verb);
+        console_reply_err(KCLI_ERR_BUSY, "busy");
         console_end();
     }
 }

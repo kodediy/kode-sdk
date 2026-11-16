@@ -443,6 +443,53 @@ TEST_CASE("test_probe_cuts_a_running_sweep", "[radio_probe]")
     probe_case_end();
 }
 
+/* The check ends the sweep it cannot wait for, whoever asked for it: an asked
+ * one is told a newer request took its place, not that it failed. */
+TEST_CASE("an asked sweep the check cuts is answered cancelled", "[radio_probe]")
+{
+    const ScanRspEvt *rsp = NULL;
+
+    probe_up();
+    fake_ble_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_wifi_scan(ao_spy()));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    radio_probe_t const req = full_request();
+    TEST_ASSERT_TRUE(ask(&req));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, run_real_sweep(), "the sweep was not asked to end");
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, s_sweep_rc);
+
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+
+        if ( NULL == e )
+        {
+            break;
+        }
+        if ( (QSignal)WIFI_SCAN_RSP_SIG == e->sig )
+        {
+            rsp = (const ScanRspEvt *)(const void *)e;
+            break;
+        }
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(rsp, "the sweep's asker was not answered");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CANCELLED, rsp->rc);
+
+    /* The check goes on as it does behind any sweep. */
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_C5_INFO, running_job());
+    finish_card();
+    leave_heard(true, (int8_t)RSSI_24, CH24, false);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    leave_heard(true, (int8_t)RSSI_5, CH5, false);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    leave_found(false, 0);
+    finish(KDRV_RADIO_JOB_BLE_FIND, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, answer()->status);
+    probe_case_end();
+}
+
 TEST_CASE("test_probe_keeps_advertising_on", "[radio_probe]")
 {
     probe_up();

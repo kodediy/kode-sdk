@@ -502,7 +502,7 @@ TEST_CASE("a join that arrives while a job is in flight is made when the job end
 {
     radio_fresh();
     go_up();
-    wifi_scan_request();
+    (void)wifi_scan_request(NULL);
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
 
@@ -527,7 +527,7 @@ TEST_CASE("a join that arrives during a listed scan cuts the sweep short",
 {
     radio_fresh();
     go_up();
-    wifi_scan_request();
+    (void)wifi_scan_request(NULL);
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
 
@@ -552,7 +552,7 @@ TEST_CASE("of two joins that arrive while a job is in flight only the second is 
 {
     radio_fresh();
     go_up();
-    wifi_scan_request();
+    (void)wifi_scan_request(NULL);
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
 
@@ -588,7 +588,7 @@ TEST_CASE("a leave that arrives while a join is owed clears the join",
 {
     radio_fresh();
     go_up();
-    wifi_scan_request();
+    (void)wifi_scan_request(NULL);
     pump();
     TEST_ASSERT_TRUE(wifi_join_request("net", "pw12345678", false));
     pump();
@@ -639,7 +639,7 @@ TEST_CASE("a join's state says it is still out until it has ended, and why it "
     TEST_ASSERT_FALSE(wifi_state_now().joining);
 
     /* Behind a sweep it waits: not an answer. */
-    wifi_scan_request();
+    (void)wifi_scan_request(NULL);
     pump();
     TEST_ASSERT_TRUE(wifi_join_request("net", "pw12345678", false));
     pump();
@@ -1437,7 +1437,7 @@ TEST_CASE("an asked scan leaves the free slots in the asker's queue and says mor
     ao_spy_drain();
 }
 
-TEST_CASE("the console's scan still publishes, and is turned away while an asked one runs",
+TEST_CASE("the console's scan still publishes, and ends an asked one that runs",
           "[radio_ao][ask]")
 {
     scan_seen_t s;
@@ -1450,14 +1450,16 @@ TEST_CASE("the console's scan still publishes, and is turned away while an asked
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
     dispatch(WIFI_SCAN_REQ_SIG);
     s = scan_take_spy();
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s.bus_ends, "the console was not answered");
-    TEST_ASSERT_EQUAL_UINT(0U, s.ends);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s.bus_ends, "the console was turned away");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s.ends, "the asker was not told its scan ended early");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CANCELLED, s.end->rc);
     ao_spy_drain();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
     scan_sweep(2U, -50, KODE_OK);
     s = scan_take_spy();
     TEST_ASSERT_EQUAL_UINT(2U, s.entries);
-    TEST_ASSERT_EQUAL_UINT(1U, s.ends);
-    TEST_ASSERT_EQUAL_UINT(0U, s.bus_ends);
+    TEST_ASSERT_EQUAL_UINT(0U, s.ends);
+    TEST_ASSERT_EQUAL_UINT(1U, s.bus_ends);
     ao_spy_drain();
 
     dispatch(WIFI_SCAN_REQ_SIG);
@@ -1528,7 +1530,7 @@ TEST_CASE("an asked scan the link drops under is ended, not abandoned",
     ao_spy_drain();
 }
 
-TEST_CASE("a second asker while a scan is held is refused in its end, at once",
+TEST_CASE("a second asker while a scan is held takes its place, and the first is told at once",
           "[radio_ao][ask]")
 {
     const QEvt *o;
@@ -1543,18 +1545,25 @@ TEST_CASE("a second asker while a scan is held is refused in its end, at once",
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, wifi_scan_ask(ao_spy_other()),
                                   "the door is the asker's, not the kind's");
     pump();
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_other_take(), "the newer asker was answered before its scan ran");
+    s = scan_take_spy();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s.ends, "the first asker was not answered");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CANCELLED, s.end->rc);
+    TEST_ASSERT_EQUAL_UINT8(0U, s.end->seen);
+    ao_spy_drain();
+
+    /* The second asker's queue is shorter than the slots an entry leaves
+     * free, so its sweep reaches it as the answer alone. */
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+    scan_sweep(1U, -50, KODE_OK);
     o = ao_spy_other_take();
-    TEST_ASSERT_NOT_NULL_MESSAGE(o, "the second asker was not answered");
+    TEST_ASSERT_NOT_NULL_MESSAGE(o, "the newer asker was not answered");
     TEST_ASSERT_EQUAL_UINT32((uint32_t)WIFI_SCAN_RSP_SIG, (uint32_t)o->sig);
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_NO_RESOURCES, ((const ScanRspEvt *)(const void *)o)->rc);
-    TEST_ASSERT_EQUAL_UINT8(0U, ((const ScanRspEvt *)(const void *)o)->seen);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, ((const ScanRspEvt *)(const void *)o)->rc);
+    TEST_ASSERT_EQUAL_UINT8(1U, ((const ScanRspEvt *)(const void *)o)->seen);
     QF_gc(o);
     TEST_ASSERT_NULL(ao_spy_other_take());
-
-    scan_sweep(1U, -50, KODE_OK);
-    s = scan_take_spy();
-    TEST_ASSERT_EQUAL_UINT(1U, s.ends);
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, s.end->rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, scan_take_spy().ends, "the first asker was answered twice");
     ao_spy_drain();
 }
 
@@ -1568,9 +1577,11 @@ static const ScanRspEvt *scan_answered_at_once(void)
     return s.end;
 }
 
-TEST_CASE("an asked scan while the console's sweep runs is refused at once, busy",
+TEST_CASE("an asked scan while the console's sweep runs ends the listing and waits for the worker",
           "[radio_ao][ask]")
 {
+    scan_seen_t s;
+
     radio_fresh();
     go_up();
     ao_spy_drain();
@@ -1579,15 +1590,19 @@ TEST_CASE("an asked scan while the console's sweep runs is refused at once, busy
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_wifi_scan(ao_spy()));
     pump();
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_NO_RESOURCES, scan_answered_at_once()->rc);
+    s = scan_take_spy();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s.ends, "the asked scan was refused");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s.bus_ends, "the listing was left open");
     ao_spy_drain();
-    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_wifi_scan(ao_spy()),
-                                  "the refusal left the door shut");
-    pump();
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_NO_RESOURCES, scan_answered_at_once()->rc);
-    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kode_sys_wifi_scan(ao_spy()),
+                                  "the asker's door opened before its answer");
 
-    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+    scan_sweep(1U, -50, KODE_OK);
+    s = scan_take_spy();
+    TEST_ASSERT_EQUAL_UINT(1U, s.ends);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, s.end->rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s.bus_ends, "the asked scan's end was published");
     ao_spy_drain();
 }
 
@@ -1723,7 +1738,7 @@ TEST_CASE("an asked scan owed with no job in flight is refused when a C5 update 
     ao_spy_drain();
 }
 
-TEST_CASE("a task's scan while a sweep runs is answered at once, busy, in its waiter",
+TEST_CASE("a task's scan while a join runs waits its turn, and is answered in its waiter",
           "[radio_ao][ask]")
 {
     kdrv_wifi_ap_t rows[KDRV_WIFI_SCAN_MAX];
@@ -1737,14 +1752,21 @@ TEST_CASE("a task's scan while a sweep runs is answered at once, busy, in its wa
     w.rows = rows;
     w.cap  = (uint8_t)KDRV_WIFI_SCAN_MAX;
 
-    dispatch(WIFI_SCAN_REQ_SIG);
+    /* A join in flight is not cut: the scan is owed behind it. */
+    TEST_ASSERT_TRUE(wifi_join_request("net", "pw12345678", false));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_JOIN, running_job());
     wifi_scan_request_wait(&w, 11U);
     pump();
-    TEST_ASSERT_EQUAL_UINT32(11U, w.ack);
-    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_NO_RESOURCES, w.rc);
-    TEST_ASSERT_EQUAL_UINT8(0U, w.got);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, w.ack, "the scan was answered behind a join");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_JOIN, running_job());
 
-    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_ERROR);
+    scan_sweep(1U, -50, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT32(11U, w.ack);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, w.rc);
+    TEST_ASSERT_EQUAL_UINT8(1U, w.got);
+    wifi_owed_cleanup();
     ao_spy_drain();
 }
 
@@ -5268,7 +5290,8 @@ TEST_CASE("a switch of J3's supply asked during a sweep goes before the autojoin
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_wifi_scan(ao_spy()));
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
-    dispatch(WIFI_START_REQ_SIG);   /* the round is owed behind the sweep */
+    /* The round is owed behind the sweep: asked for by itself it ends no scan. */
+    TEST_ASSERT_TRUE(wifi_auto_request());
     pump();
     exp_ask(true);
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
@@ -6009,30 +6032,27 @@ TEST_CASE("a BLE listen and a Wi-Fi scan share one slot: the second is refused a
     ble_case_end();
 }
 
-TEST_CASE("an asked BLE listen while the console's listen runs is refused at once, busy",
+TEST_CASE("an asked BLE listen while the console's listen runs ends the listing and runs next",
           "[radio_ao][ble_ask]")
 {
     ble_seen_t s;
 
     ble_on_up();
-    TEST_ASSERT_TRUE(ble_scan_request(BLE_ASK_MS));
+    TEST_ASSERT_TRUE(ble_scan_request(BLE_ASK_MS, NULL));
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_SCAN, running_job());
     TEST_ASSERT_EQUAL_INT(KODE_OK, ble_scan_ask(ao_spy(), BLE_ASK_MS));
     pump();
     s = ble_take_spy();
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s.ends, "the asker was owed behind the console's listen");
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_NO_RESOURCES, s.end->rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s.ends, "the asker was refused behind the console's listen");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s.bus_ends, "the console's listing lost its end");
     ao_spy_drain();
 
+    /* The cut listen comes back and answers nobody; the asked one runs. */
     finish_ble_scan(2U, -60);
     s = ble_take_spy();
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s.bus_ends, "the console's listing lost its end");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s.bus_ends, "the console's listing was closed twice");
     TEST_ASSERT_EQUAL_UINT(0U, s.ends);
-
-    /* The console's listen is over: an asked one runs again. */
-    TEST_ASSERT_EQUAL_INT(KODE_OK, ble_scan_ask(ao_spy(), BLE_ASK_MS));
-    pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_SCAN, running_job());
     finish_ble_scan(1U, -60);
     s = ble_take_spy();
@@ -6159,7 +6179,7 @@ TEST_CASE("a scan response asked while the radio is busy waits, and goes once th
     static const uint8_t DATA[2] = { 0x34U, 0x12U };
 
     ble_on_up();
-    TEST_ASSERT_TRUE(ble_scan_request(BLE_ASK_MS));
+    TEST_ASSERT_TRUE(ble_scan_request(BLE_ASK_MS, NULL));
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_SCAN, running_job());
     ble_rsp_ask("first", DATA, sizeof(DATA));
@@ -6602,13 +6622,15 @@ TEST_CASE("test_radio_request_while_job_runs_is_deferred: a request that needs t
     go_up();
     ao_spy_drain();
 
-    dispatch(WIFI_SCAN_REQ_SIG);
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    /* A Bluetooth listen: a job no Wi-Fi request ends or waits for. */
+    TEST_ASSERT_TRUE(ble_scan_request(KODE_BLE_SCAN_MS, NULL));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_SCAN, running_job());
     unsigned const before = job_submits();
     ao_spy_drain();
     fake_klog_reset();
 
-    dispatch(WIFI_STOP_REQ_SIG);          /* owed: paid when the scan is back */
+    dispatch(WIFI_STOP_REQ_SIG);          /* owed: paid when the listen is back */
     TEST_ASSERT_TRUE(logged("is owed"));
     dispatch(WIFI_SCAN_REQ_SIG);          /* answered on the spot: busy, ask again */
     TEST_ASSERT_TRUE(logged("was answered busy; ask again"));
@@ -6624,12 +6646,48 @@ TEST_CASE("test_radio_request_while_job_runs_is_deferred: a request that needs t
 
     TEST_ASSERT_EQUAL_UINT_MESSAGE(before, job_submits(), "a job went over the one inside");
     TEST_ASSERT_FALSE(job_queued());
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_SCAN, running_job());
 
-    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    finish(KDRV_RADIO_JOB_BLE_SCAN, KODE_ERROR);
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_STOP, running_job(),
-                                  "the owed stop was not paid when the scan came back");
+                                  "the owed stop was not paid when the listen came back");
     finish(KDRV_RADIO_JOB_WIFI_STOP, KODE_OK);
+    c5_case_end();
+}
+
+/* The round is tens of seconds and is not cut, so nothing waits behind it: a
+ * listing that waited for the worker is answered when the round starts, as
+ * an asked scan is. */
+TEST_CASE("a listing that waits for the worker is told to ask again when the board's own round starts",
+          "[radio_ao][worker]")
+{
+    bool    ok    = true;
+    uint8_t count = 9U;
+
+    radio_fresh();
+    go_up();
+    vault_has("line-ap-0");
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    dispatch(WIFI_SCAN_REQ_SIG);          /* the first is cut, the second waits */
+    TEST_ASSERT_TRUE(wifi_auto_request());   /* the round is owed behind them */
+    pump();
+    ao_spy_drain();
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+    TEST_ASSERT_TRUE_MESSAGE(scan_end_seen(&ok, &count), "the listing that waited was left open");
+    TEST_ASSERT_FALSE(ok);
+    TEST_ASSERT_TRUE_MESSAGE(s_end_busy, "the listing was not told to ask again");
+    TEST_ASSERT_TRUE_MESSAGE(job_held(), "the round did not start");
+
+    finish_whatever_runs();
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    TEST_ASSERT_FALSE_MESSAGE(scan_end_seen(&ok, &count), "the listing the round refused ran all the same");
     c5_case_end();
 }
 
@@ -7868,7 +7926,7 @@ TEST_CASE("an adopted station gets the power save this side believes in",
 /** @brief Ask for a BLE scan the way an app does, and let the AO take it. */
 static void ask_ble_scan(void)
 {
-    ble_scan_request(0U);
+    (void)ble_scan_request(0U, NULL);
     pump();
 }
 
@@ -7980,14 +8038,14 @@ TEST_CASE("a BLE scan listens as long as it is asked", "[radio_ao]")
     radio_fresh();
     go_up();
 
-    ble_scan_request(1500U);
+    (void)ble_scan_request(1500U, NULL);
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_SCAN, running_job());
     TEST_ASSERT_EQUAL_UINT32(1500U, held_req()->len);
     finish(KDRV_RADIO_JOB_BLE_SCAN, kdrv_ble_scan(held_req()->len));
     TEST_ASSERT_TRUE(ble_scan_end_ok());
 
-    ble_scan_request(0U);
+    (void)ble_scan_request(0U, NULL);
     pump();
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(KODE_BLE_SCAN_MS, held_req()->len,
                                      "0 is the default");
@@ -8006,7 +8064,7 @@ TEST_CASE("a BLE scan length out of range is refused", "[radio_ao]")
     for ( unsigned i = 0U; 2U > i; ++i )
     {
         unsigned const scans = fake_ble_scans();
-        ble_scan_request(BAD[i]);
+        (void)ble_scan_request(BAD[i], NULL);
         pump();
         TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "no job for it");
         TEST_ASSERT_EQUAL_UINT(scans, fake_ble_scans());
@@ -8014,11 +8072,11 @@ TEST_CASE("a BLE scan length out of range is refused", "[radio_ao]")
     }
 
     /* The ends of the range are in it. */
-    ble_scan_request(KODE_BLE_SCAN_MIN_MS);
+    (void)ble_scan_request(KODE_BLE_SCAN_MIN_MS, NULL);
     pump();
     TEST_ASSERT_EQUAL_UINT32(KODE_BLE_SCAN_MIN_MS, held_req()->len);
     finish(KDRV_RADIO_JOB_BLE_SCAN, kdrv_ble_scan(held_req()->len));
-    ble_scan_request(KODE_BLE_SCAN_MAX_MS);
+    (void)ble_scan_request(KODE_BLE_SCAN_MAX_MS, NULL);
     pump();
     TEST_ASSERT_EQUAL_UINT32(KODE_BLE_SCAN_MAX_MS, held_req()->len);
     finish(KDRV_RADIO_JOB_BLE_SCAN, kdrv_ble_scan(held_req()->len));
@@ -8900,7 +8958,7 @@ TEST_CASE("a try that falls due behind a job goes when the job ends, and a join 
     retry_ready();
     retry_network_drops();
     pump();
-    wifi_scan_request();
+    (void)wifi_scan_request(NULL);
     pump();
     retry_wait(6000U);
     TEST_ASSERT_EQUAL_UINT((unsigned)KDRV_RADIO_JOB_WIFI_SCAN,
@@ -8912,7 +8970,7 @@ TEST_CASE("a try that falls due behind a job goes when the job ends, and a join 
     TEST_ASSERT_EQUAL_UINT_MESSAGE(submits + 1U, job_submits(), "the try did not go");
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
 
-    wifi_scan_request();
+    (void)wifi_scan_request(NULL);
     pump();
     retry_wait(35000U);
     TEST_ASSERT_TRUE(wifi_join_request("net", "pw12345678", false));
@@ -9117,7 +9175,7 @@ TEST_CASE("a round meets a busy link, a starting link and no link",
     lp_expect_answer(true, "link starting");
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
 
-    wifi_scan_request();                 /* a scan holds the channel */
+    (void)wifi_scan_request(NULL);                 /* a scan holds the channel */
     pump();
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
     lp_radio_round(KODE_LP_ASLEEP);
@@ -12114,6 +12172,75 @@ TEST_CASE("a loss owed behind the failed end of the job that met it answers for 
 {
     TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
                                      (uint32_t)ask_support_fork_run(&lost_behind_done_body, NULL),
+                                     "see the child's line above");
+}
+
+/** @brief Child body: a listing replaced by a newer one, the cut sweep still with the worker, and the link lost with the queue full. */
+static void lost_behind_cut_body(void *arg)
+{
+    unsigned ends = 0U;
+    bool     ok   = true;
+
+    (void)arg;
+    radio_fresh();
+    go_up();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    CHILD_CHECK((int)KDRV_RADIO_JOB_WIFI_SCAN == running_job(), "no scan with the worker");
+    dispatch(WIFI_SCAN_REQ_SIG);                 /* newer: the first is cut, the second waits */
+    board_queue();
+    radio_queue_fill_to(0U);
+    fake_klog_reset();
+    ao_spy_drain();
+    unsigned const before = job_submits();
+
+    fake_radio_lose_link(KODE_TIMEOUT);          /* refused: owed */
+    deliver_held(KODE_DENIED);                   /* the cut sweep comes back first */
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            ++ends;
+        }
+    }
+    CHILD_CHECK(0U == ends, "the cut sweep's end closed the listing that waits");
+    CHILD_CHECK(job_submits() == before,
+                "the listing that waited started on a link whose loss waits to be heard");
+    CHILD_CHECK(0U == log_count("the C5 went mute; resetting it"),
+                "the cut sweep's end was turned into the loss");
+
+    pump();
+    pump();
+    CHILD_CHECK(1U == log_count("the C5 went mute; resetting it"), "the loss was not heard exactly once");
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            ++ends;
+            ok = ((const WifiScanEndEvt *)e)->ok;
+        }
+    }
+    CHILD_CHECK(1U == ends, "the listing that waited was not closed exactly once");
+    CHILD_CHECK(!ok, "a listing the link took was closed as a whole one");
+    CHILD_CHECK((int)KDRV_RADIO_JOB_DISCONNECT == running_job(), "no teardown after the loss");
+    CHILD_CHECK(job_submits() == (before + 1U), "not exactly one teardown");
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    pump();
+    CHILD_CHECK(1U == log_count("the C5 went mute; resetting it"), "the loss was heard twice");
+
+    /* The cut asked of the sweep went with the link: the next one runs whole. */
+    run_scan();
+    CHILD_CHECK(1U < s_starts, "the cut outlived the link");
+}
+
+/* A newer scan ends the one in flight and waits for its worker; the cut sweep
+ * comes back failed, as every cut does. With the link's loss owed behind that
+ * end, the end is left to the loss: the listing that waits never starts on a
+ * link that is gone, and the loss closes it. */
+TEST_CASE("a loss owed behind the end of a sweep a newer scan cut closes the listing that waits, once",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&lost_behind_cut_body, NULL),
                                      "see the child's line above");
 }
 

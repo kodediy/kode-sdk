@@ -462,7 +462,9 @@ _Static_assert(sizeof(ButtonsStateEvt) <= KQP_BLOCK_LARGE,
 _Static_assert(sizeof(BootStateEvt) <= KQP_BLOCK_LARGE,
                "BootStateEvt must not reach the jumbo pool");
 _Static_assert(sizeof(BleScanReqEvt) <= KQP_BLOCK_SMALL,
-               "BleScanReqEvt is one integer: the small pool");
+               "BleScanReqEvt is a length and a generation: the small pool");
+_Static_assert(sizeof(WifiScanReqEvt) <= KQP_BLOCK_SMALL,
+               "WifiScanReqEvt is one byte: the small pool");
 _Static_assert(sizeof(BleScanEvt) <= KQP_BLOCK_LARGE,
                "BleScanEvt must not reach the jumbo pool");
 _Static_assert(sizeof(IrRxEvt) <= KQP_BLOCK_LARGE,

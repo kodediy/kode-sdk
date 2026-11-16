@@ -419,10 +419,12 @@ typedef struct {
     uint16_t scan_sent;
 
     /* The asked scan: a Wi-Fi sweep (wifi_scan_ask(), wifi_scan_request_wait())
-     * or a BLE listen (ble_scan_ask(), ble_scan_request_wait()), one at a time.
-     * Owed only while the link comes up and the reconcile runs; refused behind
-     * a console scan, a test row or an install. Its entries go to `ask_who`,
-     * never to the bus, so `scan_live` stays false. */
+     * or a BLE listen (ble_scan_ask(), ble_scan_request_wait()), one at a time:
+     * a newer one of its radio ends it. Owed while the link comes up, the
+     * reconcile or a join runs, or the scan it replaces leaves the worker;
+     * refused behind a scan of the other radio, the board's own round, a test
+     * row or an install. Its entries go to `ask_who`, never to the bus, so
+     * `scan_live` stays false. */
     uint8_t     ask_scan;  /**< SCAN_ASK_NONE, _OWED or _RUNNING              */
     uint8_t     ask_kind;  /**< KQP_SCAN_WIFI or KQP_SCAN_BLE                 */
     uint32_t    ask_ms;    /**< KQP_SCAN_BLE: how long to listen.             */
@@ -432,9 +434,23 @@ typedef struct {
     uint32_t    ask_gen;   /**< The task's tag.                               */
     uint16_t    ask_seen;  /**< Networks or devices handed over.              */
     bool        ask_cut;   /**< An entry did not fit the asker's queue.       */
-    bool        ble_scan_live; /**< The console's BLE listen is on the worker:
-                                *   an asked scan is refused behind it, as
-                                *   behind `scan_live`.                       */
+    bool        ble_scan_live; /**< The console's BLE listen is on the worker. */
+
+    /* The newest request of a radio wins (radio_scan_replace()): one scan of
+     * each radio is alive at a time, running or waiting, and a newer request
+     * of that radio ends it. */
+    bool        scan_orphan;   /**< The sweep or the listen with the worker has
+                                *   no asker any more: a newer request took its
+                                *   place and its asker was answered then. Its
+                                *   outcome is read and dropped.              */
+    uint8_t     scan_orphan_kind; /**< Whose it was: KQP_SCAN_WIFI or _BLE.   */
+    bool        scan_next;     /**< A Wi-Fi listing waits for the worker.     */
+    bool        ble_scan_next; /**< A BLE listing waits for the worker.       */
+    uint32_t    ble_scan_next_ms; /**< How long it listens.                   */
+    uint8_t     scan_gen;      /**< The generation of the newest `wifi_scan`
+                                *   request: what the Wi-Fi listing's entries
+                                *   and ends carry (WifiScanEndEvt.gen).      */
+    uint8_t     ble_scan_gen;  /**< The same for the BLE listing.             */
 
     /* The radio check (radio_probe_request()), one at a time. It is a chain
      * of the worker's jobs, each one's done event starting the next, and it
@@ -1134,11 +1150,52 @@ enum {
     SCAN_ASK_RUNNING    /**< Its sweep is on the worker.                   */
 };
 
-#if CONFIG_KODEOS_WIFI
-void wifi_scan_request(void)
+#if RADIO_ASKS
+static void radio_scan_replace(Radio * const me, uint8_t kind, bool listing);
+static bool scan_alive(Radio const * const me, uint8_t kind);
+
+/**
+ * @brief Take the next generation for a listing request.
+ *
+ * One count for both radios, taken by whoever asks, on its own thread: a
+ * listener tells its listing's end from an older one's by it.
+ *
+ * @return The generation, never KQP_SCAN_GEN_NONE.
+ */
+static uint8_t scan_gen_next(void)
 {
-    static const QEvt evt = QEVT_INITIALIZER(WIFI_SCAN_REQ_SIG);
-    QACTIVE_POST(AO_Radio, &evt, NULL);
+    static uint8_t s_gen;
+    /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
+    uint8_t gen = __atomic_add_fetch(&s_gen, 1U, __ATOMIC_RELAXED);
+
+    if ( (uint8_t)KQP_SCAN_GEN_NONE == gen )
+    {
+        /* Wrapped: the count goes on from 1, and a request that raced this
+         * one may share its generation, which only makes the two one age. */
+        /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
+        gen = __atomic_add_fetch(&s_gen, 1U, __ATOMIC_RELAXED);
+    }
+    return gen;
+}
+#endif
+
+#if CONFIG_KODEOS_WIFI
+bool wifi_scan_request(uint8_t *gen)
+{
+    WifiScanReqEvt *e = Q_NEW_X(WifiScanReqEvt, 0U, WIFI_SCAN_REQ_SIG);
+    bool            posted = false;
+
+    if ( NULL != e )
+    {
+        e->gen = scan_gen_next();
+        if ( NULL != gen )
+        {
+            *gen = e->gen;
+        }
+        /* QActive_post_ recycles the event itself when it refuses. */
+        posted = QACTIVE_POST_X(AO_Radio, &e->super, KQP_RADIO_POST_MARGIN, NULL);
+    }
+    return posted;
 }
 
 bool wifi_scan_stop_request(void)
@@ -1429,17 +1486,23 @@ void ble_start_request(void)
     QACTIVE_POST(AO_Radio, &evt, NULL);
 }
 
-bool ble_scan_request(uint32_t ms)
+bool ble_scan_request(uint32_t ms, uint8_t *gen)
 {
     BleScanReqEvt *e = Q_NEW_X(BleScanReqEvt, 0U, BLE_SCAN_REQ_SIG);
-    if ( NULL == e )
+    bool           posted = false;
+
+    if ( NULL != e )
     {
-        KLOG_E(TAG, "out of events; BLE scan request dropped");
-        return false;
+        e->ms  = ms;
+        e->gen = scan_gen_next();
+        if ( NULL != gen )
+        {
+            *gen = e->gen;
+        }
+        /* QActive_post_ recycles the event itself when it refuses. */
+        posted = QACTIVE_POST_X(AO_Radio, &e->super, KQP_RADIO_POST_MARGIN, NULL);
     }
-    e->ms = ms;
-    QACTIVE_POST(AO_Radio, &e->super, NULL);
-    return true;
+    return posted;
 }
 
 /**
@@ -2992,26 +3055,68 @@ static bool scan_ask_refuse_off(Radio const * const me, QEvt const * const e)
 /**
  * @brief Whether the channel is held by something an asked scan is never owed behind.
  *
- * A console scan of either kind (the autojoin round is a state of its own
- * and refuses there), the production row or an install, or an update: each
- * holds the channel for tens of seconds, and a scan owed behind one would
- * outlast its caller's wait. Only the link's bring-up and the reconcile
- * chain, which take seconds, are waited for.
+ * The production row, an install or an update (the autojoin round is a state
+ * of its own and refuses there): each holds the channel for tens of seconds
+ * and none is cut, so a scan owed behind one would outlast its caller's wait.
+ * A scan of the asker's own radio is not in the list: a newer one ends it
+ * (radio_scan_replace()). The link's bring-up, the reconcile chain and a
+ * join, which take seconds, are waited for.
  *
  * @param me The AO.
  * @return true when an asked scan is refused instead of owed.
  */
 static bool scan_ask_blocked(Radio const * const me)
 {
-    return me->scan_live
-           || me->ble_scan_live
-           || ((uint8_t)TEST_IDLE != me->test_phase)
+    return ((uint8_t)TEST_IDLE != me->test_phase)
            || ((uint8_t)INST_IDLE != me->inst)
            || ((uint8_t)OTA_IDLE != me->phase);
 }
 
 /**
+ * @brief Whether the board's own round over the remembered networks is owed.
+ *
+ * The round refuses every scan when it starts, so one asked for now would
+ * end the scan before it and then be refused itself.
+ *
+ * @param me The AO.
+ * @return true when the round runs as soon as the channel is free.
+ */
+static bool scan_round_owed(Radio const * const me)
+{
+    bool owed = false;
+
+#if CONFIG_KODEOS_WIFI
+    owed = me->wifi_start_pending || ((uint8_t)WOWED_AUTO == me->wifi_owed);
+#else
+    (void)me;
+#endif
+    return owed;
+}
+
+/**
+ * @brief The radio a scan of @p kind does not use.
+ * @param kind KQP_SCAN_WIFI or KQP_SCAN_BLE.
+ * @return The other of the two.
+ */
+static uint8_t scan_other(uint8_t kind)
+{
+    uint8_t other = (uint8_t)KQP_SCAN_WIFI;
+
+    if ( (uint8_t)KQP_SCAN_WIFI == kind )
+    {
+        other = (uint8_t)KQP_SCAN_BLE;
+    }
+    return other;
+}
+
+/**
  * @brief Take an asked scan into the one slot, or refuse it at once.
+ *
+ * The newest scan of a radio wins: the scan of that radio before it, a
+ * listing or an asked one, running or waiting, ends here and its asker is
+ * told. Behind a scan of the other radio it is refused, as it is behind the
+ * board's own round, owed or running.
+ *
  * @param me The AO.
  * @param e  The RADIO_SCAN_ASK_SIG.
  * @return true when it is held, owed; false when it was answered already.
@@ -3024,20 +3129,21 @@ static bool scan_ask_take(Radio * const me, QEvt const * const e)
     {
         return false;
     }
-    if ( (uint8_t)SCAN_ASK_NONE != me->ask_scan )
+    if ( scan_ask_blocked(me) || scan_round_owed(me) )
     {
-        KLOG_N(TAG, "a scan is already asked for; this %s is refused",
-               scan_ask_name(a->kind));
-        scan_ask_refuse(e, KODE_NO_RESOURCES);
-        return false;
-    }
-    if ( scan_ask_blocked(me) )
-    {
-        KLOG_N(TAG, "the radio is busy with a scan, a test or an install; "
+        KLOG_N(TAG, "the radio is busy with a round, a test or an install; "
                     "a %s is refused", scan_ask_name(a->kind));
         scan_ask_refuse(e, KODE_NO_RESOURCES);
         return false;
     }
+    if ( scan_alive(me, scan_other(a->kind)) )
+    {
+        /* A request ends the scan of its own radio and no other. */
+        KLOG_N(TAG, "the other radio scans; a %s is refused", scan_ask_name(a->kind));
+        scan_ask_refuse(e, KODE_NO_RESOURCES);
+        return false;
+    }
+    radio_scan_replace(me, a->kind, false);
     me->ask_scan = (uint8_t)SCAN_ASK_OWED;
     me->ask_kind = a->kind;
     me->ask_ms   = a->ms;
@@ -3055,7 +3161,8 @@ static bool scan_ask_take(Radio * const me, QEvt const * const e)
  * @param me The AO.
  * @param rc KODE_OK, the scan reached its end; KODE_ERROR, it failed or the
  *           link went; KODE_NO_RESOURCES, the radio turned out busy;
- *           KODE_DENIED, Bluetooth went off in Settings before a BLE scan ran.
+ *           KODE_DENIED, Bluetooth went off in Settings before a BLE scan ran;
+ *           KODE_CANCELLED, a newer radio request took its place.
  */
 static void scan_ask_end(Radio * const me, kode_status_t rc)
 {
@@ -3081,16 +3188,17 @@ static void scan_ask_end(Radio * const me, kode_status_t rc)
 }
 
 /**
- * @brief Refuse the held scan if it is still owed: a scan, a test row or an
- *        install is about to take the channel, and it is never owed behind one.
+ * @brief Refuse the held scan if it is still owed: a scan of the other radio,
+ *        the board's own round, a test row or an install is about to take the
+ *        channel, and it is never owed behind one.
  * @param me The AO.
  */
 static void scan_ask_refuse_owed(Radio * const me)
 {
     if ( (uint8_t)SCAN_ASK_OWED == me->ask_scan )
     {
-        KLOG_N(TAG, "the radio is busy with a scan, a test or an install; "
-                    "the asked %s is refused", scan_ask_name(me->ask_kind));
+        KLOG_N(TAG, "the radio is taken by the other radio's scan, a round, a test "
+                    "or an install; the asked %s is refused", scan_ask_name(me->ask_kind));
         scan_ask_end(me, KODE_NO_RESOURCES);
     }
 }
@@ -3347,7 +3455,7 @@ static void wifi_retry_keep(Radio * const me)
 }
 
 /** @brief Publish the scan's end, with or without results behind it. */
-static void wifi_publish_scan_end(Radio * const me, uint8_t count, bool ok)
+static void wifi_publish_scan_end(Radio const * const me, uint8_t count, bool ok)
 {
     WifiScanEndEvt *e = Q_NEW_X(WifiScanEndEvt, 0U, WIFI_SCAN_END_SIG);
     if ( NULL != e )
@@ -3356,6 +3464,7 @@ static void wifi_publish_scan_end(Radio * const me, uint8_t count, bool ok)
         e->ok    = ok;
         e->busy  = false;
         e->cut   = false;
+        e->gen   = me->scan_gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
 }
@@ -3364,11 +3473,14 @@ static void wifi_publish_scan_end(Radio * const me, uint8_t count, bool ok)
  * @brief Publish the end of a Wi-Fi scan the C5 had no time for.
  *
  * Not a failure of the scan: nothing was started, and the asker is told to
- * ask again (the console answers `busy`, code 4).
+ * ask again (the console answers `busy`, code 4). It carries the generation
+ * of the request it refuses, which is not the listing's when one is alive:
+ * a listener that waits for another request does not take it for its own.
  *
- * @param me The AO.
+ * @param me  The AO.
+ * @param gen The refused request's generation.
  */
-static void wifi_publish_scan_busy(Radio * const me)
+static void wifi_publish_scan_busy(Radio * const me, uint8_t gen)
 {
     WifiScanEndEvt *e = Q_NEW_X(WifiScanEndEvt, 0U, WIFI_SCAN_END_SIG);
     if ( NULL != e )
@@ -3377,6 +3489,7 @@ static void wifi_publish_scan_busy(Radio * const me)
         e->ok    = false;
         e->busy  = true;
         e->cut   = false;
+        e->gen   = gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
     (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
@@ -3400,6 +3513,32 @@ static void wifi_publish_scan_cut(Radio * const me, uint8_t count)
         e->ok    = false;
         e->busy  = false;
         e->cut   = true;
+        e->gen   = me->scan_gen;
+        QACTIVE_PUBLISH(&e->super, &me->super);
+    }
+    (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
+}
+
+/**
+ * @brief Publish that the Wi-Fi listing starts again for a newer `wifi_scan`.
+ *
+ * Not an end: a listener that waits for the listing's end goes on waiting,
+ * and one WIFI_SCAN_END_SIG, the new sweep's, closes it. The entries before
+ * this are the cut sweep's.
+ *
+ * @param me    The AO.
+ * @param count How many entries the cut sweep published.
+ */
+static void wifi_publish_scan_again(Radio * const me, uint8_t count)
+{
+    WifiScanEndEvt *e = Q_NEW_X(WifiScanEndEvt, 0U, WIFI_SCAN_AGAIN_SIG);
+    if ( NULL != e )
+    {
+        e->count = count;
+        e->ok    = false;
+        e->busy  = false;
+        e->cut   = true;
+        e->gen   = me->scan_gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
     (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
@@ -3417,12 +3556,19 @@ static void wifi_publish_scan_cut(Radio * const me, uint8_t count)
  *
  * @param me The AO.
  */
-static void wifi_scan_stop(Radio const * const me)
+static void wifi_scan_stop(Radio * const me)
 {
     if ( me->scan_live )
     {
         KLOG_N(TAG, "wifi_scan_stop: the scan ends after the step on the air");
         kdrv_wifi_scan_abort(true);
+    }
+    else if ( me->scan_next )
+    {
+        /* Asked for behind a scan that is leaving the worker: it never runs. */
+        KLOG_N(TAG, "wifi_scan_stop: the scan that waited is not started");
+        me->scan_next = false;
+        wifi_publish_scan_cut(me, 0U);
     }
     else
     {
@@ -3459,6 +3605,7 @@ static void wifi_ask_entry(Radio * const me, kdrv_wifi_ap_t const *ap)
     e->channel  = ap->channel;
     e->authmode = ap->authmode;
     (void)memcpy(e->bssid, ap->bssid, sizeof(e->bssid));
+    e->gen      = (uint8_t)KQP_SCAN_GEN_NONE;
     if ( !QACTIVE_POST_X(me->ask_who, &e->super, KODE_STORAGE_LIST_FREE_SLOTS, &me->super) )
     {
         me->ask_cut = true;   /* QP took the entry back; the posting ends here */
@@ -3501,6 +3648,7 @@ static void wifi_drain_scan(Radio * const me)
         e->channel  = ap.channel;
         e->authmode = ap.authmode;
         (void)memcpy(e->bssid, ap.bssid, sizeof(e->bssid));
+        e->gen      = me->scan_gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
         ++me->scan_sent;
     }
@@ -3519,11 +3667,20 @@ static void wifi_finish_scan(Radio * const me, kode_status_t sweep)
     wifi_drain_scan(me);
     if ( scan_ask_running(me, (uint8_t)KQP_SCAN_WIFI) )
     {
-        /* An asked sweep: its end goes to the asker, never the bus. */
+        /* An asked sweep: its end goes to the asker, never the bus. A sweep
+         * the radio check cut short ends KODE_CANCELLED. */
         kode_status_t rc = KODE_ERROR;
         if ( ok )
         {
             rc = KODE_OK;
+        }
+        else if ( KODE_DENIED == sweep )
+        {
+            rc = KODE_CANCELLED;
+        }
+        else
+        {
+            /* it failed, or the link went */
         }
         scan_ask_end(me, rc);
         return;
@@ -3546,6 +3703,34 @@ static void wifi_finish_scan(Radio * const me, kode_status_t sweep)
     }
     me->scan_live = false;
     me->scan_sent = 0U;
+}
+
+/**
+ * @brief Hand the console's listing to the worker.
+ *
+ * Its end is the answer either way: a sweep the worker would not take is
+ * closed here, empty and not ok.
+ *
+ * @param me The AO, its channel free.
+ * @return true when the sweep is with the worker.
+ */
+static bool wifi_listing_start(Radio * const me)
+{
+    bool const started = radio_submit(me, KDRV_RADIO_JOB_WIFI_SCAN);
+
+    me->scan_next = false;
+    if ( started )
+    {
+        /* This one has a listener, so the sweep's knocks count. */
+        me->scan_live = true;
+        me->scan_sent = 0U;
+        KLOG_I(TAG, "scanning; networks are listed as they are found");
+    }
+    else
+    {
+        wifi_publish_scan_end(me, 0U, false);
+    }
+    return started;
 }
 
 /**
@@ -3583,6 +3768,7 @@ static void wifi_publish_saved(Radio * const me, bool ok)
         end->ok    = ok;
         end->busy  = false;
         end->cut   = false;
+        end->gen   = (uint8_t)KQP_SCAN_GEN_NONE;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
 }
@@ -4188,12 +4374,13 @@ static BleScanEvt *ble_scan_evt(kdrv_ble_dev_t const *d)
         (void)memcpy(e->mfg, d->mfg, sizeof(e->mfg));
         e->svc_n     = d->svc_n;
         (void)memcpy(e->svc16, d->svc16, sizeof(e->svc16));
+        e->gen       = (uint8_t)KQP_SCAN_GEN_NONE;
     }
     return e;
 }
 
 /** @brief One event per device seen, then the end marker. */
-static void ble_publish_scan(Radio * const me)
+static void ble_publish_scan(Radio const * const me)
 {
     uint8_t const total = kdrv_ble_scan_count();
     uint8_t       sent  = 0U;
@@ -4211,6 +4398,7 @@ static void ble_publish_scan(Radio * const me)
             KLOG_W(TAG, "BLE listing cut short: no event blocks left");
             break;
         }
+        e->gen = me->ble_scan_gen;
         QACTIVE_PUBLISH(&e->super, &me->super);
         ++sent;
     }
@@ -4222,12 +4410,13 @@ static void ble_publish_scan(Radio * const me)
         end->ok    = true;
         end->busy  = false;
         end->cut   = false;
+        end->gen   = me->ble_scan_gen;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
 }
 
 /** @brief Publish an empty BLE listing - the answer when there is no link. */
-static void ble_publish_scan_end(Radio * const me, bool ok)
+static void ble_publish_scan_end(Radio const * const me, bool ok)
 {
     WifiScanEndEvt *end = Q_NEW_X(WifiScanEndEvt, 0U, BLE_SCAN_END_SIG);
     if ( NULL != end )
@@ -4236,6 +4425,7 @@ static void ble_publish_scan_end(Radio * const me, bool ok)
         end->ok    = ok;
         end->busy  = false;
         end->cut   = false;
+        end->gen   = me->ble_scan_gen;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
 }
@@ -4243,9 +4433,10 @@ static void ble_publish_scan_end(Radio * const me, bool ok)
 /**
  * @brief Publish the end of a BLE scan the C5 had no time for (see wifi_publish_scan_busy()).
  *
- * @param me The AO.
+ * @param me  The AO.
+ * @param gen The refused request's generation.
  */
-static void ble_publish_scan_busy(Radio * const me)
+static void ble_publish_scan_busy(Radio * const me, uint8_t gen)
 {
     WifiScanEndEvt *end = Q_NEW_X(WifiScanEndEvt, 0U, BLE_SCAN_END_SIG);
     if ( NULL != end )
@@ -4254,9 +4445,65 @@ static void ble_publish_scan_busy(Radio * const me)
         end->ok    = false;
         end->busy  = true;
         end->cut   = false;
+        end->gen   = gen;
         QACTIVE_PUBLISH(&end->super, &me->super);
     }
     (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
+}
+
+/**
+ * @brief Publish the end of a BLE listing a newer request ended early.
+ *
+ * Empty: the devices are read from the driver's table when the listen is
+ * over, and this one's worker still holds it.
+ *
+ * @param me The AO.
+ */
+static void ble_publish_scan_cut(Radio * const me)
+{
+    WifiScanEndEvt *end = Q_NEW_X(WifiScanEndEvt, 0U, BLE_SCAN_END_SIG);
+    if ( NULL != end )
+    {
+        end->count = 0U;
+        end->ok    = false;
+        end->busy  = false;
+        end->cut   = true;
+        end->gen   = me->ble_scan_gen;
+        QACTIVE_PUBLISH(&end->super, &me->super);
+    }
+    (void)me;   /* without Q_SPY, QACTIVE_PUBLISH() ignores its sender */
+}
+
+/**
+ * @brief Hand the console's listen to the worker.
+ *
+ * Its end is the answer either way: a listen the worker would not take is
+ * closed here, empty and not ok.
+ *
+ * @param me The AO, its channel free.
+ * @param ms How long to listen, inside KODE_BLE_SCAN_MIN_MS..KODE_BLE_SCAN_MAX_MS.
+ * @return true when the listen is with the worker.
+ */
+static bool ble_listing_start(Radio * const me, uint32_t ms)
+{
+    kdrv_radio_req_t req;
+    bool             started;
+
+    (void)memset(&req, 0, sizeof(req));
+    req.type = KDRV_RADIO_JOB_BLE_SCAN;
+    req.len  = ms;
+    started  = radio_submit_req(me, &req);
+    me->ble_scan_next = false;
+    if ( started )
+    {
+        me->ble_scan_live = true;
+        KLOG_I(TAG, "listening for BLE advertisers for %lu ms", (unsigned long)ms);
+    }
+    else
+    {
+        ble_publish_scan_end(me, false);
+    }
+    return started;
 }
 
 /**
@@ -4498,6 +4745,362 @@ static void ble_publish_pair(Radio * const me)
 }
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
 #endif /* CONFIG_KODEOS_BLE */
+
+#if RADIO_ASKS
+/* ---- The newest scan of a radio wins -------------------------------------
+ * One scan somebody asked for is alive per radio, running or waiting: a
+ * listing on the bus (the console's `wifi_scan` or `ble_scan`) or an asked
+ * scan. A newer request of the same radio ends it, and its asker is answered
+ * at that moment. The sweep or the listen the worker still holds is asked to
+ * end and left without an asker: its outcome is read and dropped, and what
+ * replaced it starts when the worker is back (radio_settle()). A request of
+ * the other radio ends nothing: it waits its turn or is answered busy, as
+ * behind any other job.
+ */
+
+/**
+ * @brief Leave the scan with the worker without an asker, and ask its driver to end it.
+ *
+ * A sweep ends after its step on the air; a listen at once. The outcome of
+ * the job withdraws the request (RADIO_OUT_WIFI_SCAN_DONE,
+ * RADIO_OUT_BLE_SCAN_DONE), and so does the link's loss.
+ *
+ * @param me   The AO.
+ * @param kind KQP_SCAN_WIFI or KQP_SCAN_BLE: whose job it is.
+ */
+static void scan_let_go(Radio * const me, uint8_t kind)
+{
+    me->scan_orphan      = true;
+    me->scan_orphan_kind = kind;
+#if CONFIG_KODEOS_WIFI
+    if ( (uint8_t)KQP_SCAN_WIFI == kind )
+    {
+        kdrv_wifi_scan_abort(true);
+    }
+#endif
+#if CONFIG_KODEOS_BLE
+    if ( (uint8_t)KQP_SCAN_BLE == kind )
+    {
+        kdrv_ble_scan_abort(true);
+    }
+#endif
+}
+
+/**
+ * @brief Whether the job with the worker is a scan of @p kind somebody asked for.
+ * @param me   The AO.
+ * @param kind KQP_SCAN_WIFI or KQP_SCAN_BLE.
+ * @return true for a listing or an asked scan of that radio on the worker,
+ *         cut already or not.
+ */
+static bool scan_on_worker(Radio const * const me, uint8_t kind)
+{
+    bool on = (me->scan_orphan && (me->scan_orphan_kind == kind))
+              || (((uint8_t)SCAN_ASK_RUNNING == me->ask_scan) && (me->ask_kind == kind));
+
+#if CONFIG_KODEOS_WIFI
+    if ( (uint8_t)KQP_SCAN_WIFI == kind )
+    {
+        on = on || me->scan_live;
+    }
+#endif
+#if CONFIG_KODEOS_BLE
+    if ( (uint8_t)KQP_SCAN_BLE == kind )
+    {
+        on = on || me->ble_scan_live;
+    }
+#endif
+    return on;
+}
+
+/**
+ * @brief Whether a scan of @p kind somebody asked for is alive.
+ * @param me   The AO.
+ * @param kind KQP_SCAN_WIFI or KQP_SCAN_BLE.
+ * @return true for one of that radio on the worker or waiting for it.
+ */
+static bool scan_alive(Radio const * const me, uint8_t kind)
+{
+    bool alive = scan_on_worker(me, kind)
+                 || (((uint8_t)SCAN_ASK_NONE != me->ask_scan) && (me->ask_kind == kind));
+
+#if CONFIG_KODEOS_WIFI
+    if ( (uint8_t)KQP_SCAN_WIFI == kind )
+    {
+        alive = alive || me->scan_next;
+    }
+#endif
+#if CONFIG_KODEOS_BLE
+    if ( (uint8_t)KQP_SCAN_BLE == kind )
+    {
+        alive = alive || me->ble_scan_next;
+    }
+#endif
+    return alive;
+}
+
+/**
+ * @brief Whether a join somebody asked for is with the radio.
+ *
+ * It is not cut, and it ends in seconds: a scan waits for it.
+ *
+ * @param me The AO.
+ * @return true while the join's job, or the vault's join, is out.
+ */
+static bool scan_join_running(Radio const * const me)
+{
+    bool running = false;
+
+#if CONFIG_KODEOS_WIFI
+    if ( me->autojoin )
+    {
+        /* The round's joins are the round's. */
+    }
+    else if ( (uint8_t)VOP_JOIN == me->vault_op )
+    {
+        running = true;
+    }
+    else if ( me->winflight && (NULL != me->jobs) )
+    {
+        kdrv_radio_job_t const job = me->jobs->wreq.type;
+
+        running = (KDRV_RADIO_JOB_WIFI_JOIN == job)
+                  || (KDRV_RADIO_JOB_WIFI_PREPARE == job)
+                  || (KDRV_RADIO_JOB_WIFI_AWAIT == job);
+    }
+    else
+    {
+        /* Nothing of a join is out. */
+    }
+#else
+    (void)me;
+#endif
+    return running;
+}
+
+/**
+ * @brief Whether a listing of @p kind is taken now, to start or to wait.
+ * @param me   The AO.
+ * @param kind KQP_SCAN_WIFI or KQP_SCAN_BLE.
+ * @return true when the channel is free, or the job with the worker is a scan
+ *         of that radio or a join; false behind a job that is not cut and is
+ *         not waited for (a scan of the other radio, a row, an install), and
+ *         with the board's own round owed, which would refuse it as it starts.
+ */
+static bool scan_can_take(Radio const * const me, uint8_t kind)
+{
+    bool can = !me->busy;
+
+    if ( me->busy && !scan_round_owed(me) )
+    {
+        can = scan_on_worker(me, kind) || scan_join_running(me);
+    }
+    return can;
+}
+
+#if CONFIG_KODEOS_WIFI
+/**
+ * @brief End the Wi-Fi listing that is alive, for a newer Wi-Fi request.
+ * @param me      The AO.
+ * @param listing The newer request is a listing: the one alive goes on
+ *                behind it instead of being closed.
+ */
+static void wifi_listing_replace(Radio * const me, bool listing)
+{
+    if ( me->scan_live && listing )
+    {
+        uint8_t count = (uint8_t)UINT8_MAX;
+
+        if ( (uint16_t)UINT8_MAX > me->scan_sent )
+        {
+            count = (uint8_t)me->scan_sent;
+        }
+        KLOG_N(TAG, "a newer wifi_scan; the listing starts again");
+        wifi_publish_scan_again(me, count);
+        me->scan_live = false;
+        me->scan_sent = 0U;
+        scan_let_go(me, (uint8_t)KQP_SCAN_WIFI);
+    }
+    else if ( me->scan_live )
+    {
+        KLOG_N(TAG, "a newer Wi-Fi request takes the radio; the listing ends early");
+        wifi_finish_scan(me, KODE_DENIED);
+        scan_let_go(me, (uint8_t)KQP_SCAN_WIFI);
+    }
+    else if ( me->scan_next && !listing )
+    {
+        me->scan_next = false;
+        wifi_publish_scan_cut(me, 0U);
+    }
+    else
+    {
+        /* no Wi-Fi listing, or one that waits and goes on behind the newer one */
+    }
+}
+#endif
+
+#if CONFIG_KODEOS_BLE
+/**
+ * @brief End the BLE listing that is alive, for a newer Bluetooth request.
+ * @param me      The AO.
+ * @param listing The newer request is a listing: the one alive had published
+ *                nothing, and the newer one's end closes both.
+ */
+static void ble_listing_replace(Radio * const me, bool listing)
+{
+    if ( me->ble_scan_live )
+    {
+        me->ble_scan_live = false;
+        if ( !listing )
+        {
+            KLOG_N(TAG, "a newer Bluetooth request takes the radio; the listing ends early");
+            ble_publish_scan_cut(me);
+        }
+        scan_let_go(me, (uint8_t)KQP_SCAN_BLE);
+    }
+    else if ( me->ble_scan_next && !listing )
+    {
+        me->ble_scan_next = false;
+        ble_publish_scan_cut(me);
+    }
+    else
+    {
+        /* no BLE listing, or one that waits and goes on behind the newer one */
+    }
+}
+#endif
+
+/**
+ * @brief End the scan of one radio that is alive, because a newer request of
+ *        that radio arrived.
+ *
+ * An asked scan is answered KODE_CANCELLED. A listing is closed with an end
+ * that says cut, except behind a newer listing: the Wi-Fi one is told it
+ * starts again (WIFI_SCAN_AGAIN_SIG) and the new sweep's end closes it; the
+ * BLE one had published nothing yet. A scan of the other radio is left as it
+ * is. When the worker holds the scan that ended, what replaces it waits for
+ * that job's outcome.
+ *
+ * @param me      The AO.
+ * @param kind    The radio of the request that arrived: KQP_SCAN_WIFI or
+ *                KQP_SCAN_BLE.
+ * @param listing The request is a listing on the bus.
+ */
+static void radio_scan_replace(Radio * const me, uint8_t kind, bool listing)
+{
+    if ( ((uint8_t)SCAN_ASK_NONE != me->ask_scan) && (me->ask_kind == kind) )
+    {
+        bool const running = ((uint8_t)SCAN_ASK_RUNNING == me->ask_scan);
+
+        KLOG_N(TAG, "a newer request takes the radio; the asked %s ends early",
+               scan_ask_name(kind));
+        scan_ask_end(me, KODE_CANCELLED);
+        if ( running )
+        {
+            scan_let_go(me, kind);
+        }
+    }
+#if CONFIG_KODEOS_WIFI
+    if ( (uint8_t)KQP_SCAN_WIFI == kind )
+    {
+        wifi_listing_replace(me, listing);
+    }
+#endif
+#if CONFIG_KODEOS_BLE
+    if ( (uint8_t)KQP_SCAN_BLE == kind )
+    {
+        ble_listing_replace(me, listing);
+    }
+#endif
+}
+
+/**
+ * @brief Close the listings that wait for the worker: the link is gone, or
+ *        an update or the board's own round takes the channel, and they are
+ *        never owed behind any of them.
+ * @param me   The AO.
+ * @param busy The radio is taken and the asker may ask again; false when the
+ *             listing failed with the link.
+ */
+static void scan_next_drop(Radio * const me, bool busy)
+{
+#if CONFIG_KODEOS_WIFI
+    if ( me->scan_next )
+    {
+        me->scan_next = false;
+        if ( busy )
+        {
+            wifi_publish_scan_busy(me, me->scan_gen);
+        }
+        else
+        {
+            wifi_publish_scan_end(me, 0U, false);
+        }
+    }
+#endif
+#if CONFIG_KODEOS_BLE
+    if ( me->ble_scan_next )
+    {
+        me->ble_scan_next = false;
+        if ( busy )
+        {
+            ble_publish_scan_busy(me, me->ble_scan_gen);
+        }
+        else
+        {
+            ble_publish_scan_end(me, false);
+        }
+    }
+#endif
+}
+
+/**
+ * @brief Start a listing that waits for the worker, if the channel is free.
+ * @param me The AO.
+ * @return true when its job is with the worker.
+ */
+static bool scan_next_start(Radio * const me)
+{
+    bool started = false;
+
+    if ( scan_channel_free(me) )
+    {
+#if CONFIG_KODEOS_WIFI
+        if ( me->scan_next )
+        {
+            started = wifi_listing_start(me);
+        }
+#endif
+#if CONFIG_KODEOS_BLE
+        if ( (!started) && me->ble_scan_next )
+        {
+            started = ble_listing_start(me, me->ble_scan_next_ms);
+        }
+#endif
+    }
+    return started;
+}
+
+/**
+ * @brief The scan the worker held with no asker is back: forget it and
+ *        withdraw the cut asked of its driver.
+ * @param me The AO.
+ * @return true when there was one: the outcome in hand is its own, and is dropped.
+ */
+static bool scan_orphan_back(Radio * const me)
+{
+    bool const was = me->scan_orphan;
+
+    me->scan_orphan = false;
+#if CONFIG_KODEOS_BLE
+    if ( was && ((uint8_t)KQP_SCAN_BLE == me->scan_orphan_kind) )
+    {
+        kdrv_ble_scan_abort(false);
+    }
+#endif
+    return was;
+}
+#endif /* RADIO_ASKS */
 
 /**
  * @brief Post a request to AO_Storage and go on.
@@ -6433,9 +7036,9 @@ static bool radio_link_unused(Radio const * const me)
     }
 #endif
 #if RADIO_ASKS
-    if ( (uint8_t)SCAN_ASK_NONE != me->ask_scan )
+    if ( ((uint8_t)SCAN_ASK_NONE != me->ask_scan) || me->scan_next || me->ble_scan_next )
     {
-        unused = false;   /* an asked scan holds the link to its end */
+        unused = false;   /* a scan that waits holds the link to its end */
     }
 #endif
 #if CONFIG_KODE_LOWPOWER
@@ -7201,7 +7804,12 @@ static void radio_settle(Radio * const me)
 #endif
 #if RADIO_ASKS
     /* After the short switches, above. Before the install and the row,
-     * which it is never owed behind. */
+     * which it is never owed behind. At most one of the two waits: the
+     * newest scan ended the one before it. */
+    if ( scan_next_start(me) )
+    {
+        return;
+    }
     if ( scan_ask_start(me) )
     {
         return;
@@ -8610,6 +9218,13 @@ void Radio_ctor(void)
     me->ask_seen    = 0U;
     me->ask_cut     = false;
     me->ble_scan_live = false;
+    me->scan_orphan   = false;
+    me->scan_orphan_kind = (uint8_t)KQP_SCAN_WIFI;
+    me->scan_next     = false;
+    me->ble_scan_next = false;
+    me->ble_scan_next_ms = 0U;
+    me->scan_gen      = (uint8_t)KQP_SCAN_GEN_NONE;
+    me->ble_scan_gen  = (uint8_t)KQP_SCAN_GEN_NONE;
     me->rsp_name[0] = '\0';
     me->rsp_len     = 0U;
     me->rsp_dirty   = false;
@@ -9292,7 +9907,8 @@ static const char *radio_lp_busy_why(Radio const * const me)
     {
         why = RADIO_LP_WHY_TEST;
     }
-    else if ( me->busy || me->winflight || me->wiping || radio_svc_busy(me) )
+    else if ( me->busy || me->winflight || me->wiping || radio_svc_busy(me)
+             || me->scan_next || me->ble_scan_next )
     {
         why = RADIO_LP_WHY_BUSY;
     }
@@ -10140,6 +10756,7 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
         }
 #if CONFIG_KODEOS_WIFI
         case WIFI_SCAN_REQ_SIG: {
+            me->scan_gen = Q_EVT_CAST(WifiScanReqEvt)->gen;
             KLOG_W(TAG, "no link to the C5; `radio_up` first");
             wifi_publish_scan_end(me, 0U, false);
             status = Q_HANDLED();
@@ -10207,6 +10824,7 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             break;
         }
         case BLE_SCAN_REQ_SIG: {
+            me->ble_scan_gen = Q_EVT_CAST(BleScanReqEvt)->gen;
             KLOG_W(TAG, "no link to the C5; `radio_up` first");
             ble_publish_scan_end(me, false);
             status = Q_HANDLED();
@@ -11172,6 +11790,14 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
                 c5_test_end(me, false, "the link dropped mid-test");
             }
             me->ble_scan_live = false;   /* its listing ends with the link */
+#if RADIO_ASKS
+            /* A scan left without an asker is forgotten with the link: its
+             * job comes back to a state that reads no scan outcome. A
+             * listing that waited for the worker is closed: nothing will
+             * run it. */
+            me->scan_orphan = false;
+            scan_next_drop(me, false);
+#endif
 #if CONFIG_KODEOS_WIFI
             if ( me->scan_live || scan_ask_running(me, (uint8_t)KQP_SCAN_WIFI) )
             {
@@ -11187,6 +11813,12 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
              * sweep's job comes back to a state that reads no scan outcome,
              * and the cut would be met by the first sweep of the next link. */
             kdrv_wifi_scan_abort(false);
+#endif
+#if CONFIG_KODEOS_BLE
+            /* The same for a listen: the flag is the driver's and outlives
+             * the link, so it is taken back here or the next link's first
+             * listen ends before it listens. */
+            kdrv_ble_scan_abort(false);
 #endif
             radio_relink_note(me, (kode_status_t)job->status);
             radio_unmount_for_teardown(me);
@@ -11272,7 +11904,13 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             {
                 radio_hints_sweep(me);
             }
-            if ( probe_owns(me, (uint8_t)PB_SWEEP) )
+            if ( scan_orphan_back(me) )
+            {
+                /* A newer request ended this sweep and its asker was told
+                 * then: the ring is emptied and nothing is published. */
+                wifi_drain_scan(me);
+            }
+            else if ( probe_owns(me, (uint8_t)PB_SWEEP) )
             {
                 /* The check's own sweep: read for two names, never listed. */
                 probe_done(me, job);
@@ -11482,7 +12120,12 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
         }
         case RADIO_OUT_BLE_SCAN_DONE: {
             me->busy = false;
-            if ( me->test_job )
+            if ( scan_orphan_back(me) )
+            {
+                /* A newer request ended this listen and its asker was told
+                 * then: nothing of it is published. */
+            }
+            else if ( me->test_job )
             {
                 /* The row's listen: judged, never listed, for the
                  * reason its WiFi scan is not. */
@@ -11644,6 +12287,11 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         }
         case Q_EXIT_SIG: {
             probe_lost(me);
+#if RADIO_ASKS
+            /* A listing that waited for the worker has no link to run on. No
+             * job is out on the way here, so no scan is left without an asker. */
+            scan_next_drop(me, false);
+#endif
             /* Whatever the C5 was asked about the identity will not be
              * answered on this link: the asker hears so now. */
             (void)QTimeEvt_disarm(&me->svc_tmo[KODE_SVC_ID]);
@@ -11802,6 +12450,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             me->inst       = (uint8_t)INST_PUSHING;
 #if RADIO_ASKS
             scan_ask_refuse_owed(me);   /* never owed behind an update */
+            scan_next_drop(me, false);
 #endif
             status = Q_TRAN(&Radio_updating);
             break;
@@ -11890,11 +12539,20 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
              * below guards only the action: a request that cannot act right
              * now still records that WiFi is wanted, and the next reconcile
              * or the next boot delivers it. */
+            bool const was_on = me->wifi_want;
+
             radio_flag_set(me, SVC_WIFI, true);
             if ( me->busy )
             {
                 /* Refused now, owed from now - the mirror of `wifi_down`'s
-                 * debt, and what makes an off-then-on tap land on. */
+                 * debt, and what makes an off-then-on tap land on. Switched
+                 * on from off, a Wi-Fi scan somebody asked for ends for it;
+                 * asked again with Wi-Fi on, it changes nothing a scan
+                 * should give way to. */
+                if ( !was_on )
+                {
+                    radio_scan_replace(me, (uint8_t)KQP_SCAN_WIFI, false);
+                }
                 radio_say_busy("wifi_up", RADIO_BUSY_OWED);
                 radio_start_owed(me, SVC_WIFI);
                 wifi_publish_state(me);
@@ -11937,7 +12595,9 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 /* Refused now, owed from now: radio_settle() carries it out
                  * the moment the job in flight is done, which is what stops
                  * a `wifi_down` typed during the boot autojoin from being
-                 * overtaken by the join it was meant to prevent. */
+                 * overtaken by the join it was meant to prevent. A Wi-Fi
+                 * scan somebody asked for ends for it. */
+                radio_scan_replace(me, (uint8_t)KQP_SCAN_WIFI, false);
                 radio_say_busy("wifi_down", RADIO_BUSY_OWED);
                 radio_stop_owed(me, SVC_WIFI);
                 wifi_publish_state(me);
@@ -11952,22 +12612,36 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         }
 
         case WIFI_SCAN_REQ_SIG: {
-            if ( me->busy )
+            uint8_t const gen = Q_EVT_CAST(WifiScanReqEvt)->gen;
+
+            if ( !scan_can_take(me, (uint8_t)KQP_SCAN_WIFI) )
             {
+                /* A job that is neither cut nor waited for holds the channel.
+                 * A listing that is alive keeps its own generation. */
                 radio_say_busy("wifi_scan", RADIO_BUSY_ASKED);
-                wifi_publish_scan_busy(me);
-            }
-            else if ( !radio_submit(me, KDRV_RADIO_JOB_WIFI_SCAN) )
-            {
-                wifi_publish_scan_end(me, 0U, false);
+                wifi_publish_scan_busy(me, gen);
             }
             else
             {
-                scan_ask_refuse_owed(me);
-                /* This one has a listener, so the sweep's knocks count. */
-                me->scan_live = true;
-                me->scan_sent = 0U;
-                KLOG_I(TAG, "scanning; networks are listed as they are found");
+                /* From here the listing is this request's: the restart and
+                 * the end that follow say so. */
+                me->scan_gen = gen;
+                radio_scan_replace(me, (uint8_t)KQP_SCAN_WIFI, true);
+                if ( me->busy )
+                {
+                    /* The sweep before it is leaving the worker, or a join
+                     * is with it: this listing starts when the worker is
+                     * back (radio_settle()). */
+                    me->scan_next = true;
+                }
+                else if ( wifi_listing_start(me) )
+                {
+                    scan_ask_refuse_owed(me);   /* a listen that waited: not behind a sweep */
+                }
+                else
+                {
+                    /* the worker would not take it, and its end said so */
+                }
             }
             status = Q_HANDLED();
             break;
@@ -11990,15 +12664,14 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             WifiJoinEvt const * const j = Q_EVT_CAST(WifiJoinEvt);
             if ( me->busy )
             {
-                if ( me->scan_live )
-                {
-                    /* The Wi-Fi page sweeps most of the time it is open,
-                     * and a sweep is about 38 s: behind a whole one the
-                     * join waited as long. Cut, it goes out when the step
-                     * on the air ends, a few seconds at most; the sweep's
-                     * end withdraws the cut (RADIO_OUT_WIFI_SCAN_DONE). */
-                    kdrv_wifi_scan_abort(true);
-                }
+                /* The Wi-Fi page sweeps most of the time it is open, and a
+                 * sweep is about 38 s: behind a whole one the join waited as
+                 * long. A scan somebody asked for ends for the join, which
+                 * goes out when the step on the air ends, a few seconds at
+                 * most; the sweep's end withdraws the cut
+                 * (RADIO_OUT_WIFI_SCAN_DONE). A Bluetooth listen is not
+                 * the join's to end: it is waited for. */
+                radio_scan_replace(me, (uint8_t)KQP_SCAN_WIFI, false);
                 radio_say_busy("wifi_join", RADIO_BUSY_OWED);
                 wifi_owe(me, e);
                 radio_flag_set(me, SVC_WIFI, true);
@@ -12152,7 +12825,10 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 if ( me->hint_on || radio_submit(me, KDRV_RADIO_JOB_WIFI_SCAN) )
                 {
                     wifi_owed_clear(me);
+                    /* The round is tens of seconds and is not cut: a scan
+                     * that waited is told to ask again. */
                     scan_ask_refuse_owed(me);
+                    scan_next_drop(me, true);
                     me->tried    = 0UL;
                     me->autojoin = true;
                     /* Its end starts the next wait, if there is to be one. */
@@ -12232,6 +12908,8 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         case BLE_START_REQ_SIG: {
             /* The flag first, and outside the busy check: it is the desire,
              * recorded even when this attempt is refused. */
+            bool const was_on = me->ble_want;
+
             radio_flag_set(me, SVC_BLE, true);
             me->ble_fast_owed = true;
             if ( me->busy )
@@ -12240,7 +12918,12 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                  * disarmed for this command. The chain is neither advanced
                  * (the autojoin would meet an occupied channel) nor re-asked
                  * (it would spin on the busy job): radio_reconcile_retry()
-                 * does it once the channel is free. */
+                 * does it once the channel is free. Switched on from off, a
+                 * listen somebody asked for ends for it. */
+                if ( !was_on )
+                {
+                    radio_scan_replace(me, (uint8_t)KQP_SCAN_BLE, false);
+                }
                 radio_say_busy("ble_up", RADIO_BUSY_OWED);
                 radio_start_owed(me, SVC_BLE);
                 ble_publish_state(me);
@@ -12262,42 +12945,52 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             break;
         }
         case BLE_SCAN_REQ_SIG: {
-            if ( me->busy )
+            uint32_t      ms  = Q_EVT_CAST(BleScanReqEvt)->ms;
+            uint8_t const gen = Q_EVT_CAST(BleScanReqEvt)->gen;
+
+            if ( 0U == ms )
             {
+                ms = KODE_BLE_SCAN_MS;
+            }
+            if ( !scan_can_take(me, (uint8_t)KQP_SCAN_BLE) )
+            {
+                /* A job that is neither cut nor waited for holds the channel.
+                 * A listing that is alive keeps its own generation. */
                 radio_say_busy("ble_scan", RADIO_BUSY_ASKED);
-                ble_publish_scan_busy(me);
+                ble_publish_scan_busy(me, gen);
+            }
+            else if ( !ble_scan_ms_ok(ms) )
+            {
+                /* Refused before it ends anything: it would run nothing. With
+                 * no listen in flight the refusal is the request's own. */
+                KLOG_W(TAG, "a BLE scan of %lu ms is refused: %u..%u ms",
+                       (unsigned long)ms, (unsigned)KODE_BLE_SCAN_MIN_MS,
+                       (unsigned)KODE_BLE_SCAN_MAX_MS);
+                if ( !scan_alive(me, (uint8_t)KQP_SCAN_BLE) )
+                {
+                    me->ble_scan_gen = gen;
+                }
+                ble_publish_scan_end(me, false);
             }
             else
             {
-                uint32_t ms = Q_EVT_CAST(BleScanReqEvt)->ms;
-                if ( 0U == ms )
+                me->ble_scan_gen = gen;
+                radio_scan_replace(me, (uint8_t)KQP_SCAN_BLE, true);
+                if ( me->busy )
                 {
-                    ms = KODE_BLE_SCAN_MS;
+                    /* The listen before it is leaving the worker, or a join
+                     * is with it: this one starts when the worker is back
+                     * (radio_settle()). */
+                    me->ble_scan_next    = true;
+                    me->ble_scan_next_ms = ms;
                 }
-                if ( !ble_scan_ms_ok(ms) )
+                else if ( ble_listing_start(me, ms) )
                 {
-                    KLOG_W(TAG, "a BLE scan of %lu ms is refused: %u..%u ms",
-                           (unsigned long)ms, (unsigned)KODE_BLE_SCAN_MIN_MS,
-                           (unsigned)KODE_BLE_SCAN_MAX_MS);
-                    ble_publish_scan_end(me, false);
+                    scan_ask_refuse_owed(me);   /* a sweep that waited: not behind a listen */
                 }
                 else
                 {
-                    kdrv_radio_req_t req;
-                    (void)memset(&req, 0, sizeof(req));
-                    req.type = KDRV_RADIO_JOB_BLE_SCAN;
-                    req.len  = ms;
-                    if ( !radio_submit_req(me, &req) )
-                    {
-                        ble_publish_scan_end(me, false);
-                    }
-                    else
-                    {
-                        scan_ask_refuse_owed(me);
-                        me->ble_scan_live = true;
-                        KLOG_I(TAG, "listening for BLE advertisers for %lu ms",
-                               (unsigned long)ms);
-                    }
+                    /* the worker would not take it, and its end said so */
                 }
             }
             status = Q_HANDLED();
@@ -12308,7 +13001,9 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             if ( me->busy )
             {
                 /* Refused now, owed from now - the settle takes BLE down as
-                 * soon as the channel is free. */
+                 * soon as the channel is free. A listen somebody asked for
+                 * ends for it. */
+                radio_scan_replace(me, (uint8_t)KQP_SCAN_BLE, false);
                 radio_say_busy("ble_down", RADIO_BUSY_OWED);
                 radio_stop_owed(me, SVC_BLE);
                 ble_publish_state(me);
@@ -12483,6 +13178,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             c5_release(me);
 #if RADIO_ASKS
             scan_ask_refuse_owed(me);   /* never owed behind an update */
+            scan_next_drop(me, false);
 #endif
             status = Q_TRAN(&Radio_updating);
             break;
@@ -12925,7 +13621,7 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
              * scan-end event with its watchdog disarmed, and this state
              * consumes its scan outcome without publishing a listing. */
             radio_say_busy("wifi_scan", RADIO_BUSY_ASKED);
-            wifi_publish_scan_busy(me);
+            wifi_publish_scan_busy(me, Q_EVT_CAST(WifiScanReqEvt)->gen);
             status = Q_HANDLED();
             break;
         }
@@ -13559,6 +14255,7 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
 #endif
 #if CONFIG_KODEOS_WIFI
         case WIFI_SCAN_REQ_SIG: {
+            me->scan_gen = Q_EVT_CAST(WifiScanReqEvt)->gen;
             radio_say_busy("wifi_scan", RADIO_BUSY_EMPTY);
             wifi_publish_scan_end(me, 0U, false);
             status = Q_HANDLED();
@@ -13594,6 +14291,7 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
              * `ble_scan` waits for the scan's end marker, exactly as
              * `wifi_scan` does above, and a state record would not close it.
              * Radio_down answers these two the same two ways. */
+            me->ble_scan_gen = Q_EVT_CAST(BleScanReqEvt)->gen;
             radio_say_busy("ble_scan", RADIO_BUSY_EMPTY);
             ble_publish_scan_end(me, false);
             status = Q_HANDLED();

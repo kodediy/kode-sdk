@@ -486,6 +486,16 @@ enum KodeSignals {
                                  *   the glass and says so to the next boot
                                  *   (kdrv_display_keep_for_restart()); nobody
                                  *   answers, and a refusal is the old way.   */
+    WIFI_SCAN_AGAIN_SIG,        /**< AO_Radio: the Wi-Fi listing in flight ended
+                                 *   early for a newer `wifi_scan` and starts
+                                 *   again (WifiScanEndEvt: @c cut, how many
+                                 *   entries the cut sweep published, and the
+                                 *   newer request's @c gen). The entries
+                                 *   before it are that sweep's; one
+                                 *   WIFI_SCAN_END_SIG closes the listing, the
+                                 *   newest sweep's. Last of the published
+                                 *   signals, so the ones before it keep their
+                                 *   numbers.                                */
     /* Published signals end here: QF sizes subscriber lists by it; a publish above asserts. */
     MAX_PUB_SIG,
 
@@ -4661,18 +4671,42 @@ typedef struct {
     uint8_t channel;
     uint8_t authmode;   /**< 0 = open.                                      */
     uint8_t bssid[6];   /**< The access point's MAC, as on the air.         */
+    uint8_t gen;        /**< The listing's generation, as WifiScanEndEvt.gen;
+                         *   0 in an entry posted to an asker.              */
 } WifiScanEntryEvt;
 
-/** @brief The end of a scan (WIFI_SCAN_END_SIG, WIFI_SAVED_END_SIG). */
+/** @brief WifiScanEndEvt.gen and its like: no generation, taken by every listener. */
+#define KQP_SCAN_GEN_NONE  0U
+
+/**
+ * @brief The console's Wi-Fi listing, asked for (WIFI_SCAN_REQ_SIG).
+ *
+ * The generation is what tells a listing's entries and end from the ones of
+ * a listing before it that are still in a listener's queue.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t gen;        /**< The request's generation, from wifi_scan_request();
+                         *   KQP_SCAN_GEN_NONE for none.                    */
+} WifiScanReqEvt;
+
+/** @brief The end of a scan (WIFI_SCAN_END_SIG, WIFI_SCAN_AGAIN_SIG, BLE_SCAN_END_SIG, WIFI_SAVED_END_SIG). */
 typedef struct {
     QEvt    super;
     uint8_t count;      /**< How many entries were published.               */
     bool    ok;         /**< false: the scan itself failed; count is 0.     */
     bool    busy;       /**< true: not started, the C5 was busy with another
                          *   job (ok is false, count 0); ask again.          */
-    bool    cut;        /**< true: a Wi-Fi sweep ended before its last step,
-                         *   for a stop or for a job that needed the radio
-                         *   (ok is false); count is what it had heard.      */
+    bool    cut;        /**< true: the scan ended before its end, for a
+                         *   stop or for a newer request that needed the
+                         *   radio (ok is false); count is what it had
+                         *   published.                                      */
+    uint8_t gen;        /**< The generation of the newest request this
+                         *   listing answers: generations go up by one a
+                         *   request, both radios together, and wrap past
+                         *   255 to 1. A listener that waits for its own
+                         *   request skips an end older than it.
+                         *   KQP_SCAN_GEN_NONE: not told.                    */
 } WifiScanEndEvt;
 
 /** @brief ScanAskEvt.kind: the Wi-Fi sweep; the rows are kdrv_wifi_ap_t. */
@@ -4691,6 +4725,9 @@ typedef struct {
     QEvt    super;
     uint8_t rc;         /**< kode_status_t: KODE_OK, the scan ended;
                          *   KODE_ERROR, it failed or the link went;
+                         *   KODE_CANCELLED, a newer radio request took
+                         *   its place, and @c seen is what it had handed
+                         *   over;
                          *   KODE_NO_RESOURCES, the radio was busy with a
                          *   scan, a test row or an install: ask again;
                          *   KODE_DENIED, a BLE scan with Bluetooth off in
@@ -4975,6 +5012,9 @@ typedef struct {
     uint32_t ms;         /**< 0 = KODE_BLE_SCAN_MS; otherwise
                           *   KODE_BLE_SCAN_MIN_MS..KODE_BLE_SCAN_MAX_MS,
                           *   and anything else is refused.              */
+    uint8_t  gen;        /**< The request's generation, from
+                          *   ble_scan_request(); KQP_SCAN_GEN_NONE for
+                          *   none.                                      */
 } BleScanReqEvt;
 
 /**
@@ -5012,6 +5052,9 @@ typedef struct {
     uint8_t  mfg[KQP_BLE_MFG_MAX];   /**< Maker data, company id (LE) first. */
     uint8_t  svc_n;      /**< Entries in @c svc16.                          */
     uint16_t svc16[KQP_BLE_SVC_MAX]; /**< 16-bit service UUIDs.             */
+    uint8_t  gen;        /**< The listing's generation, as
+                          *   WifiScanEndEvt.gen; 0 in an entry posted to
+                          *   an asker.                                     */
 } BleScanEvt;
 
 /** @brief Bytes of a characteristic's name in the app's service, NUL included. */

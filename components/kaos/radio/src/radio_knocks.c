@@ -17,7 +17,8 @@
  * slots short of the end, and one event of each knock waits at a time, so
  * the three never fill the queue and never assert on a full one. That is
  * all the margin says. The slots it leaves are not kept for anybody: the
- * requests other Active Objects post with no margin, the AO's posts to
+ * requests other Active Objects post with no margin (the Wi-Fi doors and the
+ * scan requests keep KQP_RADIO_POST_MARGIN of their own), the AO's posts to
  * itself, a worker's done event and the AO's time events all go past it, and
  * a full queue is still QP's assertion for every one of those but the done
  * event, which waits. The port also reads the free slots and sends in two
