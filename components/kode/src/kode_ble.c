@@ -251,8 +251,11 @@ static void ble_scan_fail(kode_status_t rc, uint32_t ms)
         kode_err_set("kode_ble_scan: Bluetooth is off in Settings");
         break;
     case KODE_NO_RESOURCES:
-        kode_err_set("kode_ble_scan: the radio is busy with a scan, a self-test or an install; "
-                     "try again");
+        kode_err_set("kode_ble_scan: the radio is busy with another scan, its search for a "
+                     "network, a self-test or an install; try again");
+        break;
+    case KODE_CANCELLED:
+        kode_err_set("kode_ble_scan: a newer Bluetooth request ended the listen early");
         break;
     case KODE_TIMEOUT:
         kode_err_set("kode_ble_scan: no answer to the listen within %" PRIu32 " s",

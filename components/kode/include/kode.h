@@ -1083,12 +1083,18 @@ typedef struct {
  * @brief Scan the air for networks, both bands, and wait for the sweep (about 38 s).
  *
  * Brings the radio's link up first when it is down, and switches Wi-Fi on for
- * nobody; the call can wait for that bring-up plus one sweep. It does not wait
- * for anything longer: while the radio is already sweeping - the boot's own
- * search for a known network, another scan - or listens for Bluetooth
- * devices (kode_ble_scan(), or the console's `ble_scan`), or runs a self-test
- * or an install, it fails at once and kode_error() says the radio is busy;
- * ask again later. Joins and leaves take turns with it.
+ * nobody; the call can wait for that bring-up plus one sweep. The newest Wi-Fi
+ * request wins: this scan ends the Wi-Fi scan that is in flight (another
+ * app's, the console's `wifi_scan`) and runs in its place, and a newer one -
+ * another Wi-Fi scan, kode_wifi_connect(), Wi-Fi switched - ends this one: it
+ * fails and kode_error() says a newer request ended it early. Do not scan
+ * again at once then: whoever ended it has the radio, and two callers that
+ * each scan again the moment they are ended never let a sweep finish. Scan
+ * again after a pause, or when the app next needs the list. While the radio
+ * listens for Bluetooth devices, runs the boot's own search for a known
+ * network, a self-test or an install, it fails at once and kode_error() says
+ * the radio is busy; ask again later. A join in flight is waited for. One
+ * task at a time.
  *
  * @param out Where the networks go, the strongest first.
  * @param cap How many @p out holds; the strongest @p cap are kept.
@@ -1150,13 +1156,15 @@ typedef struct {
 /**
  * @brief Listen for Bluetooth devices for @p ms and wait for the end.
  *
- * Brings the radio's link up first when it is down. Like kode_wifi_scan() it
- * waits for nothing longer: while the radio is already scanning - a Wi-Fi
- * scan, another listen, or its own search for a known network - or runs a
- * self-test or an install, it fails at once and kode_error() says the radio
- * is busy. That search runs each time the link comes up with Wi-Fi on, so
- * the first listen on a link that was down nearly always fails busy; ask
- * again once the search is over. One task at a time.
+ * Brings the radio's link up first when it is down. As kode_wifi_scan() does
+ * for Wi-Fi, it ends the Bluetooth listen that is in flight and runs in its
+ * place, and a newer Bluetooth request ends it the same way: it fails, and
+ * the caller does not listen again at once. While the radio sweeps for Wi-Fi
+ * networks, runs its own search for a known network, a self-test or an
+ * install, it fails at once and kode_error() says the radio is busy. That
+ * search runs each time the link comes up with Wi-Fi on, so the first listen
+ * on a link that was down nearly always fails busy; ask again once the search
+ * is over. One task at a time.
  *
  * @param out Where the devices go, the strongest first.
  * @param cap How many @p out holds; the strongest @p cap are kept.

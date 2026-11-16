@@ -1460,13 +1460,21 @@ kode_status_t kode_sys_udp_send(QActive *me, const char *host, uint16_t port, co
  * and switches no service on. The networks are a listing: AO_Radio posts one
  * WIFI_SCAN_ENTRY_SIG per network to @p me while its queue keeps
  * KODE_SYS_LIST_FREE_SLOTS free - the queue rule above, with AO_Radio
- * (KODE_PRIO_RADIO) in AO_Storage's place - then the answer. A scan waits for
- * the link's bring-up and the reconcile chain, seconds, and nothing longer:
- * while a sweep holds the radio (another asked scan, of this or any AO, the
- * console's, the boot's autojoin round), or a Bluetooth listen (asked, or the
- * console's `ble_scan`), the production row or an install does, it is
- * answered at once with @c rc KODE_NO_RESOURCES. Without
- * CONFIG_KODEOS_WIFI the request is refused at once with KODE_DENIED.
+ * (KODE_PRIO_RADIO) in AO_Storage's place - then the answer. The newest
+ * Wi-Fi request wins: a Wi-Fi scan somebody asked for that is in flight or
+ * waiting (another asked scan, of any AO or task, the console's `wifi_scan`)
+ * ends for this one, and its asker is told at once; this one ends the same
+ * way for a newer Wi-Fi request - a scan, a join, Wi-Fi switched - with
+ * @c rc KODE_CANCELLED. An asker answered KODE_CANCELLED does not scan again
+ * at once: whoever ended its scan has the radio, and two askers that each
+ * scan again the moment they are ended never let a sweep finish. It scans
+ * again after a pause, or when it next needs the list. A scan waits for the
+ * link's bring-up, the reconcile chain, a join and the scan it replaces to
+ * leave the radio, seconds, and nothing longer: while a Bluetooth listen,
+ * the boot's autojoin round (running or owed), the production row or an
+ * install holds the radio it is answered at once with @c rc
+ * KODE_NO_RESOURCES. Without CONFIG_KODEOS_WIFI the request is refused at
+ * once with KODE_DENIED.
  */
 
 /** @brief The most networks one sweep keeps: the strongest, the rest dropped. */
@@ -1488,7 +1496,8 @@ typedef WifiScanEntryEvt kode_sys_wifi_scan_entry_t;
 /**
  * @brief Answers kode_sys_wifi_scan() (WIFI_SCAN_RSP_SIG): @c rc, KODE_OK when the sweep
  *        ended, KODE_ERROR when it failed or the link went, KODE_NO_RESOURCES when the
- *        radio was busy (ask again); @c seen, the networks the sweep handed over;
+ *        radio was busy (ask again), KODE_CANCELLED when a newer Wi-Fi request took its
+ *        place (do not ask again at once); @c seen, the networks the sweep handed over;
  *        @c more, entries left out.
  */
 typedef ScanRspEvt kode_sys_wifi_scan_answer_t;
@@ -1562,10 +1571,13 @@ kode_status_t kode_sys_wifi_frames(QActive *me, bool on, uint8_t channel);
  * advertises repeatedly is listed once, at its strongest. The devices are a
  * listing: AO_Radio posts one BLE_SCAN_ENTRY_SIG per device to @p me while
  * its queue keeps KODE_SYS_LIST_FREE_SLOTS free, then the answer. It shares
- * the Wi-Fi scan's one slot and rules: it waits for the link's bring-up and
- * the reconcile chain, and nothing longer; with another scan of either kind
- * held, or the console's, the autojoin round, the production row or an
- * install holding the radio, it is answered at once with @c rc
+ * the Wi-Fi scan's one slot and rules, for its own radio: the newest
+ * Bluetooth request wins, and a newer one - a listen, Bluetooth switched -
+ * ends this one with @c rc KODE_CANCELLED, after which its asker does not
+ * listen again at once; it waits for the link's bring-up, the reconcile
+ * chain, a join and the listen it replaces, and nothing longer; with a Wi-Fi
+ * scan, the autojoin round, the production row or an install holding the
+ * radio, it is answered at once with @c rc
  * KODE_NO_RESOURCES. The autojoin round runs each time the link comes up with
  * Wi-Fi on, and a listen owed behind that bring-up is refused when the round
  * starts, so the first listen asked on a cold link with Wi-Fi on is nearly
@@ -1594,8 +1606,9 @@ typedef BleScanEvt kode_sys_ble_scan_entry_t;
 /**
  * @brief Answers kode_sys_ble_scan() (BLE_SCAN_RSP_SIG): @c rc, KODE_OK when the listen
  *        ended, KODE_ERROR when it failed or the link went, KODE_NO_RESOURCES when the
- *        radio was busy (ask again), KODE_DENIED with Bluetooth off in Settings; @c seen,
- *        the devices handed over; @c more, entries left out.
+ *        radio was busy (ask again), KODE_DENIED with Bluetooth off in Settings,
+ *        KODE_CANCELLED when a newer Bluetooth request took its place (do not ask
+ *        again at once); @c seen, the devices handed over; @c more, entries left out.
  */
 typedef ScanRspEvt kode_sys_ble_scan_answer_t;
 

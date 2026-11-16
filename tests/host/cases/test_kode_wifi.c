@@ -721,7 +721,12 @@ TEST_CASE("scan that fails says why and returns -1", "[kode_wifi]")
 
     seam_scan_script(rssi, 2U, KODE_NO_RESOURCES);
     TEST_ASSERT_EQUAL_INT(-1, seam_wifi_scan(out, 4U));
-    TEST_ASSERT_EQUAL_STRING("the radio is busy with a scan, a self-test or an install; try again",
+    TEST_ASSERT_EQUAL_STRING("the radio is busy with another scan, its search for a network, "
+                             "a self-test or an install; try again", kode_error());
+
+    seam_scan_script(rssi, 2U, KODE_CANCELLED);
+    TEST_ASSERT_EQUAL_INT(-1, seam_wifi_scan(out, 4U));
+    TEST_ASSERT_EQUAL_STRING("a newer Wi-Fi request ended the scan early; do not scan again at once",
                              kode_error());
 
     seam_scan_script(rssi, 2U, KODE_TIMEOUT);
