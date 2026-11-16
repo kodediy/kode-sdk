@@ -22,6 +22,8 @@ extern "C" {
                                             *   the port leave; back on, the host finds a new device. */
 #define KHAL_CONSOLE_FRAME_SPAN_MS  2048U  /**< The span of the frame count khal_console_frame() reads: eleven
                                             *   bits, one frame a millisecond, then it wraps. */
+#define KHAL_CONSOLE_REST_MS        1000U  /**< The reader's one wait while the console rests (khal_console_rest()):
+                                            *   the longest a P4 in light sleep goes without a wake for it. */
 
 _Static_assert(KHAL_CONSOLE_FRAME_WAIT_MS < KHAL_CONSOLE_FRAME_SPAN_MS,
                "a wait shorter than the count's span: a frame in it always moves the count");
@@ -33,10 +35,12 @@ void khal_console_init(void);
  * @brief Tell the reader the board is asleep, or that it is not any more.
  *
  * The reader wakes about 200 times a second to look at the dock, and about 20 to
- * look for a raw-mode request, which is a wake of the P4 every time. Asleep there
- * is no host on either port (a cable never sleeps) and no verb to ask for raw
- * mode, so it waits a second in one go. Bytes on the cable still end the wait at
- * once; the dock and a raw-mode request are heard within that second.
+ * look for a raw-mode request, which is a wake of the P4 every time. While the
+ * board sleeps there is no host on either port (a cable never sleeps) and no
+ * verb to ask for raw mode, so it waits KHAL_CONSOLE_REST_MS in one go. Bytes on
+ * the cable still end the wait at once; the dock and a raw-mode request are
+ * heard within that wait. A timer that does not wake the P4 by itself runs at
+ * the reader's wake after it is due, so it runs at least that late.
  *
  * @param rest true while the board sleeps. Takes effect from the reader's next wait.
  */

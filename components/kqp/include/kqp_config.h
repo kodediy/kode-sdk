@@ -348,8 +348,10 @@
 #define KODE_LOWPOWER_DIM_PCT          20U     /**< The glass in ASLEEP when no glyphs were handed;
                                                 *   the interface sets its own through rest_pct. */
 #define KODE_LOWPOWER_MINUTE_S         60U     /**< The minute the glass is lit for. */
-#define KODE_LOWPOWER_CABLE_LOOK_MS    2000U   /**< How often ASLEEP and the CPU part's rest read the charger for a
-                                                *   cable: no line of the board wakes the P4 for one. */
+#define KODE_LOWPOWER_CABLE_LOOK_MS    KODE_POWER_POLL_MS  /**< How often ASLEEP and the CPU part's rest look
+                                                *   for a cable, which no line of the board wakes the P4 for: as
+                                                *   often as AO_Power's poll does awake, so a cable is seen as soon
+                                                *   asleep as awake. */
 #define KODE_LOWPOWER_GLYPHS_WAIT_MS   1500U   /**< Longest AO_Display waits for the renderer's glyphs
                                                 *   after a round opens: under KODE_LOWPOWER_ROUND_MS, so
                                                 *   it can still answer busy and name the reason. */
@@ -1686,7 +1688,9 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  * registers mean anything - ask sooner and every scale reads at its floor,
  * which looks exactly like a flat cell.
  */
-#define KODE_POWER_POLL_MS      2000U
+#define KODE_POWER_POLL_MS      2000U   /**< How often AO_Power reads both chips and publishes the reading
+                                         *   while the board is awake; KODE_LOWPOWER_CABLE_LOOK_MS keeps the
+                                         *   same pace asleep. */
 #define KODE_POWER_FIRST_MS     1500U
 
 /* ---- The gauge row (`test component=gauge`) ---------------------------------

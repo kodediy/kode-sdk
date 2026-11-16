@@ -615,6 +615,9 @@ static bool state_retry_fire(LowPower * const me)
 
 /* ---- The look for a cable ------------------------------------------------------- */
 
+_Static_assert(KODE_LOWPOWER_CABLE_LOOK_MS >= KHAL_CONSOLE_REST_MS,
+               "the look runs at the console reader's wakes: a shorter period would be the reader's, not its own");
+
 /**
  * @brief Runs in the timer task: ask AO_Power whether a cable is in.
  *
@@ -641,8 +644,9 @@ static void cable_look_due_cb(void *arg)
  * the look), AO_Power is asked whether a cable is in every
  * KODE_LOWPOWER_CABLE_LOOK_MS. The timer does not wake the P4 by itself: it
  * runs at the first wake after it is due, and the console reader wakes the P4
- * once a second while it sleeps (khal_console_rest()). It is a periodic timer
- * of its own, so the minute keeps every one-shot.
+ * every KHAL_CONSOLE_REST_MS while it sleeps (khal_console_rest()), so a cable
+ * is seen within KODE_LOWPOWER_CABLE_LOOK_MS + KHAL_CONSOLE_REST_MS. It is a
+ * periodic timer of its own, so the minute keeps every one-shot.
  *
  * @param on true when the lock is let go, false when it is taken again.
  */

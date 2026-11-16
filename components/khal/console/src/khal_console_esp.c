@@ -40,9 +40,8 @@
 #define READER_STACK        4096U   /**< Reader task stack, bytes. */
 #define READER_TIMEOUT_MS   50U     /**< Longest wait before the reader looks for a raw-mode request. */
 #define READER_DRAIN_CHUNK  64U     /**< Bytes read per pass when discarding input before raw mode. */
-#define READER_REST_MS      1000U   /**< The same wait while the board sleeps: khal_console_rest(). */
 
-static volatile bool s_reader_rest;   /**< The board sleeps: the reader looks up once a second. */
+static volatile bool s_reader_rest;   /**< The board sleeps: the reader looks up every KHAL_CONSOLE_REST_MS. */
 
 /* ---- The dock port (CONFIG_KHAL_CONSOLE_DOCK): a TinyUSB CDC-ACM on GPIO26/27 ---- */
 #if defined(CONFIG_KHAL_CONSOLE_DOCK)
@@ -630,7 +629,7 @@ static void khal_reader_task(void *pv)
         uint32_t wait_ms = READER_TIMEOUT_MS;
         if ( s_reader_rest )
         {
-            wait_ms = READER_REST_MS;
+            wait_ms = KHAL_CONSOLE_REST_MS;
         }
         int32_t const c = console_getc(wait_ms);
         if ( 0 > c )
