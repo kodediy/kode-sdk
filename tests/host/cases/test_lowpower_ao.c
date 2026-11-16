@@ -5319,3 +5319,107 @@ TEST_CASE("kode_rest is refused inside an Active Object, which is named, and pos
                                    "a request was posted all the same");
     task_rest_down();
 }
+
+/* ---- The look for a cable ------------------------------------------------------------ */
+
+/** @brief The period of the look for a cable, microseconds. */
+#define LOOK_US  ((uint64_t)KODE_LOWPOWER_CABLE_LOOK_MS * 1000ULL)
+
+TEST_CASE("asleep, the charger is read every few seconds on a timer of its own; awake, it is not",
+          "[lowpower_ao]")
+{
+    lp_up(KODE_OK);
+    go_asleep();
+    (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+
+    TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "asleep, the look runs");
+    TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running(), "and the tick does not");
+    TEST_ASSERT_TRUE(fake_time_periodic_fire_at(LOOK_US));
+    TEST_ASSERT_EQUAL_UINT(1U, queued(AO_Power, POWER_PEEK_REQ_SIG));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_time_once_pending(), "the minute's one-shot is the only one");
+
+    expander(LEVELS_BOT, CHANGED_BOT);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_ASLEEP);
+    TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running_at(LOOK_US),
+                              "awake, AO_Power polls the charger by itself");
+    lp_down();
+}
+
+TEST_CASE("a cable the look finds wakes the board and has the cable port shown again, once",
+          "[lowpower_ao]")
+{
+    unsigned calls;
+
+    lp_up(KODE_OK);
+    go_asleep();
+    calls = fake_console_cable_calls();
+
+    charger_reading(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "no cable, no wake");
+    TEST_ASSERT_EQUAL_UINT(calls, fake_console_cable_calls());
+
+    charger_reading(true);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_VBUS, KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(),
+                                   "the port was off the bus when the cable came");
+    TEST_ASSERT_FALSE(fake_time_periodic_running_at(LOOK_US));
+
+    charger_reading(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(), "once for one cable");
+    lp_down();
+}
+
+TEST_CASE("a cable in the first reading after another wake has the cable port shown again",
+          "[lowpower_ao]")
+{
+    unsigned calls;
+
+    lp_up(KODE_OK);
+    go_asleep();
+    expander(LEVELS_BOT, CHANGED_BOT);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_ASLEEP);
+    calls = fake_console_cable_calls();
+
+    charger_reading(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(),
+                                   "the cable came before the look saw it");
+    lp_down();
+}
+
+TEST_CASE("a cable that comes to a board that is awake leaves the cable port alone",
+          "[lowpower_ao]")
+{
+    unsigned calls;
+
+    lp_up(KODE_OK);
+    calls = fake_console_cable_calls();
+    charger_reading(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls, fake_console_cable_calls(), "the board never slept");
+    charger_reading(false);
+
+    go_asleep();
+    expander(LEVELS_BOT, CHANGED_BOT);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_ASLEEP);
+    charger_reading(false);
+    charger_reading(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls, fake_console_cable_calls(),
+                                   "the reading after the wake had no cable: the port was on the bus");
+    lp_down();
+}
+
+TEST_CASE("a dark wake holds the lock: the look stops for it and runs again after",
+          "[lowpower_ao]")
+{
+    lp_up(KODE_OK);
+    radio_asleep(20U * SECOND_MS);
+    TEST_ASSERT_TRUE(fake_time_periodic_running_at(LOOK_US));
+
+    dark_wake();
+    TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "the lock keeps the port on the bus");
+
+    dark_done_all();
+    dark_rest_both(expect_dark_rounds(), 0U);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
+    TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "the lock is let go again");
+    lp_down();
+}

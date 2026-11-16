@@ -676,14 +676,28 @@ void fake_time_advance_us(uint32_t us);
 /** @brief Forget the stops and starts khal_timer_periodic_run() has counted. */
 void fake_time_periodic_forget(void);
 
-/** @brief How many times the periodic timer was told to stop since the last forget. */
+/** @brief How many times the QP tick's periodic timer was told to stop since the last forget. */
 unsigned fake_time_periodic_stops(void);
 
-/** @brief How many times the periodic timer was told to run since the last forget. */
+/** @brief How many times the QP tick's periodic timer was told to run since the last forget. */
 unsigned fake_time_periodic_starts(void);
 
-/** @brief Whether the fake's periodic timer is running now. */
+/** @brief Whether the QP tick's periodic timer is running now. */
 bool fake_time_periodic_running(void);
+
+/**
+ * @brief Whether the periodic timer started with @p period_us is running now.
+ * @param period_us Its period, microseconds.
+ * @return false when none was started with it, or it is stopped.
+ */
+bool fake_time_periodic_running_at(uint64_t period_us);
+
+/**
+ * @brief Run the periodic timer started with @p period_us once, as the timer task would.
+ * @param period_us Its period, microseconds.
+ * @return false, and nothing run, when none was started with it or it is stopped.
+ */
+bool fake_time_periodic_fire_at(uint64_t period_us);
 
 /** @brief How many khal_timer_once() one-shots are armed and not yet fired. */
 unsigned fake_time_once_pending(void);
@@ -798,6 +812,9 @@ void fake_console_feed_byte(int c);
 
 /** @brief What khal_console_rest() was told last. */
 bool fake_console_resting(void);
+
+/** @brief How many times khal_console_cable() was called since fake_console_reset(). */
+unsigned fake_console_cable_calls(void);
 
 /** @brief What khal_watch_rest() was told last. */
 bool fake_watch_resting(void);

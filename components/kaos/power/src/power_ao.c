@@ -156,7 +156,9 @@ void power_dump_request(void)
 void power_peek_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(POWER_PEEK_REQ_SIG);
-    QACTIVE_POST(AO_Power, &evt, NULL);
+    /* Asked again within seconds, so a queue short of its margin drops it
+     * rather than assert. */
+    (void)QACTIVE_POST_X(AO_Power, &evt, KQP_POWER_POST_MARGIN, NULL);
 }
 
 bool power_ship_request(void)
@@ -2774,10 +2776,11 @@ static QState Power_polling(Power * const me, QEvt const * const e)
         case POWER_PEEK_REQ_SIG: {
             reading_t r;
             uint8_t   soc = 0U;
-            /* The minute's look while the board sleeps: the poll that keeps
-             * the clock stops with the tick, so the keep happens here, and
-             * the reading is published for the cable. Nothing is logged and
-             * no chip is dumped, or every minute asleep would print a page. */
+            /* AO_LowPower's look while the board sleeps, every few seconds
+             * and each minute: the poll that keeps the clock stops with the
+             * tick, so the keep happens here, and the reading is published
+             * for the cable. Nothing is logged and no chip is dumped, or
+             * every look would print a page. */
             (void)kdrv_clocks_wall_keep(false);
             (void)power_read(me, &r, &soc);
             status = Q_HANDLED();

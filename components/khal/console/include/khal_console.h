@@ -32,6 +32,20 @@ void khal_console_init(void);
 void khal_console_rest(bool rest);
 
 /**
+ * @brief A cable came while the board slept: show the host the cable port again
+ *        when the host is not talking to it.
+ *
+ * Asleep, every light sleep takes the port's pad off the bus, so a host that
+ * tried to enumerate it then may have given the port up, and it does not try
+ * again by itself. When no frame arrives from the host in the next 100 ms,
+ * the pad leaves the bus for 300 ms and comes back, which the host sees as a
+ * new connection. A port the host is talking to is left alone. Returns at
+ * once: the wait and the time off the bus run on a timer of the console's
+ * own. A call while an earlier one is under way does nothing.
+ */
+void khal_console_cable(void);
+
+/**
  * @brief Start the task that blocks on the console and reports each byte.
  * @param on_byte Called with each byte; it posts and returns.
  * @param prio    Scheduler priority for the task.

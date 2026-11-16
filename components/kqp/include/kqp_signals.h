@@ -1443,7 +1443,7 @@ enum KodeSignals {
     POWER_DUMP_REQ_SIG,         /**< AO_Power: log everything both chips say. */
     POWER_PEEK_REQ_SIG,         /**< AO_Power: take one reading, publish it and keep
                                  *   the wall clock; log nothing and dump no chip.
-                                 *   AO_LowPower asks it once a minute asleep. */
+                                 *   AO_LowPower asks it every few seconds asleep. */
     POWER_SHIP_REQ_SIG,         /**< AO_Power: ship mode - open the BATFET and
                                  *   cut the battery from VSYS. On battery the
                                  *   board dies handling this event; waking is

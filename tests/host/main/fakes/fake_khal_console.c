@@ -34,6 +34,9 @@ static void (*s_on_byte)(uint8_t byte);
 /* What khal_console_rest() was told last. */
 static bool     s_resting;
 
+/* How many times khal_console_cable() was called. */
+static unsigned s_cable_calls;
+
 /* The dock's pins: lent or held, how many calls, and what the next take answers. */
 static bool          s_dock_lent;
 static unsigned      s_dock_releases;
@@ -56,6 +59,7 @@ void fake_console_reset(void)
     s_dock_releases = 0U;
     s_dock_takes    = 0U;
     s_dock_take_rc  = KODE_OK;
+    s_cable_calls   = 0U;
 }
 
 void fake_console_clear_out(void)
@@ -137,6 +141,17 @@ void khal_console_write(const char *buf, size_t len)
 void khal_console_rest(bool rest)
 {
     s_resting = rest;
+}
+
+void khal_console_cable(void)
+{
+    /* No port to show a host: the call is counted. */
+    ++s_cable_calls;
+}
+
+unsigned fake_console_cable_calls(void)
+{
+    return s_cable_calls;
 }
 
 bool fake_console_resting(void)

@@ -1969,8 +1969,10 @@ void power_dump_request(void);
  * @brief Ask AO_Power for one reading, published as POWER_EVT_SIG, and for the
  *        wall clock to be kept if a keep is due. Logs nothing.
  *
- * What AO_LowPower asks once a minute while the board sleeps: the cable shows
- * in the reading, and the poll that keeps the clock does not run asleep.
+ * What AO_LowPower asks every KODE_LOWPOWER_CABLE_LOOK_MS and each minute
+ * while the board sleeps: the cable shows in the reading, and the poll that
+ * keeps the clock does not run asleep. A request that finds AO_Power's queue
+ * short of KQP_POWER_POST_MARGIN is dropped; the next one asks again.
  */
 void power_peek_request(void);
 

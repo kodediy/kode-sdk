@@ -270,6 +270,8 @@ typedef struct {
     uint8_t     part_late_who[PART_COUNT]; /**< By the part's bit: the participant that owes its answer. */
     bool        part_pin_free;    /**< The header's position was free, not an input, before it was armed. */
     khal_gpio_pull_t part_pin_pulled; /**< The pull that input had: it gets it back. */
+    bool        cable_check;      /**< The board woke from ASLEEP and AWAKE has had no reading since: a cable
+                                   *   in that reading came while the cable port was off the bus. */
 } LowPower;
 
 static LowPower l_lowpower;
@@ -610,7 +612,80 @@ static bool state_retry_fire(LowPower * const me)
 }
 
 
+/* ---- The look for a cable ------------------------------------------------------- */
+
+/**
+ * @brief Runs in the timer task: ask AO_Power for a reading.
+ *
+ * The reading is published, and one with a cable in it wakes the board
+ * (POWER_EVT_SIG in LowPower_asleep).
+ *
+ * @param arg Unused.
+ */
+static void cable_look_due_cb(void *arg)
+{
+    (void)arg;
+    power_peek_request();
+}
+
+/**
+ * @brief Begin or end the look for a cable while the board sleeps.
+ *
+ * No line of the board wakes the P4 for a cable, and asleep, every light
+ * sleep takes the cable port off the bus: a host that plugs in then is not
+ * answered and gives the port up. While the lock is let go, AO_Power is
+ * asked for a reading every KODE_LOWPOWER_CABLE_LOOK_MS. The timer does not
+ * wake the P4 by itself: it runs at the first wake after it is due, and the
+ * console reader wakes the P4 once a second while the board sleeps
+ * (khal_console_rest()). It is a periodic timer of its own, so the minute
+ * keeps every one-shot.
+ *
+ * @param on true when the lock is let go, false when it is taken again.
+ */
+static void cable_look(bool on)
+{
+    static bool s_cable_timer;   /* The periodic timer exists: khal_timer_periodic() took it. */
+
+    if ( s_cable_timer )
+    {
+        if ( khal_timer_periodic_run(&cable_look_due_cb, on) != KODE_OK )
+        {
+            KLOG_W(TAG, "the look for a cable would not change");
+        }
+    }
+    else if ( on )
+    {
+        if ( khal_timer_periodic(&cable_look_due_cb, NULL,
+                                 (uint64_t)KODE_LOWPOWER_CABLE_LOOK_MS * US_PER_MS) == KODE_OK )
+        {
+            s_cable_timer = true;
+        }
+        else
+        {
+            KLOG_W(TAG, "the look for a cable would not start; the minute's reading finds a cable");
+        }
+    }
+    else
+    {
+        /* Never started: nothing to stop. */
+    }
+}
+
 /* ---- The way down ------------------------------------------------------------- */
+
+/**
+ * @brief The tick, then the look for a cable, then the lock: what ASLEEP lets go of.
+ *
+ * Every owner has answered ready, so no AO is inside an event while the tick
+ * is stopped.
+ */
+static void light_down(void)
+{
+    kqp_tick_rest(true);
+    khal_console_rest(true);
+    cable_look(true);
+    khal_power_hold(false);
+}
 
 /**
  * @brief Every participant said ready: change the state.
@@ -638,9 +713,7 @@ static QState round_done(LowPower * const me)
                cause_name(me->cause));
         /* After the lines above are published, and the tick before the lock.
          * Every owner has answered ready: no AO is inside an event while the tick is stopped. */
-        kqp_tick_rest(true);
-        khal_console_rest(true);
-        khal_power_hold(false);
+        light_down();
         status = Q_TRAN(&LowPower_asleep);
     }
     else
@@ -1114,11 +1187,12 @@ static void summary_close(LowPower * const me, uint8_t cause)
 
 /* ---- The way up ----------------------------------------------------------------- */
 
-/** @brief The tick, then the lock: what the P4 needs before anything else runs. */
+/** @brief The tick, then the lock, and no more look for a cable: what the P4 needs before anything else runs. */
 static void light_up(void)
 {
     kqp_tick_rest(false);
     khal_console_rest(false);
+    cable_look(false);
     khal_power_hold(true);
 }
 
@@ -1182,6 +1256,7 @@ static void wake_up(LowPower * const me, uint8_t cause)
     /* An owner's time is nobody at the board; every other wake is somebody. */
     me->used    = ((uint8_t)KODE_LP_CAUSE_TIMER != cause);
     me->rest_on = false;
+    me->cable_check = true;
     if ( (LP_CAUSES > cause) && (!counted) )
     {
         me->wakes[cause] += 1U;
@@ -1941,9 +2016,7 @@ static QState dark_release(LowPower * const me)
     dark_clear(me);
     KLOG_N(TAG, "dark wake done: ASLEEP again, the glass was not lit");
     wake_fold(me);   /* a time the owners gave in the round */
-    kqp_tick_rest(true);
-    khal_console_rest(true);
-    khal_power_hold(false);
+    light_down();
     return Q_TRAN(&LowPower_asleep);
 }
 
@@ -4166,11 +4239,20 @@ static QState LowPower_awake(LowPower * const me, QEvt const * const e)
             break;
         }
         case POWER_EVT_SIG: {
+            bool const plugged = Q_EVT_CAST(PowerEvt)->vbus && (!me->vbus);
+
             /* A cable that appears is somebody at the board. */
-            if ( Q_EVT_CAST(PowerEvt)->vbus && (!me->vbus) )
+            if ( plugged )
             {
                 me->used = true;
             }
+            if ( plugged && me->cable_check )
+            {
+                /* It came while the board slept, and a host on it may have
+                 * given the cable port up. */
+                khal_console_cable();
+            }
+            me->cable_check = false;
             me->vbus = Q_EVT_CAST(PowerEvt)->vbus;
             if ( me->retry_on && me->vbus )
             {
@@ -4423,6 +4505,8 @@ static QState LowPower_asleep(LowPower * const me, QEvt const * const e)
             if ( me->vbus )
             {
                 wake_up(me, (uint8_t)KODE_LP_CAUSE_VBUS);
+                /* The cable came while the cable port was off the bus. */
+                khal_console_cable();
                 status = Q_TRAN(&LowPower_awake);
             }
             else
@@ -4642,6 +4726,7 @@ void LowPower_ctor(void)
     me->round_src = (uint8_t)KODE_LOG_SRC_NONE;
     me->power_ok = false;
     me->vbus     = false;
+    me->cable_check = false;
     for ( uint8_t i = 0U; (uint8_t)SETTING_COUNT > i; i++ )
     {
         me->secs[i] = SETTINGS[i].def_s;
