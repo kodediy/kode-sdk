@@ -208,6 +208,9 @@ static bool s_on_factory;
 /** @brief What otadata says of the slot that is not running, on the next boot. */
 static kdrv_slot_state_t s_other_state = KDRV_SLOT_STATE_UNDEFINED;
 
+/** @brief Whether otadata selected that slot after the running one, on the next boot. */
+static bool s_other_newer = true;
+
 /** @brief Where the kodeOS running starts, as kdrv_running_info() answers. */
 static uint32_t s_running_at;
 
@@ -285,9 +288,12 @@ static void boot_up(int reset_reason, bool rescued)
     kdrv_slot_crashes_set_StubWithCallback(&crashes_write);
     kdrv_slot_reject_self_StubWithCallback(&slot_reject);
     kdrv_slot_state_IgnoreAndReturn(s_other_state);
+    kdrv_slot_newer_IgnoreAndReturn(s_other_newer);
     kdrv_running_info_StubWithCallback(&running_info);
     kdrv_reset_reason_IgnoreAndReturn(reset_reason);
-    kdrv_running_is_factory_IgnoreAndReturn(rescued);
+    /* One answer for the whole boot: an ignore queued twice hands out the
+     * first value once and only then the second. */
+    kdrv_running_is_factory_IgnoreAndReturn(rescued || s_on_factory);
     if ( rescued )
     {
         kdrv_otadata_blank_IgnoreAndReturn(false);
@@ -296,7 +302,6 @@ static void boot_up(int reset_reason, bool rescued)
     else if ( s_on_factory )
     {
         /* Factory with nothing in otadata: no rescue, just the image. */
-        kdrv_running_is_factory_IgnoreAndReturn(true);
         kdrv_otadata_blank_IgnoreAndReturn(true);
     }
 
@@ -893,6 +898,52 @@ TEST_CASE("the minute says what became of the other slot, factory's rescue inclu
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(KBOOT_OTHER_NEVER_RAN,
         other_after_minute(KDRV_SLOT_STATE_UNDEFINED, false, true),
         "factory with otadata blank never switched");
+}
+
+/* otadata keeps an entry per slot, and the slot that is not running often
+ * holds one from an earlier update, valid or not. When the running slot's
+ * entry is the newer, the last switch to the other slot never took effect,
+ * whatever that old entry says. */
+TEST_CASE("an old entry of the other slot that the running one outranks is a switch "
+          "that never took effect", "[boot_ao]")
+{
+    uint8_t valid;
+    uint8_t aborted;
+
+    s_other_newer = false;
+    valid   = other_after_minute(KDRV_SLOT_STATE_OTHER, false, false);
+    aborted = other_after_minute(KDRV_SLOT_STATE_ABORTED, false, false);
+    s_other_newer = true;
+
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KBOOT_OTHER_NEVER_RAN, valid,
+        "an earlier update's valid entry read as a crash");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KBOOT_OTHER_NEVER_RAN, aborted,
+        "an earlier update's aborted entry read as this one's");
+}
+
+/* The rescue clears otadata on its first boot. A reset before that boot's
+ * minute must not turn the verdict into a switch that never happened: the
+ * rescue is kept until a minute tells it, and only then forgotten. */
+TEST_CASE("a factory boot after the rescue and before its minute still tells the rescue, "
+          "once", "[boot_ao]")
+{
+    uint8_t again;
+    uint8_t after;
+
+    fake_nvs_reset();
+    Mockkdrv_slot_Init();
+    crashes_none();
+    boot_up((int)KDRV_RESET_POWERON, true);   /* the rescue's boot, cut short */
+    Mockkdrv_slot_Destroy();
+
+    again = other_after_minute(KDRV_SLOT_STATE_UNDEFINED, false, true);
+    after = other_after_minute(KDRV_SLOT_STATE_UNDEFINED, false, true);
+    fake_nvs_reset();
+
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KBOOT_OTHER_UNCONFIRMED, again,
+        "the rescue was forgotten with the otadata it cleared");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KBOOT_OTHER_NEVER_RAN, after,
+        "the rescue outlived the minute that told it");
 }
 
 /* A switch that cannot be made leaves the board where it is: the update that

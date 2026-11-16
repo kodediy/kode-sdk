@@ -77,6 +77,8 @@ typedef struct {
     bool     stable_next;   /**< The healthy timer is on its second count.      */
     uint8_t  other;         /**< kboot_other_t: what became of the slot that is
                              *   not running, read before otadata is cleared. */
+    bool     rescue_kept;   /**< `kset/rescued` is in NVS: erased at the stable
+                             *   minute that tells the rescue.              */
     QActive *reset_who;     /**< Where the reset's answer goes.                 */
     uint32_t welcome_off;   /**< The welcome app's extent in the apps region.   */
     uint32_t welcome_size;  /**< Its length.                                    */
@@ -572,22 +574,28 @@ static void boot_crashes_count(bool after_app)
  * @brief What became of the kodeOS slot that is not running, from otadata.
  *
  * @param st      What the bootloader recorded about that slot.
+ * @param newer   That slot was selected after the running one; when not, @p st
+ *                is an earlier update's and the last switch never took effect.
  * @param rescued The rescue took over: an update was launched and never
  *                confirmed. From factory, @p st is ota_0's, which need not be
  *                the slot written, so it is not read.
  * @return Its kboot_other_t.
  */
-static kboot_other_t boot_other_of(kdrv_slot_state_t st, bool rescued)
+static kboot_other_t boot_other_of(kdrv_slot_state_t st, bool newer, bool rescued)
 {
     kboot_other_t other = KBOOT_OTHER_GIVEN_UP;
 
-    if ( rescued || (KDRV_SLOT_STATE_ABORTED == st) )
+    if ( rescued )
     {
         other = KBOOT_OTHER_UNCONFIRMED;
     }
-    else if ( KDRV_SLOT_STATE_UNDEFINED == st )
+    else if ( (!newer) || (KDRV_SLOT_STATE_UNDEFINED == st) )
     {
         other = KBOOT_OTHER_NEVER_RAN;
+    }
+    else if ( KDRV_SLOT_STATE_ABORTED == st )
+    {
+        other = KBOOT_OTHER_UNCONFIRMED;
     }
     else
     {
@@ -706,12 +714,21 @@ static QState Boot_initial(Boot * const me, void const * const par)
 
     /* 2. Running from factory with otadata non-blank means the rescue took
      *    over: a kodeOS update died before confirming. Make it sticky. What
-     *    became of the other slot is read first, while otadata still says. */
-    bool const rescued = kdrv_running_is_factory() && !kdrv_otadata_blank();
-    me->other = (uint8_t)boot_other_of(kdrv_slot_state(), rescued);
+     *    became of the other slot is read first, while otadata still says,
+     *    and the rescue is kept in NVS before otadata is cleared: a boot
+     *    before the stable minute finds otadata blank and still owes it. */
+    bool const factory = kdrv_running_is_factory();
+    bool const rescued = factory && !kdrv_otadata_blank();
+    uint8_t    owed    = 0U;
+
+    me->rescue_kept = (khal_nvs_get_u8(KSET_NAMESPACE, KSET_KEY_RESCUED, &owed) == KODE_OK);
+    me->other = (uint8_t)boot_other_of(kdrv_slot_state(), kdrv_slot_newer(),
+                                       rescued || (factory && (0U != owed)));
     if ( rescued )
     {
         s_reason = KBOOT_UNEXPECTED;
+        me->rescue_kept = (khal_nvs_set_u8(KSET_NAMESPACE, KSET_KEY_RESCUED, 1U) == KODE_OK)
+                          || me->rescue_kept;
         (void)kdrv_otadata_clear();
         KLOG_W(TAG, "a kodeOS update never confirmed; staying on factory");
     }
@@ -1697,11 +1714,17 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
                     kdrv_running_info(NULL, &ev->running, NULL);
                     ev->other = me->other;
                     QACTIVE_PUBLISH(&ev->super, &me->super);
+                    if ( me->rescue_kept )
+                    {
+                        (void)khal_nvs_erase(KSET_NAMESPACE, KSET_KEY_RESCUED);
+                        me->rescue_kept = false;   /* told: the minute has come */
+                    }
                 }
                 else
                 {
                     KLOG_W(TAG, "no event for the stable minute; a kodeOS "
-                                "update waiting on it stays rebooting");
+                                "update waiting on it stays installed until "
+                                "the next boot's minute");
                 }
             }
             status = Q_HANDLED();

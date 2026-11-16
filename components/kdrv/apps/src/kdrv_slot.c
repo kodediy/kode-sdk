@@ -9,12 +9,15 @@
 #include "kdrv_image_walk.h"
 
 #include "kdrv_kfw.h"
+#include "kdrv_slot_seq.h"
 
 #include <string.h>
 
 #include "kode_log.h"
 
 #include "esp_app_desc.h"
+#include "bootloader_common.h"   /* bootloader_common_ota_select_crc(): an otadata entry's CRC */
+#include "esp_flash_partitions.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
@@ -424,9 +427,42 @@ kdrv_slot_state_t kdrv_slot_state(void)
     switch ( state )
     {
         case ESP_OTA_IMG_ABORTED:   return KDRV_SLOT_STATE_ABORTED;
+        case ESP_OTA_IMG_NEW:       return KDRV_SLOT_STATE_UNDEFINED;  /* selected, never launched */
         case ESP_OTA_IMG_UNDEFINED: return KDRV_SLOT_STATE_UNDEFINED;
         default:                    return KDRV_SLOT_STATE_OTHER;
     }
+}
+
+bool kdrv_slot_newer(void)
+{
+    const esp_partition_t * const ota = otadata_part();
+    const esp_partition_t * const run = esp_ota_get_running_partition();
+    const esp_partition_t * const p   = slot_part();
+    uint32_t seq[KSLOT_SEQ_ENTRIES]   = { 0U, 0U };
+    bool     valid[KSLOT_SEQ_ENTRIES] = { false, false };
+
+    if ( (NULL == ota) || (NULL == run) || (NULL == p)
+        || (ESP_PARTITION_SUBTYPE_APP_OTA_MIN > run->subtype)
+        || (ESP_PARTITION_SUBTYPE_APP_OTA_MAX <= run->subtype) )
+    {
+        return false;   /* factory, or no table to read */
+    }
+    for ( uint32_t i = 0U; KSLOT_SEQ_ENTRIES > i; ++i )
+    {
+        esp_ota_select_entry_t e;
+
+        if ( esp_partition_read(ota, (size_t)i * (size_t)SPI_FLASH_SEC_SIZE, &e, sizeof(e))
+            == ESP_OK )
+        {
+            seq[i]   = e.ota_seq;
+            valid[i] = (UINT32_MAX != e.ota_seq)
+                       && (bootloader_common_ota_select_crc(&e) == e.crc);
+        }
+    }
+    return kslot_seq_newer(seq, valid,
+                           (uint32_t)p->subtype - (uint32_t)ESP_PARTITION_SUBTYPE_APP_OTA_MIN,
+                           (uint32_t)run->subtype - (uint32_t)ESP_PARTITION_SUBTYPE_APP_OTA_MIN,
+                           (uint32_t)esp_ota_get_app_partition_count());
 }
 
 /* ---- Every app partition, by id ------------------------------------------ */

@@ -152,8 +152,22 @@ typedef enum {
     KDRV_SLOT_STATE_OTHER          /**< Anything else - worth saying out loud. */
 } kdrv_slot_state_t;
 
-/** @brief Read the slot's recorded state. Call before clearing otadata. */
+/** @brief Read the slot's recorded state. Call before clearing otadata.
+ *         A slot selected and never launched reads UNDEFINED. */
 kdrv_slot_state_t kdrv_slot_state(void);
+
+/**
+ * @brief Whether otadata selected the slot after the running one.
+ *
+ * Its state is that selection's only then; otherwise it is an earlier
+ * update's, and the last switch to the slot never took effect. Call before
+ * clearing otadata.
+ *
+ * @return true when the slot's latest entry is newer than the running
+ *         slot's; false from factory, with no entry naming it, or when otadata
+ *         cannot be read.
+ */
+bool kdrv_slot_newer(void);
 
 /* ---- Every app partition, by id ------------------------------------------ */
 

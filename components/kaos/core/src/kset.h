@@ -55,6 +55,11 @@
                                   *   ASLEEP. Owner: AO_LowPower.      */
 #define KSET_KEY_OFF_AFTER "off_after" /**< u32, seconds: the time asleep before
                                   *   OFF. Owner: AO_LowPower.         */
+#define KSET_KEY_RESCUED "rescued"  /**< u8, 1: the rescue took over from a kodeOS
+                                  *   update and the stable minute that tells
+                                  *   it has not come; it outlives the otadata
+                                  *   the rescue clears. Absent = no rescue
+                                  *   owed. Owner: AO_Boot.            */
 #define KSET_KEY_LP_LAST "lp_last"  /**< blob, a lowpower_last_t: the summary of the
                                   *   last rest, written at most once a
                                   *   minute asleep and once when it ends.
