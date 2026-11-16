@@ -714,6 +714,28 @@ TEST_CASE("a rest round with a listener is busy, stops the stream and tells the 
     frames_end();
 }
 
+/* The radio put away by an app is the C5 asleep between wakes, with the board
+ * awake: nothing the radio does by itself is held back as for a board at rest. */
+TEST_CASE("a start asked while the radio rests for an app is taken: the board is awake",
+          "[radio_frames]")
+{
+    frames_up();
+    lp_part_round(AO_Radio, KODE_LP_PART_RADIO);
+    drain();
+    finish(KDRV_RADIO_JOB_SLEEP, KODE_OK);
+    lp_expect_answer(false, NULL);
+    fake_peer_reset();
+
+    ask(ao_spy_other(), true, FR_CH);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_SNIFF_START, sent_sniff()->op,
+                                    "refused as if the board were at rest");
+
+    c5_answers(KODE_ST_OK, 0U, FR_CH, 0U, KODE_SNIFF_WHY_NONE);
+    pump();
+    frames_awake();
+    frames_end();
+}
+
 TEST_CASE("a start asked while the board rests is refused resting and sends nothing",
           "[radio_frames]")
 {

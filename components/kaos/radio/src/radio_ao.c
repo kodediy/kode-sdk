@@ -10310,7 +10310,15 @@ static void radio_lp_round(Radio * const me, const LowPowerRoundEvt * const r)
 {
     bool const off    = ((uint8_t)KODE_LP_OFF == r->target);
 
-    me->lp_rest      = true;     /* AWAKE says when it was abandoned */
+    if ( 0U == r->parts )
+    {
+        me->lp_rest  = true;     /* AWAKE says when it was abandoned */
+    }
+    else
+    {
+        /* An app's rest of the radio: the C5 sleeps between wakes and the
+         * board stays awake, so nothing is held back as for a board at rest. */
+    }
     me->lp_round     = r->round;
     me->lp_target    = r->target;
     me->lp_owed      = true;
