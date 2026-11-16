@@ -45,6 +45,16 @@ size_t kode_banner_reset_line(char *out, size_t len, int32_t reason,
                               char const *dump_reason, char const *app_name);
 
 /**
+ * @brief Compose the board's words for the hardware line: the product and the
+ *        revision production wrote, or that no official one is loaded.
+ * @param out Receives the words, NUL-terminated (cut to fit). Not NULL.
+ * @param len Room in @p out; at least 1.
+ * @param rev The revision, as khal_identity_board_rev() gives it: "" for none.
+ * @return @p out.
+ */
+char const *kode_banner_board(char *out, size_t len, char const *rev);
+
+/**
  * @brief Print the four banner lines through klog, at every level but off.
  * @note Call once, right after AO_Log starts. In the OS role it reads the TRIED
  *       boot request to name the app the board came back from, and never clears it.

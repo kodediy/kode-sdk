@@ -9,9 +9,6 @@
 /** @brief The product's name, as the boot banner prints it. */
 #define KBSP_PRODUCT_NAME       "Kode Dot"
 
-/** @brief The board revision, as the boot banner and `info` print it. */
-#define KBSP_BOARD_REV          "DVT"
-
 /* ---- The AMOLED (CO5300, 410x502, MIPI-DSI) ------------------------------ */
 #define KBSP_LCD_H_RES          410U  /**< Width in pixels.                  */
 #define KBSP_LCD_V_RES          502U  /**< Height in pixels.                 */

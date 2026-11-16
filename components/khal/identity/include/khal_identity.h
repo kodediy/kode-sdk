@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file khal_identity.h
- * @brief The board's serial, derived from its C5's MAC.
+ * @brief The board's serial, derived from its C5's MAC, and the hardware
+ *        revision production writes.
  */
 #ifndef KHAL_IDENTITY_H_
 #define KHAL_IDENTITY_H_
@@ -27,6 +28,12 @@ extern "C" {
 
 /** @brief Printed serial plus NUL: "KODE-XXXX-XXXX-XXX". */
 #define KHAL_ID_PRETTY_LEN  19U
+
+/** @brief NVS key of the hardware revision, in KHAL_IDENTITY_NVS_NS. */
+#define KHAL_ID_BOARD_REV_KEY  "board_rev"
+
+/** @brief A hardware revision plus NUL: up to seven characters, as "1.0". */
+#define KHAL_ID_BOARD_REV_LEN  8U
 
 /**
  * @brief Name the board from the cached C5 MAC. Re-reads the cache each call.
@@ -70,6 +77,30 @@ bool khal_identity_valid(void);
  * @return KODE_OK, or KODE_ERROR when identity is unknown.
  */
 kode_status_t khal_identity_mac(uint8_t mac[KHAL_ID_MAC_LEN]);
+
+/**
+ * @brief The board's hardware revision, as production wrote it.
+ *
+ * Read from the store by khal_identity_init(). A stored value that is not a
+ * revision is none.
+ *
+ * @return "1.0", or an empty string when no official revision is loaded.
+ */
+const char *khal_identity_board_rev(void);
+
+/**
+ * @brief Write the board's hardware revision, which the factory reset keeps.
+ *
+ * Production's station writes it once a board, over the cable. A revision is
+ * one or more digits, a dot and one or more digits, at most
+ * KHAL_ID_BOARD_REV_LEN - 1 characters in all. A revision already written may
+ * be written again.
+ *
+ * @param rev The revision, as "1.0".
+ * @return KODE_OK stored and in use; KODE_DENIED NULL or not a revision;
+ *         KODE_IO_ERROR the store refused it, and the revision in use stays.
+ */
+kode_status_t khal_identity_set_board_rev(const char *rev);
 
 /**
  * @brief Encode any MAC into a canonical serial. Pure: no state, no hardware.

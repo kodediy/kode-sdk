@@ -3870,6 +3870,53 @@ static void info_mac_text(const uint8_t mac[KHAL_ID_MAC_LEN], char *out, size_t 
     }
 }
 
+/** @brief Say in the log why a board has no revision, when it has none. */
+static void board_rev_say_none(void)
+{
+    if ( '\0' == khal_identity_board_rev()[0] )
+    {
+        KLOG_N(TAG, "no official hardware revision is loaded: production "
+                    "writes it with board_rev on the cable");
+    }
+}
+
+/**
+ * @brief board_rev [value="1.0"]: the hardware revision production wrote, or
+ *        writes it.
+ *
+ * Read from any source; written from the cable alone, as the identity it sits
+ * beside, and kept across a factory reset. With nothing written the record
+ * says `value=-` and the log says why.
+ */
+static void h_board_rev(Console *me, const kcmd_t *c, const karg_val_t *v)
+{
+    char q[CONSOLE_QUOTED_MAX(KHAL_ID_BOARD_REV_LEN)];
+
+    (void)me;
+    if ( v[0].present )
+    {
+        if ( !console_src_allows(CONSOLE_NEED_CABLE) )
+        {
+            return;
+        }
+        kode_status_t const st = khal_identity_set_board_rev(v[0].s);
+        if ( KODE_DENIED == st )
+        {
+            console_reply_err(KCLI_ERR_VALUE, "value");
+            return;
+        }
+        if ( KODE_OK != st )
+        {
+            console_reply_err(KCLI_ERR_REJECT, c->verb);
+            return;
+        }
+    }
+    board_rev_say_none();
+    console_reply(">|board_rev value=%s",
+                  console_kv_text(q, sizeof(q), khal_identity_board_rev()));
+    console_reply(">ok");
+}
+
 /**
  * @brief info: what this board is.
  *
@@ -3899,10 +3946,13 @@ static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
     info_mac_text(mac, c5, sizeof(c5));
 
     /* The product is a firmware fact, so it answers even when the silicon
-     * would not: a board that cannot read its own MAC still knows what it is. */
-    console_reply(">|serial=%s product=\"%s\" board=\"%s\"",
+     * would not: a board that cannot read its own MAC still knows what it is.
+     * The revision is what production wrote, or `-` and the reason. */
+    char rev[CONSOLE_QUOTED_MAX(KHAL_ID_BOARD_REV_LEN)];
+    board_rev_say_none();
+    console_reply(">|serial=%s product=\"%s\" board=%s",
           known ? khal_identity_serial() : "-", KBSP_ID_PRODUCT,
-          KBSP_BOARD_REV);
+          console_kv_text(rev, sizeof(rev), khal_identity_board_rev()));
     console_reply(">|mac_p4=%s mac_c5=%s", p4, c5);
 
     /* Then what is programmed where: a descriptor is one 256-byte flash read,
@@ -6375,6 +6425,11 @@ static const karg_spec_t A_NVS_SET[] = {
     { .key = "key",   .required = true, .type = KARG_STRING },
     { .key = "value", .required = true, .type = KARG_STRING },
 };
+/* `value="1.0"`: the one string a hardware revision is, quoted as every
+ * string is. */
+static const karg_spec_t A_BOARD_REV[] = {
+    { .key = "value", .required = false, .type = KARG_STRING },
+};
 static const karg_spec_t A_NVS_KEY[] = {
     { .key = "key", .required = true, .type = KARG_STRING },
 };
@@ -6511,6 +6566,7 @@ static const kcmd_t CMDS[] = {
     { "nvs_get",    A_NVS_KEY,   1U, h_nvs_get    },
     { "nvs_del",    A_NVS_KEY,   1U, h_nvs_del    },
     { "nvs_list",   NULL,        0U, h_nvs_list   },
+    { "board_rev",  A_BOARD_REV, 1U, h_board_rev  },
 #if CONFIG_KODEOS_BOOT_ROLE_OS
     { "factory_reset", console_confirm_args, CONSOLE_CONFIRM_ARGS_N, h_factory_reset },
 #endif

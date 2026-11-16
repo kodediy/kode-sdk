@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "kbsp_board.h"
 #include "kdrv_slot.h"
 
 /** @brief One reset reason and what the banner says for it. */
@@ -91,4 +92,18 @@ size_t kode_banner_reset_line(char *out, size_t len, int32_t reason,
         return len - 1U;
     }
     return (size_t)n;
+}
+
+char const *kode_banner_board(char *out, size_t len, char const *rev)
+{
+    if ( (NULL == rev) || ('\0' == rev[0]) )
+    {
+        (void)snprintf(out, len, "%s (no official hardware revision loaded)",
+                       KBSP_PRODUCT_NAME);
+    }
+    else
+    {
+        (void)snprintf(out, len, "%s %s", KBSP_PRODUCT_NAME, rev);
+    }
+    return out;
 }

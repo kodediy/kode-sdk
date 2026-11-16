@@ -144,6 +144,43 @@ TEST_CASE("info names the P4's own MAC as mac_p4 and the C5's beside it", "[cons
     Mockkdrv_slot_Destroy();
 }
 
+/* ---- The board's revision: what production wrote, or none -------------- */
+
+TEST_CASE("info says board=- and why on a board production wrote no revision for",
+          "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    fake_nvs_reset();
+    (void)khal_identity_init();
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied("product=\"KODE-DOT\" board=-"));
+    TEST_ASSERT_TRUE_MESSAGE(replied("no official hardware revision is loaded"),
+                             "the log does not say why");
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("info says the revision production wrote", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    fake_nvs_reset();
+    (void)khal_identity_init();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_identity_set_board_rev("1.0"));
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied("product=\"KODE-DOT\" board=\"1.0\""));
+    TEST_ASSERT_FALSE(replied("no official hardware revision"));
+    Mockkdrv_slot_Destroy();
+}
+
 TEST_CASE("info names the P4's MAC on a board that has never seen its C5", "[console_info]")
 {
     console_up();
