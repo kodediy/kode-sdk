@@ -1438,6 +1438,67 @@ void display_minute_request(void);
  */
 void display_brightness_request(uint8_t pct, bool persist);
 
+/* ---- The glass asleep ------------------------------------------------------
+ * kode_sys_screen_sleep() posts DISPLAY_SLEEP_REQ_SIG. To sleep, AO_Display
+ * parks whoever draws (DISPLAY_PARK_SIG, answered with kode_sys_screen_parked()),
+ * puts the panel in sleep-in and takes its link down; to wake, it brings both
+ * back, gives the brightness and publishes DISPLAY_REPAINT_SIG. Each request
+ * ends in one DISPLAY_SLEEP_SIG. A task hears no event, so the same is kept in
+ * two words any thread may read: display_asleep() and display_sleep_last().
+ * With AO_LowPower the board's rest outranks the request: a round takes the
+ * glass over as it finds it, and the AWAKE that ends the rest wakes it.
+ */
+
+/** @brief How the last request to sleep or wake the glass ended. */
+typedef struct {
+    uint16_t answers;   /**< Requests answered since the boot; it wraps.     */
+    uint8_t  rc;        /**< The last answer's kode_status_t.                */
+    uint8_t  why;       /**< The last answer's display_sleep_why_t.          */
+} display_sleep_last_t;
+
+/**
+ * @brief Whether the glass is at rest: its link down, the panel asleep or, in
+ *        the board's ASLEEP, dimmed and showing its memory.
+ *
+ * A plain read of one word, from any thread. True from the moment AO_Display
+ * has taken the link down until it has brought the glass back.
+ *
+ * @return true while the glass is at rest.
+ */
+bool display_asleep(void);
+
+/**
+ * @brief How the last request to sleep or wake the glass ended.
+ *
+ * A plain read of one word, from any thread. AO_Display writes it just before
+ * it publishes DISPLAY_SLEEP_SIG, so a change of @c answers is one more
+ * request answered.
+ *
+ * @param out Filled; all zero before the first answer.
+ */
+void display_sleep_last(display_sleep_last_t *out);
+
+/**
+ * @brief A reason of DisplaySleepEvt in words, for a log line or an error text.
+ * @param why A display_sleep_why_t.
+ * @return The words; "" for DISPLAY_SLEEP_WHY_NONE and for a value that is no reason.
+ */
+const char *display_sleep_why_text(uint8_t why);
+
+/**
+ * @brief Tell AO_Display the renderer has stopped drawing, and hand it the
+ *        glyphs the minute is drawn from.
+ *
+ * What a renderer answers a round of AO_LowPower with; an app's sleep
+ * (DISPLAY_PARK_SIG) is answered with kode_sys_screen_parked(). The hand-over
+ * carries no park number, whatever @c park @p e holds. The strip is not
+ * copied: it stays the caller's, in PSRAM, until the next AWAKE (see
+ * DisplayGlyphsEvt). The event is copied; @p e need not outlive the call.
+ *
+ * @param e The glyphs and where they go; NULL when the renderer has none to give.
+ */
+void display_glyphs_hand(const DisplayGlyphsEvt *e);
+
 /* ---- Capture: a picture of the panel ------------------------------------
  * AO_Display owns the panel, so a capture is asked for. The answer is a loan:
  * the 402 KB buffer is collected separately and held until released, like
@@ -4590,17 +4651,6 @@ bool lowpower_wake_at(uint8_t who, uint64_t due_us);
  * @param why   Why, at most KODE_LOWPOWER_WHY_MAX - 1 characters; NULL for none.
  */
 void lowpower_ready(uint8_t who, uint32_t round, bool busy, const char *why);
-
-/**
- * @brief Hand AO_Display the glyphs the minute is drawn from.
- *
- * The strip is not copied: it stays the caller's, in PSRAM, until the next
- * AWAKE (see DisplayGlyphsEvt). The event is copied; @p e need not outlive
- * the call.
- *
- * @param e The glyphs and where they go.
- */
-void display_glyphs_hand(const DisplayGlyphsEvt *e);
 
 /**
  * @brief Tell AO_Radio that AO_Net has closed its sessions for an OFF round.

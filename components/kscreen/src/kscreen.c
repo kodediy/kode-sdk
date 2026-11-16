@@ -376,12 +376,14 @@ void kscreen_ctor(kscreen_t *s, QActive *owner, enum_t tick_sig)
     s->part_buf[0] = NULL;
     s->part_buf[1] = NULL;
     s->rot_buf = NULL;
+    s->parked  = false;
 }
 
 void kscreen_start(kscreen_t *s)
 {
     QActive_subscribe(s->owner, DISPLAY_STATE_SIG);
     QActive_subscribe(s->owner, DISPLAY_REPAINT_SIG);
+    QActive_subscribe(s->owner, DISPLAY_PARK_SIG);
     touch_subscribe(s->owner);
 #if CONFIG_KODE_TEST_DOT
     QActive_subscribe(s->owner, TEST_DOT_SCREEN_REQ_SIG);
@@ -499,7 +501,9 @@ kode_status_t kscreen_open(kscreen_t *s, DisplayStateEvt const *d)
 
 void kscreen_tick(kscreen_t *s)
 {
-    if ( NULL != s->disp )
+    /* Parked, a tick already queued is let go and not re-armed: the
+     * framebuffers may be gone. kscreen_repaint() starts the pass again. */
+    if ( (NULL != s->disp) && !s->parked )
     {
         /* A resting finger publishes nothing - AO_Touch only speaks on change
          * - so feed LVGL the unchanged position each pass while pressed:
@@ -532,6 +536,9 @@ void kscreen_tick(kscreen_t *s)
         {
             wait = KODE_GUI_TICK_MS;
         }
+        /* A repaint may have armed the timer while this tick sat in the
+         * queue; arming an armed QTimeEvt is a QP assert. */
+        (void)QTimeEvt_disarm(&s->tick);
         QTimeEvt_armX(&s->tick, KQP_TICKS_PER_MS(wait) + 1U, 0U);
     }
 }
@@ -542,6 +549,13 @@ void kscreen_touch(kscreen_t *s, TouchEvt const *t)
     {
         /* A contact that stopped counting lifts with no click: nothing was
          * tapped where it rested. */
+        lv_indev_wait_release(s->indev);
+    }
+    if ( s->parked && t->pressed && (NULL != s->indev) )
+    {
+        /* The glass is dark: a finger on it wakes the app, and presses
+         * nothing it cannot see. The contact lifts with no click, even when
+         * it outlasts the wake. */
         lv_indev_wait_release(s->indev);
     }
     s->x       = t->x;
@@ -561,11 +575,39 @@ void kscreen_repaint(kscreen_t *s)
         if ( s->direct )
         {
             /* The row flipped the panel on its own, so LVGL's idea of which
-             * framebuffer is free may be the one on the glass. */
+             * framebuffer is free may be the one on the glass; after a sleep
+             * the link brought both back new. */
             buffers_align(s->disp);
         }
         lv_obj_invalidate(lv_screen_active());
         lv_obj_invalidate(lv_layer_top());
+        if ( s->parked )
+        {
+            /* A tick that fell due before kscreen_park() may still be in the
+             * queue; kscreen_tick() disarms before it arms, so the two never
+             * meet on an armed timer. */
+            s->parked = false;
+            QTimeEvt_armX(&s->tick, KQP_TICKS_PER_MS(KODE_GUI_TICK_MS), 0U);
+        }
+    }
+}
+
+void kscreen_park(kscreen_t *s, uint32_t seq)
+{
+    if ( NULL != s->disp )
+    {
+        if ( !s->parked )
+        {
+            s->parked = true;
+            (void)QTimeEvt_disarm(&s->tick);
+        }
+        /* Answered again for a second ask: each sleep waits for its own. */
+        if ( kode_sys_screen_parked(seq) != KODE_OK )
+        {
+            /* AO_Display's wait runs out and the glass stays lit; its repaint
+             * starts the pass again. */
+            KLOG_E(TAG, "could not tell the display the screen stopped drawing");
+        }
     }
 }
 

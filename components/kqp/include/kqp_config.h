@@ -361,6 +361,12 @@
                                                 *   was asleep at the last write, and a reset ended it. */
 #define KODE_DISPLAY_RESTORE_RETRY_MS  200U    /**< AO_Display's wait before it puts the glass back again
                                                 *   after the link or the panel refused to wake. */
+#define KODE_DISPLAY_SLEEP_WAIT_MS     2000U   /**< Longest kode_display_sleep() waits for AO_Display to
+                                                *   sleep the glass or wake it: the renderer's
+                                                *   KODE_LOWPOWER_GLYPHS_WAIT_MS, then the panel's sleep-in
+                                                *   and the link, about 210 ms. */
+_Static_assert(KODE_DISPLAY_SLEEP_WAIT_MS > KODE_LOWPOWER_GLYPHS_WAIT_MS,
+               "a task's wait for the glass outlasts the renderer's time to stop drawing");
 
 /* ---- AO_Scheduler: the table, the clock and the lines it runs -------------- */
 #define KODE_SCHED_MAX           16U     /**< Entries, the built-in `mqtt` included (its slot is always taken). */

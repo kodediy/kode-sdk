@@ -17,6 +17,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
+#include "display_sleep.h"
 #include "fakes.h"
 #include "khal_system.h"
 #include "khal_time.h"
@@ -83,6 +84,8 @@ static _Atomic uint32_t  s_set_n;                               /**< How many th
 static char              s_op_text[OP_KINDS][OP_TEXT_MAX];
 
 static atomic_bool       s_prepare_ok = true;   /**< prepare() has memory to give.     */
+static _Atomic uint32_t  s_park_n;              /**< DISPLAY_PARK_SIG the fake was handed. */
+static _Atomic uint32_t  s_park_seq;            /**< The number the last park carried.   */
 
 /** @brief The fake's prepare: the screen's memory, or none. */
 static bool fake_prepare(void)
@@ -182,6 +185,13 @@ static bool fake_event(QEvt const *e)
     else if ( (QSignal)TOUCH_EVT_SIG == e->sig )
     {
         kode_widget_tapped(atomic_load(&s_gen), (uint32_t)((const TouchEvt *)e)->x);
+        handled = true;
+    }
+    else if ( (QSignal)DISPLAY_PARK_SIG == e->sig )
+    {
+        atomic_store(&s_park_seq, ((const DisplayParkEvt *)(const void *)e)->seq);
+        (void)atomic_fetch_add(&s_park_n, 1U);
+        (void)xSemaphoreGive(s_seen);
         handled = true;
     }
     else
@@ -2336,4 +2346,186 @@ TEST_CASE("a brightness that never finds a free event fails after its bound", "[
     TEST_ASSERT_EQUAL_UINT32(0U, bright_count());
     TEST_ASSERT_EQUAL_STRING("the screen did not take the brightness", kode_error());
     bright_pool_free_all();
+}
+
+/* ---- kode_display_sleep(): the request, then AO_Display's answer ---------- */
+
+/** @brief What the stand-in for AO_Display answers the request with. */
+static kode_status_t       s_sleep_rc;
+static display_sleep_why_t s_sleep_why;
+
+/** @brief Whether the stand-in leaves the glass as the request asked. */
+static bool s_sleep_obeys;
+
+/** @brief Requests the stand-in has taken off AO_Display's queue. */
+static uint32_t s_sleep_taken;
+
+/** @brief Whether the stand-in answers at all. */
+static bool s_sleep_silent;
+
+/** @brief Whether a wake overtakes the request, as one while the renderer parks does. */
+static bool s_sleep_woken;
+
+/**
+ * @brief AO_Display, for a task's wait: take the request waiting, set the
+ *        glass and the answer the way the owner does.
+ *
+ * Run from each of the task's own waits, so the answer lands while it waits.
+ */
+static void sleep_owner_step(void)
+{
+    const QEvt *e = NULL;
+
+    if ( xQueueReceive(AO_Display->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( ((QSignal)DISPLAY_SLEEP_REQ_SIG == e->sig) && s_sleep_woken )
+        {
+            /* Two answers in one step: this request's no, the wake's yes. */
+            display_sleep_answer_set(KODE_DENIED, DISPLAY_SLEEP_WHY_WOKEN);
+            display_sleep_answer_set(KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+        }
+        else if ( ((QSignal)DISPLAY_SLEEP_REQ_SIG == e->sig) && !s_sleep_silent )
+        {
+            if ( s_sleep_obeys )
+            {
+                display_sleep_glass_set(((const DisplaySleepReqEvt *)(const void *)e)->sleep);
+            }
+            display_sleep_answer_set(s_sleep_rc, s_sleep_why);
+        }
+        ++s_sleep_taken;
+        QF_gc(e);
+    }
+    /* The hook runs once: the owner goes on answering for the whole wait. */
+    fake_time_delay_hook(&sleep_owner_step);
+}
+
+/** @brief A clean start: an awake glass, an owner that does as asked. */
+static void sleep_fresh(void)
+{
+    bright_fresh();
+    display_sleep_glass_set(false);
+    s_sleep_rc     = KODE_OK;
+    s_sleep_why    = DISPLAY_SLEEP_WHY_NONE;
+    s_sleep_obeys  = true;
+    s_sleep_silent = false;
+    s_sleep_woken  = false;
+    s_sleep_taken  = 0U;
+    fake_time_delay_hook(&sleep_owner_step);
+}
+
+TEST_CASE("the display's sleep waits for AO_Display and is true once the glass is as asked",
+          "[kode_screen_sleep]")
+{
+    sleep_fresh();
+
+    TEST_ASSERT_TRUE(kode_display_sleep(true));
+    TEST_ASSERT_EQUAL_UINT(1U, s_sleep_taken);
+    TEST_ASSERT_TRUE(kode_sys_screen_is_asleep());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+
+    TEST_ASSERT_TRUE(kode_display_sleep(false));
+    TEST_ASSERT_EQUAL_UINT(2U, s_sleep_taken);
+    TEST_ASSERT_FALSE(kode_sys_screen_is_asleep());
+    TEST_ASSERT_LESS_THAN_UINT32(KODE_DISPLAY_SLEEP_BOUND_MS, kode_sys_time_ms());
+}
+
+TEST_CASE("a sleep AO_Display refuses is false at once, with the reason", "[kode_screen_sleep]")
+{
+    sleep_fresh();
+    s_sleep_rc    = KODE_TIMEOUT;
+    s_sleep_why   = DISPLAY_SLEEP_WHY_RENDERER;
+    s_sleep_obeys = false;
+
+    TEST_ASSERT_FALSE(kode_display_sleep(true));
+    TEST_ASSERT_EQUAL_STRING("the display did not go to sleep: the renderer did not stop drawing",
+                             kode_error());
+    TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(KODE_DISPLAY_SLEEP_BOUND_MS, kode_sys_time_ms(),
+                                         "a refusal waited out the whole bound");
+
+    s_sleep_rc  = KODE_DENIED;
+    s_sleep_why = DISPLAY_SLEEP_WHY_LENT;
+    TEST_ASSERT_FALSE(kode_display_sleep(true));
+    TEST_ASSERT_EQUAL_STRING("the display did not go to sleep: a screenshot or the mirror is reading it",
+                             kode_error());
+
+    s_sleep_why = DISPLAY_SLEEP_WHY_BOARD;
+    TEST_ASSERT_FALSE(kode_display_sleep(false));
+    TEST_ASSERT_EQUAL_STRING("the display did not wake: the board's rest has it", kode_error());
+}
+
+TEST_CASE("a sleep nobody answers is false after its bound, and says how long", "[kode_screen_sleep]")
+{
+    sleep_fresh();
+    s_sleep_silent = true;
+
+    TEST_ASSERT_FALSE(kode_display_sleep(true));
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_DISPLAY_SLEEP_BOUND_MS, kode_sys_time_ms());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_sleep_taken, "the request was posted more than once");
+    TEST_ASSERT_EQUAL_STRING("the display did not go to sleep in 2000 ms", kode_error());
+
+    fake_time_reset();
+    fake_time_delay_hook(&sleep_owner_step);
+    TEST_ASSERT_FALSE(kode_display_sleep(false));
+    TEST_ASSERT_EQUAL_STRING("the display did not wake in 2000 ms", kode_error());
+}
+
+/* An answer that leaves the glass the other way round is some earlier
+ * request's: this one's is still to come. */
+TEST_CASE("an answer that is not this request's does not end the wait", "[kode_screen_sleep]")
+{
+    sleep_fresh();
+    s_sleep_obeys = false;
+
+    TEST_ASSERT_FALSE(kode_display_sleep(true));
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_DISPLAY_SLEEP_BOUND_MS, kode_sys_time_ms());
+    TEST_ASSERT_EQUAL_STRING("the display did not go to sleep in 2000 ms", kode_error());
+}
+
+/* A wake that comes while the renderer parks answers the sleep no and itself
+ * yes in one step; the word keeps only the second. The sleeper hears it at
+ * once, not at its bound. */
+TEST_CASE("a sleep a later wake undid is false at once", "[kode_screen_sleep]")
+{
+    sleep_fresh();
+    s_sleep_woken = true;
+
+    TEST_ASSERT_FALSE(kode_display_sleep(true));
+    TEST_ASSERT_EQUAL_STRING("the display did not go to sleep: a later request undid it", kode_error());
+    TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(KODE_DISPLAY_SLEEP_BOUND_MS, kode_sys_time_ms(),
+                                         "the sleeper waited out its bound");
+}
+
+TEST_CASE("a sleep that cannot be posted says the system is busy", "[kode_screen_sleep]")
+{
+    sleep_fresh();
+    fake_time_delay_hook(NULL);
+    bright_pool_exhaust();
+
+    TEST_ASSERT_FALSE(kode_display_sleep(true));
+    TEST_ASSERT_EQUAL_UINT32(0U, bright_count());
+    TEST_ASSERT_EQUAL_STRING("the display did not go to sleep: the system is busy", kode_error());
+    bright_pool_free_all();
+}
+
+/* ---- The renderer parked for the display's sleep ---------------------------- */
+
+/** @brief A park's number, any but 0. */
+#define TEST_PARK_SEQ  7U
+
+TEST_CASE("the display's call to stop drawing reaches the screen", "[kode_screen]")
+{
+    static const DisplayParkEvt park = { QEVT_INITIALIZER(DISPLAY_PARK_SIG), TEST_PARK_SEQ };
+
+    screen_case();
+    TEST_ASSERT_TRUE(kode_screen_new("Park"));
+    TEST_ASSERT_TRUE(seen_wait(1U));
+
+    const uint32_t before = atomic_load(&s_park_n);
+
+    /* Posted, not published, so no other subscriber in this binary hears it. */
+    QACTIVE_POST(AO_KodeStandard, &park.super, NULL);
+    TEST_ASSERT_TRUE(seen_wait(1U));
+    TEST_ASSERT_EQUAL_UINT32(before + 1U, atomic_load(&s_park_n));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(TEST_PARK_SEQ, atomic_load(&s_park_seq),
+                                     "the park's number did not reach the screen");
 }

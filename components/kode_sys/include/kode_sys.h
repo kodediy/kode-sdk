@@ -92,6 +92,48 @@ kode_status_t kode_sys_led_set_rgb(uint8_t r, uint8_t g, uint8_t b);
  */
 kode_status_t kode_sys_screen_brightness(uint8_t pct);
 
+/**
+ * @brief Put the display to sleep, or wake it.
+ *
+ * Asleep is the panel in sleep-in and its link to the processor down: the
+ * glass is dark, nothing is drawn, and the touch keeps reporting. That is what
+ * a brightness of 0 leaves running. The saving is the panel's and the link's
+ * own draw.
+ *
+ * To sleep, AO_Display first asks whoever draws to stop, with
+ * DISPLAY_PARK_SIG (DisplayParkEvt): a kscreen renderer answers in
+ * kscreen_park(), one of the app's own with kode_sys_screen_parked(), and
+ * neither draws again before DISPLAY_REPAINT_SIG. A renderer is whoever has
+ * asked for the panel's state (display_state_request()) or flushed, drawn
+ * yet or not. Every park carries a number, and only the answer that names
+ * the park in hand settles the sleep: one that comes late, or never, leaves
+ * the next sleep its own. The link goes down only after that answer, and a
+ * renderer that gives none in KODE_LOWPOWER_GLYPHS_WAIT_MS leaves the glass
+ * lit. To wake, the link and the panel come back, the brightness is the one
+ * the glass had, and DISPLAY_REPAINT_SIG has the renderer paint it whole.
+ *
+ * Each call that returns KODE_OK ends in one DISPLAY_SLEEP_SIG (DisplaySleepEvt)
+ * on the bus: KODE_OK when the glass is as asked, also when it already was;
+ * otherwise the reason. A wake the panel refuses is tried again every
+ * KODE_DISPLAY_RESTORE_RETRY_MS and answered when it works. With AO_LowPower
+ * the board's rest has the glass first: a round takes it as it finds it, and
+ * the AWAKE that ends the rest wakes it, with no DISPLAY_SLEEP_SIG of its own:
+ * DISPLAY_REPAINT_SIG says the glass is back.
+ *
+ * @param sleep true to sleep, false to wake.
+ * @return As the commands' rule above.
+ */
+kode_status_t kode_sys_screen_sleep(bool sleep);
+
+/**
+ * @brief Tell AO_Display the app's renderer has stopped drawing: the answer to DISPLAY_PARK_SIG.
+ * @note For a renderer of the app's own. kscreen answers in kscreen_park().
+ * @param seq The DisplayParkEvt's @c seq: each park is answered with its own.
+ * @return As the commands' rule above; KODE_DENIED for a @p seq of 0, which no
+ *         park carries.
+ */
+kode_status_t kode_sys_screen_parked(uint32_t seq);
+
 /* ---- Infrared: to AO_Ir; without KODEOS_RADIO (the block is on the C5) AO_Ir refuses ----
  * The C5 link, for this command and the infrared requests below: one that
  * finds the link down is held while AO_Ir has AO_Radio bring it up, within its
@@ -1689,6 +1731,14 @@ bool kode_sys_nfc_is_emulating(void);
  * @return true from the start's KODE_OK until the stop ends.
  */
 bool kode_sys_rfid_is_emulating(void);
+
+/* ---- The screen: AO_Display's word on the glass ---- */
+
+/**
+ * @brief Whether the display is asleep: by kode_sys_screen_sleep(), or by the board's own rest.
+ * @return true from the moment the link is down until the glass is back.
+ */
+bool kode_sys_screen_is_asleep(void);
 
 /* ---- Touch: AO_Touch's reports of the finger ---- */
 

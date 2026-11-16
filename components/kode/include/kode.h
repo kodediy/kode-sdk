@@ -2246,6 +2246,29 @@ bool kode_rfid_emulate_stop(void);
  */
 bool kode_display_set_brightness(uint8_t pct);
 
+/** @brief How long kode_display_sleep() waits for the display, in ms. */
+#define KODE_DISPLAY_SLEEP_BOUND_MS 2000U
+
+/**
+ * @brief Put the display to sleep, or wake it.
+ *
+ * Asleep, the panel and its link to the processor are off: the glass is dark
+ * and the board draws less than at a brightness of 0, which leaves both
+ * running. The touch keeps reading, so a touch event can be what wakes it.
+ * On waking, the screen comes back as the app last left it, at the brightness
+ * it had; what the app draws while it sleeps shows then.
+ *
+ * Waits until the display is as asked, up to KODE_DISPLAY_SLEEP_BOUND_MS: a
+ * sleep waits for the screen to finish the frame it draws, up to 1.5 s, then
+ * puts the panel to sleep and takes its link down. Already asleep, or already
+ * awake, is true at once. One task at a time.
+ *
+ * @param sleep true to sleep, false to wake.
+ * @return true when the display is as asked; false with kode_error() saying
+ *         why: a screenshot is being read, the display did not answer in time.
+ */
+bool kode_display_sleep(bool sleep);
+
 /* ---- Touch ---- */
 
 /*

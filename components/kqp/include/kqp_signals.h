@@ -448,6 +448,17 @@ enum KodeSignals {
                                  *   The firmware's LVGL owner builds it and
                                  *   answers test_dot_screen_done() once it
                                  *   is on the panel.                       */
+    DISPLAY_PARK_SIG,           /**< AO_Display: the glass is about to sleep
+                                 *   for kode_sys_screen_sleep()
+                                 *   (DisplayParkEvt). Whoever draws stops
+                                 *   drawing and says so with
+                                 *   kode_sys_screen_parked(seq), within
+                                 *   KODE_LOWPOWER_GLYPHS_WAIT_MS, and draws
+                                 *   nothing until DISPLAY_REPAINT_SIG.     */
+    DISPLAY_SLEEP_SIG,          /**< AO_Display: how one request to sleep or
+                                 *   wake the glass ended (DisplaySleepEvt).
+                                 *   Once per DISPLAY_SLEEP_REQ_SIG, done or
+                                 *   refused.                               */
 #if CONFIG_KODE_LOWPOWER
     LOWPOWER_ROUND_SIG,         /**< Published by AO_LowPower: a round of
                                  *   readiness is open for a target state,
@@ -876,6 +887,10 @@ enum KodeSignals {
     DISPLAY_STATE_REQ_SIG,      /**< AO_Display: publish DISPLAY_STATE_SIG
                                  *   again, for whoever started too late to
                                  *   have heard the first one.                */
+    DISPLAY_SLEEP_REQ_SIG,      /**< AO_Display: put the glass to sleep or
+                                 *   wake it (DisplaySleepReqEvt). Posted by
+                                 *   kode_sys_screen_sleep(); answered with
+                                 *   one DISPLAY_SLEEP_SIG.                   */
     DISPLAY_CAPTURE_REQ_SIG,    /**< AO_Display: copy the frame on the glass
                                  *   and say how big it is
                                  *   (DisplayCaptureReqEvt).                  */
@@ -1867,6 +1882,17 @@ enum KodeSignals {
                                  *   Private to kode_standard_ao.c.          */
 
     DISPLAY_HEALTH_SIG,         /**< AO_Display private QTimeEvt: the glass is looked at. */
+    DISPLAY_GLYPHS_SIG,         /**< AO_Display (from display_glyphs_hand()):
+                                 *   the renderer has stopped drawing, for
+                                 *   a round or an app's sleep, and hands
+                                 *   the glyph strip the minute is drawn
+                                 *   from, or none (DisplayGlyphsEvt).      */
+    DISPLAY_GLYPHS_TMO_SIG,     /**< AO_Display private QTimeEvt, one-shot:
+                                 *   the renderer handed nothing in
+                                 *   KODE_LOWPOWER_GLYPHS_WAIT_MS.          */
+    DISPLAY_RESTORE_SIG,        /**< AO_Display private QTimeEvt, one-shot:
+                                 *   try again to put the glass back after
+                                 *   a wake it could not carry out.         */
 
 #if CONFIG_KODE_LOWPOWER
     LOWPOWER_REQ_SIG,           /**< AO_LowPower (direct post, from
@@ -1900,24 +1926,15 @@ enum KodeSignals {
                                  *   AO_LowPower): light the glass for the
                                  *   minute's glyphs and let it go dark
                                  *   again. Static event, no payload.       */
-    DISPLAY_GLYPHS_SIG,         /**< AO_Display (from display_glyphs_hand()):
-                                 *   the glyph strip the minute is drawn
-                                 *   from (DisplayGlyphsEvt).               */
     RADIO_SLEEP_NOTE_SIG,       /**< AO_Radio private: the C5 woke the P4, or
                                  *   the P4 woke it (RadioSleepNoteEvt).    */
     RADIO_NET_LEFT_SIG,         /**< AO_Radio (direct post, from
                                  *   radio_net_left()): AO_Net has closed its
                                  *   sessions for an OFF round, so the link
                                  *   may go down (RadioNetLeftEvt).         */
-    DISPLAY_GLYPHS_TMO_SIG,     /**< AO_Display private QTimeEvt, one-shot:
-                                 *   the renderer handed no glyphs in
-                                 *   KODE_LOWPOWER_GLYPHS_WAIT_MS.          */
     TOUCH_RESTORE_SIG,          /**< AO_Touch private QTimeEvt, one-shot:
                                  *   try again to write the controller back
                                  *   to its awake settings.                 */
-    DISPLAY_RESTORE_SIG,        /**< AO_Display private QTimeEvt, one-shot:
-                                 *   try again to put the glass back after
-                                 *   an AWAKE it could not carry out.       */
     LOWPOWER_STATE_RETRY_SIG,   /**< AO_LowPower private QTimeEvt, one-shot:
                                  *   publish the state change again, the
                                  *   event pool having had none to carry it. */
@@ -5435,6 +5452,98 @@ typedef struct {
                           *   Meaningless when @c up is false.              */
 } DisplayStateEvt;
 
+/** @brief Put the glass to sleep or wake it (DISPLAY_SLEEP_REQ_SIG). */
+typedef struct {
+    QEvt super;
+    bool sleep;   /**< true: the panel in sleep-in and its link down. false:
+                   *   both back, the glass at the brightness it had.      */
+} DisplaySleepReqEvt;
+
+/** @brief Why a request to sleep or wake the glass ended as it did (DisplaySleepEvt::why). */
+typedef enum {
+    DISPLAY_SLEEP_WHY_NONE = 0,   /**< The glass is as asked.                          */
+    DISPLAY_SLEEP_WHY_NO_PANEL,   /**< The panel is not up.                            */
+    DISPLAY_SLEEP_WHY_LENT,       /**< A screenshot or the mirror is reading the glass. */
+    DISPLAY_SLEEP_WHY_TEST,       /**< The panel's test row is on the glass.           */
+    DISPLAY_SLEEP_WHY_RENDERER,   /**< Whoever draws did not stop in
+                                   *   KODE_LOWPOWER_GLYPHS_WAIT_MS.                  */
+    DISPLAY_SLEEP_WHY_PANEL,      /**< The panel or its link refused a step.          */
+    DISPLAY_SLEEP_WHY_BOARD,      /**< The board's own rest has the glass.            */
+    DISPLAY_SLEEP_WHY_UNDERWAY,   /**< An earlier request is still being carried out. */
+    DISPLAY_SLEEP_WHY_WOKEN,      /**< A wake came before the glass slept.            */
+    DISPLAY_SLEEP_WHY_EVENTS,     /**< No event was free to ask the renderer to stop. */
+    DISPLAY_SLEEP_WHY_COUNT       /**< How many reasons there are.                    */
+} display_sleep_why_t;
+
+/**
+ * @brief How one request to sleep or wake the glass ended (DISPLAY_SLEEP_SIG).
+ *
+ * Published once per DISPLAY_SLEEP_REQ_SIG, when AO_Display has done its part
+ * or refused: asleep is the panel in sleep-in with its link down; awake is
+ * both back, the brightness given and DISPLAY_REPAINT_SIG published. The first
+ * frame is the renderer's, after it.
+ */
+typedef struct {
+    QEvt    super;
+    bool    asleep;   /**< Whether the glass is at rest now.                  */
+    uint8_t rc;       /**< A kode_status_t: KODE_OK when the glass is as the
+                       *   request asked.                                     */
+    uint8_t why;      /**< A display_sleep_why_t: why not, when @c rc is not
+                       *   KODE_OK.                                           */
+} DisplaySleepEvt;
+
+/**
+ * @brief Stop drawing: the glass is about to sleep for an app (DISPLAY_PARK_SIG).
+ *
+ * The renderer answers with kode_sys_screen_parked(seq). AO_Display settles
+ * the sleep only with the number of the park it is waiting for, so an answer
+ * that comes late, or one that never comes, leaves the next sleep its own.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t seq;   /**< This park's number, never 0.                         */
+} DisplayParkEvt;
+
+/**
+ * @brief What the renderer hands AO_Display once it has stopped drawing
+ *        (DISPLAY_GLYPHS_SIG): for a round, the glyphs the minute is drawn
+ *        from; for an app's sleep, none.
+ *
+ * The one exception to rule 7 that this event makes, and the reason: the
+ * eleven glyphs (0 to 9 and the colon) of a large font are far more than an
+ * event can carry, and copying them into the pool for every hand-over would
+ * only move the same bytes twice. @c strip is in PSRAM, owned by the sender,
+ * and valid from the hand-over until the board is AWAKE again: AO_Display
+ * reads it and never frees or writes it.
+ */
+typedef struct {
+    QEvt            super;
+    const uint16_t *strip;    /**< The glyphs, RGB565, in one row: the ten
+                               *   digits 0 to 9, glyph_w wide each, then the
+                               *   colon, colon_w wide; the row is
+                               *   10 * glyph_w + colon_w pixels wide and
+                               *   glyph_h tall. NULL: the renderer is parked
+                               *   and has no glyphs to give.                */
+    uint16_t        glyph_w;  /**< One digit's width, pixels.                 */
+    uint16_t        glyph_h;  /**< One digit's height, pixels.                */
+    uint16_t        x;        /**< Left edge of the time on the glass.        */
+    uint16_t        y;        /**< Top edge of the time on the glass.         */
+    uint16_t        colon_w;  /**< The colon's width, pixels.                 */
+    uint8_t         rest_pct; /**< The glass's brightness while ASLEEP.       */
+    bool            h12;      /**< true: the hour is read on a 12 h dial, 1 to
+                               *   12 with no AM or PM, and an hour of one
+                               *   figure leaves the tens cell blank, the
+                               *   way the renderer's own clock does. false:
+                               *   00 to 23.                                 */
+    uint8_t         adv[11];  /**< From a figure to the next, the ten digits
+                               *   then the colon, so the time keeps the
+                               *   renderer's own spacing. All 0: fixed cells. */
+    uint32_t        park;     /**< The DisplayParkEvt this answers, set by
+                               *   kode_sys_screen_parked(); 0 for a round's
+                               *   hand-over, which display_glyphs_hand()
+                               *   always sends.                             */
+} DisplayGlyphsEvt;
+
 /** @brief Copy the frame on the glass for @c who (DISPLAY_CAPTURE_REQ_SIG). */
 typedef struct {
     QEvt     super;
@@ -7350,40 +7459,6 @@ typedef struct {
     bool     busy;     /**< true: not now; the state change is refused.       */
     char     why[KODE_LOWPOWER_WHY_MAX]; /**< Why busy; NUL-terminated.       */
 } LowPowerReadyEvt;
-
-/**
- * @brief The glyphs the minute is drawn from (DISPLAY_GLYPHS_SIG).
- *
- * The one exception to rule 7 that this event makes, and the reason: the
- * eleven glyphs (0 to 9 and the colon) of a large font are far more than an
- * event can carry, and copying them into the pool for every hand-over would
- * only move the same bytes twice. @c strip is in PSRAM, owned by the sender,
- * and valid from the hand-over until the board is AWAKE again: AO_Display
- * reads it and never frees or writes it.
- */
-typedef struct {
-    QEvt            super;
-    const uint16_t *strip;    /**< The glyphs, RGB565, in one row: the ten
-                               *   digits 0 to 9, glyph_w wide each, then the
-                               *   colon, colon_w wide; the row is
-                               *   10 * glyph_w + colon_w pixels wide and
-                               *   glyph_h tall. NULL: the renderer is parked
-                               *   and has no glyphs to give.                */
-    uint16_t        glyph_w;  /**< One digit's width, pixels.                 */
-    uint16_t        glyph_h;  /**< One digit's height, pixels.                */
-    uint16_t        x;        /**< Left edge of the time on the glass.        */
-    uint16_t        y;        /**< Top edge of the time on the glass.         */
-    uint16_t        colon_w;  /**< The colon's width, pixels.                 */
-    uint8_t         rest_pct; /**< The glass's brightness while ASLEEP.       */
-    bool            h12;      /**< true: the hour is read on a 12 h dial, 1 to
-                               *   12 with no AM or PM, and an hour of one
-                               *   figure leaves the tens cell blank, the
-                               *   way the renderer's own clock does. false:
-                               *   00 to 23.                                 */
-    uint8_t         adv[11];  /**< From a figure to the next, the ten digits
-                               *   then the colon, so the time keeps the
-                               *   renderer's own spacing. All 0: fixed cells. */
-} DisplayGlyphsEvt;
 
 /**
  * @brief A wake of the P4 that involved the C5 (RADIO_SLEEP_NOTE_SIG).

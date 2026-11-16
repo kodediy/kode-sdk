@@ -43,6 +43,20 @@ extern "C" {
  */
 void kode_block_delay_ms(uint32_t ms);
 
+/* ---- The screen: AO_Display's answers to kode_sys_screen_sleep() ---- */
+
+/**
+ * @brief How many requests to sleep or wake the display AO_Display has answered, and how the last one ended.
+ * @note Never blocks: a task, which hears no DISPLAY_SLEEP_SIG, waits for its
+ *       request by watching the count change.
+ * @param[out] rc  The last answer's status: KODE_OK when the glass was as that
+ *                 request asked. NULL when not wanted.
+ * @param[out] why Why not, in words, or "" for KODE_OK; a string owned by
+ *                 the system. NULL when not wanted.
+ * @return The count since the boot; it wraps at 65536.
+ */
+uint16_t kode_block_screen_sleep_answers(kode_status_t *rc, const char **why);
+
 /* ---- Infrared: through AO_Ir; without KODEOS_RADIO (the block is on the C5) the calls refuse ---- */
 
 /**

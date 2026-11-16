@@ -40,6 +40,7 @@ set(srcs
     "haptic/src/haptic_ao.c"
     "power/src/power_ao.c"
     "display/src/display_ao.c"
+    "display/src/display_sleep.c"
     "touch/src/touch_ao.c"
     # The touch test's record, which the console writes with: its own file,
     # so the console does not link AO_Touch into an app that never uses it.

@@ -21,6 +21,7 @@
 
 #include "ao_spy.h"
 #include "config_support.h"
+#include "display_sleep.h"
 #include "fakes.h"
 #include "kaos.h"
 #include "kbsp_owners.h"
@@ -213,6 +214,44 @@ static const DisplayStateEvt *announced(void)
         return NULL;
     }
     return (DisplayStateEvt const *)e;
+}
+
+/**
+ * @brief Boot AO_Display again, with nobody drawing on it yet.
+ *
+ * AO_Display counts a renderer from the first state request or flush and
+ * never forgets it, and the bring-up above asks for the state as AO_Gui does.
+ * A case about a firmware with no renderer starts from a second boot: the
+ * AO's timers out of QF's list and its queue emptied, then the constructor,
+ * the initial transition and the supply's two answers.
+ *
+ * @return The brightness the second boot announced.
+ */
+static uint8_t display_headless(void)
+{
+    display_up_once(0U);
+    qf_support_disarm_timers(AO_Display);
+    qf_support_reap_timers();
+    (void)qf_support_waiting_of(AO_Display, 0U);
+    kdrv_jpeg_init_IgnoreAndReturn(KODE_OK);
+    kdrv_ppa_init_IgnoreAndReturn(KODE_OK);
+    ao_spy_drain();
+
+    Display_ctor();
+    QASM_INIT(AO_Display, (void *)0, 0U);
+    supply_answered(KDRV_TCA_O7, 1);
+    kdrv_display_init_ExpectAndReturn(KODE_OK);
+    supply_answered(KDRV_TCA_C7, 0);
+
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the second boot announced no panel");
+    TEST_ASSERT_EQUAL_INT((int)DISPLAY_STATE_SIG, (int)e->sig);
+    uint8_t const bright = ((const DisplayStateEvt *)(const void *)e)->bright;
+
+    ao_spy_drain();
+    fake_klog_reset();
+    return bright;
 }
 
 /* ---- The rest: stand-ins for the driver's three new calls ------------------ */
@@ -905,10 +944,10 @@ TEST_CASE("another owner's key is not AO_Display's to answer", "[display_ao]")
 
 /* ---- The rest: a board nobody has drawn on ---------------------------------- */
 
-/* These come before every flush in this file on purpose: AO_Display counts a
- * renderer from its first flush and never forgets it, so the cases below see
- * the glass as a headless firmware does. The cases after the flushing section
- * see it as kodeOS does. */
+/* AO_Display counts a renderer from the first state request or flush and never
+ * forgets it. The cases below boot it again first, with display_headless(), so
+ * they see the glass as a firmware with nobody drawing does; the cases after
+ * the flushing section see it as kodeOS does. */
 
 /* A round for ASLEEP: the glass is dimmed to the level the interface gave, or
  * to the default when it gave none, and only then does the link go; the
@@ -917,7 +956,7 @@ TEST_CASE("a round for ASLEEP with no renderer dims the glass, drops the link, "
           "then answers", "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     round_for(KODE_LP_ASLEEP);
@@ -943,9 +982,8 @@ TEST_CASE("AWAKE restores the glass once, however often it is said",
     uint8_t user;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    user = display_headless();
     rest_mocks();
-    user = announced()->bright;
     ao_spy_drain();
 
     round_for(KODE_LP_ASLEEP);
@@ -973,7 +1011,7 @@ TEST_CASE("a restore the link refused is tried again until it answers",
           "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     ao_spy_drain();
 
@@ -1012,7 +1050,7 @@ TEST_CASE("a restore the link refused is tried again until it answers",
 TEST_CASE("a new round ends the restore retry", "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     round_for(KODE_LP_ASLEEP);
@@ -1037,9 +1075,8 @@ TEST_CASE("a round for OFF sleeps the panel and drops the link",
     uint8_t user;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    user = display_headless();
     rest_mocks();
-    user = announced()->bright;
     ao_spy_drain();
 
     round_for(KODE_LP_OFF);
@@ -1079,7 +1116,7 @@ TEST_CASE("STATE(OFF) after the sleep-in drives the reset line low, then asks fo
     unsigned asked;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     round_for(KODE_LP_OFF);
@@ -1109,7 +1146,7 @@ TEST_CASE("STATE(OFF) asks for the supply off even when the reset line is refuse
     uint32_t asked;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     s_reset_low_rc = KODE_DENIED;
 
@@ -1136,7 +1173,7 @@ TEST_CASE("the panel keeps its supply when it did not sleep, and for ASLEEP",
     unsigned asked;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     /* ASLEEP, the glass at rest: no reset line, no supply. */
@@ -1187,7 +1224,7 @@ TEST_CASE("OFF from the ASLEEP rest brings the link up for the sleep-in",
           "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     round_for(KODE_LP_ASLEEP);
@@ -1213,7 +1250,7 @@ TEST_CASE("OFF from the ASLEEP rest brings the link up for the sleep-in",
 TEST_CASE("a link that will not go down refuses the round", "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     s_link_down_rc = KODE_ERROR;
 
@@ -1236,7 +1273,7 @@ TEST_CASE("a link error on the way to OFF still wakes the link and the panel",
           "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     s_link_down_rc = KODE_ERROR;
 
@@ -1258,12 +1295,272 @@ TEST_CASE("a link error on the way to OFF still wakes the link and the panel",
     Mockkdrv_display_Destroy();
 }
 
+/* ---- The glass asleep for an app: kode_sys_screen_sleep() ------------------ */
+
+/** @brief The rest's stand-ins, and the spy listening for the request's answers. */
+static void sleep_mocks(void)
+{
+    rest_mocks();
+    ao_spy_subscribe(DISPLAY_PARK_SIG);
+    ao_spy_subscribe(DISPLAY_SLEEP_SIG);
+    ao_spy_drain();
+}
+
+/** @brief An app asks for the glass asleep (true) or awake (false). */
+static void sleep_asked(bool sleep)
+{
+    DisplaySleepReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(DISPLAY_SLEEP_REQ_SIG);
+    e.sleep = sleep;
+    QASM_DISPATCH(AO_Display, &e.super, 0U);
+}
+
+/** @brief The next thing on the bus is @p sig. */
+static void expect_published(enum_t sig)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "nothing was published");
+    TEST_ASSERT_EQUAL_INT((int)sig, (int)e->sig);
+}
+
+/** @brief The next thing on the bus is a request's answer, as given. */
+static void expect_sleep_event(bool asleep, kode_status_t rc, display_sleep_why_t why)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the request was not answered");
+    TEST_ASSERT_EQUAL_INT((int)DISPLAY_SLEEP_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_INT(asleep, ((const DisplaySleepEvt *)(const void *)e)->asleep);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)rc, ((const DisplaySleepEvt *)(const void *)e)->rc);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)why, ((const DisplaySleepEvt *)(const void *)e)->why);
+}
+
+/** @brief The next thing on the bus is the last request's answer, as given,
+ *         and the words a task reads say the same. */
+static void expect_sleep_answer(bool asleep, kode_status_t rc, display_sleep_why_t why)
+{
+    display_sleep_last_t last;
+
+    expect_sleep_event(asleep, rc, why);
+    display_sleep_last(&last);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)rc, last.rc);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)why, last.why);
+    TEST_ASSERT_EQUAL_INT(asleep, display_asleep());
+}
+
+/** @brief How many requests AO_Display has answered since the boot. */
+static uint16_t sleep_answers(void)
+{
+    display_sleep_last_t last;
+
+    display_sleep_last(&last);
+    return last.answers;
+}
+
+/* With nobody drawing there is nothing to wait for: the panel sleeps, then its
+ * link goes, and the wake undoes both in the order the panel needs - the link
+ * first, since the sleep-out rides it. */
+TEST_CASE("an app's sleep with no renderer sleeps the panel, drops the link and says so; "
+          "its wake brings both back", "[display_ao][sleep]")
+{
+    uint8_t  user;
+    uint16_t answered;
+
+    Mockkdrv_display_Init();
+    user = display_headless();
+    sleep_mocks();
+    ao_spy_drain();
+    answered = sleep_answers();
+
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "one request, one answer");
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)(answered + 1U), sleep_answers());
+
+    s_trace_n = 0U;
+    sleep_asked(false);
+    EXPECT_TRACE(T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(user, s_driven, "the brightness the glass had is back");
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)(answered + 2U), sleep_answers());
+
+    Mockkdrv_display_Destroy();
+}
+
+/* Asking for what is already true moves nothing and is still answered. */
+TEST_CASE("a glass already as asked is answered at once and not touched", "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+
+    sleep_asked(false);
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    s_trace_n = 0U;
+    sleep_asked(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a sleeping panel was put to sleep again");
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A panel that refuses the sleep-in is left as it was: lit, its link up. */
+TEST_CASE("a panel that will not sleep leaves the glass awake, and the asker is told",
+          "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+    s_sleep_in_rc = KODE_ERROR;
+
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_UP, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_IO_ERROR, DISPLAY_SLEEP_WHY_PANEL);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    /* And nothing is left half done: the next request starts from awake. */
+    s_sleep_in_rc = KODE_OK;
+    s_trace_n = 0U;
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A link that answers an error has gone down all the same, with the panel
+ * already asleep: both are brought back before the asker hears no. */
+TEST_CASE("a link that will not go down wakes the panel again, and the asker is told",
+          "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+    s_link_down_rc = KODE_ERROR;
+
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_IO_ERROR, DISPLAY_SLEEP_WHY_PANEL);
+
+    Mockkdrv_display_Destroy();
+}
+
+/* The wake is not answered until the glass is back: a link that refuses is
+ * asked again on the restore timer, and a second wake meanwhile is told the
+ * first is still under way. */
+TEST_CASE("a wake the link refuses is tried again and answered when the glass is back",
+          "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    s_link_up_rc = KODE_ERROR;
+    s_trace_n = 0U;
+    sleep_asked(false);
+    EXPECT_TRACE(T_LINK_UP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a wake that failed was answered");
+    TEST_ASSERT_TRUE_MESSAGE(display_asleep(), "the glass is still dark");
+
+    sleep_asked(false);
+    expect_sleep_answer(true, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+
+    s_link_up_rc = KODE_OK;
+    s_trace_n = 0U;
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_RESTORE_RETRY_MS) + 1U);
+    EXPECT_TRACE(T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    Mockkdrv_display_Destroy();
+}
+
+/* The board's rest has the glass first. A round that finds it asleep for the
+ * app keeps it as it is and answers ready; the AWAKE that ends the rest wakes
+ * it, and the app's next request starts from an awake glass. */
+TEST_CASE("the board's rest takes over a glass the app slept, and its AWAKE wakes it",
+          "[display_ao][sleep][lowpower]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    s_trace_n = 0U;
+    round_for(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a glass at rest was moved for the round");
+    expect_answer(false, NULL);
+    expect_no_more_answers();
+
+    state_awake(KODE_LP_ASLEEP);
+    EXPECT_TRACE(T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    TEST_ASSERT_FALSE(display_asleep());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the board's wake answers no request");
+
+    s_trace_n = 0U;
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* While the board rests the glass is not the app's to wake; asking for it
+ * asleep is asking for what it is. */
+TEST_CASE("a wake asked while the board rests is refused, and a sleep finds it asleep",
+          "[display_ao][sleep][lowpower]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+    s_trace_n = 0U;
+
+    sleep_asked(false);
+    expect_sleep_answer(true, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the resting glass was touched");
+
+    state_awake(KODE_LP_ASLEEP);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
 /* The minute is written only into a glass that is resting, and only from
  * glyphs: without them the panel's memory is left as it is. */
 TEST_CASE("the minute without glyphs writes nothing", "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     fake_time_wall_set(EPOCH_0941 * US_PER_S);
 
@@ -2044,5 +2341,455 @@ TEST_CASE("pixel-path errors on most frames are a lost glass", "[display_ao]")
     look_seconds(5U, 66U, 60U);
     TEST_ASSERT_EQUAL_UINT(before, fake_system_restarts());
     TEST_ASSERT_TRUE(fake_klog_saw("the glass stays lost"));
+    Mockkdrv_display_Destroy();
+}
+
+/* ---- The glass asleep for an app, with a renderer -------------------------- */
+
+/**
+ * @brief The next thing on the bus is a park; its number.
+ * @return The number the renderer answers with.
+ */
+static uint32_t expect_park(void)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "no park was published");
+    TEST_ASSERT_EQUAL_INT((int)DISPLAY_PARK_SIG, (int)e->sig);
+    uint32_t const seq = ((const DisplayParkEvt *)(const void *)e)->seq;
+
+    TEST_ASSERT_NOT_EQUAL_UINT32_MESSAGE(0U, seq, "a park numbered 0, a round's number");
+    return seq;
+}
+
+/**
+ * @brief The renderer says it has stopped drawing for one park, with no
+ *        glyphs to give, as kode_sys_screen_parked() does.
+ * @param seq The number of the park it answers.
+ */
+static void renderer_parks(uint32_t seq)
+{
+    DisplayGlyphsEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(DISPLAY_GLYPHS_SIG);
+    e.park  = seq;
+    QASM_DISPATCH(AO_Display, &e.super, 0U);
+}
+
+/* The link takes the framebuffers with it, so whoever draws is asked to stop
+ * first and the glass does not move until it has said so. */
+TEST_CASE("an app's sleep asks the renderer to park and keeps the link up until it has",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT(1U, s_flush_sent);
+
+    sleep_asked(true);
+    seq = expect_park();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "answered before the renderer stopped");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the glass moved before the renderer stopped");
+
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_flush_sent, "the renderer's last page was dropped");
+
+    renderer_parks(seq);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_flush_sent, "a flush reached the sleeping glass");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_flush_aborted, "a flush into the sleeping glass was not completed");
+
+    /* The wait ended with the answer: no timer is left to refuse anything. */
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 2U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    sleep_asked(false);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(3U, s_flush_sent, "flushes flow again once awake");
+
+    Mockkdrv_display_Destroy();
+}
+
+/* A renderer that never answers keeps the glass: the link is never taken from
+ * under somebody who may still be drawing. It is told it may draw again, in
+ * case it stopped late. */
+TEST_CASE("a renderer that does not park in time keeps the glass lit, and the asker is told",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    seq = expect_park();
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "refused before the wait was over");
+    (void)qf_support_tick(AO_Display, 2U);
+
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_TIMEOUT, DISPLAY_SLEEP_WHY_RENDERER);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the glass moved under a renderer that never stopped");
+
+    /* A late answer belongs to a request that is over. */
+    renderer_parks(seq);
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_flush_sent, "the lit glass refused a flush");
+
+    Mockkdrv_display_Destroy();
+}
+
+/* A wake that comes while the renderer is still being parked ends the sleep
+ * before it happened: the first asker hears no, the second yes, and the
+ * renderer is told it may draw. */
+TEST_CASE("a wake before the renderer parked ends the sleep, and both requests are answered",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    uint16_t answered;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    answered = sleep_answers();
+    sleep_asked(true);
+    seq = expect_park();
+    sleep_asked(false);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_event(false, KODE_DENIED, DISPLAY_SLEEP_WHY_WOKEN);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE((uint16_t)(answered + 2U), sleep_answers(),
+                                     "two requests, two answers counted");
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 2U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the wait outlived the request it timed");
+    renderer_parks(seq);
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+
+    Mockkdrv_display_Destroy();
+}
+
+/* The renderer answers each park in its turn, after whatever AO_Display
+ * published before it. Sleep, wake and sleep again in a row publish PARK,
+ * REPAINT and PARK: the first answer is for the first sleep, and the renderer
+ * draws again at the REPAINT behind it. Only the second answer says it stopped
+ * for the sleep that is open; taking the link down at the first would free the
+ * framebuffers under a renderer about to draw. */
+TEST_CASE("a hand-over for an earlier park does not settle the sleep that is open",
+          "[display_ao][sleep]")
+{
+    uint32_t first;
+    uint32_t second;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    first = expect_park();
+    sleep_asked(false);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_event(false, KODE_DENIED, DISPLAY_SLEEP_WHY_WOKEN);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    sleep_asked(true);
+    second = expect_park();
+
+    renderer_parks(first);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n,
+        "the first park's answer took the link from the second sleep");
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    renderer_parks(second);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A park that timed out may still be answered, late, before the next sleep's
+ * own answer: that late one is the old park's. */
+TEST_CASE("a late hand-over for a park that timed out is not the next sleep's",
+          "[display_ao][sleep]")
+{
+    uint32_t first;
+    uint32_t second;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    first = expect_park();
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 2U);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_TIMEOUT, DISPLAY_SLEEP_WHY_RENDERER);
+
+    sleep_asked(true);
+    second = expect_park();
+    renderer_parks(first);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n,
+        "the late answer to the old park took the link from the new sleep");
+
+    renderer_parks(second);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A park that ran out with no hand-over at all leaves nothing owed: the next
+ * sleep's one hand-over carries its own number, and the glass sleeps. */
+TEST_CASE("a park that ran out unanswered does not take the next sleep's hand-over",
+          "[display_ao][sleep]")
+{
+    uint32_t first;
+    uint32_t second;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    first = expect_park();
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 2U);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_TIMEOUT, DISPLAY_SLEEP_WHY_RENDERER);
+
+    sleep_asked(true);
+    second = expect_park();
+    TEST_ASSERT_NOT_EQUAL_UINT32_MESSAGE(first, second, "two parks carry one number");
+    renderer_parks(second);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* Whoever asks for the panel's state draws on it, flush or not: kscreen asks
+ * as it opens, before its first frame. Its glass is parked like any
+ * renderer's, and the link stays up until it has answered. */
+TEST_CASE("a renderer that asked for the state and never flushed is parked before the link goes",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+    TEST_ASSERT_NOT_NULL(announced());
+    ao_spy_drain();
+
+    sleep_asked(true);
+    seq = expect_park();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n,
+        "the link went under a renderer that asked for the state");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "answered before the renderer stopped");
+
+    renderer_parks(seq);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* One request at a time: a second sleep while the first is parking the
+ * renderer is told so, and the first still ends as it would have. */
+TEST_CASE("a second sleep while the renderer parks is told one is under way",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    seq = expect_park();
+    sleep_asked(true);
+    expect_sleep_answer(false, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the renderer was asked to park twice");
+
+    renderer_parks(seq);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A glass that is lent refuses at once, before anybody is asked to park. */
+TEST_CASE("a lent glass refuses the app's sleep before anything moves", "[display_ao][sleep]")
+{
+    DisplayCaptureReqEvt req;
+    static const QEvt end = QEVT_INITIALIZER(DISPLAY_CAPTURE_END_SIG);
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+    kdrv_display_capture_begin_StubWithCallback(&on_capture_begin);
+    kdrv_display_capture_painted_IgnoreAndReturn(true);
+    kdrv_display_capture_end_Ignore();
+    (void)memset(&req, 0, sizeof(req));
+    req.super = (QEvt)QEVT_INITIALIZER(DISPLAY_CAPTURE_REQ_SIG);
+    req.who   = AO_Display;   /* the answer lands on this AO and is not its business */
+    QASM_DISPATCH(AO_Display, &req.super, 0U);
+
+    sleep_asked(true);
+    expect_sleep_answer(false, KODE_DENIED, DISPLAY_SLEEP_WHY_LENT);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a renderer was parked for a refused sleep");
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+
+    QASM_DISPATCH(AO_Display, &end, 0U);
+    Mockkdrv_display_Destroy();
+}
+
+/* A round that opens while the renderer is parking for the app has the glass:
+ * the app's request ends refused, and the round goes on from there as any
+ * round with a renderer does. */
+TEST_CASE("a round that opens while the renderer parks for the app takes the glass",
+          "[display_ao][sleep][lowpower]")
+{
+    uint32_t seq;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    strip_fill();
+    renderer_flushes();
+
+    sleep_asked(true);
+    seq = expect_park();
+
+    round_for(KODE_LP_ASLEEP);
+    expect_sleep_answer(false, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+    TEST_ASSERT_FALSE_MESSAGE(lp_queued() > 0U, "the round was answered before the renderer stopped");
+
+    /* The renderer answers the park first, then the round's own ask. */
+    renderer_parks(seq);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the park's answer was taken as the round's");
+    TEST_ASSERT_FALSE(lp_queued() > 0U);
+
+    hand(s_strip, (uint16_t)GLYPH_X);
+    EXPECT_TRACE(T_BRIGHT, T_LINK_DOWN);
+    expect_answer(false, NULL);
+    expect_no_more_answers();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the round's rest answered the app again");
+
+    state_awake(KODE_LP_ASLEEP);
+    expect_published(DISPLAY_REPAINT_SIG);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* The display row paints the glass and, as it ends, has the renderer paint it
+ * whole again. With the glass asleep the link is down and the framebuffers
+ * are gone with it: the row is refused at once, saying why, and the renderer
+ * is not woken over memory the link let go. */
+TEST_CASE("the display row is refused while the glass is asleep, and the renderer stays parked",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    static const QEvt req = QEVT_INITIALIZER(DISPLAY_TEST_REQ_SIG);
+    const QEvt *e;
+    unsigned    verdicts = 0U;
+    bool        failed   = false;
+    bool        repaint  = false;
+    bool        said     = false;
+    unsigned    moves;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    ao_spy_subscribe(TEST_RESULT_SIG);
+    renderer_flushes();
+
+    sleep_asked(true);
+    seq = expect_park();
+    renderer_parks(seq);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    moves = s_trace_n;
+    fake_klog_reset();
+    QASM_DISPATCH(AO_Display, &req, 0U);
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS));
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const line = fake_klog_line(i);
+
+        if ( (NULL != line) && (NULL != strstr(line, "the glass is asleep")) )
+        {
+            said = true;
+        }
+    }
+    for ( e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (int)e->sig == TEST_RESULT_SIG )
+        {
+            verdicts += 1U;
+            failed = !((const TestResultEvt *)(const void *)e)->ok;
+        }
+        if ( (int)e->sig == DISPLAY_REPAINT_SIG )
+        {
+            repaint = true;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, verdicts, "the row was not answered at once");
+    TEST_ASSERT_TRUE_MESSAGE(failed, "a row on a sleeping glass passed");
+    TEST_ASSERT_FALSE_MESSAGE(repaint, "the renderer was woken over a downed link");
+    TEST_ASSERT_TRUE_MESSAGE(said, "the refusal did not say why");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(moves, s_trace_n, "the row moved the sleeping glass");
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* The look at the glass once a second counts frames, and a sleeping glass
+ * sends none: that is not a lost glass. */
+TEST_CASE("a glass the app slept is not a lost glass", "[display_ao][sleep]")
+{
+    unsigned const before = fake_system_restarts();
+
+    look_setup();
+    ao_spy_subscribe(DISPLAY_PARK_SIG);
+    ao_spy_subscribe(DISPLAY_SLEEP_SIG);
+    sleep_asked(true);
+    renderer_parks(expect_park());
+    TEST_ASSERT_TRUE(display_asleep());
+
+    look_seconds(6U, 0U, 0U);
+    TEST_ASSERT_EQUAL_UINT(before, fake_system_restarts());
+    TEST_ASSERT_FALSE(fake_klog_saw("the glass is lost"));
+
+    sleep_asked(false);
+    ao_spy_drain();
     Mockkdrv_display_Destroy();
 }

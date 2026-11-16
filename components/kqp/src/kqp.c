@@ -441,6 +441,10 @@ _Static_assert(sizeof(WifiStateEvt) <= KQP_BLOCK_LARGE,
                "WifiStateEvt must not reach the jumbo pool");
 _Static_assert(sizeof(DisplayStateEvt) <= KQP_BLOCK_LARGE,
                "DisplayStateEvt must not reach the jumbo pool");
+_Static_assert(sizeof(DisplaySleepReqEvt) <= KQP_BLOCK_SMALL,
+               "DisplaySleepReqEvt must fit the small pool");
+_Static_assert(sizeof(DisplaySleepEvt) <= KQP_BLOCK_SMALL,
+               "DisplaySleepEvt must fit the small pool");
 _Static_assert(sizeof(DisplayCaptureReqEvt) <= KQP_BLOCK_LARGE,
                "DisplayCaptureReqEvt must not reach the jumbo pool");
 _Static_assert(sizeof(DisplayCaptureRspEvt) <= KQP_BLOCK_LARGE,

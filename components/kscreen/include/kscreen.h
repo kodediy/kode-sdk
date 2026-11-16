@@ -51,6 +51,8 @@ typedef struct {
     uint8_t      *rot_buf;  /**< Where a band is turned before it goes to
                              *   the panel, PSRAM, taken once and kept.
                              *   kscreen's own.                           */
+    bool          parked;   /**< DISPLAY_PARK_SIG stopped the render pass
+                             *   until DISPLAY_REPAINT_SIG. kscreen's own. */
 } kscreen_t;
 
 /**
@@ -69,9 +71,10 @@ void kscreen_ctor(kscreen_t *s, QActive *owner, enum_t tick_sig);
  * @brief Subscribe the owner to the panel and the touch feed, then ask for
  *        the panel's announcement.
  *
- * Subscribes to DISPLAY_STATE_SIG, DISPLAY_REPAINT_SIG and TOUCH_EVT_SIG, in
- * that order, before display_state_request(): the answer can come the instant
- * the request is posted. Call from the owner's initial transition, which runs
+ * Subscribes to DISPLAY_STATE_SIG, DISPLAY_REPAINT_SIG, DISPLAY_PARK_SIG and
+ * TOUCH_EVT_SIG, in that order, before display_state_request(): the answer can
+ * come the instant the request is posted. The owner hands each to its call:
+ * kscreen_open(), kscreen_repaint(), kscreen_park() and kscreen_touch(). Call from the owner's initial transition, which runs
  * after kode_init() has returned - the condition the request needs.
  *
  * @param s The renderer.
@@ -113,6 +116,11 @@ void kscreen_tick(kscreen_t *s);
 /**
  * @brief Feed one TOUCH_EVT_SIG sample to LVGL.
  *
+ * While kscreen_park() holds the render pass, a press reaches LVGL as a
+ * contact to wait out: it clicks nothing, also when the finger stays down
+ * past DISPLAY_REPAINT_SIG. The owner still hears TOUCH_EVT_SIG itself, so
+ * the touch can be what wakes the glass.
+ *
  * @param s The renderer.
  * @param t The sample.
  */
@@ -123,11 +131,29 @@ void kscreen_touch(kscreen_t *s, TouchEvt const *t);
  *
  * AO_Display completed every flush issued while it ran the panel row without
  * painting it, so the glass holds the row's last field while LVGL believes it
- * is up to date. The next pass paints everything back.
+ * is up to date. The next pass paints everything back. A renderer parked by
+ * kscreen_park() takes the panel's framebuffers again, which the link brought
+ * back new, and starts its render pass.
  *
  * @param s The renderer.
  */
 void kscreen_repaint(kscreen_t *s);
+
+/**
+ * @brief Answer DISPLAY_PARK_SIG: stop drawing, and tell AO_Display so.
+ *
+ * AO_Display is about to put the glass to sleep (kode_sys_screen_sleep()),
+ * and the link it takes down frees the framebuffers LVGL draws in. The render
+ * pass stops here and draws nothing until DISPLAY_REPAINT_SIG; a touch
+ * presses nothing meanwhile (kscreen_touch()). Then
+ * kode_sys_screen_parked(@p seq) lets the glass go to sleep. Before
+ * kscreen_open() has succeeded nothing answers: the sleep is refused, and the
+ * glass stays lit.
+ *
+ * @param s   The renderer.
+ * @param seq The DisplayParkEvt's @c seq.
+ */
+void kscreen_park(kscreen_t *s, uint32_t seq);
 
 /**
  * @brief Turn the glass: 0, 90, 180 or 270 degrees, now or at any later time.
