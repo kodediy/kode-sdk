@@ -506,6 +506,12 @@ kode_status_t kdrv_slot_info(kdrv_slot_id_t id, kdrv_slot_info_t *out)
     const esp_partition_t *run = esp_ota_get_running_partition();
     out->running = (NULL != run) && (run->address == p->address);
 
+    /* IDF's reading of otadata, the bootloader's own rule with no rollback:
+     * the factory while otadata is blank, NULL with no otadata at all. An
+     * app is never named, so in an app this is the kodeOS it goes home to. */
+    const esp_partition_t * const boot = esp_ota_get_boot_partition();
+    out->boot = (NULL != boot) && (boot->address == p->address);
+
     esp_app_desc_t desc;
     if ( esp_ota_get_partition_description(p, &desc) == ESP_OK )
     {

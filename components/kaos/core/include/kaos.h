@@ -2777,6 +2777,23 @@ void radio_amp_request(bool on);
 void ble_pair_subscribe(QActive const *who);
 
 /**
+ * @brief The kode_c5 release the C5 runs ("0.1.3"), as its image descriptor
+ *        said at the last link-up.
+ *
+ * Reads the snapshot kdrv_c5 keeps: no link is crossed and nothing blocks.
+ * `info`'s `>|fw` record asks it. The version the link negotiates is
+ * esp-hosted's, the `c5` verb's fw_* rows; this is the image's own. Beside
+ * AO_Radio's start, so the call links AO_Radio (tools/check_starts.sh).
+ *
+ * @param out Where the release goes, NUL-terminated.
+ * @param len Room there.
+ * @return KODE_OK; KODE_DENIED with no snapshot (no link up this boot, or
+ *         one dropped or taken down since), for a slave that is not kode_c5
+ *         or has no descriptor, or with no room.
+ */
+kode_status_t radio_c5_release(char *out, size_t len);
+
+/**
  * @brief Send AO_Radio one input report of the HID service, for its host.
  *
  * Claims the driver's ring and posts the report; never blocks. The HID

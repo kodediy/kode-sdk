@@ -9752,6 +9752,20 @@ void ble_pair_subscribe(QActive const *who)
     QActive_subscribe(who, BLE_PAIR_SIG);
 }
 
+kode_status_t radio_c5_release(char *out, size_t len)
+{
+    /* A stock slave's descriptor carries esp-hosted's version, not a
+     * release of kode_c5: only the project name tells the two apart. */
+    int32_t       kode = 0;
+    kode_status_t st   = KODE_DENIED;
+
+    if ( (kdrv_c5_get(KDRV_C5_PROJECT_KODE, &kode) == KODE_OK) && (0 != kode) )
+    {
+        st = kdrv_c5_app_version(out, len);
+    }
+    return st;
+}
+
 void ble_app_subscribe(QActive const *who)
 {
     QActive_subscribe(who, BLE_APP_WRITE_SIG);

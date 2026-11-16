@@ -98,6 +98,7 @@ KAOS_WEAK bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
                                    bool launch, uint8_t src, const char *name);
 KAOS_WEAK void c5_flash_request(uint8_t src_kind, const char *src);
 KAOS_WEAK bool c5_recv_request(uint32_t size, uint32_t crc32, uint8_t src);
+KAOS_WEAK kode_status_t radio_c5_release(char *out, size_t len);
 KAOS_WEAK const uint8_t *display_capture_buf(void);
 KAOS_WEAK void display_capture_release(void);
 KAOS_WEAK void display_capture_request(QActive *who);
@@ -3942,13 +3943,43 @@ static void h_board_rev(Console *me, const kcmd_t *c, const karg_val_t *v)
 }
 
 /**
+ * @brief `info`'s `>|fw` record: the kodeOS release and the kode_c5 release.
+ *
+ * `c5` is the release the C5's image descriptor gave at the last link-up,
+ * `-` with no link up this boot, for a slave that is not kode_c5, or in an
+ * image without AO_Radio. Never the version the link negotiates: that one is
+ * esp-hosted's, and the `c5` verb gives it.
+ *
+ * @param kodeos The kodeOS release h_info() chose; empty prints `-`.
+ */
+static void info_fw(const char *kodeos)
+{
+    char c5[KDRV_SLOT_VERSION_MAX];
+    char qk[CONSOLE_QUOTED_MAX(KDRV_SLOT_VERSION_MAX)];
+    char qc[CONSOLE_QUOTED_MAX(sizeof(c5))];
+
+    c5[0] = '\0';
+    if ( kaos_linked(&kaos_radio_start) )
+    {
+        if ( radio_c5_release(c5, sizeof(c5)) != KODE_OK )
+        {
+            c5[0] = '\0';
+        }
+    }
+    console_reply(">|fw kodeos=%s c5=%s",
+                  console_kv_text(qk, sizeof(qk), kodeos),
+                  console_kv_text(qc, sizeof(qc), c5));
+}
+
+/**
  * @brief info: what this board is.
  *
  * Synchronous: the identity is decoded at startup, so no owner is asked.
  * `mac_p4` is the P4's own MAC, the one its USB port gives as its serial
  * number; `mac_c5` is the C5's, which the serial encodes. A board with no
  * identity is not a refusal: its record carries `-` placeholders and closes
- * with `>ok`.
+ * with `>ok`. After the partitions, `>|fw` gives the two releases on the
+ * board, kodeOS's and kode_c5's (info_fw()).
  */
 static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
@@ -3984,6 +4015,13 @@ static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
     static const char *const SLOT_NAMES[KDRV_SLOT_ID_COUNT] = {
         "factory", "ota_0", "ota_1",
     };
+    /* The kodeOS release for `>|fw`: the one that runs, else the one otadata
+     * names - in an app's console no partition runs, and that is the kodeOS
+     * the next boot that is not the app's starts. */
+    char running[KDRV_SLOT_VERSION_MAX];
+    char booted[KDRV_SLOT_VERSION_MAX];
+    running[0] = '\0';
+    booted[0]  = '\0';
     for ( unsigned i = 0U; (unsigned)KDRV_SLOT_ID_COUNT > i; ++i )
     {
         kdrv_slot_info_t info;
@@ -4006,12 +4044,28 @@ static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
             project = console_kv_text(qp, sizeof(qp), info.desc.project);
             version = console_kv_text(qv, sizeof(qv), info.desc.version);
             idf     = console_kv_text(qi, sizeof(qi), info.desc.idf_ver);
+            if ( info.running )
+            {
+                (void)snprintf(running, sizeof(running), "%s", info.desc.version);
+            }
+            if ( info.boot )
+            {
+                (void)snprintf(booted, sizeof(booted), "%s", info.desc.version);
+            }
         }
         console_reply(">|slot=%s addr=0x%06lx size_kb=%lu state=%s project=%s "
               "version=%s idf=%s",
               info.label, (unsigned long)info.address,
               (unsigned long)(info.size / 1024U), state,
               project, version, idf);
+    }
+    if ( '\0' != running[0] )
+    {
+        info_fw(running);
+    }
+    else
+    {
+        info_fw(booted);
     }
 
     /* Whether a crash waits in the coredump partition, and whose. Omitted

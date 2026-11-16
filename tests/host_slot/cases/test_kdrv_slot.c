@@ -860,6 +860,7 @@ TEST_CASE("every app partition can be described by id, and only the running "
     kdrv_slot_info_t      info;
 
     slot_fresh(ESP_PARTITION_SUBTYPE_APP_OTA_0);
+    esp_ota_get_boot_partition_IgnoreAndReturn(app_part(ESP_PARTITION_SUBTYPE_APP_OTA_0));
 
     expect_desc(&descs[0], "rescue");
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_info(KDRV_SLOT_ID_FACTORY, &info));
@@ -867,6 +868,7 @@ TEST_CASE("every app partition can be described by id, and only the running "
     TEST_ASSERT_EQUAL_HEX32(0x20000U, info.address);
     TEST_ASSERT_EQUAL_HEX32(0x400000U, info.size);
     TEST_ASSERT_FALSE(info.running);
+    TEST_ASSERT_FALSE(info.boot);
     TEST_ASSERT_TRUE(info.has_image);
     TEST_ASSERT_EQUAL_STRING("rescue", info.desc.project);
     TEST_ASSERT_EQUAL_STRING("00.00.18", info.desc.version);
@@ -876,6 +878,7 @@ TEST_CASE("every app partition can be described by id, and only the running "
     TEST_ASSERT_EQUAL_STRING("ota_0", info.label);
     TEST_ASSERT_EQUAL_HEX32(0x420000U, info.address);
     TEST_ASSERT_TRUE_MESSAGE(info.running, "the board runs from ota_0 here");
+    TEST_ASSERT_TRUE_MESSAGE(info.boot, "and otadata names it");
     TEST_ASSERT_EQUAL_STRING("kodeos", info.desc.project);
 
     expect_desc(&descs[2], "kodeos");
@@ -883,6 +886,33 @@ TEST_CASE("every app partition can be described by id, and only the running "
     TEST_ASSERT_EQUAL_STRING("ota_1", info.label);
     TEST_ASSERT_EQUAL_HEX32(0x820000U, info.address);
     TEST_ASSERT_FALSE(info.running);
+    TEST_ASSERT_FALSE(info.boot);
+
+    slot_done();
+}
+
+/* An app runs from the apps region, so no partition is running, and the
+ * kodeOS the board comes home to is the one otadata names. After an update is
+ * selected and before its boot, kodeOS runs from one slot and otadata names
+ * the other. */
+TEST_CASE("the partition otadata names says so, whichever one is running",
+          "[kdrv_slot]")
+{
+    static esp_app_desc_t descs[2];
+    kdrv_slot_info_t      info;
+
+    slot_fresh(ESP_PARTITION_SUBTYPE_APP_OTA_0);
+    esp_ota_get_boot_partition_IgnoreAndReturn(app_part(ESP_PARTITION_SUBTYPE_APP_OTA_1));
+
+    expect_desc(&descs[0], "kodeos");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_info(KDRV_SLOT_ID_OTA_0, &info));
+    TEST_ASSERT_TRUE(info.running);
+    TEST_ASSERT_FALSE_MESSAGE(info.boot, "otadata names the other slot");
+
+    expect_desc(&descs[1], "kodeos");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_info(KDRV_SLOT_ID_OTA_1, &info));
+    TEST_ASSERT_FALSE(info.running);
+    TEST_ASSERT_TRUE_MESSAGE(info.boot, "the next boot of kodeOS starts it");
 
     slot_done();
 }
@@ -893,6 +923,8 @@ TEST_CASE("a partition with no readable image is reported empty, with its "
     kdrv_slot_info_t info;
 
     slot_fresh(ESP_PARTITION_SUBTYPE_APP_FACTORY);
+    /* No otadata to read names no partition. */
+    esp_ota_get_boot_partition_IgnoreAndReturn(NULL);
 
     esp_ota_get_partition_description_ExpectAnyArgsAndReturn(ESP_ERR_NOT_FOUND);
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_info(KDRV_SLOT_ID_OTA_1, &info));
@@ -902,6 +934,7 @@ TEST_CASE("a partition with no readable image is reported empty, with its "
     TEST_ASSERT_EQUAL_HEX32(0x820000U, info.address);
     TEST_ASSERT_EQUAL_HEX32(0x400000U, info.size);
     TEST_ASSERT_FALSE(info.running);
+    TEST_ASSERT_FALSE(info.boot);
 
     slot_done();
 }

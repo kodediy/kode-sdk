@@ -706,7 +706,7 @@ static kode_status_t radio_do_connect(bool wants_wifi)
         s_radio.fw.minor = fw.minor1;
         s_radio.fw.patch = fw.patch1;
         s_radio.fw_known = true;
-        KLOG_N(TAG, "link up; C5 slave firmware v%lu.%lu.%lu",
+        KLOG_N(TAG, "link up; esp-hosted v%lu.%lu.%lu on the C5",
                (unsigned long)s_radio.fw.major,
                (unsigned long)s_radio.fw.minor,
                (unsigned long)s_radio.fw.patch);
