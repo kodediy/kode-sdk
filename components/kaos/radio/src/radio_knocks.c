@@ -51,6 +51,7 @@ void radio_knocks_reset(void)
     static const QEvt ble_evt   = QEVT_INITIALIZER(BLE_LINK_SIG);
     static const QEvt pair_evt  = QEVT_INITIALIZER(BLE_PAIR_TAKE_SIG);
     static const QEvt heard_evt = QEVT_INITIALIZER(RADIO_HEARD_KNOCK_SIG);
+    static const QEvt ask_evt   = QEVT_INITIALIZER(BLE_STATE_REQ_SIG);
     /* A report's event of no bytes: radio_hid_event() reads its length. */
     static const BleHidReportEvt hid_evt = { .super = QEVT_INITIALIZER(BLE_HID_REPORT_REQ_SIG) };
     static const radio_knock_door_t door[RADIO_KNOCK_COUNT] = {
@@ -59,6 +60,7 @@ void radio_knocks_reset(void)
         [RADIO_KNOCK_PAIR]  = { &knocks_post, &knocks_room, &pair_evt  },
         [RADIO_KNOCK_HEARD] = { &knocks_post, &knocks_room, &heard_evt },
         [RADIO_KNOCK_HID]   = { &knocks_post, &knocks_room, &hid_evt.super },
+        [RADIO_KNOCK_STATE] = { &knocks_post, &knocks_room, &ask_evt   },
     };
 
     for ( uint32_t i = 0U; (uint32_t)RADIO_KNOCK_COUNT > i; ++i )
@@ -76,6 +78,7 @@ void radio_knocks_post(radio_knock_id_t id, uint8_t arg)
         [RADIO_KNOCK_PAIR]  = "the pairing note",
         [RADIO_KNOCK_HEARD] = "the BLE advertisements",
         [RADIO_KNOCK_HID]   = "the HID wake-up",
+        [RADIO_KNOCK_STATE] = "the BLE state ask",
     };
 
     if ( !radio_knock_post(&s_knock[id], arg) )

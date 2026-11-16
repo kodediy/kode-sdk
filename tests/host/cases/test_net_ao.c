@@ -10447,3 +10447,68 @@ TEST_CASE("a leave hands the waiting replies over a burst a step, then says offl
     TEST_ASSERT_TRUE_MESSAGE(rows_first, "the replies did not all go out, in order");
     TEST_ASSERT_TRUE_MESSAGE(will_last, "offline was not said after the replies");
 }
+
+/* ---- A channel state ask a full queue refused ---------------------------------- */
+
+/** @brief Fill AO_Net's queue with an event it ignores, then ask for the channel's state.
+ *  @return What channel_state_request() answered. */
+static bool chan_ask_into_full_queue(void)
+{
+    static const QEvt filler = QEVT_INITIALIZER(GUI_STATE_SIG);
+
+    while ( QACTIVE_POST_X(AO_Net, &filler, 0U, NULL) )
+    {
+        /* until the queue refuses: no slot to spare */
+    }
+    return channel_state_request();
+}
+
+/** @brief How many CHANNEL_STATE_SIG the spy holds; drains it. */
+static unsigned chan_states_heard(void)
+{
+    unsigned    n = 0U;
+    const QEvt *e;
+
+    while ( (e = ao_spy_take()) != NULL )
+    {
+        if ( (QSignal)CHANNEL_STATE_SIG == e->sig )
+        {
+            ++n;
+        }
+    }
+    ao_spy_drain();
+    return n;
+}
+
+/* channel_info and AO_AppMgr wait for the answer and have no clock of their
+ * own: a refused ask is owed and answered once, before the next event AO_Net
+ * handles, with or without an address. */
+TEST_CASE("test_chan_state_owed: a channel state ask a full queue refused is answered "
+          "once, before AO_Net's next event", "[net_ao]")
+{
+    bool     posted_up;
+    bool     posted_down;
+    unsigned up;
+    unsigned up_again;
+    unsigned down;
+
+    cmd_fresh();
+    posted_up = chan_ask_into_full_queue();
+    (void)net_settle();
+    up = chan_states_heard();
+    (void)net_tick(1U);
+    up_again = chan_states_heard();
+    net_done();
+
+    chan_fresh();
+    posted_down = chan_ask_into_full_queue();
+    (void)net_settle();
+    down = chan_states_heard();
+    net_done();
+
+    TEST_ASSERT_FALSE_MESSAGE(posted_up, "the queue took the ask: the case proves nothing");
+    TEST_ASSERT_FALSE(posted_down);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, up, "online: the ask was not answered once");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, up_again, "the owed ask was answered twice");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, down, "offline: the ask was not answered once");
+}

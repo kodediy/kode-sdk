@@ -12465,7 +12465,7 @@ static bool owed_state_reach(owed_state_t st)
     return reached;
 }
 
-/** @brief Child body: in the state in @p arg every knock is refused; the next event the state handles posts each again, and each is taken when handled. */
+/** @brief Child body: in the state in @p arg every knock is refused, the BLE state ask too; the next event the state handles posts each again, and each is taken when handled. */
 static void owed_paid_body(void *arg)
 {
     owed_state_t const st = *(owed_state_t const *)arg;
@@ -12480,6 +12480,7 @@ static void owed_paid_body(void *arg)
     fake_ble_pair_show(KNOCK_PASSKEY);
 #endif
     fake_radio_lose_link(KODE_TIMEOUT);
+    ble_state_request();
     CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue), "a refused post took a slot");
 
     radio_queue_flush();
@@ -12496,12 +12497,14 @@ static void owed_paid_body(void *arg)
     CHILD_CHECK(NULL != take_queued(BLE_PAIR_TAKE_SIG), "the pairing note was not posted again");
 #endif
     CHILD_CHECK(NULL != take_queued(RADIO_LINK_LOST_SIG), "the loss was not posted again");
+    CHILD_CHECK(NULL != take_queued(BLE_STATE_REQ_SIG), "the BLE state ask was not posted again");
     CHILD_CHECK(0U == uxQueueMessagesWaiting(AO_Radio->eQueue), "a knock was posted more than once");
 
     /* Handled by this state, each knock is free again: the next post is an event of its own. */
     {
         static const QEvt ble  = QEVT_INITIALIZER(BLE_LINK_SIG);
         static const QEvt lost = QEVT_INITIALIZER(RADIO_LINK_LOST_SIG);
+        static const QEvt ask  = QEVT_INITIALIZER(BLE_STATE_REQ_SIG);
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
         static const QEvt pair = QEVT_INITIALIZER(BLE_PAIR_TAKE_SIG);
 
@@ -12509,8 +12512,11 @@ static void owed_paid_body(void *arg)
 #endif
         QASM_DISPATCH(AO_Radio, &ble, 0U);
         QASM_DISPATCH(AO_Radio, &lost, 0U);
+        QASM_DISPATCH(AO_Radio, &ask, 0U);
     }
     radio_queue_flush();
+    ble_state_request();
+    CHILD_CHECK(NULL != take_queued(BLE_STATE_REQ_SIG), "the BLE state ask's knock was left standing");
     fake_ble_central(false);
     CHILD_CHECK(NULL != take_queued(BLE_LINK_SIG), "the BLE state's knock was left standing");
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY

@@ -35,6 +35,7 @@
 #include "lowpower_cases.h"
 #include "miniz.h"
 #include "qf_support.h"
+#include "radio_knocks.h"
 #include "appmgr_outcome.h"
 
 /**
@@ -78,6 +79,10 @@ static void appmgr_make(void)
     qf_support_give_queue(AO_Net);
     qf_support_give_queue(AO_Boot);
     qf_support_give_queue(AO_Log);
+    /* AO_Radio is played from its queue: the BLE state ask is a knock, which
+     * AO_Radio's initial transition makes on a board before anyone asks, and
+     * which the cases take wherever they read the ask out of that queue. */
+    radio_knocks_reset();
     AO_AppMgr->prio  = KODE_PRIO_APPMGR;
     AO_AppMgr->pthre = KODE_PRIO_APPMGR;
 
@@ -10275,6 +10280,10 @@ static void inst_ble(bool console)
     QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
     while ( xQueueReceive(AO_Radio->eQueue, &q, 0U) == pdTRUE )
     {
+        if ( (QSignal)BLE_STATE_REQ_SIG == q->sig )
+        {
+            (void)radio_knocks_take(RADIO_KNOCK_STATE, NULL);   /* as AO_Radio would */
+        }
         QF_gc(q);
     }
 }
@@ -10542,6 +10551,10 @@ static unsigned radio_requests(enum_t sig)
         if ( (enum_t)e->sig == sig )
         {
             ++n;
+        }
+        if ( (QSignal)BLE_STATE_REQ_SIG == e->sig )
+        {
+            (void)radio_knocks_take(RADIO_KNOCK_STATE, NULL);   /* as AO_Radio would */
         }
         QF_gc(e);
     }

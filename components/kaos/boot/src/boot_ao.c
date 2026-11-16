@@ -271,7 +271,9 @@ void boot_net_left(void)
 void boot_log_flushed(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(BOOT_LOG_FLUSHED_SIG);
-    QACTIVE_POST(AO_Boot, &evt, NULL);
+    /* A full queue drops the word: the leave's KODE_LEAVE_LOG_MS bound
+     * moves it on as if AO_Log had not answered. */
+    (void)QACTIVE_POST_X(AO_Boot, &evt, KQP_BOOT_CMD_MARGIN, NULL);
 }
 
 bool boot_home_pending(void)

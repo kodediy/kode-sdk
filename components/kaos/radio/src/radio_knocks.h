@@ -7,7 +7,8 @@
  * stream heard come from the radio worker, esp-hosted's tasks and NimBLE's
  * host task; the pairing note also from AO_Radio's own thread, when it
  * refuses a pairing; the HID wake-up from whichever task lets a key or a
- * button go with the reports' ring full. Each is a knock
+ * button go with the reports' ring full. The BLE state ask comes from
+ * whoever calls ble_state_request() and waits for the answer. Each is a knock
  * (radio_knock.h): one static event, posted with KQP_RADIO_KNOCK_MARGIN, that
  * a full queue owes and never loses.
  */
@@ -26,6 +27,7 @@ typedef enum {
     RADIO_KNOCK_PAIR,       /**< BLE_PAIR_TAKE_SIG: a pairing moved; the driver keeps the record. */
     RADIO_KNOCK_HEARD,      /**< RADIO_HEARD_KNOCK_SIG: advertisements wait in the stream's ring, or the stack ended its scan. */
     RADIO_KNOCK_HID,        /**< BLE_HID_REPORT_REQ_SIG with no report: a report of zeroes is owed to the host; wake the drain. */
+    RADIO_KNOCK_STATE,      /**< BLE_STATE_REQ_SIG: somebody asked for the BLE state and waits for it. */
     RADIO_KNOCK_COUNT       /**< How many there are. */
 } radio_knock_id_t;
 

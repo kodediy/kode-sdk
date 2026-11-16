@@ -1906,7 +1906,7 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
 /* ---- Request doors: queue depths, and the post margin each leaves free (half a queue) ---- */
 /* AO_Radio's queue: a scan knock and a KODE answer, posted from other tasks,
  * leave KQP_RADIO_DROP_MARGIN slots free and are refused past it. The BLE
- * state, the pairing note, the lost link, the knock of the BLE
+ * state and its ask, the pairing note, the lost link, the knock of the BLE
  * advertisement stream and the HID wake-up leave KQP_RADIO_KNOCK_MARGIN and
  * are owed past it: posted again once there is room, never lost. Neither
  * margin reserves the slots it leaves. The Wi-Fi doors and the two scan
@@ -1919,7 +1919,7 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
 #define KQP_POWER_QUEUE_LEN     8U    /**< Events AO_Power buffers.           */
 #define KQP_RADIO_POST_MARGIN   8U    /**< Slots a Wi-Fi door, a scan request or a link ask leaves free. */
 #define KQP_RADIO_DROP_MARGIN   2U    /**< Slots a post that may be refused, a scan knock or a KODE answer, leaves free. */
-#define KQP_RADIO_KNOCK_MARGIN  2U    /**< Slots a post that is owed when refused leaves free: the BLE state, the pairing note, the lost link, the advertisements heard, the HID wake-up. */
+#define KQP_RADIO_KNOCK_MARGIN  2U    /**< Slots a post that is owed when refused leaves free: the BLE state and its ask, the pairing note, the lost link, the advertisements heard, the HID wake-up. */
 #define KQP_POWER_POST_MARGIN   4U    /**< Slots a power door leaves free.    */
 _Static_assert((KQP_RADIO_POST_MARGIN * 2U) == KQP_RADIO_QUEUE_LEN,
                "the radio door margin is half of AO_Radio's queue");

@@ -1648,11 +1648,7 @@ void ble_stop_request(void)
 
 void ble_state_request(void)
 {
-    static const QEvt evt = QEVT_INITIALIZER(BLE_STATE_REQ_SIG);
-    if ( !QACTIVE_POST_X(AO_Radio, &evt, KQP_RADIO_POST_MARGIN, NULL) )
-    {
-        KLOG_W(TAG, "no room to ask for the BLE state; the next change says it");
-    }
+    radio_knocks_post(RADIO_KNOCK_STATE, 0U);
 }
 
 void ble_unpair_request(void)
@@ -11116,10 +11112,14 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
         case BLE_LINK_SIG: {
             /* No link to the C5, so there is nothing to put back on the air
              * either: down here the two signals really are the same event,
-             * but for the knock that one of them is. */
+             * but for the knock each of them is. */
             if ( (QSignal)BLE_LINK_SIG == e->sig )
             {
                 (void)radio_knocks_take(RADIO_KNOCK_BLE, NULL);
+            }
+            else
+            {
+                (void)radio_knocks_take(RADIO_KNOCK_STATE, NULL);
             }
             ble_publish_state(me);
             status = Q_HANDLED();
@@ -13454,7 +13454,9 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         }
         case BLE_STATE_REQ_SIG: {
             /* A question and nothing more. The invariant is restored where
-             * it breaks, not where somebody asks about it. */
+             * it breaks, not where somebody asks about it. The knock is
+             * taken before the state is read. */
+            (void)radio_knocks_take(RADIO_KNOCK_STATE, NULL);
             ble_publish_state(me);
             status = Q_HANDLED();
             break;

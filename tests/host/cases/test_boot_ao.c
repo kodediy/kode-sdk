@@ -34,6 +34,7 @@
 #include "kode_wire.h"
 #include "kqp.h"
 #include "kset.h"
+#include "ask_support.h"
 #include "lowpower_cases.h"
 #include "qf_support.h"
 
@@ -2258,6 +2259,38 @@ TEST_CASE("a full AO_Log queue sends the leave straight to AO_Net", "[boot_ao]")
     finish_leave();
     Mockkdrv_slot_Verify();
     Mockkdrv_slot_Destroy();
+}
+
+/**
+ * @brief The child's body: AO_Log's word arrives at an AO_Boot whose queue
+ *        has no slot left.
+ *
+ * @param arg Unused.
+ */
+static void flushed_into_full_boot(void *arg)
+{
+    static const QEvt filler = QEVT_INITIALIZER(LOG_DOCK_SIG);
+
+    (void)arg;
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    for ( uint32_t guard = 0U;
+          (LOG_FILL_MAX > guard) && QACTIVE_POST_X(AO_Boot, &filler, 0U, NULL);
+          ++guard )
+    {
+        /* until the queue refuses */
+    }
+    boot_log_flushed();
+}
+
+/* AO_Log's word is posted with AO_Boot's margin: into a full queue it is
+ * dropped, not QP's assert, and the leave's own bound takes the leave on. */
+TEST_CASE("AO_Log's word into a full AO_Boot queue is dropped, not an assert",
+          "[boot_ao]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&flushed_into_full_boot, NULL),
+        "the word was posted with no margin");
 }
 
 TEST_CASE("a late answer after the reset step is ignored", "[boot_ao]")

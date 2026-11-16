@@ -776,11 +776,24 @@ kode_status_t net_udp_ask(QActive *who, const char *host, uint16_t port, const v
                          KQP_NET_CMD_MARGIN);
 }
 
+/** @brief A channel state ask the queue refused: AO_Net answers it before its next event. */
+static _Atomic bool s_chan_ask_owed;
+
 /* cppcheck-suppress misra-c2012-8.7 ; called by kgui, a consumer outside this component */
 bool channel_state_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(CHANNEL_STATE_REQ_SIG);
-    return QACTIVE_POST_X(AO_Net, &evt, KQP_NET_CMD_MARGIN, NULL);
+    bool const posted = QACTIVE_POST_X(AO_Net, &evt, KQP_NET_CMD_MARGIN, NULL);
+
+    if ( !posted )
+    {
+        /* The queue is that full only with events waiting, so the answer
+         * comes before the first of them is handled. */
+        atomic_store_explicit(&s_chan_ask_owed, true, memory_order_release);
+        KLOG_W(TAG, "no room for the channel state ask in AO_Net's queue; "
+                    "it is answered before the next event");
+    }
+    return posted;
 }
 
 #if CONFIG_KODEOS_CHANNEL
@@ -1059,6 +1072,7 @@ static bool net_on_mqtt(kdrv_net_mqtt_evt_t evt, const kdrv_mqtt_msg_t *msg,
     }
     else
     {
+        bool linked = false;
         NetMqttLinkEvt *e = Q_NEW_X(NetMqttLinkEvt, 0U, NET_MQTT_LINK_SIG);
         if ( NULL != e )
         {
@@ -1066,7 +1080,13 @@ static bool net_on_mqtt(kdrv_net_mqtt_evt_t evt, const kdrv_mqtt_msg_t *msg,
             e->session_present = session_present;
             /* A tighter margin than the messages get: a lost DISCONNECTED
              * leaves the channel believing in a dead session. */
-            (void)QACTIVE_POST_X(AO_Net, &e->super, KQP_NET_LINK_MARGIN, NULL);
+            linked = QACTIVE_POST_X(AO_Net, &e->super, KQP_NET_LINK_MARGIN, NULL);
+        }
+        if ( (!linked) && (KDRV_NET_MQTT_ACKED == evt) )
+        {
+            /* Its record stays owed: told again when the channel comes up. */
+            KLOG_W(TAG, "no room for a reply's PUBACK in AO_Net's queue; "
+                        "the record it confirms stays owed");
         }
     }
     return posted;
@@ -6768,6 +6788,57 @@ static QState Net_initial(Net * const me, void const * const par)
 }
 
 /**
+ * @brief Publish CHANNEL_STATE_SIG: the channel's state, or CHAN_OFF in a
+ *        firmware built without the channel.
+ *
+ * @param me The AO.
+ */
+static void chan_state_answer(const Net * const me)
+{
+#if CONFIG_KODEOS_CHANNEL
+    chan_publish(me);
+#else
+    ChannelStateEvt * const cs = Q_NEW_X(ChannelStateEvt, 0U, CHANNEL_STATE_SIG);
+    if ( NULL != cs )
+    {
+        (void)memset(&cs->why, 0, sizeof(cs->why));
+        (void)memset(&cs->broker, 0, sizeof(cs->broker));
+        cs->state   = (uint8_t)CHAN_OFF;
+        cs->since_s = 0U;
+        cs->next_s  = 0U;
+        cs->lost    = 0U;
+        cs->fast    = false;
+        cs->shot         = (uint8_t)KSHOT_IDLE;
+        cs->shot_sent    = 0U;
+        cs->shot_fps_x10 = 0U;
+        cs->shot_left_s  = 0U;
+        cs->keep_s       = 0U;
+        cs->session      = (uint8_t)CHAN_SESSION_NONE;
+        QACTIVE_PUBLISH(&cs->super, &me->super);
+    }
+#endif
+}
+
+/**
+ * @brief Answer a channel state ask the queue refused, before the event in hand.
+ *
+ * Called at the head of each state that can be the current one; asks owed
+ * together are answered once.
+ *
+ * @param me The AO.
+ * @param e  The event about to be handled; the entry, exit and init signals
+ *           of a transition are not events and pay nothing.
+ */
+static void chan_ask_pay(const Net * const me, QEvt const * const e)
+{
+    if ( ((enum_t)Q_USER_SIG <= (enum_t)e->sig)
+        && atomic_exchange_explicit(&s_chan_ask_owed, false, memory_order_acq_rel) )
+    {
+        chan_state_answer(me);
+    }
+}
+
+/**
  * @brief What both states answer the same way.
  *
  * The queries, and the worker outcomes: a job submitted online may land after
@@ -7044,28 +7115,7 @@ static QState Net_root(Net * const me, QEvt const * const e)
         }
 #endif
         case CHANNEL_STATE_REQ_SIG: {
-#if CONFIG_KODEOS_CHANNEL
-            chan_publish(me);
-#else
-            ChannelStateEvt * const cs = Q_NEW_X(ChannelStateEvt, 0U, CHANNEL_STATE_SIG);
-            if ( NULL != cs )
-            {
-                (void)memset(&cs->why, 0, sizeof(cs->why));
-                (void)memset(&cs->broker, 0, sizeof(cs->broker));
-                cs->state   = (uint8_t)CHAN_OFF;
-                cs->since_s = 0U;
-                cs->next_s  = 0U;
-                cs->lost    = 0U;
-                cs->fast    = false;
-                cs->shot         = (uint8_t)KSHOT_IDLE;
-                cs->shot_sent    = 0U;
-                cs->shot_fps_x10 = 0U;
-                cs->shot_left_s  = 0U;
-                cs->keep_s       = 0U;
-                cs->session      = (uint8_t)CHAN_SESSION_NONE;
-                QACTIVE_PUBLISH(&cs->super, &me->super);
-            }
-#endif
+            chan_state_answer(me);
             status = Q_HANDLED();
             break;
         }
@@ -7101,6 +7151,8 @@ static void stream_open_refuse(QActive * const who, bool from)
 static QState Net_offline(Net * const me, QEvt const * const e)
 {
     QState status;
+
+    chan_ask_pay(me, e);
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
@@ -7304,6 +7356,7 @@ static QState Net_online(Net * const me, QEvt const * const e)
 {
     QState status;
 
+    chan_ask_pay(me, e);
     if ( net_lp_refuses(me, e) )
     {
         status = Q_HANDLED();
@@ -7328,6 +7381,10 @@ static QState Net_online(Net * const me, QEvt const * const e)
 #endif
 {
     QState status;
+
+#if !CONFIG_KODE_LOWPOWER
+    chan_ask_pay(me, e);    /* with the board's rest, Net_online() paid */
+#endif
     switch ( e->sig )
     {
         case NET_STREAM_OPEN_REQ_SIG: {

@@ -21,6 +21,7 @@
 #include "kqp.h"
 #include "qf_support.h"
 #include "owners_support.h"
+#include "radio_knocks.h"
 
 /* The command watchdog, in QP ticks, repeated rather than imported for the
  * reason test_console_flow.c repeats it. */
@@ -62,6 +63,9 @@ static void console_up(void)
     {
         QF_gc(e);
     }
+    /* The BLE state ask is a knock, which AO_Radio's initial transition makes
+     * on a board before anyone asks; posted() takes it as AO_Radio would. */
+    radio_knocks_reset();
     fake_klog_reset();
 }
 
@@ -118,6 +122,10 @@ static bool posted(enum_t sig)
         if ( (QSignal)sig == e->sig )
         {
             hit = true;
+        }
+        if ( (QSignal)BLE_STATE_REQ_SIG == e->sig )
+        {
+            (void)radio_knocks_take(RADIO_KNOCK_STATE, NULL);
         }
         QF_gc(e);
     }

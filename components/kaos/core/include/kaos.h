@@ -2559,11 +2559,11 @@ uint32_t console_rx_dropped(void);
 bool console_congested(void);
 
 /**
- * @brief Ask AO_Radio to publish BLE_STATE_SIG now.
+ * @brief Ask AO_Radio to publish BLE_STATE_SIG now. Always answered.
  *
- * Posted with KQP_RADIO_POST_MARGIN, as AO_Radio's doors are. A queue too
- * full for it drops the ask; the asker then hears the BLE state the next time
- * it changes.
+ * A knock, as the BLE state change is: asks that pile up fold into one
+ * BLE_STATE_SIG, and a queue too full for it owes the ask and posts it again
+ * before the next event AO_Radio handles.
  */
 void ble_state_request(void);
 
@@ -3097,13 +3097,13 @@ typedef enum {
 
 /**
  * @brief Ask AO_Net to publish CHANNEL_STATE_SIG now, with CHAN_OFF in a
- *        firmware built without the channel.
+ *        firmware built without the channel. Always answered.
  *
  * Posted with KQP_NET_CMD_MARGIN, as AO_Net's other doors are. A queue too
- * full for it refuses the ask; the asker then hears the channel's state the
- * next time it changes.
+ * full for it owes the ask, and AO_Net answers it before the next event it
+ * handles; asks owed together are answered once.
  *
- * @return true when the ask was posted; false when the queue refused it.
+ * @return true when the ask was posted; false when it is owed.
  */
 bool channel_state_request(void);
 
@@ -4642,6 +4642,9 @@ void boot_net_left(void);
 /**
  * @brief Tell AO_Boot that AO_Log has written what was posted to it before
  *        the leave. AO_Log's answer to log_flush_request(), exactly once.
+ *
+ * Posted with KQP_BOOT_CMD_MARGIN. A queue too full for it drops the answer,
+ * and the leave goes on at its KODE_LEAVE_LOG_MS bound.
  */
 void boot_log_flushed(void);
 
