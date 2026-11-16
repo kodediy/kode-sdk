@@ -66,6 +66,8 @@ extern "C" {
 #define AUTOTEST_ORDER_POWER_PLUG  33U   /**< `user`: the charger plugged. */
 #define AUTOTEST_ORDER_NFC_CARD    34U   /**< `user`: an NFC card read. */
 #define AUTOTEST_ORDER_RFID_CARD   35U   /**< `user`: a 125 kHz card read. */
+/* cppcheck-suppress misra-c2012-2.5 ; its row is built with CONFIG_KODE_COMPOSE */
+#define AUTOTEST_ORDER_COMPOSE     36U   /**< Bench: the pixel accelerator. */
 
 /** @brief Whether a row answers on the spot or later, on the bus. */
 typedef enum {

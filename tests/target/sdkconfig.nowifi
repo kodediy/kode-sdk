@@ -26,3 +26,7 @@ CONFIG_KODEOS_MIRROR=n
 # (scheduler_none.c) and every `#if CONFIG_KODE_SCHEDULER` around their callers
 # are compiled here and nowhere else.
 CONFIG_KODE_SCHEDULER=n
+
+# Composing off, as the SDK ships it: the call that refuses and an AO_Display
+# that claims no accelerator are compiled here. (kaos)
+CONFIG_KODE_COMPOSE=n

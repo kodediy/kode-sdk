@@ -6061,6 +6061,7 @@ static const char *const EN_COMPONENT[] = {
     "display",
     "buttons", "tp",
     "psram",
+    "compose",
     "mem",
     "boot",
     "apps", "kfw", "id",
@@ -6240,6 +6241,13 @@ static void h_test(Console *me, const kcmd_t *c, const karg_val_t *v)
     {
         group = AUTOTEST_G_USER;
     }
+#if !defined(CONFIG_KODE_COMPOSE)
+    else if ( strcmp(EN_COMPONENT[v[0].u], "compose") == 0 )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "not_built");
+        return;
+    }
+#endif
     else
     {
         sel = EN_COMPONENT[v[0].u];

@@ -69,6 +69,16 @@ menu "kodeOS active objects"
 
                 On in kodeOS, off in an app.
 
+        config KODE_COMPOSE
+            bool "Compose pictures with the pixel accelerator"
+            default n
+            help
+                The passes a renderer composes with (kscreen_pic_*), run by
+                AO_Display, and the `compose` self-test row. Off, a pass is
+                refused as not built.
+
+                If unsure, say N.
+
     endmenu
 
     menu "Radio (ESP32-C5)"

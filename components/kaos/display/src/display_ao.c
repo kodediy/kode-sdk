@@ -35,6 +35,7 @@
 #if CONFIG_KODE_LOWPOWER
 #include "display_clock.h"
 #endif
+#include "display_compose.h"
 
 #if CONFIG_KODEOS_MIRROR
 /* Everything below is the mirror's and is compiled only with KODEOS_MIRROR:
@@ -595,6 +596,12 @@ void kaos_display_register(void)
           NULL, 0U, "Screen",
           "Screen problem",
           AUTOTEST_ORDER_DISPLAY },
+#if defined(CONFIG_KODE_COMPOSE)
+        { "compose", AUTOTEST_ID_COMPOSE, display_compose_row, KROW_SYNC, AUTOTEST_G_NONE, 0U,
+          NULL, 0U, "Pixel accelerator",
+          "Accelerator problem",
+          AUTOTEST_ORDER_COMPOSE },
+#endif
     };
 
     kaos_require(krows_add(DISPLAY_ROWS, sizeof(DISPLAY_ROWS) / sizeof(DISPLAY_ROWS[0])),
@@ -1502,11 +1509,13 @@ static QState Display_initial(Display * const me, void const * const par)
         QActive_subscribe(&me->super, LOWPOWER_STATE_SIG);
     }
 #endif
+#if defined(CONFIG_KODEOS_MIRROR) || defined(CONFIG_KODE_COMPOSE)
+    /* The accelerator scales the mirror and composes for a renderer. */
+    kaos_claim(KBSP_RES_PPA, me, "AO_Display");
+#endif
 #if CONFIG_KODEOS_MIRROR
-    /* The codec and the scaler are claimed only with the mirror: nothing else
-     * in kodeOS touches either. */
-    kaos_claim(KBSP_RES_JPEG,      me, "AO_Display");
-    kaos_claim(KBSP_RES_PPA,       me, "AO_Display");
+    /* The codec is claimed only with the mirror: nothing else touches it. */
+    kaos_claim(KBSP_RES_JPEG, me, "AO_Display");
 #endif
 
     /* The panel's supply first, and from its owner: VCI_EN is P7 of the
@@ -1756,6 +1765,15 @@ static QState Display_powering(Display * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#if defined(CONFIG_KODE_COMPOSE)
+        case DISPLAY_COMPOSE_REQ_SIG: {
+            /* The accelerator does not wait for the panel: answered now, and
+             * a pass that reads the glass is told there is no frame yet. */
+            display_compose_answer(Q_EVT_CAST(DisplayComposeReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+#endif
 #if CONFIG_KODE_LOWPOWER
         case LOWPOWER_ROUND_SIG: {
             /* Asked before the panel is up: say so rather than let the round
@@ -3061,6 +3079,13 @@ static QState Display_active(Display * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#if defined(CONFIG_KODE_COMPOSE)
+        case DISPLAY_COMPOSE_REQ_SIG: {
+            display_compose_answer(Q_EVT_CAST(DisplayComposeReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+#endif
         case DISPLAY_HEALTH_SIG: {
             /* In every build: the look and the retry of a panel that did not
              * come up are not about rest. */

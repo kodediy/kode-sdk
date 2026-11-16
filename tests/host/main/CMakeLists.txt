@@ -131,6 +131,8 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kaos/lowpower/src/lowpower_last.c"
     "${SDK_DIR}/components/kaos/display/src/display_ao.c"
     "${SDK_DIR}/components/kaos/display/src/display_sleep.c"
+    "${SDK_DIR}/components/kaos/display/src/display_compose.c"
+    "${SDK_DIR}/components/kaos/display/src/display_compose_none.c"
     "${SDK_DIR}/components/kaos/display/src/display_clock.c"
     "${SDK_DIR}/components/kaos/storage/src/storage_ao.c"
     "${SDK_DIR}/components/kaos/storage/src/storage_fetch.c"
@@ -385,6 +387,9 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     # AO_Scheduler, off in the SDK and on in kodeOS, spelled out for the same
     # reason: without it test_scheduler_ao.c would compile out and pass.
     "CONFIG_KODE_SCHEDULER=1"
+    # The compose passes behind AO_Display, off in the SDK: on here, or the
+    # cases in test_display_ao.c would ask a call that only refuses.
+    "CONFIG_KODE_COMPOSE=1"
     # The console is compiled here as a loose source, so this symbol is what
     # the registry reads to know there is a console to reach the table at
     # all; without it every kode_variables_add() and kode_functions_add()
@@ -448,6 +453,11 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 set_source_files_properties(
     "${SDK_DIR}/components/kaos/display/src/display_ao.c"
     PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_BLE_CONSOLE=1")
+
+# The compose call of an image without CONFIG_KODE_COMPOSE, compiled beside the real one under another name.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/display/src/display_compose_none.c"
+    PROPERTIES COMPILE_DEFINITIONS "display_compose_run=display_compose_run_none")
 
 # And to kdrv_ble_app.c, the app's own service's rules: the service rides
 # beside the console's, so without the symbol every table would be judged

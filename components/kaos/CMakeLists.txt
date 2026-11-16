@@ -85,6 +85,13 @@ else()
     # option off they refuse.
     list(APPEND srcs "lowpower/src/lowpower_none.c")
 endif()
+if(CONFIG_KODE_COMPOSE)
+    # The pixel accelerator behind AO_Display: the request, its answer and the row.
+    list(APPEND srcs "display/src/display_compose.c")
+else()
+    # The call exists either way, so a renderer's source links; it refuses.
+    list(APPEND srcs "display/src/display_compose_none.c")
+endif()
 if(CONFIG_KODE_SCHEDULER)
     # AO_Scheduler: the table of cron entries and the lines it runs.
     list(APPEND srcs "scheduler/src/scheduler_ao.c")

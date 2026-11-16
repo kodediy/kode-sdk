@@ -199,9 +199,11 @@ void kaos_park_touch(void)
 void kaos_park_display(void)
 {
     park_claim(KBSP_RES_PANEL, "parked(AO_Display)");
+#if defined(CONFIG_KODEOS_MIRROR) || defined(CONFIG_KODE_COMPOSE)
+    park_claim(KBSP_RES_PPA,   "parked(AO_Display)");
+#endif
 #if CONFIG_KODEOS_MIRROR
     park_claim(KBSP_RES_JPEG, "parked(AO_Display)");
-    park_claim(KBSP_RES_PPA,  "parked(AO_Display)");
 #endif
     /* VCI_EN is P7, AO_IoExp's to drive: the level first, then the direction,
      * so a pin a cold power-on left an input never drives high on its way. */

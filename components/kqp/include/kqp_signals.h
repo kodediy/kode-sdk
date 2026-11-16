@@ -1849,6 +1849,10 @@ enum KodeSignals {
                                  *   RGB565 and copy the JPEG into its buffer
                                  *   (DisplayJpegReqEvt),
                                  *   display_jpeg_request().                  */
+    DISPLAY_COMPOSE_REQ_SIG,    /**< AO_Display: run one pass of the pixel
+                                 *   accelerator on the requester's pictures
+                                 *   (DisplayComposeReqEvt),
+                                 *   display_compose_run().                   */
 
     NET_SHOT_REQ_SIG,           /**< AO_Net (direct post, from
                                  *   net_shot_request()): upload the glass to
@@ -2961,6 +2965,8 @@ typedef struct {
 #define AUTOTEST_ID_NFC_CARD   33U
 #define AUTOTEST_ID_RFID_CARD  34U
 #define AUTOTEST_ID_PSRAM      35U
+/* cppcheck-suppress misra-c2012-2.5 ; its row is built with CONFIG_KODE_COMPOSE */
+#define AUTOTEST_ID_COMPOSE    36U
 
 /** @brief The most rows one run may hold. */
 #define AUTOTEST_RUN_MAX       24U
@@ -5703,6 +5709,65 @@ typedef struct {
     uint32_t       *ack;   /**< Where @c gen is written back, just before
                             *   @c done.                                   */
 } DisplayJpegReqEvt;
+
+#define DISPLAY_COMPOSE_FILL   0U  /**< Paint a block of @c dst one colour.          */
+#define DISPLAY_COMPOSE_SCALE  1U  /**< Copy a block of @c src into @c dst, scaled.  */
+#define DISPLAY_COMPOSE_BLEND  2U  /**< Lay a block of @c src over @c dst.           */
+
+/** @brief A picture a compose pass reads or writes: RGB565, @c w * 2 bytes a row. */
+typedef struct {
+    uint8_t *px;     /**< The pixels: the requester's, held until the answer. */
+    uint32_t bytes;  /**< The allocation's size.                              */
+    uint16_t w;      /**< Width in pixels.                                    */
+    uint16_t h;      /**< Height in pixels.                                   */
+} display_pic_t;
+
+/** @brief What display_compose_run() runs: one pass, as kdrv_compose.h takes it. */
+typedef struct {
+    uint8_t       op;       /**< DISPLAY_COMPOSE_*.                              */
+    bool          glass;    /**< The source is the frame on the glass, not
+                             *   @c src: a scale only.                           */
+    display_pic_t dst;      /**< The picture written.                            */
+    display_pic_t src;      /**< The picture read; unused by a fill.             */
+    uint16_t      dst_x;    /**< Column of @c dst the block lands on.            */
+    uint16_t      dst_y;    /**< Row of @c dst the block lands on.               */
+    uint16_t      x;        /**< The block's first column: of @c src, or of
+                             *   @c dst for a fill.                              */
+    uint16_t      y;        /**< The block's first row, likewise.                */
+    uint16_t      w;        /**< The block's columns.                            */
+    uint16_t      h;        /**< The block's rows.                               */
+    uint16_t      scale_x;  /**< A scale's horizontal factor, in sixteenths.     */
+    uint16_t      scale_y;  /**< Its vertical factor.                            */
+    uint32_t      colour;   /**< A fill's colour, 0xAARRGGBB; the alpha is not
+                             *   used.                                           */
+    uint8_t       opa;      /**< A blend's opacity, 0..255.                      */
+    uint8_t       turns;    /**< A scale's quarter turns counter-clockwise, 0..3. */
+} display_compose_t;
+
+#if defined(CONFIG_KODE_COMPOSE)
+/**
+ * @brief Run one pass of the pixel accelerator (DISPLAY_COMPOSE_REQ_SIG).
+ *
+ * The blocking request of a renderer inside its own pass, or of a worker:
+ * AO_Display owns the accelerator and runs the pass in its step. The answer
+ * is display_jpeg_request()'s shape: @c rc and @c us written, @c gen stamped
+ * into @c ack, then @c done signalled - and nothing at all for a request
+ * whose @c gen no longer matches @c cur. AO_Display marks @c cur as it takes
+ * the request, so its asker cannot give up on a pass that is running.
+ */
+typedef struct {
+    QEvt              super;
+    display_compose_t job;   /**< The pass.                                  */
+    uint32_t         *rc;    /**< Receives the kode_status_t.                */
+    uint32_t         *us;    /**< Receives the microseconds the pass took.   */
+    khal_sem_t        done;  /**< Signalled once @c rc and @c us are written. */
+    uint32_t          gen;   /**< The requester's tag for this request.      */
+    uint32_t         *cur;   /**< The requester's current tag; marked while
+                              *   this request's pass runs.                  */
+    uint32_t         *ack;   /**< Where @c gen is written back, just before
+                              *   @c done.                                   */
+} DisplayComposeReqEvt;
+#endif
 
 /**
  * @brief A shot, ready to be read (DISPLAY_SHOT_RSP_SIG).

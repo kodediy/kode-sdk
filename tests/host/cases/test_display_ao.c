@@ -18,12 +18,14 @@
 #include "kdrv_tca6408a.h"
 #include "Mockkdrv_jpeg.h"
 #include "Mockkdrv_ppa.h"
+#include "Mockkdrv_compose.h"
 
 #include "ao_spy.h"
 #include "config_support.h"
 #include "display_sleep.h"
 #include "fakes.h"
 #include "kaos.h"
+#include "kbsp_board.h"
 #include "kbsp_owners.h"
 #include "khal_nvs.h"
 #include "khal_time.h"
@@ -89,6 +91,46 @@ static void supply_answered(kdrv_tca6408a_field_t f, int32_t value)
     a.rc    = (uint8_t)KODE_OK;
     a.value = value;
     QASM_DISPATCH(AO_Display, &a.super, 0U);
+}
+
+/**
+ * @brief Ask for a compose pass while the panel's supply is still being asked for.
+ *
+ * Dispatched as the request arrives, with the answer's four places on this
+ * frame: the pass is run and answered in the same step.
+ */
+static void compose_asked_while_powering(void)
+{
+    static uint8_t       px[64];
+    DisplayComposeReqEvt q;
+    uint32_t             rc  = UINT32_MAX;
+    uint32_t             us  = UINT32_MAX;
+    uint32_t             cur = 1U;
+    uint32_t             ack = 0U;
+    unsigned const       woken = fake_sem_signals();
+
+    (void)memset(&q, 0, sizeof(q));
+    q.super         = (QEvt)QEVT_INITIALIZER(DISPLAY_COMPOSE_REQ_SIG);
+    q.job.op        = DISPLAY_COMPOSE_FILL;
+    q.job.dst.px    = px;
+    q.job.dst.bytes = (uint32_t)sizeof(px);
+    q.job.dst.w     = 8U;
+    q.job.dst.h     = 4U;
+    q.job.w         = 8U;
+    q.job.h         = 4U;
+    q.rc            = &rc;
+    q.us            = &us;
+    q.done          = khal_sem_create();
+    q.gen           = 1U;
+    q.cur           = &cur;
+    q.ack           = &ack;
+
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    QASM_DISPATCH(AO_Display, &q.super, 0U);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)KODE_OK, rc,
+                                     "a pass asked before the panel is up is run");
+    TEST_ASSERT_EQUAL_UINT32(1U, ack);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(woken + 1U, fake_sem_signals(), "and its asker is woken");
 }
 
 /**
@@ -158,6 +200,11 @@ static void display_up_once(uint8_t stored)
         QASM_DISPATCH(AO_Display, &early, 0U);
         TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
                                        "a state asked for too early is deferred, not refused");
+
+        /* A renderer that composes this early is answered too: the
+         * accelerator does not wait for the panel, and a request left to
+         * drop would cost its asker the whole wait. */
+        compose_asked_while_powering();
 
         supply_answered(KDRV_TCA_O7, 1);
         TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 2U, fake_neighbour_ioexp_posts(),
@@ -2792,4 +2839,338 @@ TEST_CASE("a glass the app slept is not a lost glass", "[display_ao][sleep]")
     sleep_asked(false);
     ao_spy_drain();
     Mockkdrv_display_Destroy();
+}
+
+/* ---- Composing: the accelerator behind its owner -----------------------------
+ * A renderer never calls the accelerator: it asks AO_Display, which runs the
+ * pass in its own step and wakes the asker. The asker sleeps on a semaphore
+ * meanwhile, so each case runs AO_Display's step from inside that wait. */
+
+#define CP_W      32U   /* pictures of 32 by 8: 512 bytes, whole cache lines */
+#define CP_H      8U
+#define CP_BYTES  (CP_W * CP_H * 2U)
+#define CP_WAIT   500U  /* a renderer's bound, ms */
+
+static uint8_t s_cp_dst[CP_BYTES];
+static uint8_t s_cp_src[CP_BYTES];
+static display_compose_ask_t s_cp_ask;
+
+/** @brief AO_Display takes what is in its queue, while the asker sleeps. */
+static void cp_owner_runs(void)
+{
+    (void)qf_support_pump(AO_Display, 1U);
+}
+
+/** @brief A pass over the two small pictures, the whole of each. */
+static display_compose_t cp_job(uint8_t op)
+{
+    display_compose_t job;
+
+    (void)memset(&job, 0, sizeof(job));
+    job.op        = op;
+    job.dst.px    = s_cp_dst;
+    job.dst.bytes = CP_BYTES;
+    job.dst.w     = (uint16_t)CP_W;
+    job.dst.h     = (uint16_t)CP_H;
+    job.src.px    = s_cp_src;
+    job.src.bytes = CP_BYTES;
+    job.src.w     = (uint16_t)CP_W;
+    job.src.h     = (uint16_t)CP_H;
+    job.w         = (uint16_t)CP_W;
+    job.h         = (uint16_t)CP_H;
+    return job;
+}
+
+/** @brief The mocks a compose case needs, and a fresh asker. */
+static void cp_setup(void)
+{
+    Mockkdrv_display_Init();
+    Mockkdrv_compose_Init();
+    display_up_once(0U);
+    /* A request is posted with a margin, which QP reads from the static kind
+     * of queue. */
+    qf_support_margin_queue(AO_Display);
+    fake_sem_reset();
+    (void)memset(&s_cp_ask, 0, sizeof(s_cp_ask));
+}
+
+/** @brief Every expected pass was made, and no other. */
+static void cp_done(void)
+{
+    /* A wait that never came leaves its hook armed for somebody else's. */
+    fake_sem_wait_hook(NULL);
+    Mockkdrv_compose_Verify();
+    Mockkdrv_compose_Destroy();
+    Mockkdrv_display_Destroy();
+}
+
+TEST_CASE("a compose pass is run by the accelerator's owner, and its answer wakes the asker",
+          "[display_ao][compose]")
+{
+    kdrv_compose_pic_t const  dst  = { s_cp_dst, CP_BYTES, (uint16_t)CP_W, (uint16_t)CP_H };
+    kdrv_compose_pic_t const  src  = { s_cp_src, CP_BYTES, (uint16_t)CP_W, (uint16_t)CP_H };
+    kdrv_compose_rect_t const half = { 4U, 2U, 16U, 4U };
+    kdrv_compose_rect_t const all  = { 0U, 0U, (uint16_t)CP_W, (uint16_t)CP_H };
+    display_compose_t         job;
+    uint32_t                  us   = UINT32_MAX;
+
+    cp_setup();
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("AO_Display", kbsp_owner_name(KBSP_RES_PPA),
+                                     "the accelerator is AO_Display's");
+
+    /* A scale: a block of the source, to a point of the destination. */
+    job         = cp_job(DISPLAY_COMPOSE_SCALE);
+    job.x       = half.x;
+    job.y       = half.y;
+    job.w       = half.w;
+    job.h       = half.h;
+    job.dst_x   = 8U;
+    job.dst_y   = 6U;
+    job.scale_x = 8U;
+    job.scale_y = 4U;
+    kdrv_compose_scale_ExpectAndReturn(&dst, 8U, 6U, &src, &half, 8U, 4U, 0U, KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, &us));
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(UINT32_MAX, us, "the pass's time is answered");
+    TEST_ASSERT_EQUAL_UINT32(CP_WAIT, fake_sem_last_wait_ms());
+
+    /* A fill: the block is the destination's. */
+    job        = cp_job(DISPLAY_COMPOSE_FILL);
+    job.colour = 0xFFFF0000U;
+    kdrv_compose_fill_ExpectAndReturn(&dst, &all, 0xFFFF0000U, KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* A blend, and the accelerator's refusal reaches the asker as it is. */
+    job     = cp_job(DISPLAY_COMPOSE_BLEND);
+    job.opa = 128U;
+    kdrv_compose_blend_ExpectAndReturn(&dst, 0U, 0U, &src, &all, 128U, KODE_ERROR);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_ERROR, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+TEST_CASE("the frame on the glass is a source only its owner can name", "[display_ao][compose]")
+{
+    static uint8_t            front[64];
+    kdrv_compose_pic_t const  dst   = { s_cp_dst, CP_BYTES, (uint16_t)CP_W, (uint16_t)CP_H };
+    kdrv_compose_pic_t const  glass = { front, (uint32_t)KDRV_DISPLAY_FB_BYTES,
+                                        (uint16_t)KBSP_LCD_H_RES, (uint16_t)KBSP_LCD_V_RES };
+    kdrv_compose_rect_t const from  = { 0U, 0U, 16U, 8U };
+    display_compose_t         job;
+
+    cp_setup();
+
+    job         = cp_job(DISPLAY_COMPOSE_SCALE);
+    job.glass   = true;
+    job.src.px  = NULL;
+    job.w       = from.w;
+    job.h       = from.h;
+    job.scale_x = 16U;
+    job.scale_y = 16U;
+    /* Turned on its way, for a glass that is: the turn reaches the pass. */
+    job.turns   = 3U;
+    kdrv_display_front_buffer_ExpectAndReturn(front);
+    kdrv_compose_scale_ExpectAndReturn(&dst, 0U, 0U, &glass, &from, 16U, 16U, 3U, KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* A panel with one framebuffer, or a link that is down: nothing to read. */
+    kdrv_display_front_buffer_ExpectAndReturn(NULL);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_NO_RESOURCES, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* The glass is read, never blended from or filled. */
+    job.op = DISPLAY_COMPOSE_BLEND;
+    kdrv_display_front_buffer_ExpectAndReturn(front);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+TEST_CASE("a pass nobody can run is refused, not waited out", "[display_ao][compose]")
+{
+    display_compose_t job;
+
+    cp_setup();
+
+    /* No accelerator for this kind of pass: its answer reaches the asker. */
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_NO_RESOURCES);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_NO_RESOURCES, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* A pass that is none of the three. */
+    job = cp_job(0x7FU);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(NULL, &job, CP_WAIT, NULL));
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, NULL, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+/* The owner did not answer in time: the asker goes on, and the request it
+ * left behind must not run later into pictures it may have freed. No
+ * expectation is the assertion: CMock fails a pass nobody asked for. */
+TEST_CASE("a compose pass its asker stopped waiting for is never run", "[display_ao][compose]")
+{
+    display_compose_t job;
+
+    cp_setup();
+
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    TEST_ASSERT_EQUAL(KODE_TIMEOUT, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_TRUE(fake_klog_saw("did not answer within"));
+
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_pump(AO_Display, 1U));
+    TEST_ASSERT_TRUE(fake_klog_saw("stopped waiting"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_sem_signals(), "nobody is woken for a stale tag");
+
+    /* The next request is answered as if nothing had happened. */
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+/* A glass that sleeps has its link down, and its framebuffers may be gone.
+ * The renderer was parked before that and has nothing to compose for; a pass
+ * asked all the same is refused at once, with its reason, and never reaches
+ * the accelerator. No expectation is the assertion: CMock fails a pass nobody
+ * asked for. */
+TEST_CASE("a compose pass asked with the glass asleep is refused, and served again once it wakes",
+          "[display_ao][compose][sleep]")
+{
+    display_compose_t job;
+
+    Mockkdrv_display_Init();
+    Mockkdrv_compose_Init();
+    (void)display_headless();
+    sleep_mocks();
+    qf_support_margin_queue(AO_Display);
+    fake_sem_reset();
+    (void)memset(&s_cp_ask, 0, sizeof(s_cp_ask));
+
+    sleep_asked(true);
+    ao_spy_drain();
+    TEST_ASSERT_TRUE_MESSAGE(display_asleep(), "the glass sleeps for the app");
+    fake_klog_reset();
+
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_TRUE_MESSAGE(fake_klog_saw("the glass is asleep"), "the refusal says why");
+
+    /* The frame on the glass is not read either: nobody is asked for it. */
+    job         = cp_job(DISPLAY_COMPOSE_SCALE);
+    job.glass   = true;
+    job.scale_x = 16U;
+    job.scale_y = 16U;
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    sleep_asked(false);
+    ao_spy_drain();
+    TEST_ASSERT_FALSE(display_asleep());
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+/* ---- A deadline that falls inside a pass -------------------------------------
+ * The asker's time can run out while AO_Display is already inside the pass:
+ * the accelerator is then writing the destination by DMA. Giving up there
+ * would let the asker free pictures a pass still writes. So the request is
+ * claimed: once AO_Display has taken it, the asker can no longer abandon it
+ * and waits a second, longer time for the answer. */
+
+#define CP_PASS_MAX  2000U  /* the second wait, ms; repeated, not imported */
+
+/** @brief The answer comes at last, while the asker waits a second time. */
+static void cp_answer_arrives(void)
+{
+    khal_sem_signal(s_cp_ask.done);
+}
+
+/** @brief AO_Display runs the pass, but its signal has not reached the asker
+ *         when the first wait runs out; it comes during the second. */
+static void cp_owner_runs_late(void)
+{
+    (void)qf_support_pump(AO_Display, 1U);
+    fake_sem_reset();
+    fake_sem_wait_hook(&cp_answer_arrives);
+}
+
+/** @brief AO_Display takes the pass and its answer never reaches the asker. */
+static void cp_owner_runs_never_heard(void)
+{
+    (void)qf_support_pump(AO_Display, 1U);
+    fake_sem_reset();
+}
+
+TEST_CASE("a deadline that falls inside a pass waits for the pass, and answers what it did",
+          "[display_ao][compose]")
+{
+    display_compose_t job;
+
+    cp_setup();
+
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs_late);
+    TEST_ASSERT_EQUAL_MESSAGE(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL),
+                              "the pass ran: its answer, not a timeout");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(CP_PASS_MAX, fake_sem_last_wait_ms(),
+                                     "the second wait is the pass's own bound");
+
+    /* The accelerator never finishes: said as a fault of the device, so
+     * nobody takes it for a pass that was never started. */
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs_never_heard);
+    TEST_ASSERT_EQUAL(KODE_IO_ERROR, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_TRUE(fake_klog_saw("may still be writing"));
+
+    /* And the request after it is served as ever. */
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+/* A renderer's request must never fill AO_Display's queue to the brim: the
+ * queue keeps room for its own traffic, and a request that does not fit is
+ * refused at once, not asserted on and not waited out. */
+TEST_CASE("a compose request leaves AO_Display's queue its margin, and is refused when it cannot",
+          "[display_ao][compose]")
+{
+    display_compose_t job;
+    const QEvt       *left = NULL;
+
+    cp_setup();
+    while ( uxQueueSpacesAvailable(AO_Display->eQueue) > (UBaseType_t)KQP_DISPLAY_CMD_MARGIN )
+    {
+        display_state_request();
+    }
+
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    TEST_ASSERT_EQUAL(KODE_NO_RESOURCES, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)KQP_DISPLAY_CMD_MARGIN,
+                                   (unsigned)uxQueueSpacesAvailable(AO_Display->eQueue),
+                                   "nothing was queued");
+
+    while ( xQueueReceive(AO_Display->eQueue, &left, 0U) == pdTRUE )
+    {
+        QF_gc(left);
+    }
+    ao_spy_drain();
+    cp_done();
 }

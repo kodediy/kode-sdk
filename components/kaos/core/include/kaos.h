@@ -1396,7 +1396,10 @@ kode_status_t ir_last_ask(QActive *who);
  * Two exceptions to events: flush completion is kdrv_display's semaphore, given
  * from the DMA ISR (cache disabled, so no callback) because LVGL waits inside its
  * render call (kdrv_display_flush_wait()); and kdrv_display's shutdown handler
- * resets the panel inside esp_restart(), in the restarting task.
+ * resets the panel inside esp_restart(), in the restarting task. The first
+ * covers a compose pass too (display_compose_run()): the renderer hands the
+ * pass over by event and waits for it on a semaphore, inside its own render
+ * work, bounded, and AO_Display never waits for the renderer.
  */
 extern QActive * const AO_Display;  /**< The panel owner AO. */
 void Display_ctor(void);            /**< Construct it; kaos_display_start() calls it. */
@@ -1585,6 +1588,51 @@ void display_shot_release(void);
  */
 void display_jpeg_request(display_jpeg_t const *job, uint32_t *len, uint32_t *rc, khal_sem_t done,
                           uint32_t gen, uint32_t const *cur, uint32_t *ack);
+
+/**
+ * @brief An asker's own state for display_compose_run(): one per asking thread.
+ *
+ * Static storage, zeroed, for the life of the image: AO_Display may still
+ * read and write it for a request the asker stopped waiting for, and the
+ * semaphore made on the first request is kept.
+ */
+typedef struct {
+    khal_sem_t done;  /**< AO_Display's signal, made on the first request and kept. */
+    uint32_t   gen;   /**< The tag of the request waited on now.                    */
+    uint32_t   ack;   /**< The tag AO_Display answered last.                        */
+    uint32_t   rc;    /**< The answer's kode_status_t.                              */
+    uint32_t   us;    /**< The microseconds the pass took.                          */
+} display_compose_ask_t;
+
+/**
+ * @brief Run one pass of the pixel accelerator on the caller's pictures, and wait for it.
+ *
+ * AO_Display owns the accelerator and runs the pass in its step. A blocking
+ * request: for a renderer inside its own pass (kscreen) or a worker task.
+ * Built with CONFIG_KODE_COMPOSE; without it every pass is refused, logged.
+ * The pictures stay the caller's and must outlive the call. A request is
+ * either given up before AO_Display takes it (KODE_TIMEOUT: no pass runs for
+ * it, then or later) or waited for until its pass is over, two seconds more
+ * at most. Only KODE_IO_ERROR leaves a pass that may still be writing its
+ * destination: the pictures of that request are not freed.
+ *
+ * @param ask        The caller's state, in static storage; never shared
+ *                   between threads.
+ * @param job        The pass; copied into the request.
+ * @param timeout_ms How long to wait for the answer.
+ * @param us         Receives the microseconds the pass took; may be NULL.
+ * @return KODE_OK; KODE_DENIED for a NULL argument, a malformed or oversized
+ *         picture, a block that does not fit, a glass that is asleep
+ *         (display_asleep()) or a build without CONFIG_KODE_COMPOSE;
+ *         KODE_NO_RESOURCES with no accelerator, no
+ *         event to carry the request, no room in AO_Display's queue or no
+ *         frame on the glass to read;
+ *         KODE_TIMEOUT when AO_Display did not take the request in time;
+ *         KODE_ERROR when the accelerator refused the pass; KODE_IO_ERROR
+ *         when a pass it started never ended.
+ */
+kode_status_t display_compose_run(display_compose_ask_t *ask, display_compose_t const *job,
+                                  uint32_t timeout_ms, uint32_t *us);
 
 /* ---- Mirror: the panel, live -------------------------------------------
  * A live stream of small JPEG frames from the panel's framebuffer, paced by a
