@@ -40,6 +40,24 @@ static inline void lp_round(QActive * const ao, kode_lp_state_t target)
 }
 
 /**
+ * @brief Open an app's rest on @p ao: a round posted to it alone, the board AWAKE.
+ *
+ * @param ao   The owner under test.
+ * @param part The KODE_LP_PART_* it is asked for.
+ */
+static inline void lp_part_round(QActive * const ao, uint8_t part)
+{
+    LowPowerRoundEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(LOWPOWER_ROUND_SIG);
+    e.target = (uint8_t)KODE_LP_ASLEEP;
+    e.parts  = part;
+    e.round  = ++s_lp_round_no;
+    QASM_DISPATCH(ao, &e.super, 0U);
+}
+
+/**
  * @brief Tell @p ao the board is AWAKE (again).
  *
  * @param ao The owner under test.

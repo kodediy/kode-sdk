@@ -7194,6 +7194,194 @@ TEST_CASE("a round with nothing open is ready, twice", "[storage_ao][lowpower]")
     lp_expect_answer(false, NULL);
 }
 
+/* The board's round leaves the card where it is; an app's rest of the card
+ * unmounts it and switches its supply off, on the worker, and answers when
+ * both are done. */
+TEST_CASE("an app's rest of the card unmounts it on the worker, then answers",
+          "[storage_ao][lowpower]")
+{
+    storage_fresh();
+    fake_sdmmc_fresh_card();
+    TEST_ASSERT_NOT_NULL(kdrv_storage_mount(KDRV_MEDIUM_SD));
+
+    lp_round(AO_Storage, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_storage_mounted(KDRV_MEDIUM_SD),
+                             "a round of the board unmounted the card");
+    TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
+
+    lp_part_round(AO_Storage, KODE_LP_PART_CARD);
+    lp_expect_silence();
+    TEST_ASSERT_TRUE_MESSAGE(run_sd_job(), "the card's rest is the worker's to do");
+
+    lp_expect_answer(false, NULL);
+    lp_expect_no_more();
+    TEST_ASSERT_FALSE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
+}
+
+/** @brief Put the card away as an app's rest does, the worker doing it. */
+static void card_rests(void)
+{
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_storage_mounted(KDRV_MEDIUM_SD), "no card was mounted to rest");
+    lp_part_round(AO_Storage, KODE_LP_PART_CARD);
+    TEST_ASSERT_TRUE(run_sd_job());
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_FALSE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
+    ao_spy_drain();
+}
+
+/**
+ * @brief Post a whole-payload write request from the pool, and let the AO take it.
+ *
+ * From the pool, not the stack as ask_write()'s: a request the AO holds for
+ * the card outlives the call that made it.
+ */
+static void post_write(const char *name, const void *data, uint32_t len)
+{
+    StorageWriteEvt *e = Q_NEW_X(StorageWriteEvt, 0U, STORAGE_WRITE_REQ_SIG);
+
+    TEST_ASSERT_NOT_NULL(e);
+    (void)snprintf(e->name, sizeof(e->name), "%s", name);
+    e->data = data;
+    e->len  = len;
+    e->who  = ao_spy();
+    QACTIVE_POST_LIFO(AO_Storage, &e->super);
+    (void)qf_support_pump(AO_Storage, 1U);
+}
+
+/** @brief Take the next answer and insist it is a write that ended on @p medium. */
+static void expect_written_on(kdrv_medium_t medium)
+{
+    const StorageWriteRspEvt * const w = (const StorageWriteRspEvt *)ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(w, "the write was not answered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_WRITE_RSP_SIG, (int)w->super.sig);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)w->status);
+    TEST_ASSERT_EQUAL_INT((int)medium, (int)w->medium);
+}
+
+/* Where a write goes is decided by what is mounted. A card at rest is not,
+ * so it comes back first: otherwise a file the card holds would get a twin
+ * inside, and the read after it would bring the card back and show the old
+ * one. */
+TEST_CASE("after the card's rest a bare name the card holds is written over on the card",
+          "[storage_ao][lowpower][first]")
+{
+    static const uint8_t payload[64] = { 0x42U };
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_sd_path("log.csv", "old", 3U);
+    TEST_ASSERT_NOT_NULL(kdrv_storage_probe(KDRV_MEDIUM_SD));
+    card_rests();
+    fake_klog_reset();
+
+    post_write("log.csv", payload, sizeof(payload));
+    settle_card();
+    drain_write();
+
+    expect_written_on(KDRV_MEDIUM_SD);
+    TEST_ASSERT_FALSE_MESSAGE(fake_media_file_exists(fake_media_fs_dir(), "log.csv"),
+                              "the file was split between the two volumes");
+    TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
+    TEST_ASSERT_TRUE(log_says("'log.csv' is written over on the card, where it is"));
+}
+
+TEST_CASE("after the card's rest a new bare name goes to the card", "[storage_ao][lowpower][first]")
+{
+    static const uint8_t payload[64] = { 0x42U };
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    TEST_ASSERT_NOT_NULL(kdrv_storage_probe(KDRV_MEDIUM_SD));
+    card_rests();
+
+    post_write("shot.bmp", payload, sizeof(payload));
+    settle_card();
+    drain_write();
+
+    expect_written_on(KDRV_MEDIUM_SD);
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_sd_dir(), "shot.bmp"));
+    TEST_ASSERT_FALSE(fake_media_file_exists(fake_media_fs_dir(), "shot.bmp"));
+}
+
+TEST_CASE("after the card's rest a new data folder goes to the card, and nothing inside",
+          "[storage_ao][lowpower][appdata][first]")
+{
+    storage_fresh();
+    fake_psram_reset();
+    fake_media_set_sd_present(true);
+    TEST_ASSERT_NOT_NULL(kdrv_storage_probe(KDRV_MEDIUM_SD));
+    card_rests();
+
+    ask_appdata_put("demo", KAPP_ICON_HALF_BYTES);
+    settle_card();
+    drain_write();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
+    TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_sd_dir(), CARD_DEMO_JSON));
+    TEST_ASSERT_FALSE_MESSAGE(fake_media_file_exists(fake_media_fs_dir(), ".kode/appsdata/demo"),
+                              "a folder the card would take went inside");
+}
+
+/* The card comes back on the worker: the request that needs it waits there,
+ * and the AO's own step stays short. */
+TEST_CASE("the card comes back on the worker, and the write waits for it", "[storage_ao][lowpower][first]")
+{
+    static const uint8_t payload[64] = { 0x42U };
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    TEST_ASSERT_NOT_NULL(kdrv_storage_probe(KDRV_MEDIUM_SD));
+    card_rests();
+
+    post_write("shot.bmp", payload, sizeof(payload));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
+                                   "the card was not asked back on the worker");
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_storage_mounted(KDRV_MEDIUM_SD), "the AO mounted the card in its own step");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the write was decided before the card was back");
+
+    settle_card();
+    drain_write();
+    expect_written_on(KDRV_MEDIUM_SD);
+}
+
+/* A slot that held no card was not forgotten as tried: nothing is probed
+ * again, and the write goes inside as it did before the rest. */
+TEST_CASE("after a rest with no card in the slot a bare name still goes inside", "[storage_ao][lowpower][first]")
+{
+    static const uint8_t payload[64] = { 0x42U };
+
+    storage_fresh();
+    fake_media_set_sd_present(false);
+    TEST_ASSERT_NULL(kdrv_storage_probe(KDRV_MEDIUM_SD));
+    lp_part_round(AO_Storage, KODE_LP_PART_CARD);
+    TEST_ASSERT_TRUE(run_sd_job());
+    lp_expect_answer(false, NULL);
+    ao_spy_drain();
+
+    post_write("shot.bmp", payload, sizeof(payload));
+    settle_card();
+    drain_write();
+
+    expect_written_on(KDRV_MEDIUM_FS);
+}
+
+TEST_CASE("a write in flight refuses the card's rest, and nothing is unmounted",
+          "[storage_ao][lowpower]")
+{
+    storage_fresh();
+
+    ask_write("outgoing.bin", s_big, sizeof(s_big));
+    lp_part_round(AO_Storage, KODE_LP_PART_CARD);
+    lp_expect_answer(true, "file write");
+    lp_expect_no_more();
+    TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
+
+    drain_write();
+    ao_spy_drain();
+}
+
 /* Nothing is restored on AWAKE: the next open mounts nothing and closes
  * nothing, it simply opens. */
 TEST_CASE("after the rest AWAKE does nothing and the next open is served",

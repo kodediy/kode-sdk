@@ -172,7 +172,10 @@ typedef enum {
     SD_OP_REMOUNT,    /**< Unmount, then mount: the next width, or a rescan.  */
     SD_OP_READ,       /**< Read raw sectors.                                  */
     SD_OP_WRITE,      /**< Write raw sectors.                                 */
-    SD_OP_FORMAT      /**< Make a fresh filesystem and ask how big it is.     */
+    SD_OP_FORMAT,     /**< Make a fresh filesystem and ask how big it is.     */
+    SD_OP_REST,       /**< Unmount it and switch its supply off.              */
+    SD_OP_BACK        /**< Bring back a card an app's rest put away: power it
+                       *   and mount it, as the first look for a file does.   */
 } SdOp;
 
 /** @brief What a call was for: where the AO goes on when it returns. */
@@ -190,7 +193,10 @@ typedef enum {
     SD_THEN_PROBE_READ,    /**< One chunk of the far end read back.           */
     SD_THEN_ALIAS,         /**< One sector of the wrap scan.                  */
     SD_THEN_FORMAT,        /**< The format.                                   */
-    SD_THEN_NONE           /**< Nothing: the remount a script owed the slot.  */
+    SD_THEN_NONE,          /**< Nothing: the remount a script owed the slot.  */
+    SD_THEN_REST,          /**< An app's rest: answer its round.              */
+    SD_THEN_BACK           /**< The card back from an app's rest: nothing to
+                            *   answer, the request that wanted it was held.  */
 } SdThen;
 
 /**
@@ -470,6 +476,10 @@ typedef struct {
                               *   of every launcher repaint.                 */
 #if CONFIG_KODE_LOWPOWER
     uint8_t  lp_who;         /**< The id lowpower_join() gave.               */
+    uint32_t lp_round;       /**< The round the card's rest answers.         */
+    bool     card_rested;    /**< An app's rest put the card away and nothing
+                              *   has brought it back: the next request that
+                              *   needs it brings it back first (card_back()). */
 #endif
 
     /* The `appdata_put` in progress, between its two steps (app.json, then the
@@ -6420,6 +6430,15 @@ static kode_status_t sd_job_run(void *arg, uint32_t *value)
             kdrv_storage_unmount(KDRV_MEDIUM_SD);
             break;
         }
+        case SD_OP_REST: {
+            rc = kdrv_storage_card_rest();
+            break;
+        }
+        case SD_OP_BACK: {
+            /* A slot that held no card stays as it was: not asked again. */
+            (void)kdrv_storage_probe(KDRV_MEDIUM_SD);
+            break;
+        }
         case SD_OP_REMOUNT: {
             kdrv_storage_unmount(KDRV_MEDIUM_SD);
             if ( kdrv_storage_mount(KDRV_MEDIUM_SD) == NULL )
@@ -7749,6 +7768,27 @@ static void sd_job_complete(Storage * const me, kode_status_t rc,
         case SD_THEN_NONE: {
             break;
         }
+#ifdef CONFIG_KODE_LOWPOWER
+        case SD_THEN_REST: {
+            if ( KODE_OK == rc )
+            {
+                KLOG_N(TAG, "card at rest for the app: unmounted, supply off");
+            }
+            /* Unmounted whatever the supply did: what is decided by a
+             * mounted card must not be decided before it is back. */
+            me->card_rested = true;
+            lowpower_ready(me->lp_who, me->lp_round, KODE_OK != rc, "card supply");
+            break;
+        }
+        case SD_THEN_BACK: {
+            if ( kdrv_storage_mounted(KDRV_MEDIUM_SD) )
+            {
+                KLOG_N(TAG, "card back from the app's rest: mounted at %s",
+                       kdrv_storage_mount_point(KDRV_MEDIUM_SD));
+            }
+            break;
+        }
+#endif
         default: {
             break;
         }
@@ -7808,6 +7848,8 @@ void Storage_ctor(void)
     QTimeEvt_ctorX(&me->x_pacer, &me->super, STORAGE_APP_WIPE_NEXT_SIG, 0U);
 #if CONFIG_KODE_LOWPOWER
     me->lp_who = KODE_LOWPOWER_WHO_NONE;
+    me->lp_round    = 0U;
+    me->card_rested = false;
 #endif
 }
 
@@ -8102,10 +8144,14 @@ static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
 /**
  * @brief LOWPOWER_ROUND_SIG: files closed and the card idle, or busy; answer once.
  *
+ * A round of the board leaves the card as it is. An app's rest (the round's
+ * @c parts) also unmounts it and switches its supply off, and is answered
+ * when the worker has done both.
+ *
  * @param me The AO.
  * @param r  The round.
  */
-static void storage_round(Storage const * const me, const LowPowerRoundEvt * const r)
+static void storage_round(Storage * const me, const LowPowerRoundEvt * const r)
 {
     if ( (NULL != me->writer) || me->r_open )
     {
@@ -8120,9 +8166,17 @@ static void storage_round(Storage const * const me, const LowPowerRoundEvt * con
     {
         lowpower_ready(me->lp_who, r->round, true, "storage busy");
     }
-    else
+    else if ( 0U == r->parts )
     {
         lowpower_ready(me->lp_who, r->round, false, NULL);
+    }
+    else if ( sd_job_submit(me, SD_OP_REST, SD_THEN_REST) )
+    {
+        me->lp_round = r->round;
+    }
+    else
+    {
+        lowpower_ready(me->lp_who, r->round, true, "storage busy");
     }
 }
 #endif /* CONFIG_KODE_LOWPOWER */
@@ -9112,6 +9166,57 @@ static bool card_hold(Storage * const me, QEvt const * const e)
     return card_refuse(me, e);
 }
 
+#ifdef CONFIG_KODE_LOWPOWER
+/**
+ * @brief Whether a request is decided by what the card holds or by whether it
+ *        is mounted, so that a card at rest has to come back before it.
+ *
+ * Everything needs_card() names, and a download: with no volume named it
+ * goes where a write of that name goes.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return true for a request that wants the card back first.
+ */
+static bool card_wanted(const Storage * const me, QEvt const * const e)
+{
+    return needs_card(me, e) || ((QSignal)HTTP_FILE_REQ_SIG == e->sig);
+}
+
+/**
+ * @brief Bring back the card an app's rest put away, and keep the request
+ *        that wants it until it is back.
+ *
+ * Where a write, a data folder or a download with no volume named goes is
+ * decided by whether the card is mounted, and only a read or a path on the
+ * card mounts it. Decided with the card away, a file the card holds would get
+ * a twin inside, and the read after it would mount the card and find the old
+ * one. So the card comes back first, on the worker, and the request is
+ * recalled once it has (card_pump()).
+ *
+ * @param me The AO, the card at rest and no call to it out.
+ * @param e  The request.
+ * @return true when the request was held or refused; false when it has to be
+ *         served now, as the card stands.
+ */
+static bool card_back(Storage * const me, QEvt const * const e)
+{
+    bool kept = false;
+
+    me->card_rested = false;
+    if ( !sd_job_submit(me, SD_OP_BACK, SD_THEN_BACK) )
+    {
+        KLOG_W(TAG, "the card could not be asked back from the app's rest; "
+                    "it is used as it stands");
+    }
+    else
+    {
+        kept = card_hold(me, e);
+    }
+    return kept;
+}
+#endif /* CONFIG_KODE_LOWPOWER */
+
 /**
  * @brief Take up what was held, once no call to the card is out.
  *
@@ -9601,6 +9706,14 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
         wait_pump(me);
         status = Q_HANDLED();
     }
+#ifdef CONFIG_KODE_LOWPOWER
+    else if ( me->card_rested && (!me->sdj.busy) && card_wanted(me, e)
+             && card_back(me, e) )
+    {
+        /* Held until the card an app's rest put away is back. */
+        status = Q_HANDLED();
+    }
+#endif
     else if ( (NULL != storage_fetch_event)
              && storage_fetch_event(e, busy(me) || me->sdj.busy) )
     {
