@@ -105,6 +105,14 @@ uint32_t kdrv_storage_cluster_bytes(kdrv_medium_t m)
     {
         bytes = kdrv_fs_cluster_bytes();
     }
+    else if ( KDRV_MEDIUM_SD == m )
+    {
+        bytes = kdrv_sd_cluster_bytes();
+    }
+    else
+    {
+        /* no such medium */
+    }
     return bytes;
 }
 

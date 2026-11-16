@@ -472,6 +472,16 @@ void fake_sdmmc_set_alias(uint32_t real_sectors);
  */
 void fake_sdmmc_set_total_mb(uint32_t total_mb);
 
+/** @brief The allocation unit a reset gives the card's volume. */
+#define FAKE_SD_CLUSTER_BYTES  4096U
+
+/**
+ * @brief Set the allocation unit the card's volume reports.
+ * @param bytes What khal_sdmmc_cluster_bytes() says while a card is mounted;
+ *              fake_sdmmc_reset() puts back FAKE_SD_CLUSTER_BYTES.
+ */
+void fake_sdmmc_set_cluster(uint32_t bytes);
+
 /** @brief Make every raw sector write fail. */
 void fake_sdmmc_fail_writes(bool fail);
 

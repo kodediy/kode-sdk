@@ -120,23 +120,27 @@ typedef struct {
  *         volume's mount behind it, each command waiting out the host's own
  *         timeout. */
 #define KDRV_SD_TRY_MAX_MS        3000U
-/** @brief The most the write check on four lines may take: one sector read and
- *         the same sector written back, each given as long as a try. */
+/** @brief The most one write check may take: one sector read and the same
+ *         sector written back, each given as long as a try. */
 #define KDRV_SD_CHECK_MAX_MS      (2U * KDRV_SD_TRY_MAX_MS)
 /** @brief How many times a card that takes no write on four lines is mounted
  *         on one, each after a cycle of its supply, before it is reported as a
  *         card that would not come up. */
 #define KDRV_SD_ONE_LINE_TRIES    2U
+/** @brief Taking a card that failed a check down to one line: cycles of its
+ *         supply, each followed by a try on one. */
+#define KDRV_SD_NARROW_MAX_MS     (KDRV_SD_ONE_LINE_TRIES \
+                                   * (KDRV_SD_CYCLE_MS + KDRV_SD_TRY_MAX_MS))
 /** @brief A mount: the rail, a try on one line for a card remembered as one
  *         that takes no write on four, which another card in the slot then
- *         repeats on four, the write check behind that, and, when the card
- *         takes no write on four lines, cycles of its supply, each followed
- *         by a try on one. A card that does not come up on four lines at all
- *         takes two tries, which is less. */
+ *         repeats on four, the write check behind that and, when the card
+ *         takes no write on four lines, the way down to one; then the check
+ *         on one line and, when the card takes no write there either, the way
+ *         down again. A card that does not come up on four lines at all takes
+ *         two tries before its check on one, which is less. */
 #define KDRV_SD_MOUNT_MAX_MS      (KDRV_SD_POWER_SETTLE_MS + (2U * KDRV_SD_TRY_MAX_MS) \
-                                   + KDRV_SD_CHECK_MAX_MS \
-                                   + (KDRV_SD_ONE_LINE_TRIES \
-                                      * (KDRV_SD_CYCLE_MS + KDRV_SD_TRY_MAX_MS)))
+                                   + (2U * (KDRV_SD_CHECK_MAX_MS \
+                                            + KDRV_SD_NARROW_MAX_MS)))
 /** @brief A transfer of 32 KB of sectors, which is the largest one asked. */
 #define KDRV_SD_SECTORS_MAX_MS    5000U
 /** @brief A format of the largest card the slot takes, with the volume's size
@@ -152,14 +156,23 @@ typedef struct {
  * The fall to one line is not a policy, it is what makes a counterfeit card
  * usable: the cards shipped with some units advertise 4-bit in their SCR, read
  * on four lines and fail the first write there. A mount that comes up on four
- * lines therefore proves the card takes a write: it reads the card's last
+ * lines therefore checks the card takes a write: it reads the card's last
  * sector, where no partition lives, and writes the same bytes back. When that
  * read or write fails, or there is no memory to try it, the card is unmounted,
  * its supply is cycled and it is mounted on one line, up to
  * KDRV_SD_ONE_LINE_TRIES times with a cycle before each, and the outcome is
  * told at NOTICE. A card that comes up on none of them is reported as one that
- * would not come up. A mount that does not come up on four lines at all falls
- * to one line without that check, and a mount asked on one line never writes.
+ * would not come up.
+ *
+ * A mount that stands on one line, whichever way it got there, is checked the
+ * same way on one line, once per card and boot (kdrv_sd_took_write() says how
+ * it went); a card that fails there is taken down and up again on one line,
+ * the same way, so that it is still read.
+ *
+ * The check proves that a write reaches the card: the bus, the card's
+ * controller and the one sector. It does not prove that the card keeps what
+ * it is given or holds what it says: a card of a false size may accept the
+ * sector past its real end and drop it or write it over another.
  *
  * What a card took is remembered for the boot, in RAM, for the last card
  * judged: it is known by what its CID says of it. A card that took the write is
@@ -222,11 +235,45 @@ bool kdrv_sd_mounted(void);
  */
 bool kdrv_sd_mounted_everyday(void);
 
+/**
+ * @brief Whether the card in the slot took the write check on the lines it
+ *        stands on, and no write of a file on it has failed since.
+ *
+ * The check is kdrv_sd_mount()'s: one sector read and written back as it was,
+ * which proves the way a write goes and not that the card keeps it.
+ *
+ * @return true for the card that took the check this boot (on four lines, or
+ *         on one after it took none on four), while it is mounted and until
+ *         kdrv_sd_write_failed(); false with nothing mounted, for a card that
+ *         took no write, for one whose check could not be made, and for a card
+ *         mounted with the check off.
+ */
+bool kdrv_sd_took_write(void);
+
+/**
+ * @brief Tell the driver that a write of a file on the mounted card failed.
+ *
+ * The card is no longer counted as one that takes a write until the boot ends
+ * (kdrv_sd_took_write() says false, a remount of it included), and its next
+ * mount is on one line. Said once at NOTICE; nothing when the card was not
+ * counted as one.
+ *
+ * @return true when this call took the card's word back; false when there was
+ *         none to take, already taken back or never given.
+ */
+bool kdrv_sd_write_failed(void);
+
 /** @brief The card's mount point string, mounted or not. */
 const char *kdrv_sd_mount_point(void);
 
 /** @brief FAT usage of the mounted card. KODE_DENIED when no card. */
 kode_status_t kdrv_sd_usage(uint64_t *total, uint64_t *free_bytes);
+
+/**
+ * @brief The allocation unit of the mounted card's volume.
+ * @return Bytes a file of one byte takes there; 0 with no card mounted.
+ */
+uint32_t kdrv_sd_cluster_bytes(void);
 
 /* ---- The table ----------------------------------------------------------- */
 

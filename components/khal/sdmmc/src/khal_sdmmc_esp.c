@@ -12,6 +12,8 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "diskio_sdmmc.h"
+#include "ff.h"
 #include "driver/sdmmc_host.h"
 #include "sd_protocol_defs.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
@@ -511,6 +513,33 @@ kode_status_t khal_sdmmc_info(uint64_t *total, uint64_t *free_bytes)
         *free_bytes = f;
     }
     return KODE_OK;
+}
+
+uint32_t khal_sdmmc_cluster_bytes(void)
+{
+    uint32_t bytes = 0U;
+
+    if ( NULL != s_card )
+    {
+        char   drive[3];
+        FATFS *fs            = NULL;
+        DWORD  free_clusters = 0U;
+
+        drive[0] = (char)('0' + ff_diskio_get_pdrv_card(s_card));
+        drive[1] = ':';
+        drive[2] = '\0';
+        /* The FATFS esp_vfs_fat_info() reads its sizes from comes with the
+         * free count. */
+        if ( (f_getfree(drive, &free_clusters, &fs) == FR_OK) && (NULL != fs) )
+        {
+            WORD sector = FF_MIN_SS;
+#if FF_MAX_SS != FF_MIN_SS
+            sector = fs->ssize;
+#endif
+            bytes = (uint32_t)fs->csize * (uint32_t)sector;
+        }
+    }
+    return bytes;
 }
 
 kode_status_t khal_sdmmc_format(void)

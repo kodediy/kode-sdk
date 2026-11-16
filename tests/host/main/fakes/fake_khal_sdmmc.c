@@ -58,6 +58,7 @@ static khal_sdmmc_card_t s_live;      /**< What the current mount reported.  */
 static uint8_t  s_max_width = 4U;     /**< The widest mount that succeeds.   */
 static uint32_t s_alias;              /**< Non-zero: the real size, in sectors. */
 static uint32_t s_total_mb;           /**< Non-zero: force the volume's size. */
+static uint32_t s_cluster;            /**< The volume's allocation unit.      */
 static bool     s_hosted;
 
 static unsigned s_mounts;
@@ -248,6 +249,7 @@ void fake_sdmmc_reset(void)
     s_max_width   = 4U;
     s_alias       = 0U;
     s_total_mb    = 0U;
+    s_cluster     = FAKE_SD_CLUSTER_BYTES;
     s_hosted      = false;
     s_mounts      = 0U;
     s_last_width  = 0U;
@@ -590,6 +592,22 @@ kode_status_t khal_sdmmc_info(uint64_t *total, uint64_t *free_bytes)
         *free_bytes = (used < t) ? (t - used) : 0U;
     }
     return KODE_OK;
+}
+
+uint32_t khal_sdmmc_cluster_bytes(void)
+{
+    uint32_t bytes = 0U;
+
+    if ( s_mounted )
+    {
+        bytes = s_cluster;
+    }
+    return bytes;
+}
+
+void fake_sdmmc_set_cluster(uint32_t bytes)
+{
+    s_cluster = bytes;
 }
 
 kode_status_t khal_sdmmc_format(void)

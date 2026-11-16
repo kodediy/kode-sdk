@@ -596,7 +596,7 @@ TEST_CASE("a write-back that fails ends in an unmount, a supply cycle and a "
 
     TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
 
-    TEST_ASSERT_EQUAL_UINT(8U, fake_sdmmc_trace_count());
+    TEST_ASSERT_EQUAL_UINT(10U, fake_sdmmc_trace_count());
     trace_is(0U, "supply on");
     trace_is_n(1U, "mount", 4U);
     trace_is_n(2U, "read", last);
@@ -605,6 +605,8 @@ TEST_CASE("a write-back that fails ends in an unmount, a supply cycle and a "
     trace_is(5U, "supply off");
     trace_is(6U, "supply on");
     trace_is_n(7U, "mount", 1U);
+    trace_is_n(8U, "read", last);    /* the check again, on one line */
+    trace_is_n(9U, "write", last);
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(KDRV_SD_POWER_OFF_MS + KDRV_SD_POWER_SETTLE_MS,
                                      khal_time_ms() - t0,
                                      "the supply is off for its time and settles");
@@ -629,7 +631,7 @@ TEST_CASE("a read-back that fails ends the same way", "[kdrv_sd]")
 
     TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
 
-    TEST_ASSERT_EQUAL_UINT(7U, fake_sdmmc_trace_count());
+    TEST_ASSERT_EQUAL_UINT(9U, fake_sdmmc_trace_count());
     trace_is(0U, "supply on");
     trace_is_n(1U, "mount", 4U);
     trace_is_n(2U, "read", last);
@@ -637,10 +639,13 @@ TEST_CASE("a read-back that fails ends the same way", "[kdrv_sd]")
     trace_is(4U, "supply off");
     trace_is(5U, "supply on");
     trace_is_n(6U, "mount", 1U);
+    trace_is_n(7U, "read", last);
+    trace_is_n(8U, "write", last);
 
     TEST_ASSERT_EQUAL_INT32(1, field(KDRV_SD_BUS_WIDTH));
     TEST_ASSERT_EQUAL_UINT(1U, lines_saying('N', "cannot be read on four lines"));
-    TEST_ASSERT_EQUAL_UINT(0U, fake_sdmmc_raw_writes());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_sdmmc_raw_writes(),
+                                   "the one write is the check on one line");
     unwatch_supply();
 }
 
@@ -659,7 +664,7 @@ TEST_CASE("a one-line mount that fails is tried once more after another cycle",
 
     TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
 
-    TEST_ASSERT_EQUAL_UINT(11U, fake_sdmmc_trace_count());
+    TEST_ASSERT_EQUAL_UINT(13U, fake_sdmmc_trace_count());
     trace_is(0U, "supply on");
     trace_is_n(1U, "mount", 4U);
     trace_is_n(2U, "read", last);
@@ -671,6 +676,8 @@ TEST_CASE("a one-line mount that fails is tried once more after another cycle",
     trace_is(8U, "supply off");
     trace_is(9U, "supply on");
     trace_is_n(10U, "mount", 1U);
+    trace_is_n(11U, "read", last);
+    trace_is_n(12U, "write", last);
     TEST_ASSERT_EQUAL_UINT32(2U * (KDRV_SD_POWER_OFF_MS + KDRV_SD_POWER_SETTLE_MS),
                              khal_time_ms() - t0);
 
@@ -706,18 +713,32 @@ TEST_CASE("a card that comes up on neither is reported as one that would not "
     unwatch_supply();
 }
 
-TEST_CASE("a mount asked on one line does no write check", "[kdrv_sd]")
+/* A card on one line is checked there, the same way, once per card and boot. */
+TEST_CASE("a mount asked on one line is checked on one line, once",
+          "[kdrv_sd]")
 {
+    uint32_t const last = default_last_sector();
+
     kdrv_sd_unmount();
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_set(KDRV_SD_WIDTH_REQ, 1));
     ready_one_mount();
 
     TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
 
-    TEST_ASSERT_EQUAL_UINT(1U, fake_sdmmc_trace_count());
+    TEST_ASSERT_EQUAL_UINT(3U, fake_sdmmc_trace_count());
     trace_is_n(0U, "mount", 1U);
-    TEST_ASSERT_EQUAL_UINT(0U, fake_sdmmc_raw_writes());
-    TEST_ASSERT_EQUAL_UINT(0U, fake_psram_alloc_count());
+    trace_is_n(1U, "read", last);
+    trace_is_n(2U, "write", last);
+    TEST_ASSERT_EQUAL_UINT(1U, fake_sdmmc_raw_writes());
+    TEST_ASSERT_EQUAL_UINT(fake_psram_alloc_count(), fake_psram_free_count());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+
+    kdrv_sd_unmount();
+    fake_sdmmc_trace_reset();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_sdmmc_trace_count(),
+                                   "the card was checked again");
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
 }
 
 TEST_CASE("an empty slot does no write check", "[kdrv_sd]")
@@ -745,17 +766,21 @@ TEST_CASE("a mount khal refuses does no write check", "[kdrv_sd]")
 }
 
 TEST_CASE("a card that came up on one line after the four-line try failed is "
-          "not checked either", "[kdrv_sd]")
+          "checked on one line", "[kdrv_sd]")
 {
+    uint32_t const last = default_last_sector();
+
     ready_one_mount();
     fake_sdmmc_set_max_width(1U);
 
     TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
 
-    TEST_ASSERT_EQUAL_UINT(2U, fake_sdmmc_trace_count());
+    TEST_ASSERT_EQUAL_UINT(4U, fake_sdmmc_trace_count());
     trace_is_n(0U, "mount", 4U);
     trace_is_n(1U, "mount", 1U);
-    TEST_ASSERT_EQUAL_UINT(0U, fake_sdmmc_raw_writes());
+    trace_is_n(2U, "read", last);
+    trace_is_n(3U, "write", last);
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
 }
 
 /* A check that cannot run proves nothing, and a card that is not proven is
@@ -768,10 +793,12 @@ TEST_CASE("with no memory for the check the card is mounted on one line",
 
     TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
 
-    TEST_ASSERT_EQUAL_UINT(3U, fake_sdmmc_trace_count());
+    TEST_ASSERT_EQUAL_UINT(5U, fake_sdmmc_trace_count());
     trace_is_n(0U, "mount", 4U);
     trace_is(1U, "unmount");
     trace_is_n(2U, "mount", 1U);
+    trace_is_n(3U, "read", default_last_sector());   /* memory again */
+    trace_is_n(4U, "write", default_last_sector());
     TEST_ASSERT_EQUAL_INT32(1, field(KDRV_SD_BUS_WIDTH));
     TEST_ASSERT_EQUAL_UINT(1U, lines_saying('N', "no memory"));
 }
@@ -1073,6 +1100,182 @@ TEST_CASE("a card that fell to one line at bring-up counts as mounted the "
 
     TEST_ASSERT_EQUAL_INT32(1, field(KDRV_SD_BUS_WIDTH));
     TEST_ASSERT_TRUE(kdrv_sd_mounted_everyday());
+}
+
+/* ---- Whether the card took a write ------------------------------------------ */
+
+/* What AO_Storage asks before it puts what kodeOS writes by its own choice on
+ * the card: the card in the slot took the write check on four lines. */
+TEST_CASE("a card that took the write check on four lines takes writes",
+          "[kdrv_sd]")
+{
+    kdrv_sd_unmount();
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_sd_took_write(), "nothing is mounted");
+
+    ready_one_mount();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+
+    /* The same card mounted again is the card judged, unchecked. */
+    kdrv_sd_unmount();
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+}
+
+/* The cards some units shipped with take no write on four lines; on one they
+ * may, and a card that does is as good a place as any. */
+TEST_CASE("a card narrowed by the write check that takes it on one line takes "
+          "writes", "[kdrv_sd]")
+{
+    fake_sdmmc_fail_wide_writes(true);
+    ready_one_mount();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT32(1, field(KDRV_SD_BUS_WIDTH));
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+
+    /* Mounted on one line from the memory of it, and not checked again. */
+    kdrv_sd_unmount();
+    fake_sdmmc_trace_reset();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_sdmmc_raw_writes());
+}
+
+/* A card that takes no write on one line either is still read: it is taken
+ * down and up again on one line, and it is no card that takes writes. */
+TEST_CASE("a card that takes no write on one line either is mounted again and "
+          "does not take writes", "[kdrv_sd]")
+{
+    uint32_t const last = default_last_sector();
+
+    fake_sdmmc_fail_writes(true);
+    watch_supply();
+    ready_one_mount();
+
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+
+    TEST_ASSERT_EQUAL_UINT(14U, fake_sdmmc_trace_count());
+    trace_is_n(7U, "mount", 1U);
+    trace_is_n(8U, "read", last);
+    trace_is_n(9U, "write", last);
+    trace_is(10U, "unmount");
+    trace_is(11U, "supply off");
+    trace_is(12U, "supply on");
+    trace_is_n(13U, "mount", 1U);
+    TEST_ASSERT_EQUAL_INT32(1, field(KDRV_SD_BUS_WIDTH));
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+    TEST_ASSERT_EQUAL_UINT(1U, lines_saying('N', "takes no write on one line"));
+
+    /* Its next mount is on one line and asks it nothing. */
+    kdrv_sd_unmount();
+    fake_sdmmc_trace_reset();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_UINT(2U, fake_sdmmc_trace_count());
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+    unwatch_supply();
+}
+
+TEST_CASE("a card that was never checked does not take writes", "[kdrv_sd]")
+{
+    /* Four lines with the check off, on a card nobody judged. */
+    ready_one_mount();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_set(KDRV_SD_CHECK_REQ, 0));
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT32(4, field(KDRV_SD_BUS_WIDTH));
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+}
+
+/* Whatever the case before left remembered: a card that took the check, then
+ * another mounted with the check off. */
+TEST_CASE("a card mounted with the check off after one that took it does not "
+          "take writes", "[kdrv_sd]")
+{
+    ready_one_mount();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+
+    ready_one_mount();   /* another card */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_set(KDRV_SD_CHECK_REQ, 0));
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+}
+
+/* A card that took the check and then failed a write of a file is not chosen
+ * again this boot, and goes to one line at its next mount. */
+TEST_CASE("a write that failed takes the card's word back until the boot ends",
+          "[kdrv_sd]")
+{
+    ready_one_mount();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    fake_klog_reset();
+
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_sd_write_failed(),
+                             "the word taken back was not told");
+
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+    TEST_ASSERT_EQUAL_UINT(1U, lines_saying('N', "a write on the card failed"));
+    TEST_ASSERT_FALSE_MESSAGE(kdrv_sd_write_failed(),
+                              "a word already taken back was taken again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, lines_saying('N', "a write on the card"),
+                                   "it is said once");
+
+    kdrv_sd_unmount();
+    fake_sdmmc_trace_reset();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_sdmmc_trace_count());
+    trace_is_n(0U, "mount", 1U);
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+}
+
+TEST_CASE("a write that failed with nothing mounted changes nothing",
+          "[kdrv_sd]")
+{
+    kdrv_sd_unmount();
+    fake_klog_reset();
+
+    TEST_ASSERT_FALSE(kdrv_sd_write_failed());
+
+    TEST_ASSERT_EQUAL_UINT(0U, lines_saying('N', "a write on the card"));
+    ready_one_mount();
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+}
+
+/* What is taken back is one card's word: another card is judged on its own. */
+TEST_CASE("another card after a failed write is judged afresh and takes writes",
+          "[kdrv_sd]")
+{
+    khal_sdmmc_card_t a;
+    khal_sdmmc_card_t b;
+
+    fake_sdmmc_default_card(&a);
+    a.serial = 0xAAAA0003U;
+    b = a;
+    b.serial = 0xBBBB0004U;
+
+    kdrv_sd_unmount();
+    fake_sdmmc_set_card(&a);
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE(kdrv_sd_write_failed());
+
+    kdrv_sd_unmount();
+    fake_sdmmc_set_card(&b);
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_sd_took_write(),
+                             "a new card carried the old card's failure");
+}
+
+TEST_CASE("the card's cluster is told while it is mounted", "[kdrv_sd]")
+{
+    kdrv_sd_unmount();
+    TEST_ASSERT_EQUAL_UINT32(0U, kdrv_sd_cluster_bytes());
+
+    ready_one_mount();
+    fake_sdmmc_set_cluster(32U * 1024U);
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_UINT32(32U * 1024U, kdrv_sd_cluster_bytes());
 }
 
 /* ---- The two knobs --------------------------------------------------------- */

@@ -4822,9 +4822,10 @@ TEST_CASE("the card row on a card that takes no write on four lines passes the "
     TEST_ASSERT_TRUE(take_phase(SD_TEST_VERIFY)->ok);
     TEST_ASSERT_TRUE_MESSAGE(take_verdict("sd"), "a bad card condemned a good slot");
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, traced("write"),
-                                   "one failed write: the checked mount after "
-                                   "the row");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, traced("write"),
+                                   "two writes: the checked mount after the "
+                                   "row fails on four lines and proves the "
+                                   "card on one");
     TEST_ASSERT_EQUAL_UINT(2U, traced("mount 4"));    /* the row's, the restore's */
     TEST_ASSERT_EQUAL_UINT_MESSAGE((2U * chunks) + 3U, sd_jobs_run,
                                    "a card on one line was remounted for it");

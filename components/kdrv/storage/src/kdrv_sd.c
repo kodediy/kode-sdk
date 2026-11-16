@@ -43,8 +43,9 @@ static bool     s_check_req = true;
 _Static_assert((SD_PROBE_TAG_COUNT + SD_OTHER_HOLDS) <= KODE_LOG_HOLD_MAX,
                "klog has a slot for each probe tag beside the other holds");
 
-/* A mount that comes up on four lines is proved with one sector: read, then
- * written back as it was. */
+/* A mount is proved with one sector: read, then written back as it was. One
+ * on four lines that fails is taken down to one line, and a mount on one line
+ * is proved there. */
 
 #define SD_WIDTH_NARROW   1U    /**< One data line, the width every card takes. */
 #define SD_CHECK_SECTORS  1U    /**< Sectors the write check reads and writes back. */
@@ -76,6 +77,17 @@ typedef struct {
 
 static sd_verdict_t s_verdict = SD_VERDICT_NONE;
 static card_id_t    s_judged;   /**< Who s_verdict is about; valid with a verdict. */
+
+/** @brief What the last card proved by a write on the lines it stands on. */
+typedef enum {
+    SD_PROOF_NONE = 0,   /**< No card has been asked since the boot.          */
+    SD_PROOF_TOOK,       /**< It took the write, and no write of a file on it
+                          *   has failed since.                               */
+    SD_PROOF_REFUSED     /**< It took none, or a write of a file on it failed. */
+} sd_proof_t;
+
+static sd_proof_t s_proof = SD_PROOF_NONE;
+static card_id_t  s_proved;     /**< Who s_proof is about; valid with a proof. */
 
 /** @brief Whether the mount that stands was asked on everyday terms. */
 static bool s_everyday;
@@ -494,23 +506,80 @@ static card_id_t id_of(const khal_sdmmc_card_t *c)
     return id;
 }
 
-/** @brief Whether @p c is the card the last verdict is about. */
-static bool is_judged(const khal_sdmmc_card_t *c)
+/** @brief Whether @p c is the card @p who names. */
+static bool is_card(const card_id_t *who, const khal_sdmmc_card_t *c)
 {
     card_id_t const id = id_of(c);
 
-    return (SD_VERDICT_NONE != s_verdict)
-        && (id.mfg_id == s_judged.mfg_id)
-        && (id.oem_id == s_judged.oem_id)
-        && (strncmp(id.name, s_judged.name, sizeof(id.name)) == 0)
-        && (id.revision == s_judged.revision)
-        && (id.serial == s_judged.serial)
-        && (id.date == s_judged.date);
+    return (id.mfg_id == who->mfg_id)
+        && (id.oem_id == who->oem_id)
+        && (strncmp(id.name, who->name, sizeof(id.name)) == 0)
+        && (id.revision == who->revision)
+        && (id.serial == who->serial)
+        && (id.date == who->date);
+}
+
+/** @brief Whether @p c is the card the last verdict is about. */
+static bool is_judged(const khal_sdmmc_card_t *c)
+{
+    return (SD_VERDICT_NONE != s_verdict) && is_card(&s_judged, c);
+}
+
+/** @brief Whether @p c is the card the last proof is about. */
+static bool is_proved(const khal_sdmmc_card_t *c)
+{
+    return (SD_PROOF_NONE != s_proof) && is_card(&s_proved, c);
+}
+
+/**
+ * @brief Remember what the card in @p c proved, for the boot.
+ * @param c    The card.
+ * @param took Whether it took the write.
+ */
+static void prove(const khal_sdmmc_card_t *c, bool took)
+{
+    s_proved = id_of(c);
+    s_proof  = SD_PROOF_REFUSED;
+    if ( took )
+    {
+        s_proof = SD_PROOF_TOOK;
+    }
+}
+
+bool kdrv_sd_took_write(void)
+{
+    return khal_sdmmc_mounted() && (SD_PROOF_TOOK == s_proof)
+        && is_proved(&s_snap);
+}
+
+bool kdrv_sd_write_failed(void)
+{
+    if ( !kdrv_sd_took_write() )
+    {
+        return false;   /* nothing to take back: said once */
+    }
+    s_proof = SD_PROOF_REFUSED;
+    if ( is_judged(&s_snap) )
+    {
+        /* A card that fails a write on four lines may leave the controller
+         * unable to bring it up there again: the next mount is on one. */
+        s_verdict = SD_VERDICT_ONE;
+    }
+    KLOG_N(TAG, "a write on the card failed; until the boot ends it is not "
+                "counted as a card that takes a write");
+    return true;
 }
 
 /**
  * @brief Prove the card takes a write on the lines it came up on, leaving what
  *        it holds as it was.
+ *
+ * What this proves is the way a write goes: the bus, the card's controller
+ * and one sector it accepts. It does not prove the card keeps what it is
+ * given, nor that it holds as much as it says: a card of a false size may
+ * accept a sector past its real end and drop it or write it over one of its
+ * own. The card test's scan for a wrapped size (`sd_verify`) is the check of
+ * that.
  *
  * Reads the card's last sector and writes the same bytes back. No partition
  * lives that far out, so a write cut short by a power loss costs nothing.
@@ -533,7 +602,7 @@ static const char *card_check_write(bool *asked)
     }
     if ( NULL == buf )
     {
-        return "there is no sector or no memory to check a write on four lines";
+        return "there is no sector or no memory to check a write";
     }
 
     uint32_t const last = s_snap.sectors - SD_CHECK_SECTORS;
@@ -541,11 +610,11 @@ static const char *card_check_write(bool *asked)
     *asked = true;
     if ( kdrv_sd_read_sectors(last, SD_CHECK_SECTORS, buf) != KODE_OK )
     {
-        why = "the card's last sector cannot be read on four lines";
+        why = "the card's last sector cannot be read";
     }
     else if ( kdrv_sd_write_sectors(last, SD_CHECK_SECTORS, buf) != KODE_OK )
     {
-        why = "the card takes no write on four lines";
+        why = "the card takes no write";
     }
     else
     {
@@ -556,19 +625,23 @@ static const char *card_check_write(bool *asked)
 }
 
 /**
- * @brief Take a card that was not shown to take a write on four lines down to
- *        one: unmount it, cycle its supply and mount it on one line, again
- *        after another cycle if it does not answer.
+ * @brief Take a card that was not shown to take a write down to one line:
+ *        unmount it, cycle its supply and mount it on one line, again after
+ *        another cycle if it does not answer.
  *
- * Nothing is left describing the four-line mount. The host is not touched
- * beyond the unmount and the mount: the C5's link shares its controller.
+ * Nothing is left describing the mount that failed the check. The host is not
+ * touched beyond the unmount and the mount: the C5's link shares its
+ * controller.
  *
- * @param why What the check found, as it is told at NOTICE once the card is up.
+ * @param why   What the check found, as it is told at NOTICE once the card is
+ *              up.
+ * @param lines The lines the check was made on, in words: "four lines" or
+ *              "one line".
  * @return KODE_OK with s_snap filled in for the one-line mount; KODE_DENIED
  *         when khal refused a mount without a try; KODE_ERROR with s_snap
  *         cleared when the card came up on none of the tries.
  */
-static kode_status_t card_narrow(const char *why)
+static kode_status_t card_narrow(const char *why, const char *lines)
 {
     kode_status_t st   = KODE_ERROR;
     uint8_t       left = (uint8_t)KDRV_SD_ONE_LINE_TRIES;
@@ -593,14 +666,51 @@ static kode_status_t card_narrow(const char *why)
     }
     if ( KODE_OK == st )
     {
-        KLOG_N(TAG, "%s; it is mounted on one line", why);
+        KLOG_N(TAG, "%s on %s; it is mounted on one line", why, lines);
     }
     return st;
 }
 
 /**
+ * @brief Prove a mount on one line once per card and boot, and take a card
+ *        that fails down and up again on one line.
+ *
+ * A failed write is followed by a cycle of the card's supply, because it may
+ * leave the controller unable to read the card until then. A check that could
+ * not be made is no proof: the card is asked again at its next mount.
+ *
+ * @return KODE_OK with s_snap describing the mount that stands; what
+ *         card_narrow() answers when the card was taken down.
+ */
+static kode_status_t card_prove_one(void)
+{
+    bool asked = false;
+
+    if ( is_proved(&s_snap) )
+    {
+        return KODE_OK;
+    }
+
+    const char * const why = card_check_write(&asked);
+
+    if ( NULL == why )
+    {
+        prove(&s_snap, true);
+        return KODE_OK;
+    }
+    if ( !asked )
+    {
+        KLOG_N(TAG, "%s on one line", why);
+        return KODE_OK;
+    }
+    prove(&s_snap, false);
+    return card_narrow(why, "one line");
+}
+
+/**
  * @brief Settle a mount that came up on four lines: kept when the card is
- *        known to take a write there or proves to, narrowed to one otherwise.
+ *        known to take a write there or proves to, narrowed to one otherwise
+ *        and proved there.
  *
  * What a card took is remembered for the boot, so a card is judged once: a
  * card that took the write is not checked again, and one that did not is
@@ -619,6 +729,7 @@ static kode_status_t card_settle(void)
     {
         KLOG_D(TAG, "the card took a write on four lines before; it is not "
                     "checked again");
+        prove(&s_snap, true);   /* another card's proof may stand since */
         return KODE_OK;
     }
 
@@ -628,15 +739,20 @@ static kode_status_t card_settle(void)
     {
         s_judged  = id;
         s_verdict = SD_VERDICT_FOUR;
+        prove(&s_snap, true);
         return KODE_OK;
     }
 
-    kode_status_t const st = card_narrow(why);
+    kode_status_t st = card_narrow(why, "four lines");
 
     if ( (KODE_OK == st) && asked )
     {
         s_judged  = id;
         s_verdict = SD_VERDICT_ONE;
+    }
+    if ( KODE_OK == st )
+    {
+        st = card_prove_one();
     }
     return st;
 }
@@ -670,6 +786,14 @@ static kode_status_t card_mount_asked(void)
          * not by the first file. */
         st = card_settle();
     }
+    else if ( s_check_req && (KODE_OK == st) )
+    {
+        st = card_prove_one();
+    }
+    else
+    {
+        /* no check, or no card */
+    }
     return st;
 }
 
@@ -692,7 +816,7 @@ static kode_status_t card_mount_known(void)
     {
         KLOG_D(TAG, "the card took no write on four lines before; it is "
                     "mounted on one");
-        return KODE_OK;
+        return card_prove_one();
     }
     /* Another card: let go of it, and it is judged as a card nobody judged. */
     KLOG_D(TAG, "a card that was not judged is in the slot");
@@ -837,6 +961,11 @@ void kdrv_sd_unmount(void)
 kode_status_t kdrv_sd_usage(uint64_t *total, uint64_t *free_bytes)
 {
     return khal_sdmmc_info(total, free_bytes);
+}
+
+uint32_t kdrv_sd_cluster_bytes(void)
+{
+    return khal_sdmmc_cluster_bytes();
 }
 
 /* ---- Dump ---------------------------------------------------------------- */
