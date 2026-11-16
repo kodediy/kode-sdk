@@ -2776,7 +2776,7 @@ static QState Power_polling(Power * const me, QEvt const * const e)
         case POWER_PEEK_REQ_SIG: {
             reading_t r;
             uint8_t   soc = 0U;
-            /* AO_LowPower's look while the board sleeps, every few seconds
+            /* AO_LowPower's look while the P4 sleeps, every few seconds
              * and each minute: the poll that keeps the clock stops with the
              * tick, so the keep happens here, and the reading is published
              * for the cable. Nothing is logged and no chip is dumped, or

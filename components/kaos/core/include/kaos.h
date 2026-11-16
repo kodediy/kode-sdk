@@ -1970,9 +1970,10 @@ void power_dump_request(void);
  *        wall clock to be kept if a keep is due. Logs nothing.
  *
  * What AO_LowPower asks every KODE_LOWPOWER_CABLE_LOOK_MS and each minute
- * while the board sleeps: the cable shows in the reading, and the poll that
- * keeps the clock does not run asleep. A request that finds AO_Power's queue
- * short of KQP_POWER_POST_MARGIN is dropped; the next one asks again.
+ * while the P4 sleeps, ASLEEP or in the CPU part of an app's rest: the cable
+ * shows in the reading, and the poll that keeps the clock does not run then.
+ * A request that finds AO_Power's queue short of KQP_POWER_POST_MARGIN is
+ * dropped; the next one asks again.
  */
 void power_peek_request(void);
 

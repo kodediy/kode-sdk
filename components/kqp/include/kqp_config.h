@@ -348,7 +348,8 @@
 #define KODE_LOWPOWER_DIM_PCT          20U     /**< The glass in ASLEEP when no glyphs were handed;
                                                 *   the interface sets its own through rest_pct. */
 #define KODE_LOWPOWER_MINUTE_S         60U     /**< The minute the glass is lit for. */
-#define KODE_LOWPOWER_CABLE_LOOK_MS    2000U   /**< How often ASLEEP reads the charger for a cable: no line of the board wakes the P4 for one. */
+#define KODE_LOWPOWER_CABLE_LOOK_MS    2000U   /**< How often ASLEEP and the CPU part's rest read the charger for a
+                                                *   cable: no line of the board wakes the P4 for one. */
 #define KODE_LOWPOWER_GLYPHS_WAIT_MS   1500U   /**< Longest AO_Display waits for the renderer's glyphs
                                                 *   after a round opens: under KODE_LOWPOWER_ROUND_MS, so
                                                 *   it can still answer busy and name the reason. */

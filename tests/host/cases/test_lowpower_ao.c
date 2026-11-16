@@ -5423,3 +5423,86 @@ TEST_CASE("a dark wake holds the lock: the look stops for it and runs again afte
     TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "the lock is let go again");
     lp_down();
 }
+
+/* The CPU part lets go of the lock as ASLEEP does, so its light sleeps take
+ * the cable port off the bus as well. */
+TEST_CASE("the CPU part's rest reads the charger every few seconds, and its end stops the look",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+
+    /* The look's timer outlives a case: a first rest and its end leave it
+     * stopped whatever the case before left, so the second rest proves the start. */
+    rest_up();
+    cpu_rest(req);
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "the lock is back: no look");
+    ao_spy_drain();
+
+    req.parts = KODE_LP_PART_CPU;
+    rest_post(&req);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN | KODE_LP_PART_CPU);
+    TEST_ASSERT_EQUAL_UINT(2U, s_hold_false);
+    (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+
+    TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "with the lock let go, the look runs");
+    TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running(), "and the tick does not");
+    TEST_ASSERT_TRUE(fake_time_periodic_fire_at(LOOK_US));
+    TEST_ASSERT_EQUAL_UINT(1U, queued(AO_Power, POWER_PEEK_REQ_SIG));
+
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
+    TEST_ASSERT_EQUAL_UINT(2U, s_hold_true);
+    TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "the lock is back: no look");
+    lp_down();
+}
+
+TEST_CASE("a cable the look finds ends the CPU part and has the cable port shown again, once",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+    const LowPowerPartEvt *n;
+    unsigned calls;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+    calls = fake_console_cable_calls();
+
+    charger_reading(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_true, "no cable, no wake");
+    TEST_ASSERT_EQUAL_UINT(calls, fake_console_cable_calls());
+
+    charger_reading(true);
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_CABLE, n->cause);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(),
+                                   "the port was off the bus when the cable came");
+    TEST_ASSERT_FALSE(fake_time_periodic_running_at(LOOK_US));
+
+    charger_reading(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(), "once for one cable");
+    lp_down();
+}
+
+TEST_CASE("a cable in the first reading after the CPU part ended another way has the cable port shown again",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+    unsigned calls;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    calls = fake_console_cable_calls();
+
+    charger_reading(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(calls + 1U, fake_console_cable_calls(),
+                                   "the cable came before the look saw it");
+    lp_down();
+}
