@@ -1662,6 +1662,37 @@ _Static_assert(KODE_RESET_FIND_MS > KODE_APPMGR_OPEN_MS,
                                          *   directory commit, then each
                                          *   image header and each data
                                          *   folder in turn.                  */
+#define KODE_RESET_FILES_WALKS  3U      /**< Walks AO_Storage makes of each
+                                         *   root, and of the two data
+                                         *   trees, in the files step: one,
+                                         *   and another while the walk
+                                         *   before kept all it holds and
+                                         *   its pass took something.         */
+#define KODE_RESET_FILES_STEPS  (KODE_RESET_FILES_WALKS * 4U \
+                                 * KODE_APP_LIST_MAX) /**< The files step's
+                                         *   steps at most: a walk keeps
+                                         *   KODE_APP_LIST_MAX images of each
+                                         *   root and twice as many folders
+                                         *   of the two trees, one a step.    */
+#define KODE_RESET_FILES_STEP_MS 100U   /**< What one image or one folder is
+                                         *   allowed on average: the 10 ms
+                                         *   pace and the deletes. A slower
+                                         *   card runs out the budget and
+                                         *   the reset stops at files.        */
+#define KODE_RESET_FILES_MS     90000U  /**< Every other app's files on both
+                                         *   media: KODE_RESET_FILES_STEPS at
+                                         *   KODE_RESET_FILES_STEP_MS each,
+                                         *   after up to KODE_STORAGE_TURN_MS
+                                         *   of a transfer AO_Storage waits
+                                         *   for.                             */
+_Static_assert(KODE_RESET_FILES_MS
+               >= (KODE_STORAGE_TURN_MS
+                   + (KODE_RESET_FILES_STEPS * KODE_RESET_FILES_STEP_MS)),
+               "the files step must hold every step a clear may take");
+#define KODE_RESET_FILES_AGAIN_MS 500U  /**< The pause before the files step
+                                         *   asks again for a clear AO_Storage
+                                         *   refused for a transfer, inside
+                                         *   the step's budget.               */
 #define KODE_RESET_LINK_MS      20000U  /**< The C5 link brought up, if it was
                                          *   not: the bring-up of a board that
                                          *   booted without the radio.        */
@@ -1687,6 +1718,7 @@ _Static_assert(KODE_RESET_FIND_MS > KODE_APPMGR_OPEN_MS,
                                          *   write.                           */
 #define KODE_RESET_CONSOLE_MS   (KODE_RESET_FIND_MS + KODE_RESET_INSTALL_MS \
                                  + KODE_RESET_FIND_MS + KODE_RESET_APPS_MS \
+                                 + KODE_RESET_FILES_MS \
                                  + KODE_RESET_LINK_MS + KODE_RESET_WIPE_MS \
                                  + KODE_RESET_NVS_MS + KODE_RESTART_DRAIN_MS)
                                         /**< How long the console waits for

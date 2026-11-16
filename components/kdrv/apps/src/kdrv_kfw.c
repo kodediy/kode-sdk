@@ -36,6 +36,11 @@ _Static_assert(offsetof(kfw_hdr_t, name)   == 56U, "name sits at 0x38");
  * number; the two headers must agree or a mailbox image stops being seen. */
 _Static_assert(KAPPS_KFW_MAGIC == KFW_MAGIC, "kapps_fmt.h and kdrv_kfw.h must name the same container magic");
 
+/* kapp_desc.h names the P4's chip id without ESP-IDF's headers; this file has
+ * them, so the two are held equal here. */
+_Static_assert(KAPP_CHIP_ESP32P4 == (unsigned)ESP_CHIP_ID_ESP32P4,
+               "KAPP_CHIP_ESP32P4 is not esp_app_format.h's ESP32-P4");
+
 /* ---- The buffer sink ----------------------------------------------------- */
 
 /**

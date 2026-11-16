@@ -618,7 +618,8 @@ enum KodeSignals {
                                  *   off both media (AppDataReqEvt again): the
                                  *   images at a medium's root whose descriptor
                                  *   names the project, and its data folder.
-                                 *   Posted directly, never published.        */
+                                 *   With `others`, every app's files but that
+                                 *   one's. Posted directly, never published. */
     STORAGE_APP_WIPE_NEXT_SIG,  /**< AO_Storage private QTimeEvt: the next
                                  *   file of the wipe in progress.            */
     STORAGE_APP_WIPE_RSP_SIG,   /**< To the asker: what went and what stayed
@@ -2584,6 +2585,8 @@ typedef struct {
     QEvt     super;
     char     project[32];
     QActive *who;
+    bool     others;   /**< STORAGE_APP_WIPE_REQ_SIG only: take every app's
+                        *   files but @c project's, instead of its own. */
 } AppDataReqEvt;
 
 /** @brief Where an app's folder lives, or that it does not. */
@@ -2649,16 +2652,26 @@ typedef enum {
     APP_WIPE_FOLDER_LEFT        /**< It is there and something in it would not go. */
 } AppWipeFolder;
 
-/** @brief What a wipe of one app did on one medium. */
+/**
+ * @brief What a wipe did on one medium: of one app's files, or for a clear,
+ *        of every app's but the kept one's (storage_apps_clear_request()).
+ */
 typedef struct {
-    bool    present;   /**< The medium was mounted and its root was walked.   */
-    uint8_t files;     /**< Images of the project removed.                    */
-    uint8_t left;      /**< Images of the project that would not go.          */
-    uint8_t folder;    /**< AppWipeFolder.                                    */
+    bool    present;   /**< The medium was mounted and its root read.         */
+    uint8_t files;     /**< Images removed: the project's, or a clear's.      */
+    uint8_t left;      /**< Images the wipe took that would not go; for a
+                        *   clear, also those listed that would not read.    */
+    uint8_t folder;    /**< AppWipeFolder; for a clear, LEFT when any folder
+                        *   stayed, else REMOVED when any went.               */
+    bool    cut;       /**< Some of the medium was never looked at: its root
+                        *   or a tree would not read, held more than the
+                        *   wipe walks, or held an image whose name is too
+                        *   long to look at.                                  */
 } AppWipeMedium;
 
 /**
- * @brief How a wipe of one app's files ended (STORAGE_APP_WIPE_RSP_SIG).
+ * @brief How a wipe of one app's files, or a clear, ended
+ *        (STORAGE_APP_WIPE_RSP_SIG).
  *
  * KODE_OK says the wipe ran to its end, and the two media say what it found
  * and whether it went: a file left behind is in `left`, not in the status.
@@ -2667,7 +2680,9 @@ typedef struct {
  */
 typedef struct {
     QEvt          super;
-    char          project[KODE_APP_PROJECT_MAX]; /**< Echoed: answers can cross. */
+    char          project[KODE_APP_PROJECT_MAX]; /**< Echoed, the kept one's for
+                                                  *   a clear: answers can
+                                                  *   cross.                  */
     uint8_t       status;  /**< kode_status_t, as the lines above read it.     */
     AppWipeMedium fs;      /**< The internal partition.                        */
     AppWipeMedium sd;      /**< The card.                                      */

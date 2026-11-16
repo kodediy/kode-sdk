@@ -145,6 +145,8 @@ kode_status_t kapp_image_chip(const uint8_t *prefix, size_t len,
 #define KAPP_IMAGE_CHIP_OFF  12U
 /** @brief ESP_IMAGE_HEADER_MAGIC, the first byte of every ESP image. */
 #define KAPP_IMAGE_MAGIC     0xE9U
+/** @brief ESP_CHIP_ID_ESP32P4, the chip id an image for kodeOS or its apps carries. */
+#define KAPP_CHIP_ESP32P4    0x0012U
 
 /**
  * @brief Declare this firmware's manifest. Optional; omit it and the app is

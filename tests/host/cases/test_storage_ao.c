@@ -28,6 +28,7 @@
 #include "kbsp_owners.h"
 #include "kdrv_sd.h"
 #include "kdrv_storage.h"
+#include "Mockkdrv_slot.h"
 #include "kode_sys.h"
 #include "kqp.h"
 #include "kqp_worker.h"
@@ -2007,18 +2008,30 @@ TEST_CASE("appdata_rm answers with the project it was asked about",
  * the data folder. One file a step, one answer to whoever asked, and the
  * answer says what went and what stayed on each medium. */
 
-/** @brief An image prefix whose IDF descriptor names @p project. */
-static const uint8_t *image_of(const char *project)
+/** @brief ESP_CHIP_ID_ESP32S3: another chip's firmware, for the clear's cases. */
+#define CHIP_ESP32S3  0x0009U
+
+/** @brief An image prefix built for @p chip whose IDF descriptor names @p project. */
+static const uint8_t *image_for(const char *project, uint16_t chip)
 {
     static uint8_t prefix[KAPP_PREFIX_LEN];
     esp_app_desc_t desc;
 
     (void)memset(prefix, 0xFF, sizeof(prefix));
+    prefix[0] = KAPP_IMAGE_MAGIC;
+    prefix[KAPP_IMAGE_CHIP_OFF]      = (uint8_t)(chip & 0xFFU);
+    prefix[KAPP_IMAGE_CHIP_OFF + 1U] = (uint8_t)(chip >> 8U);
     (void)memset(&desc, 0, sizeof(desc));
     desc.magic_word = ESP_APP_DESC_MAGIC_WORD;
     (void)snprintf(desc.project_name, sizeof(desc.project_name), "%s", project);
     (void)memcpy(&prefix[KAPP_IDF_DESC_OFF], &desc, sizeof(desc));
     return prefix;
+}
+
+/** @brief An image prefix of a P4 app whose IDF descriptor names @p project. */
+static const uint8_t *image_of(const char *project)
+{
+    return image_for(project, (uint16_t)KAPP_CHIP_ESP32P4);
 }
 
 /** @brief Put an image of @p project at the internal partition's root. */
@@ -2324,6 +2337,646 @@ TEST_CASE("an open is refused while an app wipe is walking",
 
     TEST_ASSERT_NOT_EQUAL(KODE_OK, take_open_status());
     TEST_ASSERT_EQUAL_UINT8(2U, take_wipe()->fs.files);
+}
+
+/* ---- Taking every app's files but one ------------------------------------- */
+
+/* The factory reset's request: the same walk as one app's wipe, with the match
+ * turned round. Every image at a medium's root whose descriptor names a
+ * project other than the one kept goes, and every data folder but the kept
+ * one's, on both media and whether an app is installed behind it or not.
+ * What names no project, kodeOS's image and the coprocessor's stay, and so
+ * does every file that is no image. */
+
+/** @brief The running image's project the next clear reads; "" fails the read. */
+static const char *s_running = "kodeos";
+
+/** @brief kdrv_running_desc() for the clear: names s_running. */
+static kode_status_t stub_running_desc(kdrv_slot_desc_t *out, int calls)
+{
+    (void)calls;
+    (void)memset(out, 0, sizeof(*out));
+    if ( '\0' == s_running[0] )
+    {
+        return KODE_ERROR;
+    }
+    (void)snprintf(out->project, sizeof(out->project), "%s", s_running);
+    return KODE_OK;
+}
+
+/** @brief Post the clear of every app's files but @p keep's, the spy asking,
+ *         with @p running the running image's project ("" for none read). */
+static void ask_clear_running(const char *keep, const char *running)
+{
+    static AppDataReqEvt e;
+
+    s_running = running;
+    kdrv_running_desc_Stub(&stub_running_desc);
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(STORAGE_APP_WIPE_REQ_SIG);
+    (void)snprintf(e.project, sizeof(e.project), "%s", keep);
+    e.others = true;
+    e.who    = ao_spy();
+
+    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+}
+
+/** @brief Post the clear of every app's files but @p keep's, kodeOS running. */
+static void ask_clear(const char *keep)
+{
+    ask_clear_running(keep, "kodeos");
+}
+
+TEST_CASE("a clear takes every app image but the kept one's, on both media",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_fs_image("welcome.bin", "welcome");
+    put_fs_image("demo.bin", "demo");
+    put_fs_image("blank.bin", "");
+    put_fs_image("kodeos.bin", "kodeos");
+    put_fs_image("c5_slave.bin", "kode_c5");
+    fake_media_put_fs_file("notes.txt", "demo");
+    put_sd_image("welcome.bin", "welcome");
+    put_sd_image("scope.bin", "scope");
+    put_sd_image("renamed.bin", "demo");
+    fake_media_put_sd_path("photo.jpg", "jpeg", 4U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_STRING("welcome", r->project);
+    TEST_ASSERT_TRUE(r->fs.present);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.left);
+    TEST_ASSERT_TRUE(r->sd.present);
+    TEST_ASSERT_EQUAL_UINT8(2U, r->sd.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->sd.left);
+    TEST_ASSERT_FALSE(on_fs("demo.bin"));
+    TEST_ASSERT_FALSE(on_sd("scope.bin"));
+    TEST_ASSERT_FALSE(on_sd("renamed.bin"));
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("welcome.bin"), "the kept app's image went");
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("welcome.bin"), "the kept app's source went");
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("blank.bin"), "an image of nobody went");
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("kodeos.bin"), "the OS image went");
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("c5_slave.bin"), "the C5 image went");
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("notes.txt"), "a file of the user's went");
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("photo.jpg"), "a file of the user's went");
+}
+
+/* An orphan folder has a name no app holds: the clear lists the two trees
+ * instead of asking for names, so it goes as an installed app's does. */
+TEST_CASE("a clear takes every data folder but the kept one's, orphans "
+          "included, on both media", "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_fs_path(".kode/appsdata/welcome/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/ghost/notes.txt", "x", 1U);
+    fake_media_put_sd_path(".kode/appsdata/welcome/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_sd_path(".kode/appsdata/scope/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_sd_path(".kode/appsdata/scope/data/log.txt", "x", 1U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->fs.folder);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->sd.folder);
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/demo/app.json"));
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/ghost/notes.txt"));
+    TEST_ASSERT_FALSE(on_sd(".kode/appsdata/scope/app.json"));
+    TEST_ASSERT_FALSE(on_sd(".kode/appsdata/scope/data/log.txt"));
+    TEST_ASSERT_TRUE_MESSAGE(on_fs(".kode/appsdata/welcome/app.json"),
+                             "the kept app's folder went");
+    TEST_ASSERT_TRUE_MESSAGE(on_sd(".kode/appsdata/welcome/app.json"),
+                             "the kept app's card folder went");
+}
+
+/* No card is no failure: the partition is cleared and the card said absent. */
+TEST_CASE("a clear with no card clears the partition and says the card is absent",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(false);
+    put_fs_image("demo.bin", "demo");
+    fake_media_put_fs_path(".kode/appsdata/ghost/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_FALSE(r->sd.present);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->fs.folder);
+    TEST_ASSERT_FALSE(on_fs("demo.bin"));
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/ghost/app.json"));
+}
+
+/* A reset with no welcome app keeps nothing: every app's image and folder go,
+ * and an image that names no project still stays. */
+TEST_CASE("a clear that keeps no name takes every app's files",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    put_fs_image("welcome.bin", "welcome");
+    put_fs_image("blank.bin", "");
+    fake_media_put_fs_path(".kode/appsdata/welcome/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+
+    ask_clear("");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->fs.files);
+    TEST_ASSERT_FALSE(on_fs("welcome.bin"));
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/welcome/app.json"));
+    TEST_ASSERT_TRUE(on_fs("blank.bin"));
+}
+
+/* At the pace of a wipe: the asking step touches nothing, and a folder goes in
+ * a step of its own, as an image does. */
+TEST_CASE("a clear deletes nothing in the step that asks for it",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    put_fs_image("a.bin", "demo");
+    fake_media_put_fs_path(".kode/appsdata/ghost/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+
+    ask_clear("welcome");
+
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the clear answered in one step");
+    TEST_ASSERT_TRUE(on_fs("a.bin"));
+    TEST_ASSERT_TRUE(on_fs(".kode/appsdata/ghost/app.json"));
+
+    (void)take_wipe();
+    TEST_ASSERT_FALSE(on_fs("a.bin"));
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/ghost/app.json"));
+}
+
+/* A folder that will not empty is said: the answer does not call it gone. */
+TEST_CASE("a clear says a folder that would not empty was left",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/ghost/a/b/deep.bin", "x", 1U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, r->fs.folder);
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/demo/app.json"));
+}
+
+/* An app's image, to a clear, is one this board could run: a firmware built
+ * for another chip is the user's file, whatever project it names. */
+TEST_CASE("a clear keeps another chip's firmware", "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_sd_image("demo.bin", "demo");
+    fake_media_put_sd_path("esp32-relay.bin", image_for("relay", CHIP_ESP32S3),
+                           KAPP_PREFIX_LEN);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(1U, r->sd.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->sd.left);
+    TEST_ASSERT_FALSE(on_sd("demo.bin"));
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("esp32-relay.bin"), "another chip's firmware went");
+}
+
+/* A second download of the update is kodeOS all the same: the running
+ * system's project keeps it, whatever the file is called. */
+TEST_CASE("a clear keeps an image of the running system under any name",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_sd_image("demo.bin", "demo");
+    put_sd_image("kodeos-0.1.1.bin", "kodeos");
+    put_fs_image("kodeos (1).bin", "kodeos");
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(1U, r->sd.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.files);
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("kodeos-0.1.1.bin"), "an update download went");
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("kodeos (1).bin"), "an update download went");
+}
+
+/* The coprocessor's image is no app either, under any name. */
+TEST_CASE("a clear keeps an image of the C5 under any name",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_sd_image("demo.bin", "demo");
+    put_sd_image("c5_slave-old.bin", "kode_c5");
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(1U, r->sd.files);
+    TEST_ASSERT_TRUE_MESSAGE(on_sd("c5_slave-old.bin"), "an old C5 image went");
+}
+
+/* Without the running system's own name no image can be told from it: the
+ * clear takes none and says them left; the folders still go. */
+TEST_CASE("a clear that cannot read the running image takes no image and "
+          "says them left", "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    put_fs_image("kodeos-copy.bin", "kodeos");
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+
+    ask_clear_running("welcome", "");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(2U, r->fs.left);
+    TEST_ASSERT_TRUE(on_fs("demo.bin"));
+    TEST_ASSERT_TRUE(on_fs("kodeos-copy.bin"));
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/demo/app.json"));
+}
+
+/* A folder the kept app's name in other letters is the kept app's to FAT,
+ * and to a delete of it by path. */
+TEST_CASE("a clear keeps the kept app's folder whatever its case",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_put_fs_path(".kode/appsdata/Welcome/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_media_put_fs_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->fs.folder);
+    TEST_ASSERT_TRUE_MESSAGE(on_fs(".kode/appsdata/Welcome/app.json"),
+                             "the kept app's folder went");
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/demo/app.json"));
+}
+
+/* A name no data folder can have is not tried, and the medium says a folder
+ * stayed. */
+TEST_CASE("a clear leaves a folder whose name is too long and says so",
+          "[storage_ao][wipe][clear]")
+{
+    static const char long_name[] =
+        ".kode/appsdata/a-folder-name-of-thirty-two-chars/app.json";
+
+    storage_fresh();
+    fake_media_put_fs_path(long_name, JSON_OK, sizeof(JSON_OK) - 1U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, r->fs.folder);
+    TEST_ASSERT_TRUE(on_fs(long_name));
+}
+
+/* An image the clear listed and cannot read may be an app's: it is said as
+ * left, never passed over as nobody's. An empty file is what a counterfeit
+ * card leaves of one: the name is there and nothing reads. */
+TEST_CASE("a clear says an image it cannot read was left",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_sd_image("demo.bin", "demo");
+    fake_media_put_sd_path("locked.bin", "", 0U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->sd.files);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->sd.left);
+}
+
+/* A data tree that is there and will not read was never looked at: its
+ * folders are said as left. */
+TEST_CASE("a clear says a data tree that would not read was left",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_put_fs_path(".kode/appsdata", "not a folder", 12U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, r->fs.folder);
+}
+
+/* A tree the volume will not resolve is not a missing one: its folders were
+ * never looked at. */
+TEST_CASE("a clear says a data tree that will not resolve was left and not looked at",
+          "[storage_ao][wipe][clear]")
+{
+    char tree[512];
+
+    storage_fresh();
+    fake_media_put_fs_dir(".kode");
+    (void)snprintf(tree, sizeof(tree), "%s/.kode/appsdata", fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, symlink("appsdata", tree));
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, r->fs.folder);
+    TEST_ASSERT_TRUE(r->fs.cut);
+}
+
+/* An image the clear cannot name in a path is never looked at: said so. */
+TEST_CASE("a clear says an image with a name too long was not looked at",
+          "[storage_ao][wipe][clear]")
+{
+    char name[KODE_APP_FILE_MAX + 8U];
+
+    storage_fresh();
+    (void)memset(name, 'a', sizeof(name));
+    (void)memcpy(&name[KODE_APP_FILE_MAX - 4U], ".bin", 5U);   /* KODE_APP_FILE_MAX chars */
+    put_fs_image(name, "demo");
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.files);
+    TEST_ASSERT_TRUE(r->fs.cut);
+    TEST_ASSERT_TRUE(on_fs(name));
+}
+
+/* A root that will not read was never looked at: the medium is not said
+ * present, and is said cut. */
+TEST_CASE("a clear says a root that will not read was not present and was cut",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    TEST_ASSERT_EQUAL_INT(0, chmod(fake_media_sd_dir(), 0U));
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_wipe();
+    (void)chmod(fake_media_sd_dir(), 0755U);
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_TRUE(r->fs.present);
+    if ( 0U != geteuid() )   /* root reads whatever the mode says */
+    {
+        TEST_ASSERT_FALSE(r->sd.present);
+        TEST_ASSERT_TRUE(r->sd.cut);
+    }
+}
+
+/** @brief Steps a clear of many files may take: every step of the files step. */
+#define CLEAR_STEPS_MAX  (KODE_RESET_FILES_STEPS + 16U)
+
+/** @brief Let a long clear run to its one answer. */
+static const StorageAppWipeRspEvt *take_long_wipe(void)
+{
+    for ( uint32_t i = 0U; (CLEAR_STEPS_MAX > i) && (0U == ao_spy_count()); ++i )
+    {
+        (void)qf_support_pump(AO_Storage, 8U);
+    }
+    const QEvt *ev = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(ev, "the clear went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_APP_WIPE_RSP_SIG, (int)ev->sig);
+    return (const StorageAppWipeRspEvt *)ev;
+}
+
+/** @brief Put @p n images of apps called app<i> at the partition's root. */
+static void put_fs_apps(uint32_t n)
+{
+    char name[KODE_APP_FILE_MAX];
+    char project[KODE_APP_PROJECT_MAX];
+
+    for ( uint32_t i = 0U; i < n; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "app%u.bin", (unsigned)i);
+        (void)snprintf(project, sizeof(project), "app%u", (unsigned)i);
+        put_fs_image(name, project);
+    }
+}
+
+/* More images than one walk keeps: the root is walked again once the first
+ * walk's are gone, and the answer says the medium was looked at whole. */
+TEST_CASE("a clear walks a root again past what one walk keeps",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    put_fs_apps(KODE_APP_LIST_MAX + 1U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_long_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(KODE_APP_LIST_MAX + 1U, r->fs.files);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.left);
+    TEST_ASSERT_FALSE(r->fs.cut);
+}
+
+/* The walks are bounded, so the step's budget holds: what is still unseen
+ * after the last is said, not passed over. */
+TEST_CASE("a clear says a root it did not walk whole after its last walk",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    put_fs_apps((KODE_RESET_FILES_WALKS * KODE_APP_LIST_MAX) + 1U);
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_long_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(KODE_RESET_FILES_WALKS * KODE_APP_LIST_MAX,
+                            r->fs.files);
+    TEST_ASSERT_TRUE(r->fs.cut);
+}
+
+/* A walk full of images the clear keeps takes nothing, so a second walk
+ * would find the same: the root is said not looked at whole. */
+TEST_CASE("a clear says a root full of kept images was not looked at whole",
+          "[storage_ao][wipe][clear]")
+{
+    char name[KODE_APP_FILE_MAX];
+
+    storage_fresh();
+    for ( uint32_t i = 0U; i <= KODE_APP_LIST_MAX; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "relay%u.bin", (unsigned)i);
+        fake_media_put_fs_path(name, image_for("relay", CHIP_ESP32S3),
+                               KAPP_PREFIX_LEN);
+    }
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_long_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(0U, r->fs.files);
+    TEST_ASSERT_TRUE(r->fs.cut);
+}
+
+/** @brief A data folder's file, relative to a medium's root, with room to spare. */
+#define TREE_REL_MAX  96U
+
+/* More data folders than one walk keeps: the tree is walked again. */
+TEST_CASE("a clear walks a data tree again past what one walk keeps",
+          "[storage_ao][wipe][clear]")
+{
+    char rel[TREE_REL_MAX];
+
+    storage_fresh();
+    for ( uint32_t i = 0U; i <= KODE_APP_LIST_MAX; ++i )
+    {
+        (void)snprintf(rel, sizeof(rel), ".kode/appsdata/app%u/app.json",
+                       (unsigned)i);
+        fake_media_put_fs_path(rel, JSON_OK, sizeof(JSON_OK) - 1U);
+    }
+
+    ask_clear("welcome");
+    const StorageAppWipeRspEvt * const r = take_long_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->fs.folder);
+    TEST_ASSERT_FALSE(r->fs.cut);
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/app0/app.json"));
+    TEST_ASSERT_FALSE(on_fs(".kode/appsdata/app64/app.json"));
+}
+
+/* A tree a walk listed and that will not list on the next was there: the
+ * medium stopped answering, and its folders are said left and not looked at,
+ * whatever a look at the path says. */
+TEST_CASE("a clear says a data tree that vanished between walks was left",
+          "[storage_ao][wipe][clear]")
+{
+    char     rel[TREE_REL_MAX];
+    char     tree[512];
+    char     away[512];
+    uint32_t left = KODE_APP_LIST_MAX + 1U;
+
+    storage_fresh();
+    for ( uint32_t i = 0U; i <= KODE_APP_LIST_MAX; ++i )
+    {
+        (void)snprintf(rel, sizeof(rel), ".kode/appsdata/app%u/app.json",
+                       (unsigned)i);
+        fake_media_put_fs_path(rel, JSON_OK, sizeof(JSON_OK) - 1U);
+    }
+
+    ask_clear("welcome");
+    for ( uint32_t i = 0U; (CLEAR_STEPS_MAX > i) && (1U < left); ++i )
+    {
+        (void)qf_support_pump(AO_Storage, 8U);
+        left = 0U;
+        for ( uint32_t k = 0U; k <= KODE_APP_LIST_MAX; ++k )
+        {
+            (void)snprintf(rel, sizeof(rel), ".kode/appsdata/app%u/app.json",
+                           (unsigned)k);
+            if ( on_fs(rel) )
+            {
+                ++left;
+            }
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, left, "the first walk did not end");
+    TEST_ASSERT_EQUAL_UINT32(0U, ao_spy_count());
+    (void)snprintf(tree, sizeof(tree), "%s/.kode/appsdata", fake_media_fs_dir());
+    (void)snprintf(away, sizeof(away), "%s/.kode/away", fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, rename(tree, away));
+    TEST_ASSERT_EQUAL_INT(0, symlink("nowhere", tree));   /* reads as missing */
+
+    const StorageAppWipeRspEvt * const r = take_long_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, r->fs.folder);
+    TEST_ASSERT_TRUE(r->fs.cut);
+}
+
+/* A clear is refused as a wipe is: while a transfer runs past the turn, and
+ * with no memory for its list; nothing is touched either way. */
+TEST_CASE("a clear with no memory for its list is refused and touches nothing",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    put_fs_image("demo.bin", "demo");
+    fake_psram_refuse(1U);
+
+    ask_clear("welcome");
+    const QEvt * const ev = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL(ev);
+    TEST_ASSERT_EQUAL_UINT8(KODE_NO_RESOURCES,
+                            ((const StorageAppWipeRspEvt *)ev)->status);
+    TEST_ASSERT_TRUE(on_fs("demo.bin"));
+}
+
+/* A clear asked while a wipe of one app runs waits its turn, as behind a
+ * transfer: the wipe answers first, then the clear runs on what is left. */
+TEST_CASE("a clear asked while a wipe runs waits for it, then runs",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    put_fs_image("a.bin", "demo");
+    put_fs_image("b.bin", "other");
+    settle_card();   /* the card's first look, which a wipe would wait for */
+
+    ask_wipe("demo");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, ao_spy_count(), "the wipe ended at once");
+    ask_clear("welcome");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the clear did not wait for the wipe");
+
+    const StorageAppWipeRspEvt * const w = take_wipe();
+    TEST_ASSERT_EQUAL_STRING("demo", w->project);
+    TEST_ASSERT_EQUAL_UINT8(1U, w->fs.files);
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("b.bin"), "the wipe of one app took another");
+
+    const StorageAppWipeRspEvt * const c = take_wipe();
+    TEST_ASSERT_EQUAL_STRING("welcome", c->project);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, c->status);
+    TEST_ASSERT_EQUAL_UINT8(1U, c->fs.files);
+    TEST_ASSERT_FALSE(on_fs("b.bin"));
+}
+
+/* The pool hands the same block back: a wipe of one app asked through its
+ * door after a clear must never inherit the clear's `others`, or it would
+ * take every app but the one asked for. */
+TEST_CASE("a wipe of one app asked after a clear takes only that app",
+          "[storage_ao][wipe][clear]")
+{
+    storage_fresh();
+    s_running = "kodeos";
+    kdrv_running_desc_Stub(&stub_running_desc);
+    /* Each door asks for the card's remount first: the request waits for it. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, storage_apps_clear_request("welcome", ao_spy()));
+    settle_card();
+    (void)take_wipe();
+
+    put_fs_image("demo.bin", "demo");
+    put_fs_image("other.bin", "other");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, storage_app_wipe_request("demo", ao_spy()));
+    settle_card();
+    const StorageAppWipeRspEvt * const r = take_wipe();
+
+    TEST_ASSERT_EQUAL_UINT8(1U, r->fs.files);
+    TEST_ASSERT_FALSE(on_fs("demo.bin"));
+    TEST_ASSERT_TRUE_MESSAGE(on_fs("other.bin"), "a wipe of one app took another");
 }
 
 /* ---- Writing one app's data folder ------------------------------------------ */

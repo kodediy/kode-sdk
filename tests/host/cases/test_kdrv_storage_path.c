@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "unity.h"
 
@@ -78,6 +79,27 @@ TEST_CASE("a path that is not there is an answer, not an error",
 
     (void)memset(&st, 0, sizeof(st));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_stat("/storage/nope", &st));
+    TEST_ASSERT_FALSE(st.exists);
+}
+
+/* Only "not there" is an answer. A path the volume will not resolve (a link
+ * that loops here; an I/O error on a card that stopped answering) is an error,
+ * never a missing file. */
+TEST_CASE("a path that will not resolve is an error, not a missing file",
+          "[kdrv_storage_path]")
+{
+    char        link[512];
+    kdrv_stat_t st;
+
+    storage_fresh();
+    (void)snprintf(link, sizeof(link), "%s/loop", fake_media_fs_dir());
+    TEST_ASSERT_EQUAL_INT(0, symlink("loop", link));
+
+    (void)memset(&st, 0, sizeof(st));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_storage_stat("/storage/loop", &st));
+    TEST_ASSERT_FALSE(st.exists);
+    (void)memset(&st, 0, sizeof(st));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_stat("/storage/nope/deeper", &st));
     TEST_ASSERT_FALSE(st.exists);
 }
 

@@ -795,6 +795,9 @@ const char *boot_reset_step_name(uint8_t step)
     case (uint8_t)KBOOT_RESET_STEP_APPS:
         name = "apps";
         break;
+    case (uint8_t)KBOOT_RESET_STEP_FILES:
+        name = "files";
+        break;
     case (uint8_t)KBOOT_RESET_STEP_LINK:
         name = "link";
         break;
@@ -938,6 +941,8 @@ static void reset_enter(Boot * const me, kboot_reset_step_t step, uint32_t ms)
 {
     me->reset_step = (uint8_t)step;
     reset_arm(me, ms);
+    /* A pause the step before armed never asks this step's question. */
+    (void)QTimeEvt_disarm(&me->again);
     KLOG_N(TAG, "factory reset: %s", boot_reset_step_name((uint8_t)step));
 }
 
@@ -1031,6 +1036,26 @@ static kode_status_t reset_start_nvs(Boot * const me)
     me->reset_passes = 0U;
     KLOG_N(TAG, "factory reset: %s", boot_reset_step_name(me->reset_step));
     return reset_nvs_pass(me);
+}
+
+/**
+ * @brief The files step starts: AO_Storage takes every other app's images and
+ *        data folders off both media.
+ *
+ * The welcome app's name is kept whether or not it is installed: its folder
+ * and its image on a card are its own, and its source for the next reset.
+ */
+static kode_status_t reset_start_files(Boot * const me)
+{
+    reset_enter(me, KBOOT_RESET_STEP_FILES, KODE_RESET_FILES_MS);
+    if ( storage_apps_clear_request(CONFIG_KODEOS_WELCOME_APP, &me->super)
+        != KODE_OK )
+    {
+        KLOG_W(TAG, "factory reset: AO_Storage was not asked for the apps' "
+                    "files");
+        return KODE_ERROR;
+    }
+    return KODE_OK;
 }
 
 /** @brief The apps step starts: AppMgr removes every app but the welcome app. */
@@ -1215,6 +1240,74 @@ static kode_status_t reset_on_find(Boot * const me, AppFindRspEvt const * const 
         KLOG_D(TAG, "factory reset: a late find answer is ignored");
     }
     return st;
+}
+
+/**
+ * @brief The files step's answer: say what stayed, then erase the settings.
+ *
+ * A file or a folder that stayed, or a part of a medium never looked at, is
+ * said and does not stop the reset, as a folder the apps step could not
+ * delete. A clear refused for a transfer is asked again after
+ * KODE_RESET_FILES_AGAIN_MS, inside the step's budget; any other refusal stops
+ * the reset at this step with its status.
+ *
+ * @param me AO_Boot, in the files step.
+ * @param r  AO_Storage's answer.
+ * @return KODE_OK to go on, else the status that stops the reset.
+ */
+static kode_status_t reset_on_files(Boot * const me,
+                                    StorageAppWipeRspEvt const * const r)
+{
+    if ( (uint8_t)KODE_DENIED == r->status )
+    {
+        KLOG_I(TAG, "factory reset: AO_Storage is busy with a transfer; the "
+                    "apps' files are asked for again in %u ms",
+               (unsigned)KODE_RESET_FILES_AGAIN_MS);
+        (void)QTimeEvt_disarm(&me->again);
+        QTimeEvt_armX(&me->again, KQP_TICKS_PER_MS(KODE_RESET_FILES_AGAIN_MS),
+                      0U);
+        return KODE_OK;
+    }
+    if ( (uint8_t)KODE_OK != r->status )
+    {
+        KLOG_W(TAG, "factory reset: AO_Storage did not take the apps' files "
+                    "(status %u)", (unsigned)r->status);
+        return (kode_status_t)r->status;
+    }
+    if ( !r->fs.present )
+    {
+        KLOG_W(TAG, "factory reset: the internal partition would not mount or "
+                    "read; its apps' files were not looked at");
+    }
+    if ( !r->sd.present && r->sd.cut )
+    {
+        KLOG_N(TAG, "factory reset: %u app image(s) removed; the card would "
+                    "not read", (unsigned)r->fs.files);
+    }
+    else if ( !r->sd.present )
+    {
+        KLOG_N(TAG, "factory reset: %u app image(s) removed; no card",
+               (unsigned)r->fs.files);
+    }
+    else if ( r->sd.cut )
+    {
+        KLOG_N(TAG, "factory reset: %u app image(s) removed; the card was not "
+                    "looked at whole",
+               (unsigned)r->fs.files + (unsigned)r->sd.files);
+    }
+    else
+    {
+        KLOG_N(TAG, "factory reset: %u app image(s) removed, the card's "
+                    "included", (unsigned)r->fs.files + (unsigned)r->sd.files);
+    }
+    if ( (0U != r->fs.left) || (0U != r->sd.left) || r->fs.cut || r->sd.cut
+        || ((uint8_t)APP_WIPE_FOLDER_LEFT == r->fs.folder)
+        || ((uint8_t)APP_WIPE_FOLDER_LEFT == r->sd.folder) )
+    {
+        KLOG_W(TAG, "factory reset: some of the apps' files stay or were not "
+                    "looked at; the reset goes on");
+    }
+    return reset_start_nvs(me);
 }
 
 /**
@@ -1795,7 +1888,7 @@ static QState Boot_resetting(Boot * const me, QEvt const * const e)
                 {
                     KLOG_N(TAG, "factory reset: %u other app(s) removed",
                            (unsigned)r->erased);
-                    st = reset_start_nvs(me);
+                    st = reset_start_files(me);
                 }
                 else
                 {
@@ -1808,6 +1901,24 @@ static QState Boot_resetting(Boot * const me, QEvt const * const e)
             {
                 KLOG_D(TAG, "factory reset: a late keep-only answer is "
                             "ignored");
+            }
+            status = reset_settle(me, st);
+            break;
+        }
+        case STORAGE_APP_WIPE_RSP_SIG: {
+            kode_status_t st = KODE_OK;
+
+            StorageAppWipeRspEvt const * const r =
+                Q_EVT_CAST(StorageAppWipeRspEvt);
+            if ( ((uint8_t)KBOOT_RESET_STEP_FILES == me->reset_step)
+                && (strcmp(r->project, CONFIG_KODEOS_WELCOME_APP) == 0) )
+            {
+                st = reset_on_files(me, r);
+            }
+            else
+            {
+                KLOG_D(TAG, "factory reset: a late answer about the apps' "
+                            "files is ignored");
             }
             status = reset_settle(me, st);
             break;
@@ -1904,6 +2015,16 @@ static QState Boot_resetting(Boot * const me, QEvt const * const e)
                 }
             }
 #endif
+            if ( (uint8_t)KBOOT_RESET_STEP_FILES == me->reset_step )
+            {
+                if ( storage_apps_clear_request(CONFIG_KODEOS_WELCOME_APP,
+                                                &me->super) != KODE_OK )
+                {
+                    KLOG_W(TAG, "factory reset: out of events; the apps' files "
+                                "were not asked for again");
+                    st = KODE_ERROR;
+                }
+            }
             status = reset_settle(me, st);
             break;
         }

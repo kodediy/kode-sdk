@@ -96,9 +96,10 @@ typedef struct {
  * @param path Absolute, normalised, virtual: "/", "/sdcard/..." or
  *             "/storage/...". Never a host path.
  * @param out  Filled on KODE_OK. Required.
- * @return KODE_OK when the question was answered; KODE_DENIED for a malformed
- *         path, a NULL argument or a path naming no volume; KODE_ERROR when
- *         the volume will not mount.
+ * @return KODE_OK when the question was answered, "not there" included;
+ *         KODE_DENIED for a malformed path, a NULL argument or a path naming
+ *         no volume; KODE_ERROR when the volume will not mount or will not
+ *         say (an I/O error, a path that does not resolve).
  */
 kode_status_t kdrv_storage_stat(const char *path, kdrv_stat_t *out);
 

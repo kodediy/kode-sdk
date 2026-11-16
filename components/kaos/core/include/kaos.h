@@ -3474,6 +3474,58 @@ kode_status_t appdata_rm_request(const char *project, QActive *who);
  */
 kode_status_t storage_app_wipe_request(const char *project, QActive *who);
 
+/**
+ * @brief Take every app's files off both media but @p keep's: the factory
+ *        reset's share of this AO.
+ *
+ * An app's image, to a clear, is a file at the root of the internal partition
+ * or of the card, called `*.bin`, whose ESP image header names the ESP32-P4
+ * and whose descriptor names a project other than @p keep, the running
+ * system's own (kodeOS's, whatever the file is called) and the C5's
+ * (KDRV_C5_PROJECT_NAME). Every such image goes, and every data folder under
+ * `<root>/.kode/appsdata/` but @p keep's (compared as FAT does, without case),
+ * whether an app is installed behind it or not. When the running image's
+ * descriptor names no project, no image can be told from it: none is taken,
+ * and every P4 image that would have gone is said left.
+ *
+ * What stays: `kodeos.bin` and `c5_slave.bin`, never opened; an image that
+ * names no project or another chip; every file that is no `.bin` image, which
+ * takes in an install's `.bin.tmp`, a replace's `.bin.bak` and a `.kfw`
+ * container; every other file, at a root or deeper, outside the data trees.
+ * A folder out of the data
+ * folder's format (more files than it holds, a second sub-folder, a deeper
+ * level) loses what the delete reaches and is said left.
+ *
+ * Paced as a wipe, one image or one folder a step, and refused or kept waiting
+ * as a wipe is. A root or a tree that holds more than one walk keeps is walked
+ * again once its names are spent, while that walk's pass took something, up to
+ * KODE_RESET_FILES_WALKS walks. Answered once posted with a
+ * StorageAppWipeRspEvt naming @p keep, per medium:
+ * - `files` the images removed; `left` the images that would not go, and
+ *   those listed that would not open or read;
+ * - `folder` APP_WIPE_FOLDER_LEFT when a folder would not go, when one listed
+ *   is no longer found, or when a tree that is there would not read; else
+ *   APP_WIPE_FOLDER_REMOVED when one went;
+ * - `cut` when some of the medium was never looked at: a root or a tree that
+ *   would not read (a tree a walk listed and the next could not included), a
+ *   root or a tree with more than the walks keep, or an image whose name is
+ *   too long to look at;
+ * - `present` true once the medium mounted and its root read: false for an
+ *   absent card, which is no failure, and for a root that would not read,
+ *   said `cut` too.
+ *
+ * A request is not withdrawn once posted: an asker that stopped waiting still
+ * has it run to its end and its answer arrive, and a clear or a wipe asked
+ * meanwhile waits for the turn or is refused with KODE_DENIED.
+ *
+ * @param keep The one app whose files stay, "" for none.
+ * @param who  Where STORAGE_APP_WIPE_RSP_SIG is posted. Never NULL.
+ * @return KODE_OK when the request is posted and an answer is owed;
+ *         KODE_NO_RESOURCES when the event pool is dry: nothing was posted and
+ *         no answer will come.
+ */
+kode_status_t storage_apps_clear_request(const char *keep, QActive *who);
+
 /** @brief Write one app's data folder (APPDATA_PUT_REQ_SIG). */
 typedef struct {
     QEvt            super;
@@ -4114,8 +4166,9 @@ typedef enum {
                                *   KODE_SHIP_UNPLUG_MS, then switches off.      */
 } kboot_reset_end_t;
 
-/* What can fail comes before what cannot be undone, so a failed step leaves the apps and the
- * settings where they were. */
+/* What is most likely to fail comes before what cannot be undone. From the
+ * wipe on, a step that fails leaves the steps before it done and the settings
+ * where they were. */
 /** @brief The steps of a factory reset, in order (FactoryResetRspEvt.step). */
 typedef enum {
     KBOOT_RESET_STEP_FIND = 0,  /**< Where the welcome app is.                  */
@@ -4124,6 +4177,8 @@ typedef enum {
     KBOOT_RESET_STEP_WIPE,      /**< The C5's networks and BLE keys, and this
                                  *   chip's bond store.                         */
     KBOOT_RESET_STEP_APPS,      /**< Every other app removed.                   */
+    KBOOT_RESET_STEP_FILES,     /**< Every other app's images and data folders,
+                                 *   orphans included, on both media.           */
     KBOOT_RESET_STEP_NVS,       /**< Every other NVS namespace.                 */
     KBOOT_RESET_STEP_REQUEST,   /**< The closing request: the welcome app's boot
                                  *   request or AO_Power's cable arm. Only ever
@@ -4135,8 +4190,9 @@ typedef enum {
  * @brief The word for a step of the factory reset, as the console prints it.
  *
  * @param step A kboot_reset_step_t.
- * @return "find", "install", "apps", "link", "wipe", "nvs", "request" or
- *         "done"; "?" for a value that is none of them. Never NULL.
+ * @return "find", "install", "apps", "files", "link", "wipe", "nvs",
+ *         "request" or "done"; "?" for a value that is none of them. Never
+ *         NULL.
  */
 const char *boot_reset_step_name(uint8_t step);
 
@@ -4145,8 +4201,12 @@ const char *boot_reset_step_name(uint8_t step);
  *
  * Keeps the identity cache, the station lock and the welcome app. Steps, each with
  * a KODE_RESET_*_MS budget: find, link, install the welcome app, wipe the C5 and
- * bonds, remove apps, erase NVS. What can fail comes first: a C5 that will not
- * answer stops it with nothing erased. Then RESTART writes the welcome app's boot
+ * bonds, remove apps, take every other app's images and data folders off both
+ * media (storage_apps_clear_request()), erase NVS. A C5 that will not answer
+ * stops the reset before anything is erased. From the wipe on each step
+ * erases, and one that fails stops the reset with the steps before it done and
+ * the settings kept; the files step asks again for a clear refused for a
+ * transfer, inside its budget. Then RESTART writes the welcome app's boot
  * request and restarts at once (no radio park, no clean channel leave); SHIP waits
  * for the cable out KODE_SHIP_UNPLUG_MS, erases NVS again and ships. kodeOS role only.
  *

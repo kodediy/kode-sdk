@@ -2358,10 +2358,11 @@ static void queue_drained(QActive *ao)
     }
 }
 
-/** @brief Empty the mailboxes of the four neighbours and the spy. */
+/** @brief Empty the mailboxes of the five neighbours and the spy. */
 static void reset_mailboxes_drained(void)
 {
     queue_drained(AO_AppMgr);
+    queue_drained(AO_Storage);
     queue_drained(AO_Power);
     queue_drained(AO_Radio);
     queue_drained(AO_Net);
@@ -2397,6 +2398,7 @@ static void reset_up(void)
     Mockkdrv_slot_Init();
     boot_fresh();
     qf_support_give_queue(AO_AppMgr);
+    queue_made_proper(AO_Storage);
     queue_made_proper(AO_Power);
     (void)ao_spy();
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_init());
@@ -2476,6 +2478,28 @@ static void answer_keep(kode_status_t status, uint8_t erased)
     reset_pump();
 }
 
+/**
+ * @brief AO_Storage's answer to the clear of the apps' files.
+ *
+ * @param status The answer's status.
+ * @param left   Images that would not go on the partition.
+ * @param card   The card was there.
+ */
+static void answer_files(kode_status_t status, uint8_t left, bool card)
+{
+    StorageAppWipeRspEvt e = { .super  = QEVT_INITIALIZER(STORAGE_APP_WIPE_RSP_SIG),
+                               .status = (uint8_t)status };
+
+    (void)snprintf(e.project, sizeof(e.project), "%s",
+                   CONFIG_KODEOS_WELCOME_APP);
+    e.fs.present = true;
+    e.fs.files   = 2U;
+    e.fs.left    = left;
+    e.sd.present = card;
+    QASM_DISPATCH(AO_Boot, &e.super, 0U);
+    reset_pump();
+}
+
 /** @brief AO_Radio's answer to the wipe. */
 static void answer_wipe(C5WipeStep step, uint8_t status)
 {
@@ -2538,6 +2562,28 @@ static void expect_keep_asked(void)
     TEST_ASSERT_EQUAL_STRING(CONFIG_KODEOS_WELCOME_APP,
                              Q_EVT_CAST(AppKeepOnlyReqEvt)->project);
     TEST_ASSERT_TRUE(Q_EVT_CAST(AppKeepOnlyReqEvt)->who == AO_Boot);
+    QF_gc(e);
+}
+
+/**
+ * @brief AO_Storage was asked to take every app's files but the welcome app's;
+ *        the card's mount, asked first, is let go.
+ */
+static void expect_files_asked(void)
+{
+    const QEvt *e = mailbox_event(AO_Storage);
+
+    while ( (NULL != e) && ((QSignal)STORAGE_APP_WIPE_REQ_SIG != e->sig) )
+    {
+        QF_gc(e);
+        e = mailbox_event(AO_Storage);
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "AO_Storage was not asked for the files");
+    TEST_ASSERT_TRUE_MESSAGE(Q_EVT_CAST(AppDataReqEvt)->others,
+                             "a wipe of one app instead of a clear");
+    TEST_ASSERT_EQUAL_STRING(CONFIG_KODEOS_WELCOME_APP,
+                             Q_EVT_CAST(AppDataReqEvt)->project);
+    TEST_ASSERT_TRUE(Q_EVT_CAST(AppDataReqEvt)->who == AO_Boot);
     QF_gc(e);
 }
 
@@ -2642,13 +2688,15 @@ static void reset_to_wipe(kboot_reset_end_t end)
     TEST_ASSERT_EQUAL_INT(-1, mailbox_sig(AO_Radio));
 }
 
-/** @brief The wipe says it is done, and the other apps go. Leaves the NVS step
- *         to run, and with it the end of the reset. */
+/** @brief The wipe says it is done, the other apps go, then their files.
+ *         Leaves the NVS step to run, and with it the end of the reset. */
 static void wipe_then_apps(void)
 {
     answer_wipe(C5_WIPE_DONE, KODE_ST_OK);
     expect_keep_asked();
     answer_keep(KODE_OK, 2U);
+    expect_files_asked();
+    answer_files(KODE_OK, 0U, true);
 }
 
 /** @brief Put one key in each of @p ns's names so the store holds them. */
@@ -2668,6 +2716,7 @@ TEST_CASE("the reset's steps have the words the console prints", "[boot_ao][rese
     TEST_ASSERT_EQUAL_STRING("find",    boot_reset_step_name(KBOOT_RESET_STEP_FIND));
     TEST_ASSERT_EQUAL_STRING("install", boot_reset_step_name(KBOOT_RESET_STEP_INSTALL));
     TEST_ASSERT_EQUAL_STRING("apps",    boot_reset_step_name(KBOOT_RESET_STEP_APPS));
+    TEST_ASSERT_EQUAL_STRING("files",   boot_reset_step_name(KBOOT_RESET_STEP_FILES));
     TEST_ASSERT_EQUAL_STRING("link",    boot_reset_step_name(KBOOT_RESET_STEP_LINK));
     TEST_ASSERT_EQUAL_STRING("wipe",    boot_reset_step_name(KBOOT_RESET_STEP_WIPE));
     TEST_ASSERT_EQUAL_STRING("nvs",     boot_reset_step_name(KBOOT_RESET_STEP_NVS));
@@ -2728,9 +2777,11 @@ TEST_CASE("a person's reset without the welcome app erases all and restarts plai
                                      "there is no app to keep");
     QF_gc(e);
 
+    answer_keep(KODE_OK, 3U);
+    expect_files_asked();
     if ( setjmp(*fake_system_arm_restart()) == 0 )
     {
-        answer_keep(KODE_OK, 3U);
+        answer_files(KODE_OK, 0U, false);
         TEST_FAIL_MESSAGE("the board should have restarted");
     }
 
@@ -3483,6 +3534,253 @@ TEST_CASE("each step is armed with its own budget", "[boot_ao][reset]")
     (void)qf_support_tick(AO_Boot, 1U);
 
     expect_reply(KBOOT_RESET_STEP_APPS, KODE_ERROR);
+    reset_down();
+}
+
+/* The apps go from the directory first; their images and data folders, on
+ * both media and orphans included, are a step of their own, asked of
+ * AO_Storage, and the settings are erased only once it has answered. */
+TEST_CASE("the apps' files go after the apps and before the settings",
+          "[boot_ao][reset][files]")
+{
+    static const char *const seeded[] = { "kset", "kgui" };
+
+    reset_up();
+    nvs_seed_all(seeded, 2U);
+    reset_to_wipe(KBOOT_RESET_SHIP);
+    answer_wipe(C5_WIPE_DONE, KODE_ST_OK);
+    expect_keep_asked();
+    answer_keep(KODE_OK, 2U);
+
+    expect_files_asked();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)ao_spy_count(),
+        "answered before the files went");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, fake_nvs_count(),
+        "settings erased before the files went");
+
+    answer_files(KODE_OK, 0U, true);
+    TEST_ASSERT_EQUAL_UINT(0U, fake_nvs_count());
+    expect_reply(KBOOT_RESET_STEP_DONE, KODE_OK);
+    reset_down();
+}
+
+/* A card that is not there is no failure, nor is a file that will not go:
+ * both are said, and the reset goes on to the settings. */
+TEST_CASE("a files step with no card and a file left goes on",
+          "[boot_ao][reset][files]")
+{
+    reset_up();
+    reset_to_wipe(KBOOT_RESET_SHIP);
+    answer_wipe(C5_WIPE_DONE, KODE_ST_OK);
+    expect_keep_asked();
+    answer_keep(KODE_OK, 1U);
+    expect_files_asked();
+
+    answer_files(KODE_OK, 1U, false);
+    expect_reply(KBOOT_RESET_STEP_DONE, KODE_OK);
+    reset_down();
+}
+
+/** @brief Walk a reset to its files step, AO_Storage asked. */
+static void reset_to_files(void)
+{
+    reset_to_wipe(KBOOT_RESET_SHIP);
+    answer_wipe(C5_WIPE_DONE, KODE_ST_OK);
+    expect_keep_asked();
+    answer_keep(KODE_OK, 1U);
+    expect_files_asked();
+}
+
+/* AO_Storage with no memory for its list stops the reset at this step, with
+ * the settings still there. */
+TEST_CASE("a refused files step stops the reset there", "[boot_ao][reset][files]")
+{
+    static const char *const seeded[] = { "kset" };
+
+    reset_up();
+    nvs_seed_all(seeded, 1U);
+    reset_to_files();
+
+    answer_files(KODE_NO_RESOURCES, 0U, true);
+    expect_reply(KBOOT_RESET_STEP_FILES, KODE_NO_RESOURCES);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_nvs_count(), "settings erased");
+    reset_down();
+}
+
+/* A transfer that outlasted AO_Storage's wait passes: the clear is asked
+ * again after a pause, inside the step's budget, and the reset goes on when
+ * it is answered. */
+TEST_CASE("a files step refused for a transfer asks again", "[boot_ao][reset][files]")
+{
+    static const char *const seeded[] = { "kset" };
+
+    reset_up();
+    nvs_seed_all(seeded, 1U);
+    reset_to_files();
+
+    answer_files(KODE_DENIED, 0U, true);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)ao_spy_count(), "a refusal ended the reset");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_nvs_count(), "settings erased");
+    (void)qf_support_tick(AO_Boot, QF_SUPPORT_STEPS(KODE_RESET_FILES_AGAIN_MS));
+    expect_files_asked();
+
+    answer_files(KODE_OK, 0U, true);
+    TEST_ASSERT_EQUAL_UINT(0U, fake_nvs_count());
+    expect_reply(KBOOT_RESET_STEP_DONE, KODE_OK);
+    reset_down();
+}
+
+/* The pool too dry for the request stops the reset at the step it belongs
+ * to, before anything of the step is touched and with the settings kept. */
+TEST_CASE("a files step whose request cannot be posted stops the reset there",
+          "[boot_ao][reset][files]")
+{
+    enum { HELD_MAX = 256 };
+    static AppDataReqEvt *held[HELD_MAX];
+    uint32_t              n = 0U;
+
+    reset_up();
+    reset_to_wipe(KBOOT_RESET_SHIP);
+    answer_wipe(C5_WIPE_DONE, KODE_ST_OK);
+    expect_keep_asked();
+    while ( (uint32_t)HELD_MAX > n )
+    {
+        held[n] = Q_NEW_X(AppDataReqEvt, 0U, STORAGE_APP_WIPE_REQ_SIG);
+        if ( NULL == held[n] )
+        {
+            break;
+        }
+        ++n;
+    }
+    TEST_ASSERT_LESS_THAN_UINT32_MESSAGE((uint32_t)HELD_MAX, n,
+                                         "the pool never ran dry");
+
+    answer_keep(KODE_OK, 1U);
+    for ( uint32_t i = 0U; i < n; ++i )
+    {
+        QF_gc(&held[i]->super);
+    }
+    /* The answer comes from the same pool, so it is lost too; the log says
+     * where the reset stopped and that nobody heard it. */
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, ao_spy_count(), "an answer came from a dry pool");
+    TEST_ASSERT_TRUE(klog_has("factory reset stopped at files"));
+    TEST_ASSERT_TRUE(klog_has("a factory reset's answer could not be sent"));
+    TEST_ASSERT_FALSE(klog_has("factory reset: nvs"));
+    reset_down();
+}
+
+/* Inside the step, an answer about another clear moves nothing: the reset
+ * waits for its own. */
+TEST_CASE("an answer about another clear inside the files step is ignored",
+          "[boot_ao][reset][files]")
+{
+    static const char *const seeded[] = { "kset" };
+    StorageAppWipeRspEvt e = { .super  = QEVT_INITIALIZER(STORAGE_APP_WIPE_RSP_SIG),
+                               .status = (uint8_t)KODE_OK };
+
+    reset_up();
+    nvs_seed_all(seeded, 1U);
+    reset_to_files();
+
+    (void)snprintf(e.project, sizeof(e.project), "%s", "demo");
+    e.fs.present = true;
+    QASM_DISPATCH(AO_Boot, &e.super, 0U);
+    reset_pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)ao_spy_count(), "another clear ended the step");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_nvs_count(), "settings erased");
+
+    answer_files(KODE_OK, 0U, true);
+    expect_reply(KBOOT_RESET_STEP_DONE, KODE_OK);
+    reset_down();
+}
+
+/* A card AO_Storage could not look at whole is not called cleared, and a
+ * partition that would not mount is said; neither stops the reset. */
+TEST_CASE("a files step says a card not looked at whole and a partition not "
+          "mounted", "[boot_ao][reset][files]")
+{
+    StorageAppWipeRspEvt e = { .super  = QEVT_INITIALIZER(STORAGE_APP_WIPE_RSP_SIG),
+                               .status = (uint8_t)KODE_OK };
+
+    reset_up();
+    reset_to_files();
+
+    (void)snprintf(e.project, sizeof(e.project), "%s", CONFIG_KODEOS_WELCOME_APP);
+    e.fs.present = false;
+    e.sd.present = true;
+    e.sd.files   = 3U;
+    e.sd.cut     = true;
+    fake_klog_reset();
+    QASM_DISPATCH(AO_Boot, &e.super, 0U);
+    reset_pump();
+
+    TEST_ASSERT_TRUE(klog_has("the card was not looked at whole"));
+    TEST_ASSERT_FALSE(klog_has("the card's included"));
+    TEST_ASSERT_TRUE(klog_has("the internal partition would not mount"));
+    TEST_ASSERT_TRUE(klog_has("were not looked at; the reset goes on"));
+    expect_reply(KBOOT_RESET_STEP_DONE, KODE_OK);
+    reset_down();
+}
+
+/* A card whose root would not read is no absent card: the line says so. */
+TEST_CASE("a files step says a card that would not read, not no card",
+          "[boot_ao][reset][files]")
+{
+    StorageAppWipeRspEvt e = { .super  = QEVT_INITIALIZER(STORAGE_APP_WIPE_RSP_SIG),
+                               .status = (uint8_t)KODE_OK };
+
+    reset_up();
+    reset_to_files();
+
+    (void)snprintf(e.project, sizeof(e.project), "%s", CONFIG_KODEOS_WELCOME_APP);
+    e.fs.present = true;
+    e.sd.present = false;
+    e.sd.cut     = true;
+    fake_klog_reset();
+    QASM_DISPATCH(AO_Boot, &e.super, 0U);
+    reset_pump();
+
+    TEST_ASSERT_TRUE(klog_has("the card would not read"));
+    TEST_ASSERT_FALSE(klog_has("; no card"));
+    TEST_ASSERT_TRUE(klog_has("were not looked at; the reset goes on"));
+    expect_reply(KBOOT_RESET_STEP_DONE, KODE_OK);
+    reset_down();
+}
+
+/* A silent AO_Storage ends the reset at its step, at the step's budget. */
+TEST_CASE("a silent files step stops the reset at its budget",
+          "[boot_ao][reset][files]")
+{
+    reset_up();
+    reset_to_wipe(KBOOT_RESET_SHIP);
+    answer_wipe(C5_WIPE_DONE, KODE_ST_OK);
+    expect_keep_asked();
+    answer_keep(KODE_OK, 1U);
+    expect_files_asked();
+
+    (void)qf_support_tick(AO_Boot, QF_SUPPORT_STEPS(KODE_RESET_FILES_MS) - 1U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)ao_spy_count(),
+        "the files step has its own budget");
+    (void)qf_support_tick(AO_Boot, 1U);
+
+    expect_reply(KBOOT_RESET_STEP_FILES, KODE_ERROR);
+    reset_down();
+}
+
+/* An answer to another clear, or one that comes after the step, moves
+ * nothing. */
+TEST_CASE("an answer about the files outside the step is ignored",
+          "[boot_ao][reset][files]")
+{
+    reset_up();
+    reset_to_wipe(KBOOT_RESET_SHIP);
+    answer_files(KODE_OK, 0U, true);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)ao_spy_count(), "the wipe was skipped");
+    TEST_ASSERT_EQUAL_INT(-1, mailbox_sig(AO_AppMgr));
+    answer_wipe(C5_WIPE_DONE, KODE_ST_OK);
+    expect_keep_asked();
+    answer_keep(KODE_DENIED, 0U);            /* ends the case */
+    expect_reply(KBOOT_RESET_STEP_APPS, KODE_DENIED);
     reset_down();
 }
 

@@ -328,6 +328,50 @@ static bool vpath_of(kdrv_medium_t m, const char *name, char *out, size_t cap)
     return true;
 }
 
+/**
+ * @brief Turn the errno a failed create left behind into a status.
+ *
+ * Shared by kdrv_storage_mkdir() and kdrv_storage_create_path() because the
+ * two ask libc the same question - "make this name" - and get the same set of
+ * answers back. One table beats two splits that have to be kept in step.
+ * kdrv_storage_stat() reads its own failure through it too: a missing
+ * component (KODE_ERROR) or a file where a folder should be (KODE_NOT_DIR)
+ * is "not there", and every other answer is no answer.
+ *
+ * The distinction the four named errnos buy is the whole point: only
+ * KODE_IO_ERROR asserts that the medium refused, and a caller that turns a
+ * status into a word for an operator must not send them to check a directory
+ * that was never the problem, nor blame a card for a name that is simply
+ * taken. Everything left over is genuinely the device answering no - ESP-IDF's
+ * FATFS VFS maps a disk error to EIO, and it never invents ENOTDIR for a path
+ * that is merely missing, which is FR_NO_PATH and arrives as ENOENT.
+ *
+ * @param err The errno value, read immediately after the failed call.
+ * @return KODE_ERROR for a missing parent, KODE_EXISTS for a taken name,
+ *         KODE_NOT_DIR when a component of the path is a file, KODE_IS_DIR
+ *         when the path itself is a directory, KODE_IO_ERROR otherwise.
+ */
+static kode_status_t status_of_create_errno(int err)
+{
+    if ( ENOENT == err )
+    {
+        return KODE_ERROR;
+    }
+    if ( EEXIST == err )
+    {
+        return KODE_EXISTS;
+    }
+    if ( ENOTDIR == err )
+    {
+        return KODE_NOT_DIR;
+    }
+    if ( EISDIR == err )
+    {
+        return KODE_IS_DIR;
+    }
+    return KODE_IO_ERROR;
+}
+
 kode_status_t kdrv_storage_stat(const char *path, kdrv_stat_t *out)
 {
     if ( (NULL == path) || (NULL == out) )
@@ -356,7 +400,14 @@ kode_status_t kdrv_storage_stat(const char *path, kdrv_stat_t *out)
     struct stat st;
     if ( stat(real, &st) != 0 )
     {
-        return KODE_OK;             /* not there IS the answer */
+        /* Not there IS the answer; anything else (an I/O error, a path that
+         * will not resolve) is no answer at all. */
+        kode_status_t const why = status_of_create_errno(errno);
+        if ( (KODE_ERROR == why) || (KODE_NOT_DIR == why) )
+        {
+            return KODE_OK;
+        }
+        return KODE_ERROR;
     }
     out->exists = true;
     out->is_dir = S_ISDIR(st.st_mode);
@@ -542,47 +593,6 @@ kode_status_t kdrv_storage_list_path(const char *path,
  * comment gives; kdrv_storage_unlink() is the other, and its own comment
  * says why.
  */
-
-/**
- * @brief Turn the errno a failed create left behind into a status.
- *
- * Shared by kdrv_storage_mkdir() and kdrv_storage_create_path() because the
- * two ask libc the same question - "make this name" - and get the same set of
- * answers back. One table beats two splits that have to be kept in step.
- *
- * The distinction the four named errnos buy is the whole point: only
- * KODE_IO_ERROR asserts that the medium refused, and a caller that turns a
- * status into a word for an operator must not send them to check a directory
- * that was never the problem, nor blame a card for a name that is simply
- * taken. Everything left over is genuinely the device answering no - ESP-IDF's
- * FATFS VFS maps a disk error to EIO, and it never invents ENOTDIR for a path
- * that is merely missing, which is FR_NO_PATH and arrives as ENOENT.
- *
- * @param err The errno value, read immediately after the failed call.
- * @return KODE_ERROR for a missing parent, KODE_EXISTS for a taken name,
- *         KODE_NOT_DIR when a component of the path is a file, KODE_IS_DIR
- *         when the path itself is a directory, KODE_IO_ERROR otherwise.
- */
-static kode_status_t status_of_create_errno(int err)
-{
-    if ( ENOENT == err )
-    {
-        return KODE_ERROR;
-    }
-    if ( EEXIST == err )
-    {
-        return KODE_EXISTS;
-    }
-    if ( ENOTDIR == err )
-    {
-        return KODE_NOT_DIR;
-    }
-    if ( EISDIR == err )
-    {
-        return KODE_IS_DIR;
-    }
-    return KODE_IO_ERROR;
-}
 
 kode_status_t kdrv_storage_mkdir(const char *path)
 {

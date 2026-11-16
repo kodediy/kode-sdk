@@ -290,7 +290,7 @@ TEST_CASE("factory_reset waits for every budget it can be given", "[console_rese
 
     TEST_ASSERT_EQUAL_UINT32(
         (2U * KODE_RESET_FIND_MS) + KODE_RESET_INSTALL_MS + KODE_RESET_APPS_MS
-            + KODE_RESET_LINK_MS + KODE_RESET_WIPE_MS + KODE_RESET_NVS_MS
+            + KODE_RESET_FILES_MS + KODE_RESET_LINK_MS + KODE_RESET_WIPE_MS + KODE_RESET_NVS_MS
             + KODE_RESTART_DRAIN_MS,
         KODE_RESET_CONSOLE_MS);
 
