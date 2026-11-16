@@ -1641,11 +1641,14 @@ kode_status_t kode_sys_ble_scan(QActive *me, uint32_t ms);
  * One AO listens at a time, and the newest Bluetooth request wins, as it
  * does between two listens (kode_sys_ble_scan()). A start ends the listen
  * somebody asked for, whose answer says KODE_CANCELLED, and another AO's
- * request takes the stream. A newer listen ends the stream in turn, and it
- * is told KBLE_HEARD_CANCELLED at once. A Wi-Fi request ends nothing of it.
- * Behind what is not cut (a Wi-Fi scan somebody asked for, the board's own
- * round, an install, an update) a start is answered KBLE_HEARD_BUSY: ask
- * again. Bluetooth switched off, the board's rest, a C5 update and the link
+ * request takes the stream. A newer listen ends the stream in turn, and so
+ * do the radio check's name find and the production row's scan as they
+ * start: @p me is told KBLE_HEARD_CANCELLED at once. A Wi-Fi request ends
+ * nothing of it. Behind what is not cut (a Wi-Fi scan somebody asked for,
+ * the board's own round, the radio check, the production row, an install,
+ * an update) a start is answered KBLE_HEARD_BUSY: ask again. So the radio
+ * check and the production row end a stream, and a stream never ends them:
+ * the host has one scan, and a check of the board does not wait on an app. Bluetooth switched off, the board's rest, a C5 update and the link
  * going end the stream too, each with its reason. A stream that was ended
  * does not come back by itself: ask again. For an Active Object only: a
  * task has no such call. Without CONFIG_KODEOS_BLE the request is refused at

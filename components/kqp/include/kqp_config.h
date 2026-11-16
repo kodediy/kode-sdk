@@ -1883,8 +1883,9 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
 /* AO_Radio's queue: a scan knock and a KODE answer, posted from other tasks,
  * leave KQP_RADIO_DROP_MARGIN slots free and are refused past it. The BLE
  * state, the pairing note, the lost link and the knock of the BLE
- * advertisement stream leave KQP_RADIO_KNOCK_MARGIN and are owed past it: posted again once there is room, never lost. Neither
- * margin reserves the slots it leaves. The Wi-Fi doors and the two scan
+ * advertisement stream leave KQP_RADIO_KNOCK_MARGIN and are owed past it:
+ * posted again once there is room, never lost. Neither margin reserves the
+ * slots it leaves. The Wi-Fi doors and the two scan
  * requests (wifi_scan_request(), ble_scan_request()) leave
  * KQP_RADIO_POST_MARGIN and tell their caller when they could not post. The
  * other requests Active Objects post with no margin, the AO's posts to
