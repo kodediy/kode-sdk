@@ -37,6 +37,9 @@
 /** @brief The same patience, in consecutive feeds. */
 #define HAPTIC_STALL_FEEDS (HAPTIC_STALL_MS / KODE_HAPTIC_TICK_MS)
 
+/** @brief A whole, in per cent: what KDRV_AW_RATE_TOL_PCT is a part of. */
+#define HAPTIC_PCT_FULL    100U
+
 /** @brief Bits one byte takes on I2C: eight and the acknowledge. */
 #define HAPTIC_BITS_PER_BYTE     9U
 
@@ -116,6 +119,7 @@ typedef struct {
     uint32_t      stall;    /**< Consecutive feeds the FIFO took nothing.   */
     uint32_t      t_go;     /**< khal_time_ms() when GO was issued.         */
     bool          starved;  /**< The FIFO refused a burst at least once.    */
+    bool          draining; /**< Fed whole: the tick watches it play out.   */
     uint8_t       gain;     /**< Per cent of full scale, as asked for.      */
     uint8_t       reg;      /**< The PLAYCFG2 byte the chip actually got.   */
     kode_status_t rc;       /**< What the buzz amounted to.                 */
@@ -518,7 +522,8 @@ static void play_start(Haptic * const me, const uint16_t *seg_ms, uint8_t n,
     me->play.phase   = 0U;
     me->play.stall   = 0U;
     me->play.t_go    = 0U;
-    me->play.starved = false;
+    me->play.starved  = false;
+    me->play.draining = false;
     me->play.gain    = gain_pct;
     me->play.reg     = 0U;
     me->play.rc      = KODE_OK;
@@ -597,6 +602,61 @@ static void play_fill(Haptic * const me, size_t n)
 }
 
 /**
+ * @brief Is the chip still playing its RTP FIFO?
+ *
+ * Through the driver's own read of GLB_STATE. The chip leaves RTP by itself
+ * once its FIFO is played empty, through brake to standby.
+ *
+ * @param me  The AO.
+ * @param rtp Set true while GLB_STATE reads RTP.
+ * @return false when the bus refused the read; @c play.rc then says so.
+ */
+static bool play_state(Haptic * const me, bool * const rtp)
+{
+    int32_t       state = 0;
+    kode_status_t rc    = kdrv_aw86233_get(KDRV_AW_GLB_STATE, &state);
+
+    if ( KODE_OK != rc )
+    {
+        me->play.rc = rc;
+        KLOG_E(TAG, "the chip's state could not be read mid-buzz");
+        return false;
+    }
+    *rtp = ((int32_t)KDRV_AW_GLB_RTP == state);
+    return true;
+}
+
+/**
+ * @brief Is the chip still in RTP, mid-buzz?
+ *
+ * Out of RTP while samples are still owed is a FIFO that ran dry: the chip
+ * stopped early and plays nothing it is given.
+ *
+ * @param me The AO.
+ * @return false when the bus refused the read or the chip has left RTP;
+ *         @c play.rc says which.
+ */
+static bool play_running(Haptic * const me)
+{
+    bool rtp = false;
+
+    if ( !play_state(me, &rtp) )
+    {
+        return false;
+    }
+    if ( !rtp )
+    {
+        me->play.rc = KODE_IO_ERROR;
+        KLOG_E(TAG, "the RTP FIFO ran dry: the chip left RTP within %u ms "
+                    "of GO, with %u ms of the buzz fed",
+               (unsigned)(khal_time_ms() - me->play.t_go),
+               (unsigned)kdrv_aw86233_playing_ms((size_t)me->play.fed));
+        return false;
+    }
+    return true;
+}
+
+/**
  * @brief Offer the chip up to @p bursts bursts of the waveform.
  *
  * Paced by the chip itself: kdrv_aw86233_rtp_feed() reads FF_AFS before each
@@ -609,13 +669,24 @@ static void play_fill(Haptic * const me, size_t n)
  *
  * @param me     The AO.
  * @param bursts How many to offer.
- * @return false when the buzz cannot go on: the bus refused, or the FIFO
- *         has not taken a sample for HAPTIC_STALL_MS. @c play.rc says which.
+ * @return false when the buzz cannot go on: the bus refused, the chip ran
+ *         dry and went back to standby, or the FIFO has not taken a sample
+ *         for HAPTIC_STALL_MS. @c play.rc says which.
  */
 static bool play_feed(Haptic * const me, unsigned bursts)
 {
     unsigned i;
     size_t   taken = 0U;
+
+    /* After GO's own bursts, the chip is asked first whether it still plays:
+     * one that ran dry is back in standby and plays nothing it is given. */
+    if ( 0U < me->play.fed )
+    {
+        if ( !play_running(me) )
+        {
+            return false;
+        }
+    }
 
     for ( i = 0U; i < bursts; ++i )
     {
@@ -686,33 +757,54 @@ static bool play_feed(Haptic * const me, unsigned bursts)
 }
 
 /**
- * @brief The feed is over. Wait out what the chip STILL HOLDS, not all of it.
+ * @brief The feed is over. Watch the chip play out what it STILL HOLDS.
  *
- * The feed has handed most of the buzz over and the chip holds the rest, up
- * to its almost-full mark, so what is left is the buzz's length less the time
- * since GO, not the whole kdrv_aw86233_playing_ms().
+ * The chip holds up to its almost-full mark, about 130 ms, and leaves RTP by
+ * itself once that is played. So the tick goes on, reads GLB_STATE each
+ * period, and the buzz ends the period after the chip has left RTP - on the
+ * chip's clock, which nothing on the board measures, not the board's.
  *
- * Counted from GO, not from the first sample, and at the nominal rate: a buzz
- * can end up to a millisecond early, and on a chip whose oscillator runs slow
- * by a fraction e, STOP comes e of the buzz's length before the chip has
- * played all of it, and cuts that off.
+ * The tail timer is only the bound for a chip that never leaves RTP: the
+ * buzz's length less the time since GO, as the board's clock counts it, and
+ * KDRV_AW_RATE_TOL_PCT of the length more for a chip that plays slow.
  *
  * @param me The AO.
  */
 static void play_tail(Haptic * const me)
 {
-    uint32_t const held = kdrv_aw86233_playing_ms((size_t)me->play.fed);
-    uint32_t const gone = khal_time_ms() - me->play.t_go;
-    uint32_t       left = 0U;
+    uint32_t const held  = kdrv_aw86233_playing_ms((size_t)me->play.fed);
+    uint32_t const gone  = khal_time_ms() - me->play.t_go;
+    uint32_t       bound = (held * KDRV_AW_RATE_TOL_PCT) / HAPTIC_PCT_FULL;
 
     if ( held > gone )
     {
-        left = held - gone;
+        bound += held - gone;
     }
+    me->play.draining = true;
     (void)QTimeEvt_disarm(&me->tick);
-    /* tail_start() floors this at one tick: the chip is never told to stop in
-     * the same step that handed it its last sample. */
-    tail_start(me, KQP_TICKS_PER_MS(left));
+    QTimeEvt_armX(&me->tick, KQP_TICKS_PER_MS(KODE_HAPTIC_TICK_MS),
+                  KQP_TICKS_PER_MS(KODE_HAPTIC_TICK_MS));
+    tail_start(me, KQP_TICKS_PER_MS(bound));
+}
+
+/**
+ * @brief One period of a buzz fed whole: end it once the chip has left RTP.
+ *
+ * Through the tail, the one door every ending takes, a tick from now: the
+ * chip is never told to stop in the step that saw it finish.
+ *
+ * @param me The AO.
+ */
+static void play_drain(Haptic * const me)
+{
+    bool rtp = true;
+
+    if ( (!play_state(me, &rtp)) || (!rtp) )
+    {
+        me->play.draining = false;
+        (void)QTimeEvt_disarm(&me->tick);
+        tail_start(me, 1U);
+    }
 }
 
 /**
@@ -730,8 +822,9 @@ static void play_fail(Haptic * const me)
     /* @c total comes down to what the chip actually took rather than to zero,
      * so nothing feeds it again AND the DONE event still reports the samples
      * that did go in - a count the caller can act on. */
-    me->play.total = me->play.fed;
-    me->play.hold  = false;
+    me->play.total    = me->play.fed;
+    me->play.hold     = false;
+    me->play.draining = false;
     (void)QTimeEvt_disarm(&me->tick);
     tail_start(me, 1U);
 }
@@ -1550,7 +1643,11 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
             break;
         }
         case HAPTIC_TICK_SIG: {
-            if ( !me->tail_live )
+            if ( me->play.draining )
+            {
+                play_drain(me);
+            }
+            else if ( !me->tail_live )
             {
                 if ( !play_feed(me, (unsigned)KODE_HAPTIC_BURSTS_PER_TICK) )
                 {
@@ -1570,6 +1667,10 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
                     /* More to feed, and the chip is keeping up. */
                 }
             }
+            else
+            {
+                /* A buzz already ending: the tail stops the chip. */
+            }
             status = Q_HANDLED();
             break;
         }
@@ -1585,6 +1686,15 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
                 break;
             }
             me->tail_live = false;   /* this event IS its expiry */
+            if ( me->play.draining )
+            {
+                /* The bound, not the chip: it still read RTP past the buzz's
+                 * length and the oscillator's tolerance. */
+                me->play.draining = false;
+                KLOG_W(TAG, "the chip still played %u%% past the buzz's length; "
+                            "stopped it",
+                       (unsigned)KDRV_AW_RATE_TOL_PCT);
+            }
             (void)kdrv_aw86233_rtp_end();
             /* And back to rest. This is the one site, because every way a buzz
              * can end arrives here: the good one, a FIFO that stopped
@@ -1595,13 +1705,14 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
             done_publish(me);
             if ( me->row.active && (KODE_OK != me->play.rc) )
             {
-                /* Nothing was driven into this gain's window: the bus refused a
-                 * burst, or the FIFO stopped draining. Measuring it would blame
-                 * a motor no current reached, so the cause is named and no
-                 * further gain is asked of the witness. */
+                /* The buzz did not play through this gain's window: the bus
+                 * refused a burst, the FIFO stopped draining, or the chip ran
+                 * dry and went back to standby. Measuring it would judge the
+                 * motor on a buzz the chip cut short, so the cause is named
+                 * and no further gain is asked of the witness. */
                 row_noverdict(me, (uint8_t)HAPTIC_TF_MUTE,
-                              "the chip stopped taking samples; the motor was "
-                              "never driven");
+                              "the chip stopped playing before the buzz "
+                              "ended; the motor was not driven through it");
                 status = Q_TRAN(&Haptic_idle);
             }
             else if ( me->row.active )

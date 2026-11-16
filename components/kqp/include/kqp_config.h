@@ -1509,14 +1509,17 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  * pushes four bursts - 256 samples, 21.3 ms of playback - in about 6.3 ms of
  * bus: some 9 ms in one step, 10 at worst. The feed then runs every 4 ms, so
  * the first one lands about 10 ms after GO with some 11 ms still to play.
- * Each feed offers up to two bursts, each after a read of FF_AFS: 3.2 ms of
+ * Each feed reads GLB_STATE once (about 0.1 ms, 2-3 % of the bus at this
+ * period) and offers up to two bursts, each after a read of FF_AFS: 3.3 ms of
  * the 4 ms period at worst. A tick that comes due while a feed is still on
  * the bus waits in the queue and costs a status read. Two bursts are 2.7
  * times what the chip plays in a period, so the level climbs to the chip's
  * almost-full mark within about 75 ms of GO and stays there: at its reset
  * value (KDRV_AW_FIFO_AF), about 124 ms of playback in hand just before a
- * feed and 133 ms at most just after one. haptic_ao.c holds these numbers to
- * each other and to the driver's. */
+ * feed and 133 ms at most just after one. After the last sample the tick
+ * goes on reading GLB_STATE, and the buzz ends the period after the chip has
+ * left RTP. haptic_ao.c holds these numbers to each other and to the
+ * driver's. */
 /** @brief The RTP feed period, in milliseconds. */
 #define KODE_HAPTIC_TICK_MS          4U
 /** @brief Bursts offered per feed, at most. */

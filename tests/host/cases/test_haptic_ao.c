@@ -109,6 +109,7 @@ static uint32_t s_chip_fed;     /* samples handed over since GO            */
 static bool     s_chip_dry;     /* the FIFO ran empty before the buzz ended */
 static bool     s_chip_over;    /* a burst landed past the FIFO's capacity */
 static uint32_t s_chip_rate_hz; /* what its oscillator really plays at     */
+static uint32_t s_chip_left_at_stop; /* samples still unplayed when STOP came */
 
 static uint32_t chip_level(void);
 
@@ -120,6 +121,11 @@ static kode_status_t on_read(khal_i2c_dev_t dev, uint8_t reg, uint8_t *buf,
     if ( !s_acks )
     {
         return KODE_ERROR;
+    }
+    if ( (REG_GLBRD5 == reg) && s_chip_clock && s_chip_started && (0U == chip_level()) )
+    {
+        /* Played out: the chip has gone back to standby on its own. */
+        s_regs[REG_GLBRD5] = 0x00U;
     }
     (void)memcpy(buf, &s_regs[reg], len);
     if ( REG_SYSST == reg )
@@ -177,7 +183,8 @@ static kode_status_t on_write(khal_i2c_dev_t dev, uint8_t reg, uint8_t val,
         }
         if ( (val & AW_STOP) != 0U )
         {
-            s_regs[REG_GLBRD5] = 0x00U;
+            s_chip_left_at_stop = chip_level();
+            s_regs[REG_GLBRD5]  = 0x00U;
         }
     }
     /* A bus that takes one more write and then stops answering. There is no
@@ -302,6 +309,7 @@ static void bus_up(bool present)
     s_chip_dry     = false;
     s_chip_over    = false;
     s_chip_rate_hz = KDRV_AW_RATE_HZ;
+    s_chip_left_at_stop = 0U;
 }
 
 /* ---- Bringing the AO up --------------------------------------------------- */
@@ -1469,6 +1477,40 @@ TEST_CASE("a FIFO that never drains ends the buzz once it has waited long enough
     haptic_down();
 }
 
+/* A chip that ran dry is back in standby with samples still owed, and from
+ * there it plays nothing however many more it is fed. The buzz ends at the
+ * next feed, through the tail, with a failure the caller can read and a line
+ * that says what happened - not a HAPTIC_DONE_SIG that says KODE_OK on time
+ * for a buzz that stopped after ten milliseconds. */
+TEST_CASE("a chip back in standby mid-buzz ends the buzz as a failure",
+          "[haptic_ao]")
+{
+    const HapticDoneEvt *done;
+    size_t               held;
+
+    bus_up(true);
+    haptic_up();
+
+    play_evt((uint16_t)BUZZ_MS, 50U);
+    feed_once();
+    held = s_fifo_bytes;
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)(GO_BYTES + TICK_BYTES), (unsigned)held,
+                                   "the first feed did not land");
+
+    s_regs[REG_GLBRD5] = 0x00U;   /* the FIFO ran dry: standby */
+    feed_once();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)held, (unsigned)s_fifo_bytes,
+                                   "a chip in standby was fed anyway");
+
+    done = play_finish();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_IO_ERROR, (int)done->rc,
+                                  "a buzz that stopped early was reported as "
+                                  "played");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)held, done->samples);
+    TEST_ASSERT_TRUE(logged("ran dry"));
+    haptic_down();
+}
+
 /* ---- The tail is what the chip STILL HOLDS ------------------------------------ */
 
 /* Feeding is not free of time: the FIFO is offered bursts against its own
@@ -1846,6 +1888,47 @@ TEST_CASE("a pattern feeds its on segments as the sine and its off segments as "
      * one again and begins from a zero crossing rather than from a step. */
     TEST_ASSERT_EQUAL_INT8_ARRAY((const int8_t *)&s_fifo_data[0],
                                  (const int8_t *)&s_fifo_data[a + b], a);
+    haptic_down();
+}
+
+/* A pattern ends when the chip has played it. The chip plays by its own
+ * oscillator, so a tail timed on the board's clock would stop a slow chip
+ * with the last of the pattern still in its FIFO - 130 ms of it, once the
+ * pattern is long enough - and report the buzz whole. */
+TEST_CASE("a long pattern on a chip that plays 2 % slow is played to its last "
+          "sample before STOP", "[haptic_ao]")
+{
+    static const uint16_t seg[] = { 9800U, 100U, 100U };
+    const HapticDoneEvt  *done;
+    uint32_t const        total = KDRV_AW_SAMPLES(10000U);
+    unsigned              i;
+
+    bus_up(true);
+    haptic_up();
+    s_chip_clock   = true;
+    s_chip_rate_hz = (KDRV_AW_RATE_HZ * (PCT_FULL - CHIP_DRIFT_PCT)) / PCT_FULL;
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_OK, (uint32_t)haptic_pattern_request(seg, 3U, 50U));
+    for ( i = 0U; (2U * 10000U) > i; ++i )
+    {
+        if ( AW_STOP == s_regs[REG_PLAYCFG4] )
+        {
+            break;
+        }
+        fake_time_advance_ms(1U);
+        (void)qf_support_tick_1ms(AO_Haptic);
+    }
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(AW_STOP, s_regs[REG_PLAYCFG4],
+                                   "the pattern never ended");
+    TEST_ASSERT_FALSE_MESSAGE(s_chip_dry, "the FIFO ran empty mid-pattern");
+    TEST_ASSERT_EQUAL_UINT32(total, s_chip_fed);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_chip_left_at_stop,
+                                     "STOP cut off samples the chip had not "
+                                     "played: the last pulse was shortened");
+
+    done = (const HapticDoneEvt *)spy_expect(HAPTIC_DONE_SIG);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)done->rc);
+    TEST_ASSERT_EQUAL_UINT32(total, done->samples);
     haptic_down();
 }
 

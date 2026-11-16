@@ -22,6 +22,20 @@ extern "C" {
 /** @brief The LRA's resonance, in Hz. Off it, the motor barely moves. */
 #define KDRV_AW_F0_HZ        235U
 
+/** @brief GLB_STATE (KDRV_AW_GLB_STATE) while the chip plays its RTP FIFO.
+ *         It leaves this state by itself once the FIFO is played empty. */
+#define KDRV_AW_GLB_RTP      8
+
+/**
+ * @brief How far the chip's own oscillator may stray from KDRV_AW_RATE_HZ,
+ *        per cent.
+ *
+ * DS_AW8623X V1.4 gives no accuracy for the oscillator. Its trim, TRIM_LRA
+ * (0x5A), reaches 31 steps of 0.24 % - 7.4 % - which is the spread the part
+ * is built to correct; this is that reach, rounded up.
+ */
+#define KDRV_AW_RATE_TOL_PCT 8U
+
 /** @brief The longest burst one kdrv_aw86233_rtp_feed() writes, in bytes. */
 #define KDRV_AW_BURST        64U
 

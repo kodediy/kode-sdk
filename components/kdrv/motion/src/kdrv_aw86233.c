@@ -40,7 +40,6 @@
                                   * value and it plays at 24 kHz, an octave up. */
 #define AW_STANDBY_BIT   0x40U   /* SYSCTRL2 bit 6: the driver stage parked.  */
 #define AW_GLB_STATE_MASK 0x0FU
-#define AW_GLB_RTP       0x08U   /* GLB_STATE: playing from the RTP FIFO.     */
 #define AW_FAMILY        0x23U   /* CHIPID_H on every AW8623X.                */
 
 #define AW_PROBE_MS      50U
@@ -279,7 +278,7 @@ static bool go_took(void)
         {
             return false;
         }
-        if ( (st & AW_GLB_STATE_MASK) == AW_GLB_RTP )
+        if ( (st & AW_GLB_STATE_MASK) == (uint8_t)KDRV_AW_GLB_RTP )
         {
             return true;
         }

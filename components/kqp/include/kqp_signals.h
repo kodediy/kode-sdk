@@ -6304,7 +6304,9 @@ typedef struct {
  * cannot read out of the status code. The feed is paced by that refusal, so
  * every buzz long enough to fill the FIFO to its almost-full mark, about
  * 75 ms of one, sets it, and a buzz that ends KODE_OK with it set played out
- * whole.
+ * whole. A chip found out of RTP with samples still owed - its FIFO ran
+ * dry - ends the buzz with KODE_IO_ERROR, and @c samples is what it was fed
+ * up to then.
  */
 typedef struct {
     QEvt     super;
