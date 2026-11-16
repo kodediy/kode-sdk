@@ -26,6 +26,11 @@
  * into the port's ring before the radios go down. Back in kodeOS, an owed
  * `installed` goes out again when its port comes up, a kodeOS update's as an
  * app's; the update's verdict follows at AO_Boot's minute.
+ *
+ * While an install runs, its port hears its percent every
+ * APPMGR_INST_PCT_STEP points, as plain lines kept nowhere. A step the console
+ * is too far behind for is skipped, and the next one says more. A stream from
+ * the terminal hears none: the lines would cross the transfer's own answers.
  */
 #include <stdio.h>
 #include <string.h>
@@ -58,6 +63,7 @@ typedef struct {
     uint8_t           open;                    /**< Kind taken and not ended, or
                                                 *   APPMGR_INST_KINDS for none.      */
     uint8_t           why;                     /**< The cause noted for the open one. */
+    uint8_t           said_pct;                /**< The open one's last percent told. */
     bool              live;                    /**< The open one's command is still in
                                                 *   flight: its end answers it.      */
     bool              switching;               /**< The switch was asked this boot.   */
@@ -588,8 +594,9 @@ void appmgr_inst_taken(void)
     r->state  = (uint8_t)APPMGR_INST_RUNNING;
     r->src    = s_inst->pending_src;
     s_inst->pending = (uint8_t)APPMGR_INST_KINDS;
-    s_inst->open    = kind;
-    s_inst->why     = (uint8_t)APPMGR_WHY_NONE;
+    s_inst->open     = kind;
+    s_inst->why      = (uint8_t)APPMGR_WHY_NONE;
+    s_inst->said_pct = 0U;
     inst_tell(kind, true, false);   /* the answer to the command that asked */
 }
 
@@ -601,6 +608,27 @@ void appmgr_inst_named(const char *name)
         appmgr_inst_rec_t * const r = &s_inst->rec[s_inst->open];
 
         (void)snprintf(r->name, sizeof(r->name), "%s", name);
+    }
+}
+
+void appmgr_inst_progress(uint32_t pct)
+{
+    if ( (NULL == s_inst) || ((uint8_t)APPMGR_INST_KINDS == s_inst->open)
+        || s_inst->live )
+    {
+        return;   /* nothing open, or a stream the terminal is still sending */
+    }
+    uint8_t const                   kind = s_inst->open;
+    appmgr_inst_rec_t const * const r    = &s_inst->rec[kind];
+
+    if ( (pct >= ((uint32_t)s_inst->said_pct + APPMGR_INST_PCT_STEP))
+        && ((uint8_t)KODE_CONSOLE_SRC_SCHED != r->src) && inst_port_up(r->src)
+        && (!console_congested()) )
+    {
+        s_inst->said_pct = (uint8_t)pct;
+#if CONFIG_KODEOS_CONSOLE
+        inst_say(kind, r, r->src, pct, false);
+#endif
     }
 }
 

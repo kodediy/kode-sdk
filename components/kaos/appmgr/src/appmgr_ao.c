@@ -3387,7 +3387,8 @@ static unsigned progress_pct(const AppMgr * const me)
 
 /**
  * @brief Report a write's progress after a chunk: on the bus at every whole
- *        percent, in the log every APPMGR_PROGRESS.
+ *        percent, in the log every APPMGR_PROGRESS, to the install's port
+ *        every APPMGR_INST_PCT_STEP (appmgr_inst_progress()).
  *
  * A medium's chunks and the console's both come through here. The bus needs
  * the percent step: the Opening pill moves by it, and AO_Power drops its orange
@@ -3403,6 +3404,7 @@ static void progress_report(AppMgr * const me)
     {
         progress_publish(me, pct);
     }
+    appmgr_inst_progress(pct);
     if ( pct >= me->next_report )
     {
         KLOG_N(TAG, "  %u%% (%u/%u bytes)", pct,

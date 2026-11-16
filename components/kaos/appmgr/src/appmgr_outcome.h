@@ -5,10 +5,11 @@
  *
  * One record per kind, kept in NVS, numbered by AO_AppMgr when it takes the
  * install. The record goes to the port of the command that asked, as a
- * `>|install` line: when the install is taken, before the verdict, and again
- * when it ends. A kodeOS update ends `installed` before the switch, like an
- * app; its verdict follows on the next boot, once AO_Boot says the kodeOS
- * running has stayed up a minute. A port that is down then (the Kode channel, the BLE console) gets
+ * `>|install` line: when the install is taken, before the verdict, every
+ * APPMGR_INST_PCT_STEP points while it runs, and again when it ends. A kodeOS
+ * update ends `installed` before the switch, like an app; its verdict follows
+ * on the next boot, once AO_Boot says the kodeOS running has stayed up a
+ * minute. A port that is down then (the Kode channel, the BLE console) gets
  * the record when it comes up. Every call here runs in AO_AppMgr's thread.
  */
 #ifndef APPMGR_OUTCOME_H
@@ -30,6 +31,7 @@ extern "C" {
 #define APPMGR_INST_VER_MAX   32U         /**< A version, terminator included.            */
 #define APPMGR_INST_LEN       80U         /**< Bytes of appmgr_inst_rec_t, as stored.     */
 #define APPMGR_INST_PCT_DONE  100U        /**< The percent of a written image.            */
+#define APPMGR_INST_PCT_STEP  5U          /**< Points a progress line adds to the last told. */
 
 /* The two kinds of install a record is kept for, an index into the records. */
 #define APPMGR_INST_APP       0U          /**< An app, into the apps region.              */
@@ -121,6 +123,19 @@ void appmgr_inst_taken(void);
  * @param name Its project name; NULL or "" changes nothing.
  */
 void appmgr_inst_named(const char *name);
+
+/**
+ * @brief The install in hand has reached @p pct: tell its port, every
+ *        APPMGR_INST_PCT_STEP points.
+ *
+ * A plain line, kept nowhere. Nothing is said to a stream from the terminal
+ * while it is sending, to the scheduler, or to a port that is down; a step the
+ * console is too far behind for (console_congested()) is skipped, and the next
+ * chunk tries again with a bigger percent.
+ *
+ * @param pct The percent of the whole install, copies included.
+ */
+void appmgr_inst_progress(uint32_t pct);
 
 /**
  * @brief Note why the install in hand is failing; the first cause noted wins.

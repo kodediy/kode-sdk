@@ -12181,7 +12181,183 @@ TEST_CASE("a kodeOS update whose switch failed is told at once, and this boot's 
     TEST_ASSERT_TRUE(told_failed);
 }
 
-/* ---- A kodeOS update by URL, a lost line, a bad image -------------------- */
+/* ---- Progress, a kodeOS update by URL, a lost line, a bad image ---------- */
+
+/** @brief Bytes of the image the progress cases stream: 2,000 make a 50-byte
+ *         chunk 2.5 points, so a step of five falls on every second one. */
+#define PROGRESS_IMG_LEN    2000U
+#define PROGRESS_CHUNK_LEN  50U     /**< Bytes a chunk of those cases carries. */
+
+/** @brief The image the progress cases stream, built by progress_begin(). */
+static uint8_t s_progress_img[PROGRESS_IMG_LEN];
+
+/**
+ * @brief Start a kodeOS update from a file of PROGRESS_IMG_LEN bytes, asked on
+ *        the cable, up to its first chunk.
+ */
+static void progress_begin(void)
+{
+    for ( unsigned i = 0U; sizeof(s_progress_img) > i; ++i )
+    {
+        s_progress_img[i] = (uint8_t)((i * 7U) + 3U);
+    }
+    image_chain(s_progress_img);
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    (void)boot_saw(BOOT_OS_SWITCH_SIG);
+    kdrv_slot_present_IgnoreAndReturn(true);
+    kdrv_slot_size_IgnoreAndReturn(0x400000U);
+    kdrv_slot_address_IgnoreAndReturn(0x420000U);
+    kdrv_slot_sink_IgnoreAndReturn(&SLOT_FAKE_SINK);
+    kdrv_slot_desc_IgnoreAndReturn(KODE_ERROR);
+    fake_klog_reset();
+    kode_log_set_level(NULL, KODE_LOG_NOTICE);   /* the records, not the chunks' debug */
+
+    ask_file_from("kodeos.bin", (uint8_t)KFW_TARGET_OS, (uint8_t)KODE_CONSOLE_SRC_SERIAL);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the update never asked for its file");
+    answer_open(PROGRESS_IMG_LEN, (uint8_t)KDRV_MEDIUM_FS);
+}
+
+/** @brief Hand over the image's chunks from @p from up to (not including) @p to. */
+static void progress_chunks(unsigned from, unsigned to)
+{
+    for ( unsigned k = from; to > k; ++k )
+    {
+        answer_data_bytes(&s_progress_img[k * PROGRESS_CHUNK_LEN], PROGRESS_CHUNK_LEN);
+    }
+}
+
+/** @brief End the update the progress cases started, and clean up after it. */
+static void progress_end(void)
+{
+    answer_eof();
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    (void)boot_saw(BOOT_OS_SWITCH_SIG);
+    run_ticks(2U);
+    kode_log_set_level(NULL, KODE_LOG_DEBUG);
+    Mockkdrv_slot_Destroy();
+}
+
+/**
+ * @brief The percents the captured `running` records of the kodeOS update
+ *        said, in order.
+ * @param pcts Receives them.
+ * @param cap  Its room.
+ * @return How many there were.
+ */
+static unsigned progress_said(unsigned *pcts, unsigned cap)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const line = fake_klog_line(i);
+        const char * const pct  = (NULL != line) ? strstr(line, "pct=") : NULL;
+
+        if ( (NULL != pct) && (strstr(line, "dst=os state=running") != NULL)
+            && (cap > n) )
+        {
+            pcts[n] = (unsigned)strtoul(&pct[4], NULL, 10);
+            ++n;
+        }
+    }
+    return n;
+}
+
+/* The asker hears how far the install has got without asking: a `running`
+ * record each time the percent has moved five points or more, after the one
+ * that answered the command. */
+TEST_CASE("a running install tells its port every five points",
+          "[appmgr_ao][install_rec][progress]")
+{
+    unsigned pcts[32];
+
+    progress_begin();
+    progress_chunks(0U, PROGRESS_IMG_LEN / PROGRESS_CHUNK_LEN);
+    unsigned const n = progress_said(pcts, 32U);
+    unsigned const src = inst_src_of("dst=os state=running", "pct=50 ");
+    progress_end();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(21U, n, "the answer, then one line every five points");
+    for ( unsigned i = 0U; n > i; ++i )
+    {
+        TEST_ASSERT_EQUAL_UINT(i * APPMGR_INST_PCT_STEP, pcts[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_SERIAL, src,
+        "a progress line goes to the asker's port, plain");
+}
+
+/* A progress line is a nicety: while the console is too far behind for it
+ * (here, the BLE link holding a backlog) it is skipped, and the first one
+ * that fits says where the install has got to by then. */
+TEST_CASE("a progress line the console has no room for is skipped",
+          "[appmgr_ao][install_rec][progress]")
+{
+    unsigned pcts[32];
+
+    progress_begin();
+    fake_ble_mirror_set_attached(true);
+    fake_ble_console_set_backlog(1024U);
+    bool const congested = console_congested();
+    progress_chunks(0U, 20U);                  /* up to 50 %, all skipped */
+    fake_ble_console_set_backlog(0U);
+    bool const clear = !console_congested();
+    progress_chunks(20U, 21U);                 /* 52 %: the next one that fits */
+    unsigned const n = progress_said(pcts, 32U);
+    fake_ble_mirror_set_attached(false);
+    progress_chunks(21U, PROGRESS_IMG_LEN / PROGRESS_CHUNK_LEN);
+    progress_end();
+
+    TEST_ASSERT_TRUE_MESSAGE(congested, "the case did not back the console up");
+    TEST_ASSERT_TRUE_MESSAGE(clear, "the console stayed backed up");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, n, "the answer, then the first line that fit");
+    TEST_ASSERT_EQUAL_UINT(0U, pcts[0]);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(52U, pcts[1], "it says the percent reached by then");
+}
+
+/* A stream from the terminal has its own answers on the same wire, chunk by
+ * chunk: no progress line may cross them. The record that ends it does go. */
+TEST_CASE("a terminal install hears no progress, only its record at the end",
+          "[appmgr_ao][install_rec][progress]")
+{
+    static uint8_t payload[3U * KODE_RECV_CHUNK];
+    unsigned       pcts[32];
+
+    for ( unsigned i = 0U; sizeof(payload) > i; ++i )
+    {
+        payload[i] = (uint8_t)((i * 11U) + 5U);
+    }
+    image_chain(payload);
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    kdrv_slot_present_IgnoreAndReturn(true);
+    kdrv_slot_size_IgnoreAndReturn(0x400000U);
+    kdrv_slot_address_IgnoreAndReturn(0x420000U);
+    kdrv_slot_sink_IgnoreAndReturn(&SLOT_FAKE_SINK);
+    kdrv_slot_desc_IgnoreAndReturn(KODE_ERROR);
+    fake_klog_reset();
+    kode_log_set_level(NULL, KODE_LOG_NOTICE);
+
+    ask_recv_os((uint32_t)sizeof(payload),
+                khal_crc32(KHAL_CRC32_INIT, payload, sizeof(payload)));
+    raw_armed(true);
+    for ( unsigned k = 0U; 3U > k; ++k )
+    {
+        feed(&payload[k * KODE_RECV_CHUNK], (uint16_t)KODE_RECV_CHUNK);
+    }
+    unsigned const n     = progress_said(pcts, 32U);
+    bool const     ended = (NULL != inst_line_with("dst=os state=installed", "pct=100"));
+
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    (void)boot_saw(BOOT_OS_SWITCH_SIG);
+    ao_spy_drain();
+    kode_log_set_level(NULL, KODE_LOG_DEBUG);
+    Mockkdrv_slot_Destroy();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n, "only the answer at the take is a running line");
+    TEST_ASSERT_EQUAL_UINT(0U, pcts[0]);
+    TEST_ASSERT_TRUE_MESSAGE(ended, "the record that ends it was not written");
+}
 
 /* `dst=os` from a URL ends as one from a file does: `installed`, to the
  * asker's port, in the step that asks AO_Boot for the switch. */
