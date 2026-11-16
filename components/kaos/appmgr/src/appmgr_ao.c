@@ -890,6 +890,26 @@ void appmgr_image_request(uint8_t src_kind, const char *src,
     (void)appmgr_image_ask(src_kind, src, dst_kind, launch, NULL);
 }
 
+bool appmgr_install_info_ask(QActive *who, uint8_t asker)
+{
+    InstallInfoReqEvt * const e = Q_NEW_X(InstallInfoReqEvt, 0U,
+                                          INSTALL_INFO_REQ_SIG);
+
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "out of events; install_info dropped");
+        return false;
+    }
+    e->who = who;
+    e->src = asker;
+    if ( !QACTIVE_POST_X(AO_AppMgr, &e->super, KQP_APPMGR_CMD_MARGIN, NULL) )
+    {
+        KLOG_W(TAG, "AO_AppMgr's queue is full; install_info dropped");
+        return false;
+    }
+    return true;
+}
+
 /* A reader that keeps KODE_APP_LIST_MAX rows of the installed list holds
  * every app the region can: nothing installed is ever out of its reach. */
 _Static_assert(KODE_APP_LIST_MAX >= KAPPS_MAX_ENTRIES,
@@ -2197,6 +2217,34 @@ static void req_settle(AppMgr * const me, app_req_verdict_t verdict)
 
     me->req_who = NULL;
     req_verdict(who, verdict);
+}
+
+/**
+ * @brief What the install records wait on, in whichever state the AO is.
+ *
+ * `install_info` is answered here: the records go to the asker's port first,
+ * then the end of the command.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return true when @p e was the records'.
+ */
+static bool inst_event(const AppMgr * const me, QEvt const * const e)
+{
+    bool handled = true;
+
+    if ( (QSignal)INSTALL_INFO_REQ_SIG == e->sig )
+    {
+        InstallInfoReqEvt const * const req = Q_EVT_CAST(InstallInfoReqEvt);
+
+        appmgr_inst_info(req->src, (uint32_t)progress_pct(me));
+        req_verdict(req->who, APP_REQ_TAKEN);
+    }
+    else
+    {
+        handled = appmgr_inst_on(e);
+    }
+    return handled;
 }
 
 /** Release everything an in-flight copy owns. Safe to call twice. */
@@ -4486,7 +4534,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
 #endif
         default: {
             status = Q_SUPER(&QHsm_top);
-            if ( appmgr_inst_on(e) )   /* the ports the records wait on */
+            if ( inst_event(me, e) )
             {
                 status = Q_HANDLED();
             }
@@ -6489,7 +6537,7 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
         }
         default: {
             status = Q_SUPER(&QHsm_top);
-            if ( appmgr_inst_on(e) )   /* the ports the records wait on */
+            if ( inst_event(me, e) )
             {
                 status = Q_HANDLED();
             }

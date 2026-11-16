@@ -96,6 +96,18 @@ static void type_line(const char *text)
     QASM_DISPATCH(AO_Console, &e.super, 0U);
 }
 
+/** @brief Send @p text in as a line from the port @p src (KODE_CONSOLE_SRC_*). */
+static void type_line_from(const char *text, uint8_t src)
+{
+    ConsoleLineEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CONSOLE_LINE_SIG);
+    e.src   = src;
+    (void)snprintf(e.line, sizeof(e.line), "%s", text);
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
 /** @brief Type @p text with the captured replies cleared first. */
 static void ask(const char *text)
 {
@@ -349,6 +361,65 @@ TEST_CASE("app_run of a .bin asks for it to be installed and booted, and waits t
     verdict(APP_REQ_MISSING);
     TEST_ASSERT_TRUE(replied(">err code=5 msg=missing"));
     console_end();
+}
+
+/* `install_info` is AO_AppMgr's to answer: the records are its, and it writes
+ * them to the port the command came on before the console ends the line. */
+TEST_CASE("install_info asks AO_AppMgr for the records, from the port it came on, "
+          "and ends on its answer", "[console_apps]")
+{
+    console_up();
+    ask("install_info");
+
+    const InstallInfoReqEvt * const req =
+        (const InstallInfoReqEvt *)appmgr_took(INSTALL_INFO_REQ_SIG);
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_TRUE(AO_Console == req->who);
+    TEST_ASSERT_EQUAL_UINT8(KODE_CONSOLE_SRC_SERIAL, req->src);
+    QF_gc(&req->super);
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), "the line answered before the records");
+
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_TRUE(replied(">ok"));
+    console_end();
+}
+
+/* The port a command came on is the one its records go to: `install` and
+ * `install_info` from BLE name BLE to AO_AppMgr. */
+TEST_CASE("install and install_info from BLE name BLE as the asker",
+          "[console_apps]")
+{
+    console_up();
+    fake_klog_reset();
+    type_line_from("install_info", (uint8_t)KODE_CONSOLE_SRC_BLE);
+    const InstallInfoReqEvt * const info =
+        (const InstallInfoReqEvt *)appmgr_took(INSTALL_INFO_REQ_SIG);
+    uint8_t info_src = (uint8_t)KODE_LOG_SRC_NONE;
+    if ( NULL != info )
+    {
+        info_src = info->src;
+        QF_gc(&info->super);
+    }
+    verdict(APP_REQ_TAKEN);
+    console_end();
+
+    console_up();
+    fake_klog_reset();
+    type_line_from("install src=\"sd:/notes.bin\" dst=app", (uint8_t)KODE_CONSOLE_SRC_BLE);
+    const FlashReqEvt * const req = (const FlashReqEvt *)appmgr_took(FLASH_REQ_SIG);
+    uint8_t req_src = (uint8_t)KODE_LOG_SRC_NONE;
+    if ( NULL != req )
+    {
+        req_src = req->asker_src;
+        QF_gc(&req->super);
+    }
+    verdict(APP_REQ_MISSING);
+    console_end();
+
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_CONSOLE_SRC_BLE, info_src,
+        "install_info from BLE named another port");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_CONSOLE_SRC_BLE, req_src,
+        "install from BLE named another port as its asker");
 }
 
 /* ---- app_erase --------------------------------------------------------------- */

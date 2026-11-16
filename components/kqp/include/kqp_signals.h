@@ -597,6 +597,10 @@ enum KodeSignals {
                                  *   install (FLASH_REQ_SIG) or run
                                  *   (APP_RUN_REQ_SIG) request that named one
                                  *   (AppReqRspEvt). Posted, not published.   */
+    INSTALL_INFO_REQ_SIG,       /**< AO_AppMgr: write the records of the
+                                 *   last app install and the last kodeOS
+                                 *   update to the asker's port, then post
+                                 *   it APP_REQ_RSP_SIG (InstallInfoReqEvt). */
     STORAGE_CMD_SIG,            /**< AO_Storage: do StorageCmdEvt.op.         */
     STORAGE_LIST_PAGE_SIG,      /**< AO_Storage: post a page of the bootable
                                  *   images on every medium to the asker
@@ -2333,6 +2337,18 @@ typedef struct {
     QEvt    super;
     uint8_t verdict;   /**< app_req_verdict_t. */
 } AppReqRspEvt;
+
+/**
+ * @brief Ask AO_AppMgr for the records of its last installs (INSTALL_INFO_REQ_SIG).
+ *
+ * AO_AppMgr writes them to @c src itself, so they reach the port before the
+ * APP_REQ_RSP_SIG it posts @c who after them.
+ */
+typedef struct {
+    QEvt     super;
+    QActive *who;   /**< Where APP_REQ_RSP_SIG is posted once the records are out. */
+    uint8_t  src;   /**< KODE_CONSOLE_SRC_* of the command that asked.             */
+} InstallInfoReqEvt;
 
 /**
  * @brief One installed app, in answer to APP_LIST_REQ_SIG (APP_ENTRY_SIG).

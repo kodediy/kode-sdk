@@ -11939,3 +11939,62 @@ TEST_CASE("a terminal install whose host goes quiet is kept as failed for stalle
     TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
     TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_STALLED, got.why);
 }
+
+/* `install_info` is the record read back: the last app install, then the last
+ * kodeOS update, to the port that asked, then the end of the command. */
+TEST_CASE("install_info writes both records to the asker, then ends the command",
+          "[appmgr_ao][install_rec]")
+{
+    InstallInfoReqEvt e;
+
+    appmgr_fresh();
+    ao_spy_drain();
+    fake_klog_reset();
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(INSTALL_INFO_REQ_SIG);
+    e.who   = ao_spy();
+    e.src   = (uint8_t)KODE_CONSOLE_SRC_BLE;
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+
+    unsigned const n = klog_count_of(">|install id=");
+    const char * const first  = fake_klog_line(0U);
+    const char * const second = fake_klog_line(1U);
+    bool const app_first = (NULL != first) && (strstr(first, " dst=app ") != NULL);
+    bool const os_second = (NULL != second) && (strstr(second, " dst=os ") != NULL);
+    unsigned const src = fake_klog_src(0U);
+    const QEvt * const end = ao_spy_take();
+    uint8_t got = 0xFFU;
+    if ( (NULL != end) && ((enum_t)APP_REQ_RSP_SIG == (enum_t)end->sig) )
+    {
+        got = ((AppReqRspEvt const *)end)->verdict;
+    }
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, n, "one record of each kind");
+    TEST_ASSERT_TRUE(app_first);
+    TEST_ASSERT_TRUE(os_second);
+    TEST_ASSERT_EQUAL_UINT(KODE_CONSOLE_SRC_BLE, src);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APP_REQ_TAKEN, got, "the command ends after the records");
+}
+
+/* A record that was never written reads as none, numbered 0. */
+TEST_CASE("install_info with nothing ever installed says none",
+          "[appmgr_ao][install_rec]")
+{
+    InstallInfoReqEvt e;
+
+    fake_nvs_reset();
+    appmgr_fresh();
+    fake_klog_reset();
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(INSTALL_INFO_REQ_SIG);
+    e.src   = (uint8_t)KODE_CONSOLE_SRC_SERIAL;
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+
+    TEST_ASSERT_NOT_NULL(inst_line_with(
+        ">|install id=0 dst=app state=none pct=0 name=- version=- why=-", ""));
+    TEST_ASSERT_NOT_NULL(inst_line_with(
+        ">|install id=0 dst=os state=none pct=0 name=- version=- why=-", ""));
+}

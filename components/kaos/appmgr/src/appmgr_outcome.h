@@ -164,6 +164,13 @@ void appmgr_inst_rebooting(void);
  */
 bool appmgr_inst_on(QEvt const *e);
 
+/**
+ * @brief `install_info`: write both records to @p src.
+ * @param src      KODE_CONSOLE_SRC_* of the command.
+ * @param live_pct The percent of the install in hand, for a running record.
+ */
+void appmgr_inst_info(uint8_t src, uint32_t live_pct);
+
 #ifdef __cplusplus
 }
 #endif

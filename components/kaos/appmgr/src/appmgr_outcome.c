@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file appmgr_outcome.c
- * @brief The record of the last app install and the last kodeOS update: kept and told.
+ * @brief The record of the last app install and the last kodeOS update: kept, told, read.
  *
  * The block lives in PSRAM, not in AO_AppMgr, whose static object is held
  * under 2 KB of internal RAM. It is AO_AppMgr's alone: every function runs in
@@ -103,9 +103,11 @@ static void inst_store(uint8_t kind)
  * @param buf  Where.
  * @param cap  Its size.
  * @param kind APPMGR_INST_APP or APPMGR_INST_OS.
+ * @param r    The record.
  * @param pct  The percent to show.
  */
-static void inst_line(char *buf, size_t cap, uint8_t kind, uint32_t pct)
+static void inst_line(char *buf, size_t cap, uint8_t kind,
+                      appmgr_inst_rec_t const *r, uint32_t pct)
 {
     /* The `dst=` word of each kind. */
     static const char * const KIND_WORD[APPMGR_INST_KINDS] = { "app", "os" };
@@ -115,7 +117,6 @@ static void inst_line(char *buf, size_t cap, uint8_t kind, uint32_t pct)
         "busy", "keep", "cancelled", "stalled", "reset", "switch", "unconfirmed",
         "crashed", "other",
     };
-    appmgr_inst_rec_t const * const r = &s_inst->rec[kind];
     char name[CONSOLE_QUOTED_MAX(APPMGR_INST_NAME_MAX)];
     char ver[CONSOLE_QUOTED_MAX(APPMGR_INST_VER_MAX)];
     uint8_t state = r->state;
@@ -142,17 +143,19 @@ static void inst_line(char *buf, size_t cap, uint8_t kind, uint32_t pct)
 /**
  * @brief Put one record on a port, the way the console answers a command from it.
  * @param kind    APPMGR_INST_APP or APPMGR_INST_OS.
+ * @param r       The record.
  * @param src     KODE_CONSOLE_SRC_*, or KODE_LOG_SRC_NONE for nobody.
  * @param pct     The percent to show.
  * @param confirm Ask the port to answer CONSOLE_SENT_SIG once it is delivered.
  */
-static void inst_say(uint8_t kind, uint8_t src, uint32_t pct, bool confirm)
+static void inst_say(uint8_t kind, appmgr_inst_rec_t const *r, uint8_t src,
+                     uint32_t pct, bool confirm)
 {
     if ( (uint8_t)KODE_LOG_SRC_NONE != src )
     {
         char line[KODE_LOG_LINE_MAX];
 
-        inst_line(line, sizeof(line), kind, pct);
+        inst_line(line, sizeof(line), kind, r, pct);
         if ( (uint8_t)KODE_CONSOLE_SRC_SCHED == src )
         {
             KLOG_N(TAG, "sched: %s", line);
@@ -371,7 +374,7 @@ static void inst_tell(uint8_t kind, bool live, bool jumps)
 #if CONFIG_KODEOS_CONSOLE
     if ( say )
     {
-        inst_say(kind, r->src, r->pct, conf);
+        inst_say(kind, r, r->src, r->pct, conf);
     }
 #else
     (void)say;
@@ -678,4 +681,31 @@ bool appmgr_inst_on(QEvt const *e)
         }
     }
     return handled;
+}
+
+void appmgr_inst_info(uint8_t src, uint32_t live_pct)
+{
+#if CONFIG_KODEOS_CONSOLE
+    /* Without the block no install was numbered: each kind reads as none. */
+    static const appmgr_inst_rec_t NONE_REC = { 0 };
+
+    for ( uint8_t k = 0U; (uint8_t)APPMGR_INST_KINDS > k; ++k )
+    {
+        if ( NULL == s_inst )
+        {
+            inst_say(k, &NONE_REC, src, 0U, false);
+        }
+        else if ( k == s_inst->open )
+        {
+            inst_say(k, &s_inst->rec[k], src, live_pct, false);
+        }
+        else
+        {
+            inst_say(k, &s_inst->rec[k], src, s_inst->rec[k].pct, false);
+        }
+    }
+#else
+    (void)src;
+    (void)live_pct;
+#endif
 }

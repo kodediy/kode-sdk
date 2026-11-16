@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file appmgr_verbs.c
- * @brief AO_AppMgr's console verbs: `app_list`, `app_run`, `app_erase` and `app_cat`, registered by kaos_appmgr_start().
+ * @brief AO_AppMgr's console verbs: `app_list`, `app_run`, `app_erase`, `app_cat` and `install_info`, registered by kaos_appmgr_start().
  */
 #include <stdio.h>
 #include <inttypes.h>
@@ -30,7 +30,8 @@ typedef enum {
     APPMGR_V_LIST,      /**< app_list: APP_ENTRY_SIG pages until the end.   */
     APPMGR_V_CAT,       /**< app_cat set/clear: closed by APP_CAT_RSP_SIG.  */
     APPMGR_V_ERASE,     /**< app_erase: closed by APP_ERASE_DONE_SIG.       */
-    APPMGR_V_RUN        /**< app_run: closed by APP_REQ_RSP_SIG.            */
+    APPMGR_V_RUN,       /**< app_run: closed by APP_REQ_RSP_SIG.            */
+    APPMGR_V_INFO       /**< install_info: closed by APP_REQ_RSP_SIG.       */
 } appmgr_verb_kind_t;
 
 static appmgr_verb_kind_t s_appmgr_kind;
@@ -84,6 +85,26 @@ static void h_app_run(const kverb_t *c, const karg_val_t *v)
         posted = appmgr_run_ask(v[0].s, AO_Console);
     }
     if ( !posted )
+    {
+        /* Nothing was posted, so nobody will answer. */
+        console_reply_err(KCLI_ERR_REJECT, c->verb);
+        console_end();
+    }
+}
+
+/**
+ * @brief install_info: the record of the last app install and of the last
+ *        kodeOS update, one `>|install` each, then `>ok`.
+ *
+ * AO_AppMgr writes the records itself, the way it writes them when an install
+ * is taken and when it ends, so the line stays open until it says it is done.
+ */
+static void h_install_info(const kverb_t *c, const karg_val_t *v)
+{
+    (void)v;
+    console_begin(c->verb);
+    s_appmgr_kind = APPMGR_V_INFO;
+    if ( !appmgr_install_info_ask(AO_Console, console_src()) )
     {
         /* Nothing was posted, so nobody will answer. */
         console_reply_err(KCLI_ERR_REJECT, c->verb);
@@ -384,7 +405,7 @@ static bool appmgr_erase_answer(QEvt const *e)
     return true;
 }
 
-/** @brief app_run's answer: AO_AppMgr's verdict on the request. */
+/** @brief app_run's and install_info's answer: AO_AppMgr's verdict on the request. */
 static bool appmgr_run_answer(QEvt const *e)
 {
     bool handled = false;
@@ -414,7 +435,7 @@ static bool appmgr_answer(QEvt const *e)
     {
         handled = appmgr_erase_answer(e);
     }
-    else if ( APPMGR_V_RUN == s_appmgr_kind )
+    else if ( (APPMGR_V_RUN == s_appmgr_kind) || (APPMGR_V_INFO == s_appmgr_kind) )
     {
         handled = appmgr_run_answer(e);
     }
@@ -441,6 +462,7 @@ static const kverb_t APPMGR_VERBS[] = {
     { "app_run",   A_APP_NAME, KVERB_KEYS(A_APP_NAME), h_app_run   },
     { "app_erase", A_APP_NAME, KVERB_KEYS(A_APP_NAME), h_app_erase },
     { "app_cat",   A_APP_CAT,  KVERB_KEYS(A_APP_CAT),  h_app_cat   },
+    { "install_info", NULL,    0U,                     h_install_info },
 };
 
 const kverbs_t appmgr_verbs = {

@@ -4038,6 +4038,20 @@ bool appmgr_image_ask_from(uint8_t src_kind, const char *src, uint8_t dst_kind,
                            bool launch, QActive *who, uint8_t asker);
 
 /**
+ * @brief Ask AO_AppMgr for the records of the last app install and the last
+ *        kodeOS update (`install_info`).
+ *
+ * AO_AppMgr writes the two `>|install` records to @p asker, then posts @p who
+ * one APP_REQ_RSP_SIG, always APP_REQ_TAKEN.
+ *
+ * @param who   Where the end is posted.
+ * @param asker KODE_CONSOLE_SRC_* of the command that asked.
+ * @return false when the pool was dry or AO_AppMgr's queue had no room past
+ *         KQP_APPMGR_CMD_MARGIN, and nothing was posted: no answer will come.
+ */
+bool appmgr_install_info_ask(QActive *who, uint8_t asker);
+
+/**
  * @brief appmgr_run_request(), asking AO_AppMgr for its verdict.
  *
  * AO_AppMgr posts @p who one APP_REQ_RSP_SIG: taken when an installed app has
