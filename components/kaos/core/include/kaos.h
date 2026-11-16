@@ -3521,8 +3521,7 @@ void appdata_request(const char *project, QActive *who);
  * The one recursive delete, bounded to `<root>/.kode/appsdata/<project>` and one
  * subfolder level (https://docs.kode.diy/sdk/kdrv/apps). The internal partition's
  * folder is the one removed; a card folder of that name is then left where it is
- * and logged. A folder only on the card, where appdata_put_request() wrote it
- * for want of room inside, is removed from the card. Always answered once posted, refusals
+ * and logged. A folder only on the card is removed from the card. Always answered once posted, refusals
  * included, with an AppDataRmRspEvt naming @p project. It waits for a transfer in
  * flight like storage_path_request()'s deletes; a transfer that outlasts the wait
  * is KODE_DENIED.
@@ -3636,12 +3635,20 @@ typedef struct {
  * @brief Write @p project's data folder, replacing whatever folder was there
  *        whole, or not at all.
  *
- * A folder that is there is replaced on the medium that holds its app.json, the
- * internal partition before the card as the reader chooses, and never moved. A
- * new folder goes inside; when the internal partition has no room for it and a
- * card is mounted that has, it goes to the card, where the reader finds it, and
- * stays there. A card that will not take the write leaves nothing behind and the
- * answer is KODE_NO_RESOURCES, as with no card.
+ * A card put in since the last listing is mounted first (a mount is posted
+ * ahead of the put). A folder that is there is replaced on the medium that
+ * holds its app.json, the internal partition before the card as the reader
+ * chooses. One inside whose replacement has no room there goes to a card that
+ * took the write check (kdrv_sd_took_write()) and has room, and the folder
+ * inside is removed once the new one reads back as written; a folder on the
+ * card is never moved inside. A new folder goes to a card that took the write
+ * check and has room for it, and stays there; a card that then will not take
+ * the write is not chosen again this boot (kdrv_sd_write_failed()) and is
+ * mounted again, leaves none of the folder behind, and the folder goes
+ * inside. With no such card, or a full one,
+ * it goes inside and the log says why; when the internal partition has no room
+ * either and a card is mounted that has, it goes to the card. A folder that
+ * fits on neither is answered KODE_NO_RESOURCES.
  *
  * Makes missing parents, writes `app.json` and, if @p icon_len, `icon.k64` in two
  * steps under temporary names beside the old files, and only when both are down
@@ -3651,8 +3658,10 @@ typedef struct {
  * frees it on every path. A put that meets a transfer in flight waits for it
  * (KODE_STORAGE_TURN_MS). Always answered with an AppDataPutRspEvt: KODE_OK;
  * KODE_DENIED bad name, length, NULL buffer or busy (AppDataPutRspEvt.busy tells
- * the last apart); KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when
- * the put does not fit. It is charged what it weighs on the volume: its app.json
+ * the last apart; a put that meets a call to the card waits for it, and is busy
+ * when the line of those waiting is full); KODE_ERROR not mounted; KODE_IO_ERROR,
+ * also when the card would not write it and the internal partition, with room,
+ * would not either; KODE_NO_RESOURCES when the put does not fit. It is charged what it weighs on the volume: its app.json
  * and its icon, each rounded up to the volume's cluster (kdrv_storage_cluster_bytes()).
  * A new folder is charged one cluster more, its own, and on the internal partition
  * must leave KODE_APPDATA_FREE_MIN_BYTES free besides; a folder that is there is
@@ -3746,8 +3755,16 @@ void storage_close_request(void);
  *
  * One call, since the caller already holds the whole buffer: @p data must stay
  * valid and unchanged until the answer. AO_Storage chunks the write with self-posts.
- * A bare name goes internal first, then the card; a name starting with '/' goes
- * to the volume it names only.
+ * A bare name is written over where a read finds it, unless that is a card that
+ * has not taken the write check (kdrv_sd_took_write()); a new one goes to a card
+ * that took it and has room, and inside otherwise, the log saying where and why.
+ * A card put in since the last listing is mounted first. A bare name whose write
+ * or close fails on one medium is removed there and tried once on the other: on
+ * the card only when it took the write check, and not at all when what landed
+ * on the card would not go, which a read of the name would find first. A card
+ * it failed on is not chosen again this boot (kdrv_sd_write_failed()) and is
+ * mounted again once the write is over. A name starting with '/' goes to the
+ * volume it names only.
  *
  * @param who Receives STORAGE_WRITE_RSP_SIG when it is over, either way.
  */
@@ -3762,9 +3779,16 @@ void storage_write_all_request(const char *name, const void *data,
  * (0 for a new one), so asking again after a cut takes the download up where
  * it stopped. One download at a time on the board, and one ask per AO.
  *
+ * A bare name goes where storage_write_all_request() puts one: on the card
+ * when the card took the write check, inside otherwise, and written over where
+ * it is. The card is not mounted for it first: a download asked while the
+ * card is out on a call is refused. A chunk the card fails ends the download
+ * with that error and takes the card's word back, as a write's does.
+ *
  * @param who  The asking AO.
  * @param url  Shorter than KODE_NET_FETCH_URL_MAX; copied.
- * @param path Absolute, virtual, shorter than KODE_PATH_MAX; copied.
+ * @param path Absolute and virtual, or a bare name; shorter than KODE_PATH_MAX
+ *             once a volume's root is put in front of a bare name; copied.
  * @return As the asks above; KODE_NO_RESOURCES also when PSRAM has no room
  *         for the download's record.
  */

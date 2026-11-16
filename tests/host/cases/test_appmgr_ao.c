@@ -165,8 +165,11 @@ static void ask_flash(const char *name)
     ask_flash_dst(name, (uint8_t)KFW_TARGET_OS);
 }
 
-/** @brief The deadline AppMgr_opening arms, in QP ticks. */
-#define APPMGR_OPEN_DEADLINE_TICKS 3000U
+/** @brief The deadline AppMgr_opening arms, in steps of run_ticks(). */
+#define APPMGR_OPEN_DEADLINE_TICKS QF_SUPPORT_STEPS(KODE_APPMGR_OPEN_MS)
+/** @brief AO_AppMgr's 30 s long-stop between two chunks and on a STAT,
+ *         in steps of run_ticks(). */
+#define APPMGR_LONGSTOP_TICKS QF_SUPPORT_STEPS(30000U)
 
 /**
  * @brief Run the clock forward, delivering whatever the AO posts itself.
@@ -3261,7 +3264,7 @@ TEST_CASE("a write whose medium goes quiet is abandoned, not waited on forever",
     (void)begin_install((uint8_t)KDRV_MEDIUM_FS, "new");   /* then silence */
     TEST_ASSERT_FALSE_MESSAGE(klog_has(READ_THROUGH_SAID),
         "an install that gives nothing up read its file through first");
-    run_ticks(APPMGR_OPEN_DEADLINE_TICKS - 50U);
+    run_ticks(APPMGR_LONGSTOP_TICKS - 50U);
     TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "gave up before the deadline");
 
     run_ticks(100U);
@@ -6101,7 +6104,7 @@ TEST_CASE("a late STAT answer is not taken for the next victim's",
     storage_expect(STORAGE_PATH_REQ_SIG, "the first victim was not looked for");
 
     /* Never answered in time: past the deadline the second STAT is out. */
-    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);
+    run_ticks(APPMGR_LONGSTOP_TICKS + 50U);
     const QEvt *stat = storage_take_patient(STORAGE_PATH_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(stat, "the round did not go on to the second victim");
     TEST_ASSERT_EQUAL_STRING("/sdcard/second.bin", ((StoragePathEvt const *)stat)->path);
@@ -6606,7 +6609,7 @@ TEST_CASE("a replacement nobody answers fails the copy, and its late answer is n
     pair_req_expect("/sdcard/first.bin.tmp", "/sdcard/first.bin",
                     "the finished copy was not put on its name");
 
-    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);          /* the replacement is never answered */
+    run_ticks(APPMGR_LONGSTOP_TICKS + 50U);          /* the replacement is never answered */
     path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/second.bin",
                     "the round did not go on to the second victim");
     TEST_ASSERT_FALSE_MESSAGE(klog_has("'first' kept as"),

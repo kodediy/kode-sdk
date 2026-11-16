@@ -58,6 +58,7 @@ typedef struct {
     uint8_t      held_idx; /**< AO_Net's buffer it is in.                    */
     fetch_phase_t phase;   /**< Where the download is.                       */
     bool         holding;  /**< A chunk waits for the file's turn.           */
+    bool         on_card;  /**< A bare name AO_Storage put on the card.      */
     bool         stopping; /**< A stop was asked while the open was out.     */
 } FetchJob;
 
@@ -242,6 +243,20 @@ static void fetch_begin(HttpFileReqEvt const * const q, bool busy)
         fetch_answer(job, KODE_DENIED, false);
         return;
     }
+    if ( '/' != job->path[0] )
+    {
+        /* No volume named: it goes where a write of that name goes. */
+        char placed[KODE_PATH_MAX];
+
+        if ( !storage_bare_path(job->path, placed, sizeof(placed)) )
+        {
+            KLOG_W(TAG, "'%s' is too long to place on a volume", job->path);
+            fetch_answer(job, KODE_DENIED, false);
+            return;
+        }
+        (void)snprintf(job->path, sizeof(job->path), "%s", placed);
+        job->on_card = (kdrv_storage_medium_of(job->path) == KDRV_MEDIUM_SD);
+    }
     rc = kdrv_storage_stat(job->path, &st);
     if ( (KODE_OK == rc) && st.exists && st.is_dir )
     {
@@ -418,6 +433,10 @@ static void fetch_write_held(bool busy)
     }
     if ( KODE_OK != rc )
     {
+        if ( job->on_card )
+        {
+            storage_bare_failed();   /* the card AO_Storage chose failed it */
+        }
         fetch_abort(rc, false);
         return;
     }

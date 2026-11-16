@@ -329,18 +329,12 @@ kode_status_t kdrv_storage_seek(uint32_t offset);
  * section's own note on why the old refusal was an accident of one handle
  * rather than a rule.
  *
- * Reading looks at the card first and writing does **not**, and the asymmetry
- * is the point: those are different questions. A read asks where somebody is
- * most likely to have put a file, and somebody who went to the trouble of
- * inserting a card meant it. A write asks where the bytes will actually
- * survive, and the answer is the medium the board owns - always present,
- * always writable, and impossible to swap for a counterfeit.
- *
- * That is not a hypothetical. Writing to one of the fake cards some units
- * shipped with does not merely fail: FATFS is left holding dirty sectors it
- * can never flush, and every later read of that volume comes back as a
- * zero-length file. One capture written to the card cost the rest of the
- * session's reads from it.
+ * Reading has one order for everybody, the card first; writing takes its
+ * order from @p first, because the caller is the one who knows where these
+ * bytes belong. kdrv_sd_took_write() is what a caller weighs before it puts the
+ * card first: writing to one of the fake cards some units shipped with does
+ * not merely fail, it leaves FATFS holding dirty sectors it can never flush,
+ * and every later read of that volume comes back as a zero-length file.
  *
  * @param[out] medium  Where it was created. May be NULL.
  * @return KODE_OK; KODE_DENIED for a NULL name or a file already open for

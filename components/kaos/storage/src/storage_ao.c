@@ -57,6 +57,11 @@ Q_DEFINE_THIS_MODULE("storage_ao")
 #define APPDATA_JSON_NAME   KAPP_DATA_JSON_NAME   /**< The folder's app.json. */
 #define APPDATA_ICON_NAME   KAPP_DATA_ICON_NAME   /**< The icon's default file name. */
 #define APPDATA_TMP_SUFFIX  ".tmp"   /**< What a put appends to a file's name while it writes it. */
+#define STORAGE_FS_ROOT     "/storage"  /**< The internal partition's volume, as a virtual path. */
+#define STORAGE_SD_ROOT     "/sdcard"   /**< The card's volume, as a virtual path. */
+/** @brief Bytes of a file on the card read back at a time, when a put there is
+ *         checked before the folder inside is taken away. */
+#define APPDATA_CHECK_CHUNK 4096U
 #define APPDATA_JSON_TMP    APPDATA_JSON_NAME APPDATA_TMP_SUFFIX   /**< app.json while a put writes it. */
 #define APPDATA_ICON_TMP    APPDATA_ICON_NAME APPDATA_TMP_SUFFIX   /**< The icon while a put writes it. */
 _Static_assert(sizeof(APPDATA_ICON_TMP) <= KAPP_DATA_ICON_MAX,
@@ -142,6 +147,10 @@ _Static_assert((KODE_STORAGE_LIST_MAX + 1U) < KQP_MEDIUM_POOL_COUNT,
 /** @brief The most the AO waits for a mount, a remount or an unmount: the
  *         driver's own bound and the AO's margin. */
 #define STORAGE_JOB_MOUNT_MS   (KDRV_SD_MOUNT_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS)
+/* AO_AppMgr's open of a card file may wait for a mount; it must not give up
+ * on one that is still within its bound. */
+_Static_assert(STORAGE_JOB_MOUNT_MS < KODE_APPMGR_OPEN_MS,
+               "AO_AppMgr gives up on a card open before a mount may end");
 /** @brief The same for a transfer of raw sectors. */
 #define STORAGE_JOB_SECTORS_MS (KDRV_SD_SECTORS_MAX_MS + KODE_STORAGE_JOB_MARGIN_MS)
 /** @brief The same for a format. */
@@ -161,6 +170,7 @@ typedef enum {
 typedef enum {
     SD_THEN_MOUNT,         /**< A mount command: say where, answer.           */
     SD_THEN_UNMOUNT,       /**< An unmount command: answer.                   */
+    SD_THEN_REMOUNT,       /**< The remount after a write on the card failed. */
     SD_THEN_SCRIPT,        /**< The remount that starts a card script.        */
     SD_THEN_READ4,         /**< One chunk of the four-line read.              */
     SD_THEN_READ1_MOUNT,   /**< The remount onto one data line.               */
@@ -317,6 +327,9 @@ typedef struct {
     bool      width_owed;               /**< A script ended on a call that
                                          *   overran: the slot goes back onto
                                          *   the everyday width when it returns. */
+    bool      remount_owed;             /**< A write on the card failed: it is
+                                         *   mounted again once nothing is open
+                                         *   and no call to it is out.        */
     QEQueue   deferq;                   /**< Requests held while a call is out. */
     QEvtPtr   defer_sto[KODE_STORAGE_DEFER_DEPTH - 1U]; /**< Its ring; the queue
                                          *   keeps the front event aside.     */
@@ -445,14 +458,18 @@ typedef struct {
     uint16_t       g_icon_len;     /**< 0 when there is no icon step.         */
     AppDataMedium  g_medium;       /**< Where the folder is written: the
                                     *   internal partition, or the card.      */
-    bool           g_spill;        /**< The internal partition had no room for
-                                    *   this new folder, so it goes to the
-                                    *   card.                                  */
-    char           g_full[APPDATA_WHY_MAX]; /**< Why the internal partition had
-                                    *   no room, for the put that went to the
-                                    *   card and failed there.                 */
+    bool           g_spill;        /**< This new folder is on its second
+                                    *   medium: inside when the card would not
+                                    *   take it, the card when the internal
+                                    *   partition had no room.                 */
+    char           g_full[APPDATA_WHY_MAX]; /**< Why the folder is not on the
+                                    *   other medium, said when the put ends;
+                                    *   empty for a folder on its first.       */
     bool           g_fresh;        /**< The folder was not there when the put
                                     *   began: a failed put takes it away.     */
+    bool           g_new;          /**< No medium held the folder's app.json
+                                    *   when the put began: one the card would
+                                    *   not write may start again inside.      */
 
     /* The wipe of one app's files in progress: the images kept by the walk of
      * each root, read and deleted one a step, then the folders. x_who is the
@@ -1323,12 +1340,15 @@ kode_status_t appdata_put_request(const char *project, uint8_t *buf,
     e->json_len = json_len;
     e->icon_len = icon_len;
     e->who      = who;
+    /* A card put in since the last listing is mounted before the put weighs
+     * it: posted first, so the put waits behind the call to the card. */
+    storage_request(KDRV_MEDIUM_SD, STORAGE_OP_MOUNT);
     QACTIVE_POST(AO_Storage, &e->super, (void *)0);
     return KODE_OK;
 }
 
 /** @brief Each AppDataMedium's root, in the enum's order. */
-static const char *const APPDATA_ROOT[] = { "", "/storage", "/sdcard" };
+static const char *const APPDATA_ROOT[] = { "", STORAGE_FS_ROOT, STORAGE_SD_ROOT };
 
 bool appdata_folder_path(char *out, size_t cap, AppDataMedium m,
                          const char *project)
@@ -1390,6 +1410,12 @@ void storage_write_all_request(const char *name, const void *data,
     e->data = data;
     e->len  = len;
     e->who  = who;
+    if ( '/' != name[0] )
+    {
+        /* A bare name may go to the card: one put in since the last listing
+         * is mounted first, and the write waits behind the call to it. */
+        storage_request(KDRV_MEDIUM_SD, STORAGE_OP_MOUNT);
+    }
     QACTIVE_POST(AO_Storage, &e->super, NULL);
 }
 
@@ -2103,6 +2129,7 @@ static kode_status_t appdata_rm_tree(const char *folder)
 }
 
 static void warn_if_card(const char *verb, const char *path);
+static void warn_if_unproven_card(const char *verb, const char *path);
 
 /**
  * @brief Delete @p project's data folder, from the medium that holds it, and
@@ -2110,8 +2137,7 @@ static void warn_if_card(const char *verb, const char *path);
  *
  * The internal partition first: a folder there is the one the reader shows,
  * so it is the one removed, and a card folder of the same name is left where
- * it is and said so. A folder only on the card, which a put that found no room
- * inside wrote there, is removed from the card.
+ * it is and said so. A folder only on the card is removed from the card.
  *
  * @param me      The AO, for busy().
  * @param project The app's project name.
@@ -2151,7 +2177,7 @@ static kode_status_t appdata_rm(const Storage * const me, const char *project)
     if ( (KODE_ERROR == rc) && on_card )
     {
         /* Nothing inside: the folder is the card's. */
-        warn_if_card("appdata_rm", card);
+        warn_if_unproven_card("appdata_rm", card);
         rc = appdata_rm_tree(card);
         if ( KODE_OK == rc )
         {
@@ -2901,9 +2927,25 @@ static void wipe_step(Storage * const me)
  * one go; the request's fields and bytes are kept in g_* for the second step,
  * and appdata_put_finish() frees g_buf. Each file is written under a temporary
  * name beside the old one, and the second step, with both down, puts them in
- * the old files' place: a folder is replaced whole or not at all. Internal
- * partition only.
+ * the old files' place: a folder is replaced whole or not at all. The folder
+ * is on the internal partition or on the card, as appdata_plan() decides.
  */
+
+/**
+ * @brief A data folder's medium, in the words the log says it in.
+ * @param medium APPDATA_MEDIUM_FS or APPDATA_MEDIUM_SD.
+ * @return "card" for the card, "internal volume" for anything else.
+ */
+static const char *appdata_medium_name(AppDataMedium medium)
+{
+    const char *name = "internal volume";
+
+    if ( APPDATA_MEDIUM_SD == medium )
+    {
+        name = "card";
+    }
+    return name;
+}
 
 /**
  * @brief Say how a put ended: the one line about its folder, at NOTICE.
@@ -2917,12 +2959,16 @@ static void wipe_step(Storage * const me)
  * @param medium  Where the folder was written: the card is said, the internal
  *                partition is the default and is not.
  * @param why     Read only when @p rc is not KODE_OK: why it was not written.
+ * @param aside   Read only when @p rc is KODE_OK: why the folder is not on the
+ *                other medium, or empty when it is where it goes first.
  */
 static void appdata_put_say(const char *project, kode_status_t rc, bool icon,
-                            AppDataMedium medium, const char *why)
+                            AppDataMedium medium, const char *why,
+                            const char *aside)
 {
     const char *what  = "json, no icon";
     const char *where = "";
+    const char *other = "";
 
     if ( KODE_OK != rc )
     {
@@ -2937,8 +2983,16 @@ static void appdata_put_say(const char *project, kode_status_t rc, bool icon,
     {
         where = " on the card";
     }
-    KLOG_N(TAG, "the data folder of '%s' is in place%s (%s)", project, where,
-           what);
+    if ( '\0' != aside[0] )
+    {
+        other = ", not on the card: ";
+        if ( APPDATA_MEDIUM_SD == medium )
+        {
+            other = ", not inside: ";
+        }
+    }
+    KLOG_N(TAG, "the data folder of '%s' is in place%s (%s)%s%s", project,
+           where, what, other, aside);
 }
 
 /**
@@ -2982,7 +3036,7 @@ static void appdata_put_free(Storage * const me)
 /**
  * @brief Write one file of a folder: create, write, close, all in this step.
  *
- * @param path Absolute virtual path on the internal partition.
+ * @param path Absolute virtual path, on either medium.
  * @param data The bytes.
  * @param len  How many.
  * @return KODE_OK, or what the medium said; the stub is discarded on failure.
@@ -3184,16 +3238,155 @@ static void appdata_put_sweep(const char *folder)
     }
 }
 
+static bool appdata_put_inside(Storage * const me, kode_status_t *rc,
+                               const char **why);
+static kode_status_t appdata_put_start(Storage * const me);
+static void card_write_failed(Storage * const me);
+static void card_remount_owed(Storage * const me);
+
+/**
+ * @brief Whether a file reads back as exactly @p len bytes equal to @p data.
+ *
+ * @param path  Absolute, virtual.
+ * @param data  What was written.
+ * @param len   How many bytes.
+ * @param chunk A buffer of APPDATA_CHECK_CHUNK bytes.
+ * @return true when the file is there, of that length, with those bytes.
+ */
+static bool appdata_reads_back(const char *path, const uint8_t *data,
+                               uint32_t len, uint8_t *chunk)
+{
+    uint32_t size = 0U;
+    bool     same = false;
+
+    if ( kdrv_storage_open_path(path, &size) == KODE_OK )
+    {
+        uint32_t done = 0U;
+
+        same = (size == len);
+        while ( same && (done < len) )
+        {
+            size_t got = 0U;
+
+            if ( (kdrv_storage_read(chunk, APPDATA_CHECK_CHUNK, &got) != KODE_OK)
+                || (0U == got) || (got > (size_t)(len - done))
+                || (memcmp(chunk, &data[done], got) != 0) )
+            {
+                same = false;
+            }
+            else
+            {
+                done += (uint32_t)got;
+            }
+        }
+        if ( kdrv_storage_close() != KODE_OK )
+        {
+            same = false;
+        }
+    }
+    return same;
+}
+
+/**
+ * @brief Whether the folder just written on the card reads back as the put
+ *        wrote it: app.json, and the icon when there is one.
+ *
+ * The check at mount proves a write reaches the card, not that the card keeps
+ * it; this is read before the only other copy goes.
+ *
+ * @param me The AO, with the put's buffer still held.
+ * @return true when every file reads back whole; false when one does not, or
+ *         when there is no memory to read it with.
+ */
+static bool appdata_put_reads_back(const Storage * const me)
+{
+    char      folder[APPDATA_FOLDER_MAX];
+    char      path[APPDATA_PATH_MAX];
+    bool      whole = false;
+    /* cppcheck-suppress misra-c2012-11.5 ; a byte buffer from a void * allocator */
+    uint8_t * const chunk = (uint8_t *)khal_alloc_psram(STORAGE_PSRAM_ALIGN,
+                                                         APPDATA_CHECK_CHUNK);
+
+    if ( NULL == chunk )
+    {
+        KLOG_W(TAG, "no memory to read back the data folder of '%s' on the "
+                    "card", me->g_project);
+        return false;
+    }
+    if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_SD,
+                             me->g_project)
+        && appdata_file_path(path, folder, APPDATA_JSON_NAME) )
+    {
+        whole = appdata_reads_back(path, me->g_buf, me->g_json_len, chunk);
+        if ( whole && (0U != me->g_icon_len) )
+        {
+            whole = appdata_file_path(path, folder, APPDATA_ICON_NAME)
+                 && appdata_reads_back(path, &me->g_buf[me->g_json_len],
+                                       me->g_icon_len, chunk);
+        }
+    }
+    khal_free(chunk);
+    return whole;
+}
+
+/**
+ * @brief Take away the folder inside that a folder just written whole on the
+ *        card replaces: the reader looks inside first and would show the old.
+ *
+ * Only once the card's folder reads back as the put wrote it
+ * (appdata_put_reads_back()): when it does not, or cannot be read, the folder
+ * inside stays. Its app.json goes first, so that whatever else stays is no
+ * folder the reader shows. Nothing happens when there is no app.json inside.
+ *
+ * @param me The AO, with the put's buffer still held.
+ */
+static void appdata_put_unshadow(const Storage * const me)
+{
+    const char * const project = me->g_project;
+    char        folder[APPDATA_FOLDER_MAX];
+    char        path[APPDATA_PATH_MAX];
+    kdrv_stat_t st;
+
+    if ( kdrv_storage_mounted(KDRV_MEDIUM_FS)
+        && appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
+                               project)
+        && appdata_file_path(path, folder, APPDATA_JSON_NAME)
+        && (kdrv_storage_stat(path, &st) == KODE_OK) && st.exists )
+    {
+        if ( !appdata_put_reads_back(me) )
+        {
+            KLOG_W(TAG, "the data folder of '%s' on the card does not read back "
+                        "as written; the one inside stays", project);
+        }
+        else if ( (kdrv_storage_unlink(path) == KODE_OK)
+            && (appdata_rm_tree(folder) == KODE_OK) )
+        {
+            KLOG_N(TAG, "the old data folder of '%s' inside is gone", project);
+        }
+        else
+        {
+            KLOG_W(TAG, "the old data folder of '%s' inside did not all go",
+                   project);
+        }
+    }
+}
+
 /**
  * @brief End a put: forget it, remove what a failure left, answer.
  *
  * The state goes first because g_who is part of busy(), and what a failure
  * removes is removed with the AO free.
  *
- * A failed put leaves the folder that was there as it was, less the
- * temporaries; a folder the put made is taken away again. A put that went to
- * the card for want of room inside and failed there is answered
- * KODE_NO_RESOURCES, as with no card, and says both.
+ * A failed put on the card tells the driver (card_write_failed()), so the
+ * card is not chosen again this boot, and the card is mounted again once the
+ * put is over (card_remount_owed()). A failed put leaves the folder that was
+ * there as it was, less the temporaries; a folder the put made is taken away
+ * again. A new folder the card would not write starts again inside
+ * (appdata_put_inside()). A put on its second medium that failed there says
+ * both, and is answered KODE_NO_RESOURCES when the internal partition had no
+ * room for it, as with no card. A folder written whole on the card replaces
+ * the one inside, which is taken away once the card's reads back as written
+ * (appdata_put_unshadow()).
  *
  * @param me  The AO.
  * @param rc  How it ended.
@@ -3202,21 +3395,36 @@ static void appdata_put_sweep(const char *folder)
 static void appdata_put_finish(Storage * const me, kode_status_t rc,
                                const char *why)
 {
+    kode_status_t end    = rc;
+    const char   *reason = why;
+
+    if ( (KODE_OK != rc) && (APPDATA_MEDIUM_SD == me->g_medium) )
+    {
+        card_write_failed(me);
+    }
+    if ( (KODE_OK != rc) && appdata_put_inside(me, &end, &reason) )
+    {
+        return;   /* the put goes on inside */
+    }
+
     QActive * const     who    = me->g_who;
     bool const          fresh  = me->g_fresh;
     bool const          icon   = (0U != me->g_icon_len);
     bool const          spill  = me->g_spill;
     AppDataMedium const medium = me->g_medium;
-    kode_status_t       answer = rc;
-    const char         *reason = why;
+    kode_status_t       answer = end;
     char                project[KDRV_SLOT_PROJECT_MAX];
     char                folder[APPDATA_FOLDER_MAX];
     char                told[APPDATA_WHY_MAX + 64U];
 
     (void)snprintf(project, sizeof(project), "%s", me->g_project);
+    if ( (KODE_OK == end) && (APPDATA_MEDIUM_SD == medium) )
+    {
+        appdata_put_unshadow(me);
+    }
     me->g_who      = NULL;
     appdata_put_free(me);
-    if ( (KODE_OK != rc)
+    if ( (KODE_OK != end)
         && appdata_folder_path(folder, sizeof(folder), medium, project) )
     {
         appdata_put_drop_tmps(folder);
@@ -3225,20 +3433,25 @@ static void appdata_put_finish(Storage * const me, kode_status_t rc,
             (void)appdata_rm_tree(folder);
         }
     }
-    if ( (KODE_OK != rc) && spill )
+    if ( (KODE_OK != end) && spill )
     {
-        /* The folder had no room inside and the card would not take it: that
-         * is `full`, as it is without a card, and says both. */
-        (void)snprintf(told, sizeof(told), "%s; the card would not take it "
-                       "either", me->g_full);
+        /* Neither medium would take the folder, and both are said. */
+        (void)snprintf(told, sizeof(told), "%s; the %s would not take it "
+                       "either", me->g_full, appdata_medium_name(medium));
         reason = told;
-        answer = KODE_NO_RESOURCES;
+        if ( APPDATA_MEDIUM_SD == medium )
+        {
+            /* The card was the second because the internal partition had no
+             * room: that is `full`, as it is without a card. */
+            answer = KODE_NO_RESOURCES;
+        }
     }
-    appdata_put_say(project, answer, icon, medium, reason);
+    appdata_put_say(project, answer, icon, medium, reason, me->g_full);
     if ( NULL != who )
     {
         appdata_put_answer(who, project, answer, false);
     }
+    card_remount_owed(me);
 }
 
 /**
@@ -3271,7 +3484,8 @@ typedef struct {
 typedef struct {
     AppDataMedium medium;  /**< The medium the folder is written on.            */
     AppDataRoom   weight;  /**< What it weighs there, and what is free.         */
-    bool          spill;   /**< A new folder that had no room inside: the card. */
+    bool          spill;   /**< A folder that had no room inside: the card.     */
+    bool          held;    /**< A medium held the folder's app.json.            */
 } AppDataPlan;
 
 /**
@@ -3350,7 +3564,8 @@ static bool appdata_room(AppDataMedium medium, const char *folder,
  *        its app.json.
  *
  * A folder on both media is the internal one's: a put replaces it, and the
- * card's is left as it is.
+ * card's is left as it is. Reading inside first keeps a folder inside the one
+ * that is found and replaced, whatever the card holds.
  *
  * @param project The app's project name.
  * @return APPDATA_MEDIUM_FS, APPDATA_MEDIUM_SD, or APPDATA_MEDIUM_NONE.
@@ -3392,12 +3607,8 @@ static void appdata_room_words(char *out, size_t cap, AppDataMedium medium,
                                const AppDataRoom *w)
 {
     uint32_t const need_kb = (w->need + (APPDATA_KB - 1U)) / APPDATA_KB;
-    const char    *name    = "internal volume";
+    const char    *name    = appdata_medium_name(medium);
 
-    if ( APPDATA_MEDIUM_SD == medium )
-    {
-        name = "card";
-    }
     if ( w->there )
     {
         (void)snprintf(out, cap, "it needs %lu KB beside the old files and the "
@@ -3422,19 +3633,71 @@ static void appdata_room_words(char *out, size_t cap, AppDataMedium medium,
 }
 
 /**
+ * @brief Whether the card is where kodeOS puts what it writes by its own
+ *        choice, and why not.
+ *
+ * It is when it is mounted, took the write check at mount and no write of a
+ * file on it has failed since (kdrv_sd_took_write()); room is the caller's to
+ * weigh.
+ *
+ * @param[out] why Why not, in words; written only when the answer is false.
+ * @param cap      The size of @p why.
+ * @return true when the card goes first.
+ */
+static bool card_takes_writes(char *why, size_t cap)
+{
+    bool takes = false;
+
+    if ( !kdrv_storage_mounted(KDRV_MEDIUM_SD) )
+    {
+        (void)snprintf(why, cap, "no card is mounted");
+    }
+    else if ( !kdrv_sd_took_write() )
+    {
+        (void)snprintf(why, cap, "the card has not proved it takes a write");
+    }
+    else
+    {
+        takes = true;
+    }
+    return takes;
+}
+
+/**
+ * @brief Say that the card has less free than something it was weighed for.
+ *
+ * @param why     Where the words go.
+ * @param cap     Its size.
+ * @param avail   Bytes the card has free.
+ * @param need    Bytes it would take.
+ */
+static void card_full_words(char *why, size_t cap, uint64_t avail,
+                            uint64_t need)
+{
+    (void)snprintf(why, cap, "the card has %lu KB free and it needs %lu KB",
+                   (unsigned long)(avail / APPDATA_KB),
+                   (unsigned long)((need + (APPDATA_KB - 1U)) / APPDATA_KB));
+}
+
+/**
  * @brief Decide where a put goes, or say why it goes nowhere.
  *
  * A folder that is there is replaced where it is, whichever medium holds its
- * app.json, and never moved: a replacement that does not fit is refused. A new
- * folder goes inside; when the internal partition has no room for it and a
- * card is mounted that has, it goes to the card, which the reader finds. A
- * folder on the card is not moved inside when room comes back.
+ * app.json. A replacement that does not fit inside goes to a card that took a
+ * write at mount and has room for it, and the folder inside goes once the new
+ * one is whole (appdata_put_unshadow()); any other replacement that does not
+ * fit is refused, and a folder on the card is never moved inside. A new
+ * folder goes to a card that took a write at mount and has room for it; with
+ * no such card it goes inside, and @p why says why not the card. When the
+ * internal partition has no room either and a card is mounted that has not
+ * proved it takes a write but has room, the folder goes there.
  *
  * @param project  The app's project name.
  * @param json_len Bytes of the app.json the put carries.
  * @param icon_len Bytes of the icon it carries: 0 for none.
  * @param[out] plan Where it goes, when it goes anywhere.
- * @param[out] why  Why it goes nowhere; with a spill, why it is not inside.
+ * @param[out] why  Why it goes nowhere; with a place, why it is not on the
+ *                  other medium, or empty when it is on its first.
  * @param cap       The size of @p why.
  * @return true when the put has a place.
  */
@@ -3442,34 +3705,34 @@ static bool appdata_plan(const char *project, uint32_t json_len,
                          uint32_t icon_len, AppDataPlan *plan, char *why,
                          size_t cap)
 {
-    AppDataMedium const holder = appdata_holder(project);
+    AppDataMedium const holder  = appdata_holder(project);
     char                folder[APPDATA_FOLDER_MAX];
-    bool                fits   = false;
+    AppDataRoom         card;
+    bool                weighed = false;
 
     plan->medium = APPDATA_MEDIUM_FS;
     plan->spill  = false;
+    plan->held   = (APPDATA_MEDIUM_NONE != holder);
     (void)memset(&plan->weight, 0, sizeof(plan->weight));
-    if ( APPDATA_MEDIUM_SD == holder )
+    (void)memset(&card, 0, sizeof(card));
+    why[0] = '\0';
+    if ( plan->held )
     {
-        plan->medium = APPDATA_MEDIUM_SD;
-    }
-    if ( appdata_folder_path(folder, sizeof(folder), plan->medium, project) )
-    {
-        fits = appdata_room(plan->medium, folder, json_len, icon_len,
-                            &plan->weight);
-    }
-    if ( fits )
-    {
-        return true;
-    }
-    appdata_room_words(why, cap, plan->medium, &plan->weight);
-    if ( (APPDATA_MEDIUM_NONE == holder) && kdrv_storage_mounted(KDRV_MEDIUM_SD) )
-    {
-        AppDataRoom card;
+        char not_card[APPDATA_WHY_MAX];
 
-        if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_SD,
-                                 project) )
+        plan->medium = holder;
+        if ( appdata_folder_path(folder, sizeof(folder), holder, project)
+            && appdata_room(holder, folder, json_len, icon_len, &plan->weight) )
         {
+            return true;
+        }
+        appdata_room_words(why, cap, holder, &plan->weight);
+        if ( (APPDATA_MEDIUM_FS == holder)
+            && card_takes_writes(not_card, sizeof(not_card))
+            && appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_SD,
+                                   project) )
+        {
+            /* No room inside for the replacement: a folder on the card. */
             if ( appdata_room(APPDATA_MEDIUM_SD, folder, json_len, icon_len,
                               &card) )
             {
@@ -3478,11 +3741,55 @@ static bool appdata_plan(const char *project, uint32_t json_len,
                 plan->spill  = true;
                 return true;
             }
-            /* The card says it has less free than the folder takes. */
             (void)snprintf(&why[strlen(why)], cap - strlen(why),
                            "; the card has %lu KB free",
                            (unsigned long)(card.avail / APPDATA_KB));
         }
+        return false;
+    }
+
+    /* A new folder: the card first, when it took a write and has room. */
+    if ( card_takes_writes(why, cap)
+        && appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_SD,
+                               project) )
+    {
+        weighed = true;
+        if ( appdata_room(APPDATA_MEDIUM_SD, folder, json_len, icon_len, &card) )
+        {
+            plan->medium = APPDATA_MEDIUM_SD;
+            plan->weight = card;
+            return true;
+        }
+        card_full_words(why, cap, card.avail, (uint64_t)card.need);
+    }
+    if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS, project)
+        && appdata_room(APPDATA_MEDIUM_FS, folder, json_len, icon_len,
+                        &plan->weight) )
+    {
+        return true;   /* inside; @p why says why not the card */
+    }
+    appdata_room_words(why, cap, APPDATA_MEDIUM_FS, &plan->weight);
+    if ( (!weighed) && kdrv_storage_mounted(KDRV_MEDIUM_SD)
+        && appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_SD,
+                               project) )
+    {
+        /* A card that has not proved it takes a write, for a folder that has
+         * no room inside. */
+        weighed = true;
+        if ( appdata_room(APPDATA_MEDIUM_SD, folder, json_len, icon_len, &card) )
+        {
+            plan->medium = APPDATA_MEDIUM_SD;
+            plan->weight = card;
+            plan->spill  = true;
+            return true;
+        }
+    }
+    if ( weighed )
+    {
+        /* The card says it has less free than the folder takes. */
+        (void)snprintf(&why[strlen(why)], cap - strlen(why),
+                       "; the card has %lu KB free",
+                       (unsigned long)(card.avail / APPDATA_KB));
     }
     return false;
 }
@@ -3505,7 +3812,8 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     const char   *why = "it is not a name or a size a data folder takes";
     kode_status_t rc = KODE_DENIED;
     bool          no_turn = false;
-    AppDataPlan   plan    = { APPDATA_MEDIUM_FS, { false, 0U, 0U, 0U }, false };
+    AppDataPlan   plan    = { APPDATA_MEDIUM_FS, { false, 0U, 0U, 0U }, false,
+                              false };
 
     if ( busy(me) )
     {
@@ -3541,14 +3849,12 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         {
             khal_free(req->buf);
         }
-        appdata_put_say(req->project, rc, false, APPDATA_MEDIUM_FS, why);
+        appdata_put_say(req->project, rc, false, APPDATA_MEDIUM_FS, why, "");
         appdata_put_answer(req->who, req->project, rc, no_turn);
         return;
     }
 
     /* From here the put owns the AO. */
-    (void)appdata_folder_path(folder, sizeof(folder), plan.medium,
-                              req->project);
     me->g_who      = req->who;
     (void)snprintf(me->g_project, sizeof(me->g_project), "%s", req->project);
     me->g_buf      = req->buf;
@@ -3557,15 +3863,35 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
     me->g_medium   = plan.medium;
     me->g_spill    = plan.spill;
     me->g_fresh    = !plan.weight.there;
-    if ( plan.spill )
+    me->g_new      = !plan.held;
+    (void)snprintf(me->g_full, sizeof(me->g_full), "%s", room);
+
+    rc = appdata_put_start(me);
+    if ( KODE_OK != rc )
     {
-        (void)snprintf(me->g_full, sizeof(me->g_full), "%s", room);
+        appdata_put_finish(me, rc, APPDATA_WHY_WRITE);
     }
-    if ( APPDATA_MEDIUM_SD == plan.medium )
+}
+
+/**
+ * @brief Make the folder on g_medium and write its new app.json, then post
+ *        step two.
+ *
+ * @param me The AO, with the put's fields set.
+ * @return KODE_OK with step two posted; the failure otherwise.
+ */
+static kode_status_t appdata_put_start(Storage * const me)
+{
+    char          folder[APPDATA_FOLDER_MAX];
+    kode_status_t rc = KODE_ERROR;
+
+    if ( !appdata_folder_path(folder, sizeof(folder), me->g_medium,
+                              me->g_project) )
     {
-        /* One line for the whole put, as the card's other writes say theirs. */
-        warn_if_card("appdata_put", folder);
+        return rc;
     }
+    /* One line for the whole put. */
+    warn_if_unproven_card("appdata_put", folder);
 
     rc = appdata_put_make_tree(folder);
     if ( KODE_OK == rc )
@@ -3583,18 +3909,74 @@ static void appdata_put_begin(Storage * const me, AppDataPutEvt const * const re
         }
         else
         {
-            rc = appdata_put_file(path, req->buf, req->json_len);
+            rc = appdata_put_file(path, me->g_buf, me->g_json_len);
         }
     }
-    if ( KODE_OK != rc )
-    {
-        appdata_put_finish(me, rc, APPDATA_WHY_WRITE);
-    }
-    else
+    if ( KODE_OK == rc )
     {
         static const QEvt next = QEVT_INITIALIZER(APPDATA_PUT_NEXT_SIG);
         QACTIVE_POST(&me->super, &next, &me->super);
     }
+    return rc;
+}
+
+/**
+ * @brief Start a new folder the card would not write again, inside.
+ *
+ * Only a folder whose app.json no medium held, on its first medium, the card:
+ * what the put wrote there is taken away (the folder too when the put made
+ * it) and the put begins again on the internal partition when it has room, as
+ * a put with no card would. Called from appdata_put_finish() before it ends
+ * the put.
+ *
+ * @param me       The AO.
+ * @param[in,out] rc  How the put ended; how it ends now, when it does.
+ * @param[in,out] why Why, in words; replaced when the put ends otherwise.
+ * @return true when the put goes on inside; false when it ends.
+ */
+static bool appdata_put_inside(Storage * const me, kode_status_t *rc,
+                               const char **why)
+{
+    char        folder[APPDATA_FOLDER_MAX];
+    AppDataRoom room;
+    bool        goes = false;
+
+    if ( (APPDATA_MEDIUM_SD != me->g_medium) || me->g_spill || !me->g_new )
+    {
+        return false;
+    }
+    if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_SD,
+                             me->g_project) )
+    {
+        appdata_put_drop_tmps(folder);
+        if ( me->g_fresh )
+        {
+            (void)appdata_rm_tree(folder);
+        }
+    }
+    (void)memset(&room, 0, sizeof(room));
+    me->g_spill = true;
+    if ( appdata_folder_path(folder, sizeof(folder), APPDATA_MEDIUM_FS,
+                             me->g_project)
+        && appdata_room(APPDATA_MEDIUM_FS, folder, me->g_json_len,
+                        me->g_icon_len, &room) )
+    {
+        me->g_medium = APPDATA_MEDIUM_FS;
+        me->g_fresh  = !room.there;
+        (void)snprintf(me->g_full, sizeof(me->g_full),
+                       "the card would not take it");
+        *rc  = appdata_put_start(me);
+        *why = APPDATA_WHY_WRITE;
+        goes = (KODE_OK == *rc);
+    }
+    else
+    {
+        /* No room inside either: ended as a folder that went to the card for
+         * want of room, which says both. */
+        appdata_room_words(me->g_full, sizeof(me->g_full), APPDATA_MEDIUM_FS,
+                           &room);
+    }
+    return goes;
 }
 
 /**
@@ -3866,11 +4248,13 @@ static void answer_path_stat(QActive *who, uint8_t op, const char *path)
  * @brief Warn that the card is about to be changed, naming the verb and the
  *        path.
  *
- * Called before every kdrv call that might change the card, even if it then
- * refuses: on counterfeit cards one failed write leaves every later open on
- * /sdcard reading length 0, and the log must say a write was tried. A spare
- * line is cheap. Keep it here, in the card's owner, not in the driver or the
- * console: writes nobody typed (`install dst=app`) pass through here too.
+ * Called before every kdrv call that might change the card at a path someone
+ * gave, even if it then refuses: on counterfeit cards one failed write leaves
+ * every later open on /sdcard reading length 0, and the log must say a write
+ * was tried. A spare line is cheap. Keep it here, in the card's owner, not in
+ * the driver or the console: writes nobody typed (`install dst=app`) pass
+ * through here too. The data folders, which kodeOS places itself, call
+ * warn_if_unproven_card() instead.
  *
  * @param verb What is about to be attempted, as an operator would name it -
  *             "mkdir", "rm", "mv", "write". It goes on the wire verbatim, so
@@ -3883,6 +4267,24 @@ static void warn_if_card(const char *verb, const char *path)
     if ( kdrv_storage_medium_of(path) == KDRV_MEDIUM_SD )
     {
         KLOG_W(TAG, "%s on the card: %s", verb, path);
+    }
+}
+
+/**
+ * @brief warn_if_card() for a change kodeOS makes on the card by its own
+ *        choice: said only when the card has not proved it takes a write.
+ *
+ * On a card that has, a data folder is where it belongs, and a line for each
+ * would bury the log.
+ *
+ * @param verb As warn_if_card() takes it.
+ * @param path As warn_if_card() takes it.
+ */
+static void warn_if_unproven_card(const char *verb, const char *path)
+{
+    if ( !kdrv_sd_took_write() )
+    {
+        warn_if_card(verb, path);
     }
 }
 
@@ -5323,13 +5725,17 @@ static void recv_stall(Storage * const me)
 
 /* ---- Writing ------------------------------------------------------------- */
 
+static bool write_elsewhere(Storage * const me);
+
 /**
  * @brief Close the write, tell the writer how it went, and free the handle.
  *
  * A failed close demotes the whole write: fclose() is the first flush of
  * hundreds of kilobytes (`screenshot dst=file`), and KODE_OK over bytes that
- * never reached the card is the counterfeit-card failure. The stub is left
- * where it fell; the status tells the writer.
+ * never reached the card is the counterfeit-card failure. A bare name's stub
+ * is removed and the write starts once on the other medium, as a failed chunk
+ * does (write_elsewhere()); a path's stub is left where it fell, and the
+ * status tells the writer.
  */
 static void write_finish(Storage * const me, kode_status_t st)
 {
@@ -5341,6 +5747,27 @@ static void write_finish(Storage * const me, kode_status_t st)
         {
             KLOG_E(TAG, "'%s' did not land: %lu bytes were written and the "
                         "close failed", me->w_name, (unsigned long)me->w_done);
+            if ( '/' != me->w_name[0] )
+            {
+                bool const gone = (kdrv_storage_remove(me->w_name,
+                                      (kdrv_medium_t)me->w_medium) == KODE_OK);
+
+                if ( gone || ((uint8_t)KDRV_MEDIUM_FS == me->w_medium) )
+                {
+                    if ( write_elsewhere(me) )
+                    {
+                        return;   /* the write goes on on the other medium */
+                    }
+                }
+                else
+                {
+                    /* A read of the name looks at the card first and would
+                     * find what stayed there, never a copy written inside. */
+                    card_write_failed(me);
+                    KLOG_W(TAG, "what landed of '%s' on the card would not go; "
+                                "it is not written again inside", me->w_name);
+                }
+            }
         }
     }
     else
@@ -5370,6 +5797,7 @@ static void write_finish(Storage * const me, kode_status_t st)
     me->w_data = NULL;
     me->w_len  = 0U;
     me->w_done = 0U;
+    card_remount_owed(me);
 }
 
 /**
@@ -5400,6 +5828,62 @@ static kode_status_t write_open(const char *name, kdrv_medium_t first,
     return kdrv_storage_create_path(name, false);
 }
 
+/**
+ * @brief Start a write that failed on one medium again on the other, once.
+ *
+ * A bare name only: a path names its volume. A bare name that failed on the
+ * card tells the driver first (card_write_failed()), so the card is not
+ * chosen again this boot. One that failed inside goes on on the card only when
+ * the card took a write. The payload is still whole in memory.
+ *
+ * @param me The AO, with the failed write's stub already discarded.
+ * @return true when the write goes on on the other medium; false when it ends.
+ */
+static bool write_elsewhere(Storage * const me)
+{
+    kdrv_medium_t next  = KDRV_MEDIUM_FS;
+    kdrv_medium_t other = KDRV_MEDIUM_SD;
+    bool          goes  = false;
+
+    if ( '/' == me->w_name[0] )
+    {
+        return false;
+    }
+    if ( (uint8_t)KDRV_MEDIUM_SD == me->w_medium )
+    {
+        card_write_failed(me);
+        other = KDRV_MEDIUM_FS;
+    }
+    else if ( !kdrv_sd_took_write() )
+    {
+        return false;   /* a card that took no write is no place to go on */
+    }
+    else
+    {
+        /* inside, onto a card that took a write */
+    }
+    /* Not onto the card while a call to it is out: opening a file there may
+     * mount it, and the worker is doing that. */
+    if ( !me->w_retried
+        && !((KDRV_MEDIUM_SD == other) && me->sdj.busy)
+        && (write_open(me->w_name, other, &next) == KODE_OK) )
+    {
+        const char *where = "internal partition";
+
+        if ( KDRV_MEDIUM_SD == next )
+        {
+            where = "card";
+        }
+        KLOG_W(TAG, "retrying on the %s", where);
+        me->w_retried = true;
+        me->w_medium  = (uint8_t)next;
+        me->w_done    = 0U;
+        QTimeEvt_armX(&me->w_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+        goes = true;
+    }
+    return goes;
+}
+
 /** @brief Put one chunk on the medium and arm the next, or finish. */
 static void write_chunk(Storage * const me)
 {
@@ -5423,28 +5907,8 @@ static void write_chunk(Storage * const me)
          * promises bytes it does not have is worse than no file at all. */
         kdrv_storage_discard();
 
-        /* One failure earns one retry on the other medium (a full internal
-         * partition is the case); the payload is still whole in memory. */
-        kdrv_medium_t next  = KDRV_MEDIUM_FS;
-        kdrv_medium_t other = KDRV_MEDIUM_FS;
-        if ( (uint8_t)KDRV_MEDIUM_FS == me->w_medium )
-        {
-            other = KDRV_MEDIUM_SD;
-        }
-        /* Not onto the card while a call to it is out: opening a file there
-         * may mount it, and the worker is doing that. */
-        if ( !me->w_retried
-            && !((KDRV_MEDIUM_SD == other) && me->sdj.busy)
-            && (write_open(me->w_name, other, &next) == KODE_OK) )
-        {
-            KLOG_W(TAG, "retrying on the %s",
-                   (KDRV_MEDIUM_SD == next) ? "card" : "internal partition");
-            me->w_retried = true;
-            me->w_medium  = (uint8_t)next;
-            me->w_done    = 0U;
-            QTimeEvt_armX(&me->w_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
-        }
-        else
+        /* One failure earns one retry on the other medium. */
+        if ( !write_elsewhere(me) )
         {
             KLOG_E(TAG, "nowhere left to write '%s'", me->w_name);
             write_finish(me, st);
@@ -5463,11 +5927,173 @@ static void write_chunk(Storage * const me)
     }
 }
 
+/**
+ * @brief Which mounted medium holds a file of a bare name, in the order a read
+ *        of it looks: the card, then the internal partition.
+ *
+ * @param name The bare name.
+ * @param[out] held The medium, when one holds it.
+ * @return true when a medium holds a file of that name.
+ */
+static bool write_holder(const char *name, kdrv_medium_t *held)
+{
+    /* The volumes' virtual roots, in the order a read looks. */
+    static const kdrv_medium_t ORDER[KDRV_MEDIUM_COUNT] = { KDRV_MEDIUM_SD,
+                                                            KDRV_MEDIUM_FS };
+    static const char *const   ROOT[KDRV_MEDIUM_COUNT]  = { STORAGE_SD_ROOT,
+                                                            STORAGE_FS_ROOT };
+    bool found = false;
+
+    for ( size_t i = 0U; ((sizeof(ORDER) / sizeof(ORDER[0])) > i) && !found;
+          ++i )
+    {
+        char        path[KODE_PATH_MAX];
+        kdrv_stat_t st;
+        int const   n = snprintf(path, sizeof(path), "%s/%s", ROOT[i], name);
+
+        if ( kdrv_storage_mounted(ORDER[i]) && (0 <= n)
+            && ((size_t)n < sizeof(path))
+            && (kdrv_storage_stat(path, &st) == KODE_OK) && st.exists
+            && !st.is_dir )
+        {
+            *held = ORDER[i];
+            found = true;
+        }
+    }
+    return found;
+}
+
+/**
+ * @brief Where a file with no volume named goes first, and why not the card.
+ *
+ * A name a medium holds is written over where it is, so a read finds the new
+ * one; but not on a card that has not proved it takes a write, where it goes
+ * inside and the card keeps its own. A new name goes to the card when it took
+ * a write at mount and says it has room, inside otherwise.
+ *
+ * @param name      The bare name.
+ * @param len       The bytes it will hold.
+ * @param[out] over true when the name is written over where it is.
+ * @param[out] why  Why not the card, when the answer is the internal partition
+ *                  for a new name; empty otherwise.
+ * @param cap       The size of @p why.
+ * @return KDRV_MEDIUM_SD or KDRV_MEDIUM_FS.
+ */
+static kdrv_medium_t write_first(const char *name, uint32_t len, bool *over,
+                                 char *why, size_t cap)
+{
+    kdrv_medium_t first = KDRV_MEDIUM_FS;
+    kdrv_medium_t held  = KDRV_MEDIUM_FS;
+    bool const    takes = card_takes_writes(why, cap);
+    bool const    there = write_holder(name, &held);
+
+    *over = false;
+    if ( takes )
+    {
+        why[0] = '\0';
+    }
+    if ( there && (takes || (KDRV_MEDIUM_FS == held)) )
+    {
+        *over = true;
+        first = held;
+    }
+    else if ( there )
+    {
+        /* On a card that has not proved it takes a write: not written over. */
+        (void)snprintf(&why[strlen(why)], cap - strlen(why),
+                       ", and a read finds the one the card holds");
+    }
+    else if ( takes )
+    {
+        uint64_t total = 0U;
+        uint64_t freeb = 0U;
+
+        if ( (kdrv_storage_usage(KDRV_MEDIUM_SD, &total, &freeb) == KODE_OK)
+            && ((uint64_t)len > freeb) )
+        {
+            card_full_words(why, cap, freeb, (uint64_t)len);
+        }
+        else
+        {
+            first = KDRV_MEDIUM_SD;
+        }
+    }
+    else
+    {
+        /* inside; @p why says why not the card */
+    }
+    return first;
+}
+
+/**
+ * @brief Say, at NOTICE, where a file with no volume named was opened.
+ *
+ * @param name   The bare name.
+ * @param first  The medium it was meant for.
+ * @param medium The medium it was opened on.
+ * @param over   The name is written over where it is.
+ * @param why    write_first()'s words: why not the card.
+ */
+static void write_say(const char *name, kdrv_medium_t first,
+                      kdrv_medium_t medium, bool over, const char *why)
+{
+    const char *where = "the internal volume";
+    const char *other = "the card";
+
+    if ( KDRV_MEDIUM_SD == medium )
+    {
+        where = "the card";
+        other = "the internal volume";
+    }
+    if ( first != medium )
+    {
+        KLOG_N(TAG, "'%s' goes to %s: %s would not create it", name, where,
+               other);
+    }
+    else if ( over )
+    {
+        KLOG_N(TAG, "'%s' is written over on %s, where it is", name, where);
+    }
+    else if ( KDRV_MEDIUM_SD == medium )
+    {
+        KLOG_N(TAG, "'%s' goes to %s", name, where);
+    }
+    else
+    {
+        KLOG_N(TAG, "'%s' goes to %s: %s", name, where, why);
+    }
+}
+
+bool storage_bare_path(const char *name, char *out, size_t cap)
+{
+    char                why[APPDATA_WHY_MAX];
+    bool                over  = false;
+    kdrv_medium_t const first = write_first(name, 0U, &over, why, sizeof(why));
+    const char         *root  = STORAGE_FS_ROOT;
+    int                 n;
+
+    if ( KDRV_MEDIUM_SD == first )
+    {
+        root = STORAGE_SD_ROOT;
+    }
+    n = snprintf(out, cap, "%s/%s", root, name);
+    if ( (0 > n) || ((size_t)n >= cap) )
+    {
+        return false;
+    }
+    write_say(name, first, first, over, why);
+    return true;
+}
+
+void storage_bare_failed(void)
+{
+    card_write_failed(&l_storage);
+}
+
 /** @brief Start a write, or refuse it because the one handle is taken. */
 static void write_begin(Storage * const me, StorageWriteEvt const * const req)
 {
     kdrv_medium_t medium = KDRV_MEDIUM_FS;
-    kdrv_medium_t first  = KDRV_MEDIUM_FS;
     kode_status_t st     = KODE_DENIED;
 
     if ( busy(me) )
@@ -5478,15 +6104,28 @@ static void write_begin(Storage * const me, StorageWriteEvt const * const req)
     {
         KLOG_W(TAG, "nothing to write to '%s'", req->name);
     }
+    else if ( '/' == req->name[0] )
+    {
+        /* A path goes where it says. */
+        st = write_open(req->name, kdrv_storage_medium_of(req->name), &medium);
+    }
     else
     {
-        /* A bare name goes to the internal partition first: see
-         * kdrv_storage_create(). A path goes where it says. */
-        if ( '/' == req->name[0] )
-        {
-            first = kdrv_storage_medium_of(req->name);
-        }
+        char                why[APPDATA_WHY_MAX];
+        bool                over  = false;
+        kdrv_medium_t const first = write_first(req->name, req->len, &over,
+                                                why, sizeof(why));
+
         st = write_open(req->name, first, &medium);
+        if ( (KDRV_MEDIUM_SD == first) && (KDRV_MEDIUM_SD != medium) )
+        {
+            /* The card it chose would not create the file. */
+            card_write_failed(me);
+        }
+        if ( KODE_OK == st )
+        {
+            write_say(req->name, first, medium, over, why);
+        }
     }
 
     if ( KODE_OK != st )
@@ -5673,6 +6312,50 @@ static bool sd_job_submit(Storage * const me, SdOp op, SdThen then)
     QTimeEvt_armX(&me->sdj_dl,
                   (QTimeEvtCtr)KQP_TICKS_PER_MS(sd_job_deadline_ms(op)), 0U);
     return true;
+}
+
+/**
+ * @brief A write AO_Storage sent to the card failed: take the card's word
+ *        back, and owe it a remount the first time.
+ *
+ * @param me The AO.
+ */
+static void card_write_failed(Storage * const me)
+{
+    if ( kdrv_sd_write_failed() )
+    {
+        me->remount_owed = true;
+    }
+}
+
+/**
+ * @brief Mount the card again after a write on it failed, once nothing is
+ *        open and no call to it is out.
+ *
+ * A card that fails a write may leave FATFS holding sectors it can never
+ * flush, and every later read of the volume comes back empty. An unmount and
+ * a mount, one call on the card's worker, give the reads back. The card stays
+ * one that took no write (kdrv_sd_took_write()) until the boot ends or another
+ * card comes in.
+ *
+ * @param me The AO.
+ */
+static void card_remount_owed(Storage * const me)
+{
+    if ( (!me->remount_owed) || busy(me) || me->sdj.busy )
+    {
+        return;   /* asked again when the transfer or the call ends */
+    }
+    me->remount_owed = false;
+    if ( !kdrv_storage_mounted(KDRV_MEDIUM_SD) )
+    {
+        return;   /* gone already: its next mount is a fresh one */
+    }
+    if ( !sd_job_submit(me, SD_OP_REMOUNT, SD_THEN_REMOUNT) )
+    {
+        KLOG_W(TAG, "the card could not be mounted again after the write that "
+                    "failed on it");
+    }
 }
 
 /**
@@ -6830,6 +7513,18 @@ static void sd_job_complete(Storage * const me, kode_status_t rc,
             sd_verify_format_done(me, rc, value);
             break;
         }
+        case SD_THEN_REMOUNT: {
+            if ( KODE_OK == rc )
+            {
+                KLOG_N(TAG, "the card is mounted again after the write that "
+                            "failed on it");
+            }
+            else
+            {
+                KLOG_W(TAG, "the card did not mount again (rc=%d)", (int)rc);
+            }
+            break;
+        }
         case SD_THEN_NONE: {
             break;
         }
@@ -6864,6 +7559,7 @@ void Storage_ctor(void)
     me->x          = NULL;     /* as g_buf: the heap's now */
     me->worker_up  = false;
     me->width_owed = false;
+    me->remount_owed = false;
     me->sdj_stale  = 0U;
     (void)memset(&me->worker, 0, sizeof(me->worker));
     (void)memset(&me->sdj, 0, sizeof(me->sdj));
@@ -7314,6 +8010,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
         }
         case STORAGE_SDJOB_DONE_SIG: {
             sd_job_done(me, Q_EVT_CAST(KqpWorkerDoneEvt));
+            card_remount_owed(me);
             status = Q_HANDLED();
             break;
         }
@@ -7834,8 +8531,8 @@ static bool path_is_fs(const char *path)
 /**
  * @brief Whether serving @p e could touch the card.
  *
- * A bare file name is the flat vocabulary, which tries the card first and
- * falls over to the partition, so it is the card's. A listing of the partition
+ * A bare file name is the flat vocabulary, which may go to the card first,
+ * so it is the card's, and so is a data folder's put. A listing of the partition
  * is the card's too while one of the card's is held: a rescan posts the two in
  * order and the second ends the burst, so it must not overtake the first.
  *
@@ -7871,6 +8568,7 @@ static bool needs_card(const Storage * const me, QEvt const * const e)
         }
         case STORAGE_DESC_REQ_SIG:
         case APPDATA_REQ_SIG:
+        case APPDATA_PUT_REQ_SIG:
         case APPDATA_RM_REQ_SIG:
         case STORAGE_APP_WIPE_REQ_SIG:
         case STORAGE_FIELD_REQ_SIG:
@@ -8053,6 +8751,20 @@ static bool card_refuse(Storage * const me, QEvt const * const e)
                 rsp->status = (uint8_t)KODE_DENIED;
                 QACTIVE_POST(req->who, &rsp->super, &me->super);
             }
+            break;
+        }
+        case APPDATA_PUT_REQ_SIG: {
+            AppDataPutEvt const * const req = Q_EVT_CAST(AppDataPutEvt);
+
+            /* The buffer is this AO's from the post; busy, so it is asked
+             * again. */
+            KLOG_W(TAG, "the card is busy; the data folder of '%s' is not "
+                        "written", req->project);
+            if ( NULL != req->buf )
+            {
+                khal_free(req->buf);
+            }
+            appdata_put_answer(req->who, req->project, KODE_DENIED, true);
             break;
         }
         case STORAGE_APP_WIPE_REQ_SIG: {
@@ -8384,7 +9096,9 @@ static QState Storage_active(Storage * const me, QEvt const * const e)
              && storage_fetch_event(e, busy(me) || me->sdj.busy) )
     {
         /* A download's own event, in an image whose app asks for one: the
-         * module keeps no file open between chunks, so it takes no turn. */
+         * module keeps no file open between chunks, so it takes no turn, and
+         * a remount owed since its chunk failed on the card may go now. */
+        card_remount_owed(me);
         status = Q_HANDLED();
     }
     else if ( me->sdj.busy && needs_card(me, e) && card_hold(me, e) )

@@ -622,16 +622,17 @@ enum KodeSignals {
     APPDATA_END_SIG,            /**< To the asker: the conversation is
                                  *   over.                                    */
     APPDATA_RM_REQ_SIG,         /**< AO_Storage: delete one app's data folder
-                                 *   on the INTERNAL partition (AppDataReqEvt
-                                 *   again - the request is the same two
-                                 *   fields). The card is never touched:
+                                 *   from the medium the reader finds it on
+                                 *   (AppDataReqEvt again - the request is the
+                                 *   same two fields):
                                  *   https://docs.kode.diy/sdk/kdrv/apps.  */
     APPDATA_RM_RSP_SIG,         /**< To the asker: how that delete ended
                                  *   (AppDataRmRspEvt).                       */
     APPDATA_PUT_REQ_SIG,        /**< AO_Storage: write one app's data folder
-                                 *   on the INTERNAL partition (AppDataPutEvt:
-                                 *   app.json, then the icon when there is
-                                 *   one). Posted directly, never published.  */
+                                 *   on the medium appdata_put_request() says
+                                 *   (AppDataPutEvt: app.json, then the icon
+                                 *   when there is one). Posted directly,
+                                 *   never published.                         */
     APPDATA_PUT_NEXT_SIG,       /**< AO_Storage private self-post: the icon's
                                  *   step of a put in progress.               */
     APPDATA_PUT_RSP_SIG,        /**< To the asker: how that put ended

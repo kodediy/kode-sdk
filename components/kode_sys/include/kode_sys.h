@@ -1410,8 +1410,10 @@ typedef HttpFileEvt kode_sys_http_file_answer_t;
  *       rest while one runs. A file can hold 4 GB at most (FAT32).
  * @param me   The asking AO.
  * @param url  http:// or https://, shorter than KODE_SYS_HTTP_FILE_URL_MAX.
- * @param path Where it goes: absolute and virtual, shorter than
- *             KODE_SYS_FILE_PATH_MAX, in a folder that exists.
+ * @param path Where it goes: absolute and virtual, in a folder that exists,
+ *             or a bare name, which goes on the card when the card has
+ *             proved it takes a write and inside otherwise; shorter than
+ *             KODE_SYS_FILE_PATH_MAX with the volume's root in front.
  * @return As the requests' rules above; KODE_DENIED without CONFIG_KODEOS_NET.
  */
 kode_status_t kode_sys_http_get_file(QActive *me, const char *url, const char *path);
