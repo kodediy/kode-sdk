@@ -11167,6 +11167,7 @@ TEST_CASE("an install a reset cut is kept as a failure for reset",
     r.layout = (uint8_t)APPMGR_INST_LAYOUT;
     r.state  = (uint8_t)APPMGR_INST_RUNNING;
     r.src    = (uint8_t)KODE_CONSOLE_SRC_NET;
+    r.told   = 1U;
     fake_nvs_seed(APPMGR_UNDO_NS, APPMGR_INST_KEY_APP, &r, sizeof(r));
 
     appmgr_fresh();
@@ -11175,6 +11176,218 @@ TEST_CASE("an install a reset cut is kept as a failure for reset",
     TEST_ASSERT_EQUAL_UINT32(41U, got.id);
     TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
     TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_RESET, got.why);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, got.told,
+        "its port has not been told how it ended");
+}
+
+/** @brief The captured line that holds @p a and @p b, or NULL. */
+static const char *inst_line_with(const char *a, const char *b)
+{
+    const char *found = NULL;
+
+    for ( unsigned i = 0U; (fake_klog_count() > i) && (NULL == found); ++i )
+    {
+        const char * const line = fake_klog_line(i);
+
+        if ( (NULL != line) && (strstr(line, a) != NULL) && (strstr(line, b) != NULL) )
+        {
+            found = line;
+        }
+    }
+    return found;
+}
+
+/** @brief The port the captured line holding @p a and @p b went to. */
+static unsigned inst_src_of(const char *a, const char *b)
+{
+    unsigned src = KODE_LOG_SRC_NONE;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const line = fake_klog_line(i);
+
+        if ( (NULL != line) && (strstr(line, a) != NULL) && (strstr(line, b) != NULL) )
+        {
+            src = fake_klog_src(i);
+        }
+    }
+    return src;
+}
+
+/** @brief Tell AO_AppMgr whether a BLE console is subscribed, and empty AO_Radio's queue. */
+static void inst_ble(bool console)
+{
+    static BleStateEvt e;
+    const QEvt        *q;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super   = (QEvt)QEVT_INITIALIZER(BLE_STATE_SIG);
+    e.console = console;
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+    while ( xQueueReceive(AO_Radio->eQueue, &q, 0U) == pdTRUE )
+    {
+        QF_gc(q);
+    }
+}
+
+static void inst_sent(uint8_t src, bool ok);
+
+/** @brief Tell AO_AppMgr where the Kode channel stands. */
+static void inst_channel(uint8_t state)
+{
+    static ChannelStateEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CHANNEL_STATE_SIG);
+    e.state = state;
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/* The asker hears of the install twice without asking: when it is taken,
+ * before the verdict, and when it ends, before anything is launched. Both
+ * lines name the same number, and both go to the port the command came on. */
+TEST_CASE("the record goes to the asker's port when taken and when it ends",
+          "[appmgr_ao][install_rec]")
+{
+    kapps_dir_t saved;
+    char        id_kv[24];
+    uint32_t    len;
+
+    len = image_named("notes");
+    recv_fresh();
+    saved = *kdrv_apps_dir();
+    fake_klog_reset();
+
+    ask_recv(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len), false);
+    appmgr_inst_rec_t const taken = inst_read(APPMGR_INST_KEY_APP);
+    (void)snprintf(id_kv, sizeof(id_kv), "id=%lu ", (unsigned long)taken.id);
+    bool const running_before_feed =
+        (NULL != inst_line_with(id_kv, "state=running"));
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+
+    const char * const end = inst_line_with(id_kv, "state=installed");
+    char ended[KODE_LOG_LINE_MAX] = "";
+    if ( NULL != end )
+    {
+        (void)snprintf(ended, sizeof(ended), "%s", end);
+    }
+    unsigned const end_src = inst_src_of(id_kv, "state=installed");
+
+    tidy_settle();   /* no install left tidying for the next case */
+    run_ticks(2U);   /* and its disarmed deadlines out of QF's list */
+    ao_spy_drain();
+    kode_status_t const restored = kdrv_apps_dir_commit(&saved);
+
+    TEST_ASSERT_TRUE_MESSAGE(running_before_feed,
+        "the record goes out when the install is taken");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ended,
+        ">|install id="), "the end is a >|install record");
+    TEST_ASSERT_NOT_NULL(strstr(ended,
+        "dst=app state=installed pct=100 name=\"notes\" version=\"0.0.1\" why=-"));
+    TEST_ASSERT_EQUAL_UINT(KODE_CONSOLE_SRC_SERIAL, end_src);
+    TEST_ASSERT_EQUAL_UINT8(1U, inst_read(APPMGR_INST_KEY_APP).told);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, restored);
+}
+
+/* A URL install is taken when the download starts: the record is written in
+ * the same step, so it is ahead of the verdict on AO_Log's queue. */
+TEST_CASE("a URL install's record is written in the step that posts its verdict",
+          "[appmgr_ao][install_rec]")
+{
+    FlashReqEvt e;
+
+    appmgr_fresh();
+    qf_support_give_queue(AO_Radio);   /* the BLE half is asked where it stands */
+    ao_spy_drain();
+    fake_klog_reset();
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super     = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    e.src_kind  = (uint8_t)KFW_SRC_HTTP;
+    e.dst_kind  = (uint8_t)KFW_TARGET_APP;
+    e.asker_src = (uint8_t)KODE_CONSOLE_SRC_BLE;
+    e.who       = ao_spy();
+    (void)snprintf(e.src, sizeof(e.src), "%s", "https://example.com/notes.bin");
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+
+    const QEvt * const verdict = ao_spy_take();
+    uint8_t got = 0xFFU;
+    if ( (NULL != verdict) && ((enum_t)APP_REQ_RSP_SIG == (enum_t)verdict->sig) )
+    {
+        got = ((AppReqRspEvt const *)verdict)->verdict;
+    }
+    appmgr_inst_rec_t const r = inst_read(APPMGR_INST_KEY_APP);
+    bool const written = (NULL != inst_line_with(">|install id=", "state=running"));
+
+    /* Out of the opening state again, and nothing left behind. */
+    static const QEvt cancel = QEVT_INITIALIZER(APP_CANCEL_REQ_SIG);
+    QASM_DISPATCH(AO_AppMgr, &cancel, 0U);
+    (void)net_requests(NET_STREAM_OPEN_REQ_SIG);
+    ao_spy_drain();
+    bool const owed = (0U == inst_read(APPMGR_INST_KEY_APP).told);
+    inst_ble(true);   /* the end is told, and the BLE half let go */
+    run_ticks(2U);    /* the disarmed deadline leaves QF's list */
+
+    TEST_ASSERT_EQUAL_UINT8(APP_REQ_TAKEN, got);
+    TEST_ASSERT_TRUE_MESSAGE(owed, "the end waited for the BLE console to be known up");
+    TEST_ASSERT_EQUAL_UINT8(KODE_CONSOLE_SRC_BLE, r.src);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, inst_read(APPMGR_INST_KEY_APP).state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_CANCELLED, inst_read(APPMGR_INST_KEY_APP).why);
+    TEST_ASSERT_TRUE_MESSAGE(written, "the record was not written with the verdict");
+}
+
+/* The Kode channel may be down when an install ends - a reset, a lost
+ * network. The record waits in NVS, and the channel coming up tells it. */
+TEST_CASE("a record for the Kode channel waits for the channel to come up",
+          "[appmgr_ao][install_rec]")
+{
+    FlashReqEvt e;
+    char        id_kv[24];
+    static const QEvt cancel = QEVT_INITIALIZER(APP_CANCEL_REQ_SIG);
+
+    appmgr_fresh();
+    ao_spy_drain();
+    inst_channel((uint8_t)CHAN_WAITING);
+    fake_klog_reset();
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super     = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    e.src_kind  = (uint8_t)KFW_SRC_HTTP;
+    e.dst_kind  = (uint8_t)KFW_TARGET_APP;
+    e.asker_src = (uint8_t)KODE_CONSOLE_SRC_NET;
+    (void)snprintf(e.src, sizeof(e.src), "%s", "https://example.com/notes.bin");
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+    QASM_DISPATCH(AO_AppMgr, &cancel, 0U);
+    (void)net_requests(NET_STREAM_OPEN_REQ_SIG);
+
+    appmgr_inst_rec_t const held = inst_read(APPMGR_INST_KEY_APP);
+    (void)snprintf(id_kv, sizeof(id_kv), "id=%lu ", (unsigned long)held.id);
+    bool const running_live = (NULL != inst_line_with(id_kv, "state=running"));
+    bool const failed_down  = (NULL != inst_line_with(id_kv, "state=failed"));
+
+    inst_channel((uint8_t)CHAN_UP);
+    unsigned const src_up = inst_src_of(id_kv, "state=failed");
+    bool const said = (NULL != inst_line_with(id_kv, "why=cancelled"));
+    uint8_t const told_unacked = inst_read(APPMGR_INST_KEY_APP).told;
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_NET, true);   /* the broker's PUBACK */
+    appmgr_inst_rec_t const told = inst_read(APPMGR_INST_KEY_APP);
+
+    inst_channel((uint8_t)CHAN_UP);   /* told once: a second up says nothing */
+    unsigned const lines_again = klog_count_of(id_kv);
+    inst_channel((uint8_t)CHAN_OFF);
+    run_ticks(2U);    /* the disarmed deadline leaves QF's list */
+
+    TEST_ASSERT_TRUE_MESSAGE(running_live,
+        "the record answers the command in flight whatever the channel says");
+    TEST_ASSERT_FALSE_MESSAGE(failed_down, "the end went to a channel not known up");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, held.state);
+    TEST_ASSERT_EQUAL_UINT8(0U, held.told);
+    TEST_ASSERT_TRUE_MESSAGE(said, "the channel coming up tells the record");
+    TEST_ASSERT_EQUAL_UINT(KODE_CONSOLE_SRC_NET | KODE_LOG_SRC_CONFIRM, src_up);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, told_unacked, "told before the broker had it");
+    TEST_ASSERT_EQUAL_UINT8(1U, told.told);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, lines_again, "running, then failed, once each");
 }
 
 /* The record says why in the words a host can act on: an image the region
@@ -11205,6 +11418,9 @@ TEST_CASE("an install too big for the region is kept as failed for no_room",
     raw_armed(true);
     feed(buf, (uint16_t)sizeof(buf));
     appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    char id_kv[24];
+    (void)snprintf(id_kv, sizeof(id_kv), "id=%lu ", (unsigned long)got.id);
+    bool const said = (NULL != inst_line_with(id_kv, "why=no_room"));
 
     run_ticks(2U);
     ao_spy_drain();
@@ -11212,6 +11428,7 @@ TEST_CASE("an install too big for the region is kept as failed for no_room",
     TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_NO_ROOM, got.why,
         "an image the region cannot hold");
+    TEST_ASSERT_TRUE_MESSAGE(said, "the record says why=no_room");
     TEST_ASSERT_EQUAL_STRING_MESSAGE("huge", got.name,
         "the name the host gave is kept with the failure");
 }
@@ -11233,6 +11450,9 @@ TEST_CASE("an image for another chip is kept as failed for wrong_board",
     raw_armed(true);
     feed(s_named_img, (uint16_t)len);
     appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    char id_kv[24];
+    (void)snprintf(id_kv, sizeof(id_kv), "id=%lu ", (unsigned long)got.id);
+    bool const said = (NULL != inst_line_with(id_kv, "why=wrong_board"));
 
     run_ticks(2U);
     ao_spy_drain();
@@ -11240,4 +11460,482 @@ TEST_CASE("an image for another chip is kept as failed for wrong_board",
     TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_WRONG_BOARD, got.why,
         "an image for another chip");
+    TEST_ASSERT_TRUE_MESSAGE(said, "the record says why=wrong_board");
+}
+
+/* ---- Told means delivered ---------------------------------------------------
+ * On the Kode channel and the BLE console the final record is a confirmed
+ * line: `told` waits for the port's CONSOLE_SENT_SIG. A launch or a kodeOS
+ * switch waits for nothing: the record goes plain just before it, stays owed,
+ * and is told again once the board is back and the port is up.
+ */
+
+/** @brief Tell AO_AppMgr that @p src delivered, or lost, its last confirmed line. */
+static void inst_sent(uint8_t src, bool ok)
+{
+    static ConsoleSentEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CONSOLE_SENT_SIG);
+    e.src   = src;
+    e.ok    = ok;
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/** @brief Empty AO_Radio's queue and count the events with signal @p sig in it. */
+static unsigned radio_requests(enum_t sig)
+{
+    const QEvt *e;
+    unsigned    n = 0U;
+
+    while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (enum_t)e->sig == sig )
+        {
+            ++n;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/** @brief Seed one stored record of @p kind: final, owed to @p src. */
+static void inst_seed(const char *key, uint32_t id, uint8_t state, uint8_t why,
+                      uint8_t src)
+{
+    appmgr_inst_rec_t r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.id     = id;
+    r.layout = (uint8_t)APPMGR_INST_LAYOUT;
+    r.state  = state;
+    r.why    = why;
+    r.src    = src;
+    r.told   = 0U;
+    fake_nvs_seed(APPMGR_UNDO_NS, key, &r, sizeof(r));
+}
+
+/* AO_AppMgr starts before AO_Radio and AO_Net, which have no queue yet: a
+ * record owed at its start subscribes to its port and asks nobody where it
+ * stands. The port's own event, when it comes up, tells it. */
+TEST_CASE("a record owed at start waits for its port without asking its owner",
+          "[appmgr_ao][install_rec]")
+{
+    inst_seed(APPMGR_INST_KEY_APP, 71U, (uint8_t)APPMGR_INST_INSTALLED,
+              (uint8_t)APPMGR_WHY_NONE, (uint8_t)KODE_CONSOLE_SRC_NET);
+    inst_seed(APPMGR_INST_KEY_OS, 72U, (uint8_t)APPMGR_INST_FAILED,
+              (uint8_t)APPMGR_WHY_CUT, (uint8_t)KODE_CONSOLE_SRC_BLE);
+    qf_support_give_queue(AO_Net);
+    qf_support_give_queue(AO_Radio);
+    (void)net_requests(CHANNEL_STATE_REQ_SIG);
+    (void)radio_requests(BLE_STATE_REQ_SIG);
+    fake_klog_reset();
+
+    appmgr_fresh();
+    unsigned const asked_net = net_requests(CHANNEL_STATE_REQ_SIG);
+    unsigned const asked_ble = radio_requests(BLE_STATE_REQ_SIG);
+
+    inst_channel((uint8_t)CHAN_UP);
+    unsigned const net_src = inst_src_of("id=71 ", "state=installed");
+    uint8_t const  net_before = inst_read(APPMGR_INST_KEY_APP).told;
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_NET, true);
+    uint8_t const  net_after = inst_read(APPMGR_INST_KEY_APP).told;
+
+    inst_ble(true);
+    unsigned const ble_src = inst_src_of("id=72 ", "why=cut");
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_BLE, true);
+    uint8_t const  ble_after = inst_read(APPMGR_INST_KEY_OS).told;
+    inst_channel((uint8_t)CHAN_OFF);
+    inst_ble(false);
+    run_ticks(2U);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, asked_net, "AO_Net was asked before it had a queue");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, asked_ble, "AO_Radio was asked before it had a queue");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_NET | KODE_LOG_SRC_CONFIRM, net_src,
+        "the channel coming up tells the record, confirmed");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, net_before, "told before the broker had it");
+    TEST_ASSERT_EQUAL_UINT8(1U, net_after);
+    TEST_ASSERT_EQUAL_UINT(KODE_CONSOLE_SRC_BLE | KODE_LOG_SRC_CONFIRM, ble_src);
+    TEST_ASSERT_EQUAL_UINT8(1U, ble_after);
+}
+
+/** @brief landed_over(), with the asker's port known up while the image arrives. */
+static void landed_told(uint8_t src)
+{
+    uint32_t const len = image_named("new");
+
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    fake_ble_console_set_backlog(0U);
+    ask_recv_from(src, len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len), true,
+                  "new");
+    if ( (uint8_t)KODE_CONSOLE_SRC_BLE == src )
+    {
+        inst_ble(true);
+    }
+    else
+    {
+        inst_channel((uint8_t)CHAN_UP);
+    }
+    raw_armed(true);
+    fake_klog_reset();
+    feed(s_named_img, (uint16_t)len);
+    tidy_settle();
+}
+
+/* `run=on` over BLE: the record is handed to the console before the reset
+ * that boots the app, and nothing waits for the stack to deliver it. The
+ * launch keeps only the terminal `>ok`'s own drain, as before. */
+TEST_CASE("a run=on install over BLE launches without waiting for its record",
+          "[appmgr_ao][install_rec]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    Mockkdrv_slot_Init();
+    landed_told((uint8_t)KODE_CONSOLE_SRC_BLE);
+    appmgr_inst_rec_t const out = inst_read(APPMGR_INST_KEY_APP);
+    char id_kv[24];
+    (void)snprintf(id_kv, sizeof(id_kv), "id=%lu ", (unsigned long)out.id);
+    unsigned const src = inst_src_of(id_kv, "state=installed");
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    bool const launched = boot_run_request(&off, &size, &mode);
+    inst_ble(false);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_INSTALLED, out.state);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_BLE, src,
+        "the last record before a jump goes plain: no answer can come back");
+    TEST_ASSERT_TRUE_MESSAGE(launched, "the launch waited for the stack");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, inst_read(APPMGR_INST_KEY_APP).told,
+        "a record handed over before a jump is not known to be delivered");
+}
+
+/** @brief Ask for an install from a file, asked on @p asker, to @p dst, booting it. */
+static void ask_file_from(const char *name, uint8_t dst, uint8_t asker)
+{
+    FlashReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super     = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    e.src_kind  = (uint8_t)KFW_SRC_FS;
+    e.dst_kind  = dst;
+    e.launch    = ((uint8_t)KFW_TARGET_APP == dst);
+    e.asker_src = asker;
+    (void)snprintf(e.src, sizeof(e.src), "%s", name);
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+}
+
+/** @brief A `run=on` install from a file asked over the channel, to its end. */
+static void file_run_over_channel(void)
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+    uint32_t const   len  = image_named("new");
+
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    (void)boot_run_request(&off, &size, &mode);
+
+    ask_file_from("new.bin", (uint8_t)KFW_TARGET_APP, (uint8_t)KODE_CONSOLE_SRC_NET);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    inst_channel((uint8_t)CHAN_UP);   /* AO_Net's answer to the ask at the take */
+    answer_data(len);
+    fake_klog_reset();
+    answer_eof();       /* the end of the file ends the install */
+    tidy_settle();
+}
+
+/* A file installed with `run=on` asked over the channel: the last record is
+ * written, and AO_Boot asked to boot the app, with no tick between. */
+TEST_CASE("a run=on install from a file boots in the step its record is written",
+          "[appmgr_ao][install_rec]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+
+    Mockkdrv_slot_Init();
+    file_run_over_channel();
+
+    unsigned const src      = inst_src_of(">|install id=", "state=installed");
+    bool const     launched = boot_run_request(&off, &size, &mode);
+    uint8_t const  told     = inst_read(APPMGR_INST_KEY_APP).told;
+    inst_channel((uint8_t)CHAN_OFF);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_NET, src,
+        "the record is written to the channel, plain");
+    TEST_ASSERT_TRUE_MESSAGE(launched, "AO_Boot was not asked with the record");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, told,
+        "a record handed over before a jump is not known to be delivered");
+}
+
+/* Back in kodeOS after the app: the record written just before the jump is
+ * still owed, and the channel coming up tells it again, confirmed this time.
+ * The store keeps the first of an `id` + `state` pair it sees twice. */
+TEST_CASE("a record written just before a jump is told again on return",
+          "[appmgr_ao][install_rec]")
+{
+    Mockkdrv_slot_Init();
+    file_run_over_channel();
+    inst_channel((uint8_t)CHAN_OFF);
+    appmgr_inst_rec_t const before = inst_read(APPMGR_INST_KEY_APP);
+    char id_kv[24];
+    (void)snprintf(id_kv, sizeof(id_kv), "id=%lu ", (unsigned long)before.id);
+
+    appmgr_fresh();     /* the board is back in kodeOS */
+    fake_klog_reset();
+    inst_channel((uint8_t)CHAN_UP);
+    unsigned const src = inst_src_of(id_kv, "state=installed");
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_NET, true);
+    uint8_t const told = inst_read(APPMGR_INST_KEY_APP).told;
+    inst_channel((uint8_t)CHAN_OFF);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_INSTALLED, before.state);
+    TEST_ASSERT_EQUAL_UINT8(0U, before.told);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_NET | KODE_LOG_SRC_CONFIRM, src,
+        "the owed record goes out again, confirmed, when the channel is up");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1U, told, "the PUBACK on return tells it");
+}
+
+/* `dst=os` from a file: the `rebooting` record is written to the channel and
+ * AO_Boot asked for the switch with no tick between. The verdict, after the
+ * reboot, is what the channel is owed then. */
+TEST_CASE("a kodeOS update from a file switches in the step its record is written",
+          "[appmgr_ao][install_rec]")
+{
+    static uint8_t payload[96];
+
+    for ( unsigned i = 0U; sizeof(payload) > i; ++i )
+    {
+        payload[i] = (uint8_t)((i * 5U) + 1U);
+    }
+    image_chain(payload);
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    (void)boot_saw(BOOT_OS_SWITCH_SIG);
+    kdrv_slot_present_IgnoreAndReturn(true);
+    kdrv_slot_size_IgnoreAndReturn(0x400000U);
+    kdrv_slot_address_IgnoreAndReturn(0x420000U);
+    kdrv_slot_sink_IgnoreAndReturn(&SLOT_FAKE_SINK);
+    kdrv_slot_desc_IgnoreAndReturn(KODE_ERROR);
+
+    ask_file_from("kodeos.bin", (uint8_t)KFW_TARGET_OS, (uint8_t)KODE_CONSOLE_SRC_NET);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the update never asked for its file");
+    answer_open((uint32_t)sizeof(payload), (uint8_t)KDRV_MEDIUM_FS);
+    inst_channel((uint8_t)CHAN_UP);   /* AO_Net's answer to the ask at the take */
+    answer_data_bytes(payload, (uint32_t)sizeof(payload));
+    fake_klog_reset();
+    answer_eof();       /* the end of the file ends the update */
+    (void)qf_support_pump(AO_AppMgr, 8U);
+
+    unsigned const src      = inst_src_of(">|install id=", "state=rebooting");
+    bool const     switched = boot_saw(BOOT_OS_SWITCH_SIG);
+    appmgr_inst_rec_t const r = inst_read(APPMGR_INST_KEY_OS);
+    inst_channel((uint8_t)CHAN_OFF);
+    run_ticks(2U);
+    Mockkdrv_slot_Destroy();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_NET, src,
+        "the rebooting record is written to the channel, plain");
+    TEST_ASSERT_TRUE_MESSAGE(switched, "AO_Boot was not asked with the record");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_REBOOTING, r.state);
+    TEST_ASSERT_EQUAL_UINT8(0U, r.told);
+}
+
+/* A terminal install over BLE whose console is not known up when it ends: the
+ * command in flight still hears its end, but the record is not told until a
+ * BLE_STATE_SIG says the console is there. */
+TEST_CASE("an install over BLE that ends with the console not known up stays owed",
+          "[appmgr_ao][install_rec]")
+{
+    uint32_t         off  = 0U;
+    uint32_t         size = 0U;
+    kboot_run_mode_t mode = KBOOT_RUN_STICKY;
+    uint32_t const   len  = image_named("new");
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    fake_ble_console_set_backlog(0U);
+    ask_recv_from((uint8_t)KODE_CONSOLE_SRC_BLE, len,
+                  khal_crc32(KHAL_CRC32_INIT, s_named_img, len), false, "new");
+    raw_armed(true);
+    fake_klog_reset();
+    feed(s_named_img, (uint16_t)len);
+    tidy_settle();
+
+    unsigned const src = inst_src_of(">|install id=", "state=installed");
+    uint8_t const  told = inst_read(APPMGR_INST_KEY_APP).told;
+    (void)boot_run_request(&off, &size, &mode);
+    inst_ble(true);
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_BLE, true);
+    uint8_t const  later = inst_read(APPMGR_INST_KEY_APP).told;
+    inst_ble(false);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_BLE, src,
+        "the command in flight did not hear its end");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, told, "told on a console not known up");
+    TEST_ASSERT_EQUAL_UINT8(1U, later);
+}
+
+/* The causes a host acts on, each from the step that knows it. */
+/* A URL's install is taken when the download starts, so the server's no is a
+ * record's end. (A file that is not there is the command's `>err`: nothing was
+ * taken.) */
+TEST_CASE("an install whose URL is not there is kept as failed for missing",
+          "[appmgr_ao][install_rec]")
+{
+    FlashReqEvt       e;
+    StorageOpenRspEvt o;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    fake_klog_reset();
+    (void)memset(&e, 0, sizeof(e));
+    e.super     = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    e.src_kind  = (uint8_t)KFW_SRC_HTTP;
+    e.dst_kind  = (uint8_t)KFW_TARGET_APP;
+    e.asker_src = (uint8_t)KODE_CONSOLE_SRC_SERIAL;
+    (void)snprintf(e.src, sizeof(e.src), "%s", "https://example.com/gone.bin");
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+    (void)net_requests(NET_STREAM_OPEN_REQ_SIG);
+    (void)memset(&o, 0, sizeof(o));
+    o.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_OPEN_RSP_SIG);
+    o.status = (uint8_t)KODE_ERROR;
+    QASM_DISPATCH(AO_AppMgr, &o.super, 0U);
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    bool const said = (NULL != inst_line_with(">|install id=", "why=missing"));
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_MISSING, got.why);
+    TEST_ASSERT_TRUE(said);
+}
+
+/**
+ * @brief Ask for a URL's install and answer its open with @p status.
+ * @param status What AO_Net says to the open.
+ * @return The app record afterwards.
+ */
+static appmgr_inst_rec_t url_open_answered(kode_status_t status)
+{
+    FlashReqEvt       e;
+    StorageOpenRspEvt o;
+
+    undo_fresh();
+    fake_klog_reset();
+    (void)memset(&e, 0, sizeof(e));
+    e.super     = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    e.src_kind  = (uint8_t)KFW_SRC_HTTP;
+    e.dst_kind  = (uint8_t)KFW_TARGET_APP;
+    e.asker_src = (uint8_t)KODE_CONSOLE_SRC_SERIAL;
+    (void)snprintf(e.src, sizeof(e.src), "%s", "https://example.com/app.bin");
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+    (void)net_requests(NET_STREAM_OPEN_REQ_SIG);
+    (void)memset(&o, 0, sizeof(o));
+    o.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_OPEN_RSP_SIG);
+    o.status = (uint8_t)status;
+    QASM_DISPATCH(AO_AppMgr, &o.super, 0U);
+    return inst_read(APPMGR_INST_KEY_APP);
+}
+
+/* AO_Net has one download. While an app's file or GET holds it, a URL's
+ * install is refused at the open: the record says the network was busy, and
+ * nothing closes the transfer that is not the install's. */
+TEST_CASE("an install whose URL finds the network busy is kept as failed for busy",
+          "[appmgr_ao][install_rec]")
+{
+    Mockkdrv_slot_Init();
+    appmgr_inst_rec_t const denied = url_open_answered(KODE_DENIED);
+    bool const said = (NULL != inst_line_with(">|install id=", "why=busy"));
+    unsigned const closes = net_requests(NET_STREAM_CLOSE_REQ_SIG);
+    keep_end();
+
+    Mockkdrv_slot_Init();
+    appmgr_inst_rec_t const queued = url_open_answered(KODE_NO_RESOURCES);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, denied.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_BUSY, denied.why);
+    TEST_ASSERT_TRUE(said);
+    TEST_ASSERT_EQUAL_UINT(0U, closes);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, queued.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_BUSY, queued.why);
+}
+
+TEST_CASE("an install whose file ends early is kept as failed for cut",
+          "[appmgr_ao][install_rec]")
+{
+    uint32_t const len = image_named("new");
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    ask_file_from("new.bin", (uint8_t)KFW_TARGET_APP, (uint8_t)KODE_CONSOLE_SRC_SERIAL);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data(len / 2U);
+    answer_eof();
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_CUT, got.why);
+}
+
+TEST_CASE("a terminal install with the wrong CRC is kept as failed for corrupt",
+          "[appmgr_ao][install_rec]")
+{
+    uint32_t const len = image_named("new");
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    ask_recv(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len) ^ 1U, false);
+    raw_armed(true);
+    feed(s_named_img, (uint16_t)len);
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    (void)log_saw(CONSOLE_RAW_END_SIG);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_CORRUPT, got.why);
+}
+
+TEST_CASE("a terminal install whose host goes quiet is kept as failed for stalled",
+          "[appmgr_ao][install_rec]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    ask_recv(4096U, 0U, false);
+    raw_armed(true);
+    run_ticks(APPMGR_RECV_IDLE_DEADLINE_TICKS + 50U);
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    (void)log_saw(CONSOLE_RAW_END_SIG);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_STALLED, got.why);
 }

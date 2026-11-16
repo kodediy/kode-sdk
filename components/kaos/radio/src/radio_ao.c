@@ -1620,7 +1620,10 @@ void ble_stop_request(void)
 void ble_state_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(BLE_STATE_REQ_SIG);
-    QACTIVE_POST(AO_Radio, &evt, NULL);
+    if ( !QACTIVE_POST_X(AO_Radio, &evt, KQP_RADIO_POST_MARGIN, NULL) )
+    {
+        KLOG_W(TAG, "no room to ask for the BLE state; the next change says it");
+    }
 }
 
 void ble_unpair_request(void)

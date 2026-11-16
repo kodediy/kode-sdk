@@ -3002,7 +3002,7 @@ static void push_rows(unsigned first, unsigned n)
     for ( unsigned i = 0U; i < n; i++ )
     {
         (void)snprintf(line, sizeof(line), ">|row=%03u", first + i);
-        (void)kchan_out_push(line, strlen(line));
+        (void)kchan_out_push(line, strlen(line), false);
     }
 }
 
@@ -10305,4 +10305,145 @@ TEST_CASE("an entry's whole wake in the check's minute dwells, and only then is 
 
     pair_down();
     net_done();
+}
+
+/* ---- Confirmed reply lines --------------------------------------------------
+ * An install's last record is a confirmed line: AO_Net publishes it at QoS 1,
+ * and the broker's PUBACK is published as CONSOLE_SENT_SIG for AO_AppMgr.
+ */
+
+static unsigned s_nacked;   /**< kdrv_net_mqtt_publish_acked() calls on cmd/out. */
+static kode_status_t s_acked_rc;
+
+static kode_status_t stub_publish_acked(const char *topic, const void *data,
+                                        uint16_t len, int n)
+{
+    (void)data;
+    (void)len;
+    (void)n;
+    if ( strcmp(topic, "kode/KODE0001F00MR1C/cmd/out") == 0 )
+    {
+        s_nacked++;
+    }
+    return s_acked_rc;
+}
+
+/** @brief The CONSOLE_SENT_SIG the spy holds, or one with src NONE. */
+static ConsoleSentEvt sent_taken(void)
+{
+    ConsoleSentEvt out;
+
+    (void)memset(&out, 0, sizeof(out));
+    out.src = (uint8_t)KODE_LOG_SRC_NONE;
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)CONSOLE_SENT_SIG == (enum_t)e->sig )
+        {
+            out = *(ConsoleSentEvt const *)e;
+        }
+    }
+    return out;
+}
+
+TEST_CASE("a confirmed reply goes at QoS 1, and its PUBACK is published",
+          "[net_ao]")
+{
+    cmd_fresh();
+    s_nacked   = 0U;
+    s_acked_rc = KODE_OK;
+    kdrv_net_mqtt_publish_acked_Stub(&stub_publish_acked);
+    ao_spy_subscribe(CONSOLE_SENT_SIG);
+
+    (void)kchan_out_push(">ok", 3U, false);
+    (void)kchan_out_push(">|install id=3", 14U, true);
+    (void)net_settle();
+    unsigned const plain = s_nout;
+    unsigned const acked = s_nacked;
+    ConsoleSentEvt const before = sent_taken();
+
+    mqtt_link(KDRV_NET_MQTT_ACKED);
+    ConsoleSentEvt const after = sent_taken();
+
+    s_acked_rc = KODE_NO_RESOURCES;
+    (void)kchan_out_push(">|install id=4", 14U, true);
+    (void)net_settle();
+    ConsoleSentEvt const refused = sent_taken();
+    QActive_unsubscribe(ao_spy(), CONSOLE_SENT_SIG);
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, plain, "the plain line went at QoS 0");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, acked, "the confirmed line was not published at QoS 1");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KODE_LOG_SRC_NONE, before.src,
+        "CONSOLE_SENT_SIG before the broker answered");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CONSOLE_SRC_NET, after.src);
+    TEST_ASSERT_TRUE(after.ok);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CONSOLE_SRC_NET, refused.src);
+    TEST_ASSERT_FALSE_MESSAGE(refused.ok, "a line the client refused was not said lost");
+}
+
+/* AO_Boot's leave cannot overtake the replies already in the ring: they go out
+ * before the offline notice, an install's last record among them. */
+TEST_CASE("a leave publishes the waiting replies before it says offline",
+          "[net_ao]")
+{
+    static const QEvt leave = QEVT_INITIALIZER(NET_LEAVE_REQ_SIG);
+
+    chan_fresh();
+    qf_support_give_queue(AO_Boot);
+    (void)boot_left_taken();
+    drive_to_up();
+    s_drv_state = KDRV_MQTT_UP;
+    s_npub = 0U;
+    s_nout = 0U;
+
+    push_rows(0U, 3U);
+    net_dispatch(&leave);   /* ahead of the drain the push woke */
+    (void)net_settle();
+
+    bool const rows_first = outs_are_rows(0U, 3U);
+    bool const will_last  = (4U == s_npub)
+                            && (strcmp(s_pubs[3].topic, "kode/KODE0001F00MR1C/status") == 0);
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    net_done();
+    (void)boot_left_taken();
+
+    TEST_ASSERT_TRUE_MESSAGE(rows_first, "the replies did not go out before the leave");
+    TEST_ASSERT_TRUE_MESSAGE(will_last, "offline was not said after the replies");
+}
+
+/** @brief net_ao.c's CHAN_OUT_BURST, repeated: reply lines a step hands over. */
+#define LEAVE_BURST  8U
+
+/* The leave's drain is chunked like any other (rule 5): a step hands over a
+ * burst and posts the next, so the replies still all go out before offline
+ * without one long step. */
+TEST_CASE("a leave hands the waiting replies over a burst a step, then says offline",
+          "[net_ao]")
+{
+    static const QEvt leave = QEVT_INITIALIZER(NET_LEAVE_REQ_SIG);
+
+    chan_fresh();
+    qf_support_give_queue(AO_Boot);
+    (void)boot_left_taken();
+    drive_to_up();
+    s_drv_state = KDRV_MQTT_UP;
+    s_npub = 0U;
+    s_nout = 0U;
+
+    push_rows(0U, 20U);
+    net_dispatch(&leave);
+    unsigned const first_step = s_nout;
+    unsigned const pubs_first = s_npub;
+    (void)net_settle();
+
+    bool const rows_first = outs_are_rows(0U, 20U);
+    bool const will_last  = (21U == s_npub);   /* the rows, then offline */
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    net_done();
+    (void)boot_left_taken();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(LEAVE_BURST, first_step, "the first step was not one burst");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(LEAVE_BURST, pubs_first, "offline came before the rest");
+    TEST_ASSERT_TRUE_MESSAGE(rows_first, "the replies did not all go out, in order");
+    TEST_ASSERT_TRUE_MESSAGE(will_last, "offline was not said after the replies");
 }

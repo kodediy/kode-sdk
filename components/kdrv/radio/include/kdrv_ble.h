@@ -879,6 +879,43 @@ kode_status_t kdrv_ble_unpair(void);
 kode_status_t kdrv_ble_console_write(const char *buf, size_t len);
 
 /**
+ * @brief Told whether the lines written with
+ *        kdrv_ble_console_write_confirmed() reached the central.
+ *
+ * Called from NimBLE's host task, or from the writer's thread when a line is
+ * refused at once. Post an event and return.
+ *
+ * @param ok true: the central answered a request sent after the last such
+ *           line, so it has that line and every one before it. false: the
+ *           link went, a line was dropped, or the central did not answer.
+ */
+typedef void (*kdrv_ble_console_sent_t)(bool ok);
+
+/**
+ * @brief Install the confirmation callback.
+ *
+ * @param cb The callback; NULL uninstalls it.
+ * @return KODE_OK.
+ */
+kode_status_t kdrv_ble_console_set_sent_cb(kdrv_ble_console_sent_t cb);
+
+/**
+ * @brief kdrv_ble_console_write(), and the callback says once the central has
+ *        the line.
+ *
+ * Once NimBLE has taken every byte the ring held, the driver sends the
+ * central one GATT request (a discovery of the GAP service) and waits for its
+ * answer: the link layer keeps order, so an answer means the notifications
+ * before it arrived. Only the last mark is kept, and one answer confirms
+ * every line before it.
+ *
+ * @param buf As for kdrv_ble_console_write().
+ * @param len As for kdrv_ble_console_write().
+ * @return As kdrv_ble_console_write(); nothing is confirmed unless KODE_OK.
+ */
+kode_status_t kdrv_ble_console_write_confirmed(const char *buf, size_t len);
+
+/**
  * @brief The console ring, checked against itself: `test component=ble_console`.
  *
  * Exercises a ring of its own rather than the live one, so it can run with a

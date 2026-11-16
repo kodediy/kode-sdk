@@ -554,8 +554,15 @@ uint32_t kchan_backoff_ms(uint8_t attempt, uint32_t rnd)
 
 /* ---- The reply ring ------------------------------------------------------- */
 
-/** @brief Bytes in front of each line in the ring: its length, little endian. */
+/** @brief Bytes in front of each line in the ring: its length, little endian,
+ *         with OUT_ACK in the high byte. */
 #define OUT_HDR  2U
+/** @brief Set in a header's high byte: the line goes at QoS 1 and its PUBACK
+ *         is waited for. A length is at most KODE_LOG_LINE_MAX, well under it. */
+#define OUT_ACK  0x80U
+
+_Static_assert(((uint32_t)KODE_LOG_LINE_MAX >> 8) < OUT_ACK,
+               "a line's length reaches the acknowledgement bit");
 
 /** @brief The ring's state. Written under @c lock, except @c wake_owed. */
 typedef struct {
@@ -624,7 +631,7 @@ void kchan_out_set_wake(kchan_out_wake_t wake)
     s_replies.wake = wake;
 }
 
-bool kchan_out_push(const char *line, size_t len)
+bool kchan_out_push(const char *line, size_t len, bool acked)
 {
     bool stored    = false;
     bool tell      = false;
@@ -640,6 +647,10 @@ bool kchan_out_push(const char *line, size_t len)
 
             hdr[0] = (uint8_t)(len & 0xFFU);
             hdr[1] = (uint8_t)((len >> 8) & 0xFFU);
+            if ( acked )
+            {
+                hdr[1] |= (uint8_t)OUT_ACK;
+            }
             ring_put(s_replies.head, hdr, OUT_HDR);
             ring_put((s_replies.head + OUT_HDR) % KCHAN_OUT_BYTES,
                      (const uint8_t *)line, (uint32_t)len);
@@ -666,10 +677,14 @@ bool kchan_out_push(const char *line, size_t len)
     return stored;
 }
 
-size_t kchan_out_pop(char *line, size_t cap)
+size_t kchan_out_pop(char *line, size_t cap, bool *acked)
 {
     size_t got = 0U;
 
+    if ( NULL != acked )
+    {
+        *acked = false;
+    }
     if ( (NULL == s_replies.buf) || (NULL == line) || (0U == cap) )
     {
         return 0U;
@@ -682,7 +697,11 @@ size_t kchan_out_pop(char *line, size_t cap)
         uint32_t keep;
 
         ring_get(s_replies.tail, hdr, OUT_HDR);
-        n    = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8);
+        if ( (NULL != acked) && (0U != (hdr[1] & (uint8_t)OUT_ACK)) )
+        {
+            *acked = true;
+        }
+        n    = (uint32_t)hdr[0] | ((uint32_t)(hdr[1] & (uint8_t)(~(uint8_t)OUT_ACK)) << 8);
         keep = n;
         if ( (uint32_t)(cap - 1U) < keep )
         {

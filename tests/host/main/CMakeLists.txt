@@ -476,6 +476,14 @@ set_source_files_properties(
     "${SDK_DIR}/components/kaos/storage/src/storage_fetch.c"
     PROPERTIES COMPILE_DEFINITIONS "net_stream_buf=host_fetch_stream_buf")
 
+# The install records wait for the port their command came on: the Kode
+# channel and the BLE console are on for this source, so the cases can bring
+# either down and up and see the record told when it comes back.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/appmgr/src/appmgr_outcome.c"
+    PROPERTIES COMPILE_DEFINITIONS
+        "CONFIG_KODEOS_CHANNEL=1;CONFIG_KODEOS_BLE_CONSOLE=1")
+
 # The standard layer's Active Object is built for the APP role only, and the
 # project-wide role above is the OS one. This source is the app build, so the
 # cases can start the real Active Object and the dispatch task; the OS build,
@@ -517,12 +525,14 @@ set_property(SOURCE
     "${SDK_DIR}/components/kaos/console/src/console_ao.c"
     APPEND PROPERTY COMPILE_DEFINITIONS "CONFIG_KODEOS_CHANNEL=1")
 
-# AO_Log hands the replies of the channel's commands to the ring. Without the
-# option its case file would assert about a push that was compiled out.
+# AO_Log hands the replies of the channel's commands to the ring, and writes
+# every line to the BLE console, a confirmed one through the driver's
+# confirmed write. Without the options its case file would assert about a
+# push and a write that were compiled out.
 set_source_files_properties(
     "${SDK_DIR}/components/kaos/log/src/log_ao.c"
     "${CMAKE_CURRENT_LIST_DIR}/../cases/test_log_ao.c"
-    PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_CHANNEL=1")
+    PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_CHANNEL=1;CONFIG_KODEOS_BLE_CONSOLE=1")
 
 # Scoped to the two front ends' AOs and their case files the same way. The
 # real CONFIG_KODEOS_NFC_CERT builds the certification app's maximum-drive

@@ -2273,7 +2273,7 @@ static void flash_done_publish(AppMgr * const me, const char *name)
     {
         version = desc.version;
     }
-    appmgr_inst_installed(name, version);   /* kept before the end is published */
+    appmgr_inst_installed(name, version, me->launch);   /* told before the end is published */
     keep_clear(me);          /* the install ends here; so does its round */
     AppFlashDoneEvt *ev = Q_NEW_X(AppFlashDoneEvt, 0U, APP_FLASH_DONE_SIG);
     if ( NULL != ev )
@@ -3210,8 +3210,8 @@ static void flash_finish(AppMgr * const me)
                    desc.idf_ver);
         }
         KLOG_N(TAG, "install complete (%u bytes)", (unsigned)me->written);
+        appmgr_inst_rebooting();    /* on its way before the switch is asked */
         me->os_target = false;      /* back to idle before AO_Boot resets us */
-        appmgr_inst_rebooting();
         boot_os_switch_request();   /* AO_Boot selects otadata and resets */
         return;
     }
@@ -3703,7 +3703,7 @@ static QState AppMgr_initial(AppMgr * const me, void const * const par)
     /* A table in NVS is an install a reset cut: its apps are looked at before
      * anything is served, the adoption included. */
     (void)khal_nvs_init();
-    appmgr_inst_init();
+    appmgr_inst_init(&me->super);
     bool const recovering = undo_recover_begin(me);
     if ( kdrv_apps_pending_present(&img_len, NULL) )
     {
@@ -3985,6 +3985,8 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             raw->size = req->size;
             raw->who  = &me->super;
             raw->src  = req->src;
+            /* The record reaches AO_Log before the request that turns the
+             * console raw. */
             appmgr_inst_prepare((uint8_t)KFW_SRC_SERIAL, req->dst, req->src);
             appmgr_inst_taken();
             appmgr_inst_named(req->name);   /* the host read it from the image */
@@ -4157,7 +4159,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 me->net_held = true;
                 /* The download's own failures are asynchronous: the verdict
                  * is that it has begun, not that it will end well. */
-                appmgr_inst_taken();   /* numbered before the verdict */
+                appmgr_inst_taken();   /* its record goes out before the verdict */
                 req_settle(me, APP_REQ_TAKEN);
             }
             else
@@ -4484,6 +4486,10 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
 #endif
         default: {
             status = Q_SUPER(&QHsm_top);
+            if ( appmgr_inst_on(e) )   /* the ports the records wait on */
+            {
+                status = Q_HANDLED();
+            }
             break;
         }
     }
@@ -4567,6 +4573,17 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
                                                 : "file not found",
                                KFAIL_WRITE);
                 }
+                else if ( me->from_net
+                          && (((uint8_t)KODE_DENIED == rsp->status)
+                              || ((uint8_t)KODE_NO_RESOURCES == rsp->status)) )
+                {
+                    /* AO_Net has one download, and it is someone else's: an
+                     * app's file or GET. */
+                    KLOG_E(TAG, "'%s' cannot start: the network is busy with "
+                                "another download", me->file);
+                    appmgr_inst_why(APPMGR_WHY_BUSY);
+                    flash_fail(me, "the network is busy", KFAIL_WRITE);
+                }
                 else
                 {
                     /* Found but unusable - AO_Storage already logged what was
@@ -4599,7 +4616,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
                 status = Q_TRAN(&AppMgr_idle);
                 break;
             }
-            appmgr_inst_taken();   /* numbered before the verdict */
+            appmgr_inst_taken();   /* its record goes out before the verdict */
             req_settle(me, APP_REQ_TAKEN);   /* the file is open and the write has begun */
 
             me->writing     = true;
@@ -6472,6 +6489,10 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
         }
         default: {
             status = Q_SUPER(&QHsm_top);
+            if ( appmgr_inst_on(e) )   /* the ports the records wait on */
+            {
+                status = Q_HANDLED();
+            }
             break;
         }
     }
@@ -7401,7 +7422,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
         }
         KLOG_N(TAG, "install dst=os complete (%u bytes); switching to the "
                     "new kodeOS", (unsigned)me->written);
-        appmgr_inst_rebooting();
+        appmgr_inst_rebooting();   /* told before the `>ok` */
         QACTIVE_PUBLISH(&s_recv_done_evt, &me->super);
         return Q_TRAN(&AppMgr_launching);
     }
@@ -7439,7 +7460,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
     {
         appmgr_inst_why(APPMGR_WHY_STALLED);
     }
-    appmgr_inst_failed((uint32_t)progress_pct(me));   /* before the counts are reset */
+    appmgr_inst_failed((uint32_t)progress_pct(me));   /* told before the `>err` */
     me->os_target = false;
     me->bypass    = false;
     undo_restore(me);   /* the apps its write never reached come back */

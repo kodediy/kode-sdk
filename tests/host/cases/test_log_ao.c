@@ -958,7 +958,7 @@ static void ring_emptied(void)
 
     TEST_ASSERT_TRUE(kchan_out_init());
     kchan_out_set_wake(NULL);
-    while ( kchan_out_pop(scratch, sizeof(scratch)) != 0U )
+    while ( kchan_out_pop(scratch, sizeof(scratch), NULL) != 0U )
     {
         /* emptied */
     }
@@ -975,7 +975,7 @@ TEST_CASE("a reply to a NET command is written to the cable and kept for cmd/out
 
     log_line_src(">|pong\n", (uint8_t)KODE_CONSOLE_SRC_NET);
 
-    n = kchan_out_pop(got, sizeof(got));
+    n = kchan_out_pop(got, sizeof(got), NULL);
     TEST_ASSERT_EQUAL_STRING(">|pong\n", fake_console_out());
     TEST_ASSERT_EQUAL_UINT(6U, n);
     TEST_ASSERT_EQUAL_STRING(">|pong", got);
@@ -995,6 +995,115 @@ TEST_CASE("replies to the cable or BLE, and log lines, never reach cmd/out",
                  (uint8_t)KODE_LOG_SRC_NONE);
 
     TEST_ASSERT_FALSE(kchan_out_pending());
+}
+
+/* A confirmed line - an install's last record - asks its port to say when it
+ * was delivered. On BLE the driver is asked, and its answer is published as
+ * CONSOLE_SENT_SIG; on the channel the line is marked in the ring, for AO_Net
+ * to publish at QoS 1. */
+TEST_CASE("a confirmed BLE reply asks the stack, and its answer is published",
+          "[log_ao]")
+{
+    log_fresh();
+    ao_spy_drain();
+    ao_spy_subscribe(CONSOLE_SENT_SIG);
+    unsigned const before = fake_ble_console_confirmed();
+
+    log_line_src(">|install id=1\n",
+                 (uint8_t)(KODE_CONSOLE_SRC_BLE | KODE_LOG_SRC_CONFIRM));
+    log_line_src(">ok\n", (uint8_t)KODE_CONSOLE_SRC_BLE);
+    unsigned const asked = fake_ble_console_confirmed() - before;
+    bool const early = (NULL != ao_spy_take());
+    fake_ble_console_answer(true);
+    const QEvt * const got = ao_spy_take();
+    ConsoleSentEvt sent;
+    (void)memset(&sent, 0, sizeof(sent));
+    if ( (NULL != got) && ((enum_t)CONSOLE_SENT_SIG == (enum_t)got->sig) )
+    {
+        sent = *(ConsoleSentEvt const *)got;
+    }
+    QActive_unsubscribe(ao_spy(), CONSOLE_SENT_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, asked, "only the confirmed line asks the stack");
+    TEST_ASSERT_FALSE_MESSAGE(early, "CONSOLE_SENT_SIG before the stack answered");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CONSOLE_SRC_BLE, sent.src);
+    TEST_ASSERT_TRUE(sent.ok);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(fake_console_out(), ">|install id=1\n"),
+        "the cable still gets every line");
+}
+
+TEST_CASE("a confirmed NET reply is kept for cmd/out marked for a PUBACK",
+          "[log_ao]")
+{
+    char got[KODE_LOG_LINE_MAX + 1U];
+    bool acked_plain = true;
+    bool acked_conf  = false;
+
+    log_fresh();
+    ring_emptied();
+
+    log_line_src(">ok\n", (uint8_t)KODE_CONSOLE_SRC_NET);
+    log_line_src(">|install id=2\n",
+                 (uint8_t)(KODE_CONSOLE_SRC_NET | KODE_LOG_SRC_CONFIRM));
+
+    size_t const n1 = kchan_out_pop(got, sizeof(got), &acked_plain);
+    size_t const n2 = kchan_out_pop(got, sizeof(got), &acked_conf);
+
+    TEST_ASSERT_EQUAL_UINT(3U, n1);
+    TEST_ASSERT_FALSE(acked_plain);
+    TEST_ASSERT_EQUAL_UINT(14U, n2);
+    TEST_ASSERT_EQUAL_STRING(">|install id=2", got);
+    TEST_ASSERT_TRUE(acked_conf);
+}
+
+/* The first step of AO_Boot's leave: a line posted to AO_Log before the
+ * flush request (an install's last record, just before a jump) is in the
+ * channel's ring when AO_Boot hears the answer, so AO_Net's leave publishes it
+ * before the client stops. */
+TEST_CASE("a flush request is answered after the lines ahead of it are written",
+          "[log_ao]")
+{
+    char        got[KODE_LOG_LINE_MAX + 1U];
+    const QEvt *e        = NULL;
+    unsigned    answered = 0U;
+
+    log_fresh();
+    ring_emptied();
+    if ( NULL == AO_Boot->eQueue )
+    {
+        qf_support_give_queue(AO_Boot);
+    }
+    while ( xQueueReceive(AO_Boot->eQueue, &e, 0U) == pdTRUE )
+    {
+        QF_gc(e);
+    }
+
+    LogEvt * const l = Q_NEW_X(LogEvt, 0U, LOG_LINE_SIG);
+    TEST_ASSERT_NOT_NULL(l);
+    l->src = (uint8_t)KODE_CONSOLE_SRC_NET;
+    l->len = (uint16_t)snprintf(l->line, sizeof(l->line), "%s",
+                                ">|install id=3 state=installed\n");
+    TEST_ASSERT_TRUE(QACTIVE_POST_X(AO_Log, &l->super, 0U, NULL));
+    TEST_ASSERT_TRUE(log_flush_request());
+    bool const early = kchan_out_pending();
+
+    log_run();
+    while ( xQueueReceive(AO_Boot->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)BOOT_LOG_FLUSHED_SIG == e->sig )
+        {
+            ++answered;
+        }
+        QF_gc(e);
+    }
+    size_t const n = kchan_out_pop(got, sizeof(got), NULL);
+
+    TEST_ASSERT_FALSE_MESSAGE(early, "the line was written before AO_Log ran");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, answered, "AO_Boot hears one answer");
+    TEST_ASSERT_EQUAL_UINT(30U, n);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(">|install id=3 state=installed", got,
+        "the line ahead of the request is in the channel's ring");
 }
 
 /** @brief Most LogEvt blocks the harness's pool holds, with headroom. */
@@ -1043,6 +1152,118 @@ TEST_CASE("a NET reply lost to a dry event pool is counted as lost for the "
 
     TEST_ASSERT_EQUAL_UINT32(lost0 + 1U, lost_net);
     TEST_ASSERT_EQUAL_UINT32(lost0 + 1U, lost_cable);
+}
+
+/** @brief The CONSOLE_SENT_SIG answers the spy holds, by port; the spy is emptied. */
+typedef struct {
+    unsigned net_lost;   /**< Not-sent answers for the Kode channel. */
+    unsigned ble_lost;   /**< Not-sent answers for the BLE console.  */
+    unsigned sent;       /**< Delivered answers, any port.           */
+} sent_tally_t;
+
+static sent_tally_t sent_tally(void)
+{
+    sent_tally_t t;
+
+    (void)memset(&t, 0, sizeof(t));
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)CONSOLE_SENT_SIG == (enum_t)e->sig )
+        {
+            ConsoleSentEvt const * const c = (ConsoleSentEvt const *)e;
+            if ( c->ok )
+            {
+                ++t.sent;
+            }
+            else if ( (uint8_t)KODE_CONSOLE_SRC_NET == c->src )
+            {
+                ++t.net_lost;
+            }
+            else if ( (uint8_t)KODE_CONSOLE_SRC_BLE == c->src )
+            {
+                ++t.ble_lost;
+            }
+            else
+            {
+                /* no other port answers */
+            }
+        }
+    }
+    return t;
+}
+
+/* A confirmed line AO_Log never gets is not delivered, and its asker must hear
+ * so: it would wait for an answer from the port that never comes. A plain line
+ * lost the same way is only counted. */
+TEST_CASE("a confirmed reply lost to a dry event pool is said not sent",
+          "[log_ao]")
+{
+    const QEvt *held[LOG_FILL_MAX];
+    size_t      n = 0U;
+
+    log_bring_up();
+    ring_emptied();
+    ao_spy_drain();
+    ao_spy_subscribe(CONSOLE_SENT_SIG);
+
+    while ( LOG_FILL_MAX > n )
+    {
+        LogEvt *e = Q_NEW_X(LogEvt, 0U, LOG_LINE_SIG);
+        if ( NULL == e )
+        {
+            break;
+        }
+        held[n] = &e->super;
+        ++n;
+    }
+    TEST_ASSERT_GREATER_THAN_UINT(0U, n);
+
+    kode_log_reply_confirm(">|install id=4", (uint8_t)KODE_CONSOLE_SRC_NET);
+    kode_log_reply_confirm(">|install id=5", (uint8_t)KODE_CONSOLE_SRC_BLE);
+    kode_log_reply_src(">|install id=6", (uint8_t)KODE_CONSOLE_SRC_NET);
+
+    for ( size_t i = 0U; i < n; ++i )
+    {
+        QF_gc(held[i]);
+    }
+    sent_tally_t const t = sent_tally();
+    QActive_unsubscribe(ao_spy(), CONSOLE_SENT_SIG);
+    log_settle();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, t.net_lost, "the channel's asker was not told");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, t.ble_lost, "the BLE asker was not told");
+    TEST_ASSERT_EQUAL_UINT(0U, t.sent);
+}
+
+/* The ring AO_Net drains onto cmd/out is the channel's last stop inside the
+ * board. A confirmed line it has no room for is lost there, and said so. */
+TEST_CASE("a confirmed NET reply the full cmd/out ring refuses is said not sent",
+          "[log_ao]")
+{
+    static const char line[] = ">|install id=7\n";
+    unsigned          pushed = 0U;
+
+    log_fresh();
+    ring_emptied();
+    ao_spy_drain();
+    ao_spy_subscribe(CONSOLE_SENT_SIG);
+    /* Lines as long as the confirmed one, so that none of them fits after. */
+    while ( kchan_out_push(line, sizeof(line) - 1U, false) )
+    {
+        ++pushed;   /* until the ring says no */
+    }
+
+    log_line_src(line,
+                 (uint8_t)(KODE_CONSOLE_SRC_NET | KODE_LOG_SRC_CONFIRM));
+    log_line_src(">ok\n", (uint8_t)KODE_CONSOLE_SRC_NET);
+    sent_tally_t const t = sent_tally();
+    QActive_unsubscribe(ao_spy(), CONSOLE_SENT_SIG);
+    ring_emptied();
+
+    TEST_ASSERT_GREATER_THAN_UINT(0U, pushed);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, t.net_lost,
+        "the confirmed line the ring refused was not said lost");
+    TEST_ASSERT_EQUAL_UINT(0U, t.sent);
 }
 
 /* ---- The console's congestion, through kode_sys -------------------------- */

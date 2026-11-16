@@ -992,14 +992,19 @@ _Static_assert(KODE_HOME_HOLD_MS > KODE_BUTTON_HOLD_MS,
 _Static_assert(KODE_BOOT_STABLE_MS > KODE_BOOT_CONFIRM_MS, "the crashes outlast the confirmation");
 #define KODE_BOOT_CRASHES_MAX   3U      /**< Crashes in a row, none of them after KODE_BOOT_STABLE_MS up, that make kodeOS give its slot up. */
 #define KODE_RESTART_DRAIN_MS   45U
+#define KODE_LEAVE_LOG_MS       40U   /**< AO_Log's answer that the lines
+                                       *   posted before a jump are on their
+                                       *   ports: a bound for an AO_Log that
+                                       *   does not run, not a pause.       */
 #define KODE_LEAVE_NET_MS       200U  /**< The channel's clean stop before a
                                        *   jump.                            */
 #define KODE_LEAVE_RADIO_MS     250U  /**< BLE hung up and the C5 parked
                                        *   before a jump.                   */
-/** @brief Half a second: the most the two steps of a leave may cost together. */
+/** @brief Half a second: the most the three steps of a leave may cost together. */
 #define KODE_LEAVE_BUDGET_MS    500U
-_Static_assert((KODE_LEAVE_NET_MS + KODE_LEAVE_RADIO_MS) < KODE_LEAVE_BUDGET_MS,
-               "the two steps of a leave must stay under half a second");
+_Static_assert((KODE_LEAVE_LOG_MS + KODE_LEAVE_NET_MS + KODE_LEAVE_RADIO_MS)
+               < KODE_LEAVE_BUDGET_MS,
+               "the three steps of a leave must stay under half a second");
 #define KODE_IOEXP_RETRY_MS     500U  /**< The expander's INT fired and the
                                        *   input register did not read: look
                                        *   again this much later rather than

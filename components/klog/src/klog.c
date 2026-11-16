@@ -266,6 +266,11 @@ void kode_log_reply_src(const char *line, uint8_t src)
     klog_out(buf, klog_close_line(buf, sizeof(buf), n), src);
 }
 
+void kode_log_reply_confirm(const char *line, uint8_t src)
+{
+    kode_log_reply_src(line, (uint8_t)(src | KODE_LOG_SRC_CONFIRM));
+}
+
 void kode_log_reply(const char *line)
 {
     kode_log_reply_src(line, KODE_LOG_SRC_NONE);

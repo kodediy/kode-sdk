@@ -521,6 +521,8 @@ typedef enum {
                              *   refusal (bad or expired credentials). A
                              *   bench client is retried with the same
                              *   ones.                                     */
+    KDRV_NET_MQTT_ACKED,    /**< The broker's PUBACK for the last
+                             *   kdrv_net_mqtt_publish_acked().            */
 } kdrv_net_mqtt_evt_t;
 
 /**
@@ -695,6 +697,22 @@ void kdrv_net_mqtt_uri_copy(char *out, size_t cap);
  */
 kode_status_t kdrv_net_mqtt_publish(const char *topic, const void *data,
                                     uint16_t len, bool retain);
+
+/**
+ * @brief Publish at QoS 1, written to the socket before it returns, and report
+ *        KDRV_NET_MQTT_ACKED when the broker's PUBACK arrives.
+ *
+ * Only the last one is waited for: a second before the first's PUBACK takes
+ * its place, and the first's is not reported. A client that stops first never
+ * reports it.
+ *
+ * @param topic Where to.
+ * @param data  Payload bytes; may be NULL when @p len is 0.
+ * @param len   Payload length.
+ * @return As kdrv_net_mqtt_publish().
+ */
+kode_status_t kdrv_net_mqtt_publish_acked(const char *topic, const void *data,
+                                          uint16_t len);
 
 /**
  * @brief Subscribe at the QoS the client's session asked for (0 for the

@@ -364,6 +364,8 @@ typedef struct {
     char                held[KODE_LOG_LINE_MAX]; /**< A reply line taken from
                                     *   the ring and not yet published.      */
     uint16_t            held_len;  /**< Its length; 0 when there is none.   */
+    bool                held_ack;  /**< It waits for the broker's PUBACK
+                                    *   (kode_log_reply_confirm()).          */
     char                cq[KODE_CHAN_QUEUE_MAX][KODE_CONSOLE_LINE_MAX]; /**<
                                     *   The lines that arrived on cmd/in and
                                     *   have not ended, oldest first from
@@ -439,6 +441,8 @@ typedef struct {
     bool     leaving;  /**< A leave was asked: no channel session starts
                         *   again this boot.                                 */
     bool     leave_owed; /**< BOOT_NET_LEFT_SIG is owed to AO_Boot.          */
+    uint16_t leave_left; /**< Reply lines the leave may still publish before
+                          *   it says offline; 0 while it is not draining.  */
 #if CONFIG_KODE_LOWPOWER
     uint8_t  lp_who;   /**< The id lowpower_join_radio() gave.              */
     bool     lp_rest;  /**< The board sleeps: nothing new is started.       */
@@ -776,8 +780,7 @@ kode_status_t net_udp_ask(QActive *who, const char *host, uint16_t port, const v
 bool channel_state_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(CHANNEL_STATE_REQ_SIG);
-    QACTIVE_POST(AO_Net, &evt, NULL);
-    return true;
+    return QACTIVE_POST_X(AO_Net, &evt, KQP_NET_CMD_MARGIN, NULL);
 }
 
 #if CONFIG_KODEOS_CHANNEL
@@ -3594,6 +3597,72 @@ static void chan_after_job(Net * const me)
 /** @brief Wait before the drain tries again after its own post was refused. */
 #define CHAN_OUT_RETRY_MS  100U
 
+/** @brief Reply lines a leave publishes at most, CHAN_OUT_BURST a step, before
+ *         it says offline; any left after them are dropped with the session,
+ *         counted. */
+#define CHAN_OUT_FLUSH_MAX  256U
+
+/**
+ * @brief Hand up to @p max lines from the ring to the client, oldest first.
+ *
+ * A confirmed line goes at QoS 1, and its PUBACK comes back as
+ * KDRV_NET_MQTT_ACKED; one the client refuses is published as not sent.
+ *
+ * @param me  The AO; the session is up.
+ * @param max Lines at most.
+ * @return true when it stopped at @p max, with lines that may still wait;
+ *         false when the ring is drained or the client just went down.
+ */
+static bool chan_out_publish(Net * const me, uint16_t max)
+{
+    /* A confirmed reply line could not be handed to the client. */
+    static const ConsoleSentEvt s_chan_unsent = {
+        .super = QEVT_INITIALIZER(CONSOLE_SENT_SIG),
+        .src   = (uint8_t)KODE_CONSOLE_SRC_NET,
+        .ok    = false,
+    };
+    ChanWork * const cw = me->cw;
+
+    for ( uint16_t i = 0U; max > i; i++ )
+    {
+        kode_status_t rc;
+
+        if ( 0U == cw->held_len )
+        {
+            cw->held_len = (uint16_t)kchan_out_pop(cw->held, sizeof(cw->held),
+                                                   &cw->held_ack);
+        }
+        if ( 0U == cw->held_len )
+        {
+            return false;   /* drained */
+        }
+        if ( cw->held_ack )
+        {
+            rc = kdrv_net_mqtt_publish_acked(cw->sess.t_out, cw->held,
+                                             cw->held_len);
+        }
+        else
+        {
+            rc = kdrv_net_mqtt_publish(cw->sess.t_out, cw->held, cw->held_len,
+                                       false);
+        }
+        if ( KODE_DENIED == rc )
+        {
+            return false;   /* the client just went down: its LINK event follows */
+        }
+        cw->held_len = 0U;
+        if ( KODE_OK != rc )
+        {
+            kchan_out_lose(1U);
+            if ( cw->held_ack )
+            {
+                QACTIVE_PUBLISH(&s_chan_unsent.super, &me->super);
+            }
+        }
+    }
+    return true;
+}
+
 /** @brief Slots AO_Console's queue keeps free when a line off the channel is posted to it. */
 #define CHAN_LINE_MARGIN  2U
 
@@ -3647,31 +3716,8 @@ static void chan_out_step(Net * const me)
     {
         return;   /* joining, waiting or renewing: the next CONNECTED comes back */
     }
-    for ( uint8_t i = 0U; CHAN_OUT_BURST > i; i++ )
-    {
-        ChanWork * const cw = me->cw;
-        kode_status_t    rc;
-
-        if ( 0U == cw->held_len )
-        {
-            cw->held_len = (uint16_t)kchan_out_pop(cw->held, sizeof(cw->held));
-        }
-        if ( 0U == cw->held_len )
-        {
-            return;   /* drained */
-        }
-        rc = kdrv_net_mqtt_publish(cw->sess.t_out, cw->held, cw->held_len, false);
-        if ( KODE_DENIED == rc )
-        {
-            return;   /* the client just went down: its LINK event follows */
-        }
-        cw->held_len = 0U;
-        if ( KODE_OK != rc )
-        {
-            kchan_out_lose(1U);
-        }
-    }
-    if ( kchan_out_pending() && (!chan_out_wake()) )
+    if ( chan_out_publish(me, CHAN_OUT_BURST) && kchan_out_pending()
+        && (!chan_out_wake()) )
     {
         /* The queue has no room for the next step (a post keeps one slot
          * free): come back on a timer, the ring holds the lines meanwhile. */
@@ -4815,8 +4861,9 @@ static void shot_put_expired(Net * const me)
 #endif /* CONFIG_KODEOS_CHANNEL */
 
 /* ---- Leaving for a jump --------------------------------------------------
- * AO_Boot asks once before it restarts the board. The channel says "offline"
- * and stops its client, then BOOT_NET_LEFT_SIG lets the jump go on. `leaving`
+ * AO_Boot asks once before it restarts the board. The replies already in the
+ * ring go out first, CHAN_OUT_BURST a step; then the channel says "offline"
+ * and stops its client, and BOOT_NET_LEFT_SIG lets the jump go on. `leaving`
  * stays set for the rest of the boot, so no join starts before the reset.
  */
 
@@ -4844,7 +4891,65 @@ static void net_leave_settle(Net * const me)
 }
 
 /**
- * @brief Leave the channel: end the join, stop the client, answer AO_Boot.
+ * @brief The leave's last part: say offline, stop the client, and answer
+ *        AO_Boot once nothing is on its way down.
+ *
+ * @param me The AO.
+ */
+static void net_leave_close(Net * const me)
+{
+    me->leave_left = 0U;
+#if CONFIG_KODEOS_CHANNEL
+    if ( chan_active(me) )
+    {
+        chan_leave(me, "leaving");   /* says offline first, then ends the join */
+        chan_stop_client(me);
+    }
+#endif
+    net_leave_settle(me);
+}
+
+#if CONFIG_KODEOS_CHANNEL
+/**
+ * @brief One step of the leave's drain: up to CHAN_OUT_BURST reply lines, then
+ *        the next step, or the close.
+ *
+ * What the console answered before the leave goes out before the offline
+ * notice, an install's last record among it. The close comes once the ring is
+ * empty, the session cannot take a line, CHAN_OUT_FLUSH_MAX lines are out, or
+ * the queue has no room for the next step (rule 5: each step stays short).
+ *
+ * @param me The AO.
+ */
+static void net_leave_drain(Net * const me)
+{
+    uint16_t burst = CHAN_OUT_BURST;
+    bool     more  = false;
+    bool     next  = false;
+
+    if ( burst > me->leave_left )
+    {
+        burst = me->leave_left;
+    }
+    if ( chan_active(me) && chan_out_ready(me) )
+    {
+        more = chan_out_publish(me, burst) && kchan_out_pending();
+    }
+    me->leave_left = (uint16_t)(me->leave_left - burst);
+    if ( more && (0U < me->leave_left) )
+    {
+        next = chan_out_wake();
+    }
+    if ( !next )
+    {
+        net_leave_close(me);
+    }
+}
+#endif
+
+/**
+ * @brief Leave the channel: publish the replies waiting, end the join, stop
+ *        the client, answer AO_Boot.
  *
  * A second ask while the first one's answer is owed is logged and dropped;
  * one asked after the answer is answered again at once.
@@ -4861,13 +4966,14 @@ static void net_leave(Net * const me)
     me->leaving    = true;
     me->leave_owed = true;
 #if CONFIG_KODEOS_CHANNEL
-    if ( chan_active(me) )
+    if ( chan_active(me) && chan_out_ready(me) && kchan_out_pending() )
     {
-        chan_leave(me, "leaving");   /* says offline first, then ends the join */
-        chan_stop_client(me);
+        me->leave_left = (uint16_t)CHAN_OUT_FLUSH_MAX;
+        net_leave_drain(me);
+        return;
     }
 #endif
-    net_leave_settle(me);
+    net_leave_close(me);
 }
 
 #if CONFIG_KODE_LOWPOWER
@@ -5522,6 +5628,7 @@ void Net_ctor(void)
     me->pwho          = NULL;
     me->leaving    = false;
     me->leave_owed = false;
+    me->leave_left = 0U;
 #if CONFIG_KODE_LOWPOWER
     me->lp_who     = KODE_LOWPOWER_WHO_NONE;
     me->lp_rest    = false;
@@ -6766,6 +6873,20 @@ static QState Net_root(Net * const me, QEvt const * const e)
                 case KDRV_NET_MQTT_ERROR:
                     me->err = (uint8_t)KDRV_MQTT_ERR_REFUSED;
                     break;
+                case KDRV_NET_MQTT_ACKED: {
+                    /* A confirmed reply line reached the broker (its
+                     * PUBACK); the session's state is unchanged. */
+#if CONFIG_KODEOS_CHANNEL
+                    static const ConsoleSentEvt s_chan_sent = {
+                        .super = QEVT_INITIALIZER(CONSOLE_SENT_SIG),
+                        .src   = (uint8_t)KODE_CONSOLE_SRC_NET,
+                        .ok    = true,
+                    };
+
+                    QACTIVE_PUBLISH(&s_chan_sent.super, &me->super);
+#endif
+                    break;
+                }
                 default:
                     /* A disconnect: a bench client reconnects by itself, so
                      * the phase stands and the report carries the driver's
@@ -6775,7 +6896,10 @@ static QState Net_root(Net * const me, QEvt const * const e)
 #endif
                     break;
             }
-            mqtt_publish_state(me);
+            if ( (uint8_t)KDRV_NET_MQTT_ACKED != l->evt )
+            {
+                mqtt_publish_state(me);
+            }
             status = Q_HANDLED();
             break;
         }
@@ -6824,7 +6948,14 @@ static QState Net_root(Net * const me, QEvt const * const e)
             break;
         }
         case NET_CHAN_OUT_SIG: {
-            chan_out_step(me);
+            if ( 0U < me->leave_left )
+            {
+                net_leave_drain(me);   /* the leave's own steps */
+            }
+            else
+            {
+                chan_out_step(me);
+            }
             status = Q_HANDLED();
             break;
         }

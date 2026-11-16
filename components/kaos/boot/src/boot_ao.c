@@ -52,6 +52,8 @@
 #define BOOT_LEAVE_STEP_NET     0U
 /** @brief The leave step that waits for AO_Radio's answer. */
 #define BOOT_LEAVE_STEP_RADIO   1U
+/** @brief The leave step that waits for AO_Log's answer. */
+#define BOOT_LEAVE_STEP_LOG     2U
 
 _Static_assert(KSET_ZONE_MAX == KODE_CONFIG_VALUE_MAX,
                "a zone is one setting's value, the longest one");
@@ -62,7 +64,7 @@ typedef struct {
     QActive  super;
     QTimeEvt leave;         /**< The bound of the leave step that is running. */
     uint8_t  leave_kind;    /**< kdrv_radio_note_t: the role the jump goes to. */
-    uint8_t  leave_step;    /**< BOOT_LEAVE_STEP_NET or BOOT_LEAVE_STEP_RADIO. */
+    uint8_t  leave_step;    /**< BOOT_LEAVE_STEP_LOG, _NET or _RADIO.          */
 #if CONFIG_KODE_LOWPOWER
     uint8_t  lp_who;        /**< The id lowpower_join() gave.                 */
 #endif
@@ -261,6 +263,12 @@ void boot_radio_parked(void)
 void boot_net_left(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(BOOT_NET_LEFT_SIG);
+    QACTIVE_POST(AO_Boot, &evt, NULL);
+}
+
+void boot_log_flushed(void)
+{
+    static const QEvt evt = QEVT_INITIALIZER(BOOT_LOG_FLUSHED_SIG);
     QACTIVE_POST(AO_Boot, &evt, NULL);
 }
 
@@ -763,7 +771,7 @@ static void store_set(BootNvsSetEvt const * const e)
 }
 
 /**
- * @brief Second step of the leave: AO_Radio hangs BLE up and parks the C5.
+ * @brief Third step of the leave: AO_Radio hangs BLE up and parks the C5.
  *
  * An app without AO_Radio has nothing to wait for.
  *
@@ -784,18 +792,14 @@ static void leave_radio_step(Boot * const me)
 }
 
 /**
- * @brief Start the leave that ends in a reset.
+ * @brief Second step of the leave: AO_Net's clean stop of the Kode channel.
  *
- * The caller has done whatever must be on flash first. The first step is
- * AO_Net's clean stop of the Kode channel; an app without AO_Net goes on to
- * the second at once. The caller then transitions to Boot_leaving.
+ * An app without AO_Net goes on to the third at once.
  *
- * @param me   AO_Boot.
- * @param kind The role of the firmware the jump goes to.
+ * @param me AO_Boot.
  */
-static void leave_begin(Boot * const me, kdrv_radio_note_t kind)
+static void leave_net_step(Boot * const me)
 {
-    me->leave_kind = (uint8_t)kind;
     me->leave_step = BOOT_LEAVE_STEP_NET;
     if ( kaos_linked(&kaos_net_start) )
     {
@@ -805,6 +809,32 @@ static void leave_begin(Boot * const me, kdrv_radio_note_t kind)
     else
     {
         leave_radio_step(me);
+    }
+}
+
+/**
+ * @brief Start the leave that ends in a reset.
+ *
+ * The caller has done whatever must be on flash first. The first step is
+ * AO_Log's word that the lines posted before the leave are on their ports,
+ * so nothing said just before the jump (an install's last record) is behind
+ * the ports going down; a queue with no room goes on to the second at once.
+ * The caller then transitions to Boot_leaving.
+ *
+ * @param me   AO_Boot.
+ * @param kind The role of the firmware the jump goes to.
+ */
+static void leave_begin(Boot * const me, kdrv_radio_note_t kind)
+{
+    me->leave_kind = (uint8_t)kind;
+    me->leave_step = BOOT_LEAVE_STEP_LOG;
+    if ( log_flush_request() )
+    {
+        QTimeEvt_armX(&me->leave, KQP_TICKS_PER_MS(KODE_LEAVE_LOG_MS), 0U);
+    }
+    else
+    {
+        leave_net_step(me);
     }
 }
 
@@ -1744,7 +1774,7 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
 }
 
 /**
- * @brief The leave: AO_Net, then AO_Radio, then the reset.
+ * @brief The leave: AO_Log, AO_Net, then AO_Radio, then the reset.
  *
  * The substate of Boot_active that a restart request enters once its
  * pre-reset write is done. Every restart request and home gesture is dropped
@@ -1760,6 +1790,19 @@ static QState Boot_leaving(Boot * const me, QEvt const * const e)
     QState status;
     switch ( e->sig )
     {
+        case BOOT_LOG_FLUSHED_SIG: {
+            if ( BOOT_LEAVE_STEP_LOG == me->leave_step )
+            {
+                (void)QTimeEvt_disarm(&me->leave);
+                leave_net_step(me);
+            }
+            else
+            {
+                KLOG_D(TAG, "a late answer from AO_Log is ignored");
+            }
+            status = Q_HANDLED();
+            break;
+        }
         case BOOT_NET_LEFT_SIG: {
             if ( BOOT_LEAVE_STEP_NET == me->leave_step )
             {
@@ -1791,6 +1834,11 @@ static QState Boot_leaving(Boot * const me, QEvt const * const e)
                 /* The step before ran out as its answer arrived; the timer
                  * counting now is the next step's, not this one. */
                 KLOG_D(TAG, "a stale leave timeout is ignored");
+            }
+            else if ( BOOT_LEAVE_STEP_LOG == me->leave_step )
+            {
+                KLOG_W(TAG, "AO_Log did not answer in time; going on");
+                leave_net_step(me);
             }
             else if ( BOOT_LEAVE_STEP_NET == me->leave_step )
             {

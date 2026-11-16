@@ -483,7 +483,7 @@ static void ring_fresh(void)
 
     TEST_ASSERT_TRUE(kchan_out_init());
     kchan_out_set_wake(NULL);
-    while ( kchan_out_pop(scratch, sizeof(scratch)) != 0U )
+    while ( kchan_out_pop(scratch, sizeof(scratch), NULL) != 0U )
     {
         /* emptied */
     }
@@ -498,19 +498,40 @@ TEST_CASE("the ring hands lines back in the order they came", "[net_channel]")
 
     ring_fresh();
 
-    TEST_ASSERT_TRUE(kchan_out_push(">|a=1", 5U));
-    TEST_ASSERT_TRUE(kchan_out_push(">|b=22", 6U));
-    TEST_ASSERT_TRUE(kchan_out_push(">ok", 3U));
+    TEST_ASSERT_TRUE(kchan_out_push(">|a=1", 5U, false));
+    TEST_ASSERT_TRUE(kchan_out_push(">|b=22", 6U, false));
+    TEST_ASSERT_TRUE(kchan_out_push(">ok", 3U, false));
     TEST_ASSERT_TRUE(kchan_out_pending());
 
-    TEST_ASSERT_EQUAL_UINT(5U, kchan_out_pop(got, sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT(5U, kchan_out_pop(got, sizeof(got), NULL));
     TEST_ASSERT_EQUAL_STRING(">|a=1", got);
-    TEST_ASSERT_EQUAL_UINT(6U, kchan_out_pop(got, sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT(6U, kchan_out_pop(got, sizeof(got), NULL));
     TEST_ASSERT_EQUAL_STRING(">|b=22", got);
-    TEST_ASSERT_EQUAL_UINT(3U, kchan_out_pop(got, sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT(3U, kchan_out_pop(got, sizeof(got), NULL));
     TEST_ASSERT_EQUAL_STRING(">ok", got);
-    TEST_ASSERT_EQUAL_UINT(0U, kchan_out_pop(got, sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT(0U, kchan_out_pop(got, sizeof(got), NULL));
     TEST_ASSERT_FALSE(kchan_out_pending());
+}
+
+TEST_CASE("a line marked for a PUBACK comes back marked, whole", "[net_channel]")
+{
+    char line[KODE_LOG_LINE_MAX];
+    char got[KODE_LOG_LINE_MAX + 1U];
+    bool acked = false;
+
+    ring_fresh();
+
+    for ( size_t i = 0U; sizeof(line) > i; i++ )
+    {
+        line[i] = (char)('a' + (i % 26U));
+    }
+    TEST_ASSERT_TRUE(kchan_out_push(line, sizeof(line), true));
+    TEST_ASSERT_TRUE(kchan_out_push(">ok", 3U, false));
+    TEST_ASSERT_EQUAL_UINT(sizeof(line), kchan_out_pop(got, sizeof(got), &acked));
+    TEST_ASSERT_TRUE(acked);
+    TEST_ASSERT_EQUAL_MEMORY(line, got, sizeof(line));
+    TEST_ASSERT_EQUAL_UINT(3U, kchan_out_pop(got, sizeof(got), &acked));
+    TEST_ASSERT_FALSE(acked);
 }
 
 TEST_CASE("a line of 256 bytes goes through whole", "[net_channel]")
@@ -524,8 +545,8 @@ TEST_CASE("a line of 256 bytes goes through whole", "[net_channel]")
     {
         line[i] = (char)('a' + (i % 26U));
     }
-    TEST_ASSERT_TRUE(kchan_out_push(line, sizeof(line)));
-    TEST_ASSERT_EQUAL_UINT(sizeof(line), kchan_out_pop(got, sizeof(got)));
+    TEST_ASSERT_TRUE(kchan_out_push(line, sizeof(line), false));
+    TEST_ASSERT_EQUAL_UINT(sizeof(line), kchan_out_pop(got, sizeof(got), NULL));
     TEST_ASSERT_EQUAL_MEMORY(line, got, sizeof(line));
     TEST_ASSERT_EQUAL_CHAR('\0', got[sizeof(line)]);
 }
@@ -544,7 +565,7 @@ TEST_CASE("a full ring refuses the next line and counts it lost", "[net_channel]
     for ( ;; )
     {
         line[0] = (char)('A' + (stored % 26U));
-        if ( !kchan_out_push(line, sizeof(line)) )
+        if ( !kchan_out_push(line, sizeof(line), false) )
         {
             break;
         }
@@ -557,10 +578,10 @@ TEST_CASE("a full ring refuses the next line and counts it lost", "[net_channel]
     /* What was stored is intact and in order, and the ring takes lines again. */
     for ( unsigned i = 0U; i < stored; i++ )
     {
-        TEST_ASSERT_EQUAL_UINT(sizeof(line), kchan_out_pop(got, sizeof(got)));
+        TEST_ASSERT_EQUAL_UINT(sizeof(line), kchan_out_pop(got, sizeof(got), NULL));
         TEST_ASSERT_EQUAL_CHAR((char)('A' + (i % 26U)), got[0]);
     }
-    TEST_ASSERT_TRUE(kchan_out_push(">ok", 3U));
+    TEST_ASSERT_TRUE(kchan_out_push(">ok", 3U, false));
 }
 
 TEST_CASE("a line longer than the log's, or none at all, is not stored",
@@ -573,8 +594,8 @@ TEST_CASE("a line longer than the log's, or none at all, is not stored",
     (void)memset(big, 'x', sizeof(big));
     lost0 = kchan_out_lost();
 
-    TEST_ASSERT_FALSE(kchan_out_push(big, sizeof(big)));
-    TEST_ASSERT_FALSE(kchan_out_push(big, 0U));
+    TEST_ASSERT_FALSE(kchan_out_push(big, sizeof(big), false));
+    TEST_ASSERT_FALSE(kchan_out_push(big, 0U, false));
     TEST_ASSERT_EQUAL_UINT32(lost0 + 2U, kchan_out_lost());
     TEST_ASSERT_FALSE(kchan_out_pending());
 }
@@ -597,11 +618,11 @@ TEST_CASE("records wrap around the end of the ring without a byte changing",
         size_t const len = 1U + ((round * 37U) % KODE_LOG_LINE_MAX);
 
         (void)memset(want, (int)('a' + (round % 26U)), len);
-        TEST_ASSERT_TRUE(kchan_out_push(want, len));
+        TEST_ASSERT_TRUE(kchan_out_push(want, len, false));
         next_in++;
         if ( (round % 3U) != 0U )
         {
-            size_t const n = kchan_out_pop(got, sizeof(got));
+            size_t const n = kchan_out_pop(got, sizeof(got), NULL);
             size_t const w = 1U + ((next_out * 37U) % KODE_LOG_LINE_MAX);
             TEST_ASSERT_EQUAL_UINT(w, n);
             TEST_ASSERT_EQUAL_CHAR((char)('a' + (next_out % 26U)), got[0]);
@@ -612,7 +633,7 @@ TEST_CASE("records wrap around the end of the ring without a byte changing",
         {
             while ( next_out < next_in )
             {
-                size_t const n = kchan_out_pop(got, sizeof(got));
+                size_t const n = kchan_out_pop(got, sizeof(got), NULL);
                 TEST_ASSERT_EQUAL_UINT(1U + ((next_out * 37U) % KODE_LOG_LINE_MAX), n);
                 next_out++;
             }
@@ -627,24 +648,24 @@ TEST_CASE("the wake fires when the ring stops being empty, and again if it "
 
     ring_fresh();
 
-    (void)kchan_out_push("a", 1U);
-    (void)kchan_out_push("b", 1U);
+    (void)kchan_out_push("a", 1U, false);
+    (void)kchan_out_push("b", 1U, false);
     TEST_ASSERT_EQUAL_UINT(1U, s_wakes);          /* the edge only */
-    (void)kchan_out_pop(got, sizeof(got));
-    (void)kchan_out_pop(got, sizeof(got));
-    (void)kchan_out_push("c", 1U);
+    (void)kchan_out_pop(got, sizeof(got), NULL);
+    (void)kchan_out_pop(got, sizeof(got), NULL);
+    (void)kchan_out_push("c", 1U, false);
     TEST_ASSERT_EQUAL_UINT(2U, s_wakes);          /* empty again, so again */
 
-    (void)kchan_out_pop(got, sizeof(got));
+    (void)kchan_out_pop(got, sizeof(got), NULL);
     s_wake_answer = false;                         /* the consumer cannot be told */
-    (void)kchan_out_push("d", 1U);
+    (void)kchan_out_push("d", 1U, false);
     TEST_ASSERT_EQUAL_UINT(3U, s_wakes);
-    (void)kchan_out_push("e", 1U);
+    (void)kchan_out_push("e", 1U, false);
     TEST_ASSERT_EQUAL_UINT(4U, s_wakes);          /* tried again: it was owed */
     s_wake_answer = true;
-    (void)kchan_out_push("f", 1U);
+    (void)kchan_out_push("f", 1U, false);
     TEST_ASSERT_EQUAL_UINT(5U, s_wakes);          /* this one got through */
-    (void)kchan_out_push("g", 1U);
+    (void)kchan_out_push("g", 1U, false);
     TEST_ASSERT_EQUAL_UINT(5U, s_wakes);          /* and now it is not owed */
 }
 
@@ -654,16 +675,16 @@ TEST_CASE("clearing the ring counts every waiting line as lost", "[net_channel]"
     uint32_t lost0;
 
     ring_fresh();
-    (void)kchan_out_push("a", 1U);
-    (void)kchan_out_push("b", 1U);
-    (void)kchan_out_push("c", 1U);
+    (void)kchan_out_push("a", 1U, false);
+    (void)kchan_out_push("b", 1U, false);
+    (void)kchan_out_push("c", 1U, false);
     lost0 = kchan_out_lost();
 
     kchan_out_clear();
 
     TEST_ASSERT_EQUAL_UINT32(lost0 + 3U, kchan_out_lost());
     TEST_ASSERT_FALSE(kchan_out_pending());
-    TEST_ASSERT_EQUAL_UINT(0U, kchan_out_pop(got, sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT(0U, kchan_out_pop(got, sizeof(got), NULL));
     kchan_out_lose(2U);
     TEST_ASSERT_EQUAL_UINT32(lost0 + 5U, kchan_out_lost());
 }
@@ -674,12 +695,12 @@ TEST_CASE("a small buffer cuts the line it is given and the ring moves on",
     char got[5];
 
     ring_fresh();
-    (void)kchan_out_push(">|name=long", 11U);
-    (void)kchan_out_push(">ok", 3U);
+    (void)kchan_out_push(">|name=long", 11U, false);
+    (void)kchan_out_push(">ok", 3U, false);
 
-    TEST_ASSERT_EQUAL_UINT(4U, kchan_out_pop(got, sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT(4U, kchan_out_pop(got, sizeof(got), NULL));
     TEST_ASSERT_EQUAL_STRING(">|na", got);
-    TEST_ASSERT_EQUAL_UINT(3U, kchan_out_pop(got, sizeof(got)));
+    TEST_ASSERT_EQUAL_UINT(3U, kchan_out_pop(got, sizeof(got), NULL));
     TEST_ASSERT_EQUAL_STRING(">ok", got);
 }
 

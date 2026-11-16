@@ -546,6 +546,36 @@ kode_status_t kdrv_ble_console_write(const char *buf, size_t len)
     return KODE_OK;
 }
 
+static unsigned                s_confirmed;   /* lines written confirmed */
+static kdrv_ble_console_sent_t s_sent_cb;
+
+kode_status_t kdrv_ble_console_write_confirmed(const char *buf, size_t len)
+{
+    (void)buf;
+    (void)len;
+    ++s_confirmed;
+    return KODE_OK;
+}
+
+kode_status_t kdrv_ble_console_set_sent_cb(kdrv_ble_console_sent_t cb)
+{
+    s_sent_cb = cb;
+    return KODE_OK;
+}
+
+unsigned fake_ble_console_confirmed(void)
+{
+    return s_confirmed;
+}
+
+void fake_ble_console_answer(bool ok)
+{
+    if ( NULL != s_sent_cb )
+    {
+        s_sent_cb(ok);
+    }
+}
+
 kode_status_t kdrv_ble_console_selftest(void)
 {
     return KODE_OK;

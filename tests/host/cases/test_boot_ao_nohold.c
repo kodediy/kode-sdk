@@ -27,6 +27,7 @@
 #define boot_exit_evt              boot_exit_evt_nohold
 #define boot_radio_parked          boot_radio_parked_nohold
 #define boot_net_left              boot_net_left_nohold
+#define boot_log_flushed           boot_log_flushed_nohold
 #define boot_home_pending          boot_home_pending_nohold
 #define boot_home_defer_evt        boot_home_defer_evt_nohold
 #define boot_home_now_evt          boot_home_now_evt_nohold

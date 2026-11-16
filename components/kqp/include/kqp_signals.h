@@ -308,6 +308,13 @@ enum KodeSignals {
                                  *   (ChannelStateEvt). Every change of state,
                                  *   and on request - the MQTT_STATE_SIG
                                  *   pattern.                                */
+    CONSOLE_SENT_SIG,           /**< AO_Log (BLE) or AO_Net (the Kode
+                                 *   channel): a line written with
+                                 *   kode_log_reply_confirm() left the board on
+                                 *   that port, or could not (ConsoleSentEvt).
+                                 *   It answers the last such line sent there,
+                                 *   and every line before it: two confirmed
+                                 *   lines close together may get one.     */
     CONSOLE_LINE_SIG,           /**< AO_Log: a finished command line. Published
                                  *   rather than posted to AO_Console: AO_Log
                                  *   owns the device, not the policy, and must
@@ -832,6 +839,10 @@ enum KodeSignals {
                                  *   Kode channel for the jump - the client
                                  *   stopped cleanly, or there was none. One
                                  *   per NET_LEAVE_REQ_SIG.                   */
+    BOOT_LOG_FLUSHED_SIG,       /**< AO_Boot private (direct post, from
+                                 *   boot_log_flushed()): AO_Log has written
+                                 *   every line posted before the leave began.
+                                 *   One per LOG_FLUSH_REQ_SIG.               */
     BOOT_LEAVE_TMO_SIG,         /**< AO_Boot private QTimeEvt: the step of the
                                  *   leave that is running ran out of time.   */
     FACTORY_RESET_REQ_SIG,      /**< AO_Boot: forget everything the board
@@ -2038,6 +2049,11 @@ enum KodeSignals {
                                  *   with LOG_DOCK_SIG.                       */
     LOG_DOCK_SIG,               /**< To the asker: the dock's pins are lent or
                                  *   back (LogDockEvt).                       */
+    LOG_FLUSH_REQ_SIG,          /**< AO_Log: answer AO_Boot with
+                                 *   boot_log_flushed() (log_flush_request()).
+                                 *   Its place in the queue is the point: every
+                                 *   line posted before it is on its ports
+                                 *   first.                                   */
     TEST_DOT_REQ_SIG,           /**< AO_TestDot: a station verb from the
                                  *   console (TestDotReqEvt). Answered with
                                  *   TEST_DOT_REC_SIG records and one
@@ -2289,9 +2305,9 @@ typedef struct {
     uint8_t  dst_kind;                 /**< kfw_target_t, likewise.         */
     bool     launch;                   /**< Boot it once written.           */
     uint8_t  asker_src;                /**< KODE_CONSOLE_SRC_* of the command
-                                        *   that asked, kept in the install's
-                                        *   record; KODE_LOG_SRC_NONE when no
-                                        *   command did.                    */
+                                        *   that asked, where the install's
+                                        *   record goes; KODE_LOG_SRC_NONE
+                                        *   when no command did.            */
     QActive *who;                      /**< Where AO_AppMgr's verdict is
                                         *   posted (AppReqRspEvt), or NULL
                                         *   for none.                       */
@@ -5408,6 +5424,13 @@ typedef struct {
     uint8_t state;      /**< kdrv_mqtt_state_t                              */
     uint8_t err;        /**< kdrv_mqtt_err_t: meaningful when not up.       */
 } MqttStateEvt;
+
+/** @brief Whether a confirmed console line left the board (CONSOLE_SENT_SIG). */
+typedef struct {
+    QEvt    super;
+    uint8_t src;        /**< KODE_CONSOLE_SRC_BLE or KODE_CONSOLE_SRC_NET.  */
+    bool    ok;         /**< true: the far end has it; false: it is lost.   */
+} ConsoleSentEvt;
 
 /** @brief Where the Kode channel stands (CHANNEL_STATE_SIG). */
 typedef struct {

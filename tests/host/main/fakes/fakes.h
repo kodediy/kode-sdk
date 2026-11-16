@@ -827,6 +827,13 @@ void fake_ble_reset(void);
  *         the host would. */
 void fake_ble_set_sync(bool synced);
 
+/** @brief Lines kdrv_ble_console_write_confirmed() was given since boot. */
+unsigned fake_ble_console_confirmed(void);
+
+/** @brief Call the confirmation callback the console installed, as NimBLE's
+ *         host task would once the central answered (@p ok) or did not. */
+void fake_ble_console_answer(bool ok);
+
 /** @brief Make kdrv_ble_start() fail - a controller the C5 would not bring up. */
 void fake_ble_fail_start(bool fail);
 

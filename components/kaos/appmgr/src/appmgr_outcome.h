@@ -4,7 +4,10 @@
  * @brief The record of AO_AppMgr's last app install and last kodeOS update.
  *
  * One record per kind, kept in NVS, numbered by AO_AppMgr when it takes the
- * install: how it stands, why it failed, which port asked. Every call here
+ * install. The record goes to the port of the command that asked, as a
+ * `>|install` line: when the install is taken, before the verdict, and again
+ * when it ends. A port that is down then (the Kode
+ * channel, the BLE console) gets the record when it comes up. Every call here
  * runs in AO_AppMgr's thread.
  */
 #ifndef APPMGR_OUTCOME_H
@@ -12,6 +15,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+
+#include "kqp.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,9 +53,11 @@ typedef enum {
     APPMGR_WHY_MISSING,      /**< No such file, or the server said no.         */
     APPMGR_WHY_CUT,          /**< The source stopped before the image ended.   */
     APPMGR_WHY_CORRUPT,      /**< What arrived did not verify.                 */
-    APPMGR_WHY_WRITE,        /**< The image could not be written.            */
+    APPMGR_WHY_WRITE,        /**< The image could not be written.               */
     APPMGR_WHY_NO_ROOM,      /**< It does not fit, even with every app gone.   */
     APPMGR_WHY_WRONG_BOARD,  /**< It was built for another chip or target.     */
+    APPMGR_WHY_BUSY,         /**< The network's one download was someone
+                              *   else's: an app's file or GET.              */
     APPMGR_WHY_KEEP,         /**< An app it would remove could not be kept.    */
     APPMGR_WHY_CANCELLED,    /**< The person went back.                        */
     APPMGR_WHY_STALLED,      /**< The terminal stopped sending.                */
@@ -81,12 +88,14 @@ _Static_assert(sizeof(appmgr_inst_rec_t) == APPMGR_INST_LEN,
                "the install record's stored layout moved");
 
 /**
- * @brief Take the block and read both records back.
+ * @brief Take the block, read both records back, subscribe.
  *
- * A record a reset left running becomes a failure for `reset`. Called again,
- * as the host suite does, it starts over.
+ * A record a reset left running becomes a failure for `reset`, to be told
+ * when its port comes up. Called again, as the host suite does, it starts over.
+ *
+ * @param ao AO_AppMgr.
  */
-void appmgr_inst_init(void);
+void appmgr_inst_init(QActive *ao);
 
 /**
  * @brief A fresh install request arrived: note its kind and its asker.
@@ -101,7 +110,7 @@ void appmgr_inst_init(void);
  */
 void appmgr_inst_prepare(uint8_t src_kind, uint8_t dst_kind, uint8_t asker);
 
-/** @brief The request noted is taken: number it and store it running. */
+/** @brief The request noted is taken: number it, store it running, tell its port. */
 void appmgr_inst_taken(void);
 
 /**
@@ -117,7 +126,7 @@ void appmgr_inst_named(const char *name);
 void appmgr_inst_why(appmgr_inst_why_t why);
 
 /**
- * @brief The install in hand failed: store it.
+ * @brief The install in hand failed: store it and tell its port.
  *
  * A request refused before it was taken keeps no record.
  *
@@ -126,17 +135,34 @@ void appmgr_inst_why(appmgr_inst_why_t why);
 void appmgr_inst_failed(uint32_t pct);
 
 /**
- * @brief The app install in hand is in the directory: store it.
+ * @brief The app install in hand is in the directory: store it and tell its port.
+ *
+ * With @p jumps the board resets into the app at once: the line is handed to
+ * the port, and on the Kode channel or BLE it stays owed, to be told again
+ * once the board is back in kodeOS and the port is up.
+ *
  * @param name    Its project name.
  * @param version Its version.
+ * @param jumps   The app runs now (`run=on`).
  */
-void appmgr_inst_installed(const char *name, const char *version);
+void appmgr_inst_installed(const char *name, const char *version, bool jumps);
 
 /**
  * @brief The kodeOS update in hand is written and the switch is about to be
- *        asked: store it rebooting.
+ *        asked: store it rebooting and hand its line to its port.
+ *
+ * The switch follows at once, so on the Kode channel or BLE the line is not
+ * waited on; the next boot's verdict is what its port is owed.
  */
 void appmgr_inst_rebooting(void);
+
+/**
+ * @brief The events the records wait on: the Kode channel and the BLE
+ *        console coming up.
+ * @param e The event.
+ * @return true when @p e was one of them.
+ */
+bool appmgr_inst_on(QEvt const *e);
 
 #ifdef __cplusplus
 }

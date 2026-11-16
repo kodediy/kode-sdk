@@ -1294,6 +1294,10 @@ static struct {
                                             *   push sends it (s_rx_lock).   */
     uint32_t                 rx_dropped;   /**< Messages dropped because the
                                             *   ring was full, since boot.   */
+    int  ack_id;     /**< The QoS 1 publish whose PUBACK is awaited; 0 for none
+                      *   (s_rx_lock).                                        */
+    int  acked_id;   /**< The last PUBACK nobody awaited yet: one that beat its
+                      *   publish's return (s_rx_lock).                       */
 } s_mqtt;
 
 /**
@@ -1568,7 +1572,12 @@ static void mqtt_event(void *args, esp_event_base_t base, int32_t id,
             /* Saying it out loud is what keeps `mqtt_info` from claiming a
              * broker that is not there. A client that redials by itself is
              * still connecting; one whose owner paces the retries is down
-             * until the owner starts another. */
+             * until the owner starts another. A PUBACK awaited is never
+             * coming. */
+            portENTER_CRITICAL(&s_rx_lock);
+            s_mqtt.ack_id   = 0;
+            s_mqtt.acked_id = 0;
+            portEXIT_CRITICAL(&s_rx_lock);
             if ( s_mqtt.redials )
             {
                 s_mqtt.state = KDRV_MQTT_CONNECTING;
@@ -1611,6 +1620,29 @@ static void mqtt_event(void *args, esp_event_base_t base, int32_t id,
             else
             {
                 mqtt_report(KDRV_NET_MQTT_ERROR, NULL, false);
+            }
+            break;
+        }
+        case MQTT_EVENT_PUBLISHED: {
+            /* The broker's PUBACK. Only the last acked publish is waited
+             * for: an earlier one's is late, and the later covers it. One
+             * that arrives before its publish has returned is kept for the
+             * publish to find. */
+            bool ours = false;
+            portENTER_CRITICAL(&s_rx_lock);
+            if ( (0 != s_mqtt.ack_id) && (ev->msg_id == s_mqtt.ack_id) )
+            {
+                s_mqtt.ack_id = 0;
+                ours = true;
+            }
+            else
+            {
+                s_mqtt.acked_id = ev->msg_id;
+            }
+            portEXIT_CRITICAL(&s_rx_lock);
+            if ( ours )
+            {
+                mqtt_report(KDRV_NET_MQTT_ACKED, NULL, false);
             }
             break;
         }
@@ -1842,6 +1874,48 @@ kode_status_t kdrv_net_mqtt_publish(const char *topic, const void *data,
     return (0 <= id) ? KODE_OK : KODE_NO_RESOURCES;
 }
 
+kode_status_t kdrv_net_mqtt_publish_acked(const char *topic, const void *data,
+                                          uint16_t len)
+{
+    kode_status_t st = KODE_DENIED;
+
+    if ( (NULL != s_mqtt.client) && (KDRV_MQTT_UP == s_mqtt.state) )
+    {
+        const char *payload = "";   /* see kdrv_net_mqtt_publish() */
+        if ( 0U < len )
+        {
+            payload = (const char *)data;
+        }
+        /* Written to the socket now, as QoS 0 is; esp-mqtt also keeps it
+         * until the PUBACK, which MQTT_EVENT_PUBLISHED reports. */
+        int const id = esp_mqtt_client_publish(s_mqtt.client, topic, payload,
+                                               (int)len, 1, 0);
+        st = KODE_NO_RESOURCES;
+        if ( 0 < id )
+        {
+            /* esp-mqtt's task may have heard the PUBACK already. */
+            bool early = false;
+            portENTER_CRITICAL(&s_rx_lock);
+            if ( id == s_mqtt.acked_id )
+            {
+                s_mqtt.acked_id = 0;
+                early = true;
+            }
+            else
+            {
+                s_mqtt.ack_id = id;
+            }
+            portEXIT_CRITICAL(&s_rx_lock);
+            if ( early )
+            {
+                mqtt_report(KDRV_NET_MQTT_ACKED, NULL, false);
+            }
+            st = KODE_OK;
+        }
+    }
+    return st;
+}
+
 kode_status_t kdrv_net_mqtt_subscribe(const char *topic)
 {
     kode_status_t st = KODE_DENIED;
@@ -1909,6 +1983,13 @@ kode_status_t kdrv_net_mqtt_publish(const char *topic, const void *data,
                                     uint16_t len, bool retain)
 {
     (void)topic; (void)data; (void)len; (void)retain;
+    return KODE_DENIED;
+}
+
+kode_status_t kdrv_net_mqtt_publish_acked(const char *topic, const void *data,
+                                          uint16_t len)
+{
+    (void)topic; (void)data; (void)len;
     return KODE_DENIED;
 }
 

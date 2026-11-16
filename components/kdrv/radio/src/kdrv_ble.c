@@ -67,6 +67,11 @@ extern void ble_store_config_init(void);
 #define BLE_BIT_SCAN_DONE   (1U << 1)
 /** @brief The owner asked the listen in flight to end (kdrv_ble_scan_abort()). */
 #define BLE_BIT_SCAN_ABORT  (1U << 2)
+/** @brief The host task has run kdrv_ble_quiet()'s hang-up. */
+#define BLE_BIT_HUNG_UP     (1U << 3)
+/** @brief How long kdrv_ble_quiet() gives the host task to run its hang-up
+ *         before it hangs up from its own thread. */
+#define BLE_HANGUP_MS       50U
 
 /** How long past a scan's duration its completion is waited for, ms. */
 #define BLE_SCAN_MARGIN_MS  2000U
@@ -1059,6 +1064,143 @@ static struct ble_npl_event s_tx_ev;
  * exactly that way. */
 static struct ble_npl_callout s_tx_co;
 #define KDRV_BLE_RETRY_TICKS  2U
+/* kdrv_ble_quiet()'s hang-up, run on the host task behind the drain. */
+static struct ble_npl_event s_hangup_ev;
+
+/* ---- Confirmed lines ------------------------------------------------------
+ * A line written with kdrv_ble_console_write_confirmed() is confirmed once
+ * NimBLE has taken every byte the ring held, that line's included, AND the
+ * central has answered a request sent after them. The link layer delivers in
+ * order, so an answer to the later request means the notifications before it
+ * reached the central. The request is a discovery of the GAP service by its
+ * UUID: every GATT server holds that service and answers it without security,
+ * and an error answer counts as well, since it too comes from the central.
+ * One mark is kept: one answer confirms every line before it. A line the
+ * ring refused or gave up on since the mark, a link that went, or a request
+ * nobody answered is reported as not sent. */
+
+#define KDRV_BLE_GAP_SVC_UUID16  0x1800U  /**< The GAP service, on every GATT server. */
+#define KDRV_BLE_ATT_ERR_SPAN    0x100    /**< An ATT error is one byte over BLE_HS_ERR_ATT_BASE. */
+
+static kdrv_ble_console_sent_t s_sent_cb;   /**< Told how a confirmed line went.     */
+static bool     s_confirm_want;   /**< A confirmed line waits; under the ring's lock. */
+static uint16_t s_confirm_drops;  /**< tx_drop when it was marked; under the lock.   */
+static bool     s_confirm_busy;   /**< The request is out; the host task alone.      */
+
+/**
+ * @brief Say how the confirmed lines went, and forget the mark.
+ * @param ok true when the central has them.
+ */
+static void confirm_report(bool ok)
+{
+    s_confirm_busy = false;
+    if ( NULL != s_sent_cb )
+    {
+        s_sent_cb(ok);
+    }
+}
+
+/**
+ * @brief A marked line waits and the link is gone: it is not sent.
+ *
+ * Runs on the host task, the way every caller of confirm_report() does.
+ */
+static void confirm_lost(void)
+{
+    bool want = false;
+
+    if ( NULL != s_ring_lock )
+    {
+        khal_mutex_lock(s_ring_lock);
+        want           = s_confirm_want;
+        s_confirm_want = false;
+        khal_mutex_unlock(s_ring_lock);
+    }
+    if ( want || s_confirm_busy )
+    {
+        confirm_report(false);
+    }
+}
+
+/**
+ * @brief The central's answer to the request sent after the marked line.
+ *
+ * Any answer from the central confirms: a service found, the end of the
+ * procedure, or an ATT error. A host error (no link, no answer in time) does
+ * not. A line marked after the request went is not covered by its answer: the
+ * drain sends another request, whose answer speaks for both. Returning
+ * nonzero ends the procedure here, so it calls back once.
+ */
+static int confirm_answered(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            const struct ble_gatt_svc *service, void *arg)
+{
+    (void)conn_handle;
+    (void)service;
+    (void)arg;
+    if ( s_confirm_busy )
+    {
+        int const st = (int)error->status;
+        bool const ok = (0 == st) || (BLE_HS_EDONE == st)
+                        || ((BLE_HS_ERR_ATT_BASE <= st)
+                            && ((BLE_HS_ERR_ATT_BASE + KDRV_BLE_ATT_ERR_SPAN) > st));
+        bool again = false;
+
+        if ( ok )
+        {
+            khal_mutex_lock(s_ring_lock);
+            again = s_confirm_want;
+            khal_mutex_unlock(s_ring_lock);
+        }
+        if ( again )
+        {
+            s_confirm_busy = false;
+            ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_tx_ev);
+        }
+        else
+        {
+            confirm_report(ok);
+        }
+    }
+    return 1;
+}
+
+/**
+ * @brief The ring and the record in hand are empty: send the request a marked
+ *        line waits for.
+ * @param conn The console's connection.
+ */
+static void confirm_send(uint16_t conn)
+{
+    bool     want  = false;
+    uint16_t drops = 0U;
+
+    khal_mutex_lock(s_ring_lock);
+    if ( s_confirm_want && (!s_confirm_busy) && (0U == s_ring.used) )
+    {
+        want           = true;
+        drops          = s_confirm_drops;
+        s_confirm_want = false;
+    }
+    khal_mutex_unlock(s_ring_lock);
+    if ( want )
+    {
+        s_confirm_busy = true;
+        if ( drops != s_ble.tx_drop )
+        {
+            confirm_report(false);   /* a line since the mark never went */
+        }
+        else if ( ble_gattc_disc_svc_by_uuid(conn,
+                                             BLE_UUID16_DECLARE(KDRV_BLE_GAP_SVC_UUID16),
+                                             &confirm_answered, NULL) != 0 )
+        {
+            confirm_report(false);
+        }
+        else
+        {
+            /* confirm_answered() reports. */
+        }
+    }
+}
 
 /**
  * @brief Push what the ring holds to the central. Runs on NimBLE's host task.
@@ -1082,6 +1224,7 @@ static void console_drain(struct ble_npl_event *ev)
     {
         s_pend_len = 0U;
         s_pend_off = 0U;
+        confirm_lost();
         return;
     }
 
@@ -1166,6 +1309,31 @@ static void console_drain(struct ble_npl_event *ev)
     {
         (void)ble_npl_callout_reset(&s_tx_co, KDRV_BLE_RETRY_TICKS);
     }
+    else
+    {
+        confirm_send(conn);   /* everything written is NimBLE's now */
+    }
+}
+
+/**
+ * @brief Hand the console's ring to the stack, then hang up (host task).
+ *
+ * kdrv_ble_quiet()'s disconnect, posted to the host task's queue rather than
+ * asked from the worker: a line AO_Log wrote before it (an install's last
+ * record, before a jump) is given to the stack first. Only what the stack
+ * takes at once goes: nothing here waits for the air.
+ *
+ * @param ev Unused.
+ */
+static void console_hangup(struct ble_npl_event *ev)
+{
+    (void)ev;
+    console_drain(NULL);
+    if ( BLE_HS_CONN_HANDLE_NONE != s_ble.conn )
+    {
+        (void)ble_gap_terminate(s_ble.conn, BLE_ERR_REM_USER_CONN_TERM);
+    }
+    (void)xEventGroupSetBits(s_ble.bits, BLE_BIT_HUNG_UP);
 }
 
 kode_status_t kdrv_ble_console_write(const char *buf, size_t len)
@@ -1196,6 +1364,35 @@ kode_status_t kdrv_ble_console_write(const char *buf, size_t len)
      * driver contributes at most one entry to that queue. That is both "one
      * drain in flight" and the reason this post cannot block. */
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_tx_ev);
+    return KODE_OK;
+}
+
+kode_status_t kdrv_ble_console_write_confirmed(const char *buf, size_t len)
+{
+    /* Read before the line is in the ring: the drain may take it, and lose
+     * it, before this call marks it. */
+    uint16_t const drops = s_ble.tx_drop;
+    kode_status_t const st = kdrv_ble_console_write(buf, len);
+
+    if ( KODE_OK == st )
+    {
+        khal_mutex_lock(s_ring_lock);
+        if ( !s_confirm_want )
+        {
+            s_confirm_drops = drops;   /* a drop after this fails the mark */
+        }
+        s_confirm_want = true;
+        khal_mutex_unlock(s_ring_lock);
+        /* The drain may have taken the line before the mark: once more, so
+         * it finds the ring empty and sends the request. */
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_tx_ev);
+    }
+    return st;
+}
+
+kode_status_t kdrv_ble_console_set_sent_cb(kdrv_ble_console_sent_t cb)
+{
+    s_sent_cb = cb;
     return KODE_OK;
 }
 
@@ -1951,6 +2148,19 @@ uint16_t kdrv_ble_console_backlog(void)
 uint16_t kdrv_ble_console_retry(void)
 {
     return 0U;
+}
+
+kode_status_t kdrv_ble_console_write_confirmed(const char *buf, size_t len)
+{
+    (void)buf;
+    (void)len;
+    return KODE_DENIED;
+}
+
+kode_status_t kdrv_ble_console_set_sent_cb(kdrv_ble_console_sent_t cb)
+{
+    (void)cb;
+    return KODE_OK;
 }
 
 bool kdrv_ble_mirror_attached(void)
@@ -2946,6 +3156,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 #if CONFIG_KODEOS_BLE_CONSOLE
             kdrv_ble_app_link_reset();
             s_ble.console_on = false;
+            confirm_lost();   /* before tx_drop restarts under the mark */
             s_ble.tx_drop    = 0U;
             s_line_len       = 0U;
             s_line_over      = false;
@@ -3370,7 +3581,9 @@ kode_status_t kdrv_ble_start(void)
      * os_memblock_get() on some starts and not on others. */
     (void)memset(&s_tx_ev, 0, sizeof(s_tx_ev));
     (void)memset(&s_tx_co, 0, sizeof(s_tx_co));
+    (void)memset(&s_hangup_ev, 0, sizeof(s_hangup_ev));
     ble_npl_event_init(&s_tx_ev, &console_drain, NULL);
+    ble_npl_event_init(&s_hangup_ev, &console_hangup, NULL);
     (void)ble_npl_callout_init(&s_tx_co, nimble_port_get_dflt_eventq(),
                                &console_drain, NULL);
 
@@ -3496,7 +3709,24 @@ kode_status_t kdrv_ble_quiet(void)
         /* Hang up rather than leave a session alive on a service the owner
          * has just switched off. The DISCONNECT event does the bookkeeping,
          * on the host task, exactly as it does when the peer leaves first. */
+#if CONFIG_KODEOS_BLE_CONSOLE
+        /* On the host task, behind the console's drain: what is in the ring
+         * reaches the stack first (console_hangup()). The bound only covers a
+         * host task that does not run. */
+        (void)xEventGroupClearBits(s_ble.bits, BLE_BIT_HUNG_UP);
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_hangup_ev);
+        EventBits_t const bits = xEventGroupWaitBits(s_ble.bits, BLE_BIT_HUNG_UP,
+                                                     pdFALSE, pdFALSE,
+                                                     pdMS_TO_TICKS(BLE_HANGUP_MS));
+        if ( (bits & BLE_BIT_HUNG_UP) == 0U )
+        {
+            KLOG_W(TAG, "the host task did not hang up in %u ms; hanging up here",
+                   (unsigned)BLE_HANGUP_MS);
+            (void)ble_gap_terminate(s_ble.conn, BLE_ERR_REM_USER_CONN_TERM);
+        }
+#else
         (void)ble_gap_terminate(s_ble.conn, BLE_ERR_REM_USER_CONN_TERM);
+#endif
     }
 
     /* IDLE, not OFF: the stack IS up, and this function's whole reason for
