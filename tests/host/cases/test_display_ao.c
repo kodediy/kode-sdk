@@ -3197,6 +3197,12 @@ TEST_CASE("a compose request leaves AO_Display's queue its margin, and is refuse
     TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)KQP_DISPLAY_CMD_MARGIN,
                                    (unsigned)uxQueueSpacesAvailable(AO_Display->eQueue),
                                    "nothing was queued");
+    /* A request that was never made has no answer: nothing is written for
+     * it, nobody is woken and nobody waits. */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_sem_signals(), "a refused post signals nobody");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, fake_sem_last_wait_ms(), "nor is it waited for");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_cp_ask.ack, "no answer is written for it");
+    TEST_ASSERT_EQUAL_UINT32(0U, s_cp_ask.rc);
 
     while ( xQueueReceive(AO_Display->eQueue, &left, 0U) == pdTRUE )
     {
