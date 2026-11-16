@@ -4,6 +4,7 @@
  * @brief AO_AppMgr's deadline on a wait that used to have none.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -3813,6 +3814,8 @@ TEST_CASE("the file of another length is said with its bytes and the image's",
     keep_end();
 }
 
+static appmgr_inst_rec_t inst_read(const char *key);
+
 /* The card is where the new image comes from, and a failed copy on a card can
  * poison every later read of it: so the install is called off with nothing
  * evicted, and the glass is told the card is what failed. */
@@ -3848,10 +3851,14 @@ TEST_CASE("a failed copy cancels an install read from the card, and evicts nothi
     }
     QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
     ao_spy_drain();
+    appmgr_inst_rec_t const rec = inst_read(APPMGR_INST_KEY_APP);
 
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "one cancelled install, one failure");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KFAIL_KEEP, why,
         "the failure must say the card could not keep the app");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, rec.state);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_KEEP, rec.why,
+        "the record says the app could not be kept");
     TEST_ASSERT_TRUE_MESSAGE(old_installed(),
         "the cancelled install evicted the app it could not keep");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_tally().open,
@@ -11709,9 +11716,9 @@ TEST_CASE("a record written just before a jump is told again on return",
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(1U, told, "the PUBACK on return tells it");
 }
 
-/* `dst=os` from a file: the `rebooting` record is written to the channel and
- * AO_Boot asked for the switch with no tick between. The verdict, after the
- * reboot, is what the channel is owed then. */
+/* `dst=os` from a file: the `installed` record is written to the channel and
+ * AO_Boot asked for the switch with no tick between, as an app's jump. It
+ * stays owed, told again after the reboot; the verdict follows it. */
 TEST_CASE("a kodeOS update from a file switches in the step its record is written",
           "[appmgr_ao][install_rec]")
 {
@@ -11740,7 +11747,7 @@ TEST_CASE("a kodeOS update from a file switches in the step its record is writte
     answer_eof();       /* the end of the file ends the update */
     (void)qf_support_pump(AO_AppMgr, 8U);
 
-    unsigned const src      = inst_src_of(">|install id=", "state=rebooting");
+    unsigned const src      = inst_src_of("dst=os", "state=installed");
     bool const     switched = boot_saw(BOOT_OS_SWITCH_SIG);
     appmgr_inst_rec_t const r = inst_read(APPMGR_INST_KEY_OS);
     inst_channel((uint8_t)CHAN_OFF);
@@ -11748,9 +11755,9 @@ TEST_CASE("a kodeOS update from a file switches in the step its record is writte
     Mockkdrv_slot_Destroy();
 
     TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_NET, src,
-        "the rebooting record is written to the channel, plain");
+        "the installed record is written to the channel, plain");
     TEST_ASSERT_TRUE_MESSAGE(switched, "AO_Boot was not asked with the record");
-    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_REBOOTING, r.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_INSTALLED, r.state);
     TEST_ASSERT_EQUAL_UINT8(0U, r.told);
 }
 
@@ -11997,4 +12004,302 @@ TEST_CASE("install_info with nothing ever installed says none",
         ">|install id=0 dst=app state=none pct=0 name=- version=- why=-", ""));
     TEST_ASSERT_NOT_NULL(inst_line_with(
         ">|install id=0 dst=os state=none pct=0 name=- version=- why=-", ""));
+}
+
+/** @brief Store a kodeOS update installed into @p slot, its verdict owed, then start over. */
+static void inst_os_installed_into(uint32_t slot)
+{
+    appmgr_inst_rec_t r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.id     = 70U;
+    r.layout = (uint8_t)APPMGR_INST_LAYOUT;
+    r.state  = (uint8_t)APPMGR_INST_INSTALLED;
+    r.src    = (uint8_t)KODE_CONSOLE_SRC_SERIAL;
+    r.told   = 1U;
+    r.slot   = slot;
+    r.pct    = (uint8_t)APPMGR_INST_PCT_DONE;
+    (void)snprintf(r.version, sizeof(r.version), "%s", "0.1.2");
+    fake_nvs_seed(APPMGR_UNDO_NS, APPMGR_INST_KEY_OS, &r, sizeof(r));
+    appmgr_fresh();
+    fake_klog_reset();
+}
+
+/**
+ * @brief AO_Boot's minute, as it publishes it.
+ * @param running Where kodeOS runs.
+ * @param other   kboot_other_t: what became of the other slot.
+ */
+static void inst_stable(uint32_t running, kboot_other_t other)
+{
+    BootStableEvt stable;
+
+    (void)memset(&stable, 0, sizeof(stable));
+    stable.super.sig = (QSignal)BOOT_STABLE_SIG;
+    stable.running   = running;
+    stable.other     = (uint8_t)other;
+    QASM_DISPATCH(AO_AppMgr, &stable.super, 0U);
+}
+
+/* The update is settled the minute the kodeOS that boots stays up: the slot
+ * written is running, so it is confirmed, and nothing later can undo that. */
+TEST_CASE("a kodeOS update whose slot runs a minute is confirmed and told",
+          "[appmgr_ao][install_rec]")
+{
+    inst_os_installed_into(0x420000U);
+
+    inst_stable(0x420000U, KBOOT_OTHER_GIVEN_UP);
+    appmgr_inst_rec_t const r = inst_read(APPMGR_INST_KEY_OS);
+    const char * const line = inst_line_with("id=70 dst=os state=confirmed", "");
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_CONFIRMED, r.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_NONE, r.why);
+    TEST_ASSERT_EQUAL_UINT8(1U, r.told);
+    TEST_ASSERT_NOT_NULL(line);
+    TEST_ASSERT_NOT_NULL(strstr(line, "version=\"0.1.2\" why=-"));
+}
+
+/* The board does not run the slot written: AO_Boot's word for the other slot
+ * says why. One the bootloader aborted never confirmed itself, one given up
+ * on crashed, and one never launched was never switched to. */
+TEST_CASE("a kodeOS update the board came back from is rolled back, and says why",
+          "[appmgr_ao][install_rec]")
+{
+    inst_os_installed_into(0x420000U);
+    inst_stable(0x020000U, KBOOT_OTHER_UNCONFIRMED);
+    appmgr_inst_rec_t const aborted = inst_read(APPMGR_INST_KEY_OS);
+
+    inst_os_installed_into(0x420000U);
+    inst_stable(0x820000U, KBOOT_OTHER_GIVEN_UP);
+    appmgr_inst_rec_t const crashed = inst_read(APPMGR_INST_KEY_OS);
+    bool const said = (NULL != inst_line_with("dst=os state=rolled_back", "why=crashed"));
+
+    inst_os_installed_into(0x420000U);
+    inst_stable(0x820000U, KBOOT_OTHER_NEVER_RAN);
+    appmgr_inst_rec_t const never = inst_read(APPMGR_INST_KEY_OS);
+
+    inst_stable(0x420000U, KBOOT_OTHER_GIVEN_UP);   /* settled: a later minute changes nothing */
+    appmgr_inst_rec_t const after = inst_read(APPMGR_INST_KEY_OS);
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_ROLLED_BACK, aborted.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_UNCONFIRMED, aborted.why);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_ROLLED_BACK, crashed.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_CRASHED, crashed.why);
+    TEST_ASSERT_TRUE(said);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, never.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_SWITCH, never.why);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, after.state);
+}
+
+/* A kodeOS update's `installed` its port may not have heard before the switch
+ * is told again after it, as an app's is; the verdict at the minute follows. */
+TEST_CASE("a kodeOS installed record not told before the reset is told after it",
+          "[appmgr_ao][install_rec]")
+{
+    appmgr_inst_rec_t r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.id     = 71U;
+    r.layout = (uint8_t)APPMGR_INST_LAYOUT;
+    r.state  = (uint8_t)APPMGR_INST_INSTALLED;
+    r.src    = (uint8_t)KODE_CONSOLE_SRC_BLE;
+    r.told   = 0U;
+    r.slot   = 0x420000U;
+    fake_nvs_seed(APPMGR_UNDO_NS, APPMGR_INST_KEY_OS, &r, sizeof(r));
+    appmgr_fresh();
+    fake_klog_reset();
+
+    inst_ble(true);
+    unsigned const src = inst_src_of("id=71 dst=os", "state=installed");
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_BLE, true);
+    appmgr_inst_rec_t const told = inst_read(APPMGR_INST_KEY_OS);
+    inst_stable(0x420000U, KBOOT_OTHER_GIVEN_UP);
+    inst_ble(true);   /* told, the BLE half was let go: it is asked again */
+    unsigned const verdict = inst_src_of("id=71 dst=os", "state=confirmed");
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_BLE, true);
+    appmgr_inst_rec_t const settled = inst_read(APPMGR_INST_KEY_OS);
+    inst_ble(false);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_BLE | KODE_LOG_SRC_CONFIRM, src,
+        "the owed installed goes out again, confirmed");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_INSTALLED, told.state);
+    TEST_ASSERT_EQUAL_UINT8(1U, told.told);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_CONSOLE_SRC_BLE | KODE_LOG_SRC_CONFIRM, verdict,
+        "the verdict follows it");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_CONFIRMED, settled.state);
+    TEST_ASSERT_EQUAL_UINT8(1U, settled.told);
+}
+
+/* A switch AO_Boot could not make ends the update in this boot: no reset is
+ * coming, and the minute that may still run here is not the new kodeOS's. */
+TEST_CASE("a kodeOS update whose switch failed is told at once, and this boot's "
+          "minute does not settle it", "[appmgr_ao][install_rec]")
+{
+    static uint8_t payload[96];
+    static const QEvt switch_failed = QEVT_INITIALIZER(BOOT_OS_SWITCH_FAIL_SIG);
+
+    for ( unsigned i = 0U; sizeof(payload) > i; ++i )
+    {
+        payload[i] = (uint8_t)((i * 5U) + 1U);
+    }
+    image_chain(payload);
+
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    (void)memset(&s_slot_log, 0, sizeof(s_slot_log));
+    kdrv_slot_present_ExpectAndReturn(true);
+    kdrv_slot_size_IgnoreAndReturn(0x400000U);
+    kdrv_slot_address_IgnoreAndReturn(0x420000U);
+    kdrv_slot_sink_ExpectAndReturn(&SLOT_FAKE_SINK);
+    kdrv_slot_desc_IgnoreAndReturn(KODE_ERROR);
+
+    ask_recv_os((uint32_t)sizeof(payload),
+                khal_crc32(KHAL_CRC32_INIT, payload, sizeof(payload)));
+    raw_armed(true);
+    fake_klog_reset();
+    feed(payload, (uint16_t)sizeof(payload));
+    appmgr_inst_rec_t const installed = inst_read(APPMGR_INST_KEY_OS);
+    bool const told_installed = (NULL != inst_line_with("dst=os state=installed", ""));
+
+    inst_stable(0x020000U, KBOOT_OTHER_NEVER_RAN);   /* this boot's: settles nothing */
+    QASM_DISPATCH(AO_AppMgr, &switch_failed, 0U);
+    appmgr_inst_rec_t const failed = inst_read(APPMGR_INST_KEY_OS);
+    bool const told_failed = (NULL != inst_line_with("dst=os state=failed", "why=switch"));
+
+    run_ticks(APPMGR_ANSWER_DRAIN_DEADLINE_TICKS + 2U);
+    (void)boot_saw(BOOT_OS_SWITCH_SIG);
+    ao_spy_drain();
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_INSTALLED, installed.state);
+    TEST_ASSERT_EQUAL_HEX32(0x420000U, installed.slot);
+    TEST_ASSERT_TRUE_MESSAGE(told_installed, "the write's end is told before the switch");
+    TEST_ASSERT_EQUAL_UINT32(installed.id, failed.id);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, failed.state);
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_WHY_SWITCH, failed.why);
+    TEST_ASSERT_TRUE(told_failed);
+}
+
+/* ---- A kodeOS update by URL, a lost line --------------------------------- */
+
+/* `dst=os` from a URL ends as one from a file does: `installed`, to the
+ * asker's port, in the step that asks AO_Boot for the switch. */
+TEST_CASE("a kodeOS update from a URL ends installed and switches",
+          "[appmgr_ao][install_rec]")
+{
+    static uint8_t    payload[96];
+    FlashReqEvt       e;
+    StorageDataEvt    d;
+
+    for ( unsigned i = 0U; sizeof(payload) > i; ++i )
+    {
+        payload[i] = (uint8_t)((i * 5U) + 1U);
+    }
+    image_chain(payload);
+    Mockkdrv_slot_Init();
+    recv_fresh();
+    (void)boot_saw(BOOT_OS_SWITCH_SIG);
+    (void)net_seen();
+    kdrv_slot_present_IgnoreAndReturn(true);
+    kdrv_slot_size_IgnoreAndReturn(0x400000U);
+    kdrv_slot_address_IgnoreAndReturn(0x420000U);
+    kdrv_slot_sink_IgnoreAndReturn(&SLOT_FAKE_SINK);
+    kdrv_slot_desc_IgnoreAndReturn(KODE_ERROR);
+    fake_klog_reset();
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super     = (QEvt)QEVT_INITIALIZER(FLASH_REQ_SIG);
+    e.src_kind  = (uint8_t)KFW_SRC_HTTP;
+    e.dst_kind  = (uint8_t)KFW_TARGET_OS;
+    e.asker_src = (uint8_t)KODE_CONSOLE_SRC_SERIAL;
+    (void)snprintf(e.src, sizeof(e.src), "%s", "https://example.com/kodeos.bin");
+    QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
+    fetch_opened((uint8_t)KODE_OK, (uint32_t)sizeof(payload));
+    (void)memcpy(s_net_chunk, payload, sizeof(payload));
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.len    = (uint16_t)sizeof(payload);
+    d.idx    = 0U;
+    d.status = (uint8_t)KODE_OK;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    d.len = 0U;
+    d.eof = true;                         /* the end comes on its own */
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+
+    appmgr_inst_rec_t const r = inst_read(APPMGR_INST_KEY_OS);
+    bool const said     = (NULL != inst_line_with("dst=os state=installed", "pct=100"));
+    bool const switched = boot_saw(BOOT_OS_SWITCH_SIG);
+    (void)net_seen();
+    run_ticks(2U);
+    Mockkdrv_slot_Destroy();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_INSTALLED, r.state);
+    TEST_ASSERT_EQUAL_HEX32(0x420000U, r.slot);
+    TEST_ASSERT_EQUAL_UINT8(1U, r.told);
+    TEST_ASSERT_TRUE_MESSAGE(said, "the installed record was not written");
+    TEST_ASSERT_TRUE_MESSAGE(switched, "AO_Boot was not asked for the switch");
+}
+
+/* A confirmed line the board itself lost (AO_Log's pool, its queue or the
+ * cmd/out ring) is answered not sent while the port stays up: the record is
+ * owed again, and goes out the next time the port says it is up. */
+TEST_CASE("a confirmed record the board lost with the port up is owed again",
+          "[appmgr_ao][install_rec]")
+{
+    inst_seed(APPMGR_INST_KEY_APP, 81U, (uint8_t)APPMGR_INST_INSTALLED,
+              (uint8_t)APPMGR_WHY_NONE, (uint8_t)KODE_CONSOLE_SRC_NET);
+    inst_seed(APPMGR_INST_KEY_OS, 0U, (uint8_t)APPMGR_INST_NONE,
+              (uint8_t)APPMGR_WHY_NONE, (uint8_t)KODE_CONSOLE_SRC_SERIAL);
+    appmgr_fresh();
+    fake_klog_reset();
+
+    inst_channel((uint8_t)CHAN_UP);
+    unsigned const first = klog_count_of("id=81 ");
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_NET, false);   /* lost inside the board */
+    appmgr_inst_rec_t const lost = inst_read(APPMGR_INST_KEY_APP);
+    inst_channel((uint8_t)CHAN_UP);
+    unsigned const again = klog_count_of("id=81 ");
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_NET, true);
+    appmgr_inst_rec_t const told = inst_read(APPMGR_INST_KEY_APP);
+    inst_channel((uint8_t)CHAN_OFF);
+
+    TEST_ASSERT_EQUAL_UINT(1U, first);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, lost.told, "a lost line was taken as told");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, again, "the record did not go out again");
+    TEST_ASSERT_EQUAL_UINT8(1U, told.told);
+}
+
+/* An answer comes for the line out, not for whatever the record says by
+ * then: a record that moved on while its earlier line was out is told only
+ * when a line saying its own state is answered. */
+TEST_CASE("an answer for an earlier state does not tell the record's new one",
+          "[appmgr_ao][install_rec]")
+{
+    inst_os_installed_into(0x420000U);
+    appmgr_inst_rec_t r = inst_read(APPMGR_INST_KEY_OS);
+    r.src  = (uint8_t)KODE_CONSOLE_SRC_NET;
+    r.told = 0U;
+    fake_nvs_seed(APPMGR_UNDO_NS, APPMGR_INST_KEY_OS, &r, sizeof(r));
+    appmgr_fresh();
+    fake_klog_reset();
+
+    inst_channel((uint8_t)CHAN_UP);                 /* `installed` goes out */
+    inst_stable(0x420000U, KBOOT_OTHER_GIVEN_UP);   /* the verdict, while it is out */
+    bool const held = (NULL == inst_line_with("id=70 dst=os", "state=confirmed"));
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_NET, true); /* the answer for `installed` */
+    appmgr_inst_rec_t const after_first = inst_read(APPMGR_INST_KEY_OS);
+    unsigned const verdict = inst_src_of("id=70 dst=os", "state=confirmed");
+    inst_sent((uint8_t)KODE_CONSOLE_SRC_NET, true); /* the answer for the verdict */
+    appmgr_inst_rec_t const after_second = inst_read(APPMGR_INST_KEY_OS);
+    inst_channel((uint8_t)CHAN_OFF);
+
+    TEST_ASSERT_TRUE_MESSAGE(held, "a second confirmed line went out on a busy port");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_CONFIRMED, after_first.state);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, after_first.told,
+        "the answer for installed told the verdict");
+    TEST_ASSERT_EQUAL_UINT(KODE_CONSOLE_SRC_NET | KODE_LOG_SRC_CONFIRM, verdict);
+    TEST_ASSERT_EQUAL_UINT8(1U, after_second.told);
 }

@@ -4249,6 +4249,22 @@ typedef enum {
 kboot_reason_t boot_reason(void);
 
 /**
+ * @brief What became of the kodeOS slot that is not running, as AO_Boot read
+ *        otadata on the way up, before the rescue clears it
+ *        (BootStableEvt.other).
+ *
+ * Running from factory after the rescue took over, the other slot was
+ * launched whatever otadata says of it, so it never reads as never launched.
+ */
+typedef enum {
+    KBOOT_OTHER_NEVER_RAN,     /**< Never launched: no switch to it took effect. */
+    KBOOT_OTHER_UNCONFIRMED,   /**< Launched and never confirmed itself; the
+                                *   bootloader brought the board back.          */
+    KBOOT_OTHER_GIVEN_UP       /**< Launched, then given up on after it kept
+                                *   crashing.                                   */
+} kboot_other_t;
+
+/**
  * @brief How the app before this boot ended.
  *
  * From the chip's reset reason. Clean is every way back that is not panic,

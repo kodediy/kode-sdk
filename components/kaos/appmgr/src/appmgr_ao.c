@@ -3258,7 +3258,7 @@ static void flash_finish(AppMgr * const me)
                    desc.idf_ver);
         }
         KLOG_N(TAG, "install complete (%u bytes)", (unsigned)me->written);
-        appmgr_inst_rebooting();    /* on its way before the switch is asked */
+        appmgr_inst_os_installed();    /* on its way before the switch is asked */
         me->os_target = false;      /* back to idle before AO_Boot resets us */
         boot_os_switch_request();   /* AO_Boot selects otadata and resets */
         return;
@@ -4051,6 +4051,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             FlashReqEvt const * const req = Q_EVT_CAST(FlashReqEvt);
 
             xfer_reset(me);
+            me->recv_src = (uint8_t)KODE_LOG_SRC_NONE;   /* no stream: no link to drain */
             if ( !me->keep_round && !me->verify_restart )
             {
                 keep_clear(me);
@@ -7470,7 +7471,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
         }
         KLOG_N(TAG, "install dst=os complete (%u bytes); switching to the "
                     "new kodeOS", (unsigned)me->written);
-        appmgr_inst_rebooting();   /* told before the `>ok` */
+        appmgr_inst_os_installed();   /* told before the `>ok` */
         QACTIVE_PUBLISH(&s_recv_done_evt, &me->super);
         return Q_TRAN(&AppMgr_launching);
     }

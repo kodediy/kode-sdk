@@ -75,6 +75,8 @@ typedef struct {
                              *   KODE_BOOT_STABLE_MS: one timer, one after the
                              *   other.                                        */
     bool     stable_next;   /**< The healthy timer is on its second count.      */
+    uint8_t  other;         /**< kboot_other_t: what became of the slot that is
+                             *   not running, read before otadata is cleared. */
     QActive *reset_who;     /**< Where the reset's answer goes.                 */
     uint32_t welcome_off;   /**< The welcome app's extent in the apps region.   */
     uint32_t welcome_size;  /**< Its length.                                    */
@@ -563,6 +565,34 @@ static void boot_crashes_count(bool after_app)
         }
     }
 }
+
+/**
+ * @brief What became of the kodeOS slot that is not running, from otadata.
+ *
+ * @param st      What the bootloader recorded about that slot.
+ * @param rescued The rescue took over: an update was launched and never
+ *                confirmed. From factory, @p st is ota_0's, which need not be
+ *                the slot written, so it is not read.
+ * @return Its kboot_other_t.
+ */
+static kboot_other_t boot_other_of(kdrv_slot_state_t st, bool rescued)
+{
+    kboot_other_t other = KBOOT_OTHER_GIVEN_UP;
+
+    if ( rescued || (KDRV_SLOT_STATE_ABORTED == st) )
+    {
+        other = KBOOT_OTHER_UNCONFIRMED;
+    }
+    else if ( KDRV_SLOT_STATE_UNDEFINED == st )
+    {
+        other = KBOOT_OTHER_NEVER_RAN;
+    }
+    else
+    {
+        /* Launched, and the bootloader holds something else: given up on. */
+    }
+    return other;
+}
 #endif
 
 /**
@@ -673,8 +703,11 @@ static QState Boot_initial(Boot * const me, void const * const par)
     }
 
     /* 2. Running from factory with otadata non-blank means the rescue took
-     *    over: a kodeOS update died before confirming. Make it sticky. */
-    if ( kdrv_running_is_factory() && !kdrv_otadata_blank() )
+     *    over: a kodeOS update died before confirming. Make it sticky. What
+     *    became of the other slot is read first, while otadata still says. */
+    bool const rescued = kdrv_running_is_factory() && !kdrv_otadata_blank();
+    me->other = (uint8_t)boot_other_of(kdrv_slot_state(), rescued);
+    if ( rescued )
     {
         s_reason = KBOOT_UNEXPECTED;
         (void)kdrv_otadata_clear();
@@ -1541,6 +1574,9 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case BOOT_OS_SWITCH_SIG: {
+            /* Published when the board stays on this slot, so the update
+             * that asked is not left waiting for a reset that never comes. */
+            static const QEvt failed = QEVT_INITIALIZER(BOOT_OS_SWITCH_FAIL_SIG);
 #if CONFIG_KODEOS_BOOT_ROLE_OS
             /* Before otadata moves: confirming marks the slot otadata names,
              * which from then on is the new one. */
@@ -1549,11 +1585,13 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             if ( !kdrv_slot_present() )
             {
                 KLOG_E(TAG, "no inactive kodeOS slot in the partition table");
+                QACTIVE_PUBLISH(&failed, &me->super);
             }
             else if ( !kdrv_slot_has_image() )
             {
                 KLOG_E(TAG, "the inactive kodeOS slot holds no valid image - "
                             "nothing to switch to");
+                QACTIVE_PUBLISH(&failed, &me->super);
             }
             /* kdrv_otadata_select_slot verifies the image before writing, so
              * a corrupt slot is refused here rather than at the next boot. */
@@ -1570,6 +1608,7 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             {
                 /* Said, or a failed write would look like an update in progress. */
                 KLOG_E(TAG, "could not write otadata - staying on this slot");
+                QACTIVE_PUBLISH(&failed, &me->super);
             }
             status = Q_HANDLED();
             break;
@@ -1645,7 +1684,23 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             }
             else
             {
+                BootStableEvt * const ev = Q_NEW_X(BootStableEvt, 0U, BOOT_STABLE_SIG);
+
                 kdrv_slot_crashes_set(0U);
+                /* The minute that settles a kodeOS update: where kodeOS runs
+                 * and what became of the other slot. AO_AppMgr compares the
+                 * first with the slot it wrote. */
+                if ( NULL != ev )
+                {
+                    kdrv_running_info(NULL, &ev->running, NULL);
+                    ev->other = me->other;
+                    QACTIVE_PUBLISH(&ev->super, &me->super);
+                }
+                else
+                {
+                    KLOG_W(TAG, "no event for the stable minute; a kodeOS "
+                                "update waiting on it stays rebooting");
+                }
             }
             status = Q_HANDLED();
             break;

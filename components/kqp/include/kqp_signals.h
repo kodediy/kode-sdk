@@ -339,6 +339,15 @@ enum KodeSignals {
                                  *   prints it, the GUI draws it.             */
     BOOT_STATE_SIG,             /**< AO_Boot: the boot state, in answer to
                                  *   BOOT_INFO_REQ_SIG (BootStateEvt).        */
+    BOOT_STABLE_SIG,            /**< AO_Boot: the kodeOS running has stayed
+                                 *   up KODE_BOOT_STABLE_MS: where it runs and
+                                 *   what became of the other slot
+                                 *   (BootStableEvt). Once per boot, OS role
+                                 *   only.                                    */
+    BOOT_OS_SWITCH_FAIL_SIG,    /**< AO_Boot: a BOOT_OS_SWITCH_SIG could not
+                                 *   point otadata at the other slot; the
+                                 *   board stays on this one. A bare static
+                                 *   QEvt.                                    */
     GUI_STATE_SIG,              /**< AO_Gui: what state the interface is in,
                                  *   in answer to GUI_DUMP_REQ_SIG
                                  *   (GuiStateEvt).                           */
@@ -6518,6 +6527,19 @@ typedef struct {
     uint8_t  app_end;       /**< kboot_app_end_t: how the app before this
                              *   boot ended.                                 */
 } BootStateEvt;
+
+/**
+ * @brief The kodeOS running has stayed up a minute (BOOT_STABLE_SIG).
+ *
+ * What settles a kodeOS update: the install's owner compares @c running with
+ * the slot it wrote, and when they differ @c other says why.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t running;       /**< Where the partition running starts.         */
+    uint8_t  other;         /**< kboot_other_t: what became of the slot that
+                             *   is not running.                             */
+} BootStableEvt;
 
 /* Where the interface's drag is, kode_gui_gesture_t.drag. */
 #define KODE_GUI_DRAG_IDLE    0U  /**< No drag is on.                       */

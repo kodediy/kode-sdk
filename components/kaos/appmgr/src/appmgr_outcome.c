@@ -7,11 +7,11 @@
  * under 2 KB of internal RAM. It is AO_AppMgr's alone: every function runs in
  * its thread.
  *
- * AO_AppMgr hears of a port only while a record waits on it: it subscribes
- * then, asks the port's owner where it stands (except at its own start, when
- * the owners have no queue yet: they say so when the port changes), and lets
- * go once nothing waits. The rest of the time those signals never reach its
- * queue.
+ * AO_AppMgr hears of a port, or of AO_Boot's minute, only while a record waits
+ * on it: it subscribes then, asks the port's owner where it stands (except at
+ * its own start, when the owners have no queue yet: they say so when the port
+ * changes), and lets go once nothing waits. The rest of the time those signals
+ * never reach its queue.
  *
  * `told` means delivered. On the cable it is set as the line is written. On
  * the Kode channel and the BLE console the final record goes as a confirmed
@@ -24,8 +24,8 @@
  * that answer: nothing delays the jump. Its line is handed to the port as a
  * plain one and the record stays owed; AO_Boot's leave lets AO_Log write it
  * into the port's ring before the radios go down. Back in kodeOS, an owed
- * `installed` goes out again when its port comes up, and a `rebooting` gives
- * way to the verdict.
+ * `installed` goes out again when its port comes up, a kodeOS update's as an
+ * app's; the update's verdict follows at AO_Boot's minute.
  */
 #include <stdio.h>
 #include <string.h>
@@ -60,6 +60,8 @@ typedef struct {
     uint8_t           why;                     /**< The cause noted for the open one. */
     bool              live;                    /**< The open one's command is still in
                                                 *   flight: its end answers it.      */
+    bool              switching;               /**< The switch was asked this boot.   */
+    bool              watch_boot;              /**< Subscribed to AO_Boot's two.      */
     bool              watch_net;               /**< Subscribed to the channel.        */
     bool              watch_ble;               /**< Subscribed to the BLE half.       */
     bool              watch_sent;              /**< Subscribed to CONSOLE_SENT_SIG.   */
@@ -67,6 +69,8 @@ typedef struct {
     bool              ble_up;                  /**< A BLE console is subscribed.      */
     bool              sent[APPMGR_INST_KINDS]; /**< Its confirmed line is out and its
                                                 *   answer awaited.                 */
+    uint8_t           sent_state[APPMGR_INST_KINDS]; /**< The state that line said. */
+    uint32_t          sent_id[APPMGR_INST_KINDS];    /**< The install it was about. */
     QActive          *ao;                      /**< AO_AppMgr, the subscriber.        */
 } appmgr_inst_t;
 
@@ -74,8 +78,7 @@ static appmgr_inst_t *s_inst;   /**< The block; NULL when PSRAM refused it. */
 
 /** @brief The `state=` word of each state. */
 static const char * const INST_STATE_WORD[APPMGR_INST_STATES] = {
-    "none", "running", "installed", "failed", "rebooting", "confirmed",
-    "rolled_back",
+    "none", "running", "installed", "failed", "confirmed", "rolled_back",
 };
 
 /** @brief The NVS key of each kind. */
@@ -230,9 +233,10 @@ static bool inst_port_up(uint8_t src)
 /**
  * @brief Subscribe to what the records wait on, and to nothing else.
  *
- * A port while an install from it is open or a record for it is owed, and
- * CONSOLE_SENT_SIG while any port is. A port newly watched is asked where it
- * stands, since it says so only when it changes.
+ * AO_Boot's minute and its failed switch while an update awaits its
+ * verdict; a port while an install from it is open or a record for it is
+ * owed, and CONSOLE_SENT_SIG while any port is. A port newly watched is
+ * asked where it stands, since it says so only when it changes.
  *
  * @param ask Ask the owners; false at AO_AppMgr's start, which comes before
  *            AO_Radio's and AO_Net's.
@@ -258,6 +262,22 @@ static void inst_watch(bool ask)
         }
     }
 
+    bool const want_boot = ((uint8_t)APPMGR_INST_INSTALLED
+                            == s_inst->rec[APPMGR_INST_OS].state);
+    if ( want_boot != s_inst->watch_boot )
+    {
+        s_inst->watch_boot = want_boot;
+        if ( want_boot )
+        {
+            QActive_subscribe(s_inst->ao, BOOT_STABLE_SIG);
+            QActive_subscribe(s_inst->ao, BOOT_OS_SWITCH_FAIL_SIG);
+        }
+        else
+        {
+            QActive_unsubscribe(s_inst->ao, BOOT_STABLE_SIG);
+            QActive_unsubscribe(s_inst->ao, BOOT_OS_SWITCH_FAIL_SIG);
+        }
+    }
 #if CONFIG_KODEOS_CHANNEL
     if ( want_net != s_inst->watch_net )
     {
@@ -323,10 +343,10 @@ static void inst_watch(bool ask)
  *
  * The cable and the scheduler are told as the line is written. On the
  * channel or BLE, up: a running record goes plain, a final one confirmed,
- * unless another confirmed line is out there, in which case it waits for that
- * one's answer. Not known to be up: the command in flight still gets its line,
- * and the record stays owed. Before a jump a final one goes plain and stays
- * owed: no answer could arrive before the reset.
+ * unless a confirmed line is out there, its own earlier state's included, in
+ * which case it waits for that one's answer. Not known to be up: the command
+ * in flight still gets its line, and the record stays owed. Before a jump a
+ * final one goes plain and stays owed: no answer could arrive before the reset.
  *
  * @param kind  APPMGR_INST_APP or APPMGR_INST_OS.
  * @param live  The command it answers is in flight.
@@ -340,7 +360,6 @@ static void inst_tell(uint8_t kind, bool live, bool jumps)
     bool       conf  = false;
 
     r->told = 0U;
-    s_inst->sent[kind] = false;
     if ( !inst_remote(r->src) )
     {
         say     = true;
@@ -360,7 +379,9 @@ static void inst_tell(uint8_t kind, bool live, bool jumps)
         {
             say  = true;
             conf = true;
-            s_inst->sent[kind] = true;
+            s_inst->sent[kind]       = true;
+            s_inst->sent_state[kind] = r->state;
+            s_inst->sent_id[kind]    = r->id;
         }
         else
         {
@@ -403,17 +424,19 @@ static void inst_flush(uint8_t src)
 }
 
 /**
- * @brief A port answered its confirmed line, or went down before it could.
+ * @brief A port answered its confirmed line, or lost it.
  *
- * Delivered: the records out on it are told and kept, and the next one owed
- * there goes. Not delivered: they stay owed until the port comes up again.
+ * Delivered: a record still at the install and state that line said is told
+ * and kept, and whatever is owed there goes next. Not delivered (the port went
+ * down, or dropped the line): the record stays owed until the port comes up
+ * again.
  *
  * @param src KODE_CONSOLE_SRC_* of the port.
  * @param ok  Whether the line was delivered.
  */
 static void inst_answered(uint8_t src, bool ok)
 {
-    bool told = false;
+    bool delivered = false;
 
     for ( uint8_t k = 0U; (uint8_t)APPMGR_INST_KINDS > k; ++k )
     {
@@ -422,15 +445,19 @@ static void inst_answered(uint8_t src, bool ok)
         if ( s_inst->sent[k] && (src == r->src) )
         {
             s_inst->sent[k] = false;
-            if ( ok )
+            if ( ok && (s_inst->sent_state[k] == r->state)
+                && (s_inst->sent_id[k] == r->id) )
             {
                 r->told = 1U;
                 inst_store(k);
-                told = true;
+            }
+            if ( ok )
+            {
+                delivered = true;
             }
         }
     }
-    if ( told && inst_port_up(src) )
+    if ( delivered && inst_port_up(src) )
     {
         inst_flush(src);
     }
@@ -473,6 +500,8 @@ void appmgr_inst_init(QActive *ao)
     s_inst->open    = (uint8_t)APPMGR_INST_KINDS;
     /* Started over: whatever an earlier start subscribed to is let go, and
      * inst_watch() below takes what these records wait on. */
+    QActive_unsubscribe(ao, BOOT_STABLE_SIG);
+    QActive_unsubscribe(ao, BOOT_OS_SWITCH_FAIL_SIG);
 #if CONFIG_KODEOS_CHANNEL
     QActive_unsubscribe(ao, CHANNEL_STATE_SIG);
 #endif
@@ -618,7 +647,7 @@ void appmgr_inst_installed(const char *name, const char *version, bool jumps)
     }
 }
 
-void appmgr_inst_rebooting(void)
+void appmgr_inst_os_installed(void)
 {
     if ( (NULL != s_inst) && ((uint8_t)APPMGR_INST_OS == s_inst->open) )
     {
@@ -632,8 +661,45 @@ void appmgr_inst_rebooting(void)
         }
         r->slot = kdrv_slot_address();
         r->pct  = (uint8_t)APPMGR_INST_PCT_DONE;
-        inst_finish(APPMGR_INST_REBOOTING, true);
+        s_inst->switching = true;
+        inst_finish(APPMGR_INST_INSTALLED, true);
     }
+}
+
+/**
+ * @brief The kodeOS running stayed up a minute: say what became of the update.
+ *
+ * AO_Boot says where kodeOS runs and what became of the other slot. The slot
+ * written is running: confirmed. Otherwise the board came back from it, or
+ * never went: AO_Boot's word for the other slot says which.
+ *
+ * @param ev AO_Boot's minute.
+ */
+static void inst_settle(BootStableEvt const *ev)
+{
+    appmgr_inst_rec_t * const r = &s_inst->rec[APPMGR_INST_OS];
+
+    if ( ev->running == r->slot )
+    {
+        r->state = (uint8_t)APPMGR_INST_CONFIRMED;
+    }
+    else if ( (uint8_t)KBOOT_OTHER_NEVER_RAN == ev->other )
+    {
+        r->state = (uint8_t)APPMGR_INST_FAILED;
+        r->why   = (uint8_t)APPMGR_WHY_SWITCH;
+    }
+    else
+    {
+        r->state = (uint8_t)APPMGR_INST_ROLLED_BACK;
+        r->why   = (uint8_t)APPMGR_WHY_CRASHED;
+        if ( (uint8_t)KBOOT_OTHER_UNCONFIRMED == ev->other )
+        {
+            r->why = (uint8_t)APPMGR_WHY_UNCONFIRMED;
+        }
+    }
+    KLOG_N(TAG, "kodeOS update %lu: %s", (unsigned long)r->id,
+           INST_STATE_WORD[r->state]);
+    inst_tell((uint8_t)APPMGR_INST_OS, false, false);
 }
 
 bool appmgr_inst_on(QEvt const *e)
@@ -644,8 +710,29 @@ bool appmgr_inst_on(QEvt const *e)
     {
         return false;   /* the top state ignores them */
     }
+    appmgr_inst_rec_t * const os = &s_inst->rec[APPMGR_INST_OS];
+
     switch ( e->sig )
     {
+        case BOOT_STABLE_SIG: {
+            /* While a switch is on its way, the minute is this boot's own. */
+            if ( (!s_inst->switching)
+                && ((uint8_t)APPMGR_INST_INSTALLED == os->state) )
+            {
+                inst_settle(Q_EVT_CAST(BootStableEvt));
+            }
+            break;
+        }
+        case BOOT_OS_SWITCH_FAIL_SIG: {
+            if ( s_inst->switching && ((uint8_t)APPMGR_INST_INSTALLED == os->state) )
+            {
+                s_inst->switching = false;
+                os->state = (uint8_t)APPMGR_INST_FAILED;
+                os->why   = (uint8_t)APPMGR_WHY_SWITCH;
+                inst_tell((uint8_t)APPMGR_INST_OS, false, false);
+            }
+            break;
+        }
         case CHANNEL_STATE_SIG: {
             s_inst->chan_up = ((uint8_t)CHAN_UP == Q_EVT_CAST(ChannelStateEvt)->state);
             if ( s_inst->chan_up )

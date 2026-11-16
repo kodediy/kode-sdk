@@ -204,6 +204,29 @@ static kode_status_t slot_reject(int calls)
 /** @brief The boot runs from factory, with otadata blank. */
 static bool s_on_factory;
 
+/** @brief What otadata says of the slot that is not running, on the next boot. */
+static kdrv_slot_state_t s_other_state = KDRV_SLOT_STATE_UNDEFINED;
+
+/** @brief Where the kodeOS running starts, as kdrv_running_info() answers. */
+static uint32_t s_running_at;
+
+static void running_info(const char **label, uint32_t *address, uint32_t *size, int calls)
+{
+    (void)calls;
+    if ( NULL != label )
+    {
+        *label = "ota_0";
+    }
+    if ( NULL != address )
+    {
+        *address = s_running_at;
+    }
+    if ( NULL != size )
+    {
+        *size = 0U;
+    }
+}
+
 /** @brief How many times the running image was asked to confirm itself. */
 static unsigned s_confirms;
 
@@ -260,6 +283,8 @@ static void boot_up(int reset_reason, bool rescued)
     kdrv_slot_crashes_StubWithCallback(&crashes_read);
     kdrv_slot_crashes_set_StubWithCallback(&crashes_write);
     kdrv_slot_reject_self_StubWithCallback(&slot_reject);
+    kdrv_slot_state_IgnoreAndReturn(s_other_state);
+    kdrv_running_info_StubWithCallback(&running_info);
     kdrv_reset_reason_IgnoreAndReturn(reset_reason);
     kdrv_running_is_factory_IgnoreAndReturn(rescued);
     if ( rescued )
@@ -743,6 +768,163 @@ TEST_CASE("an ordinary boot confirms nothing", "[boot_ao]")
 
     TEST_ASSERT_EQUAL_UINT(0U, log_lines_with("kodeOS update confirmed"));
     update_done();
+}
+
+/** @brief How many of @p sig the spy holds; the rest it held are dropped. */
+static unsigned spy_held(enum_t sig)
+{
+    unsigned n = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( sig == (enum_t)e->sig )
+        {
+            ++n;
+        }
+    }
+    ao_spy_drain();
+    return n;
+}
+
+/** @brief The minute AO_Boot published, or a zeroed one when it published none. */
+static BootStableEvt s_stable;
+
+/** @brief How many BOOT_STABLE_SIG the spy holds; the last is kept in s_stable. */
+static unsigned stable_held(void)
+{
+    unsigned n = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)BOOT_STABLE_SIG == (enum_t)e->sig )
+        {
+            s_stable = *Q_EVT_CAST(BootStableEvt);
+            ++n;
+        }
+    }
+    ao_spy_drain();
+    return n;
+}
+
+/* The minute that settles a kodeOS update is published, once, with where kodeOS
+ * runs, so the owner of the install can say whether that is the slot it wrote. */
+TEST_CASE("a kodeOS that stays up a minute publishes that minute, once",
+          "[boot_ao]")
+{
+    unsigned early;
+    unsigned at;
+    unsigned later;
+
+    (void)memset(&s_stable, 0, sizeof(s_stable));
+    s_running_at = 0x420000U;
+    update_boots();
+    boot_system_up();
+    ao_spy_drain();
+    ao_spy_subscribe(BOOT_STABLE_SIG);
+
+    boot_wait(KODE_BOOT_STABLE_MS - 10U);
+    early = stable_held();
+    boot_wait(10U);
+    at = stable_held();
+    boot_wait(KODE_BOOT_STABLE_MS);
+    later = stable_held();
+
+    QActive_unsubscribe(ao_spy(), BOOT_STABLE_SIG);
+    s_update_pending = false;
+    s_running_at     = 0U;
+    Mockkdrv_slot_Destroy();
+    TEST_ASSERT_EQUAL_UINT(0U, early);
+    TEST_ASSERT_EQUAL_UINT(1U, at);
+    TEST_ASSERT_EQUAL_UINT(0U, later);
+    TEST_ASSERT_EQUAL_HEX32(0x420000U, s_stable.running);
+    TEST_ASSERT_EQUAL_UINT8(KBOOT_OTHER_NEVER_RAN, s_stable.other);
+}
+
+/**
+ * @brief Boot with otadata saying @p st of the other slot, run the minute out
+ *        and hand back what it said of that slot.
+ *
+ * @param st      otadata's word for the slot that is not running.
+ * @param rescued The boot runs from factory after the rescue took over.
+ * @param factory The boot runs from factory with otadata blank.
+ * @return BootStableEvt.other, or 0xFF when no minute was published.
+ */
+static uint8_t other_after_minute(kdrv_slot_state_t st, bool rescued, bool factory)
+{
+    uint8_t other = 0xFFU;
+
+    Mockkdrv_slot_Init();
+    crashes_none();
+    s_other_state = st;
+    s_on_factory  = factory;
+    boot_up((int)KDRV_RESET_POWERON, rescued);
+    s_other_state = KDRV_SLOT_STATE_UNDEFINED;
+    s_on_factory  = false;
+    boot_system_up();
+    ao_spy_drain();
+    ao_spy_subscribe(BOOT_STABLE_SIG);
+    boot_wait(KODE_BOOT_STABLE_MS);
+    if ( 1U == stable_held() )
+    {
+        other = s_stable.other;
+    }
+    QActive_unsubscribe(ao_spy(), BOOT_STABLE_SIG);
+    Mockkdrv_slot_Destroy();
+    return other;
+}
+
+/* What became of the other slot is otadata's, read on the way up before the
+ * rescue clears it. Back on factory after the rescue took over, that slot was
+ * launched whatever otadata says, so the update did not hold; it was not a
+ * switch that never happened. Factory with otadata blank never switched. */
+TEST_CASE("the minute says what became of the other slot, factory's rescue included",
+          "[boot_ao]")
+{
+    TEST_ASSERT_EQUAL_UINT8(KBOOT_OTHER_UNCONFIRMED,
+                            other_after_minute(KDRV_SLOT_STATE_ABORTED, false, false));
+    TEST_ASSERT_EQUAL_UINT8(KBOOT_OTHER_GIVEN_UP,
+                            other_after_minute(KDRV_SLOT_STATE_OTHER, false, false));
+    TEST_ASSERT_EQUAL_UINT8(KBOOT_OTHER_NEVER_RAN,
+                            other_after_minute(KDRV_SLOT_STATE_UNDEFINED, false, false));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KBOOT_OTHER_UNCONFIRMED,
+        other_after_minute(KDRV_SLOT_STATE_UNDEFINED, true, false),
+        "the rescue took over: the update ran and did not hold");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KBOOT_OTHER_NEVER_RAN,
+        other_after_minute(KDRV_SLOT_STATE_UNDEFINED, false, true),
+        "factory with otadata blank never switched");
+}
+
+/* A switch that cannot be made leaves the board where it is: the update that
+ * asked is told, or it would wait for a reset that never comes. */
+TEST_CASE("a switch to the other slot that cannot be made is published",
+          "[boot_ao]")
+{
+    static const QEvt e = QEVT_INITIALIZER(BOOT_OS_SWITCH_SIG);
+    unsigned no_image;
+    unsigned no_write;
+
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    ao_spy_drain();
+    ao_spy_subscribe(BOOT_OS_SWITCH_FAIL_SIG);
+
+    kdrv_slot_present_ExpectAndReturn(true);
+    kdrv_slot_has_image_ExpectAndReturn(false);
+    QASM_DISPATCH(AO_Boot, &e, 0U);
+    no_image = spy_held(BOOT_OS_SWITCH_FAIL_SIG);
+
+    kdrv_slot_present_ExpectAndReturn(true);
+    kdrv_slot_has_image_ExpectAndReturn(true);
+    kdrv_otadata_select_slot_ExpectAndReturn(KODE_ERROR);
+    QASM_DISPATCH(AO_Boot, &e, 0U);
+    no_write = spy_held(BOOT_OS_SWITCH_FAIL_SIG);
+
+    QActive_unsubscribe(ao_spy(), BOOT_OS_SWITCH_FAIL_SIG);
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+    TEST_ASSERT_EQUAL_UINT(0U, fake_system_restarts());
+    TEST_ASSERT_EQUAL_UINT(1U, no_image);
+    TEST_ASSERT_EQUAL_UINT(1U, no_write);
 }
 
 /* At the next reset the bootloader turns a pending slot into an aborted one, and

@@ -6,9 +6,10 @@
  * One record per kind, kept in NVS, numbered by AO_AppMgr when it takes the
  * install. The record goes to the port of the command that asked, as a
  * `>|install` line: when the install is taken, before the verdict, and again
- * when it ends. A port that is down then (the Kode
- * channel, the BLE console) gets the record when it comes up. Every call here
- * runs in AO_AppMgr's thread.
+ * when it ends. A kodeOS update ends `installed` before the switch, like an
+ * app; its verdict follows on the next boot, once AO_Boot says the kodeOS
+ * running has stayed up a minute. A port that is down then (the Kode channel, the BLE console) gets
+ * the record when it comes up. Every call here runs in AO_AppMgr's thread.
  */
 #ifndef APPMGR_OUTCOME_H
 #define APPMGR_OUTCOME_H
@@ -39,9 +40,10 @@ extern "C" {
 typedef enum {
     APPMGR_INST_NONE = 0,     /**< No install of this kind was ever taken. */
     APPMGR_INST_RUNNING,      /**< Taken, being written.                   */
-    APPMGR_INST_INSTALLED,    /**< An app, written and in the directory.   */
+    APPMGR_INST_INSTALLED,    /**< Written and verified: an app in the
+                               *   directory, or kodeOS in its slot with the
+                               *   switch asked.                            */
     APPMGR_INST_FAILED,       /**< Ended without installing; `why` says.   */
-    APPMGR_INST_REBOOTING,    /**< kodeOS written; the board is switching. */
     APPMGR_INST_CONFIRMED,    /**< The new kodeOS stayed up a minute.      */
     APPMGR_INST_ROLLED_BACK,  /**< The board came back to the old kodeOS.  */
     APPMGR_INST_STATES        /**< How many.                               */
@@ -62,7 +64,8 @@ typedef enum {
     APPMGR_WHY_CANCELLED,    /**< The person went back.                        */
     APPMGR_WHY_STALLED,      /**< The terminal stopped sending.                */
     APPMGR_WHY_RESET,        /**< A reset cut the install.                     */
-    APPMGR_WHY_SWITCH,       /**< otadata could not be pointed at the new slot. */
+    APPMGR_WHY_SWITCH,       /**< The board never ran the new slot: otadata could
+                              *   not be pointed at it, or the switch never took. */
     APPMGR_WHY_UNCONFIRMED,  /**< The new kodeOS never confirmed itself.       */
     APPMGR_WHY_CRASHED,      /**< The new kodeOS crashed until it gave up.     */
     APPMGR_WHY_OTHER,        /**< Anything else; the log says.                 */
@@ -148,17 +151,19 @@ void appmgr_inst_failed(uint32_t pct);
 void appmgr_inst_installed(const char *name, const char *version, bool jumps);
 
 /**
- * @brief The kodeOS update in hand is written and the switch is about to be
- *        asked: store it rebooting and hand its line to its port.
+ * @brief The kodeOS update in hand is written and verified, and the switch is
+ *        about to be asked: store it installed and hand its line to its port.
  *
- * The switch follows at once, so on the Kode channel or BLE the line is not
- * waited on; the next boot's verdict is what its port is owed.
+ * The switch follows at once, as an app's jump does: on the Kode channel or
+ * BLE the line stays owed and is told again once the port is up after the
+ * reset. The verdict (`confirmed`, `rolled_back`, `failed why=switch`) follows
+ * at AO_Boot's minute.
  */
-void appmgr_inst_rebooting(void);
+void appmgr_inst_os_installed(void);
 
 /**
- * @brief The events the records wait on: the Kode channel and the BLE
- *        console coming up.
+ * @brief The events the records wait on: AO_Boot's minute and its failed
+ *        switch, the Kode channel and the BLE console coming up.
  * @param e The event.
  * @return true when @p e was one of them.
  */
