@@ -20,11 +20,13 @@
 #if CONFIG_KODEOS_BLE
 #include "kdrv_ble_heard.h"
 #include "kdrv_ble.h"
+#include "kdrv_ble_hid.h"
 #endif
 #include "kqp.h"
 
 #include "console_verbs.h"
 #include "kverbs.h"
+#include "radio_hid.h"
 
 /** @brief Which radio verb holds the console. */
 typedef enum {
@@ -1363,6 +1365,148 @@ static void ble_heard_one(BleHeardEvt const * const a)
         s_ble_run.rssi_seen = true;
     }
 }
+
+/* ---- Handlers: the HID service --------------------------------------------
+ * Each verb answers at once: its report is queued for the host or refused,
+ * and nothing later says more. The three that send a report run from the
+ * cable alone: what they type and click lands on somebody's computer, and a
+ * line from the network or from the scheduler has no business there. */
+
+/** @brief The most a console line moves the mouse or turns its wheel in one report. */
+#define RADIO_V_HID_STEP_MAX  127U
+
+_Static_assert(RADIO_V_HID_STEP_MAX == (uint32_t)KDRV_BLE_HID_STEP_MAX,
+               "a line's step is one the report carries");
+
+/**
+ * @brief Close a HID verb with what the door answered.
+ * @param kind The kind the report was of.
+ * @param rc   ble_hid_report_post()'s status.
+ */
+static void hid_reply(uint8_t kind, kode_status_t rc)
+{
+    if ( KODE_OK == rc )
+    {
+        console_reply(">ok");
+    }
+    else if ( KODE_NO_RESOURCES == rc )
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
+    else if ( !kdrv_ble_hid_served() )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "off");
+    }
+    else if ( 0U == (kdrv_ble_hid_kinds() & kind) )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "kind");
+    }
+    else
+    {
+        console_reply_err(KCLI_ERR_REJECT, "no_host");
+    }
+}
+
+/**
+ * @brief One step of the mouse from the two keys that name its directions.
+ * @param plus  The key that moves it one way.
+ * @param minus The key that moves it the other.
+ * @return The step; both keys given cancel out.
+ */
+static int8_t hid_step(const karg_val_t *plus, const karg_val_t *minus)
+{
+    int32_t step = 0;
+
+    if ( plus->present )
+    {
+        step += (int32_t)plus->u;
+    }
+    if ( minus->present )
+    {
+        step -= (int32_t)minus->u;
+    }
+    return (int8_t)step;
+}
+
+/** @brief ble_hid_info: the kinds served, whether a host takes the reports, and the counts. */
+static void h_ble_hid_info(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c; (void)v;
+    uint32_t sent    = 0U;
+    uint32_t dropped = 0U;
+    uint8_t  kinds   = 0U;
+
+    if ( kdrv_ble_hid_served() )
+    {
+        kinds = kdrv_ble_hid_kinds();
+    }
+    kdrv_ble_hid_counts(&sent, &dropped);
+    console_reply(">|ble_hid kinds=%s ready=%s sent=%" PRIu32 " dropped=%" PRIu32,
+                  RADIO_HID_WORDS[kinds], console_on_off(kdrv_ble_hid_ready()), sent, dropped);
+    console_reply(">ok");
+}
+
+/** @brief ble_hid_mouse [buttons=] [right=] [left=] [down=] [up=] [hold=]: one
+ *         mouse report. Buttons are pressed and let go unless `hold=on`. */
+static void h_ble_hid_mouse(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c;
+    uint8_t rep[KDRV_BLE_HID_MOUSE_LEN];
+    uint8_t buttons = 0U;
+
+    if ( !console_src_allows(CONSOLE_NEED_CABLE) )
+    {
+        return;
+    }
+    if ( v[0].present )
+    {
+        buttons = (uint8_t)v[0].u;
+    }
+    bool const hold = v[5].present && v[5].b;
+
+    kdrv_ble_hid_mouse_pack(buttons, hid_step(&v[1], &v[2]), hid_step(&v[3], &v[4]), 0, rep);
+    hid_reply((uint8_t)KDRV_BLE_HID_MOUSE,
+              ble_hid_report_post((uint8_t)KDRV_BLE_HID_MOUSE, rep, sizeof(rep),
+                                  (0U != buttons) && !hold));
+}
+
+/** @brief ble_hid_wheel [up=] [down=]: turn the mouse's wheel; every button is let go. */
+static void h_ble_hid_wheel(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c;
+    uint8_t rep[KDRV_BLE_HID_MOUSE_LEN];
+
+    if ( !console_src_allows(CONSOLE_NEED_CABLE) )
+    {
+        return;
+    }
+    kdrv_ble_hid_mouse_pack(0U, 0, 0, hid_step(&v[0], &v[1]), rep);
+    hid_reply((uint8_t)KDRV_BLE_HID_MOUSE,
+              ble_hid_report_post((uint8_t)KDRV_BLE_HID_MOUSE, rep, sizeof(rep), false));
+}
+
+/** @brief ble_hid_key code= [mods=]: press one key, with its modifiers, and let it go. */
+static void h_ble_hid_key(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c;
+    uint8_t rep[KDRV_BLE_HID_KEYS_LEN];
+    uint8_t keys[KDRV_BLE_HID_KEYS_MAX];
+    uint8_t mods = 0U;
+
+    if ( !console_src_allows(CONSOLE_NEED_CABLE) )
+    {
+        return;
+    }
+    (void)memset(keys, 0, sizeof(keys));
+    keys[0] = (uint8_t)v[0].u;
+    if ( v[1].present )
+    {
+        mods = (uint8_t)v[1].u;
+    }
+    kdrv_ble_hid_keys_pack(mods, keys, rep);
+    hid_reply((uint8_t)KDRV_BLE_HID_KEYBOARD,
+              ble_hid_report_post((uint8_t)KDRV_BLE_HID_KEYBOARD, rep, sizeof(rep), true));
+}
 #endif /* CONFIG_KODEOS_BLE */
 
 #if defined(CONFIG_KODEOS_WIFI) || defined(CONFIG_KODEOS_BLE)
@@ -2092,6 +2236,32 @@ static const karg_spec_t A_BLE_HEARD[] = {
     { .key = "ms", .required = true, .type = KARG_UINT,
       .min = RADIO_V_HEARD_MS_MIN, .max = RADIO_V_HEARD_MS_MAX },
 };
+/* The console has no signed number, so each direction is a key of its own. */
+static const karg_spec_t A_HID_MOUSE[] = {
+    { .key = "buttons", .required = false, .type = KARG_UINT,
+      .min = 0U, .max = KDRV_BLE_HID_BUTTONS },
+    { .key = "right",   .required = false, .type = KARG_UINT,
+      .min = 0U, .max = RADIO_V_HID_STEP_MAX },
+    { .key = "left",    .required = false, .type = KARG_UINT,
+      .min = 0U, .max = RADIO_V_HID_STEP_MAX },
+    { .key = "down",    .required = false, .type = KARG_UINT,
+      .min = 0U, .max = RADIO_V_HID_STEP_MAX },
+    { .key = "up",      .required = false, .type = KARG_UINT,
+      .min = 0U, .max = RADIO_V_HID_STEP_MAX },
+    { .key = "hold",    .required = false, .type = KARG_BOOL },
+};
+static const karg_spec_t A_HID_WHEEL[] = {
+    { .key = "up",   .required = false, .type = KARG_UINT,
+      .min = 0U, .max = RADIO_V_HID_STEP_MAX },
+    { .key = "down", .required = false, .type = KARG_UINT,
+      .min = 0U, .max = RADIO_V_HID_STEP_MAX },
+};
+static const karg_spec_t A_HID_KEY[] = {
+    { .key = "code", .required = true,  .type = KARG_UINT,
+      .min = 1U, .max = KDRV_BLE_HID_KEY_MAX },
+    { .key = "mods", .required = false, .type = KARG_UINT,
+      .min = 0U, .max = UINT8_MAX },
+};
 #endif
 
 /* The nonce is checked against the identity's own rule by the handler, so a
@@ -2162,6 +2332,10 @@ static const kverb_t RADIO_VERBS[] = {
     { "ble_info",    NULL,                 0U,                       h_ble_info    },
     { "ble_unpair",  NULL,                 0U,                       h_ble_unpair  },
     { "ble_pair",    NULL,                 0U,                       h_ble_pair    },
+    { "ble_hid_info",  NULL,               0U,                       h_ble_hid_info  },
+    { "ble_hid_mouse", A_HID_MOUSE,        KVERB_KEYS(A_HID_MOUSE),  h_ble_hid_mouse },
+    { "ble_hid_wheel", A_HID_WHEEL,        KVERB_KEYS(A_HID_WHEEL),  h_ble_hid_wheel },
+    { "ble_hid_key",   A_HID_KEY,          KVERB_KEYS(A_HID_KEY),    h_ble_hid_key   },
 #endif
 };
 
