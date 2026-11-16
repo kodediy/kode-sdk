@@ -2861,6 +2861,18 @@ static void cp_owner_runs(void)
     (void)qf_support_pump(AO_Display, 1U);
 }
 
+/** @brief Nothing happens during this wait; AO_Display runs during the next. */
+static void cp_owner_runs_next_wait(void)
+{
+    fake_sem_wait_hook(&cp_owner_runs);
+}
+
+/** @brief AO_Display takes two requests from its queue, while the asker sleeps. */
+static void cp_owner_runs_two(void)
+{
+    (void)qf_support_pump(AO_Display, 2U);
+}
+
 /** @brief A pass over the two small pictures, the whole of each. */
 static display_compose_t cp_job(uint8_t op)
 {
@@ -3035,6 +3047,15 @@ TEST_CASE("a compose pass its asker stopped waiting for is never run", "[display
     fake_sem_wait_hook(&cp_owner_runs);
     TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
 
+    /* An abandoned request still in the queue when the next one joins it:
+     * AO_Display drops the first unread and runs the second, once. */
+    TEST_ASSERT_EQUAL(KODE_TIMEOUT, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs_two);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, (unsigned)uxQueueMessagesWaiting(AO_Display->eQueue),
+                                   "both were taken from the queue");
+
     cp_done();
 }
 
@@ -3137,6 +3158,16 @@ TEST_CASE("a deadline that falls inside a pass waits for the pass, and answers w
     fake_sem_wait_hook(&cp_owner_runs_never_heard);
     TEST_ASSERT_EQUAL(KODE_IO_ERROR, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
     TEST_ASSERT_TRUE(fake_klog_saw("may still be writing"));
+
+    /* The stuck pass ends at last, long after its asker left, and its signal
+     * is still owed when the next request waits. That wait wakes on it at
+     * once, finds an answer that is not its own, and goes on waiting: what it
+     * returns is its own pass's word (an error here), not the old pass's. */
+    khal_sem_signal(s_cp_ask.done);
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_ERROR);
+    fake_sem_wait_hook(&cp_owner_runs_next_wait);
+    TEST_ASSERT_EQUAL_MESSAGE(KODE_ERROR, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL),
+                              "a late signal is not this request's answer");
 
     /* And the request after it is served as ever. */
     kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
