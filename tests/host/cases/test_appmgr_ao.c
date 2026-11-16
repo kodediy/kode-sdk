@@ -12564,3 +12564,212 @@ TEST_CASE("an evicted app with its copy on the card keeps its folder",
     card_event(false);
     tidy_end_case();
 }
+
+/* ---- The copies and the board's rest ---------------------------------------------
+ * A copy never keeps the board awake. With copies owed AO_AppMgr asks for a
+ * dark wake as it answers the round for ASLEEP, makes them there with the
+ * glass asleep, and says when it is done. */
+
+/** @brief The board goes to sleep: the round for ASLEEP, answered ready. */
+static void board_sleeps(void)
+{
+    lp_round(AO_AppMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+}
+
+TEST_CASE("a round for ASLEEP with copies owed is answered ready and asks for a dark wake",
+          "[appmgr_ao][backup][lowpower]")
+{
+    LowPowerWakeAtEvt w;
+
+    backup_fresh(1U);
+    (void)fake_lowpower_wake_take(&w);
+
+    board_sleeps();
+    TEST_ASSERT_TRUE_MESSAGE(fake_lowpower_wake_take(&w), "no dark wake was asked for the copies owed");
+    TEST_ASSERT_TRUE_MESSAGE(0U < w.due_us, "the wake asked for names no time");
+    lp_expect_no_more();
+
+    /* The tick is stopped while the board sleeps; were it not, nothing is begun. */
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS);
+    TEST_ASSERT_TRUE_MESSAGE(storage_quiet(), "a copy was begun with the board asleep");
+    backup_end();
+}
+
+TEST_CASE("a round with no copy owed, and a round for OFF, ask for no dark wake",
+          "[appmgr_ao][backup][lowpower]")
+{
+    LowPowerWakeAtEvt w;
+
+    backup_fresh(1U);
+    (void)fake_lowpower_wake_take(&w);
+    lp_round(AO_AppMgr, KODE_LP_OFF);
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_FALSE_MESSAGE(fake_lowpower_wake_take(&w), "a wake was asked of a board going off");
+
+    lp_awake(AO_AppMgr);
+    card_event(false);                         /* no card: nothing to copy */
+    board_sleeps();
+    TEST_ASSERT_FALSE_MESSAGE(fake_lowpower_wake_take(&w), "a wake was asked with nothing to copy");
+    backup_end();
+}
+
+/* The board's state changes while a step waits on AO_Storage: the step keeps
+ * its own deadline. */
+TEST_CASE("the board's state changing while the card is asked about leaves the question its time",
+          "[appmgr_ao][backup][lowpower]")
+{
+    backup_fresh(1U);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the oldest app was not asked about");
+    lp_awake(AO_AppMgr);
+    run_ticks(BACKUP_SLACK_STEPS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, klog_count_of("the card did not answer"),
+        "the question out was given up when the board's state changed");
+
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the answer to the question out was not heard");
+    QF_gc(wr);
+
+    lp_awake(AO_AppMgr);                       /* and again with the write out */
+    run_ticks(BACKUP_SLACK_STEPS);
+    answer_write_landed(KAPPS_ALIGN);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("'first' copied to /sdcard/first.bin"),
+        "the write out was given up when the board's state changed");
+    TEST_ASSERT_EQUAL_UINT(0U, klog_count_of("the card did not answer"));
+    backup_end();
+}
+
+TEST_CASE("a dark wake makes the copy owed with no wait, and says done when none is left",
+          "[appmgr_ao][backup][lowpower]")
+{
+    LowPowerWakeAtEvt w;
+
+    backup_fresh(1U);
+    board_sleeps();
+    (void)fake_lowpower_wake_take(&w);
+    (void)fake_lowpower_dark_done_count();
+
+    lp_dark(AO_AppMgr);
+    const QEvt *e = storage_wait_for(STORAGE_PATH_REQ_SIG, BACKUP_SLACK_STEPS);
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the dark wake waited before its copy");
+    QF_gc(e);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(),
+        "done was said with the copy still to make");
+
+    answer_stat(false, (uint8_t)KODE_OK);
+    e = storage_wait_for(STORAGE_WRITE_REQ_SIG, 100U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the app was not copied in the dark wake");
+    QF_gc(e);
+    answer_write_landed(KAPPS_ALIGN);
+    run_ticks(BACKUP_GAP_STEPS + BACKUP_SLACK_STEPS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(),
+        "the dark wake was held with nothing left to copy");
+
+    /* The round that ends the wake: nothing owed, no other wake. */
+    board_sleeps();
+    TEST_ASSERT_FALSE(fake_lowpower_wake_take(&w));
+    backup_end();
+}
+
+/* Another owner's dark wake reaches AO_AppMgr too: it holds it for nothing. */
+TEST_CASE("a dark wake with nothing to copy is done at once", "[appmgr_ao][backup][lowpower]")
+{
+    backup_fresh(1U);
+    card_event(false);
+    board_sleeps();
+    (void)fake_lowpower_dark_done_count();
+
+    lp_dark(AO_AppMgr);
+    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_dark_done_count());
+    TEST_ASSERT_TRUE(storage_quiet());
+    backup_end();
+}
+
+/* A copy longer than a dark wake would be begun and cut at every one. */
+TEST_CASE("a copy the end of a dark wake cuts waits for the board to be awake",
+          "[appmgr_ao][backup][lowpower]")
+{
+    LowPowerWakeAtEvt w;
+
+    backup_fresh(1U);
+    board_sleeps();
+    lp_dark(AO_AppMgr);
+    const QEvt *e = storage_wait_for(STORAGE_PATH_REQ_SIG, BACKUP_SLACK_STEPS);
+    TEST_ASSERT_NOT_NULL(e);
+    QF_gc(e);
+    answer_stat(false, (uint8_t)KODE_OK);
+    e = storage_wait_for(STORAGE_WRITE_REQ_SIG, 100U);
+    TEST_ASSERT_NOT_NULL(e);
+    QF_gc(e);
+    (void)storage_tally();
+    (void)fake_lowpower_wake_take(&w);
+
+    board_sleeps();                            /* the wake's bound: the round for ASLEEP */
+    storage_expect(STORAGE_WRITE_ABANDON_REQ_SIG, "the copy's write was left running");
+    TEST_ASSERT_FALSE_MESSAGE(fake_lowpower_wake_take(&w),
+        "another dark wake was asked for a copy that does not fit one");
+    answer_write((uint8_t)KODE_ERROR, 0U);     /* the abandoned write's answer */
+
+    lp_awake(AO_AppMgr);
+    run_ticks(BACKUP_WAIT_STEPS + BACKUP_GAP_STEPS + BACKUP_SLACK_STEPS);
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the copy was not made with the board awake");
+    backup_end();
+}
+
+/* ---- A card with no room ---------------------------------------------------------
+ * The copy that does not fit is skipped, and the person is told once for the
+ * card that is mounted. */
+
+TEST_CASE("a copy that does not fit the card is skipped, and the card is said full once",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(2U);
+    ao_spy_subscribe(APP_CARD_FULL_SIG);
+    backup_to_the_write();
+
+    answer_write((uint8_t)KODE_NO_RESOURCES, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, spy_count(APP_CARD_FULL_SIG), "nobody was told the card is full");
+    TEST_ASSERT_TRUE(klog_has("the card is full"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_tally().path,
+        "a temporary that was never written was asked to be removed");
+
+    /* The next app does not fit either: it is skipped with no second word. */
+    run_ticks(BACKUP_GAP_STEPS + BACKUP_SLACK_STEPS);
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/second.bin",
+                    "the app after the one that did not fit was not seen to");
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 100U);
+    TEST_ASSERT_NOT_NULL(wr);
+    QF_gc(wr);
+    answer_write((uint8_t)KODE_NO_RESOURCES, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_count(APP_CARD_FULL_SIG), "the card was said full twice");
+
+    /* Another card, or this one with room made, is another story. */
+    card_event(true);
+    backup_to_the_write();
+    answer_write((uint8_t)KODE_NO_RESOURCES, 0U);
+    unsigned const again = spy_count(APP_CARD_FULL_SIG);
+    QActive_unsubscribe(ao_spy(), APP_CARD_FULL_SIG);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, again, "a card mounted since was not said full");
+    backup_end();
+}
+
+TEST_CASE("a copy the card fills up during is skipped, its temporary removed, and the card said full",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(1U);
+    ao_spy_subscribe(APP_CARD_FULL_SIG);
+    backup_to_the_write();
+
+    answer_write((uint8_t)KODE_NO_RESOURCES, 1024U);
+    unsigned const told = spy_count(APP_CARD_FULL_SIG);
+    QActive_unsubscribe(ao_spy(), APP_CARD_FULL_SIG);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, told, "nobody was told the card is full");
+    path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/first.bin.tmp",
+                    "what landed of the copy was left on a full card");
+    backup_end();
+}

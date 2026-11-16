@@ -26,6 +26,7 @@
 #include "khal_crc32.h"
 #include "khal_nvs.h"
 #include "khal_system.h"
+#include "khal_time.h"
 #include "kaos_claim.h"
 #include "kverbs.h"
 
@@ -79,6 +80,7 @@
 #define APPMGR_BACKUP_IDLE_TICKS KQP_TICKS_PER_MS(KODE_APP_BACKUP_IDLE_MS)
 #define APPMGR_BACKUP_GAP_TICKS  KQP_TICKS_PER_MS(KODE_APP_BACKUP_GAP_MS)
 #define APPMGR_NO_SEQ            0U       /**< No install number: install numbers start at 1. */
+#define APPMGR_US_PER_MS         1000ULL   /**< Microseconds in a millisecond: a wake's time is in microseconds. */
 #define APPMGR_KEEP_TMP_SUFFIX KODE_CARD_APP_TMP   /**< What a copy's name carries while it is written. */
 #define APPMGR_BYTE_BITS       8U       /**< Bits in a byte: a word read from a chunk shifts by it. */
 #define APPMGR_LOAN_BITS       8U       /**< Bits of to_return: one per buffer a medium can lend. */
@@ -470,7 +472,7 @@ typedef struct {
                                                 *   asked about.              */
     char        ask_name[KDRV_SLOT_PROJECT_MAX]; /**< The victim in hand.      */
 #if CONFIG_KODE_LOWPOWER
-    uint8_t     lp_who;                        /**< The id lowpower_join() gave. */
+    uint8_t     lp_who;                        /**< The id lowpower_join_dark() gave. */
 #endif
 
     /* ---- A question about where an app is (APP_FIND_REQ_SIG) --------------
@@ -607,6 +609,10 @@ struct appmgr_bk {
     appmgr_backup_t table;                 /**< What is known of each app's copy. */
     bool        on;                        /**< The AO is in AppMgr_backing. */
     bool        nocard;                    /**< No card answers: nothing is tried until one mounts. */
+    bool        rest;                      /**< The board rests: no copy is begun outside a dark wake. */
+    bool        lp_dark;                   /**< A dark wake is on and this AO has not said it is done. */
+    bool        dark_off;                  /**< A dark wake's end cut a copy: no other is asked for until AWAKE. */
+    bool        full_told;                 /**< The card mounted was said to be full. */
     bool        front_on;                  /**< An install was refused for the app @c front: it is seen to next. */
     bool        adopt_owed;                /**< The mailbox waits for that app's copy: adopted again once it is seen to. */
     uint32_t    front;                     /**< That app, by install number.  */
@@ -670,6 +676,10 @@ static void          backup_numbered(AppMgr * const me, uint32_t seq);
 static bool          backup_blocks(AppMgr * const me, const kapps_dir_t *d,
                                    const kapps_plan_t *plan);
 static void          adopt_wait(AppMgr * const me);
+#if CONFIG_KODE_LOWPOWER
+static void          backup_round(AppMgr * const me, const LowPowerRoundEvt * const r);
+static void          backup_lp_state(AppMgr * const me, const LowPowerStateEvt * const s);
+#endif
 static void          backup_schedule(AppMgr * const me);
 static void          backup_stop(AppMgr * const me);
 static bool          backup_tick(AppMgr * const me);
@@ -3798,10 +3808,12 @@ static QState AppMgr_initial(AppMgr * const me, void const * const par)
     kaos_claim(KBSP_RES_APP_PENDING, me, "AO_AppMgr");
     kaos_claim(KBSP_RES_OTA_SLOT,    me, "AO_AppMgr");
 #if CONFIG_KODE_LOWPOWER
-    me->lp_who = lowpower_join(&me->super, "appmgr");
+    /* A dark-wake owner: the copies of the apps are made with the glass asleep. */
+    me->lp_who = lowpower_join_dark(&me->super, "appmgr");
     if ( KODE_LOWPOWER_WHO_NONE != me->lp_who )
     {
         QActive_subscribe(&me->super, LOWPOWER_ROUND_SIG);
+        QActive_subscribe(&me->super, LOWPOWER_STATE_SIG);
     }
 #endif
     (void)kdrv_apps_init();
@@ -4659,16 +4671,23 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
 #if CONFIG_KODE_LOWPOWER
         case LOWPOWER_ROUND_SIG: {
             /* Idle: no image is being written, kept, received or launched;
-             * a card waiting for its install is the one thing in hand. */
-            bool const  held = (0U < me->hold_left);
-            const char *why  = NULL;
+             * a card waiting for its install is the one thing that refuses
+             * the round. Otherwise the copies make way for the rest. */
+            const LowPowerRoundEvt * const r = Q_EVT_CAST(LowPowerRoundEvt);
 
-            if ( held )
+            if ( 0U < me->hold_left )
             {
-                why = "install announced";
+                lowpower_ready(me->lp_who, r->round, true, "install announced");
             }
-            lowpower_ready(me->lp_who, Q_EVT_CAST(LowPowerRoundEvt)->round,
-                           held, why);
+            else
+            {
+                backup_round(me, r);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_STATE_SIG: {
+            backup_lp_state(me, Q_EVT_CAST(LowPowerStateEvt));
             status = Q_HANDLED();
             break;
         }
@@ -5356,9 +5375,14 @@ static void backup_schedule(AppMgr * const me)
     {
         backup_stop(me);
     }
-    else if ( me->bk->front_on )
+    else if ( me->bk->rest && (!me->bk->lp_dark) )
     {
-        /* An install was refused for it and will be asked again: no wait. */
+        backup_stop(me);     /* asleep: the tick is stopped, and a dark wake brings it back */
+    }
+    else if ( me->bk->front_on || me->bk->lp_dark )
+    {
+        /* An install was refused for it and will be asked again, or a dark
+         * wake is held for the copies: no wait. */
         backup_arm(me, APPMGR_CHUNK_GAP_TICKS);
     }
     else
@@ -5464,7 +5488,8 @@ static void backup_card(AppMgr * const me, const StorageCardEvt * const c)
     if ( NULL != me->bk )
     {
         appmgr_backup_reset(&me->bk->table);
-        me->bk->nocard = !c->mounted;
+        me->bk->nocard    = !c->mounted;
+        me->bk->full_told = false;
         if ( me->bk->nocard )
         {
             backup_front_done(me);     /* nothing to wait for */
@@ -5485,6 +5510,102 @@ static void backup_card(AppMgr * const me, const StorageCardEvt * const c)
         }
     }
 }
+
+#if CONFIG_KODE_LOWPOWER
+/**
+ * @brief Say a dark wake is held for nothing more, once, when no copy is owed.
+ * @param me The AO.
+ */
+static void backup_dark_check(AppMgr * const me)
+{
+    if ( (NULL != me->bk) && me->bk->lp_dark && (!backup_wanted(me)) )
+    {
+        me->bk->lp_dark = false;
+        lowpower_dark_done(me->lp_who);
+    }
+}
+
+/**
+ * @brief LOWPOWER_ROUND_SIG with nothing in flight: ready, and for ASLEEP a
+ *        dark wake when copies are owed.
+ *
+ * A copy never refuses the round. The wake is asked a wait after the board
+ * falls asleep; it is not asked again once a wake's end has cut a copy,
+ * which is then made when the board is awake.
+ *
+ * @param me The AO, idle, the copy in hand given up.
+ * @param r  The round.
+ */
+static void backup_round(AppMgr * const me, const LowPowerRoundEvt * const r)
+{
+    if ( NULL != me->bk )
+    {
+        me->bk->rest    = true;
+        me->bk->lp_dark = false;       /* a round ends the dark wake's work */
+        backup_stop(me);
+        if ( ((uint8_t)KODE_LP_ASLEEP == r->target) && backup_wanted(me) && (!me->bk->dark_off) )
+        {
+            (void)lowpower_wake_at(me->lp_who,
+                                   khal_time_us() + ((uint64_t)KODE_APP_BACKUP_IDLE_MS * APPMGR_US_PER_MS));
+        }
+    }
+    lowpower_ready(me->lp_who, r->round, false, NULL);
+}
+
+/**
+ * @brief LOWPOWER_STATE_SIG: the copies go on when the board is awake, and in
+ *        a dark wake with no wait.
+ *
+ * Only the wait between two apps is cut short: a step out to the card keeps
+ * its own deadline, and a read its pace.
+ *
+ * @param me The AO, idle, in AppMgr_backing or not.
+ * @param s  The board's state.
+ */
+static void backup_lp_state(AppMgr * const me, const LowPowerStateEvt * const s)
+{
+    bool const awake = ((uint8_t)KODE_LP_AWAKE == s->state);
+    bool const dark  = ((uint8_t)KODE_LP_DARK == s->state);
+
+    if ( NULL == me->bk )
+    {
+        if ( dark )
+        {
+            lowpower_dark_done(me->lp_who);    /* nothing is copied: nothing to hold it for */
+        }
+    }
+    else if ( awake || dark )
+    {
+        me->bk->lp_dark = dark;
+        if ( awake )
+        {
+            me->bk->rest     = false;
+            me->bk->dark_off = false;
+        }
+        if ( !me->bk->on )
+        {
+            backup_schedule(me);
+        }
+        else if ( (uint8_t)BK_WAIT != me->bk->step )
+        {
+            /* a step in flight keeps its own deadline, and a read its pace */
+        }
+        else if ( backup_wanted(me) )
+        {
+            backup_arm(me, APPMGR_CHUNK_GAP_TICKS);   /* in the state, between two apps */
+        }
+        else
+        {
+            /* in the state with nothing owed: its next tick leaves it */
+        }
+        backup_dark_check(me);
+    }
+    else
+    {
+        /* ASLEEP and OFF: the round did it all */
+    }
+}
+#endif /* CONFIG_KODE_LOWPOWER */
 
 /**
  * @brief Take the PSRAM the copies' state lives in and listen for the card's news.
@@ -5876,7 +5997,27 @@ static void backup_on_write(AppMgr * const me, const StorageWriteRspEvt * const 
         /* The answer says AO_Storage is done with the buffer. */
         khal_free(me->bk->buf);
         me->bk->buf = NULL;
-        if ( (uint8_t)KODE_OK != w->status )
+        if ( (uint8_t)KODE_NO_RESOURCES == w->status )
+        {
+            /* Refused before the open, or the card filled during the write:
+             * what landed of it goes. The person is told once for the card
+             * mounted. */
+            if ( 0U != w->written )
+            {
+                backup_drop_tmp(me);
+            }
+            if ( !me->bk->full_told )
+            {
+                static const QEvt full_evt = QEVT_INITIALIZER(APP_CARD_FULL_SIG);
+
+                me->bk->full_told = true;
+                KLOG_N(TAG, "the card is full: '%s' has no copy on it. Free space on "
+                            "the card for the apps to be kept", me->bk->name);
+                QACTIVE_PUBLISH(&full_evt, &me->super);
+            }
+            backup_settle(me, APPMGR_BACKUP_SKIPPED);
+        }
+        else if ( (uint8_t)KODE_OK != w->status )
         {
             KLOG_W(TAG, "'%s' could not be copied to the card: %lu of %lu bytes written",
                    me->bk->name, (unsigned long)w->written, (unsigned long)me->bk->len);
@@ -5954,6 +6095,9 @@ static QState AppMgr_backing(AppMgr * const me, QEvt const * const e)
         case Q_EXIT_SIG: {
             backup_release(me);
             me->bk->on = false;
+#if CONFIG_KODE_LOWPOWER
+            backup_dark_check(me);     /* left with nothing owed: the dark wake is done with */
+#endif
             status = Q_HANDLED();
             break;
         }
@@ -6048,11 +6192,7 @@ static QState AppMgr_backing(AppMgr * const me, QEvt const * const e)
         case APP_FIND_REQ_SIG:
         case APP_KEEP_ONLY_REQ_SIG:
         case APP_EVICT_REQ_SIG:
-        case APP_ADOPT_SIG:
-#if CONFIG_KODE_LOWPOWER
-        case LOWPOWER_ROUND_SIG:
-#endif
-        {
+        case APP_ADOPT_SIG: {
             /* Idle's to answer, once the copy in hand is given up. Should
              * idle stay, the copies go on after the pause. */
             backup_release(me);
@@ -6060,6 +6200,22 @@ static QState AppMgr_backing(AppMgr * const me, QEvt const * const e)
             status = Q_SUPER(&AppMgr_idle);
             break;
         }
+#if CONFIG_KODE_LOWPOWER
+        case LOWPOWER_ROUND_SIG: {
+            /* A copy never keeps the board awake: the one in hand is given
+             * up, and idle answers ready. One that the end of a dark wake
+             * cuts would be cut at the next too. */
+            if ( me->bk->lp_dark && ((uint8_t)BK_WAIT != me->bk->step) )
+            {
+                KLOG_N(TAG, "the copy of '%s' does not fit a dark wake; it is made "
+                            "when the board is awake", me->bk->name);
+                me->bk->dark_off = true;
+            }
+            backup_release(me);
+            status = Q_SUPER(&AppMgr_idle);
+            break;
+        }
+#endif
         default: {
             status = Q_SUPER(&AppMgr_idle);
             break;
@@ -7164,6 +7320,15 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
             /* Every state under this one holds work that must not be cut. */
             lowpower_ready(me->lp_who, Q_EVT_CAST(LowPowerRoundEvt)->round,
                            true, "app write");
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_STATE_SIG: {
+            /* No copy is made from here: a dark wake is held for nothing. */
+            if ( (uint8_t)KODE_LP_DARK == Q_EVT_CAST(LowPowerStateEvt)->state )
+            {
+                lowpower_dark_done(me->lp_who);
+            }
             status = Q_HANDLED();
             break;
         }

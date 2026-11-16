@@ -41,6 +41,11 @@ enum KodeSignals {
                                  *   place in the region (AppEvictedEvt), one
                                  *   event per app, before the write starts.
                                  *   The app it replaces is not one.          */
+    APP_CARD_FULL_SIG,          /**< AO_AppMgr: the copy of an app does not fit
+                                 *   the card, and that app has none. Published
+                                 *   once for each card mounted; bare and
+                                 *   static. The interface says the card is
+                                 *   full when it is in sight.                */
     RECV_READY_SIG,             /**< The console's receive protocol: sent by
                                  *   whichever AO is receiving, once its
                                  *   destination is open and the console is in
@@ -2794,12 +2799,14 @@ typedef struct {
     QEvt     super;
     uint32_t written;
     uint8_t  status;    /**< kode_status_t. Before the file is opened:
-                         *   KODE_ERROR for a write that gives way on a card
-                         *   that has not proved it takes a write, KODE_DENIED
-                         *   for any other refusal. After: KODE_DENIED for a
-                         *   write that gave way to a download,
-                         *   KODE_NO_RESOURCES for one that gives way and
-                         *   found the card full, else how the medium failed. */
+                         *   KODE_NO_RESOURCES for a path whose volume has
+                         *   less room than the file is long, KODE_ERROR for a
+                         *   write that gives way on a card that has not
+                         *   proved it takes a write, KODE_DENIED for any
+                         *   other refusal. After: KODE_DENIED for a write
+                         *   that gave way to a download, KODE_NO_RESOURCES
+                         *   for one that gives way and found the card full,
+                         *   else how the medium failed. */
     uint8_t  medium;    /**< Where it landed.                                 */
     uint32_t tag;       /**< The request's tag: a late answer to a write given
                          *   up on is told from the answer to the write in hand. */

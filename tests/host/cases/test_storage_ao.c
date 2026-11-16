@@ -624,6 +624,31 @@ TEST_CASE("an abandon with no write in flight is ignored", "[storage_ao]")
     TEST_ASSERT_EQUAL_INT((int)sizeof(payload), (int)fs_size("small.bin"));
 }
 
+/* A path goes to the volume it names and to no other: when that volume has
+ * less room than the file is long, nothing is written and the answer says so. */
+TEST_CASE("a write to a path whose volume has no room for it is refused, and leaves no file",
+          "[storage_ao]")
+{
+    storage_fresh();
+    fake_media_set_fs_free(1024U);
+
+    ask_write("/storage/big.bin", s_big, sizeof(s_big));
+
+    const QEvt * const rsp = ao_spy_take();
+    fake_media_set_fs_free(8U * 1024U * 1024U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(rsp, "the write went unanswered");
+    TEST_ASSERT_EQUAL_INT(STORAGE_WRITE_RSP_SIG, (int)rsp->sig);
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, (int)((const StorageWriteRspEvt *)rsp)->status);
+    TEST_ASSERT_EQUAL_UINT32(0U, ((const StorageWriteRspEvt *)rsp)->written);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, (int)fs_size("big.bin"), "a file was begun that cannot be ended");
+
+    /* A write that fits is served as before. */
+    ask_write("/storage/small.bin", s_big, 512U);
+    const QEvt * const ok = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(ok);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)((const StorageWriteRspEvt *)ok)->status);
+}
+
 /* ---- The audit's third fix: `write` during a read must not steal it -------- */
 
 /* answer_text_write() - the `write` verb - never checked busy() until now. It

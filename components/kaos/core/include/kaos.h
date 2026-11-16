@@ -3889,7 +3889,8 @@ void storage_close_request(void);
  * on the card would not go, which a read of the name would find first. A card
  * it failed on is not chosen again this boot (kdrv_sd_write_failed()) and is
  * mounted again once the write is over. A name starting with '/' goes to the
- * volume it names only.
+ * volume it names only, and is refused with KODE_NO_RESOURCES, nothing
+ * written, when that volume says it has less room than @p len.
  *
  * @param name Where the bytes go.
  * @param data The bytes.

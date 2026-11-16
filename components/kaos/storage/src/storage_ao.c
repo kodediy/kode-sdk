@@ -6299,8 +6299,25 @@ static void write_begin(Storage * const me, StorageWriteEvt const * const req)
     }
     else if ( '/' == req->name[0] )
     {
-        /* A path goes where it says. */
-        st = write_open(req->name, kdrv_storage_medium_of(req->name), &medium);
+        /* A path goes where it says, and to no other volume: one that has no
+         * room for it is not begun. */
+        uint64_t            total = 0U;
+        uint64_t            room  = 0U;
+        kdrv_medium_t const first = kdrv_storage_medium_of(req->name);
+
+        medium = first;
+        if ( (KDRV_MEDIUM_COUNT > first)
+            && (kdrv_storage_usage(first, &total, &room) == KODE_OK)
+            && (room < (uint64_t)req->len) )
+        {
+            KLOG_W(TAG, "'%s' does not fit its volume: %lu bytes, and %lu KB are free",
+                   req->name, (unsigned long)req->len, (unsigned long)kb_of(room));
+            st = KODE_NO_RESOURCES;
+        }
+        else
+        {
+            st = write_open(req->name, first, &medium);
+        }
     }
     else
     {
