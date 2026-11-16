@@ -346,6 +346,15 @@ typedef enum {
     REST_OFF          /**< The panel in sleep-in and the link down.          */
 } rest_t;
 
+#ifdef CONFIG_KODE_LOWPOWER
+/** @brief What the expander's owner has been asked for the panel's supply, and not yet answered. */
+enum {
+    SUPPLY_ASK_NONE = 0,   /**< Nothing.                                     */
+    SUPPLY_ASK_OFF,        /**< P7 low: the supply taken for an app's rest.  */
+    SUPPLY_ASK_ON          /**< P7 high: the supply on its way back.         */
+};
+#endif
+
 typedef struct {
     QActive super;
 
@@ -450,6 +459,11 @@ typedef struct {
                                 *   DISPLAY_SLEEP_REQ_SIG, not a round's.     */
     bool      wake_open;       /**< The app's wake is not answered yet: the
                                 *   glass is still being put back.            */
+    uint8_t   ask_who;         /**< The DISPLAY_SLEEP_WHO_* of the request in
+                                *   hand: what its answer carries.            */
+    uint8_t   open_who;        /**< The same for the request that is open: a
+                                *   sleep parking its renderer, or a wake not
+                                *   answered yet.                             */
     bool      renderer_seen;   /**< Somebody asked for the panel's state or
                                 *   flushed: a renderer exists.              */
     bool      panel_asleep;    /**< kdrv_display_panel_sleep(true) is in effect. */
@@ -472,6 +486,12 @@ typedef struct {
     uint8_t   lp_who;          /**< The id lowpower_join() gave.              */
     uint32_t  lp_round;        /**< The round being answered.                 */
     uint8_t   rest_target;     /**< The kode_lp_state_t of the open round.    */
+    bool      supply_off;      /**< An app's rest took the panel's supply: the
+                                *   way back powers it and starts it cold.    */
+    bool      supply_rising;   /**< P7 is high and the rail is rising.        */
+    uint8_t   supply_ask;      /**< A SUPPLY_ASK_*: what the expander's owner
+                                *   has been asked and not yet answered.      */
+    uint32_t  supply_round;    /**< The round a supply taken away answers.    */
     bool      have_glyphs;     /**< @c glyphs holds a usable hand-over.        */
     DisplayGlyphsEvt glyphs;   /**< The last hand-over; its strip is the
                                 *   sender's, valid until the next AWAKE.     */
@@ -516,6 +536,8 @@ void Display_ctor(void)
     l_display.rest             = REST_AWAKE;
     l_display.app_sleep        = false;
     l_display.wake_open        = false;
+    l_display.ask_who          = DISPLAY_SLEEP_WHO_APP;
+    l_display.open_who         = DISPLAY_SLEEP_WHO_APP;
     l_display.renderer_seen    = false;
     l_display.panel_asleep     = false;
     l_display.glyphs_tmo_live  = false;
@@ -529,6 +551,10 @@ void Display_ctor(void)
     l_display.lp_who           = KODE_LOWPOWER_WHO_NONE;
     l_display.lp_round         = 0U;
     l_display.rest_target      = (uint8_t)KODE_LP_AWAKE;
+    l_display.supply_off       = false;
+    l_display.supply_rising    = false;
+    l_display.supply_ask       = SUPPLY_ASK_NONE;
+    l_display.supply_round     = 0U;
     l_display.have_glyphs      = false;
 #endif
 }
@@ -715,12 +741,18 @@ static void rest_set(Display * const me, rest_t rest)
  * @brief Say how one DISPLAY_SLEEP_REQ_SIG ended: the word a task reads, then
  *        DISPLAY_SLEEP_SIG on the bus.
  *
+ * The answer carries the door its request came through. The word is the
+ * app's door's alone: a task waiting there never counts an answer to
+ * AO_LowPower's request, and AO_LowPower reads only its own on the bus.
+ *
  * @param me  The AO.
+ * @param who The DISPLAY_SLEEP_WHO_* of the request answered.
  * @param rc  KODE_OK when the glass is as the request asked.
  * @param why Why not, when @p rc is not KODE_OK.
  */
 /* cppcheck-suppress misra-c2012-2.7 ; @p me is the publish's sender, which only a QS build reads */
-static void sleep_answer(Display * const me, kode_status_t rc, display_sleep_why_t why)
+static void sleep_answer(Display * const me, uint8_t who, kode_status_t rc,
+                         display_sleep_why_t why)
 {
     DisplaySleepEvt *ev;
 
@@ -728,7 +760,10 @@ static void sleep_answer(Display * const me, kode_status_t rc, display_sleep_why
     {
         KLOG_N(TAG, "the glass stays as it is: %s", display_sleep_why_text((uint8_t)why));
     }
-    display_sleep_answer_set(rc, why);
+    if ( DISPLAY_SLEEP_WHO_APP == who )
+    {
+        display_sleep_answer_set(rc, why);
+    }
     ev = Q_NEW_X(DisplaySleepEvt, 0U, DISPLAY_SLEEP_SIG);
     if ( NULL == ev )
     {
@@ -740,6 +775,7 @@ static void sleep_answer(Display * const me, kode_status_t rc, display_sleep_why
         ev->asleep = display_asleep();
         ev->rc     = (uint8_t)rc;
         ev->why    = (uint8_t)why;
+        ev->who    = who;
         QACTIVE_PUBLISH(&ev->super, &me->super);
     }
 }
@@ -772,6 +808,113 @@ static const char *glass_off(Display * const me)
     return failed;
 }
 
+#ifdef CONFIG_KODE_LOWPOWER
+/**
+ * @brief Bring back the supply an app's rest took from the panel.
+ *
+ * As at the boot, the panel is not touched until the expander's owner has
+ * said P7 is high (supply_answer()). Then the rail rises for
+ * KODE_DISPLAY_SUPPLY_SETTLE_MS, and then the panel starts cold, which leaves
+ * it in sleep-in with its registers loaded, where rest_restore() finds a
+ * panel that only slept. Each step is taken on the restore timer, which also
+ * asks again when no answer came and tries a cold start again that failed.
+ *
+ * The reset line is the touch controller's too. In an app's rest AO_LowPower
+ * tells the touch's owner to restore only after this wake is answered. On the
+ * board's AWAKE both owners hear it at once: the touch's writes find the chip
+ * in reset and its owner tries again every KODE_TOUCH_RESTORE_RETRY_MS, which
+ * is after the cold start here.
+ *
+ * @param me The AO, the glass at rest with its supply off.
+ * @return true when the panel is powered and loaded; false while a step is
+ *         still to come, the restore timer armed for it.
+ */
+static bool supply_back(Display * const me)
+{
+    bool back = false;
+
+    if ( !me->supply_rising )
+    {
+        ioexp_field_request(&me->super, FIELD_OP_SET, (uint16_t)KDRV_TCA_O7, 1);
+        me->supply_ask = SUPPLY_ASK_ON;
+        KLOG_N(TAG, "the panel's supply is asked back (P7 high)");
+    }
+    else if ( kdrv_display_panel_cold() == KODE_OK )
+    {
+        me->supply_rising = false;
+        me->supply_off    = false;
+        back              = true;
+    }
+    else
+    {
+        KLOG_E(TAG, "the panel did not start cold; trying again in %u ms",
+               (unsigned)KODE_DISPLAY_RESTORE_RETRY_MS);
+    }
+    if ( !back )
+    {
+        me->restore_owed = true;
+        (void)QTimeEvt_disarm(&me->restore_tmo);
+        QTimeEvt_armX(&me->restore_tmo, KQP_TICKS_PER_MS(KODE_DISPLAY_RESTORE_RETRY_MS), 0U);
+    }
+    return back;
+}
+
+/**
+ * @brief IOEXP_FIELD_RSP_SIG: the expander's owner answered for the panel's supply.
+ *
+ * Taken away: the app's rest is answered only now, with what the expander
+ * did. A supply that would not go leaves the panel in reset all the same, so
+ * the way back still starts it cold. Asked back: the rail's rise begins here,
+ * and a refusal is asked again on the restore timer.
+ *
+ * @param me The AO.
+ * @param a  The answer.
+ */
+static void supply_answer(Display * const me, const IoexpFieldEvt * const a)
+{
+    bool const    ok  = ((uint8_t)KODE_OK == a->rc);
+    uint8_t const ask = me->supply_ask;
+
+    me->supply_ask = SUPPLY_ASK_NONE;
+    if ( (uint16_t)KDRV_TCA_O7 != a->field )
+    {
+        me->supply_ask = ask;   /* another field's answer: still waiting */
+    }
+    else if ( SUPPLY_ASK_OFF == ask )
+    {
+        me->supply_off    = true;
+        me->supply_rising = false;
+        if ( ok )
+        {
+            KLOG_N(TAG, "the panel's supply is gone for the app (P7 low)");
+        }
+        else
+        {
+            KLOG_W(TAG, "the expander would not take the panel's supply away (rc %u)",
+                   (unsigned)a->rc);
+        }
+        lowpower_ready(me->lp_who, me->supply_round, !ok, "panel supply");
+    }
+    else if ( (SUPPLY_ASK_ON == ask) && ok )
+    {
+        me->supply_rising = true;
+        me->restore_owed  = true;
+        (void)QTimeEvt_disarm(&me->restore_tmo);
+        QTimeEvt_armX(&me->restore_tmo, KQP_TICKS_PER_MS(KODE_DISPLAY_SUPPLY_SETTLE_MS), 0U);
+    }
+    else if ( SUPPLY_ASK_ON == ask )
+    {
+        /* The restore timer asks again. */
+        KLOG_E(TAG, "the expander would not give the panel its supply back (rc %u)",
+               (unsigned)a->rc);
+    }
+    else
+    {
+        /* Nothing was asked: an answer that outlived its question. */
+    }
+}
+#endif /* CONFIG_KODE_LOWPOWER */
+
 /**
  * @brief Put the glass back, whatever part of the rest it got to: for
  *        STATE(AWAKE), for an app's wake, and to undo a sleep that failed.
@@ -803,6 +946,21 @@ static void rest_restore(Display * const me)
         bool ok = true;
 
         glyphs_wait_stop(me);
+#ifdef CONFIG_KODE_LOWPOWER
+        if ( SUPPLY_ASK_OFF == me->supply_ask )
+        {
+            /* The expander's owner has not said the supply is gone, and may
+             * never say it: the reset line is low and P7 was asked low, so
+             * the panel starts cold all the same. */
+            me->supply_ask = SUPPLY_ASK_NONE;
+            me->supply_off = true;
+        }
+        if ( me->supply_off && !supply_back(me) )
+        {
+            /* The restore timer comes back here once the rail has risen. */
+            return;
+        }
+#endif
         /* Always asked for, not only after a link this AO saw go down: a
          * link_set(false) that answers an error leaves the link down anyway,
          * and link_set(true) is a no-op where the link is already up. */
@@ -830,7 +988,7 @@ static void rest_restore(Display * const me)
             {
                 me->wake_open = false;
                 KLOG_N(TAG, "glass awake again for the app");
-                sleep_answer(me, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+                sleep_answer(me, me->open_who, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
             }
         }
         else
@@ -881,7 +1039,7 @@ static void sleep_settle(Display * const me)
     {
         rest_set(me, REST_OFF);
         KLOG_N(TAG, "glass asleep for the app: panel asleep, link down");
-        sleep_answer(me, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+        sleep_answer(me, me->open_who, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
     }
     else
     {
@@ -889,7 +1047,7 @@ static void sleep_settle(Display * const me)
         me->app_sleep = false;
         rest_set(me, REST_REFUSED);
         rest_restore(me);
-        sleep_answer(me, KODE_IO_ERROR, DISPLAY_SLEEP_WHY_PANEL);
+        sleep_answer(me, me->open_who, KODE_IO_ERROR, DISPLAY_SLEEP_WHY_PANEL);
     }
 }
 
@@ -908,7 +1066,7 @@ static void sleep_park(Display * const me)
 
     if ( NULL == park )
     {
-        sleep_answer(me, KODE_NO_RESOURCES, DISPLAY_SLEEP_WHY_EVENTS);
+        sleep_answer(me, me->open_who, KODE_NO_RESOURCES, DISPLAY_SLEEP_WHY_EVENTS);
     }
     else
     {
@@ -942,38 +1100,40 @@ static void sleep_down(Display * const me)
     if ( me->restore_owed )
     {
         /* The glass is still being put back. */
-        sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+        sleep_answer(me, me->ask_who, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
     }
     else if ( REST_AWAKE == me->rest )
     {
         if ( NULL != rest_busy_why(me) )
         {
-            sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_LENT);
+            sleep_answer(me, me->ask_who, KODE_DENIED, DISPLAY_SLEEP_WHY_LENT);
         }
         else if ( !me->renderer_seen )
         {
+            me->open_who  = me->ask_who;
             me->app_sleep = true;
             rest_set(me, REST_PARKING);
             sleep_settle(me);
         }
         else
         {
+            me->open_who = me->ask_who;
             sleep_park(me);
         }
     }
     else if ( (REST_ASLEEP == me->rest) || (REST_OFF == me->rest) )
     {
-        sleep_answer(me, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+        sleep_answer(me, me->ask_who, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
     }
     else if ( me->app_sleep )
     {
         /* The renderer is being parked for an earlier request. */
-        sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+        sleep_answer(me, me->ask_who, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
     }
     else
     {
         /* A round is open, or was refused and its AWAKE has not come. */
-        sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
+        sleep_answer(me, me->ask_who, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
     }
 }
 
@@ -990,16 +1150,16 @@ static void sleep_up(Display * const me)
 {
     if ( REST_AWAKE == me->rest )
     {
-        sleep_answer(me, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+        sleep_answer(me, me->ask_who, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
     }
     else if ( me->restore_owed )
     {
         /* The glass is being put back already. */
-        sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+        sleep_answer(me, me->ask_who, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
     }
     else if ( !me->app_sleep )
     {
-        sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
+        sleep_answer(me, me->ask_who, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
     }
     else if ( REST_PARKING == me->rest )
     {
@@ -1010,11 +1170,12 @@ static void sleep_up(Display * const me)
         rest_set(me, REST_AWAKE);
         /* The renderer may have parked already. */
         QACTIVE_PUBLISH(&repaint, &me->super);
-        sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_WOKEN);
-        sleep_answer(me, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+        sleep_answer(me, me->open_who, KODE_DENIED, DISPLAY_SLEEP_WHY_WOKEN);
+        sleep_answer(me, me->ask_who, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
     }
     else
     {
+        me->open_who  = me->ask_who;
         me->wake_open = true;
         rest_restore(me);
     }
@@ -1028,9 +1189,10 @@ static void sleep_up(Display * const me)
  */
 static void sleep_request(Display * const me, const DisplaySleepReqEvt * const r)
 {
+    me->ask_who = r->who;
     if ( !s_state_evt.up )
     {
-        sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_NO_PANEL);
+        sleep_answer(me, me->ask_who, KODE_DENIED, DISPLAY_SLEEP_WHY_NO_PANEL);
     }
     else if ( r->sleep )
     {
@@ -1291,17 +1453,58 @@ static void sleep_yield(Display * const me)
             glyphs_wait_stop(me);
             rest_set(me, REST_AWAKE);
             me->repaint_owed = true;
-            sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
+            sleep_answer(me, me->open_who, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
         }
         else if ( me->wake_open )
         {
             me->wake_open = false;
-            sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
+            sleep_answer(me, me->open_who, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
         }
         else
         {
             /* Asleep for the app: the round finds the glass at rest. */
         }
+    }
+}
+
+/**
+ * @brief DISPLAY_SUPPLY_REQ_SIG: take the supply of a panel asleep for an app.
+ *
+ * The panel's power-off order, as at OFF: the reset line low for its time,
+ * then the supply (P7). The line is the touch controller's too, so the app's
+ * rest has put the touch away first. Only a glass an app put to sleep is
+ * taken. The request is answered when the expander's owner says the supply
+ * is gone (supply_answer()), and the wake that follows, an app's or the
+ * board's AWAKE, brings it back before anything else (supply_back()). A
+ * request that finds an earlier one still unanswered asks again: AO_LowPower
+ * asks one at a time, so the answer of the earlier one was lost.
+ *
+ * @param me The AO.
+ * @param r  The request; its round is the answer's.
+ */
+static void supply_request(Display * const me, const DisplaySupplyReqEvt * const r)
+{
+    if ( me->supply_off )
+    {
+        lowpower_ready(me->lp_who, r->round, false, NULL);
+    }
+    else if ( (!me->app_sleep) || (REST_OFF != me->rest) || (!me->panel_asleep) )
+    {
+        lowpower_ready(me->lp_who, r->round, true, "glass not asleep");
+    }
+    else if ( SUPPLY_ASK_ON == me->supply_ask )
+    {
+        lowpower_ready(me->lp_who, r->round, true, "panel supply busy");
+    }
+    else if ( kdrv_display_reset_low() != KODE_OK )
+    {
+        lowpower_ready(me->lp_who, r->round, true, "reset line");
+    }
+    else
+    {
+        ioexp_field_request(&me->super, FIELD_OP_SET, (uint16_t)KDRV_TCA_O7, 0);
+        me->supply_ask   = SUPPLY_ASK_OFF;
+        me->supply_round = r->round;
     }
 }
 
@@ -1321,6 +1524,14 @@ static void rest_round(Display * const me, const LowPowerRoundEvt * const r)
      * AWAKE that ends this round restores it. */
     me->restore_owed = false;
     (void)QTimeEvt_disarm(&me->restore_tmo);
+    if ( me->supply_off && (me->supply_rising || (SUPPLY_ASK_ON == me->supply_ask)) )
+    {
+        /* The supply was on its way back to a panel still in reset: the board
+         * rests without it, and the AWAKE that ends the rest asks again. */
+        ioexp_field_request(NULL, FIELD_OP_SET, (uint16_t)KDRV_TCA_O7, 0);
+        me->supply_rising = false;
+        me->supply_ask    = SUPPLY_ASK_NONE;
+    }
     /* A renderer parks on every round it hears, whether or not the glass
      * goes on to rest, and waits for the repaint to start drawing again. */
     if ( me->renderer_seen )
@@ -1474,7 +1685,7 @@ static void rest_glyphs_late(Display * const me)
             KLOG_W(TAG, "the renderer did not park in %u ms; the glass stays lit",
                    (unsigned)KODE_LOWPOWER_GLYPHS_WAIT_MS);
             QACTIVE_PUBLISH(&repaint, &me->super);
-            sleep_answer(me, KODE_TIMEOUT, DISPLAY_SLEEP_WHY_RENDERER);
+            sleep_answer(me, me->open_who, KODE_TIMEOUT, DISPLAY_SLEEP_WHY_RENDERER);
         }
         else
         {
@@ -1761,7 +1972,8 @@ static QState Display_powering(Display * const me, QEvt const * const e)
         }
         case DISPLAY_SLEEP_REQ_SIG: {
             /* Asked before the panel is up: answered, as every request is. */
-            sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_NO_PANEL);
+            sleep_answer(me, Q_EVT_CAST(DisplaySleepReqEvt)->who, KODE_DENIED,
+                         DISPLAY_SLEEP_WHY_NO_PANEL);
             status = Q_HANDLED();
             break;
         }
@@ -1775,6 +1987,12 @@ static QState Display_powering(Display * const me, QEvt const * const e)
         }
 #endif
 #if CONFIG_KODE_LOWPOWER
+        case DISPLAY_SUPPLY_REQ_SIG: {
+            lowpower_ready(me->lp_who, Q_EVT_CAST(DisplaySupplyReqEvt)->round, true,
+                           "glass not asleep");
+            status = Q_HANDLED();
+            break;
+        }
         case LOWPOWER_ROUND_SIG: {
             /* Asked before the panel is up: say so rather than let the round
              * time out on an owner that never answered. */
@@ -2688,10 +2906,19 @@ static QState Display_testing(Display * const me, QEvt const * const e)
 #endif
         case DISPLAY_SLEEP_REQ_SIG: {
             /* The same for an app: the row has the glass until it ends. */
-            sleep_answer(me, KODE_DENIED, DISPLAY_SLEEP_WHY_TEST);
+            sleep_answer(me, Q_EVT_CAST(DisplaySleepReqEvt)->who, KODE_DENIED,
+                         DISPLAY_SLEEP_WHY_TEST);
             status = Q_HANDLED();
             break;
         }
+#ifdef CONFIG_KODE_LOWPOWER
+        case DISPLAY_SUPPLY_REQ_SIG: {
+            lowpower_ready(me->lp_who, Q_EVT_CAST(DisplaySupplyReqEvt)->round, true,
+                           "display test");
+            status = Q_HANDLED();
+            break;
+        }
+#endif
         case DISPLAY_TEST_REQ_SIG: {
             /* Not deferred: restarting the row would leave the first
              * request's verdict unpublished. */
@@ -3098,6 +3325,18 @@ static QState Display_active(Display * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#ifdef CONFIG_KODE_LOWPOWER
+        case DISPLAY_SUPPLY_REQ_SIG: {
+            supply_request(me, Q_EVT_CAST(DisplaySupplyReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case IOEXP_FIELD_RSP_SIG: {
+            supply_answer(me, Q_EVT_CAST(IoexpFieldEvt));
+            status = Q_HANDLED();
+            break;
+        }
+#endif
         case DISPLAY_GLYPHS_SIG: {
             const DisplayGlyphsEvt *const g = Q_EVT_CAST(DisplayGlyphsEvt);
 

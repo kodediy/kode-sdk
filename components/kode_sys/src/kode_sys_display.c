@@ -42,6 +42,7 @@ kode_status_t kode_sys_screen_sleep(bool sleep)
     if ( NULL != e )
     {
         e->sleep = sleep;
+        e->who   = DISPLAY_SLEEP_WHO_APP;
         evt      = &e->super;
     }
     return kode_sys_cmd_post(AO_Display, evt, KQP_DISPLAY_CMD_MARGIN);

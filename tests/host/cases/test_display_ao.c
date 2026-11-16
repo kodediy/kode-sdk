@@ -47,7 +47,8 @@ typedef enum {
     T_SLEEP_IN,     /**< kdrv_display_panel_sleep(true).                       */
     T_SLEEP_OUT,    /**< kdrv_display_panel_sleep(false).                      */
     T_GRAM,         /**< kdrv_display_gram_write().                            */
-    T_RESET_LOW     /**< kdrv_display_reset_low().                             */
+    T_RESET_LOW,    /**< kdrv_display_reset_low().                             */
+    T_COLD          /**< kdrv_display_panel_cold().                            */
 } trace_t;
 
 /** @brief Longest sequence a case traces. */
@@ -3210,4 +3211,375 @@ TEST_CASE("a compose request leaves AO_Display's queue its margin, and is refuse
     }
     ao_spy_drain();
     cp_done();
+}
+
+/* ---- The panel's supply, for an app's rest --------------------------------- */
+
+static kode_status_t s_cold_rc;   /**< What kdrv_display_panel_cold() answers. */
+
+static kode_status_t on_cold(int calls)
+{
+    (void)calls;
+    trace(T_COLD);
+    return s_cold_rc;
+}
+
+/** @brief The app sleep's stand-ins, and the cold start's. */
+static void supply_mocks(void)
+{
+    sleep_mocks();
+    s_cold_rc = KODE_OK;
+    kdrv_display_panel_cold_StubWithCallback(&on_cold);
+}
+
+/** @brief AO_LowPower asks for the supply of the panel, in a round of its own. */
+static void supply_asked(void)
+{
+    DisplaySupplyReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(DISPLAY_SUPPLY_REQ_SIG);
+    e.round = ++s_round_no;
+    QASM_DISPATCH(AO_Display, &e.super, 0U);
+}
+
+/**
+ * @brief Put the glass to sleep for an app.
+ *
+ * An earlier case may have left a renderer seen, and then the glass waits for
+ * it to stop drawing: the park is answered. With none the glass sleeps at once.
+ */
+static void glass_sleeps(void)
+{
+    ao_spy_drain();
+    sleep_asked(true);
+    if ( !display_asleep() )
+    {
+        renderer_parks(expect_park());
+    }
+    TEST_ASSERT_TRUE(display_asleep());
+    ao_spy_drain();
+}
+
+/** @brief The expander's owner answers the last thing it was asked about P7. */
+static void p7_answered(kode_status_t rc)
+{
+    IoexpFieldEvt a;
+
+    (void)memset(&a, 0, sizeof(a));
+    a.super = (QEvt)QEVT_INITIALIZER(IOEXP_FIELD_RSP_SIG);
+    a.op    = (uint8_t)FIELD_OP_SET;
+    a.field = (uint16_t)KDRV_TCA_O7;
+    a.rc    = (uint8_t)rc;
+    QASM_DISPATCH(AO_Display, &a.super, 0U);
+}
+
+/** @brief Put the glass to sleep for an app and take its supply. */
+static void supply_gone(void)
+{
+    glass_sleeps();
+    supply_asked();
+    p7_answered(KODE_OK);
+    expect_answer(false, NULL);
+    ao_spy_drain();
+    s_trace_n = 0U;
+}
+
+/** @brief Let the rail rise, once the expander's owner has said P7 is high. */
+static void rail_rises(void)
+{
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_SUPPLY_SETTLE_MS) + 1U);
+}
+
+/* The panel's power-off order, as at OFF: the line the panel shares with the
+ * touch goes low before the supply is asked off. */
+TEST_CASE("the supply of a glass asleep for an app goes: the reset line low, then P7",
+          "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+    asked = fake_neighbour_ioexp_posts();
+
+    supply_asked();
+
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN, T_RESET_LOW);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 is asked low");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked, s_posts_at_reset,
+                                   "the reset line goes low before P7 is asked");
+    /* Ready is what the expander did, not what it was asked. */
+    expect_no_more_answers();
+    p7_answered(KODE_OK);
+    expect_answer(false, NULL);
+    expect_no_more_answers();
+
+    /* Asked again, it is as asked already and nothing moves. */
+    supply_asked();
+    expect_answer(false, NULL);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN, T_RESET_LOW);
+
+    sleep_asked(false);
+    p7_answered(KODE_OK);
+    rail_rises();
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* The panel sat in reset whether or not its supply went: the rest is told
+ * the supply did not go, and the way back still starts the panel cold. */
+TEST_CASE("an expander that will not take the supply away says so, and the wake still starts the panel cold",
+          "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+
+    supply_asked();
+    p7_answered(KODE_ERROR);
+    expect_answer(true, "panel supply");
+
+    s_trace_n = 0U;
+    sleep_asked(false);
+    p7_answered(KODE_OK);
+    rail_rises();
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A lit panel that lost its supply would flash: only a glass an app put to
+ * sleep gives it up. */
+TEST_CASE("the supply of a glass that is awake is refused and nothing moves", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    asked = fake_neighbour_ioexp_posts();
+
+    supply_asked();
+
+    expect_answer(true, "glass not asleep");
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+    TEST_ASSERT_EQUAL_UINT(asked, fake_neighbour_ioexp_posts());
+    Mockkdrv_display_Destroy();
+}
+
+TEST_CASE("a reset line that will not go low keeps the supply and says so", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+    s_reset_low_rc = KODE_ERROR;
+    asked = fake_neighbour_ioexp_posts();
+
+    supply_asked();
+
+    expect_answer(true, "reset line");
+    TEST_ASSERT_EQUAL_UINT(asked, fake_neighbour_ioexp_posts());
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* The way back: the supply first, the rail's rise, the cold start, and only
+ * then what wakes a panel that merely slept. */
+TEST_CASE("the wake brings the supply back, starts the panel cold, then the link and the sleep-out",
+          "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+    asked = fake_neighbour_ioexp_posts();
+
+    sleep_asked(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 is asked high");
+    rail_rises();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the panel was touched before the expander answered");
+
+    p7_answered(KODE_OK);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the panel is not touched while the rail rises");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "not answered until the glass is back");
+    rail_rises();
+
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 is asked once");
+    Mockkdrv_display_Destroy();
+}
+
+/* A write the expander did not keep leaves the panel without its supply:
+ * nothing is sent to it, and the supply is asked for again. */
+TEST_CASE("an expander that will not give the supply back is asked again, the panel untouched",
+          "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+
+    sleep_asked(false);
+    asked = fake_neighbour_ioexp_posts();
+    p7_answered(KODE_ERROR);
+    rail_rises();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a panel with no supply was started");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a glass that is not back was answered");
+
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_RESTORE_RETRY_MS) + 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 was not asked again");
+    p7_answered(KODE_OK);
+    rail_rises();
+
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    Mockkdrv_display_Destroy();
+}
+
+/* An answer of the expander's owner that never came must not hold the supply
+ * for ever: whoever asked has given the step up, and asks again. */
+TEST_CASE("a supply whose answer never came is asked for again by the next request", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+    supply_asked();                              /* and the expander's owner says nothing */
+    asked = fake_neighbour_ioexp_posts();
+    ao_spy_drain();
+
+    supply_asked();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(),
+                                   "P7 was not asked low again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "answered before the expander's owner did");
+    p7_answered(KODE_OK);
+    expect_answer(false, NULL);
+    Mockkdrv_display_Destroy();
+}
+
+/* The reset line is low and the supply was asked away: a wake that comes
+ * before the answer finds a panel that must start cold, not one that slept. */
+TEST_CASE("a wake before the supply's answer came still starts the panel cold", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+    supply_asked();                              /* and the expander's owner says nothing */
+    asked = fake_neighbour_ioexp_posts();
+    ao_spy_drain();
+    s_trace_n = 0U;
+
+    sleep_asked(false);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 is asked high");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a panel in reset was woken as if it slept");
+    p7_answered(KODE_OK);
+    rail_rises();
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    Mockkdrv_display_Destroy();
+}
+
+TEST_CASE("a cold start that fails is tried again, the supply left on", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+    s_cold_rc = KODE_ERROR;
+
+    sleep_asked(false);
+    asked = fake_neighbour_ioexp_posts();
+    p7_answered(KODE_OK);
+    rail_rises();
+    EXPECT_TRACE(T_COLD);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a glass that is not back is not answered");
+
+    s_cold_rc = KODE_OK;
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_RESTORE_RETRY_MS) + 1U);
+
+    EXPECT_TRACE(T_COLD, T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked, fake_neighbour_ioexp_posts(), "P7 is not asked again");
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    Mockkdrv_display_Destroy();
+}
+
+/* The board took the rest over: its AWAKE restores the glass, supply and all. */
+TEST_CASE("the board's AWAKE brings the supply back before the glass", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+    asked = fake_neighbour_ioexp_posts();
+
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a glass at rest is ready as it is");
+
+    state_awake(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT(asked + 1U, fake_neighbour_ioexp_posts());
+    p7_answered(KODE_OK);
+    rail_rises();
+
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    TEST_ASSERT_FALSE(display_asleep());
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A round that comes while the rail rises finds a panel in reset with its
+ * supply on: the board rests without it, and its AWAKE asks for it again. */
+TEST_CASE("a round of the board during the supply's way back takes it away again", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+
+    sleep_asked(false);
+    p7_answered(KODE_OK);                    /* P7 is high, the rail rising */
+    asked = fake_neighbour_ioexp_posts();
+    round_for(KODE_LP_ASLEEP);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 was left high for the rest");
+    rail_rises();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the panel was started under a board at rest");
+
+    state_awake(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 2U, fake_neighbour_ioexp_posts(), "P7 was not asked back");
+    p7_answered(KODE_OK);
+    rail_rises();
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
 }
