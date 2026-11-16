@@ -50,6 +50,30 @@
 #define BUZZ_SAMPLES (KDRV_AW_SAMPLES(BUZZ_MS))
 /** @brief What one tick of the feed offers: two bursts of 64. */
 #define TICK_BYTES   (KDRV_AW_BURST * KODE_HAPTIC_BURSTS_PER_TICK)
+/** @brief What the step that issues GO pushes before the first feed. */
+#define GO_BYTES     (KDRV_AW_BURST * KODE_HAPTIC_BURSTS_AT_GO)
+
+/** @brief What one burst costs on the bus, in milliseconds: 66 bytes of nine
+ *         bits at 400 kHz is 1.5 ms, and the status read before it a little
+ *         more. */
+#define BURST_BUS_MS 2U
+/** @brief Microseconds in a second, for the chip's clock. */
+#define US_PER_S     1000000U
+/** @brief What the chip's clock gives its FIFO: the depth the driver
+ *         names, and a burst past it is a burst lost. */
+#define CHIP_FIFO    KDRV_AW_FIFO_DEPTH
+/** @brief Where it raises FF_AFS: the mark the driver names. */
+#define CHIP_AF      KDRV_AW_FIFO_AF
+/** @brief How far from its nominal rate a drifting chip plays, per cent. */
+#define CHIP_DRIFT_PCT 2U
+/** @brief Per cent, for the drift. */
+#define PCT_FULL     100U
+/** @brief How long a drifting chip is held, in milliseconds. */
+#define DRIFT_HOLD_MS 10000U
+/** @brief Status reads a throttled FIFO answers full after each burst: with
+ *         two offers a feed, one burst every other feed, 5.3 ms of playback
+ *         per 8 ms - a chip that drains slower than it plays. */
+#define THROTTLE_READS 2U
 
 /** @brief How much of the RTPDATA stream a case can read back, in bytes. */
 #define FIFO_LOG_MAX 1024U
@@ -68,11 +92,25 @@ static int8_t   s_fifo_data[FIFO_LOG_MAX];   /* and the first of it, byte for by
 static unsigned s_bursts;       /* how many writes it took                */
 static bool     s_burst_fail;   /* the chip stops taking bursts           */
 static bool     s_afs_hold;     /* the FIFO never drains again            */
-static bool     s_afs_throttle; /* it drains just fast enough for one burst
-                                 * between one status read and the next    */
-static bool     s_afs_full;     /* and right now it is holding that burst  */
+static bool     s_afs_throttle; /* it drains one burst in THROTTLE_READS
+                                 * status reads                            */
+static unsigned s_afs_full;     /* reads it still answers full for         */
 static uint8_t  s_kill_read;    /* the register whose write is the last thing
                                  * the bus ever does; 0 for a live bus     */
+/* The chip's own clock, for the cases that turn it on: the FIFO drains at
+ * s_chip_rate_hz - KDRV_AW_RATE_HZ unless a case makes it drift - from the
+ * first sample, each burst costs BURST_BUS_MS of the
+ * fake clock, and a FIFO found empty by a burst means the chip has already
+ * gone back to standby - which is what the AW86233 does when RTP runs dry. */
+static bool     s_chip_clock;   /* drain the FIFO by the fake clock        */
+static bool     s_chip_started; /* the first sample has landed             */
+static uint64_t s_chip_t0_us;   /* when it landed                          */
+static uint32_t s_chip_fed;     /* samples handed over since GO            */
+static bool     s_chip_dry;     /* the FIFO ran empty before the buzz ended */
+static bool     s_chip_over;    /* a burst landed past the FIFO's capacity */
+static uint32_t s_chip_rate_hz; /* what its oscillator really plays at     */
+
+static uint32_t chip_level(void);
 
 static kode_status_t on_read(khal_i2c_dev_t dev, uint8_t reg, uint8_t *buf,
                              size_t len, int calls)
@@ -93,14 +131,18 @@ static kode_status_t on_read(khal_i2c_dev_t dev, uint8_t reg, uint8_t *buf,
         {
             buf[0] |= AW_FF_AFS;
         }
-        else if ( s_afs_full )
+        else if ( s_chip_clock && (chip_level() >= CHIP_AF) )
         {
-            /* Full of the burst it was just given, and drained by the time
-             * the next read comes round. Self-synchronising rather than
-             * counted, so a case that starts mid-sequence still gets exactly
-             * one burst accepted between two reads. */
+            buf[0] |= AW_FF_AFS;   /* the chip's clock, at its own mark */
+        }
+        else if ( 0U < s_afs_full )
+        {
+            /* Full of the burst it was just given, and drained once that
+             * many reads have gone by. Started by the burst rather than by a
+             * count of its own, so a case that starts mid-sequence still gets
+             * exactly one burst accepted every THROTTLE_READS reads. */
             buf[0]     |= AW_FF_AFS;
-            s_afs_full  = false;
+            s_afs_full -= 1U;
         }
         else
         {
@@ -148,6 +190,55 @@ static kode_status_t on_write(khal_i2c_dev_t dev, uint8_t reg, uint8_t val,
     return KODE_OK;
 }
 
+/** @brief Samples the chip's clock has in its FIFO right now. */
+static uint32_t chip_level(void)
+{
+    uint64_t played;
+
+    if ( !s_chip_started )
+    {
+        return 0U;
+    }
+    played = ((khal_time_us() - s_chip_t0_us) * s_chip_rate_hz) / US_PER_S;
+    if ( played >= (uint64_t)s_chip_fed )
+    {
+        return 0U;
+    }
+    return (uint32_t)((uint64_t)s_chip_fed - played);
+}
+
+/**
+ * @brief Hand the chip's clock @p len samples: a burst that finds the FIFO
+ *        already played out stops the chip, and the burst takes its time on
+ *        the bus.
+ */
+static void chip_take(size_t len)
+{
+    uint64_t const now = khal_time_us();
+
+    if ( !s_chip_started )
+    {
+        s_chip_started = true;
+        s_chip_t0_us   = now;
+    }
+    else
+    {
+        uint64_t const played = ((now - s_chip_t0_us) * s_chip_rate_hz) / US_PER_S;
+
+        if ( played >= (uint64_t)s_chip_fed )
+        {
+            s_chip_dry         = true;
+            s_regs[REG_GLBRD5] = 0x00U;
+        }
+    }
+    if ( (chip_level() + (uint32_t)len) > CHIP_FIFO )
+    {
+        s_chip_over = true;
+    }
+    s_chip_fed += (uint32_t)len;
+    fake_time_advance_ms(BURST_BUS_MS);
+}
+
 static kode_status_t on_write_regs(khal_i2c_dev_t dev, uint8_t reg,
                                    const uint8_t *buf, size_t len, int calls)
 {
@@ -170,9 +261,13 @@ static kode_status_t on_write_regs(khal_i2c_dev_t dev, uint8_t reg,
     }
     s_fifo_bytes += len;
     s_bursts++;
+    if ( s_chip_clock )
+    {
+        chip_take(len);
+    }
     if ( s_afs_throttle )
     {
-        s_afs_full = true;
+        s_afs_full = THROTTLE_READS;
     }
     return KODE_OK;
 }
@@ -198,8 +293,15 @@ static void bus_up(bool present)
     s_burst_fail   = false;
     s_afs_hold     = false;
     s_afs_throttle = false;
-    s_afs_full     = false;
+    s_afs_full     = 0U;
     s_kill_read    = 0U;
+    s_chip_clock   = false;
+    s_chip_started = false;
+    s_chip_t0_us   = 0U;
+    s_chip_fed     = 0U;
+    s_chip_dry     = false;
+    s_chip_over    = false;
+    s_chip_rate_hz = KDRV_AW_RATE_HZ;
 }
 
 /* ---- Bringing the AO up --------------------------------------------------- */
@@ -414,6 +516,19 @@ static void tick_ms(unsigned ticks)
     {
         fake_time_advance_ms(TICK_MS);
         (void)qf_support_tick(AO_Haptic, 1U);
+    }
+}
+
+/**
+ * @brief Advance both clocks by one feed period, a millisecond at a time, so
+ *        exactly one feed lands and at the time its timer says.
+ */
+static void feed_once(void)
+{
+    for ( unsigned i = 0U; KODE_HAPTIC_TICK_MS > i; ++i )
+    {
+        fake_time_advance_ms(1U);
+        (void)qf_support_tick_1ms(AO_Haptic);
     }
 }
 
@@ -641,7 +756,7 @@ TEST_CASE("a buzz feeds the FIFO in bursts of at most 64 and stops only after th
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(AW_GO, s_regs[REG_PLAYCFG4],
                                    "the chip was never told to play");
     TEST_ASSERT_EQUAL_HEX8((uint8_t)((50U * 255U) / 100U), s_regs[REG_PLAYCFG2]);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)TICK_BYTES, (unsigned)s_fifo_bytes,
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)GO_BYTES, (unsigned)s_fifo_bytes,
                                    "the chip was left with nothing to play until "
                                    "the first tick");
 
@@ -670,9 +785,9 @@ TEST_CASE("a buzz feeds the FIFO in bursts of at most 64 and stops only after th
                                    "the motor was left ringing");
 
     /* And STOP lands when the chip has played the buzz, not a whole buzz after
-     * it was fed. Two bursts a tick is 10.7 ms of playback per 10 ms of feed,
-     * so the feed takes almost exactly as long as the playback: the tail has a
-     * couple of ticks left to wait, not two hundred milliseconds. */
+     * it was fed. The tail counts from GO, so however soon the feed handed the
+     * last sample over, STOP follows the end of the playback by a tick or two,
+     * not by two hundred milliseconds. */
     TEST_ASSERT_UINT_WITHIN_MESSAGE(
         2U * TICK_MS, BUZZ_MS, khal_time_ms() - t_go,
         "the buzz was held for the feed AND the playback, one after the other");
@@ -691,6 +806,150 @@ TEST_CASE("a buzz feeds the FIFO in bursts of at most 64 and stops only after th
         ((unsigned)BUZZ_SAMPLES / KDRV_AW_BURST) + 1U, s_bursts,
         "the FIFO was fed in the wrong number of bursts");
     haptic_down();
+}
+
+/* The AW86233 goes back to standby the moment its RTP FIFO is empty, and GO
+ * does not bring it back on its own. So the first feed has to land while the
+ * bursts written at GO are still playing, after the bus time those bursts
+ * took, and every feed after it has to hand over more than the chip plays
+ * meanwhile. Turned a millisecond at a time, with the chip on its own clock:
+ * a 10 ms step would deliver the first feed at the end of the step whatever
+ * its timer said. */
+TEST_CASE("the first feed lands before the chip has played what GO left it, "
+          "and the FIFO never runs dry", "[haptic_ao]")
+{
+    const HapticDoneEvt *done;
+    uint32_t             t_go;
+    unsigned             i;
+
+    bus_up(true);
+    haptic_up();
+    s_chip_clock = true;
+
+    t_go = khal_time_ms();
+    play_evt((uint16_t)BUZZ_MS, 50U);
+
+    for ( i = 0U; (2U * BUZZ_MS) > i; ++i )
+    {
+        if ( AW_STOP == s_regs[REG_PLAYCFG4] )
+        {
+            break;
+        }
+        fake_time_advance_ms(1U);
+        (void)qf_support_tick_1ms(AO_Haptic);
+    }
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(AW_STOP, s_regs[REG_PLAYCFG4],
+                                   "the buzz never ended");
+    TEST_ASSERT_FALSE_MESSAGE(s_chip_dry,
+                              "the FIFO ran empty mid-buzz: the chip went back "
+                              "to standby and played nothing after it");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)BUZZ_SAMPLES, s_chip_fed);
+    TEST_ASSERT_TRUE_MESSAGE((khal_time_ms() - t_go) >= BUZZ_MS,
+                             "STOP came before the chip had played the buzz");
+
+    done = (const HapticDoneEvt *)spy_expect(HAPTIC_DONE_SIG);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)done->rc);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)BUZZ_SAMPLES, done->samples);
+    haptic_down();
+}
+
+/* A long buzz is where the FIFO's top matters: fed faster than it plays, the
+ * level climbs until FF_AFS stops it, and a burst that landed past the top
+ * would be dropped - a jump in the waveform, a click in the motor, and no
+ * error anywhere. The chip's clock raises the flag at the mark the driver
+ * names, in a FIFO of the depth it names. */
+TEST_CASE("a long buzz never fills the FIFO past its top", "[haptic_ao]")
+{
+    const HapticDoneEvt *done;
+    uint32_t const       ms      = 1500U;
+    uint32_t const       samples = KDRV_AW_SAMPLES(ms);
+    unsigned             i;
+
+    bus_up(true);
+    haptic_up();
+    s_chip_clock = true;
+
+    play_evt((uint16_t)ms, 50U);
+    for ( i = 0U; (2U * ms) > i; ++i )
+    {
+        if ( AW_STOP == s_regs[REG_PLAYCFG4] )
+        {
+            break;
+        }
+        fake_time_advance_ms(1U);
+        (void)qf_support_tick_1ms(AO_Haptic);
+    }
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(AW_STOP, s_regs[REG_PLAYCFG4],
+                                   "the buzz never ended");
+    TEST_ASSERT_FALSE_MESSAGE(s_chip_over,
+                              "a burst landed past the FIFO's top: the chip "
+                              "dropped samples and the motor clicked");
+    TEST_ASSERT_FALSE_MESSAGE(s_chip_dry, "the FIFO ran empty mid-buzz");
+    TEST_ASSERT_EQUAL_UINT32(samples, s_chip_fed);
+
+    done = (const HapticDoneEvt *)spy_expect(HAPTIC_DONE_SIG);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)done->rc);
+    TEST_ASSERT_TRUE_MESSAGE(done->starved,
+                             "a buzz fed faster than it plays never met FF_AFS: "
+                             "the level was held down by something other than "
+                             "the chip's own flag");
+    haptic_down();
+}
+
+/**
+ * @brief Hold a buzz on a chip whose oscillator plays at @p rate_hz.
+ *
+ * The chip plays by its own oscillator, which nothing trims and nothing on
+ * the board measures. A feed paced by the board's clock drifts against it:
+ * one that thinks the chip slower than it is lets the FIFO run dry, and one
+ * that thinks it faster piles samples on top. Paced by the chip's own flag,
+ * neither happens, however long the hold.
+ *
+ * @param rate_hz What the chip really plays at.
+ */
+static void hold_on_a_drifting_chip(uint32_t rate_hz)
+{
+    const HapticDoneEvt *done;
+    uint32_t             t0;
+
+    bus_up(true);
+    haptic_up();
+    s_chip_clock   = true;
+    s_chip_rate_hz = rate_hz;
+
+    t0 = khal_time_ms();
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_OK, (uint32_t)haptic_hold_request(50U));
+    while ( ((khal_time_ms() - t0) < DRIFT_HOLD_MS) && !s_chip_dry && !s_chip_over )
+    {
+        fake_time_advance_ms(1U);
+        (void)qf_support_tick_1ms(AO_Haptic);
+    }
+    TEST_ASSERT_FALSE_MESSAGE(s_chip_dry,
+                              "the FIFO ran empty mid-hold: the chip went back "
+                              "to standby and the motor stopped");
+    TEST_ASSERT_FALSE_MESSAGE(s_chip_over,
+                              "a burst landed past the FIFO's top: the chip "
+                              "dropped samples and the motor clicked");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(AW_GO, s_regs[REG_PLAYCFG4],
+                                   "the hold was stopped by itself");
+    TEST_ASSERT_NULL_MESSAGE(ao_spy_take(), "the hold reported an end");
+
+    haptic_stop_request();
+    done = play_finish();
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_OK, (uint32_t)done->rc);
+    haptic_down();
+}
+
+TEST_CASE("a hold on a chip that plays 2 % fast never runs the FIFO dry",
+          "[haptic_ao]")
+{
+    hold_on_a_drifting_chip((KDRV_AW_RATE_HZ * (PCT_FULL + CHIP_DRIFT_PCT)) / PCT_FULL);
+}
+
+TEST_CASE("a hold on a chip that plays 2 % slow never fills the FIFO past its top",
+          "[haptic_ao]")
+{
+    hold_on_a_drifting_chip((KDRV_AW_RATE_HZ * (PCT_FULL - CHIP_DRIFT_PCT)) / PCT_FULL);
 }
 
 /* The chip rests with its driver stage parked: I2C is alive and every register
@@ -809,17 +1068,17 @@ TEST_CASE("FF_AFS holds a tick back without ending the buzz", "[haptic_ao]")
     held = s_fifo_bytes;
 
     s_regs[REG_SYSST] = AW_FF_AFS;
-    tick_ms(1U);
+    feed_once();
     TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)held, (unsigned)s_fifo_bytes,
                                    "a full FIFO was written to anyway");
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(AW_GO, s_regs[REG_PLAYCFG4],
                                    "back-pressure ended the buzz");
 
     s_regs[REG_SYSST] = 0x00U;
-    tick_ms(1U);
+    feed_once();
     TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)(held + TICK_BYTES),
                                    (unsigned)s_fifo_bytes,
-                                   "the tick after did not pick the feed back up");
+                                   "the feed after did not pick the feed back up");
 
     (void)play_finish();
     haptic_down();
@@ -1198,8 +1457,8 @@ TEST_CASE("a FIFO that never drains ends the buzz once it has waited long enough
 
     done = (const HapticDoneEvt *)spy_expect(HAPTIC_DONE_SIG);
     TEST_ASSERT_NOT_EQUAL_INT(KODE_OK, (int)done->rc);
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)TICK_BYTES, done->samples,
-                                     "only the two bursts fed before GO went in");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)GO_BYTES, done->samples,
+                                     "only the bursts pushed at GO went in");
     TEST_ASSERT_TRUE(logged("has not taken a sample"));
 
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)haptic_play_request(10U, 50U));
@@ -1227,7 +1486,7 @@ TEST_CASE("a slowly draining FIFO does not add the feed's time to the tail",
     bus_up(true);
     haptic_up();
 
-    s_afs_throttle = true;   /* one burst accepted per tick, not two */
+    s_afs_throttle = true;   /* one burst every other feed */
     play_evt((uint16_t)BUZZ_MS, 50U);
     t_go = khal_time_ms();
 
@@ -1237,7 +1496,7 @@ TEST_CASE("a slowly draining FIFO does not add the feed's time to the tail",
         {
             break;
         }
-        tick_ms(1U);
+        feed_once();
     }
     fed_at = khal_time_ms();
     TEST_ASSERT_EQUAL_UINT((unsigned)BUZZ_SAMPLES, (unsigned)s_fifo_bytes);
@@ -1250,7 +1509,7 @@ TEST_CASE("a slowly draining FIFO does not add the feed's time to the tail",
         {
             break;
         }
-        tick_ms(1U);
+        feed_once();
     }
     TEST_ASSERT_EQUAL_HEX8(AW_STOP, s_regs[REG_PLAYCFG4]);
 

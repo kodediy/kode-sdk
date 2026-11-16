@@ -442,6 +442,31 @@ unsigned qf_support_tick(QActive *ao, unsigned ticks)
     return n;
 }
 
+unsigned qf_support_tick_1ms(QActive *ao)
+{
+    unsigned n;
+
+    if ( (NULL == ao) || (NULL == ao->eQueue) )
+    {
+        return 0U;
+    }
+    timers_sound();
+
+    portENTER_CRITICAL(&s_tick_mux);   /* see the note above qf_support_tick */
+
+    for ( unsigned r = 0U; KQP_TICKS_PER_MS(1U) > r; ++r )
+    {
+        background_drain(ao);   /* room for what the tick will post */
+        QTIMEEVT_TICK_X(0U, (void *)0);
+        background_drain(ao);   /* everyone else's, straight back out */
+    }
+    n = relay_round(ao, ~0U);
+
+    portEXIT_CRITICAL(&s_tick_mux);
+
+    return n;
+}
+
 unsigned qf_support_pump(QActive *ao, unsigned max)
 {
     unsigned n = 0U;

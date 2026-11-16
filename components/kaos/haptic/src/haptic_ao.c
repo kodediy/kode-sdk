@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "kbsp_owners.h"
+#include "kbsp_pins.h"
 #include "kdrv_aw86233.h"
 #include "khal_nvs.h"
 #include "khal_time.h"
@@ -25,19 +26,68 @@
 #define TAG "kaos.haptic"
 
 /**
- * @brief Consecutive feed ticks that may find the FIFO full before the buzz
- *        is declared dead, in QP ticks.
+ * @brief How long the feed may find the FIFO full before the buzz is declared
+ *        dead, in milliseconds.
  *
- * Twenty feeds is 200 ms: the FIFO drains in about five, so a feed that waits
- * this long is stuck, not slow. FF_AFS for one or two feeds is normal.
+ * One burst drains in 5.3 ms, so FF_AFS for a feed or two is the chip being
+ * ahead; a FIFO that takes nothing for 200 ms is stuck, not slow.
  */
-#define HAPTIC_STALL_TICKS 20U
+#define HAPTIC_STALL_MS    200U
+
+/** @brief The same patience, in consecutive feeds. */
+#define HAPTIC_STALL_FEEDS (HAPTIC_STALL_MS / KODE_HAPTIC_TICK_MS)
+
+/** @brief Bits one byte takes on I2C: eight and the acknowledge. */
+#define HAPTIC_BITS_PER_BYTE     9U
+
+/**
+ * @brief Bytes a burst takes on the bus besides its samples: the address and
+ *        the register of its write, and the four of the SYSST read before it.
+ */
+#define HAPTIC_BURST_EXTRA_BYTES 6U
+
+/** @brief What the GO bursts take on the bus, in milliseconds, rounded up. */
+#define HAPTIC_GO_BUS_MS \
+    ((((uint32_t)KODE_HAPTIC_BURSTS_AT_GO * (KDRV_AW_BURST + HAPTIC_BURST_EXTRA_BYTES) \
+       * HAPTIC_BITS_PER_BYTE * KODE_MS_PER_S) + (KBSP_I2C_FREQ_HZ - 1U)) \
+     / KBSP_I2C_FREQ_HZ)
+
+/**
+ * @brief Playback the GO bursts must still hold when the first feed is due,
+ *        in milliseconds.
+ *
+ * Room for another owner's transaction on the shared bus, a task at the same
+ * priority taking its slice, and the dispatch itself.
+ */
+#define HAPTIC_FIRST_FEED_SLACK_MS 8U
+
+/* The chip goes back to standby when its FIFO runs empty: the first feed lands
+ * after the GO bursts' bus time and one period, with the slack still to play. */
+_Static_assert(((KODE_HAPTIC_TICK_MS + HAPTIC_GO_BUS_MS + HAPTIC_FIRST_FEED_SLACK_MS)
+                * KDRV_AW_RATE_HZ)
+               <= (KODE_HAPTIC_BURSTS_AT_GO * KDRV_AW_BURST * KODE_MS_PER_S),
+               "the GO bursts must outlast their bus time, a feed period and the slack");
+/* GO's own bursts go in under the almost-full mark, so none is refused. */
+_Static_assert((KODE_HAPTIC_BURSTS_AT_GO * KDRV_AW_BURST) <= KDRV_AW_FIFO_AF,
+               "the GO bursts must fit under the FIFO's almost-full mark");
+/* The level the feed holds, the mark less a period's playback at worst,
+ * outlasts another period and the slack. */
+_Static_assert((KDRV_AW_FIFO_AF * KODE_MS_PER_S)
+               >= (((2U * KODE_HAPTIC_TICK_MS) + HAPTIC_FIRST_FEED_SLACK_MS) * KDRV_AW_RATE_HZ),
+               "the almost-full mark must outlast two feed periods and the slack");
+/* A feed offers more than the chip plays in a period, so the level climbs. */
+_Static_assert((KODE_HAPTIC_BURSTS_PER_TICK * KDRV_AW_BURST * KODE_MS_PER_S)
+               > (KODE_HAPTIC_TICK_MS * KDRV_AW_RATE_HZ),
+               "a feed must offer more than a period plays");
+_Static_assert((HAPTIC_STALL_MS % KODE_HAPTIC_TICK_MS) == 0U,
+               "the stall limit must be a whole number of feeds");
 
 /**
  * @brief How long the driver stage is given to start up, in milliseconds.
  *
  * Awinic gives 0.4 ms, so one is a ceiling with margin. It is a busy-wait in
- * the step that begins a buzz: the shortest QP timer is a 10 ms tick.
+ * the step that begins a buzz: a timer of one 1 ms tick can expire at once,
+ * and a step that waited for it would push GO past the first feed's budget.
  */
 #define HAPTIC_WAKE_MS      1U
 
@@ -63,7 +113,7 @@ typedef struct {
     uint32_t      total;    /**< Samples the pattern is made of.            */
     uint32_t      fed;      /**< How many the chip has taken.               */
     uint32_t      phase;    /**< The sine's sample index, across bursts.    */
-    uint32_t      stall;    /**< Consecutive ticks the FIFO took nothing.   */
+    uint32_t      stall;    /**< Consecutive feeds the FIFO took nothing.   */
     uint32_t      t_go;     /**< khal_time_ms() when GO was issued.         */
     bool          starved;  /**< The FIFO refused a burst at least once.    */
     uint8_t       gain;     /**< Per cent of full scale, as asked for.      */
@@ -549,14 +599,18 @@ static void play_fill(Haptic * const me, size_t n)
 /**
  * @brief Offer the chip up to @p bursts bursts of the waveform.
  *
- * Stops early on back-pressure rather than spinning: an accepted count of zero
- * is FF_AFS, the FIFO still full. That patience is bounded by
- * HAPTIC_STALL_TICKS.
+ * Paced by the chip itself: kdrv_aw86233_rtp_feed() reads FF_AFS before each
+ * burst and writes none while it is set, so the level climbs to the chip's
+ * almost-full mark and stays within a burst of it, on the chip's own clock.
+ * The board's clock would drift against that oscillator, which nothing trims
+ * or measures, and a count kept by it would run the FIFO dry or pile samples
+ * on its top. An accepted count of zero stops the feed early rather than
+ * spinning, and that patience is bounded by HAPTIC_STALL_MS.
  *
  * @param me     The AO.
  * @param bursts How many to offer.
- * @return false when the buzz cannot go on: the bus refused, or the FIFO has
- *         not taken a sample for HAPTIC_STALL_TICKS. @c play.rc says which.
+ * @return false when the buzz cannot go on: the bus refused, or the FIFO
+ *         has not taken a sample for HAPTIC_STALL_MS. @c play.rc says which.
  */
 static bool play_feed(Haptic * const me, unsigned bursts)
 {
@@ -615,28 +669,33 @@ static bool play_feed(Haptic * const me, unsigned bursts)
         return true;
     }
 
-    /* Nothing was taken and there is more to feed. One or two ticks of this
-     * is the chip being ahead; HAPTIC_STALL_TICKS of it is a FIFO that has
-     * stopped draining, and there is no point offering it a burst every ten
-     * milliseconds until somebody reboots the board. */
+    /* Nothing was taken and there is more to feed. One or two feeds of this
+     * is the chip being ahead; HAPTIC_STALL_MS of it is a FIFO that has
+     * stopped draining, and there is no point offering it a burst every feed
+     * until somebody reboots the board. */
     me->play.stall += 1U;
-    if ( HAPTIC_STALL_TICKS > me->play.stall )
+    if ( HAPTIC_STALL_FEEDS > me->play.stall )
     {
         return true;
     }
     me->play.rc = KODE_TIMEOUT;
-    uint32_t const stalled_ms = HAPTIC_STALL_TICKS * KODE_HAPTIC_TICK_MS;
     KLOG_E(TAG, "the RTP FIFO has not taken a sample in %u ms; the chip has "
                 "stopped playing",
-           (unsigned)stalled_ms);
+           (unsigned)HAPTIC_STALL_MS);
     return false;
 }
 
 /**
  * @brief The feed is over. Wait out what the chip STILL HOLDS, not all of it.
  *
- * Feeding a buzz takes about as long as playing it, so what is left is its
- * length minus the time since GO, not the whole kdrv_aw86233_playing_ms().
+ * The feed has handed most of the buzz over and the chip holds the rest, up
+ * to its almost-full mark, so what is left is the buzz's length less the time
+ * since GO, not the whole kdrv_aw86233_playing_ms().
+ *
+ * Counted from GO, not from the first sample, and at the nominal rate: a buzz
+ * can end up to a millisecond early, and on a chip whose oscillator runs slow
+ * by a fraction e, STOP comes e of the buzz's length before the chip has
+ * played all of it, and cuts that off.
  *
  * @param me The AO.
  */
@@ -1464,9 +1523,11 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
              * the playback the chip has not reached yet, and feeding is not
              * free of time. */
             me->play.t_go = khal_time_ms();
-            /* Two bursts before the first tick can arrive: ten milliseconds
-             * in the FIFO is what makes a ten-millisecond feed period safe. */
-            if ( !play_feed(me, (unsigned)KODE_HAPTIC_BURSTS_PER_TICK) )
+            /* KODE_HAPTIC_BURSTS_AT_GO before the first feed can arrive: the
+             * chip goes back to standby when its FIFO runs empty, and the
+             * 21.3 ms these hold outlast their bus time and a feed period
+             * with HAPTIC_FIRST_FEED_SLACK_MS to spare. */
+            if ( !play_feed(me, (unsigned)KODE_HAPTIC_BURSTS_AT_GO) )
             {
                 play_fail(me);
             }
@@ -1494,8 +1555,8 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
                 if ( !play_feed(me, (unsigned)KODE_HAPTIC_BURSTS_PER_TICK) )
                 {
                     /* The buzz is over whether the motor heard it or not.
-                     * Without this the tick would come back in ten
-                     * milliseconds and try again, forever: a log line every
+                     * Without this the tick would come back next period
+                     * and try again, forever: a log line every
                      * tick, no HAPTIC_DONE_SIG, the claim never given
                      * back, and a row stuck in GAIN_PLAY. */
                     play_fail(me);

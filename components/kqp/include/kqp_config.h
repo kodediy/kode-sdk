@@ -1499,17 +1499,30 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief Segments in one vibration pattern: on, off, on... */
 #define KODE_HAPTIC_RETRY_MS       2000U /**< After a boot that found no AW86233, when it is looked for again: a NAK on a busy bus is not a board with no Antenna PCB. */
 #define KODE_HAPTIC_SEGMENTS_MAX    16U
-/* The RTP feed runs every 10 ms and offers up to two bursts each time - 128
- * bytes, 10.7 ms of playback - so the chip is never given less than it is
- * about to consume. The first feed after GO lands in time because AO_Haptic
- * pushes those two bursts in the same step that starts RTP playback, so the
- * chip holds ~10 ms before it. A 4 ms feed of one burst is what the
- * arithmetic asks for and the 1 ms tick could now keep; it stays at 10 ms
- * until it is measured on the chip. */
+/* The AW86233 goes back to standby the moment its RTP FIFO is empty, so
+ * the feed keeps it from running dry, paced by the chip's own almost-full
+ * flag: the chip's oscillator, not the board's clock, sets how fast the FIFO
+ * drains, and nothing on the board measures it.
+ *
+ * The step that issues GO wakes the chip (a 1 ms busy-wait), starts RTP and
+ * reads GLB_STATE until it shows it (about 1 ms of bus, 1.6 at worst), then
+ * pushes four bursts - 256 samples, 21.3 ms of playback - in about 6.3 ms of
+ * bus: some 9 ms in one step, 10 at worst. The feed then runs every 4 ms, so
+ * the first one lands about 10 ms after GO with some 11 ms still to play.
+ * Each feed offers up to two bursts, each after a read of FF_AFS: 3.2 ms of
+ * the 4 ms period at worst. A tick that comes due while a feed is still on
+ * the bus waits in the queue and costs a status read. Two bursts are 2.7
+ * times what the chip plays in a period, so the level climbs to the chip's
+ * almost-full mark within about 75 ms of GO and stays there: at its reset
+ * value (KDRV_AW_FIFO_AF), about 124 ms of playback in hand just before a
+ * feed and 133 ms at most just after one. haptic_ao.c holds these numbers to
+ * each other and to the driver's. */
 /** @brief The RTP feed period, in milliseconds. */
-#define KODE_HAPTIC_TICK_MS          10U
-/** @brief Bursts offered per feed. Two, because a feed is 10 ms. */
+#define KODE_HAPTIC_TICK_MS          4U
+/** @brief Bursts offered per feed, at most. */
 #define KODE_HAPTIC_BURSTS_PER_TICK  2U
+/** @brief Bursts pushed by the step that issues GO, before the first feed. */
+#define KODE_HAPTIC_BURSTS_AT_GO     4U
 /** @brief On/off ratio at 235 Hz a moving motor must clear, x10. MEASURED
  *         2026-09-11 on board e8:f6:0a:e7:6c:1d, one third of what that board
  *         delivered at gain 0x40: sqrt(246.1)/3. The row itself then read a

@@ -192,6 +192,20 @@ void qf_support_register(QActive *ao);
 unsigned qf_support_tick(QActive *ao, unsigned ticks);
 
 /**
+ * @brief Run one millisecond of QF's ticks, then dispatch what landed in
+ *        @p ao's own queue, as qf_support_tick() does for a 10 ms step.
+ *
+ * For a case whose subject paces itself in fewer than ten milliseconds: a
+ * 10 ms step delivers every expiry of that window in one batch, at its end,
+ * which hides how late each one is. The fake clock is the caller's to
+ * advance, as with the other calls.
+ *
+ * @param ao The Active Object whose queue is the subject.
+ * @return How many events @p ao dispatched.
+ */
+unsigned qf_support_tick_1ms(QActive *ao);
+
+/**
  * @brief Balance the critical section a jump out of a tick left entered.
  *
  * khal_restart() is noreturn and the fake leaves by longjmp, so a case that

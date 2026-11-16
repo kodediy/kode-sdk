@@ -55,6 +55,10 @@
                                      * no double unit and this is a waveform. */
 #define AW_DUMP_LINE     96U
 
+/* A burst written while FF_AFS is still clear lands under the FIFO's top. */
+_Static_assert((KDRV_AW_FIFO_AF + KDRV_AW_BURST) <= KDRV_AW_FIFO_DEPTH,
+               "a burst over the almost-full mark must fit in the FIFO");
+
 /* ---- The table ----------------------------------------------------------- */
 
 /** @brief Where a field's value comes from. */
@@ -308,8 +312,9 @@ kode_status_t kdrv_aw86233_rtp_begin(uint8_t gain_pct, uint8_t *reg_written)
     {
         return KODE_IO_ERROR;
     }
-    /* GO before a single sample exists: the chip plays what arrives and
-     * waits on an empty FIFO, so this is the mode's contract and not a race. */
+    /* GO before a single sample exists: the chip waits for its first sample,
+     * so this is the mode's contract and not a race. Once it has played, an
+     * empty FIFO sends it back to standby. */
     if ( !reg_write(AW_REG_PLAYCFG4, AW_GO) )
     {
         return KODE_IO_ERROR;
