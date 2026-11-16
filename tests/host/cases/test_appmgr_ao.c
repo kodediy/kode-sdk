@@ -37,6 +37,7 @@
 #include "qf_support.h"
 #include "radio_knocks.h"
 #include "appmgr_outcome.h"
+#include "esp_private/partition_linux.h"
 
 /**
  * @brief Whether the next appmgr_make() leaves AO_AppMgr listening to the
@@ -12785,4 +12786,54 @@ TEST_CASE("a copy the card fills up during is skipped, its temporary removed, an
     path_req_expect((uint8_t)STORAGE_PATH_UNLINK, "/sdcard/first.bin.tmp",
                     "what landed of the copy was left on a full card");
     backup_end();
+}
+
+/**
+ * @brief Install a file app, with the flash refusing every write and erase
+ *        from the point @p late names.
+ * @param late true: once the image is written, so the directory is the
+ *             first write refused; false: before the image's first byte.
+ * @return The app record after it.
+ */
+static appmgr_inst_rec_t install_with_flash_refusing(bool late)
+{
+    uint32_t const len = image_named("new");
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    kapps_dir_t empty = *kdrv_apps_dir();
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    ask_file_from("new.bin", (uint8_t)KFW_TARGET_APP, (uint8_t)KODE_CONSOLE_SRC_SERIAL);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    if ( !late )
+    {
+        esp_partition_fail_after(0U, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    }
+    answer_data(len);
+    if ( late )
+    {
+        esp_partition_fail_after(0U, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    }
+    answer_eof();
+    esp_partition_fail_after(SIZE_MAX, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    keep_end();
+    return got;
+}
+
+/* `write` is the flash refusing a write, the image's or the directory's that
+ * names it; an image that is fine says nothing else. */
+TEST_CASE("a flash that refuses the image or its directory is kept as failed for write",
+          "[appmgr_ao][install_rec]")
+{
+    appmgr_inst_rec_t const early = install_with_flash_refusing(false);
+    appmgr_inst_rec_t const dir   = install_with_flash_refusing(true);
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, early.state);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_WRITE, early.why, "the image's write");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, dir.state);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_WRITE, dir.why, "the directory's write");
 }

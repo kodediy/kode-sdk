@@ -341,12 +341,28 @@ bool kfw_foreign(void);
  * verify or says what this firmware cannot obey, a deflate stream that does
  * not decode, a payload longer than its header declared, an app data block
  * whose payload cannot be found, or a raw image the file cuts inside its first
- * segment. Read after kfw_feed() refused a chunk, to tell a bad image from one
- * that could not be written. A new kfw_begin() clears it.
+ * segment. At kfw_end(), a stream that ends inside the header, the app data
+ * block or short of the image its header declared, an image that fails its
+ * digest, or one its destination does not verify where it lies (the sink's
+ * end writes nothing; it reads back and judges). Read after kfw_feed() or
+ * kfw_end() refused, to tell a bad image from one that could not be written.
+ * A new kfw_begin() clears it.
  *
  * @return true when the image itself was at fault.
  */
 bool kfw_malformed(void);
+
+/**
+ * @brief Whether the session's destination refused to open or to take a write.
+ *
+ * The sink's begin, or a write other than a full buffer's KODE_NO_RESOURCES.
+ * Read after kfw_feed() refused a chunk, to tell a write that failed from an
+ * image at fault or a decoder that could not run (no PSRAM for the inflater,
+ * no hash). A new kfw_begin() clears it.
+ *
+ * @return true when the destination failed.
+ */
+bool kfw_sink_failed(void);
 
 /**
  * @brief Parse, refuse and decode, checked by hand: the console's `test kfw`.

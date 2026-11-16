@@ -2447,6 +2447,7 @@ static const char *region_install(AppMgr * const me, uint32_t len,
         /* Cannot happen after make_room freed a slot; kept as the guard that
          * dir.e[dir.count++] below never writes into .crc and beyond. */
         KLOG_E(TAG, "directory full (%u entries); not installing", (unsigned)dir.count);
+        appmgr_inst_why(APPMGR_WHY_NO_ROOM);
         return "directory full";
     }
     kapps_entry_t const written = {
@@ -2459,6 +2460,7 @@ static const char *region_install(AppMgr * const me, uint32_t len,
 
     if ( kdrv_apps_dir_commit(&dir) != KODE_OK )
     {
+        appmgr_inst_why(APPMGR_WHY_WRITE);   /* the flash refused the directory */
         return "cannot update the directory";
     }
     undo_clear(me);          /* the install landed: its victims are gone for good */
@@ -3097,6 +3099,7 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
     if ( !plan_commit(me, &dir, &plan) )
     {
         KLOG_E(TAG, "cannot update the directory");
+        appmgr_inst_why(APPMGR_WHY_WRITE);
         return KODE_ERROR;
     }
     me->sink_ctx.offset = plan.offset;
@@ -3235,6 +3238,33 @@ static kode_status_t xfer_begin(AppMgr * const me, uint8_t want, uint32_t src_le
 }
 
 /**
+ * @brief Note why the decoder refused the image: the install record's `why`.
+ *
+ * Another board's image, an image at fault, a destination that would not
+ * take it, or none of those (no PSRAM for the inflater, no hash): `other`.
+ * A cause noted before stands.
+ */
+static void xfer_why(void)
+{
+    if ( kfw_foreign() )
+    {
+        appmgr_inst_why(APPMGR_WHY_WRONG_BOARD);
+    }
+    else if ( kfw_malformed() )
+    {
+        appmgr_inst_why(APPMGR_WHY_CORRUPT);
+    }
+    else if ( kfw_sink_failed() )
+    {
+        appmgr_inst_why(APPMGR_WHY_WRITE);
+    }
+    else
+    {
+        appmgr_inst_why(APPMGR_WHY_OTHER);
+    }
+}
+
+/**
  * @brief Push one chunk into the transfer and count what it produced in written.
  *
  * @param me  The AO.
@@ -3303,7 +3333,7 @@ static void flash_finish(AppMgr * const me)
 
     if ( KODE_OK != st )
     {
-        appmgr_inst_why(APPMGR_WHY_CORRUPT);
+        xfer_why();
         flash_fail(me, "the written image did not verify", KFAIL_WRITE);
         return;
     }
@@ -3571,15 +3601,7 @@ static bool consume_chunk(AppMgr * const me, const StorageDataEvt *d)
         {
             return false;        /* deferred, not failed: the caller moves on */
         }
-        if ( kfw_foreign() )
-        {
-            appmgr_inst_why(APPMGR_WHY_WRONG_BOARD);
-        }
-        if ( kfw_malformed() )
-        {
-            appmgr_inst_why(APPMGR_WHY_CORRUPT);
-        }
-        appmgr_inst_why(APPMGR_WHY_WRITE);   /* unless a cause was noted first */
+        xfer_why();
         flash_fail(me, me->os_target ? "write to the kodeOS slot failed"
                                       : "write to the region failed",
                    KFAIL_WRITE);
@@ -8339,7 +8361,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
             if ( KODE_OK != st )
             {
                 ok = false;
-                appmgr_inst_why(APPMGR_WHY_CORRUPT);
+                xfer_why();
                 KLOG_E(TAG, "install failed: the written image did not verify");
             }
         }
@@ -8534,6 +8556,7 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
             if ( !plan_commit(me, &dir, &plan) )
             {
                 KLOG_E(TAG, "install failed: cannot update the directory");
+                appmgr_inst_why(APPMGR_WHY_WRITE);
                 QACTIVE_POST(AO_Log, &s_raw_end_evt, &me->super);
                 status = recv_close(me, false, false);
                 break;
@@ -8599,15 +8622,7 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                     && (xfer_feed(me, me->chunk, me->recv_fill) != KODE_OK) )
                 {
                     me->recv_ok = false;
-                    if ( kfw_foreign() )
-                    {
-                        appmgr_inst_why(APPMGR_WHY_WRONG_BOARD);
-                    }
-                    if ( kfw_malformed() )
-                    {
-                        appmgr_inst_why(APPMGR_WHY_CORRUPT);
-                    }
-                    appmgr_inst_why(APPMGR_WHY_WRITE);   /* unless a cause was noted first */
+                    xfer_why();
                     KLOG_E(TAG, "install: write failed at %u/%u bytes; "
                                 "draining the rest of the transfer",
                            (unsigned)me->recv_wire, (unsigned)me->recv_size);

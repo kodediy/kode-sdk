@@ -398,6 +398,7 @@ static struct {
     bool                    ad_dropped; /**< A block was there and was not believed: not the same as none. */
     bool                    foreign;    /**< The image was refused as another chip's or target's. */
     bool                    malformed;  /**< The image was refused as not well formed. */
+    bool                    sink_failed; /**< The destination refused to open or a write. */
 } s_kfw;
 
 bool kfw_busy(void)
@@ -418,6 +419,11 @@ bool kfw_foreign(void)
 bool kfw_malformed(void)
 {
     return s_kfw.malformed;
+}
+
+bool kfw_sink_failed(void)
+{
+    return s_kfw.sink_failed;
 }
 
 /**
@@ -497,6 +503,14 @@ static kode_status_t emit(const uint8_t *data, size_t len)
     if ( KODE_OK == st )
     {
         s_kfw.produced += (uint32_t)len;
+    }
+    else if ( KODE_NO_RESOURCES != st )
+    {
+        s_kfw.sink_failed = true;
+    }
+    else
+    {
+        /* a full buffer: drain, then offer this run again */
     }
     return st;
 }
@@ -673,6 +687,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                     }
                     if ( s_kfw.sink->begin(s_kfw.ctx, s_kfw.src_len) != KODE_OK )
                     {
+                        s_kfw.sink_failed = true;
                         s_kfw.st = KFW_ST_DEAD;
                         return KODE_ERROR;
                     }
@@ -751,6 +766,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                 }
                 if ( s_kfw.sink->begin(s_kfw.ctx, s_kfw.hdr.image_len) != KODE_OK )
                 {
+                    s_kfw.sink_failed = true;
                     s_kfw.st = KFW_ST_DEAD;
                     return KODE_ERROR;
                 }
@@ -891,6 +907,27 @@ kode_status_t kfw_feed(const void *data, size_t len)
     return KODE_OK;
 }
 
+/**
+ * @brief Close the destination, which reads back what it holds and judges it.
+ *
+ * The sink's end writes nothing (the slot's OTA session and the region's
+ * write session have no tail to flush without flash encryption, which this
+ * firmware does not use): a refusal is the image failing its destination's
+ * verification where it lies, so it is the image's fault.
+ *
+ * @return The sink's answer.
+ */
+static kode_status_t sink_end_judged(void)
+{
+    kode_status_t const rc = s_kfw.sink->end(s_kfw.ctx);
+
+    if ( KODE_OK != rc )
+    {
+        s_kfw.malformed = true;
+    }
+    return rc;
+}
+
 kode_status_t kfw_end(void)
 {
     kode_status_t rc = KODE_OK;
@@ -898,7 +935,7 @@ kode_status_t kfw_end(void)
     switch ( s_kfw.st )
     {
         case KFW_ST_RAW:
-            rc = s_kfw.sink->end(s_kfw.ctx);
+            rc = sink_end_judged();
             break;
 
         case KFW_ST_BODY: {
@@ -907,6 +944,7 @@ kode_status_t kfw_end(void)
                 KLOG_E(TAG, "the stream ended at %u of %u bytes",
                        (unsigned)s_kfw.produced, (unsigned)s_kfw.hdr.image_len);
                 s_kfw.sink->abort(s_kfw.ctx);
+                s_kfw.malformed = true;
                 rc = KODE_ERROR;
                 break;
             }
@@ -934,15 +972,17 @@ kode_status_t kfw_end(void)
                  * needed staging in the first place. */
                 KLOG_E(TAG, "the image does not match the digest it carries");
                 s_kfw.sink->abort(s_kfw.ctx);
+                s_kfw.malformed = true;
                 rc = KODE_ERROR;
                 break;
             }
-            rc = s_kfw.sink->end(s_kfw.ctx);
+            rc = sink_end_judged();
             break;
         }
 
         case KFW_ST_SNIFF:
             KLOG_E(TAG, "the stream ended inside the header");
+            s_kfw.malformed = true;
             rc = KODE_ERROR;
             break;
 
@@ -950,6 +990,7 @@ kode_status_t kfw_end(void)
         case KFW_ST_ADBODY:
             KLOG_E(TAG, "the stream ended inside the app data block");
             s_kfw.sink->abort(s_kfw.ctx);
+            s_kfw.malformed = true;
             rc = KODE_ERROR;
             break;
 
@@ -960,7 +1001,6 @@ kode_status_t kfw_end(void)
         default:
             return KODE_DENIED;
     }
-
     /* What the owner may take: only from an image that went in whole. A raw
      * image says so, so the folder is left alone; a container says block, none
      * or dropped by whether a checked block survived and, when none did,

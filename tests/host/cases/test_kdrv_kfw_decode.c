@@ -557,6 +557,112 @@ TEST_CASE("a destination that will not open ends the session", "[kfw_decode]")
     TEST_ASSERT_FALSE(sink_saw(SINK_WRITE));
 }
 
+/* ---- Whose fault: the image or its destination ------------------------------
+ * The install record says `corrupt` for an image at fault and `write` for a
+ * destination that failed; these two answers are what it reads. */
+
+/** @brief The faults kfw_end() lays at the image's door, by how the stream ends. */
+typedef enum {
+    END_SHORT = 0,      /**< Short of what the header declared. */
+    END_DIGEST,         /**< Whole, with the wrong digest. */
+    END_IN_HEADER,      /**< Inside the header. */
+    END_UNVERIFIED,     /**< Whole and right, and the destination does not verify it. */
+    END_KINDS
+} end_fault_t;
+
+/**
+ * @brief Run one container to kfw_end() with @p f, and say how it ended.
+ * @param f The fault.
+ * @return What kfw_end() answered.
+ */
+static kode_status_t end_with(end_fault_t f)
+{
+    static uint8_t body[64];
+    static uint8_t stream[KFW_HDR_LEN + 64];
+    size_t         n;
+
+    sink_fresh();
+    (void)memset(body, 0x5AU, sizeof(body));
+    n = build_stream(stream, body, sizeof(body), END_DIGEST == f);
+    if ( END_SHORT == f )
+    {
+        n -= 16U;
+    }
+    else if ( END_IN_HEADER == f )
+    {
+        n = KFW_HDR_LEN / 2U;
+    }
+    else if ( END_UNVERIFIED == f )
+    {
+        s_end_rc = KODE_ERROR;
+    }
+    else
+    {
+        /* the wrong digest is in the stream */
+    }
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(stream, n));
+    return kfw_end();
+}
+
+TEST_CASE("an image that ends short, fails its digest, ends in its header or does "
+          "not verify where it lies is the image's fault", "[kfw_decode]")
+{
+    static const char *const names[END_KINDS] = {
+        "short", "digest", "in the header", "unverified" };
+
+    for ( end_fault_t f = END_SHORT; END_KINDS > f; ++f )
+    {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR, end_with(f), names[f]);
+        TEST_ASSERT_TRUE_MESSAGE(kfw_malformed(), names[f]);
+        TEST_ASSERT_FALSE_MESSAGE(kfw_sink_failed(), names[f]);
+    }
+}
+
+TEST_CASE("a destination that will not open or refuses a write is the destination's "
+          "fault, and a full buffer is nobody's", "[kfw_decode]")
+{
+    static uint8_t body[32];
+    static uint8_t stream[KFW_HDR_LEN + 32];
+    size_t         n;
+    bool           begin_sink;
+    bool           begin_image;
+    bool           write_sink;
+    bool           write_image;
+    bool           full_sink;
+
+    (void)memset(body, 0x99U, sizeof(body));
+    n = build_stream(stream, body, sizeof(body), false);
+
+    sink_fresh();
+    s_begin_rc = KODE_ERROR;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kfw_feed(stream, n));
+    begin_sink  = kfw_sink_failed();
+    begin_image = kfw_malformed();
+
+    sink_fresh();
+    s_write_rc = KODE_ERROR;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kfw_feed(stream, n));
+    write_sink  = kfw_sink_failed();
+    write_image = kfw_malformed();
+
+    sink_fresh();
+    s_write_rc = KODE_NO_RESOURCES;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_begin(&RECORDER, NULL, KFW_TARGET_APP, 0U, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kfw_feed(stream, n));
+    full_sink = kfw_sink_failed();
+    sink_fresh();
+
+    TEST_ASSERT_TRUE_MESSAGE(begin_sink, "a refused open was not the destination's");
+    TEST_ASSERT_FALSE(begin_image);
+    TEST_ASSERT_TRUE_MESSAGE(write_sink, "a refused write was not the destination's");
+    TEST_ASSERT_FALSE(write_image);
+    TEST_ASSERT_FALSE_MESSAGE(full_sink, "a full buffer was taken for a failure");
+}
+
 /* ---- The session's own rules ----------------------------------------------- */
 
 TEST_CASE("a second session is refused while one is open", "[kfw_decode]")
