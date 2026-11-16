@@ -11,6 +11,9 @@
 #include "kdrv_ble.h"
 #include "khal_sync.h"
 #include "sdkconfig.h"
+#ifdef CONFIG_KODEOS_BLE
+#include "kdrv_ble_hid.h"
+#endif
 
 #include <stdio.h>
 #include <stddef.h>
@@ -447,6 +450,110 @@ kode_status_t kode_sys_ble_service_select(const kode_sys_ble_service_t *svc)
     return rc;
 }
 
+/* ---- The board as a mouse and a keyboard ----------------------------------- */
+
+_Static_assert(KODE_SYS_BLE_HID_MOUSE == KDRV_BLE_HID_MOUSE, "the mouse is the driver's");
+_Static_assert(KODE_SYS_BLE_HID_KEYBOARD == KDRV_BLE_HID_KEYBOARD, "the keyboard is the driver's");
+_Static_assert(KODE_SYS_BLE_HID_KEYS_MAX == KDRV_BLE_HID_KEYS_MAX, "a report's keys are the driver's");
+_Static_assert(KODE_SYS_BLE_HID_KEY_MAX == KDRV_BLE_HID_KEY_MAX, "the last key is the report map's");
+_Static_assert(KODE_SYS_BLE_HID_RING_SLOTS == KDRV_BLE_HID_RING_SLOTS, "the ring is the driver's");
+_Static_assert(KODE_SYS_BLE_PAIR_SHOW == (uint32_t)KDRV_BLE_PAIR_SHOW, "SHOW is the driver's");
+_Static_assert(KODE_SYS_BLE_PAIR_DONE == (uint32_t)KDRV_BLE_PAIR_DONE, "DONE is the driver's");
+_Static_assert(KODE_SYS_BLE_PAIR_OK == (uint32_t)KDRV_BLE_PAIR_OK, "OK is the driver's");
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_hid_select(uint8_t kinds)
+{
+    return kdrv_ble_hid_select(kinds);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_sys_ble_hid_ready(void)
+{
+    return kdrv_ble_hid_ready();
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
+{
+    uint8_t rep[KDRV_BLE_HID_MOUSE_LEN];
+
+    kdrv_ble_hid_mouse_pack(buttons, dx, dy, wheel, rep);
+    return ble_hid_report_post((uint8_t)KDRV_BLE_HID_MOUSE, rep, sizeof(rep), false);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_hid_keys(uint8_t modifiers, const uint8_t *keys)
+{
+    uint8_t rep[KDRV_BLE_HID_KEYS_LEN];
+
+    kdrv_ble_hid_keys_pack(modifiers, keys, rep);
+    return ble_hid_report_post((uint8_t)KDRV_BLE_HID_KEYBOARD, rep, sizeof(rep), false);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_hid_click(uint8_t buttons)
+{
+    kode_status_t rc = KODE_DENIED;
+
+    if ( 0U != (buttons & (uint8_t)KDRV_BLE_HID_BUTTONS) )
+    {
+        uint8_t rep[KDRV_BLE_HID_MOUSE_LEN];
+
+        kdrv_ble_hid_mouse_pack(buttons, 0, 0, 0, rep);
+        rc = ble_hid_report_post((uint8_t)KDRV_BLE_HID_MOUSE, rep, sizeof(rep), true);
+    }
+    return rc;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_hid_tap(uint8_t modifiers, uint8_t key)
+{
+    kode_status_t rc = KODE_DENIED;
+
+    if ( (0U < key) && ((uint8_t)KDRV_BLE_HID_KEY_MAX >= key) )
+    {
+        uint8_t rep[KDRV_BLE_HID_KEYS_LEN];
+        uint8_t keys[KDRV_BLE_HID_KEYS_MAX];
+
+        (void)memset(keys, 0, sizeof(keys));
+        keys[0] = key;
+        kdrv_ble_hid_keys_pack(modifiers, keys, rep);
+        rc = ble_hid_report_post((uint8_t)KDRV_BLE_HID_KEYBOARD, rep, sizeof(rep), true);
+    }
+    return rc;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_ble_pair_open(void)
+{
+#if defined(CONFIG_KODEOS_BOOT_ROLE_APP)
+    /* An app that serves no HID pairs nobody: a new phone pairs in kodeOS. */
+    if ( 0U == kdrv_ble_hid_kinds() )
+    {
+        return KODE_DENIED;
+    }
+#endif
+    if ( !ble_pair_open_request() )
+    {
+        return KODE_NO_RESOURCES;
+    }
+    return KODE_OK;
+}
+
+/* cppcheck-suppress [misra-c2012-8.7,constParameterPointer] ; a facade call the apps outside this tree call; @p me is the asking AO, non-const as every request takes it */
+kode_status_t kode_sys_ble_pair_subscribe(QActive *me)
+{
+    kode_status_t rc = KODE_DENIED;
+
+    if ( kaos_asker_started(me) )
+    {
+        ble_pair_subscribe(me);
+        rc = KODE_OK;
+    }
+    return rc;
+}
+
 /* ---- The listen ------------------------------------------------------------ */
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
@@ -605,6 +712,53 @@ bool kode_sys_ble_service_fault(char *why, size_t cap)
 {
     (void)why; (void)cap;
     return false;
+}
+
+kode_status_t kode_sys_ble_hid_select(uint8_t kinds)
+{
+    (void)kinds;
+    return KODE_DENIED;
+}
+
+bool kode_sys_ble_hid_ready(void)
+{
+    return false;
+}
+
+kode_status_t kode_sys_ble_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
+{
+    (void)buttons; (void)dx; (void)dy; (void)wheel;
+    return KODE_DENIED;
+}
+
+kode_status_t kode_sys_ble_hid_keys(uint8_t modifiers, const uint8_t *keys)
+{
+    (void)modifiers; (void)keys;
+    return KODE_DENIED;
+}
+
+kode_status_t kode_sys_ble_hid_click(uint8_t buttons)
+{
+    (void)buttons;
+    return KODE_DENIED;
+}
+
+kode_status_t kode_sys_ble_hid_tap(uint8_t modifiers, uint8_t key)
+{
+    (void)modifiers; (void)key;
+    return KODE_DENIED;
+}
+
+kode_status_t kode_sys_ble_pair_open(void)
+{
+    return KODE_DENIED;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call the apps outside this tree call */
+kode_status_t kode_sys_ble_pair_subscribe(QActive *me)
+{
+    (void)me;
+    return KODE_DENIED;
 }
 
 #endif /* CONFIG_KODEOS_BLE */

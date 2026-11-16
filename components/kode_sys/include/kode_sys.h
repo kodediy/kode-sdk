@@ -2103,6 +2103,136 @@ kode_status_t kode_sys_ble_service_select(const kode_sys_ble_service_t *svc);
  */
 kode_status_t kode_sys_ble_queue_room(const char *chr, size_t *room);
 
+/* ---- The board as a Bluetooth mouse and keyboard --------------------------
+ * HID over GATT, served only when asked: kode_sys_ble_hid_select() names the
+ * kinds before Bluetooth registers its GATT table, and the table then
+ * carries the HID service (0x1812) with the SDK's own report map, Battery
+ * and Device Information after the console's and the app's services. A
+ * computer or a phone pairs with the board from its own Bluetooth settings.
+ * While HID is served the advert carries 0x1812 and the appearance beside
+ * the console's UUID, in place of its transmit power. The board takes one
+ * link: while a host uses it as a mouse, neither the console nor a phone
+ * gets in, and a host bonded as one comes back by itself whenever it sees
+ * the board. A firmware that serves no HID hangs up on such a host, so the
+ * link stays free.
+ *
+ * A bond is the console's or the HID service's, by what the board was when
+ * it was made, and opens that one alone. A device paired while HID is served
+ * is a host: it gets the reports and never the console. A device paired
+ * while it is not, the phone for one, has the console and is never sent a
+ * report, whichever image made the bond. To use the console from a computer
+ * that is a host, forget the board on it and pair again while no HID is
+ * served.
+ *
+ * Security is the console's, so with the passkey (the default) a host pairs
+ * with a code. In an app that is the one case a new device pairs outside
+ * kodeOS: kode_sys_ble_pair_open() opens the time to pair, the code arrives
+ * as BLE_PAIR_SIG to the AOs subscribed with kode_sys_ble_pair_subscribe(),
+ * and the app shows it. HID needs CONFIG_KODEOS_BLE_CONSOLE_PAIRING.
+ *
+ * A report is a command to AO_Radio that never blocks: it waits in a ring of
+ * KODE_SYS_BLE_HID_RING_SLOTS for the link, and a full ring refuses it. A
+ * keyboard report says which keys are down now, so the one that lets them go
+ * follows it. That one, a report with nothing down, is never refused for
+ * want of room: it is sent behind what is queued. kode_sys_ble_hid_tap() and
+ * kode_sys_ble_hid_click() press and let go in one call, both or neither. */
+
+#define KODE_SYS_BLE_HID_MOUSE       0x01U  /**< A mouse: three buttons, x, y and a wheel.     */
+#define KODE_SYS_BLE_HID_KEYBOARD    0x02U  /**< A keyboard: eight modifiers and six keys.     */
+#define KODE_SYS_BLE_HID_KEYS_MAX    6U     /**< Keys one keyboard report holds down.          */
+#define KODE_SYS_BLE_HID_KEY_MAX     101U   /**< The last key the report map declares, a usage ID. */
+#define KODE_SYS_BLE_HID_RING_SLOTS  16U    /**< Reports that wait for the link.               */
+#define KODE_SYS_BLE_PAIR_SHOW       1U     /**< kode_sys_ble_pair_t.phase: show @c passkey.   */
+#define KODE_SYS_BLE_PAIR_DONE       2U     /**< kode_sys_ble_pair_t.phase: it ended, @c outcome says how. */
+#define KODE_SYS_BLE_PAIR_OK         0U     /**< kode_sys_ble_pair_t.outcome: bonded.          */
+
+/* cppcheck-suppress misra-c2012-2.3 ; an event's name for the apps that read it, never used inside the SDK */
+/**
+ * @brief A pairing wants a code shown, or has ended (BLE_PAIR_SIG): @c phase;
+ *        @c passkey, six digits, in SHOW; @c outcome in DONE.
+ */
+typedef BlePairEvt kode_sys_ble_pair_t;
+
+/**
+ * @brief Choose the kinds of HID device the board is; 0 for none.
+ *
+ * Read once, when the radio registers its GATT table at Bluetooth's first
+ * start in the boot: call it before that, at the app's start. Not stored:
+ * the app makes this call at each start.
+ *
+ * @param kinds KODE_SYS_BLE_HID_MOUSE, KODE_SYS_BLE_HID_KEYBOARD, both, or 0.
+ * @return KODE_OK when the choice is kept; KODE_DENIED for a kind that does
+ *         not exist, once the table is registered, or in a build without
+ *         CONFIG_KODEOS_BLE_CONSOLE_PAIRING.
+ */
+kode_status_t kode_sys_ble_hid_select(uint8_t kinds);
+
+/**
+ * @brief Whether a host is subscribed to the reports of every kind served.
+ * @return true when a report sent now reaches the host; from any task.
+ */
+bool kode_sys_ble_hid_ready(void);
+
+/**
+ * @brief Send one mouse report. Movement and wheel are relative.
+ * @param buttons Bit 0 left, bit 1 right, bit 2 middle.
+ * @param dx      Right, -127 to 127.
+ * @param dy      Down, -127 to 127.
+ * @param wheel   Up, -127 to 127.
+ * @return KODE_OK when queued for the link; KODE_DENIED when the mouse is not
+ *         served or no host is subscribed to it; KODE_NO_RESOURCES when the
+ *         ring is full: send it again, or the sum. A report of no button and
+ *         no movement is never refused for want of room.
+ */
+kode_status_t kode_sys_ble_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel);
+
+/**
+ * @brief Press the mouse's buttons and let them go: two reports, both queued or neither.
+ * @param buttons Bit 0 left, bit 1 right, bit 2 middle; at least one.
+ * @return As kode_sys_ble_hid_mouse(); KODE_DENIED for no button too.
+ */
+kode_status_t kode_sys_ble_hid_click(uint8_t buttons);
+
+/**
+ * @brief Send one keyboard report: the keys held down now.
+ * @param modifiers The eight modifier bits, left Control first.
+ * @param keys      KODE_SYS_BLE_HID_KEYS_MAX usage IDs up to
+ *                  KODE_SYS_BLE_HID_KEY_MAX, 0 for none; copied. NULL for no
+ *                  key down.
+ * @return As kode_sys_ble_hid_mouse(), for the keyboard. A report with
+ *         nothing down is never refused for want of room.
+ */
+kode_status_t kode_sys_ble_hid_keys(uint8_t modifiers, const uint8_t *keys);
+
+/**
+ * @brief Press one key with its modifiers and let it go: two reports, both queued or neither.
+ * @param modifiers The eight modifier bits, left Control first.
+ * @param key       A usage ID, 1 to KODE_SYS_BLE_HID_KEY_MAX.
+ * @return As kode_sys_ble_hid_mouse(), for the keyboard; KODE_DENIED for a
+ *         key out of range too.
+ */
+kode_status_t kode_sys_ble_hid_tap(uint8_t modifiers, uint8_t key);
+
+/**
+ * @brief Open the time to pair a new device: five minutes, as kodeOS's Pair new device.
+ *
+ * In an app only while the HID service is served; the code to show arrives
+ * as BLE_PAIR_SIG. With a device connected the time starts when it leaves.
+ *
+ * @return KODE_OK when asked; KODE_DENIED in an app that serves no HID, or
+ *         without CONFIG_KODEOS_BLE; KODE_NO_RESOURCES when AO_Radio's
+ *         queue had no room, and nothing was asked.
+ */
+kode_status_t kode_sys_ble_pair_open(void);
+
+/**
+ * @brief Subscribe @p me to the pairings: BLE_PAIR_SIG, and link AO_Radio.
+ * @param me The listening AO, started.
+ * @return KODE_OK; KODE_DENIED when @p me is NULL or not started, or without
+ *         CONFIG_KODEOS_BLE.
+ */
+kode_status_t kode_sys_ble_pair_subscribe(QActive *me);
+
 /* ---- The battery: AO_Power's last reading ---- */
 
 #define KODE_SYS_CHARGE_NONE  0U  /**< Not charging.                     */
