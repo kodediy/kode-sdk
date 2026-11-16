@@ -123,6 +123,7 @@ typedef struct {
     QActive *bt_who;       /**< Who asked the delivery test's boost; NULL
                             *   when no answer is owed.                    */
     uint8_t  bt_status;    /**< The kode_status_t that answer carries.     */
+    uint32_t bt_ms;        /**< khal_time_ms() at that request's write.    */
     bool     lim_raised;   /**< BOOST_LIM holds the delivery test's limit,
                             *   not the board's.                           */
 } Power;
@@ -315,6 +316,7 @@ void Power_ctor(void)
     me->vbus_last     = false;
     me->bt_who        = NULL;
     me->bt_status     = (uint8_t)KODE_OK;
+    me->bt_ms         = 0U;
     me->lim_raised    = false;
     me->pmic          = false;
     me->gauge         = false;
@@ -1896,8 +1898,9 @@ static void boost_lim_restore(Power * const me)
  * @brief The pads delivery test's boost: on raises BOOST_LIM and starts it,
  *        off stops it and puts the limit back.
  *
- * The answer waits for the next poll, which carries the load's current; a
- * refusal is answered at once. Nothing is stored: the board's limit comes back
+ * The answer waits for the first poll taken KODE_TEST_DOT_BOOST_SETTLE_MS
+ * or more after the write, which carries the charger's status once it has
+ * caught up and the load's current; a refusal is answered at once. Nothing is stored: the board's limit comes back
  * on the cable's fall, at AO_Power's start and at the station's end.
  *
  * @param me The AO.
@@ -1944,6 +1947,7 @@ static void boost_test(Power * const me, PowerBoostTestReqEvt const * const r)
     }
     me->bt_who    = r->who;
     me->bt_status = (uint8_t)rc;
+    me->bt_ms     = khal_time_ms();
     if ( KODE_OK != rc )
     {
         PowerBoostTestEvt * const ev = Q_NEW_X(PowerBoostTestEvt, 0U, POWER_BOOST_TEST_SIG);
@@ -1961,7 +1965,9 @@ static void boost_test(Power * const me, PowerBoostTestReqEvt const * const r)
 }
 
 /**
- * @brief After a reading: answer the delivery test's boost with it, once.
+ * @brief After a reading: answer the delivery test's boost with it, once,
+ *        when it was taken KODE_TEST_DOT_BOOST_SETTLE_MS or more after the
+ *        write; a reading taken sooner leaves the answer to the next poll.
  * @param me The AO.
  * @param r  The reading.
  */
@@ -1969,7 +1975,8 @@ static void boost_test_answer(Power * const me, const reading_t *r)
 {
     QActive * const who = me->bt_who;
 
-    if ( NULL != who )
+    if ( (NULL != who)
+        && ((khal_time_ms() - me->bt_ms) >= KODE_TEST_DOT_BOOST_SETTLE_MS) )
     {
         PowerBoostTestEvt * const ev = Q_NEW_X(PowerBoostTestEvt, 0U, POWER_BOOST_TEST_SIG);
 

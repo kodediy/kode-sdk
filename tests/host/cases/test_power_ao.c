@@ -2706,6 +2706,7 @@ TEST_CASE("STATE(RADIO) leaves a rested AO_Power alone; AWAKE still starts a con
 #define BQ_OTG_BIT        0x20U   /**< REG03[5]: OTG_CONFIG.                     */
 #define REG0B_NO_INPUT    0x02U   /**< REG0B: no input, PG 0.                    */
 #define REG0B_CABLE       0x56U   /**< REG0B: adapter, fast charge, power good.  */
+#define REG0B_BOOST       0xE0U   /**< REG0B: VBUS_STAT 111, the boost running.  */
 #define CELL_BOOST_OK_MV  3720U   /**< A cell well above the boost's floor.      */
 
 /** @brief Hand the AO one poll and take the delivery test's answer, if it came. */
@@ -2753,8 +2754,9 @@ TEST_CASE("test_boost_test_restores_the_limit_on_unplug", "[power_ao][test_dot]"
                                    "the limit raised before the boost");
     TEST_ASSERT_EQUAL_HEX8(BQ_OTG_BIT, s_regs[PMIC][BQ_REG03_CTRL] & BQ_OTG_BIT);
     gauge_reads(3700, -700);
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
     const PowerBoostTestEvt *a = boost_test_poll();
-    TEST_ASSERT_NOT_NULL_MESSAGE(a, "answered at the next poll");
+    TEST_ASSERT_NOT_NULL_MESSAGE(a, "answered at the next poll past the settle");
     TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
     TEST_ASSERT_TRUE_MESSAGE(0 > a->current_ma, "the reading's discharge");
     TEST_ASSERT_NULL_MESSAGE(boost_test_poll(), "answered once");
@@ -2790,10 +2792,72 @@ TEST_CASE("test_boost_test_off_puts_the_limit_back_and_answers", "[power_ao][tes
     boost_test_ask(false);
     TEST_ASSERT_EQUAL_HEX8(0x00U, s_regs[PMIC][BQ_REG03_CTRL] & BQ_OTG_BIT);
     TEST_ASSERT_EQUAL_HEX8(KBSP_CELL_BOOST_LIM_CODE, boost_lim());
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
     const PowerBoostTestEvt * const a = boost_test_poll();
     TEST_ASSERT_NOT_NULL(a);
     TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
     TEST_ASSERT_FALSE(a->boost);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    ship_done();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("test_boost_test_on_answers_with_a_reading_past_the_settle", "[power_ao][test_dot]")
+{
+    power_up_once();
+    pmic_on_the_line();
+    cell_reads(CELL_BOOST_OK_MV);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    (void)boost_test_poll();
+
+    boost_test_ask(true);
+    /* A poll a few milliseconds after the write: the status shows no boost yet. */
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS - 1U);
+    TEST_ASSERT_NULL_MESSAGE(boost_test_poll(), "a reading inside the settle is not the answer");
+
+    /* The next poll, past the settle, shows the boost and answers with it. */
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_BOOST;
+    gauge_reads(3700, -1180);
+    fake_time_advance_ms(1U);
+    const PowerBoostTestEvt * const a = boost_test_poll();
+    TEST_ASSERT_NOT_NULL_MESSAGE(a, "the first reading past the settle answers");
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
+    TEST_ASSERT_TRUE_MESSAGE(a->boost, "the answer shows the boost");
+    TEST_ASSERT_TRUE_MESSAGE(0 > a->current_ma, "the reading's discharge");
+    TEST_ASSERT_NULL_MESSAGE(boost_test_poll(), "answered once");
+
+    boost_test_ask(false);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
+    (void)boost_test_poll();
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    ship_done();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("test_boost_test_off_answers_with_a_reading_past_the_settle", "[power_ao][test_dot]")
+{
+    power_up_once();
+    pmic_on_the_line();
+    cell_reads(CELL_BOOST_OK_MV);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    (void)boost_test_poll();
+    boost_test_ask(true);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_BOOST;
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
+    (void)boost_test_poll();
+
+    boost_test_ask(false);
+    /* A poll right after the write: the status still shows the boost. */
+    TEST_ASSERT_NULL_MESSAGE(boost_test_poll(), "a reading inside the settle is not the answer");
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
+    const PowerBoostTestEvt * const a = boost_test_poll();
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
+    TEST_ASSERT_FALSE_MESSAGE(a->boost, "the answer shows the boost gone");
 
     s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
     ship_done();

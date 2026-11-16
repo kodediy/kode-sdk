@@ -37,6 +37,8 @@ _Static_assert(KODE_TEST_DOT_SWEEP_MS >= (KDRV_WIFI_SCAN_TIMEOUT_MS + KDRV_WIFI_
                "the discovery's bound holds a whole sweep at the driver's own bound");
 _Static_assert(KODE_TEST_DOT_LINE_MS > KODE_TEST_DOT_END_MS, "the console's line outlasts the end");
 _Static_assert(KODE_TEST_DOT_LINE_MS > KODE_TEST_DOT_LOOP_MS, "the console's line outlasts the pads loop");
+_Static_assert(KODE_TEST_DOT_ANSWER_MS > (KODE_POWER_POLL_MS + KODE_TEST_DOT_BOOST_SETTLE_MS),
+               "the boost's answer, a poll past the settle, arrives inside its bound");
 
 /* The option has no "depends on" (kdrv's manifest reads it, see its Kconfig
  * help), so what it needs is checked here. */

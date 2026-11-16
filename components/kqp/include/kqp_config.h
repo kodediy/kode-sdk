@@ -261,7 +261,7 @@
 #define KODE_TEST_DOT_SCREEN_MS     2000U   /**< The longest a screen or a pattern waits for its host; past it the step goes on. */
 #define KODE_TEST_DOT_JOB_MS        20000U  /**< The longest one worker job may take before the step gives it up. */
 #define KODE_TEST_DOT_JPEG_MS       2000U   /**< The longest one photo's encode waits for AO_Display: an encode takes milliseconds. */
-#define KODE_TEST_DOT_ANSWER_MS     5000U   /**< The longest an owner's answer may take (the boost, the dock's pins): AO_Power answers at its next 2 s poll. */
+#define KODE_TEST_DOT_ANSWER_MS     5000U   /**< The longest an owner's answer may take (the boost, the dock's pins): AO_Power answers at the first 2 s poll past the boost's settle. */
 #define KODE_TEST_DOT_RESET_MS      KODE_RESET_CONSOLE_MS /**< The longest the SHIP reset may take to answer: every step at its budget. */
 #define KODE_TEST_DOT_RADIO_QUEUE_MS 25000U /**< What a radio check may wait behind AO_Radio's running job: a join takes 20 s. */
 /** @brief The longest `test_dot_radio` waits for RADIO_PROBE_SIG before it answers a timeout. */
@@ -298,6 +298,7 @@
  */
 #define KODE_TEST_DOT_LINE_MS       (KODE_TEST_DOT_RESET_MS + KODE_TEST_DOT_LINE_MARGIN_MS)
 #define KODE_TEST_DOT_BOOST_LIM_CODE 2U     /**< BQ25896 BOOST_LIM for the pads delivery test: 1.2 A. */
+#define KODE_TEST_DOT_BOOST_SETTLE_MS 500U  /**< The least time between the delivery test's boost write and the reading that answers it. */
 #define KODE_TEST_DOT_LOCK_KEY      "locked" /**< The lock's key in KODE_STATION_NVS_NS. */
 #define KODE_TEST_DOT_LOCK_ON       1U      /**< The value the lock's key holds. */
 #define KODE_TEST_DOT_GRID_LEN      17U     /**< Characters of the automatic phase's grid: identification, twelve rows, four radio. */
