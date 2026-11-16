@@ -4435,6 +4435,35 @@ TEST_CASE("the CPU part is refused on a cable, and the other parts are not", "[l
     lp_down();
 }
 
+/* The request is judged on its arrival, and a busy owner of the CPU part is
+ * asked again for up to the retry window: a cable that comes in meanwhile
+ * must still keep the P4 out of light sleep. */
+TEST_CASE("a cable that comes while the CPU part's owner is asked again refuses the CPU part",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    req.parts = KODE_LP_PART_SCREEN | KODE_LP_PART_CPU;
+    rest_post(&req);
+    expect_glass_asked(true);
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), true, "expander busy");
+    expect_awake_posted();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a busy owner ended the rest at once");
+
+    charger_reading(true);
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_STRING("cable: external power", n->why);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_false, "the lock was let go with a cable in");
+    lp_down();
+}
+
 /** @brief Bring AO_LowPower up with the touch's owner and one other, and the touch at rest for an app. */
 static void touch_rests_beside_another(void)
 {

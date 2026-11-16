@@ -93,7 +93,7 @@ const char *lowpower_part_check(uint8_t *parts, const lowpower_part_ask_t *ask)
     }
     else if ( ask->cable )
     {
-        why = "cable: external power";
+        why = LOWPOWER_PART_WHY_CABLE;
     }
     else if ( ask->glass && ((held & GLASS) == 0U) )
     {

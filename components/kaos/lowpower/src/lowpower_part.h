@@ -17,6 +17,8 @@
 extern "C" {
 #endif
 
+#define LOWPOWER_PART_WHY_CABLE "cable: external power"  /**< Why the CPU part is refused while a USB cable is in. */
+
 /** @brief What a request is judged against. */
 typedef struct {
     uint8_t at_rest;     /**< The KODE_LP_PART_* held at rest already.         */

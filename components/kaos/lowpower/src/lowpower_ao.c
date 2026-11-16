@@ -3100,6 +3100,13 @@ static bool part_cpu_go(LowPower * const me)
             settled = true;
         }
     }
+    if ( (!settled) && (NULL == why) && me->vbus )
+    {
+        /* The request was judged on its arrival; a busy owner asked again
+         * may have let a cable come in since, and the P4 never light-sleeps
+         * on a cable. */
+        why = LOWPOWER_PART_WHY_CABLE;
+    }
     if ( (!settled) && (NULL == why) )
     {
         why = part_cpu_arm(me);
