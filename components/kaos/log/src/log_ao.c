@@ -638,6 +638,7 @@ static void dock_lend(LogDockReqEvt const * const r)
 
 /* ---- The cable port shown to a host again (log_bounce_request()) ---------- */
 
+/* cppcheck-suppress misra-c2012-8.7 ; a door kaos.h declares for another AO: AO_LowPower asks it, and a build without CONFIG_KODE_LOWPOWER has no asker */
 bool log_bounce_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(LOG_BOUNCE_REQ_SIG);

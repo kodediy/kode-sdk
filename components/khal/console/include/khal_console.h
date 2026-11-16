@@ -22,6 +22,7 @@ extern "C" {
                                             *   the port leave; back on, the host finds a new device. */
 #define KHAL_CONSOLE_FRAME_SPAN_MS  2048U  /**< The span of the frame count khal_console_frame() reads: eleven
                                             *   bits, one frame a millisecond, then it wraps. */
+/* cppcheck-suppress misra-c2012-2.5 ; used by khal_console_esp.c's reader, which cppcheck does not analyse: esp_vfs.h stops it with an #error on FD_SETSIZE */
 #define KHAL_CONSOLE_REST_MS        1000U  /**< The reader's one wait while the console rests (khal_console_rest()):
                                             *   the longest a P4 in light sleep goes without a wake for it. */
 

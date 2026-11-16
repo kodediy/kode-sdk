@@ -159,6 +159,7 @@ void power_peek_request(void)
     QACTIVE_POST(AO_Power, &evt, NULL);
 }
 
+/* cppcheck-suppress misra-c2012-8.7 ; a door kaos.h declares for another AO: AO_LowPower asks it, and a build without CONFIG_KODE_LOWPOWER has no asker */
 bool power_cable_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(POWER_CABLE_REQ_SIG);
