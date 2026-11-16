@@ -635,8 +635,9 @@ static void cable_look_due_cb(void *arg)
  *
  * No line of the board wakes the P4 for a cable, and every light sleep takes
  * the cable port off the bus, in ASLEEP and in the CPU part's rest alike: a
- * host that plugs in then is not answered and gives the port up. While the
- * lock is let go, AO_Power is asked for a reading every
+ * host that plugs in then is not answered and gives the port up. From the
+ * moment the lock is let go until the P4 is awake for good (a dark wake keeps
+ * the look), AO_Power is asked for a reading every
  * KODE_LOWPOWER_CABLE_LOOK_MS. The timer does not wake the P4 by itself: it
  * runs at the first wake after it is due, and the console reader wakes the P4
  * once a second while it sleeps (khal_console_rest()). It is a periodic timer
@@ -1190,20 +1191,31 @@ static void summary_close(LowPower * const me, uint8_t cause)
 
 /* ---- The way up ----------------------------------------------------------------- */
 
-/** @brief The tick, then the lock, and no more look for a cable: what the P4 needs before anything else runs. */
-static void light_up(void)
+/**
+ * @brief The tick, then the lock: what the P4 needs before anything else runs.
+ *
+ * The look for a cable is left as it is: a dark wake keeps it (dark_enter()).
+ */
+static void light_hold(void)
 {
     kqp_tick_rest(false);
     khal_console_rest(false);
-    cable_look(false);
     khal_power_hold(true);
+}
+
+/** @brief The tick, then the lock, and no more look for a cable: the P4 is awake for good. */
+static void light_up(void)
+{
+    light_hold();
+    cable_look(false);
 }
 
 /**
  * @brief A dark wake is over, one way or another: forget what it counted.
  *
- * The tick and the lock are the caller's to settle. The round's one-shot is
- * stopped only when this wake's own round is the one it times.
+ * The tick, the lock and the look for a cable are the caller's to settle. The
+ * round's one-shot is stopped only when this wake's own round is the one it
+ * times.
  *
  * @param me The AO.
  */
@@ -1222,9 +1234,10 @@ static void dark_clear(LowPower * const me)
 }
 
 /**
- * @brief Have the tick and the lock back, from either phase of ASLEEP.
+ * @brief Have the tick and the lock back, from either phase of ASLEEP, and end
+ *        the look for a cable.
  *
- * A dark wake has them already.
+ * A dark wake has the tick and the lock already, and kept the look.
  *
  * @param me The AO, ASLEEP.
  */
@@ -1233,6 +1246,7 @@ static void rest_up(LowPower * const me)
     if ( me->dark )
     {
         dark_clear(me);
+        cable_look(false);
     }
     else
     {
@@ -1882,11 +1896,15 @@ static QState dark_begin(LowPower * const me, uint64_t now)
 /**
  * @brief Entering the dark wake: the tick, the lock, then the news.
  *
+ * The look for a cable goes on: AO_Power is at rest and polls nothing, and a
+ * cable that comes now must still wake the board whole (POWER_EVT_SIG in
+ * LowPower_asleep), not wait for the wake to end.
+ *
  * @param me The AO, ASLEEP.
  */
 static void dark_enter(LowPower * const me)
 {
-    light_up();
+    light_hold();
     me->dark          = true;
     me->dark_resting  = false;
     me->dark_closing  = false;

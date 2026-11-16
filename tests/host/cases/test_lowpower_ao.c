@@ -5407,20 +5407,41 @@ TEST_CASE("a cable that comes to a board that is awake leaves the cable port alo
     lp_down();
 }
 
-TEST_CASE("a dark wake holds the lock: the look stops for it and runs again after",
-          "[lowpower_ao]")
+/* AO_Power is at rest through a dark wake and polls nothing: the look is the
+ * only reading of the charger there is. */
+TEST_CASE("a dark wake keeps the look, and it runs on after", "[lowpower_ao]")
 {
     lp_up(KODE_OK);
     radio_asleep(20U * SECOND_MS);
     TEST_ASSERT_TRUE(fake_time_periodic_running_at(LOOK_US));
 
     dark_wake();
-    TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "the lock keeps the port on the bus");
+    TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "a cable must still be seen");
+    TEST_ASSERT_TRUE(fake_time_periodic_fire_at(LOOK_US));
+    TEST_ASSERT_EQUAL_UINT(1U, queued(AO_Power, POWER_PEEK_REQ_SIG));
 
     dark_done_all();
     dark_rest_both(expect_dark_rounds(), 0U);
     expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_TIMER, KODE_LP_DARK);
     TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "the lock is let go again");
+    lp_down();
+}
+
+TEST_CASE("a cable the look finds in a dark wake wakes the board whole, and the look ends",
+          "[lowpower_ao]")
+{
+    unsigned calls;
+
+    lp_up(KODE_OK);
+    radio_asleep(20U * SECOND_MS);
+    dark_wake();
+    calls = fake_console_cable_calls();
+
+    charger_reading(true);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_VBUS, KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT(calls + 1U, fake_console_cable_calls());
+    TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "awake for good: no look");
+    ao_spy_drain();
     lp_down();
 }
 
