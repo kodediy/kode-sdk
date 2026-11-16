@@ -1,4 +1,4 @@
-# CMock over kdrv_ppa.h: the P4's pixel accelerator, without a P4.
+# CMock over kdrv_ppa.h and kdrv_compose.h: the P4's pixel accelerator, without a P4.
 #
 # The scaler/flip is hardware AO_Display drives; there is nothing here for a
 # case to assert on that the driver itself does not already prove on the
@@ -13,6 +13,7 @@ idf_component_mock(
     INCLUDE_DIRS "${SDK_DIR}/components/kdrv/audio/include"
                  "${SDK_DIR}/components/kdrv/buttons/include"
                  "${SDK_DIR}/components/kdrv/clocks/include"
+                 "${SDK_DIR}/components/kdrv/compose/include"
                  "${SDK_DIR}/components/kdrv/cst820/include"
                  "${SDK_DIR}/components/kdrv/display/include"
                  "${SDK_DIR}/components/kdrv/led/include"
@@ -24,5 +25,7 @@ idf_component_mock(
                  "${SDK_DIR}/components/kdrv/apps/include"
                  "${SDK_DIR}/components/kdrv/mirror/include"
                  "${SDK_DIR}/components/kdrv/radio/include"
+                 "${SDK_DIR}/components/kbsp/board/include"
                  "${SDK_DIR}/components/kdefs/include"
-    MOCK_HEADER_FILES "${SDK_DIR}/components/kdrv/mirror/include/kdrv_ppa.h")
+    MOCK_HEADER_FILES "${SDK_DIR}/components/kdrv/mirror/include/kdrv_ppa.h"
+                      "${SDK_DIR}/components/kdrv/compose/include/kdrv_compose.h")

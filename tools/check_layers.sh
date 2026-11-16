@@ -2,11 +2,12 @@
 #
 # The layer cake, checked rather than described.
 #
-# Twenty rules, all of them about what happens inside this SDK: where ESP-IDF
+# Twenty-one rules, all of them about what happens inside this SDK: where ESP-IDF
 # stops, where QP/C stops, where the board is described, where stdio stops,
 # where the RMT stops, where the expansion header's ADC stops, where the LEDC
 # stops, where the C5's RPC stops, where the host's network stack stops,
-# where the I2S stops, where the buses stop, where LVGL stops, where the ROM's inflater stops,
+# where the I2S stops, where the buses stop, where the pixel accelerator stops,
+# where LVGL stops, where the ROM's inflater stops,
 # where the camera stops,
 # where cJSON stops, where the standard layer stops, who may use its seam, who
 # may call the blocking calls it is built from, what the sys header may
@@ -203,6 +204,18 @@ report "IDF's I2C, SPI and UART headers only in their seven drivers, each its ow
   "A bus on J3 is kode.h's kode_i2c_*, kode_spi_*, kode_uart_*, or kode_sys_exp_lend() and kode_sys_exp_ctrl() first." \
   "$(scan '#include *[<"]driver/\(i2c\|i2c_master\|i2c_slave\|i3c_master\|i3c_master_i2c\|spi_common\|spi_master\|spi_slave\|spi_slave_hd\|sdspi_host\|uart\|uart_select\|uhci\)\.h[>"]' \
           '^components/(kdrv/exp_bus/src/kdrv_exp_bus\.c:[0-9]+:#include "driver/(i2c_master|spi_master|uart)\.h"|khal/i2c/src/khal_i2c_esp\.c:[0-9]+:#include "driver/i2c_master\.h"|kdrv/nfc/src/kdrv_st25r3916\.c:[0-9]+:#include "driver/spi_master\.h"|khal/console/src/khal_console_esp\.c:[0-9]+:#include "driver/uart\.h"|kdrv/ov5640/src/kdrv_ov5640\.c:[0-9]+:#include "driver/i2c_master\.h"|kdrv/station/src/kdrv_station_i2c\.c:[0-9]+:#include "driver/i2c_master\.h"|kdrv/station/src/kdrv_dock_loop\.c:[0-9]+:#include "driver/uart\.h")')"
+
+# ---- 8c. The pixel accelerator stops at its driver ------------------------
+# Rule 1 keeps driver/ inside kdrv, and that is not enough here: the PPA is
+# one engine with one owner, AO_Display, and every pass on it goes through
+# kdrv_compose.c - the mirror's scaled copy, and what a renderer composes
+# through kscreen. A second file registering a client would be a second user
+# of the engine that its owner knows nothing about, arriving as an include
+# rather than as a claim. Both #include spellings are read.
+report "driver/ppa.h only in kdrv_compose.c" \
+  "The accelerator has one owner, AO_Display; a renderer composes through kscreen." \
+  "$(scan '#include *[<"]driver/ppa\.h[>"]' \
+          '^components/kdrv/compose/src/kdrv_compose\.c:[0-9]+:#include "driver/ppa\.h"')"
 
 # ---- 9. LVGL stops at the UI kit and the renderer -------------------------
 # The rule is about threads, not files: there is no lock around LVGL, because

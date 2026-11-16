@@ -1,13 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kdrv_ppa.c
- * @brief The P4's pixel accelerator: one hardware pass that scales.
+ * @brief The mirror's scaled copy of the glass: one buffer, one pass through kdrv_compose.
  */
 #include "kdrv_ppa.h"
 
-#include <string.h>
-
-#include "driver/ppa.h"
 #include "esp_heap_caps.h"
 
 #include "freertos/FreeRTOS.h"
@@ -16,6 +13,7 @@
 #include "sdkconfig.h"
 
 #include "kbsp.h"
+#include "kdrv_compose.h"
 #include "kode_log.h"
 
 #define TAG "kdrv.ppa"
@@ -46,14 +44,14 @@
 #define PPA_OUT_CAP  (((PPA_PANEL_BYTES + (PPA_CACHE_LINE - 1U)) \
                       / PPA_CACHE_LINE) * PPA_CACHE_LINE)
 
-static ppa_client_handle_t s_client;
+static bool                s_ppa_ready;  /**< The accelerator and the buffer are there. */
 static uint8_t            *s_out;
 /* A try-lock: khal_mutex_t only blocks, and AO_Display must never wait out another pass. */
 static SemaphoreHandle_t   s_busy;   /**< Try-lock.                       */
 
 kode_status_t kdrv_ppa_init(void)
 {
-    if ( NULL != s_client )
+    if ( s_ppa_ready )
     {
         return KODE_OK;
     }
@@ -73,30 +71,23 @@ kode_status_t kdrv_ppa_init(void)
         }
     }
 
-    ppa_client_config_t const cfg = {
-        .oper_type             = PPA_OPERATION_SRM,
-        /* One, because every operation here is blocking: the caller is an AO
-         * step that wants the pixels before it can encode them, so a queue
-         * would only add latency to a wait that has to happen anyway. */
-        .max_pending_trans_num = 1U,
-    };
-    if ( ppa_register_client(&cfg, &s_client) != ESP_OK )
+    if ( kdrv_compose_init() != KODE_OK )
     {
-        KLOG_E(TAG, "the PPA would not register a client");
-        s_client = NULL;
         return KODE_NO_RESOURCES;
     }
 
-    s_out = (uint8_t *)heap_caps_malloc(
-        PPA_OUT_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_CACHE_ALIGNED);
+    if ( NULL == s_out )
+    {
+        s_out = (uint8_t *)heap_caps_malloc(
+            PPA_OUT_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_CACHE_ALIGNED);
+    }
     if ( NULL == s_out )
     {
         KLOG_E(TAG, "no room for a %u KB scaled buffer",
                (unsigned)(PPA_OUT_CAP / 1024U));
-        (void)ppa_unregister_client(s_client);
-        s_client = NULL;
         return KODE_NO_RESOURCES;
     }
+    s_ppa_ready = true;
     return KODE_OK;
 }
 
@@ -104,12 +95,13 @@ kode_status_t kdrv_ppa_prepare(const uint8_t *src, uint32_t w, uint32_t h,
                                uint32_t scale, uint8_t **dst,
                                uint32_t *dst_w, uint32_t *dst_h)
 {
-    if ( (NULL == s_client) || (NULL == s_out) )
+    if ( !s_ppa_ready )
     {
         return KODE_DENIED;
     }
     if ( (NULL == src) || (NULL == dst) || (NULL == dst_w) || (NULL == dst_h)
-        || (0U == w) || (0U == h) || ((1U != scale) && (2U != scale)) )
+        || (0U == w) || (0U == h) || (KDRV_COMPOSE_SIDE_MAX < w) || (KDRV_COMPOSE_SIDE_MAX < h)
+        || ((1U != scale) && (2U != scale)) )
     {
         return KODE_DENIED;
     }
@@ -125,8 +117,8 @@ kode_status_t kdrv_ppa_prepare(const uint8_t *src, uint32_t w, uint32_t h,
         return KODE_DENIED;
     }
 
-    /* Zero timeout: a refusal, not a wait. One client and one output buffer
-     * mean a second caller in here at the same time would read s_out as the
+    /* Zero timeout: a refusal, not a wait. One output buffer
+     * means a second caller in here at the same time would read s_out as the
      * first is still writing it. */
     if ( xSemaphoreTake(s_busy, 0U) != pdTRUE )
     {
@@ -134,35 +126,16 @@ kode_status_t kdrv_ppa_prepare(const uint8_t *src, uint32_t w, uint32_t h,
         return KODE_DENIED;
     }
 
-    float const factor = (2U == scale) ? 0.5F : 1.0F;
+    /* cppcheck-suppress misra-c2012-11.8 ; the pass only reads its input picture */
+    kdrv_compose_pic_t const  in   = { .px = (uint8_t *)src,
+                                       .bytes = w * h * KDRV_COMPOSE_PX_BYTES,
+                                       .w = (uint16_t)w, .h = (uint16_t)h };
+    kdrv_compose_pic_t const  out  = { .px = s_out, .bytes = (uint32_t)PPA_OUT_CAP,
+                                       .w = (uint16_t)ow, .h = (uint16_t)oh };
+    kdrv_compose_rect_t const from = { .x = 0U, .y = 0U, .w = (uint16_t)w, .h = (uint16_t)h };
+    uint16_t const            s16  = (uint16_t)(KDRV_COMPOSE_SCALE_ONE / scale);
 
-    ppa_srm_oper_config_t cfg;
-    (void)memset(&cfg, 0, sizeof(cfg));
-    cfg.in.buffer         = src;
-    cfg.in.pic_w          = w;
-    cfg.in.pic_h          = h;
-    cfg.in.block_w        = w;
-    cfg.in.block_h        = h;
-    cfg.in.block_offset_x = 0U;
-    cfg.in.block_offset_y = 0U;
-    cfg.in.srm_cm         = PPA_SRM_COLOR_MODE_RGB565;
-
-    cfg.out.buffer         = s_out;
-    cfg.out.buffer_size    = (uint32_t)PPA_OUT_CAP;
-    cfg.out.pic_w          = ow;
-    cfg.out.pic_h          = oh;
-    cfg.out.block_offset_x = 0U;
-    cfg.out.block_offset_y = 0U;
-    cfg.out.srm_cm         = PPA_SRM_COLOR_MODE_RGB565;
-
-    cfg.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
-    cfg.scale_x        = factor;
-    cfg.scale_y        = factor;
-    cfg.mirror_x        = false;
-    cfg.mirror_y        = false;
-    cfg.mode            = PPA_TRANS_MODE_BLOCKING;
-
-    esp_err_t const err = ppa_do_scale_rotate_mirror(s_client, &cfg);
+    kode_status_t const err = kdrv_compose_scale(&out, 0U, 0U, &in, &from, s16, s16, 0U);
 
     /* Given back before *dst is even set, the same shape kdrv_jpeg.c's
      * kdrv_jpeg_encode() used to have - and that shape is a real bug there,
@@ -179,7 +152,7 @@ kode_status_t kdrv_ppa_prepare(const uint8_t *src, uint32_t w, uint32_t h,
      * selftest, say) shows up on another AO. */
     (void)xSemaphoreGive(s_busy);
 
-    if ( ESP_OK != err )
+    if ( KODE_OK != err )
     {
         KLOG_W(TAG, "the PPA refused a %ux%u pass at scale %u",
                (unsigned)w, (unsigned)h, (unsigned)scale);

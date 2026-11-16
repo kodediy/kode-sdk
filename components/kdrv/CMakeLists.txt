@@ -122,11 +122,19 @@ set(srcs
     "rfid/src/kdrv_rfid_lf.c"
 )
 
+# kdrv_compose/ - the pixel accelerator's passes, for the mirror and for a renderer that composes.
+if(CONFIG_KODEOS_MIRROR OR CONFIG_KODE_COMPOSE)
+    list(APPEND srcs
+        "compose/src/kdrv_compose.c"
+        "compose/src/kdrv_compose_check.c"
+    )
+endif()
+
 # kdrv_mirror/ - the three files the mirror is made of, compiled with the
-# feature that is their only caller. The codec and the scaler are not free to
-# carry: between them they hold about 530 KB of PSRAM from boot (128 KB of
-# encoder output, a full panel of RGB565 for the scaler), and a build that has
-# said no to KODEOS_MIRROR has said no to paying it. kmirror_proto.c holds no
+# feature that is their only caller. The codec and the scaler's buffer are not
+# free to carry: between them they hold about 530 KB of PSRAM from boot (128 KB
+# of encoder output, a full panel of RGB565 for the scaler), and a build that
+# has said no to KODEOS_MIRROR has said no to paying it. kmirror_proto.c holds no
 # memory at all and goes with them anyway, because a wire format nobody can
 # speak is dead weight in the same sense.
 if(CONFIG_KODEOS_MIRROR)
@@ -221,6 +229,7 @@ idf_component_register(
         "audio/include"
         "buttons/include"
         "clocks/include"
+        "compose/include"
         "cst820/include"
         "display/include"
         "exp_bus/include"

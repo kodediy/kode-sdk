@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kdrv_ppa.h
- * @brief The ESP32-P4's Pixel Processing Accelerator, as a device.
+ * @brief The mirror's scaled copy of the glass, made by the pixel accelerator (kdrv_compose).
  */
 #ifndef KDRV_PPA_H_
 #define KDRV_PPA_H_
@@ -15,9 +15,9 @@ extern "C" {
 #endif
 
 /**
- * @brief Register the client and allocate the output buffer. Idempotent.
- * @return KODE_NO_RESOURCES when the client, the output buffer, or the
- *         prepare guard (see kdrv_ppa_prepare()) will not allocate.
+ * @brief Bring the accelerator up and allocate the output buffer. Idempotent.
+ * @return KODE_NO_RESOURCES when the accelerator, the output buffer, or the
+ *         prepare guard (see kdrv_ppa_prepare()) cannot be had.
  */
 kode_status_t kdrv_ppa_init(void);
 
@@ -35,11 +35,11 @@ kode_status_t kdrv_ppa_init(void);
  *                buffer.
  * @param dst_w   Receives w/scale.
  * @param dst_h   Receives h/scale.
- * @return KODE_DENIED before kdrv_ppa_init(), for a bad argument, for a
- *         scale other than 1 or 2, for a result that would not fit the
+ * @return KODE_DENIED before kdrv_ppa_init(), for a bad argument, for a side
+ *         longer than the glass's longer one, for a scale other than 1 or 2, for a result that would not fit the
  *         buffer, or when another call is already running - the last is a
- *         normal, expected outcome under contention (one client, one output
- *         buffer), not a fault. KODE_ERROR when the hardware refused.
+ *         normal, expected outcome under contention (one output buffer),
+ *         not a fault. KODE_ERROR when the hardware refused.
  */
 kode_status_t kdrv_ppa_prepare(const uint8_t *src, uint32_t w, uint32_t h,
                                uint32_t scale, uint8_t **dst,

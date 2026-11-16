@@ -15,6 +15,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/khal/zlib/src/khal_zlib_esp.c"
     "${SDK_DIR}/components/khal/exp/src/khal_exp.c"
     "${SDK_DIR}/components/khal/identity/src/khal_identity_esp.c"
+    "${SDK_DIR}/components/kdrv/compose/src/kdrv_compose_check.c"
     "${SDK_DIR}/components/kdrv/led/src/kdrv_led.c"
     "${SDK_DIR}/components/kdrv/power/src/kdrv_bq25896.c"
     "${SDK_DIR}/components/kdrv/power/src/kdrv_cw2217.c"
@@ -267,6 +268,9 @@ idf_component_register(
                  "${SDK_DIR}/components/kdrv/audio/include"
                  "${SDK_DIR}/components/kdrv/buttons/include"
                  "${SDK_DIR}/components/kdrv/clocks/include"
+                 "${SDK_DIR}/components/kdrv/compose/include"
+                 # kdrv_compose_check.h is private to the driver
+                 "${SDK_DIR}/components/kdrv/compose/src"
                  "${SDK_DIR}/components/kdrv/cst820/include"
                  "${SDK_DIR}/components/kdrv/display/include"
                  "${SDK_DIR}/components/kdrv/exp_bus/include"
