@@ -329,8 +329,24 @@ uint32_t kfw_produced(void);
  *
  * Read after kfw_feed() refused a chunk, to tell an image for some other
  * board from one that could not be written. A new kfw_begin() clears it.
+ *
+ * @return true when the image was for another chip or target.
  */
 bool kfw_foreign(void);
+
+/**
+ * @brief Whether the session refused its image as not well formed.
+ *
+ * Neither a container nor an ESP image, a container header that does not
+ * verify or says what this firmware cannot obey, a deflate stream that does
+ * not decode, a payload longer than its header declared, an app data block
+ * whose payload cannot be found, or a raw image the file cuts inside its first
+ * segment. Read after kfw_feed() refused a chunk, to tell a bad image from one
+ * that could not be written. A new kfw_begin() clears it.
+ *
+ * @return true when the image itself was at fault.
+ */
+bool kfw_malformed(void);
 
 /**
  * @brief Parse, refuse and decode, checked by hand: the console's `test kfw`.

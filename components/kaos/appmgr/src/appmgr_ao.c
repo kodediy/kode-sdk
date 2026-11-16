@@ -3504,6 +3504,10 @@ static bool consume_chunk(AppMgr * const me, const StorageDataEvt *d)
         {
             appmgr_inst_why(APPMGR_WHY_WRONG_BOARD);
         }
+        if ( kfw_malformed() )
+        {
+            appmgr_inst_why(APPMGR_WHY_CORRUPT);
+        }
         appmgr_inst_why(APPMGR_WHY_WRITE);   /* unless a cause was noted first */
         flash_fail(me, me->os_target ? "write to the kodeOS slot failed"
                                       : "write to the region failed",
@@ -7664,6 +7668,10 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                     if ( kfw_foreign() )
                     {
                         appmgr_inst_why(APPMGR_WHY_WRONG_BOARD);
+                    }
+                    if ( kfw_malformed() )
+                    {
+                        appmgr_inst_why(APPMGR_WHY_CORRUPT);
                     }
                     appmgr_inst_why(APPMGR_WHY_WRITE);   /* unless a cause was noted first */
                     KLOG_E(TAG, "install: write failed at %u/%u bytes; "

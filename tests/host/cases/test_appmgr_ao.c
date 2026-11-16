@@ -12181,7 +12181,7 @@ TEST_CASE("a kodeOS update whose switch failed is told at once, and this boot's 
     TEST_ASSERT_TRUE(told_failed);
 }
 
-/* ---- A kodeOS update by URL, a lost line --------------------------------- */
+/* ---- A kodeOS update by URL, a lost line, a bad image -------------------- */
 
 /* `dst=os` from a URL ends as one from a file does: `installed`, to the
  * asker's port, in the step that asks AO_Boot for the switch. */
@@ -12302,4 +12302,30 @@ TEST_CASE("an answer for an earlier state does not tell the record's new one",
         "the answer for installed told the verdict");
     TEST_ASSERT_EQUAL_UINT(KODE_CONSOLE_SRC_NET | KODE_LOG_SRC_CONFIRM, verdict);
     TEST_ASSERT_EQUAL_UINT8(1U, after_second.told);
+}
+
+/* `write` is the flash failing. An image that is not one - neither a
+ * container nor an ESP image, here a page a server sent instead - is
+ * `corrupt`, and nothing was written for it. */
+TEST_CASE("an image that is not one is kept as failed for corrupt, not write",
+          "[appmgr_ao][install_rec]")
+{
+    static uint8_t page[512];   /* longer than a container's header */
+
+    (void)memset(page, (int)' ', sizeof(page));
+    (void)snprintf((char *)page, sizeof(page), "%s",
+                   "<!doctype html><html><body>Not found</body></html>");
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    keep_hold_dir();
+    ask_file_from("page.bin", (uint8_t)KFW_TARGET_APP, (uint8_t)KODE_CONSOLE_SRC_SERIAL);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open((uint32_t)sizeof(page), (uint8_t)KDRV_MEDIUM_FS);
+    answer_data_bytes(page, (uint32_t)sizeof(page));
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_CORRUPT, got.why,
+        "a bad image was reported as a write that failed");
 }
