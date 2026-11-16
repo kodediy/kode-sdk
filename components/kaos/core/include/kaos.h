@@ -1608,7 +1608,9 @@ typedef struct {
  * @brief Run one pass of the pixel accelerator on the caller's pictures, and wait for it.
  *
  * AO_Display owns the accelerator and runs the pass in its step. A blocking
- * request: for a renderer inside its own pass (kscreen) or a worker task.
+ * request, asked by the renderer's AO inside its own pass (kscreen), by
+ * AO_Autotest's bench row or by a worker task; the call holds that AO's step
+ * for up to @p timeout_ms plus two seconds.
  * Built with CONFIG_KODE_COMPOSE; without it every pass is refused, logged.
  * The pictures stay the caller's and must outlive the call. A request is
  * either given up before AO_Display takes it (KODE_TIMEOUT: no pass runs for
