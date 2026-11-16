@@ -47,6 +47,20 @@ const char *kdrv_storage_probe(kdrv_medium_t m);
 /** @brief Unmount @p m. */
 void kdrv_storage_unmount(kdrv_medium_t m);
 
+/**
+ * @brief Put the card away: unmounted, and its supply off.
+ *
+ * For an app's rest. A card that was mounted is forgotten as tried, so the
+ * next kdrv_storage_probe() powers and mounts it again; a slot that had no
+ * card stays as it was, and is not probed again. Blocks for
+ * KDRV_SD_POWER_OFF_MS after the supply goes, the least a supply cycle keeps
+ * the card off, so no mount can follow sooner: a worker's call, not an
+ * Active Object's.
+ *
+ * @return KODE_OK, or KODE_ERROR when the supply would not switch.
+ */
+kode_status_t kdrv_storage_card_rest(void);
+
 /** @brief Whether @p m is mounted right now. */
 bool kdrv_storage_mounted(kdrv_medium_t m);
 

@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "kdrv_sd.h"
+#include "khal_time.h"
 #include "kdrv_fs.h"
 #include "kode_log.h"
 
@@ -75,6 +76,23 @@ void kdrv_storage_unmount(kdrv_medium_t m)
     {
         kdrv_fs_unmount();
     }
+}
+
+kode_status_t kdrv_storage_card_rest(void)
+{
+    kode_status_t rc;
+
+    if ( kdrv_sd_mounted() )
+    {
+        kdrv_sd_unmount();
+        /* It was there: the next look for a file brings it back. */
+        s_sd_tried = false;
+    }
+    rc = kdrv_sd_park();
+    /* A file asked for at once would power the card again before it had
+     * lost its supply: it stays off for as long as a supply cycle keeps it. */
+    khal_delay_ms(KDRV_SD_POWER_OFF_MS);
+    return rc;
 }
 
 bool kdrv_storage_mounted(kdrv_medium_t m)
