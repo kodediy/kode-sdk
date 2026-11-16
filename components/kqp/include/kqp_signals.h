@@ -95,6 +95,11 @@ enum KodeSignals {
     RECV_FAIL_SIG,              /**< The receive protocol: refused, or the
                                  *   bytes did not survive the trip - kcli
                                  *   error 5.                                 */
+    RECV_AGAIN_SIG,             /**< The receive protocol: AO_AppMgr refused the
+                                 *   stream for now and nothing was armed - an
+                                 *   app the image would evict has no copy on
+                                 *   the card yet. Ask again: kcli error 4.
+                                 *   Bare and static, as the endings beside it. */
     RECV_STALL_SIG,             /**< The receive protocol: the host stopped
                                  *   sending and never came back - kcli
                                  *   error 6.                                 */
@@ -2319,8 +2324,8 @@ typedef struct {
 /** @brief Why a write failed, as far as the glass needs to know. */
 typedef enum {
     KFAIL_WRITE = 0,  /**< The write itself: the image, the medium, the flash. */
-    KFAIL_KEEP,       /**< Nothing was written: the card could not keep an app
-                       *   this install would have removed.                  */
+    KFAIL_BUSY,       /**< Nothing was written: an app this install would
+                       *   remove has no copy on the card yet. Ask again.     */
 } kfail_t;
 
 /**
@@ -2359,7 +2364,8 @@ typedef struct {
 /** @brief What AO_AppMgr made of a request that asked for a verdict (AppReqRspEvt.verdict). */
 typedef enum {
     APP_REQ_TAKEN = 0,   /**< Taken: the install is under way, or the app is on its way to boot. */
-    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand: ask again.                           */
+    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand, or an app the install would evict
+                          *   has no copy on the card yet: ask again.                          */
     APP_REQ_MISSING,     /**< The file is not on the medium, or the app is not installed.      */
     APP_REQ_EMPTY,       /**< The mailbox holds nothing to install.                            */
     APP_REQ_REFUSED      /**< Refused for another reason, which the log gives.                 */

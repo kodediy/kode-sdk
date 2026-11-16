@@ -287,9 +287,38 @@ typedef struct {
     uint32_t seq;
 } apps_live_t;
 
+_Static_assert(KAPPS_MAX_ENTRIES <= 64U, "kdrv_apps_plan() says which entries are copied in 64 bits");
+
+/**
+ * @brief Whether live entry @p a is evicted before live entry @p b.
+ *
+ * An app with its copy on the card before one without; then the older one.
+ *
+ * @param a      A live entry.
+ * @param b      Another.
+ * @param copied Bit n: directory entry n has its copy on the card.
+ * @return true when @p a goes first.
+ */
+static bool plan_goes_first(const apps_live_t *a, const apps_live_t *b, uint64_t copied)
+{
+    bool const a_copied = ((copied >> a->idx) & 1U) != 0U;
+    bool const b_copied = ((copied >> b->idx) & 1U) != 0U;
+    bool       first;
+
+    if ( a_copied != b_copied )
+    {
+        first = a_copied;
+    }
+    else
+    {
+        first = a->seq < b->seq;
+    }
+    return first;
+}
+
 kode_status_t kdrv_apps_plan(const kapps_dir_t *d, uint32_t region_size,
                              uint32_t img_size, uint8_t replacing,
-                             kapps_plan_t *out)
+                             uint64_t copied, kapps_plan_t *out)
 {
     if ( (NULL == d) || (NULL == out) || (KAPPS_DATA_OFF >= region_size) )
     {
@@ -399,7 +428,7 @@ kode_status_t kdrv_apps_plan(const kapps_dir_t *d, uint32_t region_size,
                 {
                     replaces_live = true;
                 }
-                if ( live[i].seq < live[oldest].seq )
+                if ( plan_goes_first(&live[i], &live[oldest], copied) )
                 {
                     oldest = i;
                 }
@@ -417,8 +446,8 @@ kode_status_t kdrv_apps_plan(const kapps_dir_t *d, uint32_t region_size,
         }
 
         /* No room anywhere: evict the app being replaced, else the oldest
-         * (minimum seq) live entry, and retry - the freed extent joins the
-         * gap search on the next pass. */
+         * app with its copy on the card, else the oldest of all, and retry -
+         * the freed extent joins the gap search on the next pass. */
         uint32_t victim = 0U;
         bool     same   = false;
         for ( uint32_t i = 0U; i < n; ++i )
@@ -429,7 +458,7 @@ kode_status_t kdrv_apps_plan(const kapps_dir_t *d, uint32_t region_size,
                 same   = true;
                 break;
             }
-            if ( live[i].seq < live[victim].seq )
+            if ( plan_goes_first(&live[i], &live[victim], copied) )
             {
                 victim = i;
             }

@@ -6962,6 +6962,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, RECV_DONE_SIG);
     QActive_subscribe(&me->super, APP_EVICTED_SIG);
     QActive_subscribe(&me->super, RECV_FAIL_SIG);
+    QActive_subscribe(&me->super, RECV_AGAIN_SIG);
     QActive_subscribe(&me->super, RECV_STALL_SIG);
     QActive_subscribe(&me->super, APP_CAT_RSP_SIG);
     QActive_subscribe(&me->super, APP_ERASE_DONE_SIG);
@@ -8188,9 +8189,11 @@ static QState console_own(Console * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case RECV_AGAIN_SIG:
         case RECV_BUSY_SIG: {
             /* AO_Storage's transfer in flight outlasted the wait of this
-             * `file_put`: nothing was armed, the host sends no byte. */
+             * `file_put`, or AO_AppMgr refused this install for now:
+             * nothing was armed, the host sends no byte. */
             if ( (uint8_t)KCLI_RECV == me->inflight )
             {
                 console_reply_err(KCLI_ERR_BUSY, "busy");

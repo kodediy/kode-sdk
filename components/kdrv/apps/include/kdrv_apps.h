@@ -93,13 +93,15 @@ typedef struct {
  *                    before any other app: its old copy would otherwise cost
  *                    every older app its place, and the install replaces it
  *                    anyway.
+ * @param copied      Bit n: entry n has its copy on the card. Those apps are
+ *                    evicted first, oldest first; the others only after them.
  * @param out         The plan.
  * @return KODE_OK, or KODE_ERROR when the image cannot fit even in an empty
  *         region (nothing is planned then).
  */
 kode_status_t kdrv_apps_plan(const kapps_dir_t *d, uint32_t region_size,
                              uint32_t img_size, uint8_t replacing,
-                             kapps_plan_t *out);
+                             uint64_t copied, kapps_plan_t *out);
 
 /* ---- Writing an image into the region -------------------------------------- */
 

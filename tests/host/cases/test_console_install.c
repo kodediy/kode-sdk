@@ -183,6 +183,19 @@ TEST_CASE("a terminal install's failure closes with the verb named, and a "
     TEST_ASSERT_TRUE(replied(">err code=6 msg=install"));
 }
 
+/* AO_AppMgr refuses a stream for now when an app it would evict has no copy
+ * on the card yet: nothing was armed, and the host asks again. */
+TEST_CASE("a terminal install refused for now closes with code 4 and busy",
+          "[console_install]")
+{
+    console_up();
+    type_line("install src=\"terminal\" dst=app size=8 crc32=0");
+    drain_queue(AO_AppMgr);
+    answer(RECV_AGAIN_SIG);
+    TEST_ASSERT_TRUE(replied(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(replied(">|ready"));
+}
+
 TEST_CASE("install from the terminal to the C5 typed at the BLE console is "
           "refused as cable-only before anything is posted",
           "[console_install]")

@@ -4055,8 +4055,8 @@ void appmgr_run_request(const char *name);
  * @brief Leave the install in hand: nothing is committed, and it ends as
  *        APP_FLASH_FAIL_SIG.
  *
- * While victims are being kept on the card it ends when that copy does. With no
- * install, nothing happens.
+ * While the CRC of its victims is being taken it ends when the one in hand is
+ * done. With no install, nothing happens.
  */
 void appmgr_cancel_request(void);
 
