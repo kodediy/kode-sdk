@@ -80,6 +80,9 @@ if(CONFIG_KODE_LOWPOWER)
     list(APPEND srcs "lowpower/src/lowpower_ao.c")
     # The summary of the last rest: a ring of gauge samples over khal_nvs.
     list(APPEND srcs "lowpower/src/lowpower_last.c")
+    # The rules of an app's rest: which parts may rest together and in what
+    # order. Arithmetic on masks, no event, so the host suite compiles it alone.
+    list(APPEND srcs "lowpower/src/lowpower_part.c")
     # The time's rectangle for the glass at rest: arithmetic over the
     # renderer's glyph strip, no panel, so the host suite compiles it alone.
     list(APPEND srcs "display/src/display_clock.c")

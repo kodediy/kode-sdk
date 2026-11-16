@@ -4,6 +4,7 @@
  * @brief AO_LowPower: the state machine and the round that enters a state.
  */
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
@@ -13,6 +14,7 @@
 
 #include "qpc.h"
 #include "Mockkhal_power.h"
+#include "Mockkhal_gpio.h"
 
 #include "ao_spy.h"
 #include "fakes.h"
@@ -20,12 +22,14 @@
 #include "kbsp.h"
 #include "kdrv_buttons.h"
 #include "khal_console.h"
+#include "khal_exp.h"
 #include "khal_time.h"
 #include "kode_log.h"
 #include "kqp.h"
 #include "kqp_bsp.h"
 #include "kset.h"
 #include "config_support.h"
+#include "probe_ao.h"
 #include "qf_support.h"
 
 #if !CONFIG_KODE_LOWPOWER
@@ -3597,5 +3601,1286 @@ TEST_CASE("a scheduled line's note through the facade wakes nothing asleep", "[l
     lowpower_info_get(&info);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_ASLEEP, info.state);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(held, s_hold_true, "the lock was not taken back");
+    lp_down();
+}
+
+/* ---- An app's rest, part by part --------------------------------------------------- */
+
+/** @brief The ids the owners of the parts join with, in join_owners()'s order. */
+#define PART_WHO_AUDIO    0U
+#define PART_WHO_STORAGE  1U
+#define PART_WHO_TOUCH    2U
+#define PART_WHO_DISPLAY  3U
+#define PART_WHO_RADIO    4U
+#define PART_WHO_IOEXP    5U
+
+/** @brief The expander byte with the touch line low and every button up. */
+#define LEVELS_TOUCH   0xBFU
+/** @brief The edge of the touch line. */
+#define CHANGED_TOUCH  0x40U
+
+/** @brief How far from a step's budget the cases look, either side of it. */
+#define STEP_SLACK_MS  100U
+
+/** @brief The bytes of "screen: ", which a glass's refusal begins with. */
+#define SCREEN_PREFIX_LEN  8U
+
+/** @brief One-shots a case fires at most on the way to a wake time. */
+#define HOP_FIRES_MAX  12U
+
+/** @brief A position of the expansion header the cases wake on. */
+#define WAKE_POS       3U
+
+static khal_power_wake_cb_t s_wake_cb;   /**< The callback the last arming gave.     */
+static uint32_t s_wake_gpio;             /**< The pin of the last arming.            */
+static bool     s_wake_level;            /**< Its level.                             */
+static unsigned s_wake_arms;             /**< khal_power_wake_arm() calls.           */
+static unsigned s_wake_disarms;          /**< khal_power_wake_disarm() calls.        */
+static kode_status_t s_wake_rc;          /**< What khal_power_wake_arm() answers.    */
+
+static kode_status_t on_wake_arm(uint32_t gpio, bool level_high, khal_power_wake_cb_t cb,
+                                 void *arg, int calls)
+{
+    (void)arg;
+    (void)calls;
+    s_wake_arms++;
+    s_wake_gpio  = gpio;
+    s_wake_level = level_high;
+    s_wake_cb    = cb;
+    return s_wake_rc;
+}
+
+static void on_wake_disarm(uint32_t gpio, int calls)
+{
+    (void)gpio;
+    (void)calls;
+    s_wake_disarms++;
+}
+
+/** @brief Bring AO_LowPower up with the owners of every part joined, and listen to the rest's news. */
+static void rest_up(void)
+{
+    static const char * const names[] = {
+        "audio", "storage", "touch", "display", "radio", "ioexp"
+    };
+
+    lp_up(KODE_OK);
+    ao_spy_subscribe(LOWPOWER_PART_SIG);
+    khal_power_wake_arm_Stub(&on_wake_arm);
+    khal_power_wake_disarm_Stub(&on_wake_disarm);
+    /* The header's table drives its pins through khal_gpio as it changes hands. */
+    khal_gpio_input_IgnoreAndReturn(KODE_OK);
+    khal_gpio_release_Ignore();
+    s_wake_cb      = NULL;
+    s_wake_gpio    = 0U;
+    s_wake_level   = false;
+    s_wake_arms    = 0U;
+    s_wake_disarms = 0U;
+    s_wake_rc      = KODE_OK;
+    for ( uint8_t i = 0U; Q_DIM(names) > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_UINT8(i, lowpower_join(ao_spy(), names[i]));
+    }
+}
+
+/** @brief Post a request for parts from @p src and let AO_LowPower take it. */
+static void rest_post_from(const lowpower_part_req_t *req, uint8_t src)
+{
+    QEvt const * const e = lowpower_part_req_evt(req, src);
+
+    TEST_ASSERT_NOT_NULL(e);
+    QACTIVE_POST(AO_LowPower, e, NULL);
+    (void)qf_support_settle(AO_LowPower);
+}
+
+/** @brief Post a request for parts as a console port does. */
+static void rest_post(const lowpower_part_req_t *req)
+{
+    rest_post_from(req, SRC_TEST);
+}
+
+/** @brief Ask for @p parts with no wake source. */
+static void rest_ask(uint8_t parts)
+{
+    lowpower_part_req_t const req = { .parts = parts };
+
+    rest_post(&req);
+}
+
+/** @brief Ask for every part back. */
+static void rest_end(void)
+{
+    lowpower_part_req_t const req = { .end = true };
+
+    rest_post(&req);
+}
+
+/** @brief Take the next event and insist it is the round posted for @p part alone. */
+static uint32_t expect_part_round(uint8_t part)
+{
+    const LowPowerRoundEvt *r = (const LowPowerRoundEvt *)ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(r, "no owner was asked");
+    TEST_ASSERT_EQUAL_INT((int)LOWPOWER_ROUND_SIG, (int)r->super.sig);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_ASLEEP, r->target);
+    TEST_ASSERT_EQUAL_HEX8(part, r->parts);
+    return r->round;
+}
+
+/** @brief Take the next event and insist it is this news of the rest. */
+static const LowPowerPartEvt *expect_news(kode_lp_part_what_t what, kode_status_t rc,
+                                          uint8_t parts)
+{
+    const LowPowerPartEvt *n = (const LowPowerPartEvt *)ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(n, "no news of the rest was published");
+    TEST_ASSERT_EQUAL_INT((int)LOWPOWER_PART_SIG, (int)n->super.sig);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)what, n->what);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)rc, n->rc);
+    TEST_ASSERT_EQUAL_HEX8(parts, n->parts);
+    return n;
+}
+
+/** @brief Take the next event and insist it is the AWAKE posted to one owner. */
+static void expect_awake_posted(void)
+{
+    const LowPowerStateEvt *s = (const LowPowerStateEvt *)ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(s, "no owner was told to come back");
+    TEST_ASSERT_EQUAL_INT((int)LOWPOWER_STATE_SIG, (int)s->super.sig);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_AWAKE, s->state);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_AWAKE, s->prev);
+}
+
+/** @brief Hand AO_LowPower the glass's answer to a request to sleep or wake. */
+static void glass_says(bool asleep, kode_status_t rc, display_sleep_why_t why)
+{
+    DisplaySleepEvt s;
+
+    (void)memset(&s, 0, sizeof(s));
+    s.super  = (QEvt)QEVT_INITIALIZER(DISPLAY_SLEEP_SIG);
+    s.asleep = asleep;
+    s.rc     = (uint8_t)rc;
+    s.why    = (uint8_t)why;
+    s.who    = DISPLAY_SLEEP_WHO_REST;
+    feed(&s.super);
+}
+
+/** @brief Take the next event and insist it asks the glass to sleep or to wake. */
+static void expect_glass_asked(bool sleep)
+{
+    const DisplaySleepReqEvt *r = (const DisplaySleepReqEvt *)ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(r, "the glass was not asked");
+    TEST_ASSERT_EQUAL_INT((int)DISPLAY_SLEEP_REQ_SIG, (int)r->super.sig);
+    TEST_ASSERT_EQUAL_INT(sleep, r->sleep);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(DISPLAY_SLEEP_WHO_REST, r->who, "asked through the app's door");
+}
+
+/** @brief Put the screen and the CPU at rest with the wake sources of @p req. */
+static void cpu_rest(lowpower_part_req_t req)
+{
+    req.parts = KODE_LP_PART_SCREEN | KODE_LP_PART_CPU;
+    rest_post(&req);
+    expect_glass_asked(true);
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN | KODE_LP_PART_CPU);
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_false);
+}
+
+/** @brief Give up the board's round a case left open, so no round's timer outlives the case. */
+static void round_cancel(void)
+{
+    ask(KODE_LP_AWAKE);
+    ao_spy_drain();
+}
+
+/** @brief The parts a task reads as at rest. */
+static uint8_t parts_read(void)
+{
+    lowpower_part_last_t last;
+
+    lowpower_part_last(&last);
+    return last.parts;
+}
+
+TEST_CASE("a rest of the sound asks the audio owner alone and publishes no state", "[lowpower_ao]")
+{
+    lowpower_part_last_t last;
+    uint32_t round;
+
+    lowpower_part_req_t const req = { .parts = KODE_LP_PART_SOUND | KODE_LP_PART_TOUCH };
+
+    rest_up();
+    rest_post_from(&req, (uint8_t)KODE_LOWPOWER_SRC_APP);
+
+    round = expect_part_round(KODE_LP_PART_SOUND);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "one owner is asked, and nothing is published");
+    lowpower_part_last(&last);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, last.parts, "not at rest until the owner says so");
+    TEST_ASSERT_TRUE_MESSAGE(last.open, "a task reads that a request is being arranged");
+
+    say_ready(PART_WHO_AUDIO, round, false, NULL);
+    say_ready(PART_WHO_TOUCH, expect_part_round(KODE_LP_PART_TOUCH), false, NULL);
+
+    /* The sound is put away and held nowhere: it comes back at its next use. */
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_TOUCH);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the board's state did not change");
+    lowpower_part_last(&last);
+    TEST_ASSERT_EQUAL_UINT16(1U, last.answers);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, last.rc);
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_TOUCH, last.parts);
+    TEST_ASSERT_FALSE(last.open);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_false, "the lock is held: the board is AWAKE");
+    lp_down();
+}
+
+TEST_CASE("the parts are asked one at a time, each after the one before answered", "[lowpower_ao]")
+{
+    rest_up();
+    rest_ask(KODE_LP_PART_TOUCH | KODE_LP_PART_SOUND | KODE_LP_PART_CARD);
+
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ao_spy_count(), "only the next owner is asked");
+    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), false, NULL);
+    say_ready(PART_WHO_TOUCH, expect_part_round(KODE_LP_PART_TOUCH), false, NULL);
+
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_TOUCH);
+    lp_down();
+}
+
+TEST_CASE("a busy owner stops the rest there: its part is named and what rested stays", "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+    lowpower_info_t info;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_TOUCH);
+    say_ready(PART_WHO_TOUCH, expect_part_round(KODE_LP_PART_TOUCH), false, NULL);
+    ao_spy_drain();
+    rest_ask(KODE_LP_PART_SOUND | KODE_LP_PART_CARD | KODE_LP_PART_SCREEN);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+
+    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), true, "file write");
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, KODE_LP_PART_TOUCH);
+    TEST_ASSERT_EQUAL_STRING("card: file write", n->why);
+    TEST_ASSERT_EQUAL_UINT8(SRC_TEST, n->src);
+    lowpower_info_get(&info);
+    TEST_ASSERT_EQUAL_STRING("card: file write", info.part_why);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", lowpower_part_why(), "a console's refusal is not the app's");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the screen is never asked");
+    lp_down();
+}
+
+TEST_CASE("an owner that does not answer is named when its time is up", "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_SOUND);
+    (void)expect_part_round(KODE_LP_PART_SOUND);
+
+    wait_ms(KODE_LOWPOWER_PART_STEP_MS - STEP_SLACK_MS);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    wait_ms(2U * STEP_SLACK_MS);
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("sound: no answer", n->why);
+    lp_down();
+}
+
+TEST_CASE("the radio without the sound is refused whole and nobody is asked", "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_RADIO | KODE_LP_PART_CARD);
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("radio: needs sound at rest", n->why);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "no owner was asked");
+    lp_down();
+}
+
+TEST_CASE("the sound rests before the radio is asked", "[lowpower_ao]")
+{
+    rest_up();
+    rest_ask(KODE_LP_PART_RADIO | KODE_LP_PART_SOUND);
+
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    say_ready(PART_WHO_RADIO, expect_part_round(KODE_LP_PART_RADIO), false, NULL);
+
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_RADIO);
+    lp_down();
+}
+
+TEST_CASE("the screen is asked through the glass's own door, and rests on its answer", "[lowpower_ao]")
+{
+    rest_up();
+    rest_ask(KODE_LP_PART_SCREEN);
+
+    expect_glass_asked(true);
+    /* The answer of somebody's earlier wake is not this step's. */
+    glass_says(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN);
+    lp_down();
+}
+
+TEST_CASE("a glass that refuses says why in the answer", "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_SCREEN);
+    expect_glass_asked(true);
+
+    glass_says(false, KODE_DENIED, DISPLAY_SLEEP_WHY_LENT);
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING_LEN("screen: ", n->why, SCREEN_PREFIX_LEN);
+    /* The glass's own words, as many as the answer holds. */
+    TEST_ASSERT_EQUAL_STRING_LEN(display_sleep_why_text((uint8_t)DISPLAY_SLEEP_WHY_LENT),
+                                 &n->why[SCREEN_PREFIX_LEN], strlen(&n->why[SCREEN_PREFIX_LEN]));
+    TEST_ASSERT_TRUE(strlen(n->why) > SCREEN_PREFIX_LEN);
+    lp_down();
+}
+
+TEST_CASE("the panel takes the touch and the screen first, then its supply", "[lowpower_ao]")
+{
+    const DisplaySupplyReqEvt *q;
+    uint32_t round;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_PANEL);
+
+    say_ready(PART_WHO_TOUCH, expect_part_round(KODE_LP_PART_TOUCH), false, NULL);
+    expect_glass_asked(true);
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    q = (const DisplaySupplyReqEvt *)ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(q, "the supply was not asked for");
+    TEST_ASSERT_EQUAL_INT((int)DISPLAY_SUPPLY_REQ_SIG, (int)q->super.sig);
+    round = q->round;
+    say_ready(PART_WHO_DISPLAY, round, false, NULL);
+
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK,
+                      KODE_LP_PART_PANEL | KODE_LP_PART_SCREEN | KODE_LP_PART_TOUCH);
+    lp_down();
+}
+
+TEST_CASE("a part whose owner is not in the build is at rest without asking", "[lowpower_ao]")
+{
+    lp_up(KODE_OK);
+    ao_spy_subscribe(LOWPOWER_PART_SIG);
+    TEST_ASSERT_EQUAL_UINT8(0U, lowpower_join(ao_spy(), "audio"));
+
+    rest_ask(KODE_LP_PART_SOUND | KODE_LP_PART_CARD | KODE_LP_PART_SCREEN);
+    say_ready(0U, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN);
+    lp_down();
+}
+
+/* A task reads the reason after it has seen its answer: the console's answer
+ * in between must not have written over it. */
+TEST_CASE("the reason an app's request was refused outlives a console's answer", "[lowpower_ao]")
+{
+    lowpower_part_req_t const card = { .parts = KODE_LP_PART_CARD };
+    lowpower_info_t info;
+
+    rest_up();
+    rest_post_from(&card, (uint8_t)KODE_LOWPOWER_SRC_APP);
+    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), true, "file write");
+    ao_spy_drain();
+
+    rest_ask(KODE_LP_PART_TOUCH);
+    say_ready(PART_WHO_TOUCH, expect_part_round(KODE_LP_PART_TOUCH), false, NULL);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_STRING("card: file write", lowpower_part_why());
+    lowpower_info_get(&info);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", info.part_why, "the console's request stood");
+    lp_down();
+}
+
+/* The console's sequence is open, so no task is waiting for an answer of its
+ * own: the app's refusal can be counted, and its task hears it at once. */
+TEST_CASE("an app's request that finds a console's rest being arranged is answered to its task",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t const card = { .parts = KODE_LP_PART_CARD };
+    lowpower_part_last_t last;
+    uint32_t round;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_TOUCH);
+    round = expect_part_round(KODE_LP_PART_TOUCH);
+
+    rest_post_from(&card, (uint8_t)KODE_LOWPOWER_SRC_APP);
+
+    lowpower_part_last(&last);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(1U, last.answers, "the task waits its whole bound for nothing");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_DENIED, last.rc);
+    TEST_ASSERT_EQUAL_STRING("rest: underway", lowpower_part_why());
+    say_ready(PART_WHO_TOUCH, round, false, NULL);
+    ao_spy_drain();
+    lp_down();
+}
+
+/* kode_sys_screen_sleep(false) wakes a glass the rest put to sleep: the DSI
+ * link is up and holds the P4 awake, so the screen is no longer a part at rest. */
+TEST_CASE("a glass the app woke through its own door is no longer held, and the CPU part is refused",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t const cpu = { .parts = KODE_LP_PART_CPU };
+    const LowPowerPartEvt *n;
+    DisplaySleepEvt s;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_SCREEN);
+    expect_glass_asked(true);
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN);
+
+    (void)memset(&s, 0, sizeof(s));
+    s.super  = (QEvt)QEVT_INITIALIZER(DISPLAY_SLEEP_SIG);
+    s.asleep = false;
+    s.rc     = (uint8_t)KODE_OK;
+    s.who    = DISPLAY_SLEEP_WHO_APP;
+    feed(&s.super);
+
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, parts_read(), "a glass that is awake still reads as at rest");
+    rest_post(&cpu);
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("cpu: needs the screen at rest", n->why);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_false, "the P4 was told to sleep with the link up");
+    lp_down();
+}
+
+TEST_CASE("a second request while one is being arranged is refused, and the first goes on",
+          "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+    uint32_t round;
+
+    lowpower_part_req_t const req = { .parts = KODE_LP_PART_TOUCH };
+    lowpower_part_last_t last;
+
+    rest_up();
+    rest_post_from(&req, (uint8_t)KODE_LOWPOWER_SRC_APP);
+    round = expect_part_round(KODE_LP_PART_TOUCH);
+
+    /* The refusal is told to its asker on the bus, and what the task that
+     * waits for the first reads does not move: no answer of its own yet. */
+    rest_ask(KODE_LP_PART_CARD);
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("rest: underway", n->why);
+    TEST_ASSERT_EQUAL_UINT8(SRC_TEST, n->src);
+    lowpower_part_last(&last);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(0U, last.answers, "another's refusal counted as the task's answer");
+    TEST_ASSERT_TRUE(last.open);
+
+    say_ready(PART_WHO_TOUCH, round, false, NULL);
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_TOUCH);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LOWPOWER_SRC_APP, n->src);
+    lowpower_part_last(&last);
+    TEST_ASSERT_EQUAL_UINT16(1U, last.answers);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, last.rc);
+    lp_down();
+}
+
+TEST_CASE("the end tells the owners that restore, the CPU side first, and forgets the rest",
+          "[lowpower_ao]")
+{
+    rest_up();
+    rest_ask(KODE_LP_PART_SOUND | KODE_LP_PART_CARD | KODE_LP_PART_TOUCH | KODE_LP_PART_RADIO);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), false, NULL);
+    say_ready(PART_WHO_TOUCH, expect_part_round(KODE_LP_PART_TOUCH), false, NULL);
+    say_ready(PART_WHO_RADIO, expect_part_round(KODE_LP_PART_RADIO), false, NULL);
+    ao_spy_drain();
+
+    rest_end();
+
+    /* The radio and the touch are told; the sound and the card come back at their next use. */
+    expect_awake_posted();
+    expect_awake_posted();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    lp_down();
+}
+
+TEST_CASE("the end wakes the glass and waits for it", "[lowpower_ao]")
+{
+    rest_up();
+    rest_ask(KODE_LP_PART_SCREEN);
+    expect_glass_asked(true);
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    ao_spy_drain();
+
+    rest_end();
+    expect_glass_asked(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "not answered until the glass is back");
+    glass_says(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    lp_down();
+}
+
+TEST_CASE("the CPU part answers first, then stops the tick and lets the lock go", "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+
+    rest_up();
+    cpu_rest(req);
+
+    TEST_ASSERT_EQUAL_UINT(1U, fake_time_periodic_stops());
+    TEST_ASSERT_FALSE_MESSAGE(s_tick_at_release, "the tick stops before the lock is let go");
+    TEST_ASSERT_TRUE_MESSAGE(1U <= s_spy_at_release, "the answer is published before the lock goes");
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_SCREEN | KODE_LP_PART_CPU, parts_read());
+    lp_down();
+}
+
+TEST_CASE("a button ends the CPU part alone: the tick and the lock back, the screen still away",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
+
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    TEST_ASSERT_TRUE_MESSAGE(s_tick_at_hold, "the tick runs before the lock is taken");
+    expect_awake_posted();   /* the expander's owner: its line is the plain interrupt again */
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_BUTTON, n->cause);
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_SCREEN, parts_read());
+    lp_down();
+}
+
+TEST_CASE("a touch ends the CPU part only when the app asked for it", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+    expander(LEVELS_TOUCH, CHANGED_TOUCH);
+    touch_event();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_true, "a touch nobody asked for wakes nothing");
+    lp_down();
+
+    rest_up();
+    req.wake_touch = true;
+    cpu_rest(req);
+    ao_spy_drain();
+    expander(LEVELS_TOUCH, CHANGED_TOUCH);
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_TOUCH, n->cause);
+    lp_down();
+}
+
+TEST_CASE("the time the app gave ends the CPU part", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    req.wake_after_ms = 5000U;
+    cpu_rest(req);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, fake_time_once_pending(), "the time, and the minute");
+
+    fire_one_shot();                             /* the one due first: the app's time */
+
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_TIMER, n->cause);
+    lp_down();
+}
+
+/* No one-shot can be taken back, so a long time is reached in hops of a
+ * minute: one that outlives its rest is gone within that. */
+TEST_CASE("a wake time longer than a hop is reached hop by hop, and wakes only when it comes",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+
+    uint64_t const after_us = (uint64_t)((2U * KODE_LOWPOWER_PART_HOP_MS) + 5000U) * 1000ULL;
+    uint64_t t0;
+
+    rest_up();
+    req.wake_after_ms = (2U * KODE_LOWPOWER_PART_HOP_MS) + 5000U;
+    t0 = khal_time_us();
+    cpu_rest(req);
+    ao_spy_drain();
+
+    /* Hops and minutes come due on the way; the fake's clock moves to each. */
+    for ( unsigned i = 0U; (HOP_FIRES_MAX > i) && (0U == s_hold_true); i++ )
+    {
+        TEST_ASSERT_LESS_OR_EQUAL_UINT64_MESSAGE(t0 + after_us, khal_time_us(),
+                                                 "the wake time passed and nothing woke");
+        fire_one_shot();
+        (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+    }
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(t0 + after_us, khal_time_us(), "woken before its time");
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_TIMER, n->cause);
+    lp_down();
+}
+
+/* A rest woken early leaves its one-shot out. The next rest's time is served
+ * by a one-shot of its own, and the old one's event wakes nothing. */
+TEST_CASE("the one-shot of a rest that ended early does not wake the next rest", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+
+    rest_up();
+    req.wake_after_ms = 3000U;
+    cpu_rest(req);
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);     /* woken by a button: its one-shot stays out */
+    ao_spy_drain();
+
+    req.parts         = KODE_LP_PART_CPU;
+    req.wake_after_ms = 20000U;
+    rest_post(&req);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT(2U, s_hold_false);
+
+    fake_time_advance_ms(3000U);
+    fire_one_shot();                             /* the first rest's */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "an old one-shot woke the new rest");
+
+    fake_time_advance_ms(17000U);
+    fire_one_shot();
+    TEST_ASSERT_EQUAL_UINT(2U, s_hold_true);
+    lp_down();
+}
+
+TEST_CASE("the header's line is armed at its level, wakes the CPU part and is let go", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+    khal_exp_info_t info;
+
+    rest_up();
+    khal_exp_info(WAKE_POS, &info);
+    req.wake_pin   = WAKE_POS;
+    req.wake_level = true;
+    cpu_rest(req);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT(1U, s_wake_arms);
+    TEST_ASSERT_EQUAL_UINT32(info.gpio, s_wake_gpio);
+    TEST_ASSERT_TRUE(s_wake_level);
+    TEST_ASSERT_NOT_NULL(s_wake_cb);
+
+    s_wake_cb(NULL);
+    (void)qf_support_settle(AO_LowPower);
+
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_wake_disarms, "the line is given back after the wake");
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_PIN, n->cause);
+    lp_down();
+}
+
+TEST_CASE("a line that will not arm refuses the CPU part and the tick keeps running", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    s_wake_rc      = KODE_NO_RESOURCES;
+    req.parts      = KODE_LP_PART_SCREEN | KODE_LP_PART_CPU;
+    req.wake_pin   = WAKE_POS;
+    rest_post(&req);
+    expect_glass_asked(true);
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+
+    expect_awake_posted();   /* the expander's line is given back */
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_STRING("pin: no wake line", n->why);
+    TEST_ASSERT_EQUAL_UINT(0U, s_hold_false);
+    TEST_ASSERT_EQUAL_UINT(0U, fake_time_periodic_stops());
+    lp_down();
+}
+
+TEST_CASE("a console line ends the CPU part", "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+
+    console_line((uint8_t)KODE_CONSOLE_SRC_BLE);
+
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_CONSOLE, n->cause);
+    lp_down();
+}
+
+TEST_CASE("the CPU part is refused on a cable, and the other parts are not", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    charger_reading(true);
+
+    req.parts = KODE_LP_PART_SCREEN | KODE_LP_PART_CPU;
+    rest_post(&req);
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("cable: external power", n->why);
+
+    rest_ask(KODE_LP_PART_TOUCH);
+    say_ready(PART_WHO_TOUCH, expect_part_round(KODE_LP_PART_TOUCH), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_TOUCH);
+    lp_down();
+}
+
+/** @brief Bring AO_LowPower up with the touch's owner and one other, and the touch at rest for an app. */
+static void touch_rests_beside_another(void)
+{
+    lp_up(KODE_OK);
+    ao_spy_subscribe(LOWPOWER_PART_SIG);
+    TEST_ASSERT_EQUAL_UINT8(0U, lowpower_join(ao_spy(), "touch"));
+    TEST_ASSERT_EQUAL_UINT8(1U, lowpower_join(ao_spy(), "storage"));
+    rest_ask(KODE_LP_PART_TOUCH);
+    say_ready(0U, expect_part_round(KODE_LP_PART_TOUCH), false, NULL);
+    ao_spy_drain();
+}
+
+/** @brief Take the next event and insist it is the board's round for @p target, nobody's part. */
+static uint32_t expect_board_round(kode_lp_state_t target)
+{
+    const LowPowerRoundEvt *r = (const LowPowerRoundEvt *)ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(r, "no owner was asked for the board's round");
+    TEST_ASSERT_EQUAL_INT((int)LOWPOWER_ROUND_SIG, (int)r->super.sig);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)target, r->target);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, r->parts, "the board's round is nobody's part");
+    return r->round;
+}
+
+/* The owners of what an app put away are asked last: a round another owner
+ * refuses never reaches them, and the app's rest is as it was. */
+TEST_CASE("a round of the board asks the other owners first, and takes the rest only when they are ready",
+          "[lowpower_ao]")
+{
+    uint32_t round;
+
+    touch_rests_beside_another();
+
+    ask(KODE_LP_ASLEEP);
+    round = expect_board_round(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the touch's owner was asked with another still to answer");
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_TOUCH, parts_read());
+
+    say_ready(1U, round, false, NULL);
+    (void)expect_news(KODE_LP_PART_TAKEN, KODE_OK, 0U);
+    TEST_ASSERT_EQUAL_UINT32(round, expect_board_round(KODE_LP_ASLEEP));
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+
+    say_ready(0U, round, false, NULL);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    lp_down();
+}
+
+TEST_CASE("a round of the board an owner refuses leaves the app's rest as it was", "[lowpower_ao]")
+{
+    uint32_t round;
+
+    touch_rests_beside_another();
+    set_word(KSET_KEY_SLEEP_AFTER, WORD_30S);
+    ao_spy_drain();
+
+    wait_ms(IDLE_30S_MS);
+    round = expect_board_round(KODE_LP_ASLEEP);
+    say_ready(1U, round, true, "file write");
+
+    /* The owner that was asked is told the round is off; nobody else heard of it. */
+    expect_awake_posted();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the rest was told over, or its owner woken");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(KODE_LP_PART_TOUCH, parts_read(), "an abandoned round undid the app's rest");
+
+    rest_end();
+    expect_awake_posted();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    lp_down();
+}
+
+/* A rest half arranged has an owner that was asked and has not answered: the
+ * board takes all of it, as it did before the round learned to ask last. */
+TEST_CASE("the board asking while a rest is being arranged answers it and takes over", "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_TOUCH | KODE_LP_PART_CARD);
+    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), false, NULL);
+    (void)expect_part_round(KODE_LP_PART_TOUCH);
+
+    ask(KODE_LP_ASLEEP);
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("board: takes the rest", n->why);
+    (void)expect_news(KODE_LP_PART_TAKEN, KODE_OK, 0U);
+    (void)expect_round(KODE_LP_ASLEEP);
+    round_cancel();
+    lp_down();
+}
+
+/* OFF asked for is an order no owner can refuse: nothing is left to keep apart. */
+TEST_CASE("an order for OFF takes the app's rest at once and asks everybody together", "[lowpower_ao]")
+{
+    uint32_t round;
+
+    touch_rests_beside_another();
+
+    ask(KODE_LP_OFF);
+
+    (void)expect_news(KODE_LP_PART_TAKEN, KODE_OK, 0U);
+    round = expect_round(KODE_LP_OFF);
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    say_ready(0U, round, false, NULL);
+    say_ready(1U, round, false, NULL);
+    expect_state(KODE_LP_OFF, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    (void)qf_support_tick(AO_LowPower, QF_SUPPORT_STEPS(KODE_LOWPOWER_OFF_GRACE_MS + 10U));
+    lp_down();
+}
+
+TEST_CASE("a request for a state wakes a sleeping P4 first, then asks the others", "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+
+    ask(KODE_LP_ASLEEP);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "the tick and the lock are back for the round");
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_REQUEST, n->cause);
+    /* Five owners hold no part of the rest and are asked now; the glass's is asked last. */
+    for ( unsigned i = 0U; 5U > i; i++ )
+    {
+        (void)expect_board_round(KODE_LP_ASLEEP);
+    }
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_SCREEN, parts_read());
+    round_cancel();
+    lp_down();
+}
+
+TEST_CASE("parts are refused while the board is not AWAKE", "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+
+    lp_up(KODE_OK);
+    ao_spy_subscribe(LOWPOWER_PART_SIG);
+    go_asleep();
+
+    rest_ask(KODE_LP_PART_SOUND);
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("board: not awake", n->why);
+    lp_down();
+}
+
+/* ---- What a sleeping P4 still owes the board ---------------------------------------- */
+
+/** @brief The id the scheduler joins with, after join_owners()'s six. */
+#define PART_WHO_SCHED  6U
+
+/** @brief Fire the one-shot due first and count the readings of the charger it asked for. */
+static unsigned minute_fired(void)
+{
+    fire_one_shot();
+    return queued(AO_Power, POWER_PEEK_REQ_SIG);
+}
+
+/* Nothing else reads the charger with the tick stopped: AO_Power polls on a
+ * QTimeEvt and the charger has no interrupt line. */
+TEST_CASE("with the P4 asleep the minute asks for a reading of the charger, and a cable in it ends the CPU part",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+    cpu_rest(req);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_time_once_pending(), "no minute was armed for the sleeping P4");
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, minute_fired(), "the minute did not ask for a reading");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_true, "a minute is not a wake");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_time_once_pending(), "the next minute was not armed");
+
+    charger_reading(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_true, "a reading with no cable is not a wake");
+    charger_reading(true);
+
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_CABLE, n->cause);
+    lp_down();
+}
+
+/* An app that names no wake source cannot leave the board asleep until the
+ * cell cuts out: off_after counts from the moment the P4 went to rest. */
+TEST_CASE("a P4 left asleep for off_after takes the board OFF", "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+    const LowPowerPartEvt *n;
+    unsigned fires = 0U;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+
+    while ( (0U == ao_spy_count()) && ((KODE_LOWPOWER_OFF_AFTER_DEF_S / KODE_LOWPOWER_MINUTE_S) + 2U > fires) )
+    {
+        (void)minute_fired();
+        fires++;
+    }
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_LOWPOWER_OFF_AFTER_DEF_S / KODE_LOWPOWER_MINUTE_S, fires,
+                                   "off_after did not count from the P4's rest");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "the round needs the tick and the lock back");
+    expect_awake_posted();                       /* the expander's owner: its line is plain again */
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_OWNER, n->cause);
+    (void)expect_board_round(KODE_LP_OFF);
+    round_cancel();
+    lp_down();
+}
+
+TEST_CASE("an owner's time that comes with the P4 asleep ends the CPU part", "[lowpower_ao]")
+{
+    lowpower_part_req_t const req = { 0 };
+    const LowPowerPartEvt *n;
+    uint64_t due;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+    due = khal_time_us() + (90ULL * 1000000ULL);
+    TEST_ASSERT_TRUE(lowpower_wake_at(PART_WHO_STORAGE, due));
+    (void)qf_support_settle(AO_LowPower);
+
+    (void)minute_fired();                        /* the minute, before the time */
+    TEST_ASSERT_EQUAL_UINT(0U, s_hold_true);
+    (void)minute_fired();                        /* the one-shot armed for the time itself */
+
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(due, khal_time_us(), "the P4 was not woken at the owner's time");
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_OWNER, n->cause);
+    lp_down();
+}
+
+/* The scheduler's minute is a QTimeEvt: with the tick stopped it gives its
+ * next entry as a wake time, as it does for ASLEEP, and is told to arm again. */
+TEST_CASE("the CPU part asks the scheduler for its next minute, after the wake lines", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+
+    rest_up();
+    TEST_ASSERT_EQUAL_UINT8(PART_WHO_SCHED, lowpower_join(ao_spy(), "scheduler"));
+    req.parts = KODE_LP_PART_SCREEN | KODE_LP_PART_CPU;
+    rest_post(&req);
+    expect_glass_asked(true);
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_hold_false, "the scheduler has not given its time yet");
+    say_ready(PART_WHO_SCHED, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN | KODE_LP_PART_CPU);
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_false);
+
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
+    expect_awake_posted();                       /* the expander's owner */
+    expect_awake_posted();                       /* the scheduler: its minute runs again */
+    (void)expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    lp_down();
+}
+
+TEST_CASE("a scheduler with work in hand refuses the CPU part, and the wake lines are given back",
+          "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    TEST_ASSERT_EQUAL_UINT8(PART_WHO_SCHED, lowpower_join(ao_spy(), "scheduler"));
+    req.parts = KODE_LP_PART_SCREEN | KODE_LP_PART_CPU;
+    rest_post(&req);
+    expect_glass_asked(true);
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+    say_ready(PART_WHO_SCHED, expect_part_round(KODE_LP_PART_CPU), true, "entry running");
+
+    expect_awake_posted();
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_STRING("cpu: entry running", n->why);
+    TEST_ASSERT_EQUAL_UINT(0U, s_hold_false);
+    lp_down();
+}
+
+/* AO_Power says it before it opens the battery path, and what it does next
+ * takes time the stopped tick would not give it. */
+TEST_CASE("the cell at its cut ends the CPU part", "[lowpower_ao]")
+{
+    static const QEvt going = QEVT_INITIALIZER(POWER_SHIP_SIG);
+    lowpower_part_req_t const req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    cpu_rest(req);
+    ao_spy_drain();
+
+    feed(&going);
+
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_true);
+    expect_awake_posted();
+    n = expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_WAKE_BATTERY, n->cause);
+    lp_down();
+}
+
+/* ---- Parts that do not stay, lines in use, answers that come late --------------------- */
+
+TEST_CASE("the sound and the card asked again are put away again", "[lowpower_ao]")
+{
+    rest_up();
+    rest_ask(KODE_LP_PART_SOUND | KODE_LP_PART_CARD);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+
+    /* A sound played and a file read since then brought both back. */
+    rest_ask(KODE_LP_PART_SOUND | KODE_LP_PART_CARD);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    lp_down();
+}
+
+TEST_CASE("the radio asks the sound's owner in its own request, whatever rested before", "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_SOUND);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    ao_spy_drain();
+
+    rest_ask(KODE_LP_PART_RADIO);
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("radio: needs sound at rest", n->why);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the radio was asked with the sound unknown");
+
+    rest_ask(KODE_LP_PART_RADIO | KODE_LP_PART_SOUND);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), true, "audio playing");
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("sound: audio playing", n->why);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the C5 was put to sleep under a sound");
+    lp_down();
+}
+
+TEST_CASE("a line of the header on loan is refused as a wake source, and stays as it was", "[lowpower_ao]")
+{
+    static const uint8_t pos[] = { WAKE_POS };
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+    khal_exp_info_t info;
+    uint8_t gpio = 0U;
+
+    rest_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_lend(pos, Q_DIM(pos), "case", &gpio));
+    req.parts    = KODE_LP_PART_SCREEN | KODE_LP_PART_CPU;
+    req.wake_pin = WAKE_POS;
+    rest_post(&req);
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("pin: in use", n->why);
+    TEST_ASSERT_EQUAL_UINT(0U, s_wake_arms);
+    khal_exp_info(WAKE_POS, &info);
+    TEST_ASSERT_EQUAL_INT(KHAL_EXP_LENT, info.mode);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_return("case"));
+    lp_down();
+}
+
+TEST_CASE("an input of the header armed as a wake line is an input again after the wake", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    khal_exp_info_t info;
+
+    rest_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_input(WAKE_POS, KHAL_GPIO_PULL_NONE));
+    req.wake_pin = WAKE_POS;
+    cpu_rest(req);
+    TEST_ASSERT_EQUAL_UINT(1U, s_wake_arms);
+
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
+
+    TEST_ASSERT_EQUAL_UINT(1U, s_wake_disarms);
+    khal_exp_info(WAKE_POS, &info);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KHAL_EXP_IN, info.mode, "the position did not go back to its owner's table");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_release(WAKE_POS));
+    lp_down();
+}
+
+/* The owner did put its part away, only late: the end of the rest has to
+ * bring it back, so it is held from the moment it says so. */
+TEST_CASE("an owner that answers after its time has its part held all the same", "[lowpower_ao]")
+{
+    uint32_t round;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_TOUCH);
+    round = expect_part_round(KODE_LP_PART_TOUCH);
+    wait_ms(KODE_LOWPOWER_PART_STEP_MS + STEP_SLACK_MS);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+
+    say_ready(PART_WHO_TOUCH, round, false, NULL);
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_TOUCH, parts_read());
+
+    rest_end();
+    expect_awake_posted();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    lp_down();
+}
+
+/* The app's own door (kode_sys_screen_sleep()) answers on the same signal. */
+TEST_CASE("an answer to the app's own display request is not this rest's", "[lowpower_ao]")
+{
+    DisplaySleepEvt mine;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_SCREEN);
+    expect_glass_asked(true);
+
+    (void)memset(&mine, 0, sizeof(mine));
+    mine.super  = (QEvt)QEVT_INITIALIZER(DISPLAY_SLEEP_SIG);
+    mine.asleep = true;
+    mine.rc     = (uint8_t)KODE_OK;
+    mine.who    = DISPLAY_SLEEP_WHO_APP;
+    feed(&mine.super);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the app's answer settled the rest's step");
+
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN);
+    lp_down();
+}
+
+/** @brief One-shots a case fires to be past the ones an earlier rest left out. */
+#define ONE_SHOTS_SEEN 4U
+
+/* The owners say their times again in every rest of the CPU: one kept from
+ * the rest before has long passed, and would end this one at its first minute. */
+TEST_CASE("an owner's time from the rest before does not end the next rest of the CPU", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+
+    rest_up();
+    cpu_rest(req);
+    TEST_ASSERT_TRUE(lowpower_wake_at(PART_WHO_STORAGE, khal_time_us() + (90ULL * 1000000ULL)));
+    (void)qf_support_settle(AO_LowPower);
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);     /* a button, long before that time */
+    ao_spy_drain();
+    fake_time_advance_ms(5U * 60U * 1000U);      /* and the time passes with the P4 awake */
+
+    req.parts = KODE_LP_PART_CPU;
+    rest_post(&req);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN | KODE_LP_PART_CPU);
+    TEST_ASSERT_EQUAL_UINT(2U, s_hold_false);
+    /* The one-shots of the rest before come first, then this rest's own minutes. */
+    for ( unsigned fires = 0U; ONE_SHOTS_SEEN > fires; fires++ )
+    {
+        (void)minute_fired();
+    }
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_hold_true, "a time that had passed woke the new rest");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the new rest was told over");
+    lp_down();
+}
+
+/** @brief A listener's interrupt, for the cases that give a position one; never called. */
+static void pin_listener(void *arg)
+{
+    (void)arg;
+}
+
+/* A wake line would replace the interrupt the position's owner attached. */
+TEST_CASE("an input of the header with an interrupt attached is refused as a wake source", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    const LowPowerPartEvt *n;
+
+    rest_up();
+    khal_gpio_irq_attach_IgnoreAndReturn(KODE_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_input(WAKE_POS, KHAL_GPIO_PULL_NONE));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_irq_attach(WAKE_POS, KHAL_GPIO_IRQ_ANY_EDGE,
+                                                       &pin_listener, NULL));
+    req.parts    = KODE_LP_PART_SCREEN | KODE_LP_PART_CPU;
+    req.wake_pin = WAKE_POS;
+    rest_post(&req);
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("pin: in use", n->why);
+    TEST_ASSERT_EQUAL_UINT(0U, s_wake_arms);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_release(WAKE_POS));
+    lp_down();
+}
+
+TEST_CASE("an input of the header gets its own pull back after the wake", "[lowpower_ao]")
+{
+    lowpower_part_req_t req = { 0 };
+    khal_exp_info_t info;
+
+    rest_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_input(WAKE_POS, KHAL_GPIO_PULL_UP));
+    req.wake_pin   = WAKE_POS;
+    req.wake_level = true;                       /* the wake line pulls it down */
+    cpu_rest(req);
+
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
+
+    khal_exp_info(WAKE_POS, &info);
+    TEST_ASSERT_EQUAL_INT(KHAL_EXP_IN, info.mode);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KHAL_GPIO_PULL_UP, info.pulled, "the position kept the wake line's pull");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_exp_release(WAKE_POS));
     lp_down();
 }

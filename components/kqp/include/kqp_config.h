@@ -360,6 +360,25 @@
 #define KODE_LOWPOWER_LAST_VERSION     1U      /**< The layout of the summary in the store; another reads as none. */
 #define KODE_LOWPOWER_LAST_OPEN        0xFFU   /**< The summary's end cause when the rest left none: the board
                                                 *   was asleep at the last write, and a reset ended it. */
+#define KODE_LOWPOWER_PART_STEP_MS     3000U   /**< Longest AO_LowPower waits for one owner to put its part away
+                                                *   or bring it back in an app's rest: over the glass's own
+                                                *   KODE_DISPLAY_SLEEP_WAIT_MS and a card's unmount. */
+#define KODE_LOWPOWER_PART_ASKS        8U      /**< Owners the longest rest asks, one after the other: one a part,
+                                                *   and the CPU part asks a second for its wake time. */
+#define KODE_LOWPOWER_PART_WAIT_MS     (KODE_LOWPOWER_PART_ASKS * KODE_LOWPOWER_PART_STEP_MS) /**< Longest
+                                                *   kode_rest() and kode_rest_end() wait for their answer: every
+                                                *   owner of the longest rest silent to the end of its step. */
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
+#define KODE_LOWPOWER_PART_TIMERS      2U      /**< One-shots a rest's wake time may have out at once; a time
+                                                *   that would need another is refused. */
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
+#define KODE_LOWPOWER_PART_HOP_MS      60000U  /**< The longest one of those one-shots runs: a longer wake time is
+                                                *   reached in hops, so a one-shot that outlives its rest (none can
+                                                *   be taken back) is gone within this. */
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
+#define KODE_DISPLAY_SUPPLY_SETTLE_MS  20U     /**< AO_Display's wait between the expander's owner saying the
+                                                *   panel's supply is back and the panel's cold reset: the rail's
+                                                *   rise, the one wait there is for it. */
 #define KODE_DISPLAY_RESTORE_RETRY_MS  200U    /**< AO_Display's wait before it puts the glass back again
                                                 *   after the link or the panel refused to wake. */
 #define KODE_DISPLAY_SLEEP_WAIT_MS     2000U   /**< Longest kode_display_sleep() waits for AO_Display to

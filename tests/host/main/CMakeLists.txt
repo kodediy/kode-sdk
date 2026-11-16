@@ -132,6 +132,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kaos/haptic/src/haptic_ao.c"
     "${SDK_DIR}/components/kaos/lowpower/src/lowpower_ao.c"
     "${SDK_DIR}/components/kaos/lowpower/src/lowpower_last.c"
+    "${SDK_DIR}/components/kaos/lowpower/src/lowpower_part.c"
     "${SDK_DIR}/components/kaos/display/src/display_ao.c"
     "${SDK_DIR}/components/kaos/display/src/display_sleep.c"
     "${SDK_DIR}/components/kaos/display/src/display_compose.c"
@@ -340,6 +341,7 @@ idf_component_register(
                  # radio_knock.h, radio_knocks.h and radio_heard.h are private to the component
                  "${SDK_DIR}/components/kaos/radio/src"
                  "${SDK_DIR}/components/kaos/scheduler/src"
+                 "${SDK_DIR}/components/kaos/lowpower/src"
                  "${SDK_DIR}/components/kaos/display/src"
                  "${SDK_DIR}/components/kqp/include"
                  # kqp_watch_judge.h is private to the component

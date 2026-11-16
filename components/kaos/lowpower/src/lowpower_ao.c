@@ -5,6 +5,7 @@
  */
 #include "kaos.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,6 +13,7 @@
 #include "kbsp.h"
 #include "kdrv_radio.h"
 #include "khal_console.h"
+#include "khal_exp.h"
 #include "khal_nvs.h"
 #include "khal_power.h"
 #include "khal_system.h"
@@ -20,6 +22,7 @@
 #include "kqp.h"
 #include "kset.h"
 #include "lowpower_last.h"
+#include "lowpower_part.h"
 #include "kaos_claim.h"
 #include "kaos_start.h"
 #include "kverbs.h"
@@ -69,6 +72,31 @@ _Static_assert(KODE_LOWPOWER_PARTICIPANTS <= WAITING_BITS,
 /** @brief Why a request or a rest is refused while a round runs. With
  *         WHO_REQUEST it is KODE_LOWPOWER_WHY_RUNNING. */
 #define WHY_RUNNING     "a round is running"
+
+/** @brief The expander's button bits, in an IoexpInputEvt: BOT and the pad. */
+#define PART_BUTTONS_MASK  ((1U << KBSP_IOEXP_BIT_BTN_BOT) | (1U << KBSP_IOEXP_BIT_PAD_UP) \
+                            | (1U << KBSP_IOEXP_BIT_PAD_LEFT) | (1U << KBSP_IOEXP_BIT_PAD_DOWN) \
+                            | (1U << KBSP_IOEXP_BIT_PAD_RIGHT))
+
+/** @brief The expander's touch interrupt bit, in an IoexpInputEvt. Active low. */
+#define PART_TOUCH_MASK    (1U << KBSP_IOEXP_BIT_TP_INT)
+
+/** @brief Where the count of answers starts in the word a task reads of a rest. */
+#define PART_WORD_ANSWERS_SHIFT  16U
+
+/** @brief Where the last answer's status starts in that word; the parts are below it. */
+#define PART_WORD_RC_SHIFT       8U
+
+/** @brief The bit of that word that says a request is being arranged; the parts take the seven below. */
+#define PART_WORD_OPEN           0x80U
+
+_Static_assert((KODE_LP_PART_ALL & PART_WORD_OPEN) == 0U, "the parts leave the word its open bit");
+
+/** @brief The owners the CPU part asks, in order: the wake lines, then the scheduler's next minute. */
+#define PART_CPU_OWNERS          { "ioexp", "scheduler" }
+
+/** @brief The bits of one byte of that word. */
+#define PART_WORD_BYTE_MASK      0xFFU
 
 /** @brief Milliseconds in a second, for the idle time. */
 #define MS_PER_S        1000U
@@ -148,6 +176,8 @@ typedef struct {
     uint32_t    waiting;          /**< Bit n: participant n has not answered.*/
     uint32_t    busy;             /**< Bit n: participant n answered busy to an order for OFF and is asked
                                    *   again when retry_tmo runs out (round_order()). */
+    uint32_t    held;             /**< Bit n: participant n owns what an app has at rest, and the
+                                   *   round asks it last (round_begin()). */
     uint8_t     state;            /**< The board's state, a kode_lp_state_t. */
     uint8_t     target;           /**< The round's target state.             */
     uint8_t     cause;            /**< The round's cause, a kode_lp_cause_t. */
@@ -193,6 +223,34 @@ typedef struct {
     bool        used;             /**< Something other than an owner's time used the board since it last woke:
                                    *   every wake but a timer's, and each real input after. */
     bool        rest_on;          /**< The request in hand, round or retry, is a rest (lowpower_request_rest()). */
+    uint8_t     part_rest;        /**< The KODE_LP_PART_* an app's rest has put away. */
+    uint8_t     part_want;        /**< The parts the sequence in hand puts away. */
+    uint8_t     part_step;        /**< The part whose owner is being asked; 0 with no sequence open. */
+    uint8_t     part_who;         /**< The participant asked in that step.     */
+    uint8_t     part_src;         /**< Who asked for the sequence in hand.     */
+    bool        part_up;          /**< The sequence in hand brings the parts back. */
+    bool        part_wake_touch;  /**< A touch ends the CPU part.              */
+    bool        part_wake_level;  /**< The level of the header's line that ends it. */
+    bool        part_pin_armed;   /**< That line is armed as a wake line.      */
+    uint8_t     part_wake_pin;    /**< The header's position; 0 for none.      */
+    uint8_t     part_timers;      /**< One-shots of a wake time out and not yet heard. */
+    uint8_t     part_rc;          /**< The last answer's kode_status_t.        */
+    uint16_t    part_answers;     /**< Requests for parts answered; it wraps.  */
+    uint32_t    part_gpio;        /**< The P4 pin behind that position.        */
+    uint32_t    part_after_ms;    /**< The time that ends the CPU part; 0 for none. */
+    uint64_t    part_due_us;      /**< khal_time_us() when that time comes; 0 for none. */
+    uint64_t    part_hop_us;      /**< khal_time_us() when the last one-shot armed for it comes due. */
+    uint64_t    part_since_us;    /**< khal_time_us() when the CPU part last went to rest: off_after
+                                   *   counts from it.                          */
+    uint32_t    part_late_round;  /**< The round of the step that ran out of time. */
+    uint8_t     part_done;        /**< The parts the sequence in hand has put away, the ones that do
+                                   *   not stay at rest among them.             */
+    uint8_t     part_cpu_stage;   /**< Owners of the CPU part asked so far.     */
+    uint8_t     part_late;        /**< The part whose owner ran out of time: an answer that comes
+                                   *   late still counts. 0 for none.           */
+    uint8_t     part_late_who;    /**< The participant that owes that answer.   */
+    bool        part_pin_free;    /**< The header's position was free, not an input, before it was armed. */
+    khal_gpio_pull_t part_pin_pulled; /**< The pull that input had: it gets it back. */
 } LowPower;
 
 static LowPower l_lowpower;
@@ -201,6 +259,17 @@ QActive * const AO_LowPower = &l_lowpower.super;
 /** @brief The last refusal or busy reason; written by this AO, read by the console. */
 static char s_refusal[KODE_LOWPOWER_REFUSAL_MAX];
 
+/** @brief Why the app's last request for parts was refused; written by this AO, read by the
+ *         task that asked. No other source's answer writes it. */
+static char s_part_why[KODE_LOWPOWER_REFUSAL_MAX];
+
+/** @brief Why the last request for parts was refused, whoever asked; for `lowpower_info`. */
+static char s_part_said[KODE_LOWPOWER_REFUSAL_MAX];
+
+/** @brief What a task reads of an app's rest: the facade's answers, the last status, whether a
+ *         request is being arranged and the parts held at rest. */
+static _Atomic uint32_t s_part_word;
+
 static QState LowPower_initial(LowPower * const me, void const * const par);
 static QState LowPower_on(LowPower * const me, QEvt const * const e);
 static QState LowPower_awake(LowPower * const me, QEvt const * const e);
@@ -208,6 +277,9 @@ static QState LowPower_resting(LowPower * const me, QEvt const * const e);
 static QState LowPower_asleep(LowPower * const me, QEvt const * const e);
 static QState LowPower_dark(LowPower * const me, QEvt const * const e);
 static QState LowPower_off(LowPower * const me, QEvt const * const e);
+static void part_take(LowPower * const me);
+static uint32_t part_round_keep(LowPower * const me);
+static void part_awake_post(LowPower * const me, uint8_t who);
 
 /* ---- Names ---------------------------------------------------------------- */
 
@@ -534,6 +606,9 @@ static QState round_done(LowPower * const me)
 
     tmo_stop(&me->round_tmo);
     me->waiting = 0U;
+    /* The board has every part from here: an app's rest is over. */
+    me->held = 0U;
+    part_take(me);
 
     if ( (uint8_t)KODE_LP_ASLEEP == me->target )
     {
@@ -581,6 +656,10 @@ static bool round_order(const LowPower *me)
  * for an OFF round that began from ASLEEP) so an owner that already rested for
  * the round restores. Nobody is answered here.
  *
+ * A round given up before it asked the owners of what an app has at rest
+ * (round_begin()) tells each owner it did ask, and nobody else: those devices
+ * stay at rest, and the app's rest is as it was.
+ *
  * @param me    The AO.
  * @param cause What ended the round, a kode_lp_cause_t.
  */
@@ -599,7 +678,24 @@ static void round_leave(LowPower * const me, uint8_t cause)
     me->state = (uint8_t)KODE_LP_AWAKE;
     KLOG_N(TAG, "staying AWAKE: round %u to %s abandoned, %s",
            (unsigned)me->round, state_name(me->target), s_refusal);
-    publish_state(me, me->state, cause, prev);
+    if ( 0U == me->held )
+    {
+        publish_state(me, me->state, cause, prev);
+    }
+    else
+    {
+        uint32_t const spared = me->held;
+
+        me->held = 0U;
+        for ( uint8_t i = 0U; i < me->joined; i++ )
+        {
+            if ( (spared & (1U << i)) == 0U )
+            {
+                part_awake_post(me, i);
+            }
+        }
+        KLOG_N(TAG, "the app's rest is as it was: its owners were not asked");
+    }
 }
 
 /**
@@ -672,7 +768,71 @@ static QState round_busy(LowPower * const me, uint8_t cause)
 }
 
 /**
+ * @brief Post the running round to some participants, each its own copy.
+ *
+ * One that cannot be posted to keeps its place among those waited for: the
+ * round's budget ends the wait for it (resting_timeout()).
+ *
+ * @param me   The AO, a round running.
+ * @param whom Bit n: participant n is asked.
+ */
+static void round_post(LowPower * const me, uint32_t whom)
+{
+    for ( uint8_t i = 0U; i < me->joined; i++ )
+    {
+        if ( (whom & (1U << i)) != 0U )
+        {
+            LowPowerRoundEvt *ev = Q_NEW_X(LowPowerRoundEvt, 0U, LOWPOWER_ROUND_SIG);
+
+            if ( NULL == ev )
+            {
+                KLOG_W(TAG, "no event to ask %s", me->parts[i].name);
+            }
+            else
+            {
+                ev->target = me->target;
+                ev->parts  = 0U;
+                ev->round  = me->round;
+                if ( !QACTIVE_POST_X(me->parts[i].ao, &ev->super, 1U, &me->super) )
+                {
+                    KLOG_W(TAG, "%s's queue is full; not asked", me->parts[i].name);
+                }
+            }
+        }
+    }
+}
+
+/**
+ * @brief Every owner asked so far is ready: ask the ones kept for last, if any.
+ *
+ * The round is no longer one that may leave the app's rest as it was: the
+ * board takes it, and the owners of those devices hear the round.
+ *
+ * @param me The AO, a round running and nobody waited for.
+ * @return true when owners were asked, and the round waits for them.
+ */
+static bool round_held_ask(LowPower * const me)
+{
+    bool asked = false;
+
+    if ( 0U != me->held )
+    {
+        me->waiting = me->held;
+        me->held    = 0U;
+        part_take(me);
+        round_post(me, me->waiting);
+        asked = true;
+    }
+    return asked;
+}
+
+/**
  * @brief Begin a round for @p target and ask every participant.
+ *
+ * With devices at rest for an app, a round that may be given up asks their
+ * owners last, each with its own copy, and takes the app's rest only then: a
+ * round an owner refuses before that leaves the rest as it was. An order, and
+ * a round begun while a rest is being arranged, take it at once.
  *
  * @param me     The AO, AWAKE, or ASLEEP with the tick and the lock back.
  * @param target The state wanted, ASLEEP or OFF.
@@ -706,14 +866,26 @@ static QState round_begin(LowPower * const me, uint8_t target, uint8_t cause,
     }
     else
     {
+        bool over;
+
+        me->target = target;
+        me->cause  = cause;
+        me->held   = 0U;
+        if ( (0U == me->part_step) && (!round_order(me)) )
+        {
+            me->held = part_round_keep(me);
+        }
+        if ( 0U == me->held )
+        {
+            /* The board has every part from here: an app's rest is over. */
+            part_take(me);
+        }
         me->sealed = true;
         me->round += 1U;
         if ( ROUND_NONE == me->round )
         {
             me->round += 1U;
         }
-        me->target  = target;
-        me->cause   = cause;
         me->round_src = src;
         retry_stop(me, false);
         me->wake_due_us = 0U;   /* the owners say their times again */
@@ -729,14 +901,32 @@ static QState round_begin(LowPower * const me, uint8_t target, uint8_t cause,
         {
             me->waiting |= (1U << i);
         }
-        ev->target = target;
-        ev->round  = me->round;
-        QACTIVE_PUBLISH(&ev->super, &me->super);
+        if ( 0U == me->held )
+        {
+            ev->target = target;
+            ev->parts  = 0U;
+            ev->round  = me->round;
+            QACTIVE_PUBLISH(&ev->super, &me->super);
+        }
+        else
+        {
+            /* Nobody but the owners asked now may hear this round yet. */
+            QF_gc(&ev->super);
+            me->waiting &= ~me->held;
+            round_post(me, me->waiting);
+            KLOG_N(TAG, "round %u asks the owners of the app's rest last (0x%08x)",
+                   (unsigned)me->round, (unsigned)me->held);
+        }
         KLOG_I(TAG, "round %u to %s (%s): asking %u participants",
                (unsigned)me->round, state_name(target), cause_name(cause),
                (unsigned)me->joined);
 
-        if ( 0U == me->waiting )
+        over = (0U == me->waiting);
+        if ( over )
+        {
+            over = !round_held_ask(me);
+        }
+        if ( over )
         {
             status = round_done(me);
         }
@@ -1358,17 +1548,18 @@ static uint64_t minute_wait_us(void)
 }
 
 /**
- * @brief Whether the time asleep has reached off_after.
+ * @brief Whether the time at rest has reached off_after.
  *
- * @param me  The AO.
- * @param now khal_time_us().
+ * @param me       The AO.
+ * @param since_us khal_time_us() the time counts from.
+ * @param now      khal_time_us().
  * @return true when the board is to go OFF.
  */
-static bool off_due(const LowPower *me, uint64_t now)
+static bool off_due(const LowPower *me, uint64_t since_us, uint64_t now)
 {
     uint64_t const limit = (uint64_t)me->secs[SETTING_OFF_AFTER] * US_PER_S;
 
-    return (0U != limit) && ((now - me->off_since_us) >= limit);
+    return (0U != limit) && ((now - since_us) >= limit);
 }
 
 /**
@@ -1433,15 +1624,16 @@ static uint64_t owner_wait_us(const LowPower *me, uint64_t now)
 }
 
 /**
- * @brief Arm the one-shot for the next thing ASLEEP has to do.
+ * @brief Arm the one-shot for the next thing a board at rest has to do.
  *
  * That is the next minute, the off-after deadline or an owner's work,
  * whichever is first.
  *
- * @param me  The AO, ASLEEP.
- * @param now khal_time_us().
+ * @param me       The AO, ASLEEP, or AWAKE with the CPU part of an app's rest away.
+ * @param now      khal_time_us().
+ * @param since_us khal_time_us() off_after counts from.
  */
-static void minute_schedule(LowPower * const me, uint64_t now)
+static void minute_schedule(LowPower * const me, uint64_t now, uint64_t since_us)
 {
     uint64_t wait = minute_wait_us();
     uint64_t const limit = (uint64_t)me->secs[SETTING_OFF_AFTER] * US_PER_S;
@@ -1450,7 +1642,7 @@ static void minute_schedule(LowPower * const me, uint64_t now)
     if ( 0U != limit )
     {
         /* At least 1: a count kept across a wake may have run out already. */
-        uint64_t const left = time_wait_us(me->off_since_us + limit, now);
+        uint64_t const left = time_wait_us(since_us + limit, now);
 
         if ( left < wait )
         {
@@ -1569,7 +1761,7 @@ static QState dark_begin(LowPower * const me, uint64_t now)
     KLOG_N(TAG, "%s has work due: a dark wake, the glass stays asleep",
            owner_name(me, me->wake_who));
     me->wake_due_us = 0U;
-    minute_schedule(me, now);
+    minute_schedule(me, now, me->off_since_us);
     return Q_TRAN(&LowPower_dark);
 }
 
@@ -1651,6 +1843,7 @@ static bool dark_round_post(LowPower * const me)
             else
             {
                 ev->target = (uint8_t)KODE_LP_ASLEEP;
+                ev->parts  = 0U;
                 ev->round  = me->round;
                 QACTIVE_POST(me->parts[i].ao, &ev->super, NULL);
             }
@@ -1941,7 +2134,7 @@ static QState asleep_minute(LowPower * const me)
             minute_arm(me, me->minute_due_us - now);
         }
     }
-    else if ( off_due(me, now) )
+    else if ( off_due(me, me->off_since_us, now) )
     {
         KLOG_N(TAG, "asleep for %u s: off-after reached",
                (unsigned)me->secs[SETTING_OFF_AFTER]);
@@ -1959,7 +2152,7 @@ static QState asleep_minute(LowPower * const me)
     else
     {
         minute_work(me);
-        minute_schedule(me, now);
+        minute_schedule(me, now, me->off_since_us);
     }
     return status;
 }
@@ -1985,7 +2178,7 @@ static void asleep_enter(LowPower * const me)
     }
     me->minute_due_us   = 0U;
     summary_open(me);
-    minute_schedule(me, now);
+    minute_schedule(me, now, me->off_since_us);
 }
 
 /* ---- The settings ------------------------------------------------------------------------- */
@@ -2153,7 +2346,15 @@ static QState resting_ready(LowPower * const me, const LowPowerReadyEvt *a)
     {
         me->waiting &= ~(1U << a->who);
         me->busy    &= ~(1U << a->who);
-        if ( 0U == me->waiting )
+        if ( 0U != me->waiting )
+        {
+            /* Still waited for. */
+        }
+        else if ( round_held_ask(me) )
+        {
+            /* The owners of what an app had at rest answer now. */
+        }
+        else
         {
             if ( round_order(me) )
             {
@@ -2225,27 +2426,1290 @@ static void order_ask_again(LowPower * const me)
     uint32_t const again = me->busy;
 
     me->busy = 0U;
+    round_post(me, again);
+}
+
+/* ---- An app's rest, part by part ---------------------------------------------------
+ * kode_sys_rest() names parts and this AO puts them away one at a time, in
+ * lowpower_part.h's order, while the board stays AWAKE: no state is published
+ * and the owners that are not named hear nothing. Each owner is asked alone,
+ * with the round it already knows posted to it, or with the glass's own door,
+ * and the next part is asked only when it has answered. The CPU part is this
+ * AO's own: the tick stops and the lock goes, as in ASLEEP, until a wake.
+ * A round of the board that goes through ends the rest: the board has every
+ * part. One that may be given up asks the owners of the rest last
+ * (round_begin()), so that given up it leaves the rest as it was.
+ */
+
+/** @brief Runs in interrupt context: the header's line the app named is at its level. */
+static void part_pin_isr(void *arg)
+{
+    static const LowPowerPartWakeEvt evt = {
+        QEVT_INITIALIZER(LOWPOWER_PART_WAKE_SIG), (uint8_t)KODE_LP_WAKE_PIN
+    };
+
+    (void)arg;
+    kqp_post_from_isr(AO_LowPower, &evt.super);
+}
+
+/** @brief Runs in the timer task: a one-shot of the wake time came due. */
+static void part_timer_cb(void *arg)
+{
+    static const LowPowerPartWakeEvt evt = {
+        QEVT_INITIALIZER(LOWPOWER_PART_WAKE_SIG), (uint8_t)KODE_LP_WAKE_TIMER
+    };
+
+    (void)arg;
+    QACTIVE_POST(AO_LowPower, &evt.super, NULL);
+}
+
+/**
+ * @brief The participant that joined under @p name.
+ *
+ * @param me   The AO.
+ * @param name The name an owner joined with.
+ * @return Its id; KODE_LOWPOWER_WHO_NONE when no owner of that name is in the
+ *         build, its device parked at boot.
+ */
+static uint8_t part_who(const LowPower *me, const char *name)
+{
+    uint8_t who = KODE_LOWPOWER_WHO_NONE;
+
     for ( uint8_t i = 0U; i < me->joined; i++ )
     {
-        if ( (again & (1U << i)) != 0U )
+        if ( strcmp(me->parts[i].name, name) == 0 )
         {
-            LowPowerRoundEvt *ev = Q_NEW_X(LowPowerRoundEvt, 0U, LOWPOWER_ROUND_SIG);
+            who = i;
+        }
+    }
+    return who;
+}
 
-            if ( NULL == ev )
+/**
+ * @brief Keep what a task reads of the rest: the facade's answers so far, the
+ *        last of them, whether a request is being arranged and the parts held.
+ *
+ * @param me The AO.
+ */
+static void part_word_set(const LowPower *me)
+{
+    uint32_t word = ((uint32_t)me->part_answers << PART_WORD_ANSWERS_SHIFT)
+                    | ((uint32_t)me->part_rc << PART_WORD_RC_SHIFT)
+                    | (uint32_t)me->part_rest;
+
+    if ( 0U != me->part_step )
+    {
+        word |= PART_WORD_OPEN;
+    }
+    atomic_store(&s_part_word, word);
+}
+
+/**
+ * @brief Put one LOWPOWER_PART_SIG on the bus.
+ *
+ * @param me    The AO.
+ * @param what  The kode_lp_part_what_t.
+ * @param rc    An answer's kode_status_t.
+ * @param cause A wake's kode_lp_wake_t.
+ * @param src   The source an answer is for.
+ * @param why   Why an answer is not KODE_OK, "part: why"; NULL for none.
+ */
+static void part_publish(const LowPower *me, uint8_t what, kode_status_t rc,
+                         uint8_t cause, uint8_t src, const char *why)
+{
+    LowPowerPartEvt *ev = Q_NEW_X(LowPowerPartEvt, 0U, LOWPOWER_PART_SIG);
+
+    if ( NULL == ev )
+    {
+        /* A task still reads the word; an AO asks again when it hears nothing. */
+        KLOG_W(TAG, "out of events; the rest's news was not published");
+    }
+    else
+    {
+        ev->what  = what;
+        ev->rc    = (uint8_t)rc;
+        ev->parts = me->part_rest;
+        ev->cause = cause;
+        ev->src   = src;
+        why_copy(ev->why, sizeof(ev->why), why);
+        QACTIVE_PUBLISH(&ev->super, AO_LowPower);
+    }
+}
+
+/**
+ * @brief Answer a request for parts: the word a task reads, then the event.
+ *
+ * The word counts the facade's answers alone, so a task that waits for its
+ * own does not take the console's for it.
+ *
+ * @param me  The AO.
+ * @param src The request's source.
+ * @param rc  KODE_OK when every part is as asked.
+ * @param why Why not, "part: why"; NULL with KODE_OK.
+ */
+static void part_answer(LowPower * const me, uint8_t src, kode_status_t rc,
+                        const char *why)
+{
+    why_copy(s_part_said, sizeof(s_part_said), why);
+    if ( KODE_OK != rc )
+    {
+        KLOG_N(TAG, "rest (source %u) refused: %s", (unsigned)src, s_part_said);
+    }
+    if ( (uint8_t)KODE_LOWPOWER_SRC_APP == src )
+    {
+        /* Before the count moves: the task reads the reason once it has seen the count. */
+        why_copy(s_part_why, sizeof(s_part_why), why);
+        me->part_answers += 1U;
+        me->part_rc       = (uint8_t)rc;
+    }
+    part_word_set(me);
+    part_publish(me, (uint8_t)KODE_LP_PART_ANSWER, rc, (uint8_t)KODE_LP_WAKE_NONE, src, why);
+}
+
+/**
+ * @brief Let go of the wake sources the app chose.
+ *
+ * The header's position goes back, through its owner's table, to what it was
+ * before the wake line took it: free, or an input with the pull it had. An
+ * input with an interrupt attached is never taken, so there is none to put
+ * back. A one-shot that is out cannot be taken back: its event finds no time
+ * due.
+ *
+ * @param me The AO.
+ */
+static void part_wakes_off(LowPower * const me)
+{
+    if ( me->part_pin_armed )
+    {
+        kode_status_t rc;
+
+        khal_power_wake_disarm(me->part_gpio);
+        me->part_pin_armed = false;
+        if ( me->part_pin_free )
+        {
+            rc = khal_exp_release(me->part_wake_pin);
+        }
+        else
+        {
+            rc = khal_exp_input(me->part_wake_pin, me->part_pin_pulled);
+        }
+        if ( KODE_OK != rc )
+        {
+            KLOG_W(TAG, "rest: header position %u did not go back to what it was (rc %d)",
+                   (unsigned)me->part_wake_pin, (int)rc);
+        }
+    }
+    me->part_due_us = 0U;
+}
+
+/**
+ * @brief Tell one owner the board is AWAKE, and nobody else.
+ *
+ * What an owner restores its device on. It is posted, not published: the
+ * other owners never rested.
+ *
+ * @param me  The AO.
+ * @param who The participant.
+ */
+static void part_awake_post(LowPower * const me, uint8_t who)
+{
+    LowPowerStateEvt *ev = Q_NEW_X(LowPowerStateEvt, 0U, LOWPOWER_STATE_SIG);
+
+    if ( NULL == ev )
+    {
+        KLOG_E(TAG, "out of events; %s was not told to come back", me->parts[who].name);
+    }
+    else
+    {
+        ev->state = (uint8_t)KODE_LP_AWAKE;
+        ev->cause = (uint8_t)KODE_LP_CAUSE_REQUEST;
+        ev->prev  = (uint8_t)KODE_LP_AWAKE;
+        if ( !QACTIVE_POST_X(me->parts[who].ao, &ev->super, 1U, &me->super) )
+        {
+            KLOG_E(TAG, "%s's queue is full; it was not told to come back",
+                   me->parts[who].name);
+        }
+    }
+}
+
+/**
+ * @brief Tell the owners of the CPU part the board is AWAKE.
+ *
+ * The expander's line is the plain interrupt again and the scheduler arms its
+ * minute. Both restore on any AWAKE, rested or not.
+ *
+ * @param me The AO.
+ */
+static void part_cpu_restore(LowPower * const me)
+{
+    static const char * const owners[] = PART_CPU_OWNERS;
+
+    for ( uint8_t i = 0U; Q_DIM(owners) > i; i++ )
+    {
+        uint8_t const who = part_who(me, owners[i]);
+
+        if ( KODE_LOWPOWER_WHO_NONE != who )
+        {
+            part_awake_post(me, who);
+        }
+    }
+}
+
+/**
+ * @brief End the CPU part: the tick and the lock back, the wake sources let go.
+ *
+ * @param me The AO, with the CPU part at rest.
+ */
+static void part_cpu_up(LowPower * const me)
+{
+    light_up();
+    part_wakes_off(me);
+    me->part_rest &= (uint8_t)~KODE_LP_PART_CPU;
+    part_cpu_restore(me);
+}
+
+/**
+ * @brief A wake source ended the CPU part: say so. The other parts stay away.
+ *
+ * @param me    The AO, with the CPU part at rest.
+ * @param cause The kode_lp_wake_t.
+ */
+static void part_cpu_wake(LowPower * const me, uint8_t cause)
+{
+    static const char * const names[] = {
+        "nothing", "a button", "a touch", "the header's line", "its time",
+        "a console line", "an MQTT message", "a cable", "a request",
+        "work of the board's fell due", "the cell is at its cut"
+    };
+    _Static_assert(Q_DIM(names) == ((size_t)KODE_LP_WAKE_BATTERY + 1U),
+                   "a name for every wake, BATTERY being the last");
+    const char *name = "?";
+
+    if ( Q_DIM(names) > cause )
+    {
+        name = names[cause];
+    }
+    part_cpu_up(me);
+    KLOG_N(TAG, "rest: the P4 is awake again (%s); parts 0x%02x stay at rest",
+           name, (unsigned)me->part_rest);
+    part_word_set(me);
+    part_publish(me, (uint8_t)KODE_LP_PART_WOKE, KODE_OK, cause,
+                 (uint8_t)KODE_LOG_SRC_NONE, NULL);
+}
+
+/**
+ * @brief The sequence in hand is over: answer it, and let the P4 sleep if it asked.
+ *
+ * The answer goes out before the tick stops and the lock goes (rule 6). A
+ * sleeping P4 keeps the minute ASLEEP keeps: it is what reads the charger,
+ * counts off_after and serves an owner's time (part_minute()).
+ *
+ * @param me  The AO.
+ * @param rc  KODE_OK when every part is as asked.
+ * @param why Why not; NULL with KODE_OK.
+ */
+static void part_finish(LowPower * const me, kode_status_t rc, const char *why)
+{
+    bool const sleeps = (KODE_OK == rc) && (!me->part_up)
+                        && ((me->part_rest & KODE_LP_PART_CPU) != 0U);
+
+    tmo_stop(&me->round_tmo);
+    me->part_step = 0U;
+    me->part_want = 0U;
+    me->part_done = 0U;
+    if ( (KODE_OK == rc) && me->part_up )
+    {
+        KLOG_N(TAG, "rest ended: every part is back");
+    }
+    else if ( KODE_OK == rc )
+    {
+        KLOG_N(TAG, "rest: parts 0x%02x stay at rest", (unsigned)me->part_rest);
+    }
+    else
+    {
+        /* part_answer() says why. */
+    }
+    part_answer(me, me->part_src, rc, why);
+    if ( sleeps )
+    {
+        uint64_t const now = khal_time_us();
+
+        KLOG_N(TAG, "rest: the P4 light-sleeps when every task is idle; a button, a cable, "
+                    "the cell at its cut or off_after ends it (touch %u, header position %u, "
+                    "after %u ms)",
+               (unsigned)me->part_wake_touch, (unsigned)me->part_wake_pin,
+               (unsigned)me->part_after_ms);
+        me->part_since_us = now;
+        minute_schedule(me, now, me->part_since_us);
+        kqp_tick_rest(true);
+        khal_console_rest(true);
+        khal_power_hold(false);
+    }
+}
+
+/**
+ * @brief A step failed: the sequence stops there, and what rested stays at rest.
+ *
+ * @param me  The AO.
+ * @param who Whose reason: the part's name.
+ * @param why The reason.
+ */
+static void part_fail(LowPower * const me, const char *who, const char *why)
+{
+    char text[KODE_LOWPOWER_REFUSAL_MAX];
+
+    (void)snprintf(text, sizeof(text), "%s: %s", who, why);
+    part_finish(me, KODE_DENIED, text);
+}
+
+/**
+ * @brief Arm a one-shot toward the wake time: the whole wait, or one hop of it.
+ *
+ * A one-shot cannot be taken back, so none runs longer than
+ * KODE_LOWPOWER_PART_HOP_MS: a longer time is reached in hops, each armed
+ * when the one before it is heard (part_wake_heard()). One that is already
+ * out and comes due before the wake time serves as the first hop.
+ *
+ * @param me  The AO, with part_due_us set.
+ * @param now khal_time_us().
+ * @return false when every one-shot a rest may have is out, or the timer
+ *         would not start.
+ */
+static bool part_timer_hop(LowPower * const me, uint64_t now)
+{
+    uint64_t wait = time_wait_us(me->part_due_us, now);
+    bool     ok   = false;
+
+    if ( ((uint64_t)KODE_LOWPOWER_PART_HOP_MS * US_PER_MS) < wait )
+    {
+        wait = (uint64_t)KODE_LOWPOWER_PART_HOP_MS * US_PER_MS;
+    }
+    if ( (0U < me->part_timers) && (me->part_hop_us > now)
+        && (me->part_hop_us <= me->part_due_us) )
+    {
+        ok = true;
+    }
+    else if ( KODE_LOWPOWER_PART_TIMERS <= me->part_timers )
+    {
+        KLOG_W(TAG, "rest: %u wake timers are out already", (unsigned)me->part_timers);
+    }
+    else if ( khal_timer_once(&part_timer_cb, NULL, wait) == KODE_OK )
+    {
+        me->part_timers += 1U;
+        me->part_hop_us  = now + wait;
+        ok = true;
+    }
+    else
+    {
+        KLOG_W(TAG, "rest: the wake timer would not start");
+    }
+    return ok;
+}
+
+/**
+ * @brief Start counting the wake time the app gave.
+ *
+ * @param me The AO.
+ * @return false when no one-shot could be armed for it.
+ */
+static bool part_timer_arm(LowPower * const me)
+{
+    uint64_t const now = khal_time_us();
+    bool           ok;
+
+    me->part_due_us = now + ((uint64_t)me->part_after_ms * US_PER_MS);
+    ok = part_timer_hop(me, now);
+    if ( !ok )
+    {
+        me->part_due_us = 0U;
+    }
+    return ok;
+}
+
+/**
+ * @brief The last thing before the CPU part rests: arm what the app chose.
+ *
+ * @param me The AO, the expander's line armed.
+ * @return NULL when the sources are armed; otherwise whose refusal and why.
+ */
+static const char *part_cpu_arm(LowPower * const me)
+{
+    const char *why = NULL;
+
+    if ( 0U != me->part_wake_pin )
+    {
+        if ( khal_power_wake_arm(me->part_gpio, me->part_wake_level, &part_pin_isr,
+                                 NULL) == KODE_OK )
+        {
+            me->part_pin_armed = true;
+        }
+        else
+        {
+            why = "pin: no wake line";
+        }
+    }
+    if ( (NULL == why) && (0U != me->part_after_ms) && !part_timer_arm(me) )
+    {
+        why = "timer: busy";
+    }
+    if ( NULL != why )
+    {
+        part_wakes_off(me);
+    }
+    return why;
+}
+
+/**
+ * @brief Post a round to one owner alone: rest your device, the board stays AWAKE.
+ *
+ * @param me   The AO.
+ * @param who  The participant.
+ * @param part The KODE_LP_PART_* it is asked for.
+ * @return true when the owner has the round.
+ */
+static bool part_round_post(LowPower * const me, uint8_t who, uint8_t part)
+{
+    LowPowerRoundEvt *ev = Q_NEW_X(LowPowerRoundEvt, 0U, LOWPOWER_ROUND_SIG);
+    bool posted = false;
+
+    if ( NULL != ev )
+    {
+        ev->target = (uint8_t)KODE_LP_ASLEEP;
+        ev->parts  = part;
+        ev->round  = me->round;
+        posted = QACTIVE_POST_X(me->parts[who].ao, &ev->super, 1U, &me->super);
+    }
+    return posted;
+}
+
+/**
+ * @brief Post the glass's owner a request to sleep or wake, through this AO's door.
+ *
+ * @param me    The AO.
+ * @param who   The glass's owner.
+ * @param sleep true to sleep, false to wake.
+ * @return true when the owner has the request.
+ */
+static bool part_glass_post(LowPower * const me, uint8_t who, bool sleep)
+{
+    DisplaySleepReqEvt *ev = Q_NEW_X(DisplaySleepReqEvt, 0U, DISPLAY_SLEEP_REQ_SIG);
+    bool posted = false;
+
+    if ( NULL != ev )
+    {
+        ev->sleep = sleep;
+        ev->who   = DISPLAY_SLEEP_WHO_REST;
+        posted = QACTIVE_POST_X(me->parts[who].ao, &ev->super, 1U, &me->super);
+    }
+    return posted;
+}
+
+/**
+ * @brief Post the glass's owner a request to take the panel's supply away.
+ *
+ * @param me  The AO.
+ * @param who The glass's owner, the glass asleep.
+ * @return true when the owner has the request.
+ */
+static bool part_supply_post(LowPower * const me, uint8_t who)
+{
+    DisplaySupplyReqEvt *ev = Q_NEW_X(DisplaySupplyReqEvt, 0U, DISPLAY_SUPPLY_REQ_SIG);
+    bool posted = false;
+
+    if ( NULL != ev )
+    {
+        ev->round = me->round;
+        posted = QACTIVE_POST_X(me->parts[who].ao, &ev->super, 1U, &me->super);
+    }
+    return posted;
+}
+
+/**
+ * @brief Ask the owner of @p part to put it away.
+ *
+ * @param me   The AO.
+ * @param who  The owner.
+ * @param part One KODE_LP_PART_* bit.
+ * @return true when the owner has been asked.
+ */
+static bool part_ask_down(LowPower * const me, uint8_t who, uint8_t part)
+{
+    bool asked;
+
+    if ( KODE_LP_PART_SCREEN == part )
+    {
+        asked = part_glass_post(me, who, true);
+    }
+    else if ( KODE_LP_PART_PANEL == part )
+    {
+        asked = part_supply_post(me, who);
+    }
+    else
+    {
+        asked = part_round_post(me, who, part);
+    }
+    return asked;
+}
+
+/**
+ * @brief Bring @p part back.
+ *
+ * Only the glass answers: the others restore on the AWAKE posted to them,
+ * with retries of their own.
+ *
+ * @param me   The AO.
+ * @param who  The owner; KODE_LOWPOWER_WHO_NONE when the build has none.
+ * @param part One KODE_LP_PART_* bit.
+ * @return true when an answer is awaited.
+ */
+static bool part_ask_up(LowPower * const me, uint8_t who, uint8_t part)
+{
+    bool const glass = (KODE_LP_PART_SCREEN == part) || (KODE_LP_PART_PANEL == part);
+    bool waiting = false;
+
+    if ( KODE_LP_PART_CPU == part )
+    {
+        part_cpu_up(me);
+    }
+    else if ( KODE_LOWPOWER_WHO_NONE == who )
+    {
+        me->part_rest &= (uint8_t)~part;
+    }
+    else if ( glass )
+    {
+        if ( !part_glass_post(me, who, false) )
+        {
+            /* Left at rest: the request is answered with the reason. */
+            part_fail(me, lowpower_part_name(part), "out of events");
+        }
+        waiting = true;
+    }
+    else
+    {
+        part_awake_post(me, who);
+        me->part_rest &= (uint8_t)~part;
+    }
+    return waiting;
+}
+
+/**
+ * @brief Note that the part of the step in hand is put away.
+ *
+ * A part that does not stay at rest (the sound, the card) is done for this
+ * request and held nowhere: asked again, its owner is asked again.
+ *
+ * @param me   The AO.
+ * @param part One KODE_LP_PART_* bit.
+ */
+static void part_put_away(LowPower * const me, uint8_t part)
+{
+    me->part_done |= part;
+    if ( lowpower_part_stays(part) )
+    {
+        me->part_rest |= part;
+    }
+}
+
+/**
+ * @brief Open the next round of the sequence for one owner.
+ *
+ * @param me   The AO.
+ * @param who  The owner.
+ * @param part One KODE_LP_PART_* bit.
+ * @return true when the owner has been asked and its step's time is running.
+ */
+static bool part_step_open(LowPower * const me, uint8_t who, uint8_t part)
+{
+    bool asked;
+
+    me->round += 1U;
+    if ( ROUND_NONE == me->round )
+    {
+        me->round += 1U;
+    }
+    me->sealed   = true;
+    me->part_who = who;
+    asked = part_ask_down(me, who, part);
+    if ( asked )
+    {
+        tmo_start(&me->round_tmo, KODE_LOWPOWER_PART_STEP_MS);
+    }
+    return asked;
+}
+
+/**
+ * @brief Go on with the CPU part: ask its next owner, or arm the wake sources.
+ *
+ * The expander's owner arms the wake lines and the scheduler gives its next
+ * minute, each in a step of its own. With nobody left to ask the sources the
+ * app chose are armed and the part is put away.
+ *
+ * @param me The AO, the CPU part the step in hand.
+ * @return true when the sequence waits for an owner or was ended by a
+ *         refusal; false when the CPU part is put away.
+ */
+static bool part_cpu_go(LowPower * const me)
+{
+    static const char * const owners[] = PART_CPU_OWNERS;
+    bool        settled = false;
+    const char *why     = NULL;
+
+    while ( (!settled) && (Q_DIM(owners) > me->part_cpu_stage) )
+    {
+        uint8_t const who = part_who(me, owners[me->part_cpu_stage]);
+
+        me->part_cpu_stage += 1U;
+        if ( KODE_LOWPOWER_WHO_NONE == who )
+        {
+            /* Not in the build: nothing of its to arm. */
+        }
+        else if ( part_step_open(me, who, KODE_LP_PART_CPU) )
+        {
+            settled = true;
+        }
+        else
+        {
+            why     = "cpu: out of events";
+            settled = true;
+        }
+    }
+    if ( (!settled) && (NULL == why) )
+    {
+        why = part_cpu_arm(me);
+        if ( NULL == why )
+        {
+            part_put_away(me, KODE_LP_PART_CPU);
+        }
+    }
+    if ( NULL != why )
+    {
+        /* Whatever an owner armed was for a sleep that does not come. */
+        part_cpu_restore(me);
+        part_finish(me, KODE_DENIED, why);
+        settled = true;
+    }
+    return settled;
+}
+
+/**
+ * @brief Go on with the sequence in hand until an owner has to answer, or it is over.
+ *
+ * @param me The AO, AWAKE, with a sequence open (part_src and part_up set).
+ */
+static void part_advance(LowPower * const me)
+{
+    bool waiting = false;
+
+    while ( !waiting )
+    {
+        uint8_t part;
+
+        if ( me->part_up )
+        {
+            part = lowpower_part_next_up(me->part_rest);
+        }
+        else
+        {
+            part = lowpower_part_next_down(me->part_want, me->part_rest | me->part_done);
+        }
+        if ( 0U == part )
+        {
+            part_finish(me, KODE_OK, NULL);
+            waiting = true;
+        }
+        else
+        {
+            uint8_t const who = part_who(me, lowpower_part_owner(part));
+
+            me->part_step = part;
+            me->part_who  = who;
+            if ( me->part_up )
             {
-                KLOG_W(TAG, "no event to ask %s again", me->parts[i].name);
+                waiting = part_ask_up(me, who, part);
+                if ( waiting && (0U != me->part_step) )
+                {
+                    tmo_start(&me->round_tmo, KODE_LOWPOWER_PART_STEP_MS);
+                }
+            }
+            else if ( KODE_LP_PART_CPU == part )
+            {
+                me->part_cpu_stage = 0U;
+                /* The owners say their times again: one kept from an earlier
+                 * rest may have passed, and would end this one at its first minute. */
+                me->wake_due_us    = 0U;
+                me->app_due_us     = 0U;
+                waiting = part_cpu_go(me);
+            }
+            else if ( KODE_LOWPOWER_WHO_NONE == who )
+            {
+                /* No such owner in the build: its device was parked at boot. */
+                part_put_away(me, part);
             }
             else
             {
-                ev->target = me->target;
-                ev->round  = me->round;
-                if ( !QACTIVE_POST_X(me->parts[i].ao, &ev->super, 1U, &me->super) )
+                if ( !part_step_open(me, who, part) )
                 {
-                    KLOG_W(TAG, "%s's queue is full; not asked again", me->parts[i].name);
+                    part_fail(me, lowpower_part_name(part), "out of events");
                 }
+                waiting = true;
+            }
+        }
+        /* A step is open from here on: a task reads that in the word. */
+        part_word_set(me);
+    }
+}
+
+/**
+ * @brief The owner asked in this step says its part is as asked.
+ *
+ * @param me The AO, a step open.
+ */
+static void part_step_done(LowPower * const me)
+{
+    bool over = false;
+
+    tmo_stop(&me->round_tmo);
+    if ( me->part_up )
+    {
+        /* The glass's wake brings the supply back with it. */
+        me->part_rest &= (uint8_t)~(KODE_LP_PART_SCREEN | KODE_LP_PART_PANEL);
+    }
+    else if ( KODE_LP_PART_CPU == me->part_step )
+    {
+        over = part_cpu_go(me);
+    }
+    else
+    {
+        part_put_away(me, me->part_step);
+    }
+    if ( !over )
+    {
+        part_advance(me);
+    }
+    else
+    {
+        part_word_set(me);
+    }
+}
+
+/**
+ * @brief LOWPOWER_READY_SIG outside a step: the answer of one that ran out of time.
+ *
+ * An owner that did put its part away after its time has it away all the
+ * same, and the end of the rest must bring it back: the part is held from
+ * here. A busy answer changes nothing.
+ *
+ * @param me The AO, AWAKE.
+ * @param a  The answer.
+ * @return true when the answer was the late step's.
+ */
+static bool part_late_ready(LowPower * const me, const LowPowerReadyEvt *a)
+{
+    bool const mine = (0U != me->part_late) && (a->round == me->part_late_round)
+                      && (a->who == me->part_late_who);
+
+    if ( mine )
+    {
+        if ( (!a->busy) && lowpower_part_stays(me->part_late) )
+        {
+            me->part_rest |= me->part_late;
+            KLOG_N(TAG, "rest: the %s rested after its time; parts 0x%02x stay at rest",
+                   lowpower_part_name(me->part_late), (unsigned)me->part_rest);
+            part_word_set(me);
+        }
+        me->part_late = 0U;
+    }
+    return mine;
+}
+
+/**
+ * @brief LOWPOWER_READY_SIG while a step is open: the owner's answer to its round.
+ *
+ * @param me The AO, AWAKE.
+ * @param a  The answer.
+ * @return true when the answer was this step's.
+ */
+static bool part_ready(LowPower * const me, const LowPowerReadyEvt *a)
+{
+    bool const mine = (0U != me->part_step) && (a->round == me->round)
+                      && (a->who == me->part_who);
+
+    if ( mine && a->busy )
+    {
+        char why[KODE_LOWPOWER_WHY_MAX];
+
+        why_copy(why, sizeof(why), a->why);
+        if ( KODE_LP_PART_CPU == me->part_step )
+        {
+            /* What an earlier owner of the part armed is given back. */
+            part_cpu_restore(me);
+        }
+        part_fail(me, lowpower_part_name(me->part_step), why);
+    }
+    else if ( mine )
+    {
+        part_step_done(me);
+    }
+    else
+    {
+        /* Another round's answer: the caller looks further. */
+    }
+    return mine;
+}
+
+/**
+ * @brief DISPLAY_SLEEP_SIG for an app's own request: a glass it woke is not at rest.
+ *
+ * kode_sys_screen_sleep(false) wakes a glass the rest put to sleep, and its
+ * supply with it. The DSI link is up from then and holds the P4 awake, so the
+ * screen and the panel leave the parts held: the CPU part asked for next is
+ * refused until the screen rests again.
+ *
+ * @param me The AO.
+ * @param s  The answer.
+ */
+static void part_glass_woken(LowPower * const me, const DisplaySleepEvt *s)
+{
+    uint8_t const glass = (uint8_t)(KODE_LP_PART_SCREEN | KODE_LP_PART_PANEL);
+
+    if ( (DISPLAY_SLEEP_WHO_REST != s->who) && ((uint8_t)KODE_OK == s->rc) && (!s->asleep)
+        && ((me->part_rest & glass) != 0U) )
+    {
+        me->part_rest &= (uint8_t)~glass;
+        KLOG_N(TAG, "rest: the app woke the screen through its own door; parts 0x%02x stay at rest",
+               (unsigned)me->part_rest);
+        part_word_set(me);
+    }
+}
+
+/**
+ * @brief DISPLAY_SLEEP_SIG: the glass's owner answered a request to sleep or wake.
+ *
+ * Only the answers to this AO's own requests are judged (DISPLAY_SLEEP_WHO_REST):
+ * an app's own door has its own, and is read only for a glass it woke
+ * (part_glass_woken()). A sleep that ran out of time and came after it still
+ * leaves the glass asleep, and is held from then.
+ *
+ * @param me The AO, AWAKE.
+ * @param s  The answer.
+ */
+static void part_glass_answer(LowPower * const me, const DisplaySleepEvt *s)
+{
+    bool const up_step   = me->part_up && ((KODE_LP_PART_SCREEN == me->part_step)
+                                           || (KODE_LP_PART_PANEL == me->part_step));
+    bool const down_step = (!me->part_up) && (KODE_LP_PART_SCREEN == me->part_step);
+
+    if ( DISPLAY_SLEEP_WHO_REST != s->who )
+    {
+        /* An app's own request: not this AO's to judge. */
+        part_glass_woken(me, s);
+    }
+    else if ( up_step || down_step )
+    {
+        if ( (uint8_t)KODE_OK != s->rc )
+        {
+            part_fail(me, lowpower_part_name(me->part_step), display_sleep_why_text(s->why));
+        }
+        else if ( s->asleep == down_step )
+        {
+            part_step_done(me);
+        }
+        else
+        {
+            /* The answer of an earlier request: this step's is still to come. */
+        }
+    }
+    else if ( (KODE_LP_PART_SCREEN == me->part_late) && ((uint8_t)KODE_OK == s->rc) && s->asleep )
+    {
+        me->part_late  = 0U;
+        me->part_rest |= KODE_LP_PART_SCREEN;
+        KLOG_N(TAG, "rest: the screen rested after its time; parts 0x%02x stay at rest",
+               (unsigned)me->part_rest);
+        part_word_set(me);
+    }
+    else
+    {
+        /* Nothing was waiting for it. */
+    }
+}
+
+/**
+ * @brief The owner asked in this step did not answer in time.
+ *
+ * Its answer may still come (part_late_ready()). The CPU part is given back
+ * whole instead: nothing of it is left armed for a late answer to find.
+ *
+ * @param me The AO, a step open.
+ */
+static void part_step_timeout(LowPower * const me)
+{
+    KLOG_W(TAG, "rest: %s did not answer for the %s in %u ms",
+           me->parts[me->part_who].name, lowpower_part_name(me->part_step),
+           (unsigned)KODE_LOWPOWER_PART_STEP_MS);
+    if ( KODE_LP_PART_CPU == me->part_step )
+    {
+        part_cpu_restore(me);
+    }
+    else if ( !me->part_up )
+    {
+        me->part_late       = me->part_step;
+        me->part_late_round = me->round;
+        me->part_late_who   = me->part_who;
+    }
+    else
+    {
+        /* A wake that comes late finds the part still held: asked again, it is as asked. */
+    }
+    part_fail(me, lowpower_part_name(me->part_step), "no answer");
+}
+
+/**
+ * @brief LOWPOWER_PART_REQ_SIG while AWAKE: put parts away, or bring them back.
+ *
+ * @param me The AO.
+ * @param r  The request.
+ */
+static void part_request(LowPower * const me, const LowPowerPartReqEvt *r)
+{
+    if ( 0U != me->part_step )
+    {
+        /* One sequence at a time, and the one in hand goes on. */
+        if ( ((uint8_t)KODE_LOWPOWER_SRC_APP == r->src)
+            && ((uint8_t)KODE_LOWPOWER_SRC_APP != me->part_src) )
+        {
+            /* The one in hand is not an app's, so no task waits for an answer
+             * of its own: this refusal is counted, and its task hears it now. */
+            part_answer(me, r->src, KODE_DENIED, "rest: underway");
+        }
+        else
+        {
+            /* The one in hand has its own answer to come: this refusal is told
+             * on the bus and changes nothing a task reads of it. */
+            KLOG_N(TAG, "rest (source %u) refused: a rest is being arranged", (unsigned)r->src);
+            part_publish(me, (uint8_t)KODE_LP_PART_ANSWER, KODE_DENIED,
+                         (uint8_t)KODE_LP_WAKE_NONE, r->src, "rest: underway");
+        }
+    }
+    else if ( r->end )
+    {
+        KLOG_N(TAG, "rest ends (source %u): parts 0x%02x come back",
+               (unsigned)r->src, (unsigned)me->part_rest);
+        me->part_src  = r->src;
+        me->part_up   = true;
+        me->part_late = 0U;
+        part_advance(me);
+    }
+    else
+    {
+        khal_exp_info_t     info  = { 0 };
+        uint8_t             parts = r->parts;
+        lowpower_part_ask_t ask   = { 0 };
+        const char         *why;
+
+        ask.at_rest    = me->part_rest;
+        ask.glass      = (KODE_LOWPOWER_WHO_NONE
+                          != part_who(me, lowpower_part_owner(KODE_LP_PART_SCREEN)));
+        ask.cable      = me->vbus;
+        ask.wake_touch = r->wake_touch;
+        ask.wake_pin   = (0U != r->wake_pin);
+        ask.pin_known  = (KHAL_EXP_POS_MIN <= r->wake_pin) && (KHAL_EXP_POS_MAX >= r->wake_pin);
+        if ( ask.pin_known )
+        {
+            khal_exp_info(r->wake_pin, &info);
+            /* An input somebody listens to keeps its interrupt: a wake line would take it. */
+            ask.pin_free = (KHAL_EXP_FREE == info.mode)
+                           || ((KHAL_EXP_IN == info.mode) && (!info.irq));
+        }
+        why = lowpower_part_check(&parts, &ask);
+        if ( (NULL == why) && ((parts & KODE_LP_PART_CPU) != 0U) && !me->power_ok )
+        {
+            why = "cpu: power management did not start";
+        }
+        if ( NULL != why )
+        {
+            part_answer(me, r->src, KODE_DENIED, why);
+        }
+        else
+        {
+            KLOG_N(TAG, "rest asked (source %u): parts 0x%02x", (unsigned)r->src,
+                   (unsigned)parts);
+            me->part_src  = r->src;
+            me->part_up   = false;
+            me->part_want = parts;
+            me->part_done = 0U;
+            me->part_late = 0U;
+            if ( (parts & KODE_LP_PART_CPU) != 0U )
+            {
+                part_wakes_off(me);
+                me->part_wake_touch = r->wake_touch;
+                me->part_wake_level = r->wake_level;
+                me->part_wake_pin   = r->wake_pin;
+                me->part_after_ms   = r->wake_after_ms;
+                me->part_gpio       = info.gpio;
+                me->part_pin_free   = (KHAL_EXP_FREE == info.mode);
+                me->part_pin_pulled = info.pulled;
+            }
+            part_advance(me);
+        }
+    }
+}
+
+/**
+ * @brief The board takes every part for a state of its own: the app's rest is over.
+ *
+ * Nothing is brought back here. The round asks the owners of the rest, the
+ * ones at rest answer ready, and the AWAKE that ends it restores them all.
+ *
+ * @param me The AO, in a round or about to begin one.
+ */
+static void part_take(LowPower * const me)
+{
+    if ( (0U != me->part_rest) || (0U != me->part_step) )
+    {
+        bool const open = (0U != me->part_step);
+
+        if ( open )
+        {
+            tmo_stop(&me->round_tmo);
+            me->part_step = 0U;
+            me->part_want = 0U;
+            me->part_done = 0U;
+        }
+        if ( (me->part_rest & KODE_LP_PART_CPU) != 0U )
+        {
+            /* The minute found off_after reached: the round needs the clock. */
+            light_up();
+        }
+        part_wakes_off(me);
+        me->part_late = 0U;
+        if ( open )
+        {
+            part_answer(me, me->part_src, KODE_DENIED, "board: takes the rest");
+        }
+        KLOG_N(TAG, "rest over: the board takes parts 0x%02x", (unsigned)me->part_rest);
+        me->part_rest = 0U;
+        part_word_set(me);
+        part_publish(me, (uint8_t)KODE_LP_PART_TAKEN, KODE_OK, (uint8_t)KODE_LP_WAKE_NONE,
+                     (uint8_t)KODE_LOG_SRC_NONE, NULL);
+    }
+}
+
+/**
+ * @brief Before a round that may be given up: what of the app's rest it must not touch yet.
+ *
+ * The round needs the system's clock, so a P4 still asleep wakes here and
+ * the app is told. The devices the app put away stay as they are, and their
+ * owners are the ones the round asks last.
+ *
+ * @param me The AO, about to begin a round, with no rest being arranged.
+ * @return Bit n: participant n owns a device the app has at rest.
+ */
+static uint32_t part_round_keep(LowPower * const me)
+{
+    static const uint8_t devices[] = {
+        KODE_LP_PART_TOUCH, KODE_LP_PART_SCREEN, KODE_LP_PART_PANEL, KODE_LP_PART_RADIO
+    };
+    uint32_t held = 0U;
+
+    if ( (me->part_rest & KODE_LP_PART_CPU) != 0U )
+    {
+        /* The minute found off_after reached. */
+        part_cpu_wake(me, (uint8_t)KODE_LP_WAKE_OWNER);
+    }
+    for ( uint8_t i = 0U; Q_DIM(devices) > i; i++ )
+    {
+        if ( (me->part_rest & devices[i]) != 0U )
+        {
+            uint8_t const who = part_who(me, lowpower_part_owner(devices[i]));
+
+            if ( who < me->joined )
+            {
+                held |= ((uint32_t)1U << who);
             }
         }
     }
+    return held;
+}
+
+/**
+ * @brief Whether an event ends the CPU part, and as what.
+ *
+ * Any button does, on the expander's reading itself: with the tick stopped
+ * no settle runs and AO_Buttons publishes nothing. A touch does when the app
+ * asked for it. Everything that needs the system's clock to be served does:
+ * a console line, an MQTT message, a cable, a cell at its cut and any request
+ * to this AO. The cable and the cell show in the reading the minute asks for
+ * (part_minute()).
+ *
+ * @param me The AO, AWAKE, with the CPU part at rest.
+ * @param e  The event.
+ * @return The kode_lp_wake_t; KODE_LP_WAKE_NONE for an event that wakes nothing.
+ */
+static uint8_t part_wake_cause(const LowPower *me, QEvt const * const e)
+{
+    uint8_t cause = (uint8_t)KODE_LP_WAKE_NONE;
+
+    switch ( e->sig )
+    {
+        case IOEXP_INPUT_SIG: {
+            IoexpInputEvt const * const in = Q_EVT_CAST(IoexpInputEvt);
+
+            if ( in->ok && ((in->changed & PART_BUTTONS_MASK) != 0U) )
+            {
+                cause = (uint8_t)KODE_LP_WAKE_BUTTON;
+            }
+            else if ( in->ok && me->part_wake_touch && ((in->changed & PART_TOUCH_MASK) != 0U)
+                     && ((in->levels & PART_TOUCH_MASK) == 0U) )
+            {
+                cause = (uint8_t)KODE_LP_WAKE_TOUCH;
+            }
+            else
+            {
+                /* Another pin of the expander. */
+            }
+            break;
+        }
+        case LOWPOWER_TOP_SIG:
+        case BUTTON_EVT_SIG: {
+            cause = (uint8_t)KODE_LP_WAKE_BUTTON;
+            break;
+        }
+        case TOUCH_EVT_SIG: {
+            if ( me->part_wake_touch && !Q_EVT_CAST(TouchEvt)->stale )
+            {
+                cause = (uint8_t)KODE_LP_WAKE_TOUCH;
+            }
+            break;
+        }
+        case LOWPOWER_PART_WAKE_SIG: {
+            uint8_t const src = Q_EVT_CAST(LowPowerPartWakeEvt)->cause;
+
+            if ( (uint8_t)KODE_LP_WAKE_PIN == src )
+            {
+                if ( me->part_pin_armed )
+                {
+                    cause = src;
+                }
+            }
+            else if ( time_due(me->part_due_us, khal_time_us()) )
+            {
+                cause = (uint8_t)KODE_LP_WAKE_TIMER;
+            }
+            else
+            {
+                /* A one-shot of an earlier rest. */
+            }
+            break;
+        }
+        case LOWPOWER_INPUT_SIG: {
+            cause = (uint8_t)KODE_LP_WAKE_CONSOLE;
+            break;
+        }
+        case MQTT_MSG_SIG: {
+            cause = (uint8_t)KODE_LP_WAKE_MQTT;
+            break;
+        }
+        case POWER_EVT_SIG: {
+            if ( Q_EVT_CAST(PowerEvt)->vbus )
+            {
+                cause = (uint8_t)KODE_LP_WAKE_CABLE;
+            }
+            break;
+        }
+        case POWER_SHIP_SIG: {
+            /* AO_Power says it before it opens the battery path, and what it
+             * does next takes time. */
+            cause = (uint8_t)KODE_LP_WAKE_BATTERY;
+            break;
+        }
+        case LOWPOWER_REQ_SIG:
+        case LOWPOWER_REST_SIG:
+        case LOWPOWER_PART_REQ_SIG:
+        case CONFIG_REQ_SIG: {
+            cause = (uint8_t)KODE_LP_WAKE_REQUEST;
+            break;
+        }
+        default: {
+            /* Nothing that needs the clock. */
+            break;
+        }
+    }
+    return cause;
+}
+
+/**
+ * @brief LOWPOWER_PART_WAKE_SIG: count a one-shot heard, and arm the next hop of a later time.
+ *
+ * The header's line disarmed itself in its interrupt, so it is no longer
+ * armed once its event is here.
+ *
+ * @param me The AO.
+ * @param w  The note.
+ */
+static void part_wake_heard(LowPower * const me, const LowPowerPartWakeEvt *w)
+{
+    if ( (uint8_t)KODE_LP_WAKE_TIMER == w->cause )
+    {
+        if ( 0U < me->part_timers )
+        {
+            me->part_timers -= 1U;
+        }
+        if ( ((me->part_rest & KODE_LP_PART_CPU) != 0U) && (0U != me->part_due_us)
+            && (0U == me->part_timers) && !part_timer_hop(me, khal_time_us()) )
+        {
+            /* A hop on the way, or the one-shot of an earlier rest, and the
+             * next would not arm: the buttons and the minute still wake it. */
+            KLOG_W(TAG, "rest: the wake time lost its timer; the P4 sleeps on without it");
+        }
+    }
+}
+
+/**
+ * @brief LOWPOWER_MINUTE_SIG with the CPU part at rest: what a sleeping P4 still owes the board.
+ *
+ * The same one-shot ASLEEP keeps, because the tick is stopped here as well.
+ * The charger is read, so a cable shows and wakes the part and a cell at its
+ * cut is seen by its owner; off_after is counted from the moment the part
+ * went to rest, and sends the board OFF; and an owner's time that has come
+ * ends the part, so the owner can do its work.
+ *
+ * @param me The AO, AWAKE, with the CPU part at rest.
+ * @return The QP status.
+ */
+static QState part_minute(LowPower * const me)
+{
+    QState status = Q_HANDLED();
+    uint64_t const now = khal_time_us();
+
+    minute_heard(me);
+    if ( now < me->minute_due_us )
+    {
+        /* A one-shot of an earlier rest. If it was the last one out, the
+         * minute still needs its own. */
+        if ( 0U == me->minute_out )
+        {
+            minute_arm(me, me->minute_due_us - now);
+        }
+    }
+    else if ( off_due(me, me->part_since_us, now) )
+    {
+        KLOG_N(TAG, "the P4 at rest for %u s: off-after reached",
+               (unsigned)me->secs[SETTING_OFF_AFTER]);
+        status = round_begin(me, (uint8_t)KODE_LP_OFF, (uint8_t)KODE_LP_CAUSE_OFF_AFTER,
+                             (uint8_t)KODE_LOG_SRC_NONE);
+    }
+    else if ( time_due(me->app_due_us, now) || time_due(me->wake_due_us, now) )
+    {
+        me->app_due_us  = 0U;
+        me->wake_due_us = 0U;
+        part_cpu_wake(me, (uint8_t)KODE_LP_WAKE_OWNER);
+    }
+    else
+    {
+        power_peek_request();
+        minute_schedule(me, now, me->part_since_us);
+    }
+    return status;
 }
 
 /* ---- States --------------------------------------------------------------------------- */
@@ -2329,6 +3793,25 @@ static QState LowPower_on(LowPower * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case DISPLAY_SLEEP_SIG: {
+            /* In a round: a glass the app wakes now is awake when it ends. */
+            part_glass_woken(me, Q_EVT_CAST(DisplaySleepEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_PART_REQ_SIG: {
+            /* Asleep, going OFF or in a round: the board has every part. */
+            part_answer(me, Q_EVT_CAST(LowPowerPartReqEvt)->src, KODE_DENIED,
+                        "board: not awake");
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_PART_WAKE_SIG: {
+            /* A wake source of a rest that is over. */
+            part_wake_heard(me, Q_EVT_CAST(LowPowerPartWakeEvt));
+            status = Q_HANDLED();
+            break;
+        }
         case LOWPOWER_REST_SIG: {
             /* Asleep, going OFF, or in a round (the board's state is still AWAKE
              * for that): there is nothing to rest from, and whoever asked is
@@ -2365,10 +3848,79 @@ static QState LowPower_awake(LowPower * const me, QEvt const * const e)
 {
     QState status;
 
+    if ( (me->part_rest & KODE_LP_PART_CPU) != 0U )
+    {
+        /* The tick is stopped: whatever needs it ends the CPU part first, and
+         * is then handled as on any awake board. */
+        uint8_t const cause = part_wake_cause(me, e);
+
+        if ( (uint8_t)KODE_LP_WAKE_NONE != cause )
+        {
+            part_cpu_wake(me, cause);
+        }
+    }
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
             idle_restart(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_PART_REQ_SIG: {
+            part_request(me, Q_EVT_CAST(LowPowerPartReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_PART_WAKE_SIG: {
+            part_wake_heard(me, Q_EVT_CAST(LowPowerPartWakeEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_MINUTE_SIG: {
+            if ( (me->part_rest & KODE_LP_PART_CPU) != 0U )
+            {
+                status = part_minute(me);
+            }
+            else
+            {
+                /* A one-shot of a rest that is over. */
+                minute_heard(me);
+                status = Q_HANDLED();
+            }
+            break;
+        }
+        case LOWPOWER_WAKE_AT_SIG: {
+            wake_store(me, Q_EVT_CAST(LowPowerWakeAtEvt));
+            if ( (me->part_rest & KODE_LP_PART_CPU) != 0U )
+            {
+                /* The tick is stopped: the one-shot must not be later. */
+                wake_fold(me);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case LOWPOWER_READY_SIG: {
+            if ( part_ready(me, Q_EVT_CAST(LowPowerReadyEvt))
+                || part_late_ready(me, Q_EVT_CAST(LowPowerReadyEvt)) )
+            {
+                status = Q_HANDLED();
+            }
+            else
+            {
+                status = Q_SUPER(&LowPower_on);
+            }
+            break;
+        }
+        case LOWPOWER_ROUND_TMO_SIG: {
+            if ( tmo_fresh(&me->round_tmo) && (0U != me->part_step) )
+            {
+                part_step_timeout(me);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case DISPLAY_SLEEP_SIG: {
+            part_glass_answer(me, Q_EVT_CAST(DisplaySleepEvt));
             status = Q_HANDLED();
             break;
         }
@@ -2839,6 +4391,8 @@ static QState LowPower_initial(LowPower * const me, void const * const par)
     QActive_subscribe(&me->super, TOUCH_EVT_SIG);
     QActive_subscribe(&me->super, POWER_EVT_SIG);
     QActive_subscribe(&me->super, MQTT_MSG_SIG);
+    QActive_subscribe(&me->super, DISPLAY_SLEEP_SIG);
+    QActive_subscribe(&me->super, POWER_SHIP_SIG);
     KLOG_I(TAG, "up; AWAKE");
     return Q_TRAN(&LowPower_awake);
 }
@@ -2882,6 +4436,7 @@ void LowPower_ctor(void)
     me->sealed   = false;
     me->round    = ROUND_NONE;
     me->waiting  = 0U;
+    me->held     = 0U;
     me->state    = (uint8_t)KODE_LP_AWAKE;
     me->target   = (uint8_t)KODE_LP_AWAKE;
     me->cause    = (uint8_t)KODE_LP_CAUSE_BOOT;
@@ -2910,6 +4465,34 @@ void LowPower_ctor(void)
     me->last_cause      = (uint8_t)KODE_LP_CAUSE_BOOT;
     (void)memset(me->wakes, 0, sizeof(me->wakes));
     s_refusal[0] = '\0';
+    me->part_rest       = 0U;
+    me->part_want       = 0U;
+    me->part_step       = 0U;
+    me->part_who        = KODE_LOWPOWER_WHO_NONE;
+    me->part_src        = (uint8_t)KODE_LOG_SRC_NONE;
+    me->part_up         = false;
+    me->part_wake_touch = false;
+    me->part_wake_level = false;
+    me->part_pin_armed  = false;
+    me->part_wake_pin   = 0U;
+    me->part_timers     = 0U;
+    me->part_rc         = (uint8_t)KODE_OK;
+    me->part_answers    = 0U;
+    me->part_gpio       = 0U;
+    me->part_after_ms   = 0U;
+    me->part_due_us     = 0U;
+    me->part_hop_us     = 0U;
+    me->part_since_us   = 0U;
+    me->part_late_round = ROUND_NONE;
+    me->part_done       = 0U;
+    me->part_cpu_stage  = 0U;
+    me->part_late       = 0U;
+    me->part_late_who   = KODE_LOWPOWER_WHO_NONE;
+    me->part_pin_free   = false;
+    me->part_pin_pulled = KHAL_GPIO_PULL_NONE;
+    s_part_why[0]  = '\0';
+    s_part_said[0] = '\0';
+    atomic_store(&s_part_word, 0U);
 }
 
 /* A queue for a whole round's answers arriving together, and a small stack:
@@ -3002,6 +4585,51 @@ bool lowpower_request_rest(uint8_t src)
     return posted;
 }
 
+QEvt const *lowpower_part_req_evt(const lowpower_part_req_t *req, uint8_t src)
+{
+    LowPowerPartReqEvt *e   = NULL;
+    QEvt const         *out = NULL;
+
+    if ( NULL != req )
+    {
+        e = Q_NEW_X(LowPowerPartReqEvt, 0U, LOWPOWER_PART_REQ_SIG);
+    }
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "no event for a request for parts; it was dropped");
+    }
+    else
+    {
+        e->parts         = req->parts;
+        e->end           = req->end;
+        e->wake_touch    = req->wake_touch;
+        e->wake_level    = req->wake_level;
+        e->wake_pin      = req->wake_pin;
+        e->wake_after_ms = req->wake_after_ms;
+        e->src           = src;
+        out = &e->super;
+    }
+    return out;
+}
+
+void lowpower_part_last(lowpower_part_last_t *out)
+{
+    if ( NULL != out )
+    {
+        uint32_t const word = atomic_load(&s_part_word);
+
+        out->answers = (uint16_t)(word >> PART_WORD_ANSWERS_SHIFT);
+        out->rc      = (uint8_t)((word >> PART_WORD_RC_SHIFT) & PART_WORD_BYTE_MASK);
+        out->parts   = (uint8_t)(word & KODE_LP_PART_ALL);
+        out->open    = ((word & PART_WORD_OPEN) != 0U);
+    }
+}
+
+const char *lowpower_part_why(void)
+{
+    return s_part_why;
+}
+
 void lowpower_input_note(uint8_t src)
 {
     /* One static event per port, so a wake from BLE or the channel is never
@@ -3045,6 +4673,8 @@ void lowpower_info_get(lowpower_info_t *out)
     out->wakes_ble     = me->wakes[KODE_LP_CAUSE_BLE];
     out->wakes_mqtt    = me->wakes[KODE_LP_CAUSE_MQTT];
     out->wakes_timer   = me->wakes[KODE_LP_CAUSE_TIMER];
+    out->parts         = me->part_rest;
+    out->part_why      = s_part_said;
 }
 
 /* Called on kode_init()'s thread before any round, and refused after the first: the table

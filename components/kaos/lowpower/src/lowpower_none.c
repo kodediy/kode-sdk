@@ -36,3 +36,19 @@ const char *lowpower_last_refusal(void)
 {
     return NOT_BUILT;
 }
+
+void lowpower_part_last(lowpower_part_last_t *out)
+{
+    if ( NULL != out )
+    {
+        out->answers = 0U;
+        out->rc      = (uint8_t)KODE_OK;
+        out->parts   = 0U;
+        out->open    = false;
+    }
+}
+
+const char *lowpower_part_why(void)
+{
+    return NOT_BUILT;
+}

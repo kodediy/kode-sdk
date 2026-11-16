@@ -494,13 +494,19 @@ enum KodeSignals {
                                  *   participant rests its device on it, from
                                  *   AWAKE or, for an OFF round, from the
                                  *   ASLEEP rest, and answers exactly once
-                                 *   with lowpower_ready().                 */
+                                 *   with lowpower_ready(). A round begun
+                                 *   over an app's rest is posted to the
+                                 *   participants instead, the owners of the
+                                 *   rest last: who did not join does not
+                                 *   hear that one.                         */
     LOWPOWER_STATE_SIG,         /**< Published by AO_LowPower on every change
                                  *   of the board's state (LowPowerStateEvt).
                                  *   A participant restores its device on
                                  *   state AWAKE, which also arrives with
                                  *   prev == AWAKE when a round was abandoned
-                                 *   (so the restore must be idempotent), and
+                                 *   (so the restore must be idempotent; one
+                                 *   abandoned over an app's rest posts it to
+                                 *   the participants it had asked), and
                                  *   starts no QTimeEvt on state ASLEEP: the
                                  *   tick is stopped by then.               */
     LOWPOWER_REFUSED_SIG,       /**< Published by AO_LowPower when a request
@@ -508,6 +514,13 @@ enum KodeSignals {
                                  *   a busy owner, a person at the board
                                  *   (LowPowerRefusedEvt). What the console
                                  *   closes `sleep` and `power_off` with.   */
+    LOWPOWER_PART_SIG,          /**< Published by AO_LowPower: news of the
+                                 *   parts an app put away with
+                                 *   kode_sys_rest() (LowPowerPartEvt). The
+                                 *   one answer to each request, and, unasked,
+                                 *   a wake of the P4 and the board taking
+                                 *   the rest over. The board's state stays
+                                 *   AWAKE throughout.                      */
 #endif
     BOOT_KEEP_SIG,              /**< AO_Boot: a restart into kodeOS is a moment
                                  *   away. The panel's owner leaves the frame on
@@ -2029,6 +2042,20 @@ enum KodeSignals {
                                  *   begin a requested round again, an owner
                                  *   having been busy or silent in the last
                                  *   one (KODE_LOWPOWER_REQUEST_RETRY_MS). */
+    LOWPOWER_PART_REQ_SIG,      /**< AO_LowPower (direct post, from
+                                 *   lowpower_part_req_evt()): put parts
+                                 *   away, or bring them all back
+                                 *   (LowPowerPartReqEvt).                  */
+    LOWPOWER_PART_WAKE_SIG,     /**< AO_LowPower (direct post, from the wake
+                                 *   line's interrupt and the wake timer): a
+                                 *   source the app chose woke the P4. One
+                                 *   static event per source
+                                 *   (LowPowerPartWakeEvt).                 */
+    DISPLAY_SUPPLY_REQ_SIG,     /**< AO_Display (direct post, from
+                                 *   display_supply_off_request()): take the
+                                 *   supply of a panel already asleep for an
+                                 *   app (DisplaySupplyReqEvt). Answered with
+                                 *   lowpower_ready().                      */
 #endif
 
     SCHED_SET_REQ_SIG,          /**< AO_Scheduler (direct post, from
@@ -5680,11 +5707,18 @@ typedef struct {
                           *   Meaningless when @c up is false.              */
 } DisplayStateEvt;
 
+#define DISPLAY_SLEEP_WHO_APP   0U  /**< A request through kode_sys_screen_sleep().       */
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
+#define DISPLAY_SLEEP_WHO_REST  1U  /**< AO_LowPower's, for the screen of an app's rest.  */
+
 /** @brief Put the glass to sleep or wake it (DISPLAY_SLEEP_REQ_SIG). */
 typedef struct {
-    QEvt super;
-    bool sleep;   /**< true: the panel in sleep-in and its link down. false:
-                   *   both back, the glass at the brightness it had.      */
+    QEvt    super;
+    bool    sleep;  /**< true: the panel in sleep-in and its link down. false:
+                     *   both back, the glass at the brightness it had.      */
+    uint8_t who;    /**< DISPLAY_SLEEP_WHO_*: the door it came through. The
+                     *   answer carries it back, so neither door takes the
+                     *   other's answer for its own.                        */
 } DisplaySleepReqEvt;
 
 /** @brief Why a request to sleep or wake the glass ended as it did (DisplaySleepEvt::why). */
@@ -5718,6 +5752,7 @@ typedef struct {
                        *   request asked.                                     */
     uint8_t why;      /**< A display_sleep_why_t: why not, when @c rc is not
                        *   KODE_OK.                                           */
+    uint8_t who;      /**< The DISPLAY_SLEEP_WHO_* of the request answered.   */
 } DisplaySleepEvt;
 
 /**
@@ -7383,6 +7418,49 @@ typedef enum {
 /* cppcheck-suppress misra-c2012-2.3 ; a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
 } kode_lp_cause_t;
 
+/* ---- The parts of a rest an app asks for --------------------------------
+ * An app names the parts it does not use and AO_LowPower puts them away one
+ * at a time, while the board stays AWAKE for everything else. The bits are
+ * here for the facade, which uses them whether the option is on or not.
+ */
+#define KODE_LP_PART_SCREEN  0x01U  /**< The panel in sleep-in, its link down.          */
+#define KODE_LP_PART_PANEL   0x02U  /**< And the panel's supply off; takes the touch.   */
+#define KODE_LP_PART_TOUCH   0x04U  /**< The touch controller in auto-sleep, no interrupt. */
+#define KODE_LP_PART_SOUND   0x08U  /**< The amplifier off and the codec closed.        */
+#define KODE_LP_PART_CARD    0x10U  /**< The card unmounted and its supply off.         */
+#define KODE_LP_PART_RADIO   0x20U  /**< The C5 asleep between wakes.                   */
+#define KODE_LP_PART_CPU     0x40U  /**< The P4 light-sleeps when every task is idle.   */
+#define KODE_LP_PART_ALL     0x7FU  /**< Every part there is.                           */
+
+/** @brief What a LowPowerPartEvt tells. */
+/* cppcheck-suppress misra-c2012-2.4 ; the tag of a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
+typedef enum {
+    KODE_LP_PART_ANSWER = 0,  /**< How one request ended.                      */
+    KODE_LP_PART_WOKE,        /**< A wake source ended the CPU part.           */
+    KODE_LP_PART_TAKEN        /**< The board asked for a state of its own: the
+                               *   rest is over and the board has every part. */
+/* cppcheck-suppress misra-c2012-2.3 ; a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
+} kode_lp_part_what_t;
+
+/** @brief What ended the CPU part of a rest. */
+/* cppcheck-suppress misra-c2012-2.4 ; the tag of a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
+typedef enum {
+    KODE_LP_WAKE_NONE = 0,    /**< Nothing: not a wake.                        */
+    KODE_LP_WAKE_BUTTON,      /**< A button: the bottom one, the pad or the top. */
+    KODE_LP_WAKE_TOUCH,       /**< A touch, when the app asked for it.         */
+    KODE_LP_WAKE_PIN,         /**< The expansion header's line the app named.  */
+    KODE_LP_WAKE_TIMER,       /**< The time the app gave.                      */
+    KODE_LP_WAKE_CONSOLE,     /**< A console line, on any port.                */
+    KODE_LP_WAKE_MQTT,        /**< An MQTT message.                            */
+    KODE_LP_WAKE_CABLE,       /**< A USB cable appeared.                       */
+    KODE_LP_WAKE_REQUEST,     /**< A request to AO_LowPower itself.            */
+    KODE_LP_WAKE_OWNER,       /**< Work of the board's own fell due: an entry
+                               *   of the scheduler, an owner's time.          */
+    KODE_LP_WAKE_BATTERY      /**< The cell is at its cut: AO_Power is about to
+                               *   open the battery path.                      */
+/* cppcheck-suppress misra-c2012-2.3 ; a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
+} kode_lp_wake_t;
+
 /** @brief What woke the P4 from a sleep with the C5 involved. */
 /* cppcheck-suppress misra-c2012-2.4 ; the tag of a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
 typedef enum {
@@ -7686,6 +7764,10 @@ typedef struct {
 typedef struct {
     QEvt     super;
     uint8_t  target;   /**< The kode_lp_state_t being prepared.               */
+    uint8_t  parts;    /**< 0 for a round of the board. Otherwise the round is
+                        *   an app's rest, posted to this owner alone while
+                        *   the board stays AWAKE, and this is the
+                        *   KODE_LP_PART_* it is asked for.                  */
     uint32_t round;    /**< The round's number; answers carry it back.        */
 } LowPowerRoundEvt;
 
@@ -7774,6 +7856,50 @@ typedef struct {
     bool     busy;     /**< true: not now; the state change is refused.       */
     char     why[KODE_LOWPOWER_WHY_MAX]; /**< Why busy; NUL-terminated.       */
 } LowPowerReadyEvt;
+
+/**
+ * @brief Put parts away, or bring them all back (LOWPOWER_PART_REQ_SIG).
+ *
+ * The wake fields matter only with KODE_LP_PART_CPU among the parts.
+ */
+typedef struct {
+    QEvt     super;
+    uint8_t  parts;          /**< The KODE_LP_PART_* to put away; unused when @c end. */
+    bool     end;            /**< true: bring every part back.                  */
+    bool     wake_touch;     /**< A touch ends the CPU part.                    */
+    bool     wake_level;     /**< The level of @c wake_pin that ends it.        */
+    uint8_t  wake_pin;       /**< A position of the expansion header; 0 for none. */
+    uint8_t  src;            /**< Who asked, for the log and the answer.        */
+    uint32_t wake_after_ms;  /**< A time that ends the CPU part; 0 for none.    */
+} LowPowerPartReqEvt;
+
+/**
+ * @brief News of an app's rest (LOWPOWER_PART_SIG).
+ *
+ * @c why is a copy, as rule 7 asks. An answer that is not KODE_OK names the
+ * part and the reason, "part: why"; the parts that had rested stay at rest.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t what;      /**< A kode_lp_part_what_t.                            */
+    uint8_t rc;        /**< ANSWER: the request's kode_status_t.              */
+    uint8_t parts;     /**< The KODE_LP_PART_* at rest now.                   */
+    uint8_t cause;     /**< WOKE: the kode_lp_wake_t.                         */
+    uint8_t src;       /**< ANSWER: the source of the request answered.       */
+    char    why[KODE_LOWPOWER_REFUSAL_MAX]; /**< ANSWER refused: "part: why". */
+} LowPowerPartEvt;
+
+/** @brief A wake source the app chose woke the P4 (LOWPOWER_PART_WAKE_SIG). */
+typedef struct {
+    QEvt    super;
+    uint8_t cause;     /**< KODE_LP_WAKE_PIN or KODE_LP_WAKE_TIMER.           */
+} LowPowerPartWakeEvt;
+
+/** @brief Take the supply of a panel asleep for an app (DISPLAY_SUPPLY_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    uint32_t round;    /**< The round lowpower_ready() answers with.          */
+} DisplaySupplyReqEvt;
 
 /**
  * @brief A wake of the P4 that involved the C5 (RADIO_SLEEP_NOTE_SIG).

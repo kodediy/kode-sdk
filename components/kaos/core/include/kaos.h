@@ -4809,6 +4809,95 @@ void lowpower_input_note(uint8_t src);
  */
 const char *lowpower_last_refusal(void);
 
+/* ---- An app's rest, part by part ------------------------------------------
+ * An app names the parts it does not use (KODE_LP_PART_*) and AO_LowPower puts
+ * them away one at a time, asking each owner alone, while the board stays
+ * AWAKE for everything else. The order is fixed: sound, card, touch, screen,
+ * panel, radio, CPU; back, the CPU first. A request that asks for what cannot
+ * be is refused whole: the radio without the sound in the same request (the
+ * amplifier's enable is a line of the C5), the CPU with the glass up or on a
+ * cable, a touch as a wake source with the touch at rest, a line of the
+ * header that is in use or has an interrupt attached. The panel brings the
+ * screen and the touch with it.
+ * The sound and the card are put away once and come back at their next use:
+ * they are never among the parts held, and asking again asks their owners
+ * again.
+ *
+ * With KODE_LP_PART_CPU the QP tick stops and the awake lock goes, as in
+ * ASLEEP: no Active Object counts time until a wake. AO_LowPower keeps the
+ * minute it keeps asleep: it reads the charger, counts off_after and serves
+ * the owners' times. Any button, a console line, an MQTT message, a request
+ * to AO_LowPower, a cable, the cell at its cut, an owner's time and what the
+ * request names (a touch, a line of the expansion header, a time) end the CPU
+ * part alone; the other parts stay away until the request to end.
+ *
+ * Each request is answered once, with LOWPOWER_PART_SIG (ANSWER). The same
+ * signal says, unasked, that a wake ended the CPU part (WOKE) and that the
+ * board has every part for a state of its own (TAKEN). A task hears no event
+ * and reads the same in lowpower_part_last().
+ *
+ * A round of the board that an owner may refuse asks the owners of the
+ * devices held at rest last, each with its own copy of the round, and takes
+ * the rest (TAKEN) only when every other owner is ready. Given up before
+ * that, it tells AWAKE to the owners it did ask and to nobody else, and the
+ * rest is as it was, less the CPU part, which the round's clock ended. An
+ * order for OFF, and a round begun while a rest is being arranged, take the
+ * rest at once and are published as any round.
+ */
+
+/** @brief What lowpower_part_req_evt() asks for. */
+typedef struct {
+    uint8_t  parts;          /**< The KODE_LP_PART_* to put away; unused when @c end. */
+    bool     end;            /**< true: bring every part back.                  */
+    bool     wake_touch;     /**< A touch ends the CPU part.                    */
+    bool     wake_level;     /**< The level of @c wake_pin that ends it.        */
+    uint8_t  wake_pin;       /**< A position of the expansion header; 0 for none. */
+    uint32_t wake_after_ms;  /**< A time that ends the CPU part; 0 for none.    */
+} lowpower_part_req_t;
+
+/** @brief How the facade's last request for parts ended, and what is at rest now. */
+typedef struct {
+    uint16_t answers;   /**< The facade's requests answered since the boot; it wraps. */
+    uint8_t  rc;        /**< The last of those answers' kode_status_t.       */
+    uint8_t  parts;     /**< The KODE_LP_PART_* held at rest now.            */
+    bool     open;      /**< A request, anybody's, is being arranged: another
+                         *   is refused until it is answered.                */
+} lowpower_part_last_t;
+
+#ifdef CONFIG_KODE_LOWPOWER
+/**
+ * @brief The event that asks AO_LowPower for parts, for a door that posts it
+ *        with its own margin (LOWPOWER_PART_REQ_SIG).
+ *
+ * @param req What is asked; NULL makes no event.
+ * @param src Who asks, for the log and the answer.
+ * @return The event, to post to AO_LowPower; NULL when the pool had none.
+ */
+QEvt const *lowpower_part_req_evt(const lowpower_part_req_t *req, uint8_t src);
+#endif
+
+/**
+ * @brief How the facade's last request for parts ended, and the parts at rest now.
+ *
+ * A plain read of one word, from any thread. AO_LowPower writes it just
+ * before it publishes LOWPOWER_PART_SIG. Only the answers to requests with
+ * the source KODE_LOWPOWER_SRC_APP are counted, so a task waiting for its own
+ * never takes the console's for it; a request refused because another is
+ * being arranged is answered on the bus and counted nowhere. Without
+ * CONFIG_KODE_LOWPOWER it is all zero.
+ *
+ * @param out Filled; all zero before the first answer.
+ */
+void lowpower_part_last(lowpower_part_last_t *out);
+
+/**
+ * @brief Why the last request for parts was refused, "part: why".
+ *
+ * @return The text; "" when the last one stood. Read from another task, so a
+ *         request answered at that instant can tear it.
+ */
+const char *lowpower_part_why(void);
+
 #if CONFIG_KODE_LOWPOWER
 /** @brief What `lowpower_info` prints of AO_LowPower itself. */
 typedef struct {
@@ -4822,6 +4911,9 @@ typedef struct {
     uint32_t wakes_mqtt;     /**< Wakes from ASLEEP by the Kode channel.            */
     uint32_t wakes_timer;    /**< Wakes from ASLEEP for an owner's time, dark
                               *   wakes included.                             */
+    uint8_t  parts;          /**< The KODE_LP_PART_* an app's rest has put away.    */
+    const char *part_why;    /**< Why the last request for parts was refused,
+                              *   whoever asked; "" when it stood.            */
 } lowpower_info_t;
 
 /**
