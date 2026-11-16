@@ -131,6 +131,8 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kaos/net/src/net_ao.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_ao.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_frames.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_knock.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_knocks.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5svc.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_frames.c"
@@ -313,6 +315,8 @@ idf_component_register(
                  "${SDK_DIR}/components/kaos/core/src"
                  "${SDK_DIR}/components/kaos/autotest/src"
                  "${SDK_DIR}/components/kaos/net/src"
+                 # radio_knock.h and radio_knocks.h are private to the component
+                 "${SDK_DIR}/components/kaos/radio/src"
                  "${SDK_DIR}/components/kaos/scheduler/src"
                  "${SDK_DIR}/components/kaos/display/src"
                  "${SDK_DIR}/components/kqp/include"

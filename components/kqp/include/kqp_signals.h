@@ -1373,10 +1373,11 @@ enum KodeSignals {
     RADIO_JOB_GUARD_SIG,        /**< AO_Radio private QTimeEvt: the job with
                                  *   the radio worker never came back.        */
     RADIO_LINK_LOST_SIG,        /**< AO_Radio private: the link to the C5 is
-                                 *   gone (RadioLostEvt). Posted by the
-                                 *   driver's notification, from esp-hosted's
-                                 *   event task or from the worker, never by
-                                 *   an AO.                                  */
+                                 *   gone. A knock: one static event, posted
+                                 *   on the driver's notification, from
+                                 *   esp-hosted's event task or from the
+                                 *   worker, never by an AO; AO_Radio keeps
+                                 *   the reason.                             */
     RADIO_SVC_JOB_SIG,          /**< AO_Radio private: a KODE request came
                                  *   back from the service worker
                                  *   (KqpWorkerDoneEvt). The sends have a
@@ -4299,14 +4300,6 @@ typedef struct {
     bool     gave_up;    /**< The link is down, someone wants it, and no more
                           *   tries are coming until somebody asks.           */
 } RadioStateEvt;
-
-/** @brief The link to the C5 is gone (RADIO_LINK_LOST_SIG). */
-typedef struct {
-    QEvt    super;
-    uint8_t status;      /**< kode_status_t: KODE_ERROR when the transport
-                          *   dropped by itself, KODE_TIMEOUT when a job
-                          *   failed over a C5 that stopped answering.       */
-} RadioLostEvt;
 
 /** @brief RADIO_PARK_REQ_SIG: a jump is about to restart the board. */
 typedef struct {

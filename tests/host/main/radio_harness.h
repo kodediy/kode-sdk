@@ -50,6 +50,7 @@
 #include "kset.h"
 #include "lowpower_cases.h"
 #include "qf_support.h"
+#include "radio_knocks.h"
 
 /* ---- Fixture ----------------------------------------------------------------- */
 
@@ -662,6 +663,9 @@ static void settle_to_off(void)
 static void radio_fresh(void)
 {
     radio_up_once();
+    /* The AO outlives the case, and a case may have emptied its queue by
+     * hand: a knock whose event went that way would fold every later post. */
+    radio_knocks_reset();
     radio_lp_expect_net(true);   /* the rounds wait for AO_Net, as on the board */
     s_gate_auto = true;
     settle_to_off();

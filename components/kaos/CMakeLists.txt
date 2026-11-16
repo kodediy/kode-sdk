@@ -140,6 +140,10 @@ if(CONFIG_KODEOS_RADIO)
     list(APPEND srcs "radio/src/radio_ao.c")
     # The Wi-Fi frames door: its asker, its request and what it posts.
     list(APPEND srcs "radio/src/radio_frames.c")
+    # A knock's steps, with no queue of their own, so the host suite walks every order of them.
+    list(APPEND srcs "radio/src/radio_knock.c")
+    # The three knocks other tasks reach AO_Radio with.
+    list(APPEND srcs "radio/src/radio_knocks.c")
     if(CONFIG_KODEOS_CONSOLE)
         list(APPEND srcs "radio/src/radio_verbs.c")
     endif()

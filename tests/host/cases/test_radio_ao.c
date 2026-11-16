@@ -11442,6 +11442,950 @@ TEST_CASE("the droppable posts stop short of the last slots of the queue",
                                      "see the child's line above");
 }
 
+/* ---- AO_Radio held up: the three posts that are owed, never lost ------------
+ * The lost link, the BLE state and the pairing note are knocks
+ * (radio_knocks.h): one event of each waits at a time, a queue within
+ * KQP_RADIO_KNOCK_MARGIN of full owes it, and it is posted again by the
+ * poster or before the next event the AO handles. */
+
+/** @brief How many captured log lines contain @p needle. */
+static unsigned log_count(const char *needle)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const l = fake_klog_line(i);
+
+        if ( (NULL != l) && (strstr(l, needle) != NULL) )
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/** @brief The code the pairing cases show. */
+#define KNOCK_PASSKEY    123456U
+
+/** @brief How long the C5 has to answer a request before its deadline ends the wait, ms. */
+#define KNOCK_SVC_DEADLINE_MS 3000U
+
+/** @brief Posts from other tasks a held-up AO meets in the longest case: several queues' worth. */
+#define KNOCK_MANY_POSTS 40U
+
+/** @brief One post from another task, the n-th of a burst: BLE state, pairing note, lost link. */
+static void foreign_knock(unsigned n)
+{
+    switch ( n % 3U )
+    {
+        case 0U: {
+            fake_ble_central((n % 2U) == 0U);
+            break;
+        }
+        case 1U: {
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+            fake_ble_pair_show(KNOCK_PASSKEY);
+#endif
+            break;
+        }
+        default: {
+            fake_radio_lose_link(KODE_TIMEOUT);
+            break;
+        }
+    }
+}
+
+/** @brief Child body: a held-up AO_Radio with @p arg slots free meets a burst of the three posts. */
+static void knocks_burst_body(void *arg)
+{
+    uint32_t const left = *(uint32_t const *)arg;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    pump();
+    board_queue();
+    radio_queue_fill_to(left);
+
+    for ( unsigned n = 0U; KNOCK_MANY_POSTS > n; ++n )
+    {
+        foreign_knock(n);
+    }
+    uint32_t const now = (uint32_t)uxQueueSpacesAvailable(AO_Radio->eQueue);
+
+    if ( KQP_RADIO_KNOCK_MARGIN >= left )
+    {
+        CHILD_CHECK(now == left, "a knock took one of the last slots");
+    }
+    else
+    {
+        CHILD_CHECK(KQP_RADIO_KNOCK_MARGIN <= now, "a knock took one of the last slots");
+        CHILD_CHECK((left - now) <= (uint32_t)RADIO_KNOCK_COUNT, "more than one event of a knock waits");
+    }
+}
+
+TEST_CASE("a held-up AO_Radio owes the BLE state, the pairing note and the lost link and does not assert",
+          "[radio_ao][overflow]")
+{
+    uint32_t none = 0U;
+    uint32_t last = KQP_RADIO_KNOCK_MARGIN;
+    uint32_t half = KQP_RADIO_POST_MARGIN;
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&knocks_burst_body, &none),
+                                     "no slot free: see the child's line above");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&knocks_burst_body, &last),
+                                     "the knocks' margin free: see the child's line above");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&knocks_burst_body, &half),
+                                     "the doors' share queued: see the child's line above");
+}
+
+/** @brief The last BLE state the spy holds, or NULL; drains it. */
+static const BleStateEvt *spy_last_ble_state(void)
+{
+    const BleStateEvt *last = NULL;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)BLE_STATE_SIG == e->sig )
+        {
+            last = (const BleStateEvt *)e;
+        }
+    }
+    return last;
+}
+
+/** @brief Child body: a central arrives while the queue has @p arg slots free; the state is read once there is room. */
+static void ble_owed_body(void *arg)
+{
+    uint32_t const left = *(uint32_t const *)arg;
+
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    finish(KDRV_RADIO_JOB_BLE_ADV, kdrv_ble_advertise(true));
+    ao_spy_subscribe(BLE_STATE_SIG);
+    ao_spy_drain();
+    board_queue();
+    radio_queue_fill_to(left);
+    fake_klog_reset();
+
+    fake_ble_central(true);
+    CHILD_CHECK(uxQueueSpacesAvailable(AO_Radio->eQueue) == left, "the refused post took a slot");
+    CHILD_CHECK(1U == log_count("no room for the BLE state"), "the refusal was not said once");
+    pump();
+    pump();
+
+    const BleStateEvt *const s = spy_last_ble_state();
+    CHILD_CHECK(NULL != s, "the central that arrived was never told");
+    CHILD_CHECK((uint8_t)KDRV_BLE_CONNECTED == s->state, "the state told is not the arrival");
+    CHILD_CHECK(0U == uxQueueMessagesWaiting(AO_Radio->eQueue), "an event was left waiting");
+}
+
+TEST_CASE("a BLE state change refused by a full queue is read once the queue has room",
+          "[radio_ao][overflow]")
+{
+    uint32_t none = 0U;
+    uint32_t last = KQP_RADIO_KNOCK_MARGIN;
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&ble_owed_body, &none),
+                                     "no slot free: see the child's line above");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&ble_owed_body, &last),
+                                     "the knocks' margin free: see the child's line above");
+}
+
+TEST_CASE("BLE state changes that pile up leave one event waiting", "[radio_ao][overflow]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    radio_queue_flush();
+
+    fake_ble_central(true);
+    fake_ble_central(false);
+    fake_ble_central(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, uxQueueMessagesWaiting(AO_Radio->eQueue),
+                                   "each change posted an event of its own");
+    pump();
+    TEST_ASSERT_EQUAL_UINT(0U, uxQueueMessagesWaiting(AO_Radio->eQueue));
+
+    /* After the one was read, the next change posts again. */
+    fake_ble_central(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, uxQueueMessagesWaiting(AO_Radio->eQueue),
+                                   "the first event was handled and its knock was left standing");
+    pump();
+}
+
+TEST_CASE("a BLE state change handled with the link down leaves the next one its own event",
+          "[radio_ao][overflow]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    radio_queue_flush();
+
+    fake_ble_central(true);
+    TEST_ASSERT_EQUAL_UINT(1U, uxQueueMessagesWaiting(AO_Radio->eQueue));
+    pump();
+    TEST_ASSERT_EQUAL_UINT(0U, uxQueueMessagesWaiting(AO_Radio->eQueue));
+
+    fake_ble_central(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, uxQueueMessagesWaiting(AO_Radio->eQueue),
+                                   "the first event was handled and its knock was left standing");
+    pump();
+}
+
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+/** @brief Child body: a pairing code arrives while the queue is full; it is published once there is room. */
+static void pair_owed_body(void *arg)
+{
+    (void)arg;
+    radio_fresh();
+    go_up();
+    pump();
+    ao_spy_drain();
+    board_queue();
+    radio_queue_fill_to(0U);
+    fake_klog_reset();
+
+    fake_ble_pair_show(KNOCK_PASSKEY);
+    CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused post took a slot");
+    CHILD_CHECK(1U == log_count("no room for the pairing note"), "the refusal was not said once");
+    pump();
+    pump();
+
+    const BlePairEvt *const p = take_pair();
+    CHILD_CHECK(NULL != p, "the code was never published");
+    CHILD_CHECK((uint8_t)KDRV_BLE_PAIR_SHOW == p->phase, "not the pairing's code");
+    CHILD_CHECK(KNOCK_PASSKEY == p->passkey, "not this code");
+    CHILD_CHECK(NULL == take_pair(), "the code was published twice");
+}
+
+TEST_CASE("a pairing note refused by a full queue is published once the queue has room",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&pair_owed_body, NULL),
+                                     "see the child's line above");
+}
+
+TEST_CASE("pairing notes that pile up leave one event waiting, with the link up or down",
+          "[radio_ao][overflow]")
+{
+    radio_fresh();
+    radio_queue_flush();
+    ao_spy_drain();
+
+    /* The link down. */
+    fake_ble_pair_show(KNOCK_PASSKEY);
+    fake_ble_pair_end(KDRV_BLE_PAIR_OK);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, uxQueueMessagesWaiting(AO_Radio->eQueue),
+                                   "each note posted an event of its own");
+    pump();
+    const BlePairEvt *const down = take_pair();
+    TEST_ASSERT_NOT_NULL(down);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BLE_PAIR_DONE, down->phase);
+    fake_ble_pair_show(KNOCK_PASSKEY);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, uxQueueMessagesWaiting(AO_Radio->eQueue),
+                                   "the note was handled with the link down and its knock was left standing");
+    pump();
+
+    /* The link up. */
+    go_up();
+    radio_queue_flush();
+    fake_ble_pair_show(KNOCK_PASSKEY);
+    pump();
+    fake_ble_pair_end(KDRV_BLE_PAIR_OK);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, uxQueueMessagesWaiting(AO_Radio->eQueue),
+                                   "the note was handled with the link up and its knock was left standing");
+    pump();
+    ao_spy_drain();
+}
+#endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
+
+/** @brief Child body: the link is lost under a scan while the queue is full; the loss is heard once, with its first reason. */
+static void lost_owed_body(void *arg)
+{
+    (void)arg;
+    radio_fresh();
+    go_up();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    CHILD_CHECK((int)KDRV_RADIO_JOB_WIFI_SCAN == running_job(), "no scan with the worker");
+    board_queue();
+    radio_queue_fill_to(0U);
+    fake_klog_reset();
+
+    /* Two losses, the transport's after the mute C5's: the first one's reason stands. */
+    fake_radio_lose_link(KODE_TIMEOUT);
+    fake_radio_lose_link(KODE_ERROR);
+    CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused post took a slot");
+    CHILD_CHECK(1U == log_count("no room for the lost link"), "the refusal was not said once");
+    pump();
+    pump();
+
+    CHILD_CHECK((int)KRADIO_FAILED == link_now(), "the lost link was never heard");
+    CHILD_CHECK(1U == log_count("the C5 went mute; resetting it"), "not the first loss's reason, once");
+    CHILD_CHECK(!logged("the link to the C5 dropped"), "the second loss was heard as well");
+    unsigned const before = job_submits();
+    deliver_held(KODE_ERROR);
+    pump();
+    CHILD_CHECK((int)KDRV_RADIO_JOB_DISCONNECT == running_job(), "no teardown after the loss");
+    CHILD_CHECK(job_submits() == (before + 1U), "not exactly one teardown");
+}
+
+TEST_CASE("a lost link refused by a full queue is heard once the queue has room, with its first reason",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&lost_owed_body, NULL),
+                                     "see the child's line above");
+}
+
+/** @brief Child body: the slot a dispatch frees is taken before the owed loss can use it; it stays owed, and is said once. */
+static void lost_owed_twice_body(void *arg)
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+    const QEvt *first = NULL;
+
+    (void)arg;
+    radio_fresh();
+    go_up();
+    board_queue();
+    radio_queue_fill_to(0U);
+    fake_klog_reset();
+
+    fake_radio_lose_link(KODE_TIMEOUT);
+    CHILD_CHECK(xQueueReceive(AO_Radio->eQueue, &first, 0U) == pdTRUE, "nothing was queued");
+    QACTIVE_POST(AO_Radio, &filler, NULL);
+    QASM_DISPATCH(AO_Radio, first, 0U);          /* the AO's own payment is refused as well */
+    CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "the owed loss was posted into a queue with no room");
+    CHILD_CHECK(1U == log_count("no room for the lost link"), "not one line for the refusal");
+
+    pump();
+    pump();
+    CHILD_CHECK((int)KRADIO_FAILED == link_now(), "the lost link was never heard");
+}
+
+TEST_CASE("a lost link that finds the queue full again stays owed until there is room",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&lost_owed_twice_body, NULL),
+                                     "see the child's line above");
+}
+
+/** @brief Child body: a knock takes a slot above its margin and none of the last ones, and the time events that expire then are posted. */
+static void knock_margin_body(void *arg)
+{
+    (void)arg;
+    radio_fresh();
+    fake_ble_reset();
+    fake_peer_reset();
+    go_up();
+    pump();
+    board_queue();
+    radio_queue_fill_to(KQP_RADIO_KNOCK_MARGIN + 1U);
+
+    fake_ble_central(true);
+    CHILD_CHECK(KQP_RADIO_KNOCK_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a knock was refused with a slot above its margin free");
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    fake_ble_pair_show(KNOCK_PASSKEY);
+    CHILD_CHECK(KQP_RADIO_KNOCK_MARGIN == uxQueueSpacesAvailable(AO_Radio->eQueue),
+                "a knock took one of the last slots");
+#endif
+
+    /* The deadlines of the requests the link-up left with the C5 expire
+     * now: QP posts them with no margin, into the slots the knocks left. */
+    (void)qf_support_tick(AO_Radio, QF_SUPPORT_STEPS(KNOCK_SVC_DEADLINE_MS) + 2U);
+    pump();
+    CHILD_CHECK(logged("did not answer"), "the deadline never ended the wait");
+    CHILD_CHECK((int)KRADIO_UP == link_now(), "the link did not stay up");
+
+    fake_radio_lose_link(KODE_TIMEOUT);
+    pump();
+    CHILD_CHECK((int)KRADIO_FAILED == link_now(), "the loss was never heard");
+}
+
+TEST_CASE("the knocks leave the last slots of the queue to the time events",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&knock_margin_body, NULL),
+                                     "see the child's line above");
+}
+
+/* ---- Every state pays what is owed, and takes what it handles ---------------- */
+
+/** @brief The states that can be the current one. */
+typedef enum {
+    OWED_OFF = 0, OWED_STARTING, OWED_STOPPING, OWED_FAILED, OWED_UP,
+    OWED_AUTOJOIN, OWED_UPDATING, OWED_STATES
+} owed_state_t;
+
+/** @brief Walk the AO into @p st and say whether it got there. */
+static bool owed_state_reach(owed_state_t st)
+{
+    bool reached = false;
+
+    radio_fresh();
+    fake_ble_reset();
+    switch ( st )
+    {
+        case OWED_OFF: {
+            reached = (int)KRADIO_OFF == link_now();
+            break;
+        }
+        case OWED_STARTING: {
+            dispatch(RADIO_UP_REQ_SIG);
+            reached = (int)KRADIO_STARTING == link_now();
+            break;
+        }
+        case OWED_STOPPING: {
+            go_up();
+            dispatch(RADIO_DOWN_REQ_SIG);
+            reached = (int)KRADIO_STOPPING == link_now();
+            break;
+        }
+        case OWED_FAILED: {
+            go_up();
+            fake_radio_lose_link(KODE_ERROR);
+            pump();
+            reached = (int)KRADIO_FAILED == link_now();
+            break;
+        }
+        case OWED_UP: {
+            go_up();
+            reached = (int)KRADIO_UP == link_now();
+            break;
+        }
+        case OWED_AUTOJOIN: {
+            go_up();
+            vault_has("line-ap-0");
+            dispatch(WIFI_START_REQ_SIG);
+            pump();
+            reached = (int)KDRV_RADIO_JOB_WIFI_SCAN == running_job();
+            break;
+        }
+        case OWED_UPDATING: {
+            go_up();
+            recv_spy();
+            inst_deliver();
+            reached = (int)KDRV_RADIO_JOB_C5_BEGIN == running_job();
+            break;
+        }
+        default: {
+            reached = false;
+            break;
+        }
+    }
+    return reached;
+}
+
+/** @brief Child body: in the state in @p arg every knock is refused; the next event the state handles posts each again, and each is taken when handled. */
+static void owed_paid_body(void *arg)
+{
+    owed_state_t const st = *(owed_state_t const *)arg;
+    KqpWorkerDoneEvt   stale;
+
+    CHILD_CHECK(owed_state_reach(st), "the state was not reached");
+    board_queue();
+    radio_queue_fill_to(0U);
+
+    fake_ble_central(true);
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    fake_ble_pair_show(KNOCK_PASSKEY);
+#endif
+    fake_radio_lose_link(KODE_TIMEOUT);
+    CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue), "a refused post took a slot");
+
+    radio_queue_flush();
+    /* An event of the worker that this state handles itself, the end of a
+     * job nobody started: it does not reach a parent whose own head would
+     * pay, so the state under test has to. */
+    (void)memset(&stale, 0, sizeof(stale));
+    stale.super = (QEvt)QEVT_INITIALIZER(RADIO_JOB_SIG);
+    stale.seq   = 0xFFFEU;
+    QASM_DISPATCH(AO_Radio, &stale.super, 0U);
+
+    CHILD_CHECK(NULL != take_queued(BLE_LINK_SIG), "the BLE state was not posted again");
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    CHILD_CHECK(NULL != take_queued(BLE_PAIR_TAKE_SIG), "the pairing note was not posted again");
+#endif
+    CHILD_CHECK(NULL != take_queued(RADIO_LINK_LOST_SIG), "the loss was not posted again");
+    CHILD_CHECK(0U == uxQueueMessagesWaiting(AO_Radio->eQueue), "a knock was posted more than once");
+
+    /* Handled by this state, each knock is free again: the next post is an event of its own. */
+    {
+        static const QEvt ble  = QEVT_INITIALIZER(BLE_LINK_SIG);
+        static const QEvt lost = QEVT_INITIALIZER(RADIO_LINK_LOST_SIG);
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+        static const QEvt pair = QEVT_INITIALIZER(BLE_PAIR_TAKE_SIG);
+
+        QASM_DISPATCH(AO_Radio, &pair, 0U);
+#endif
+        QASM_DISPATCH(AO_Radio, &ble, 0U);
+        QASM_DISPATCH(AO_Radio, &lost, 0U);
+    }
+    radio_queue_flush();
+    fake_ble_central(false);
+    CHILD_CHECK(NULL != take_queued(BLE_LINK_SIG), "the BLE state's knock was left standing");
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    fake_ble_pair_end(KDRV_BLE_PAIR_OK);
+    CHILD_CHECK(NULL != take_queued(BLE_PAIR_TAKE_SIG), "the pairing note's knock was left standing");
+#endif
+    fake_radio_lose_link(KODE_ERROR);
+    CHILD_CHECK(NULL != take_queued(RADIO_LINK_LOST_SIG), "the loss's knock was left standing");
+}
+
+TEST_CASE("each state that can be current posts again what a full queue refused and takes what it handles",
+          "[radio_ao][overflow]")
+{
+    static const char *const names[OWED_STATES] = {
+        "off", "starting", "stopping", "failed", "up", "autojoin", "updating" };
+
+    for ( owed_state_t st = OWED_OFF; OWED_STATES > st; ++st )
+    {
+        owed_state_t arg = st;
+
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                         (uint32_t)ask_support_fork_run(&owed_paid_body, &arg),
+                                         names[st]);
+    }
+}
+
+TEST_CASE("a knock left standing by one case does not fold the next case's post into nothing",
+          "[radio_ao][overflow]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    go_up();
+    radio_queue_flush();
+    fake_ble_central(true);
+    radio_queue_flush();   /* the event that stood for the knock is gone */
+
+    radio_fresh();
+    fake_ble_reset();
+    radio_queue_flush();
+    fake_ble_central(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, uxQueueMessagesWaiting(AO_Radio->eQueue),
+                                   "the fresh start kept the knock of the case before");
+    pump();
+}
+
+/** @brief Blocks a case may hold to run the event pools dry. */
+#define KNOCK_HOG_MAX    512U
+
+TEST_CASE("a lost link is posted with the event pools dry and heard once they are not",
+          "[radio_ao][overflow]")
+{
+    static const QEvt *hog[KNOCK_HOG_MAX];
+    unsigned           n = 0U;
+
+    radio_fresh();
+    go_up();
+    radio_queue_flush();
+    while ( KNOCK_HOG_MAX > n )
+    {
+        QEvt *const e = QF_newX_((uint_fast16_t)sizeof(QEvt), 0U, (enum_t)Q_USER_SIG);
+
+        if ( NULL == e )
+        {
+            break;
+        }
+        hog[n] = e;
+        ++n;
+    }
+
+    fake_radio_lose_link(KODE_TIMEOUT);
+    UBaseType_t const queued = uxQueueMessagesWaiting(AO_Radio->eQueue);
+
+    /* Given back before anything is judged: a case that stops here must not
+     * leave the cases after it a dry pool. */
+    for ( unsigned i = 0U; n > i; ++i )
+    {
+        QF_gc(hog[i]);
+    }
+    TEST_ASSERT_TRUE_MESSAGE(KNOCK_HOG_MAX > n, "the pools never ran dry");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, queued, "the loss needed a block of a pool");
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
+    c5_case_end();
+}
+
+/* ---- A loss owed behind the end of a job --------------------------------------
+ * The driver tells of a loss before the job that met it comes back. A full
+ * queue owes the loss, so the job's end may be handled first. A failed end
+ * is then left to the loss, which answers for the job as it does when it is
+ * heard first; an end that worked, and a teardown's, answer as they came.
+ * Neither is turned into the other, and the loss is heard once. */
+
+/** @brief Child body: the loss is refused, then the scan inside the worker comes back before the loss can be posted again. */
+static void lost_behind_done_body(void *arg)
+{
+    unsigned ends = 0U;
+
+    (void)arg;
+    radio_fresh();
+    go_up();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    CHILD_CHECK((int)KDRV_RADIO_JOB_WIFI_SCAN == running_job(), "no scan with the worker");
+    board_queue();
+    radio_queue_fill_to(0U);
+    fake_klog_reset();
+    ao_spy_drain();
+    unsigned const before = job_submits();
+
+    fake_radio_lose_link(KODE_TIMEOUT);          /* refused: owed */
+    CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused post took a slot");
+
+    deliver_held(KODE_TIMEOUT);                  /* the scan comes back first, failed */
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            ++ends;
+        }
+    }
+    CHILD_CHECK(0U == ends, "the failed end answered for a scan whose link's loss waits");
+    CHILD_CHECK(0U == log_count("the C5 went mute; resetting it"),
+                "the scan's end was turned into the loss");
+
+    pump();
+    pump();
+    CHILD_CHECK(1U == log_count("the C5 went mute; resetting it"), "the loss was not heard exactly once");
+    CHILD_CHECK(logged("the link dropped mid-scan"), "the loss did not answer for the scan");
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)WIFI_SCAN_END_SIG == e->sig )
+        {
+            ++ends;
+        }
+    }
+    CHILD_CHECK(1U == ends, "the listing was not closed exactly once");
+    CHILD_CHECK((int)KDRV_RADIO_JOB_DISCONNECT == running_job(), "no teardown after the loss");
+    CHILD_CHECK(job_submits() == (before + 1U), "not exactly one teardown");
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    pump();
+    CHILD_CHECK(1U == log_count("the C5 went mute; resetting it"), "the loss was heard twice");
+}
+
+TEST_CASE("a loss owed behind the failed end of the job that met it answers for the job, once",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&lost_behind_done_body, NULL),
+                                     "see the child's line above");
+}
+
+/** @brief Child body: a job that worked comes back with a loss waiting behind it; it answers as it came. */
+static void lost_behind_ok_body(void *arg)
+{
+    unsigned ends = 0U;
+
+    (void)arg;
+    radio_fresh();
+    go_up();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    CHILD_CHECK((int)KDRV_RADIO_JOB_WIFI_SCAN == running_job(), "no scan with the worker");
+    seed_air(2U, -52);
+    run_scan();
+    board_queue();
+    radio_queue_fill_to(0U);
+    ao_spy_drain();
+
+    fake_radio_lose_link(KODE_ERROR);            /* the transport drops as the sweep ends: refused, owed */
+    deliver_held(KODE_OK);                       /* the sweep had worked */
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( ((QSignal)WIFI_SCAN_END_SIG == e->sig) && ((const WifiScanEndEvt *)e)->ok )
+        {
+            ++ends;
+        }
+    }
+    CHILD_CHECK(1U == ends, "a job that worked was not answered as it came");
+
+    pump();
+    pump();
+    CHILD_CHECK((int)KRADIO_FAILED == link_now(), "the loss was never heard");
+}
+
+TEST_CASE("a job that worked answers as it came, with a loss owed behind its end",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&lost_behind_ok_body, NULL),
+                                     "see the child's line above");
+}
+
+/* ---- The same, for every job that can meet a mute C5 with the link up ----------
+ * The driver tells of a C5 that stopped answering from inside the job that
+ * found it, and that job then comes back failed. The loss answers for the
+ * job, whichever of the two AO_Radio handles first: the failed end starts
+ * nothing on a link that is gone, and the link is torn down once. */
+
+/** @brief The jobs a C5 can go mute under, by how a case gets each one to the worker. */
+typedef enum {
+    MUTE_SCAN = 0,       /**< A listed Wi-Fi scan. */
+    MUTE_JOIN,           /**< A join somebody asked for. */
+    MUTE_AUTO_SCAN,      /**< The automatic round's sweep. */
+    MUTE_AUTO_PREPARE,   /**< The automatic round's join, as it readies the station. */
+    MUTE_AUTO_AWAIT,     /**< The automatic round's join, as it waits for the address. */
+    MUTE_PROBE,          /**< The automatic round's look at a channel it remembers. */
+    MUTE_LEAVE,          /**< Leaving a network. */
+    MUTE_RSSI,           /**< A signal reading. */
+    MUTE_C5_INFO,        /**< The c5 row's first job. */
+    MUTE_BLE_START,      /**< The BLE stack's start. */
+    MUTE_BLE_ADV,        /**< The advert. */
+    MUTE_BLE_SCAN,       /**< An asked BLE listen. */
+    MUTE_BLE_RSP,        /**< The scan response. */
+    MUTE_C5_BEGIN,       /**< A C5 update's session. */
+    MUTE_C5_WRITE,       /**< A C5 update's chunk. */
+    MUTE_JOBS
+} mute_job_t;
+
+/** @brief What each of them is called when its case fails. */
+static const char *const s_mute_name[MUTE_JOBS] = {
+    "a listed scan", "an asked join", "the round's sweep", "the round's join, readying",
+    "the round's join, waiting", "the round's probe", "a leave", "a signal reading",
+    "the c5 row's info", "the BLE start", "the advert", "an asked BLE listen",
+    "the scan response", "an update's session", "an update's chunk" };
+
+/**
+ * @brief Get the job of @p which to the radio worker, with the link up.
+ * @return The driver's job that is with the worker then, or -1.
+ */
+static int mute_job_reach(mute_job_t which)
+{
+    static const uint8_t rsp[4] = { 0xFFU, 0xFFU, 0x01U, 0x02U };
+    int want = -1;
+
+    switch ( which )
+    {
+        case MUTE_SCAN: {
+            radio_fresh();
+            go_up();
+            dispatch(WIFI_SCAN_REQ_SIG);
+            want = (int)KDRV_RADIO_JOB_WIFI_SCAN;
+            break;
+        }
+        case MUTE_JOIN: {
+            radio_fresh();
+            go_up();
+            vault_has("other");
+            (void)wifi_join_request("home", "secret99", true);
+            pump();
+            want = (int)KDRV_RADIO_JOB_WIFI_JOIN;
+            break;
+        }
+        case MUTE_AUTO_SCAN:
+        case MUTE_AUTO_PREPARE:
+        case MUTE_AUTO_AWAIT: {
+            radio_fresh();
+            go_up();
+            vault_has("line-ap-0");
+            dispatch(WIFI_START_REQ_SIG);
+            pump();
+            want = (int)KDRV_RADIO_JOB_WIFI_SCAN;
+            if ( MUTE_AUTO_SCAN != which )
+            {
+                seed_air(2U, -60);
+                run_scan();
+                finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+                want = (int)KDRV_RADIO_JOB_WIFI_PREPARE;
+            }
+            if ( MUTE_AUTO_AWAIT == which )
+            {
+                vault_joins("line-ap-0");
+                want = (int)KDRV_RADIO_JOB_WIFI_AWAIT;
+            }
+            break;
+        }
+        case MUTE_PROBE: {
+            radio_fresh();
+            boot_with_hint("home", 6U);
+            go_up();
+            vault_has("home");
+            dispatch(WIFI_START_REQ_SIG);
+            pump();
+            want = (int)KDRV_RADIO_JOB_WIFI_PROBE;
+            break;
+        }
+        case MUTE_LEAVE: {
+            retry_ready();
+            wifi_station_up();
+            pump();
+            dispatch(WIFI_LEAVE_REQ_SIG);
+            pump();
+            want = (int)KDRV_RADIO_JOB_WIFI_LEAVE;
+            break;
+        }
+        case MUTE_RSSI: {
+            radio_fresh();
+            go_up();
+            wifi_station_up();
+            wifi_rssi_request();
+            pump();
+            want = (int)KDRV_RADIO_JOB_WIFI_RSSI;
+            break;
+        }
+        case MUTE_C5_INFO: {
+            radio_fresh();
+            go_up();
+            ask_row();
+            want = (int)KDRV_RADIO_JOB_C5_INFO;
+            break;
+        }
+        case MUTE_BLE_START:
+        case MUTE_BLE_ADV: {
+            radio_fresh();
+            fake_ble_reset();
+            go_up();
+            dispatch(BLE_START_REQ_SIG);
+            pump();
+            want = (int)KDRV_RADIO_JOB_BLE_START;
+            if ( MUTE_BLE_ADV == which )
+            {
+                finish_ble_start();
+                want = (int)KDRV_RADIO_JOB_BLE_ADV;
+            }
+            break;
+        }
+        case MUTE_BLE_SCAN: {
+            ble_on_up();
+            (void)kode_sys_ble_scan(ao_spy(), BLE_ASK_MS);
+            pump();
+            want = (int)KDRV_RADIO_JOB_BLE_SCAN;
+            break;
+        }
+        case MUTE_BLE_RSP: {
+            ble_on_up();
+            ble_rsp_ask("Dot-7", rsp, sizeof(rsp));
+            want = (int)KDRV_RADIO_JOB_BLE_RSP;
+            break;
+        }
+        case MUTE_C5_BEGIN:
+        case MUTE_C5_WRITE: {
+            radio_fresh();
+            go_up();
+            recv_spy();
+            inst_deliver();
+            want = (int)KDRV_RADIO_JOB_C5_BEGIN;
+            if ( MUTE_C5_WRITE == which )
+            {
+                finish(KDRV_RADIO_JOB_C5_BEGIN, KODE_OK);
+                want = (int)KDRV_RADIO_JOB_C5_WRITE;
+            }
+            break;
+        }
+        default: {
+            want = -1;
+            break;
+        }
+    }
+    if ( want != running_job() )
+    {
+        want = -1;
+    }
+    return want;
+}
+
+/** @brief Child body: the job in @p arg meets a mute C5 while the queue is full, and comes back before the loss can be posted again. */
+static void mute_behind_end_body(void *arg)
+{
+    mute_job_t const which = *(mute_job_t const *)arg;
+
+    CHILD_CHECK(0 <= mute_job_reach(which), "the job was not with the worker");
+    board_queue();
+    radio_queue_fill_to(0U);
+    fake_klog_reset();
+    unsigned const before = job_submits();
+
+    fake_radio_lose_link(KODE_TIMEOUT);          /* the driver, from inside the job: refused, owed */
+    CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused post took a slot");
+    deliver_held(KODE_TIMEOUT);                  /* the job that found the C5 mute comes back, failed */
+    CHILD_CHECK((!job_queued()) && (job_submits() == before),
+                "the failed end started a job on a link that is gone");
+
+    pump();
+    pump();
+    CHILD_CHECK((int)KRADIO_FAILED == link_now(), "the loss was never heard");
+    CHILD_CHECK((int)KDRV_RADIO_JOB_DISCONNECT == running_job(), "no teardown after the loss");
+    CHILD_CHECK(job_submits() == (before + 1U), "a job went to the worker before the teardown");
+    CHILD_CHECK(1U == log_count("no room for the lost link"), "the refusal was not said once");
+}
+
+TEST_CASE("the loss answers for each job that met a mute C5, when the job's end is handled first",
+          "[radio_ao][overflow]")
+{
+    unsigned bad = 0U;
+
+    /* Every job is run, so one that fails does not hide the ones after it. */
+    for ( mute_job_t which = MUTE_SCAN; MUTE_JOBS > which; ++which )
+    {
+        mute_job_t arg = which;
+
+        if ( ASK_CHILD_RETURNED != ask_support_fork_run(&mute_behind_end_body, &arg) )
+        {
+            (void)printf("  failed for %s: see the child's line above\n", s_mute_name[which]);
+            ++bad;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, bad, "jobs whose failed end was not left to the loss");
+}
+
+/** @brief Child body: the C5 reboots into its new image while the queue is full, and the update's teardown ends before the loss is heard. */
+static void lost_behind_teardown_body(void *arg)
+{
+    unsigned ready;
+    unsigned ack;
+    unsigned done;
+    unsigned fail;
+    unsigned stall;
+
+    (void)arg;
+    radio_fresh();
+    go_up();
+    recv_spy();
+    inst_deliver();
+    finish(KDRV_RADIO_JOB_C5_BEGIN, KODE_OK);
+    finish(KDRV_RADIO_JOB_C5_WRITE, KODE_OK);
+    finish(KDRV_RADIO_JOB_C5_FINISH, KODE_OK);
+    CHILD_CHECK((int)KDRV_RADIO_JOB_DISCONNECT == running_job(), "the update is not at its teardown");
+    inst_answers(&ready, &ack, &done, &fail, &stall);
+    CHILD_CHECK(0U == done, "the update answered before its teardown");
+    board_queue();
+    radio_queue_fill_to(0U);
+
+    fake_radio_lose_link(KODE_ERROR);            /* the C5 rebooted, as told: refused, owed */
+    CHILD_CHECK(0U == uxQueueSpacesAvailable(AO_Radio->eQueue), "the refused post took a slot");
+    deliver_held(KODE_OK);                       /* the teardown's end comes first */
+    pump();
+    pump();
+
+    inst_answers(&ready, &ack, &done, &fail, &stall);
+    CHILD_CHECK(1U == done, "the update never answered");
+    CHILD_CHECK(0U == fail, "an update that activated was said to fail");
+    CHILD_CHECK((int)KRADIO_OFF == link_now(), "AO_Radio did not leave its updating state");
+    CHILD_CHECK(-1 == running_job(), "the loss heard after the update started a job");
+}
+
+TEST_CASE("a link lost under an update's teardown and owed behind its end leaves the update its answer",
+          "[radio_ao][overflow]")
+{
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+                                     (uint32_t)ask_support_fork_run(&lost_behind_teardown_body, NULL),
+                                     "see the child's line above");
+}
+
 /* The next file to run the AO cannot finish a job this one holds. */
 TEST_CASE("AO_Radio is left off for the next file", "[radio_ao]")
 {

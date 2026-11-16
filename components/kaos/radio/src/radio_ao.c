@@ -38,6 +38,7 @@
 #include "krows.h"
 
 #include "radio_frames.h"
+#include "radio_knocks.h"
 
 #define TAG "kaos.radio"
 
@@ -2780,22 +2781,13 @@ static void radio_svc_timeout(Radio * const me, QEvt const * const e)
 /* ---- Plumbing ------------------------------------------------------------ */
 
 /** Runs on the radio worker (a job that failed over a mute C5) or on
- *  esp-hosted's event task (the transport dropped): wrap the news into an
- *  event and post it. Nothing else. */
+ *  esp-hosted's event task (the transport dropped): knock and return. The
+ *  first loss's reason stands until the AO has heard it, and a loss that
+ *  comes meanwhile is the same loss. A queue with no room owes the knock,
+ *  and its static event needs no block of a pool. */
 static void radio_on_link_lost(kode_status_t why)
 {
-    RadioLostEvt *e = Q_NEW_X(RadioLostEvt, 0U, RADIO_LINK_LOST_SIG);
-    if ( NULL != e )
-    {
-        e->status = (uint8_t)why;
-        QACTIVE_POST(AO_Radio, &e->super, NULL);
-    }
-    else
-    {
-        /* Bounded, but say so loudly: without this event the state machine
-         * would wait forever for a link that is already gone. */
-        KLOG_E(TAG, "out of events for a lost link; radio state stuck");
-    }
+    radio_knocks_post(RADIO_KNOCK_LOST, (uint8_t)why);
 }
 
 #if CONFIG_KODEOS_WIFI
@@ -4475,11 +4467,12 @@ static void radio_on_ble(kdrv_ble_state_t state)
      * advert was consumed when the central arrived. Keeping `ble_info`'s
      * signal free of the side effect is what stops a read-only verb from
      * quietly starting a radio. */
-    static const QEvt evt = QEVT_INITIALIZER(BLE_LINK_SIG);
     /* Asking ourselves to publish rather than publishing from a foreign
      * thread: the state is read back from the driver on our own thread, the
-     * way every other answer here is built. */
-    QACTIVE_POST(AO_Radio, &evt, NULL);
+     * way every other answer here is built. One event waits at a time, which
+     * is enough because the state is read when it is handled, and a queue
+     * with no room owes it. */
+    radio_knocks_post(RADIO_KNOCK_BLE, 0U);
 }
 
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
@@ -4488,9 +4481,10 @@ static void radio_on_ble_pair(void)
 {
     /* Carries nothing for the same reason radio_on_ble() ignores its
      * argument: the record is collected with kdrv_ble_pair_take() on our own
-     * thread, where reading it cannot race the host task writing it. */
-    static const QEvt evt = QEVT_INITIALIZER(BLE_PAIR_TAKE_SIG);
-    QACTIVE_POST(AO_Radio, &evt, NULL);
+     * thread, where reading it cannot race the host task writing it. The
+     * driver keeps one record, so the one event that waits takes whatever
+     * the notes that follow it leave; a queue with no room owes it. */
+    radio_knocks_post(RADIO_KNOCK_PAIR, 0U);
 }
 
 /** @brief Collect what the driver is holding and put it on the bus. */
@@ -4498,6 +4492,8 @@ static void ble_publish_pair(Radio * const me)
 {
     kdrv_ble_pair_t rec;
 
+    /* Before the record is read: a note that comes after is its own event. */
+    (void)radio_knocks_take(RADIO_KNOCK_PAIR, NULL);
     /* A nudge per phase and a take per nudge, so an empty answer is normal:
      * two phases can collapse into one record when a pairing fails inside
      * the same instant it started, and the second take then finds nothing. */
@@ -5144,9 +5140,11 @@ static void radio_disconnect_after_loss(Radio * const me)
  * @brief Turn what the radio worker or the driver posted into an outcome.
  *
  * Called once per RADIO_JOB_SIG, RADIO_JOB_GUARD_SIG or RADIO_LINK_LOST_SIG,
- * by the state that handles it, never by a parent. A done event is an answer
+ * by the state that handles it, never by a parent. A lost link is an outcome
+ * once: this call takes its knock. A done event is an answer
  * only when its sequence number is @c wseq and nobody (the guard, a lost link)
- * answered for the job already; any other is dropped. The worker is free once
+ * answered for the job already; any other is dropped, and so is the failed
+ * end of a job whose link's loss waits to be heard. The worker is free once
  * the right number comes back. An expired guard answers with KODE_TIMEOUT and
  * leaves the worker busy.
  *
@@ -5160,9 +5158,18 @@ static bool radio_outcome(Radio * const me, QEvt const * const e)
 
     if ( (QSignal)RADIO_LINK_LOST_SIG == e->sig )
     {
-        me->out.evt    = (uint8_t)RADIO_OUT_LINK_LOST;
-        me->out.status = Q_EVT_CAST(RadioLostEvt)->status;
-        deliver        = true;
+        uint8_t why = (uint8_t)KODE_ERROR;
+
+        /* The knock is taken here and nowhere else: the end of a job is
+         * never turned into the loss that waits behind it, so each is
+         * answered as it came. An event that finds no loss pending was
+         * heard already. */
+        if ( radio_knocks_take(RADIO_KNOCK_LOST, &why) )
+        {
+            me->out.evt    = (uint8_t)RADIO_OUT_LINK_LOST;
+            me->out.status = why;
+            deliver        = true;
+        }
     }
     else if ( (QSignal)RADIO_JOB_GUARD_SIG == e->sig )
     {
@@ -5212,8 +5219,26 @@ static bool radio_outcome(Radio * const me, QEvt const * const e)
         }
         else
         {
-            bool const answers = (!me->wreplied) && (!me->wdrop);
+            bool answers = (!me->wreplied) && (!me->wdrop);
 
+            /* The driver tells of a C5 that went mute from inside the job
+             * that found it, and a full queue may owe that loss behind this
+             * end. The loss answers for the job then, as it does when it is
+             * heard first: the failed end is dropped, the channel stays busy
+             * and the loss's own event, which is certain to come, tears the
+             * link down. Nothing is turned into anything. The ends a state
+             * waits for whatever the link does, a bring-up's and a
+             * teardown's, and every end that worked, always answer. */
+            if ( answers && ((uint8_t)KODE_OK != d->status)
+                && (KDRV_RADIO_JOB_CONNECT != me->jobs->wreq.type)
+                && (KDRV_RADIO_JOB_DISCONNECT != me->jobs->wreq.type)
+                && radio_knocks_pending(RADIO_KNOCK_LOST) )
+            {
+                KLOG_D(TAG, "job %d failed over a link whose loss waits to be "
+                            "heard; the loss answers for it",
+                       (int)me->jobs->wreq.type);
+                answers = false;
+            }
             radio_guard_stop(me);
             me->winflight = false;
             me->wreplied  = false;
@@ -9851,6 +9876,8 @@ static QState Radio_initial(Radio * const me, void const * const par)
 {
     (void)par;
 
+    /* Before the callbacks that knock are registered. */
+    radio_knocks_reset();
     kaos_claim(KBSP_RES_C5, me, "AO_Radio");
 #if CONFIG_KODE_LOWPOWER
     me->lp_who = lowpower_join_radio(&me->super, "radio");
@@ -10224,7 +10251,12 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
         case BLE_STATE_REQ_SIG:
         case BLE_LINK_SIG: {
             /* No link to the C5, so there is nothing to put back on the air
-             * either: down here the two signals really are the same event. */
+             * either: down here the two signals really are the same event,
+             * but for the knock that one of them is. */
+            if ( (QSignal)BLE_LINK_SIG == e->sig )
+            {
+                (void)radio_knocks_take(RADIO_KNOCK_BLE, NULL);
+            }
             ble_publish_state(me);
             status = Q_HANDLED();
             break;
@@ -10497,6 +10529,8 @@ static QState radio_exp_ask_link(Radio * const me, QEvt const * const e)
 static QState Radio_off(Radio * const me, QEvt const * const e)
 {
     QState status;
+
+    radio_knocks_pay(e);
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
@@ -10621,6 +10655,8 @@ static QState Radio_off(Radio * const me, QEvt const * const e)
 static QState Radio_starting(Radio * const me, QEvt const * const e)
 {
     QState status;
+
+    radio_knocks_pay(e);
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
@@ -10823,6 +10859,8 @@ static QState Radio_starting(Radio * const me, QEvt const * const e)
 static QState Radio_stopping(Radio * const me, QEvt const * const e)
 {
     QState status;
+
+    radio_knocks_pay(e);
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
@@ -10934,6 +10972,8 @@ static QState radio_relink_due(Radio * const me)
 static QState Radio_failed(Radio * const me, QEvt const * const e)
 {
     QState status;
+
+    radio_knocks_pay(e);
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
@@ -11553,6 +11593,8 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
 static QState Radio_up(Radio * const me, QEvt const * const e)
 {
     QState status;
+
+    radio_knocks_pay(e);
     switch ( e->sig )
     {
         case RADIO_UPDATED_SIG: {
@@ -12381,7 +12423,9 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             /* A central arrived or left. Say so first - whoever is watching
              * the pill wants the colour now, not after a job - then put the
              * board back on the air if it has fallen off it. A refusal costs
-             * nothing: the next completed job sweeps again. */
+             * nothing: the next completed job sweeps again. The knock is
+             * taken before the state is read. */
+            (void)radio_knocks_take(RADIO_KNOCK_BLE, NULL);
             radio_ble_link_note(me);
             ble_publish_state(me);
             (void)radio_ble_adv_reconcile(me);
@@ -12708,6 +12752,8 @@ static QState auto_abandon(Radio * const me)
 static QState Radio_autojoin(Radio * const me, QEvt const * const e)
 {
     QState status;
+
+    radio_knocks_pay(e);
     switch ( e->sig )
     {
         case RADIO_JOB_SIG:
@@ -13221,6 +13267,8 @@ static bool c5_push_next(Radio * const me)
 static QState Radio_updating(Radio * const me, QEvt const * const e)
 {
     QState status;
+
+    radio_knocks_pay(e);
     switch ( e->sig )
     {
         /* Whoever transitions here has set the phase and the counters -
@@ -13505,6 +13553,10 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
                         /* Expected: the C5 rebooted when we told it to. */
                         break;
                     }
+                    /* The session went with the link: no abort is sent to a
+                     * C5 that does not answer, whether the job that met it
+                     * is still with the worker or already back. */
+                    me->c5_open = false;
                     ota_fail(me, "the link dropped mid-transfer");
                     radio_unmount_for_teardown(me);
                     radio_disconnect_after_loss(me);

@@ -860,7 +860,8 @@ static kode_status_t radio_do_ota_finish(void)
  * marked down here, before anything else can send an RPC into it, and the
  * owner is told with KODE_TIMEOUT, which is how it tells a mute C5 from a
  * transport that dropped by itself. The job's own status is returned either
- * way; the owner drops it, knowing the link went.
+ * way; the owner drops it, knowing the link went, whether it hears of the
+ * loss before the job's end or after it.
  *
  * @param st What the job returned.
  * @return @p st.

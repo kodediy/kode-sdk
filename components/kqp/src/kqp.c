@@ -415,8 +415,6 @@ _Static_assert(sizeof(StorageInfoEvt) <= KQP_BLOCK_LARGE,
                "StorageInfoEvt must not reach the jumbo pool");
 _Static_assert(sizeof(RadioStateEvt) <= KQP_BLOCK_LARGE,
                "RadioStateEvt must not reach the jumbo pool");
-_Static_assert(sizeof(RadioLostEvt) <= KQP_BLOCK_SMALL,
-               "RadioLostEvt must fit the small pool");
 _Static_assert(sizeof(KodeSvcEvt) <= KQP_BLOCK_SMALL,
                "KodeSvcEvt must fit the small pool");
 _Static_assert(sizeof(WifiJoinEvt) <= KQP_BLOCK_LARGE,
