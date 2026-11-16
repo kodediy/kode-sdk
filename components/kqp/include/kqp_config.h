@@ -334,9 +334,11 @@
 #define KODE_LOWPOWER_ROUND_MS         2000U   /**< Longest wait for a round's answers. */
 #define KODE_LOWPOWER_OFF_GRACE_MS     100U    /**< Between STATE(OFF) and deep sleep, for the log to drain. */
 #define KODE_LOWPOWER_REQUEST_RETRY_MS 1000U   /**< A requested round that met a busy or silent owner begins again this long
-                                                *   after it was abandoned. */
+                                                *   after it was abandoned; in an app's rest, a busy owner is asked
+                                                *   again this long after its answer. */
 #define KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS 10000U /**< The longest a request is begun again, counted from the request;
-                                                *   the requester is answered once, when it runs out. */
+                                                *   the requester is answered once, when it runs out. An app's rest
+                                                *   asks a busy owner again only inside it. */
 #define KODE_LOWPOWER_ORDER_MS         10000U  /**< The longest a request for OFF waits for a busy or silent owner;
                                                 *   the board goes OFF when it runs out, done or not. */
 #define KODE_LOWPOWER_QUEUE_LEN        48U     /**< AO_LowPower's queue: every participant's answer, a request and the inputs. */
@@ -365,9 +367,11 @@
                                                 *   KODE_DISPLAY_SLEEP_WAIT_MS and a card's unmount. */
 #define KODE_LOWPOWER_PART_ASKS        8U      /**< Owners the longest rest asks, one after the other: one a part,
                                                 *   and the CPU part asks a second for its wake time. */
-#define KODE_LOWPOWER_PART_WAIT_MS     (KODE_LOWPOWER_PART_ASKS * KODE_LOWPOWER_PART_STEP_MS) /**< Longest
-                                                *   kode_rest() and kode_rest_end() wait for their answer: every
-                                                *   owner of the longest rest silent to the end of its step. */
+#define KODE_LOWPOWER_PART_WAIT_MS     ((KODE_LOWPOWER_PART_ASKS * KODE_LOWPOWER_PART_STEP_MS) \
+                                        + KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS) /**< Longest kode_rest() and
+                                                *   kode_rest_end() wait for their answer: busy owners asked again
+                                                *   for the whole window, then every owner of the longest rest
+                                                *   silent to the end of its step. */
 /* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
 #define KODE_LOWPOWER_PART_TIMERS      2U      /**< One-shots a rest's wake time may have out at once; a time
                                                 *   that would need another is refused. */

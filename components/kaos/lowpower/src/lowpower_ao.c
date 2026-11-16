@@ -110,6 +110,9 @@ _Static_assert((KODE_LP_PART_ALL & PART_WORD_OPEN) == 0U, "the parts leave the w
 /** @brief How long a request is begun again, in microseconds. */
 #define RETRY_WINDOW_US ((uint64_t)KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS * US_PER_MS)
 
+/** @brief The wait before a request is begun again, in microseconds. */
+#define RETRY_US        ((uint64_t)KODE_LOWPOWER_REQUEST_RETRY_MS * US_PER_MS)
+
 /** @brief Microseconds in a minute, the period of the glass's time. */
 #define US_PER_MINUTE   ((uint64_t)KODE_LOWPOWER_MINUTE_S * US_PER_S)
 
@@ -165,7 +168,9 @@ typedef struct {
 
 typedef struct {
     QActive     super;
-    Tmo         round_tmo;        /**< LOWPOWER_ROUND_TMO_SIG: the round's budget, or OFF's grace. */
+    Tmo         round_tmo;        /**< LOWPOWER_ROUND_TMO_SIG: the round's budget, or OFF's grace; in
+                                   *   an app's rest the step's budget, or the wait before its busy
+                                   *   owner is asked again. */
     Tmo         idle_tmo;         /**< LOWPOWER_IDLE_TMO_SIG: the idle time, AWAKE only. */
     Tmo         dark_tmo;         /**< LOWPOWER_DARK_TMO_SIG: the bound of a dark wake. */
     Tmo         retry_tmo;        /**< LOWPOWER_RETRY_TMO_SIG: the wait before a requested round begins again. */
@@ -229,6 +234,10 @@ typedef struct {
     uint8_t     part_who;         /**< The participant asked in that step.     */
     uint8_t     part_src;         /**< Who asked for the sequence in hand.     */
     bool        part_up;          /**< The sequence in hand brings the parts back. */
+    bool        part_again;       /**< The owner of part_step answered busy and is asked again when
+                                   *   round_tmo runs out (part_busy()). */
+    uint64_t    part_us;          /**< khal_time_us() when the sequence in hand was asked for: the
+                                   *   request's window counts from it. */
     bool        part_wake_touch;  /**< A touch ends the CPU part.              */
     bool        part_wake_level;  /**< The level of the header's line that ends it. */
     bool        part_pin_armed;   /**< That line is armed as a wake line.      */
@@ -715,6 +724,23 @@ static QState round_abort(LowPower * const me, uint8_t cause)
 }
 
 /**
+ * @brief Whether a moment falls inside the window a request is asked again in.
+ *
+ * One window for both kinds of request: a requested round is begun again
+ * inside it (round_busy(), awake_retry()), and so is the busy step of an
+ * app's rest (part_busy()).
+ *
+ * @param since_us khal_time_us() when the request came in.
+ * @param at_us    The moment judged.
+ * @return true when @p at_us is less than KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS
+ *         after @p since_us.
+ */
+static bool retry_window_open(uint64_t since_us, uint64_t at_us)
+{
+    return (at_us - since_us) < RETRY_WINDOW_US;
+}
+
+/**
  * @brief Stop waiting to begin a requested round again.
  *
  * @param me     The AO.
@@ -749,7 +775,7 @@ static QState round_busy(LowPower * const me, uint8_t cause)
 {
     QState status;
     bool const again = ((uint8_t)KODE_LP_CAUSE_REQUEST == me->cause)
-                       && ((khal_time_us() - me->request_us) < RETRY_WINDOW_US);
+                       && retry_window_open(me->request_us, khal_time_us());
 
     if ( again )
     {
@@ -1464,7 +1490,7 @@ static QState awake_retry(LowPower * const me)
 
     if ( me->retry_on )
     {
-        if ( (khal_time_us() - me->request_us) >= RETRY_WINDOW_US )
+        if ( !retry_window_open(me->request_us, khal_time_us()) )
         {
             KLOG_N(TAG, "the request for %s gave up after %u ms: %s",
                    state_name(me->target),
@@ -2714,9 +2740,10 @@ static void part_finish(LowPower * const me, kode_status_t rc, const char *why)
                         && ((me->part_rest & KODE_LP_PART_CPU) != 0U);
 
     tmo_stop(&me->round_tmo);
-    me->part_step = 0U;
-    me->part_want = 0U;
-    me->part_done = 0U;
+    me->part_step  = 0U;
+    me->part_again = false;
+    me->part_want  = 0U;
+    me->part_done  = 0U;
     if ( (KODE_OK == rc) && me->part_up )
     {
         KLOG_N(TAG, "rest ended: every part is back");
@@ -3223,7 +3250,51 @@ static bool part_late_ready(LowPower * const me, const LowPowerReadyEvt *a)
 }
 
 /**
+ * @brief The owner asked in this step is busy: ask it again later, or stop there.
+ *
+ * As a requested round is begun again (round_busy()), the owner is asked
+ * again KODE_LOWPOWER_REQUEST_RETRY_MS later, on the step's own one-shot, as
+ * long as that ask falls inside the request's window. Past it the sequence
+ * stops with this reason, and what rested stays at rest.
+ *
+ * @param me  The AO, a step open.
+ * @param why The owner's reason.
+ */
+static void part_busy(LowPower * const me, const char *why)
+{
+    if ( retry_window_open(me->part_us, khal_time_us() + RETRY_US) )
+    {
+        me->part_again = true;
+        tmo_start(&me->round_tmo, KODE_LOWPOWER_REQUEST_RETRY_MS);
+        KLOG_N(TAG, "rest: the %s is busy (%s); its owner is asked again in %u ms",
+               lowpower_part_name(me->part_step), why,
+               (unsigned)KODE_LOWPOWER_REQUEST_RETRY_MS);
+    }
+    else
+    {
+        part_fail(me, lowpower_part_name(me->part_step), why);
+    }
+}
+
+/**
+ * @brief The wait after a busy answer ran out: ask the owner of the step again.
+ *
+ * The part is not put away, so the sequence opens its step again, a round of
+ * a new number; the CPU part asks its owners from the first.
+ *
+ * @param me The AO, a step waiting (part_again).
+ */
+static void part_ask_again(LowPower * const me)
+{
+    me->part_again = false;
+    part_advance(me);
+}
+
+/**
  * @brief LOWPOWER_READY_SIG while a step is open: the owner's answer to its round.
+ *
+ * An answer that comes while the step waits to be asked again is not the
+ * step's: the round it answers was refused already.
  *
  * @param me The AO, AWAKE.
  * @param a  The answer.
@@ -3231,8 +3302,8 @@ static bool part_late_ready(LowPower * const me, const LowPowerReadyEvt *a)
  */
 static bool part_ready(LowPower * const me, const LowPowerReadyEvt *a)
 {
-    bool const mine = (0U != me->part_step) && (a->round == me->round)
-                      && (a->who == me->part_who);
+    bool const mine = (0U != me->part_step) && (!me->part_again)
+                      && (a->round == me->round) && (a->who == me->part_who);
 
     if ( mine && a->busy )
     {
@@ -3244,7 +3315,7 @@ static bool part_ready(LowPower * const me, const LowPowerReadyEvt *a)
             /* What an earlier owner of the part armed is given back. */
             part_cpu_restore(me);
         }
-        part_fail(me, lowpower_part_name(me->part_step), why);
+        part_busy(me, why);
     }
     else if ( mine )
     {
@@ -3396,6 +3467,7 @@ static void part_request(LowPower * const me, const LowPowerPartReqEvt *r)
                (unsigned)r->src, (unsigned)me->part_rest);
         me->part_src  = r->src;
         me->part_up   = true;
+        me->part_us   = khal_time_us();
         me->part_late = 0U;
         part_advance(me);
     }
@@ -3435,6 +3507,7 @@ static void part_request(LowPower * const me, const LowPowerPartReqEvt *r)
                    (unsigned)parts);
             me->part_src  = r->src;
             me->part_up   = false;
+            me->part_us   = khal_time_us();
             me->part_want = parts;
             me->part_done = 0U;
             me->part_late = 0U;
@@ -3471,9 +3544,10 @@ static void part_take(LowPower * const me)
         if ( open )
         {
             tmo_stop(&me->round_tmo);
-            me->part_step = 0U;
-            me->part_want = 0U;
-            me->part_done = 0U;
+            me->part_step  = 0U;
+            me->part_again = false;
+            me->part_want  = 0U;
+            me->part_done  = 0U;
         }
         if ( (me->part_rest & KODE_LP_PART_CPU) != 0U )
         {
@@ -3914,7 +3988,14 @@ static QState LowPower_awake(LowPower * const me, QEvt const * const e)
         case LOWPOWER_ROUND_TMO_SIG: {
             if ( tmo_fresh(&me->round_tmo) && (0U != me->part_step) )
             {
-                part_step_timeout(me);
+                if ( me->part_again )
+                {
+                    part_ask_again(me);
+                }
+                else
+                {
+                    part_step_timeout(me);
+                }
             }
             status = Q_HANDLED();
             break;
@@ -4471,6 +4552,8 @@ void LowPower_ctor(void)
     me->part_who        = KODE_LOWPOWER_WHO_NONE;
     me->part_src        = (uint8_t)KODE_LOG_SRC_NONE;
     me->part_up         = false;
+    me->part_again      = false;
+    me->part_us         = 0U;
     me->part_wake_touch = false;
     me->part_wake_level = false;
     me->part_pin_armed  = false;

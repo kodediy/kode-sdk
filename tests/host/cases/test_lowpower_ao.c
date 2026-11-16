@@ -3756,6 +3756,37 @@ static void expect_awake_posted(void)
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_AWAKE, s->prev);
 }
 
+/**
+ * @brief The owner of @p part answers busy at every ask, at once, until the request gives up.
+ *
+ * An ask a second while the next one falls inside the window; each must be
+ * the round for @p part alone, and nothing else may come between two asks.
+ *
+ * @param who  The owner's participant id.
+ * @param part The part it is asked for.
+ * @param why  Its reason.
+ * @return How many times it was asked.
+ */
+static uint32_t say_busy_to_the_end(uint8_t who, uint8_t part, const char *why)
+{
+    uint32_t asks = 0U;
+
+    for ( ;; )
+    {
+        say_ready(who, expect_part_round(part), true, why);
+        asks++;
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
+            KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS / KODE_LOWPOWER_REQUEST_RETRY_MS, asks,
+            "asked again past the window");
+        if ( 0U != ao_spy_count() )
+        {
+            break;
+        }
+        wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS);
+    }
+    return asks;
+}
+
 /** @brief Hand AO_LowPower the glass's answer to a request to sleep or wake. */
 static void glass_says(bool asleep, kode_status_t rc, display_sleep_why_t why)
 {
@@ -3854,7 +3885,44 @@ TEST_CASE("the parts are asked one at a time, each after the one before answered
     lp_down();
 }
 
-TEST_CASE("a busy owner stops the rest there: its part is named and what rested stays", "[lowpower_ao]")
+/* As a requested round is begun again: a second after the busy answer, the
+ * same owner is asked again in a round of its own, and nobody is answered
+ * meanwhile. */
+TEST_CASE("a busy owner is asked again a second later, and its part rests then", "[lowpower_ao]")
+{
+    lowpower_part_last_t last;
+    uint32_t refused;
+    uint32_t again;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_SOUND | KODE_LP_PART_RADIO);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    refused = expect_part_round(KODE_LP_PART_RADIO);
+    say_ready(PART_WHO_RADIO, refused, true, "radio busy");
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a busy owner ended the rest at once");
+    lowpower_part_last(&last);
+    TEST_ASSERT_TRUE_MESSAGE(last.open, "a task reads that the rest is still being arranged");
+
+    /* A second answer to the round it refused is not the step's. */
+    say_ready(PART_WHO_RADIO, refused, false, NULL);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS - STEP_SLACK_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "asked again before its wait was over");
+    wait_real(STEP_SLACK_MS);
+    again = expect_part_round(KODE_LP_PART_RADIO);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(refused, again, "the owner is asked in a round of a new number");
+
+    say_ready(PART_WHO_RADIO, again, false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_RADIO);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    lp_down();
+}
+
+TEST_CASE("an owner still busy at the end of the window stops the rest there: its part is named "
+          "and what rested stays", "[lowpower_ao]")
 {
     const LowPowerPartEvt *n;
     lowpower_info_t info;
@@ -3866,8 +3934,8 @@ TEST_CASE("a busy owner stops the rest there: its part is named and what rested 
     rest_ask(KODE_LP_PART_SOUND | KODE_LP_PART_CARD | KODE_LP_PART_SCREEN);
     say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
 
-    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), true, "file write");
-
+    TEST_ASSERT_EQUAL_UINT32(KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS / KODE_LOWPOWER_REQUEST_RETRY_MS,
+                             say_busy_to_the_end(PART_WHO_STORAGE, KODE_LP_PART_CARD, "file write"));
     n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, KODE_LP_PART_TOUCH);
     TEST_ASSERT_EQUAL_STRING("card: file write", n->why);
     TEST_ASSERT_EQUAL_UINT8(SRC_TEST, n->src);
@@ -3875,6 +3943,8 @@ TEST_CASE("a busy owner stops the rest there: its part is named and what rested 
     TEST_ASSERT_EQUAL_STRING("card: file write", info.part_why);
     TEST_ASSERT_EQUAL_STRING_MESSAGE("", lowpower_part_why(), "a console's refusal is not the app's");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the screen is never asked");
+    wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the rest stays given up");
     lp_down();
 }
 
@@ -3998,7 +4068,7 @@ TEST_CASE("the reason an app's request was refused outlives a console's answer",
 
     rest_up();
     rest_post_from(&card, (uint8_t)KODE_LOWPOWER_SRC_APP);
-    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), true, "file write");
+    (void)say_busy_to_the_end(PART_WHO_STORAGE, KODE_LP_PART_CARD, "file write");
     ao_spy_drain();
 
     rest_ask(KODE_LP_PART_TOUCH);
@@ -4638,11 +4708,10 @@ TEST_CASE("the CPU part asks the scheduler for its next minute, after the wake l
     lp_down();
 }
 
-TEST_CASE("a scheduler with work in hand refuses the CPU part, and the wake lines are given back",
-          "[lowpower_ao]")
+TEST_CASE("a scheduler with work in hand refuses the CPU part, the wake lines are given back, "
+          "and the part's owners are asked again from the first", "[lowpower_ao]")
 {
     lowpower_part_req_t req = { 0 };
-    const LowPowerPartEvt *n;
 
     rest_up();
     TEST_ASSERT_EQUAL_UINT8(PART_WHO_SCHED, lowpower_join(ao_spy(), "scheduler"));
@@ -4655,9 +4724,19 @@ TEST_CASE("a scheduler with work in hand refuses the CPU part, and the wake line
 
     expect_awake_posted();
     expect_awake_posted();
-    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, KODE_LP_PART_SCREEN);
-    TEST_ASSERT_EQUAL_STRING("cpu: entry running", n->why);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the busy scheduler ended the rest at once");
     TEST_ASSERT_EQUAL_UINT(0U, s_hold_false);
+
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS);
+    say_ready(PART_WHO_IOEXP, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+    say_ready(PART_WHO_SCHED, expect_part_round(KODE_LP_PART_CPU), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_SCREEN | KODE_LP_PART_CPU);
+    TEST_ASSERT_EQUAL_UINT(1U, s_hold_false);
+
+    expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
+    expect_awake_posted();                       /* the expander's owner */
+    expect_awake_posted();                       /* the scheduler */
+    (void)expect_news(KODE_LP_PART_WOKE, KODE_OK, KODE_LP_PART_SCREEN);
     lp_down();
 }
 
@@ -4715,7 +4794,7 @@ TEST_CASE("the radio asks the sound's owner in its own request, whatever rested 
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the radio was asked with the sound unknown");
 
     rest_ask(KODE_LP_PART_RADIO | KODE_LP_PART_SOUND);
-    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), true, "audio playing");
+    (void)say_busy_to_the_end(PART_WHO_AUDIO, KODE_LP_PART_SOUND, "audio playing");
     n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
     TEST_ASSERT_EQUAL_STRING("sound: audio playing", n->why);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the C5 was put to sleep under a sound");
@@ -4980,7 +5059,7 @@ TEST_CASE("kode_rest that nobody answers is false after its bound, and says how 
 
     TEST_ASSERT_FALSE(kode_rest(KODE_REST_SOUND, NULL));
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_REST_BOUND_MS, kode_sys_time_ms());
-    TEST_ASSERT_EQUAL_STRING("the rest did not begin in 24000 ms", kode_error());
+    TEST_ASSERT_EQUAL_STRING("the rest did not begin in 34000 ms", kode_error());
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, queued(AO_LowPower, LOWPOWER_PART_REQ_SIG),
                                    "the request was posted more than once");
     task_rest_down();

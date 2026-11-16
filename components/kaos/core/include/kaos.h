@@ -4861,7 +4861,11 @@ const char *lowpower_last_refusal(void);
  * screen and the touch with it.
  * The sound and the card are put away once and come back at their next use:
  * they are never among the parts held, and asking again asks their owners
- * again.
+ * again. An owner that answers busy is asked again
+ * KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round is begun again,
+ * while that ask falls inside KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS of the
+ * request; busy past it, or silent for KODE_LOWPOWER_PART_STEP_MS, it ends
+ * the request there.
  *
  * With KODE_LP_PART_CPU the QP tick stops and the awake lock goes, as in
  * ASLEEP: no Active Object counts time until a wake. AO_LowPower keeps the

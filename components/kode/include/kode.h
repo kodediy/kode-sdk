@@ -1800,15 +1800,20 @@ typedef struct {
     uint32_t after_ms;  /**< A time, in ms from the moment kode_rest() returns; 0 for none.   */
 } kode_rest_wake_t;
 
-/** @brief How long kode_rest() and kode_rest_end() wait for the board, in ms. */
-#define KODE_REST_BOUND_MS 24000U
+/** @brief How long kode_rest() and kode_rest_end() wait for the board, in ms: three
+ *         seconds a part, and the ten seconds a busy part is asked again for. */
+#define KODE_REST_BOUND_MS 34000U
 
 /**
  * @brief Put the named parts away and keep them away until kode_rest_end().
  *
  * Returns once every part named is at rest, which takes up to three seconds a
- * part. A part that is busy stops the call there: it returns false, the parts
- * that had rested stay at rest, and kode_error() names the one that did not.
+ * part. A part that is busy is asked again every second, for up to ten
+ * seconds from the call, as a sleep the board is asked for is; still busy
+ * then, it stops the call there: it returns false, the parts that had rested
+ * stay at rest, and kode_error() names the one that did not. A part that does
+ * not answer in its three seconds stops the call the same way, and is not
+ * asked again.
  * Called again, it adds parts and takes the new wake sources; it also wakes
  * a processor asleep for KODE_REST_CPU, which sleeps again only when the call
  * names that part. While another request is being arranged, the console's

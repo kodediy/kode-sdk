@@ -556,7 +556,12 @@ typedef struct {
  * A request made while another is being arranged is answered KODE_DENIED,
  * `rest: underway`, and the one in hand goes on to its own answer. One asker
  * at a time: the answer carries no number, so two of the app's that ask at
- * once cannot tell their answers apart.
+ * once cannot tell their answers apart. An owner that answers busy is asked
+ * again KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round is begun
+ * again, while that ask falls inside KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS of
+ * the request; busy past it, the answer is KODE_DENIED with `part: why`, and
+ * the parts that rested stay at rest. An owner that does not answer in
+ * KODE_LOWPOWER_PART_STEP_MS is answered `part: no answer`, and not asked again.
  *
  * With KODE_SYS_REST_CPU the system's clock stops, as in the board's ASLEEP:
  * no Active Object counts time, so work in flight in an owner that was not
