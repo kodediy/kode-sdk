@@ -8,6 +8,7 @@
 
 #include <string.h>
 
+#include "kdrv_ble_hid_table.h"
 #include "khal_identity.h"
 
 /** @brief What one AD structure spends before its payload: a length, a type. */
@@ -18,6 +19,17 @@
 
 /** @brief AD type: manufacturer-specific data, its company id first. */
 #define BLE_AD_MFG    0xFFU
+
+/* What each field of an advert spends, its two bytes of header included. */
+#define BLE_AD_FLAGS_BYTES       3U   /**< The flags: one byte.               */
+#define BLE_AD_UUID128_BYTES     18U  /**< One 128-bit service UUID.          */
+#define BLE_AD_UUID16_BYTES      4U   /**< One 16-bit service UUID.           */
+#define BLE_AD_APPEARANCE_BYTES  4U   /**< The appearance: two bytes.         */
+#define BLE_AD_TX_POWER_BYTES    3U   /**< The transmit power: one byte.      */
+
+_Static_assert((BLE_AD_FLAGS_BYTES + BLE_AD_UUID128_BYTES + BLE_AD_UUID16_BYTES
+                + BLE_AD_APPEARANCE_BYTES) <= KDRV_BLE_ADV_MAX,
+               "an advert that serves HID keeps its 128-bit UUID");
 
 /* ---- Connection parameters ----
  * Intervals in 1.25 ms units, timeouts in 10 ms units, as BLE gives them. */
@@ -80,6 +92,46 @@ static size_t adv_put(uint8_t *out, size_t at, uint8_t type, const void *src, si
     out[at + 1U] = type;
     (void)memcpy(&out[at + BLE_AD_HEAD], src, n);
     return at + BLE_AD_HEAD + n;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; called by kdrv_ble.c, which is a file this check does not join to this one */
+void kdrv_ble_adv_shape(const kdrv_ble_adv_ask_t *ask, kdrv_ble_adv_shape_t *out)
+{
+    if ( (NULL == ask) || (NULL == out) )
+    {
+        return;
+    }
+    (void)memset(out, 0, sizeof(*out));
+    out->uuid128      = (uint8_t)KDRV_BLE_ADV_UUID128_NONE;
+    out->discoverable = !ask->hidden;
+    out->tx_power     = true;
+    out->bytes        = (uint8_t)BLE_AD_FLAGS_BYTES;
+    if ( !ask->console )
+    {
+        /* No service to name: the name has room in the advert itself. */
+        out->name = !ask->hidden;
+    }
+    else
+    {
+        out->uuid128 = (uint8_t)KDRV_BLE_ADV_UUID128_CONSOLE;
+        if ( ask->app_uuid )
+        {
+            out->uuid128 = (uint8_t)KDRV_BLE_ADV_UUID128_APP;
+        }
+        out->bytes = (uint8_t)(out->bytes + BLE_AD_UUID128_BYTES);
+        if ( 0U != (ask->hid & KDRV_BLE_HID_KINDS) )
+        {
+            /* The two fields a host lists the board by take the power's place. */
+            out->uuid16     = (uint16_t)KDRV_BLE_HID_SVC_UUID;
+            out->appearance = kdrv_ble_hid_appearance(ask->hid);
+            out->tx_power   = false;
+            out->bytes      = (uint8_t)(out->bytes + BLE_AD_UUID16_BYTES + BLE_AD_APPEARANCE_BYTES);
+        }
+    }
+    if ( out->tx_power )
+    {
+        out->bytes = (uint8_t)(out->bytes + BLE_AD_TX_POWER_BYTES);
+    }
 }
 
 kode_status_t kdrv_ble_adv_pack(const char *name, const uint8_t *data, size_t len,

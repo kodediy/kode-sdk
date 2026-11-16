@@ -907,6 +907,9 @@ void fake_ble_app_service_set(const kdrv_ble_app_service_t *svc);
 /** @brief How many times kdrv_ble_app_kick() was called since boot. */
 unsigned fake_ble_app_kicks(void);
 
+/** @brief How many times kdrv_ble_hid_kick() was called since boot. */
+unsigned fake_ble_hid_kicks(void);
+
 /** @brief Declare the Battery service kdrv_ble_battery_declared() reports, and
  *         forget the level; it stays across fake_ble_reset(), so a case that
  *         declares it puts false back. */

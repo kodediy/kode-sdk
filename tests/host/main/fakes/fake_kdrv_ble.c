@@ -8,6 +8,7 @@
 
 #include "fakes.h"
 #include "kdrv_ble.h"
+#include "kdrv_ble_hid.h"
 
 static struct {
     bool             up;
@@ -73,6 +74,19 @@ unsigned fake_ble_app_kicks(void)
     return s_app_kicks;
 }
 
+/** @brief Wake-ups asked of the HID drain; not cleared by fake_ble_reset(). */
+static unsigned s_hid_kicks;
+
+void kdrv_ble_hid_kick(void)
+{
+    s_hid_kicks++;
+}
+
+unsigned fake_ble_hid_kicks(void)
+{
+    return s_hid_kicks;
+}
+
 /** @brief Whether the app declared the Battery service; not cleared by fake_ble_reset(). */
 static bool s_batt_declared;
 
@@ -81,7 +95,8 @@ static int16_t s_batt_pct = -1;
 
 bool kdrv_ble_battery_declared(void)
 {
-    return s_batt_declared;
+    /* As the driver: a HID device serves its battery whether declared or not. */
+    return s_batt_declared || (0U != kdrv_ble_hid_kinds());
 }
 
 void kdrv_ble_battery_set(uint8_t pct)

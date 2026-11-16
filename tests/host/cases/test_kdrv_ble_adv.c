@@ -9,6 +9,8 @@
 #include "unity.h"
 
 #include "kdrv_ble.h"
+#include "kdrv_ble_hid.h"
+#include "kdrv_ble_hid_table.h"
 #include "khal_identity.h"
 
 /** @brief A byte the packing never writes, to see what it left alone. */
@@ -341,4 +343,82 @@ TEST_CASE("judging nothing follows with nothing, and a verdict needs no place fo
     TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_DONE, (int)kdrv_ble_pulse_next(NULL, &wait));
     TEST_ASSERT_EQUAL_UINT32(0U, wait);
     TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_NEXT, (int)kdrv_ble_pulse_next(&p, NULL));
+}
+
+/* ---- The fields an advert carries ---------------------------------------------- */
+
+/** @brief The fields of the advert @p ask asks for. */
+static kdrv_ble_adv_shape_t shape_of(bool console, bool hidden, bool app_uuid, uint8_t hid)
+{
+    kdrv_ble_adv_ask_t const ask = { .console = console, .hidden = hidden,
+                                     .app_uuid = app_uuid, .hid = hid };
+    kdrv_ble_adv_shape_t     out;
+
+    (void)memset(&out, 0xA5, sizeof(out));
+    kdrv_ble_adv_shape(&ask, &out);
+    return out;
+}
+
+TEST_CASE("a board that serves no HID advertises its flags, the console's UUID and its power",
+          "[kdrv_ble_adv]")
+{
+    kdrv_ble_adv_shape_t const s = shape_of(true, false, false, 0U);
+
+    TEST_ASSERT_TRUE(s.discoverable);
+    TEST_ASSERT_TRUE(s.tx_power);
+    TEST_ASSERT_FALSE(s.name);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_CONSOLE, s.uuid128);
+    TEST_ASSERT_EQUAL_HEX16_MESSAGE(0U, s.uuid16, "0x1812 on a board that never asked for HID");
+    TEST_ASSERT_EQUAL_HEX16_MESSAGE(0U, s.appearance, "an appearance on a board that never asked");
+    TEST_ASSERT_EQUAL_UINT8(24U, s.bytes);
+}
+
+TEST_CASE("a hidden advert is not discoverable and keeps the UUID its bonded clients filter on",
+          "[kdrv_ble_adv]")
+{
+    kdrv_ble_adv_shape_t const s = shape_of(true, true, false, 0U);
+
+    TEST_ASSERT_FALSE(s.discoverable);
+    TEST_ASSERT_FALSE(s.name);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_CONSOLE, s.uuid128);
+    TEST_ASSERT_EQUAL_UINT8(24U, s.bytes);
+}
+
+TEST_CASE("a board that serves HID adds 0x1812 and its appearance, gives up the power and "
+          "keeps the console's UUID", "[kdrv_ble_adv]")
+{
+    kdrv_ble_adv_shape_t const s = shape_of(true, false, false, KDRV_BLE_HID_KINDS);
+
+    TEST_ASSERT_EQUAL_HEX16(0x1812U, s.uuid16);
+    TEST_ASSERT_EQUAL_HEX16(KDRV_BLE_HID_APPEAR_HID, s.appearance);
+    TEST_ASSERT_FALSE(s.tx_power);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KDRV_BLE_ADV_UUID128_CONSOLE, s.uuid128,
+                                    "the console's clients would not find the board");
+    TEST_ASSERT_EQUAL_UINT8(29U, s.bytes);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(KDRV_BLE_ADV_MAX, s.bytes);
+    TEST_ASSERT_EQUAL_HEX16(KDRV_BLE_HID_APPEAR_MOUSE,
+                            shape_of(true, false, false, KDRV_BLE_HID_MOUSE).appearance);
+    TEST_ASSERT_EQUAL_HEX16(KDRV_BLE_HID_APPEAR_KEYS,
+                            shape_of(true, true, false, KDRV_BLE_HID_KEYBOARD).appearance);
+}
+
+TEST_CASE("the app's UUID takes the console's place with HID and without it", "[kdrv_ble_adv]")
+{
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_APP, shape_of(true, false, true, 0U).uuid128);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_APP,
+                            shape_of(true, false, true, KDRV_BLE_HID_MOUSE).uuid128);
+    TEST_ASSERT_EQUAL_UINT8(29U, shape_of(true, false, true, KDRV_BLE_HID_MOUSE).bytes);
+}
+
+TEST_CASE("a build without the console's service advertises its name, and none when hidden",
+          "[kdrv_ble_adv]")
+{
+    kdrv_ble_adv_shape_t const s = shape_of(false, false, false, 0U);
+
+    TEST_ASSERT_TRUE(s.name);
+    TEST_ASSERT_TRUE(s.tx_power);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_NONE, s.uuid128);
+    TEST_ASSERT_EQUAL_HEX16(0U, s.uuid16);
+    TEST_ASSERT_EQUAL_UINT8(6U, s.bytes);
+    TEST_ASSERT_FALSE(shape_of(false, true, false, 0U).name);
 }

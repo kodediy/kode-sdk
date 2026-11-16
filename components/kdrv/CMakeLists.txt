@@ -191,6 +191,8 @@ if(CONFIG_KODEOS_RADIO)
         list(APPEND srcs "radio/src/kdrv_ble_app.c")
         # Which advertisement a find waits for, pure C.
         list(APPEND srcs "radio/src/kdrv_ble_find.c")
+        # The HID service: the kinds, the report map and the ring, pure C.
+        list(APPEND srcs "radio/src/kdrv_ble_hid.c")
     endif()
 else()
     # No link, but the C5 is still on the board: its reset line alone, so

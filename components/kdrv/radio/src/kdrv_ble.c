@@ -45,6 +45,8 @@ extern void ble_store_config_init(void);
 #include "kdrv_ble_app.h"     /* the app's own service: its rules, values and ring */
 #include "kdrv_ble_bonds.h"   /* the count of bonded peers, read with no lock */
 #include "kdrv_ble_find.h"    /* kdrv_ble_scan_find(): which advert is the one */
+#include "kdrv_ble_hid_table.h" /* the HID service: its kinds, report map and ring */
+#include "khal_nvs.h"
 #include "khal_sync.h"
 #include "khal_system.h"
 #include "khal_time.h"
@@ -142,6 +144,7 @@ static const ble_uuid128_t s_mirror_uuid = BLE_UUID128_INIT(
                        | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN)
 #define CHR_READ_ENC    (BLE_GATT_CHR_F_READ_ENC \
                        | BLE_GATT_CHR_F_READ_AUTHEN)
+#define DSC_READ_ENC    (BLE_ATT_F_READ_ENC | BLE_ATT_F_READ_AUTHEN)
 #elif CONFIG_KODEOS_BLE_CONSOLE_PAIRING
 /* No screen to show a code on, so the pairing is Just Works: encrypted,
  * bonded, and nobody types anything. That cannot produce an authenticated
@@ -151,6 +154,7 @@ static const ble_uuid128_t s_mirror_uuid = BLE_UUID128_INIT(
 #define CHR_WRITE_ENC   BLE_GATT_CHR_F_WRITE_ENC
 #define CHR_NOTIFY_ENC  BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC
 #define CHR_READ_ENC    BLE_GATT_CHR_F_READ_ENC
+#define DSC_READ_ENC    BLE_ATT_F_READ_ENC
 #else
 /* Pairing is off. These two masks are the whole of what an unpaired peer is
  * refused, so emptying them opens the service - which is the point, and the
@@ -158,6 +162,7 @@ static const ble_uuid128_t s_mirror_uuid = BLE_UUID128_INIT(
 #define CHR_WRITE_ENC   0U
 #define CHR_NOTIFY_ENC  0U
 #define CHR_READ_ENC    0U
+#define DSC_READ_ENC    0U
 #endif
 
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
@@ -182,11 +187,16 @@ _Static_assert(((CHR_NOTIFY_ENC & BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC) != 0U)
  *         (s_chr_defs[1]). */
 #define BLE_CONSOLE_TX_CCCDS   1U
 
+/** @brief Client configuration descriptors of the Battery service: Battery Level. */
+#define BLE_BATT_CCCDS         1U
+
 /** @brief The most client configuration descriptors one bonded peer can
- *         subscribe: GATT's, the console's, the mirror's pipe and every
- *         characteristic of the app's, each of which may notify. */
+ *         subscribe: GATT's, the console's, the mirror's pipe, every
+ *         characteristic of the app's, each of which may notify, Battery
+ *         Level and the HID service's input reports. */
 #define BLE_PEER_CCCDS_MAX     (BLE_GATT_SVC_CCCDS + BLE_CONSOLE_TX_CCCDS \
-                                + (unsigned)KDRV_BLE_MIRROR_PIPE + KDRV_BLE_APP_CHARS_MAX)
+                                + (unsigned)KDRV_BLE_MIRROR_PIPE + KDRV_BLE_APP_CHARS_MAX \
+                                + BLE_BATT_CCCDS + KDRV_BLE_HID_CCCDS)
 
 /* NimBLE keeps CONFIG_BT_NIMBLE_MAX_CCCDS subscriptions for all its bonds
  * together (BLE_STORE_MAX_CCCDS), and one that does not fit makes the store
@@ -324,7 +334,8 @@ extern const uint8_t kode_ble_battery_service __attribute__((weak));
 
 bool kdrv_ble_battery_declared(void)
 {
-    return NULL != &kode_ble_battery_service;
+    /* A HID device serves its battery whether or not the app declares it. */
+    return (NULL != &kode_ble_battery_service) || (0U != kdrv_ble_hid_kinds());
 }
 
 kode_status_t kdrv_ble_set_cb(kdrv_ble_cb_t cb)
@@ -662,7 +673,6 @@ static kdrv_ble_pair_cb_t s_pair_cb;
  */
 static bool s_pair_live;
 
-#if !CONFIG_KODEOS_BOOT_ROLE_APP   /* an app shows no code */
 /** @brief Pick the six digits the peer will be asked to type. */
 static uint32_t ble_passkey_pick(void)
 {
@@ -672,7 +682,6 @@ static uint32_t ble_passkey_pick(void)
      * manager's thirty seconds and is never reused. */
     return (uint32_t)(esp_random() % 1000000U);
 }
-#endif
 
 /**
  * @brief Record where a pairing is and nudge whoever asked to be told.
@@ -1729,11 +1738,69 @@ kode_status_t kdrv_ble_mirror_write(const uint8_t *data, size_t len)
  *         and a notification carries at most 448 of its bytes. */
 #define BLE_APP_MTU_MAX     451U
 
-/** @brief Services in a table with the app's: the console's, the app's, Battery and the terminator. */
-#define BLE_APP_TABLE_SVCS  4U
+/** @brief Services in a table with the app's: the console's, the app's, Battery, HID,
+ *         Device Information and the terminator. */
+#define BLE_APP_TABLE_SVCS  6U
 
 #define BLE_UUID_BATTERY_SVC    0x180FU  /**< The Bluetooth SIG's Battery service.            */
 #define BLE_UUID_BATTERY_LEVEL  0x2A19U  /**< Its Battery Level: one byte, 0 to 100 percent. */
+
+#define BLE_UUID_HID_INFO       0x2A4AU  /**< Its HID Information.                            */
+#define BLE_UUID_HID_MAP        0x2A4BU  /**< Its Report Map.                                 */
+#define BLE_UUID_HID_CTRL       0x2A4CU  /**< Its HID Control Point: suspend, exit suspend.   */
+#define BLE_UUID_HID_REPORT     0x2A4DU  /**< A Report, in or out.                            */
+#define BLE_UUID_HID_REPORT_REF 0x2908U  /**< A Report's Report Reference descriptor.         */
+#define BLE_UUID_DIS_SVC        0x180AU  /**< The Bluetooth SIG's Device Information service. */
+#define BLE_UUID_DIS_MAKER      0x2A29U  /**< Its Manufacturer Name String.                   */
+#define BLE_UUID_DIS_PNP        0x2A50U  /**< Its PnP ID.                                     */
+
+#define BLE_HID_CHRS_MAX     6U   /**< HID Information, Report Map, HID Control Point, the mouse's
+                                   *   report and the keyboard's two.                          */
+#define BLE_HID_REPORTS      3U   /**< Reports, each with a Report Reference.                  */
+#define BLE_HID_REF_MOUSE    0U   /**< The mouse's input report's place among the reports.     */
+#define BLE_HID_REF_KEYS     1U   /**< The keyboard's input report's place.                    */
+#define BLE_HID_REF_LEDS     2U   /**< The keyboard's output report's place.                   */
+#define BLE_HID_REF_LEN      2U   /**< Bytes of a Report Reference: the report's ID, its type. */
+#define BLE_HID_TYPE_INPUT   1U   /**< Report Reference's type for an input report.            */
+#define BLE_HID_TYPE_OUTPUT  2U   /**< Report Reference's type for an output report.           */
+#define BLE_HID_LEDS_LEN     1U   /**< Bytes of the keyboard's output report.                  */
+#define BLE_HID_CTRL_LEN     1U   /**< Bytes of a write to HID Control Point.                  */
+#define BLE_DIS_CHRS         2U   /**< Device Information's characteristics: PnP ID, the maker. */
+
+#define BLE_HID_BCD_LO       0x11U  /**< HID Information: the HID specification's release 1.11, low byte. */
+#define BLE_HID_BCD_HI       0x01U  /**< And its high byte.                                     */
+#define BLE_HID_COUNTRY      0x00U  /**< HID Information: no country's hardware.                */
+#define BLE_HID_INFO_FLAGS   0x03U  /**< HID Information: wakes its host, and advertises when not connected. */
+#define BLE_PNP_SOURCE_USB   0x02U  /**< PnP ID: the vendor's ID is one the USB-IF assigned.    */
+#define BLE_PNP_VENDOR_LO    0x3AU  /**< PnP ID: the vendor the board's USB ports name, low byte. */
+#define BLE_PNP_VENDOR_HI    0x30U  /**< And its high byte.                                     */
+#define BLE_PNP_PRODUCT_LO   0x01U  /**< PnP ID: the Kode Dot's product ID, low byte.           */
+#define BLE_PNP_PRODUCT_HI   0x40U  /**< And its high byte.                                     */
+#define BLE_PNP_VERSION_LO   0x00U  /**< PnP ID: the product's version 1.0, low byte.           */
+#define BLE_PNP_VERSION_HI   0x01U  /**< And its high byte.                                     */
+
+/** @brief The name Device Information gives as the maker. */
+#define BLE_DIS_MAKER_NAME   "Kode"
+
+#define BLE_PRINT_NS         KDRV_BLE_HID_NVS_NS  /**< The NVS namespace of what the HID service keeps between boots. */
+#define BLE_PRINT_KEY        "table"              /**< Its key for the print of the table the last boot registered. */
+
+#define BLE_UUID_GATT_SVC      0x1801U  /**< The Generic Attribute service.                   */
+#define BLE_UUID_GATT_CHANGED  0x2A05U  /**< Its Service Changed characteristic.              */
+
+/**
+ * @brief kdrv_ble.c's NimBLE structures for the HID service and Device
+ *        Information, part of app_host_t.
+ */
+typedef struct {
+    struct ble_gatt_chr_def chr[BLE_HID_CHRS_MAX + 1U];   /**< The characteristics and the {0} terminator. */
+    struct ble_gatt_dsc_def dsc[BLE_HID_REPORTS][2];      /**< Each report's Report Reference and its terminator. */
+    struct ble_gatt_chr_def dis_chr[BLE_DIS_CHRS + 1U];   /**< Device Information's and the {0} terminator. */
+    uint16_t                handle[BLE_HID_REPORTS];      /**< Each report's value handle; 0 when not served. */
+    bool                    live;   /**< The host runs with the drain's event set up. */
+    struct ble_npl_event    ev;     /**< The drain's wake-up.                         */
+    struct ble_npl_callout  co;     /**< Its retry, timed for console_drain()'s reason. */
+} hid_host_t;
 
 /**
  * @brief kdrv_ble.c's NimBLE structures for the app's service, in the block
@@ -1757,6 +1824,7 @@ typedef struct {
     uint16_t                 batt_handle;  /**< Battery Level's value handle; 0 when not served. */
     bool                     batt_live;    /**< The host runs with batt_ev set up.             */
     struct ble_npl_event     batt_ev;      /**< A new level to notify.                         */
+    hid_host_t               hid;          /**< The HID service's, when a kind is served.      */
 } app_host_t;
 
 /** @brief The Battery service's UUID. */
@@ -1767,6 +1835,50 @@ static const ble_uuid16_t s_batt_level_uuid = BLE_UUID16_INIT(BLE_UUID_BATTERY_L
 
 /** @brief The last charge kdrv_ble_battery_set() was given, in percent; 0 before the first. */
 static _Atomic uint8_t s_batt_pct;
+
+/** @brief kdrv_ble_battery_set() has given a charge: Battery Level has a value to read. */
+static atomic_bool s_batt_known;
+
+static const ble_uuid16_t s_hid_svc_uuid    = BLE_UUID16_INIT(KDRV_BLE_HID_SVC_UUID);    /**< The HID service's UUID. */
+static const ble_uuid16_t s_hid_info_uuid   = BLE_UUID16_INIT(BLE_UUID_HID_INFO);       /**< HID Information's.      */
+static const ble_uuid16_t s_hid_map_uuid    = BLE_UUID16_INIT(BLE_UUID_HID_MAP);        /**< Report Map's.           */
+static const ble_uuid16_t s_hid_ctrl_uuid   = BLE_UUID16_INIT(BLE_UUID_HID_CTRL);       /**< HID Control Point's.    */
+static const ble_uuid16_t s_hid_report_uuid = BLE_UUID16_INIT(BLE_UUID_HID_REPORT);     /**< A Report's.             */
+static const ble_uuid16_t s_hid_ref_uuid    = BLE_UUID16_INIT(BLE_UUID_HID_REPORT_REF); /**< Report Reference's.     */
+static const ble_uuid16_t s_dis_svc_uuid    = BLE_UUID16_INIT(BLE_UUID_DIS_SVC);        /**< Device Information's.   */
+static const ble_uuid16_t s_dis_maker_uuid  = BLE_UUID16_INIT(BLE_UUID_DIS_MAKER);      /**< Manufacturer Name's.    */
+static const ble_uuid16_t s_dis_pnp_uuid    = BLE_UUID16_INIT(BLE_UUID_DIS_PNP);        /**< PnP ID's.               */
+
+/** @brief What a read of HID Information gets. */
+static const uint8_t s_hid_info[] = {
+    BLE_HID_BCD_LO, BLE_HID_BCD_HI, BLE_HID_COUNTRY, BLE_HID_INFO_FLAGS,
+};
+
+/** @brief What a read of PnP ID gets. */
+static const uint8_t s_dis_pnp[] = {
+    BLE_PNP_SOURCE_USB, BLE_PNP_VENDOR_LO, BLE_PNP_VENDOR_HI, BLE_PNP_PRODUCT_LO,
+    BLE_PNP_PRODUCT_HI, BLE_PNP_VERSION_LO, BLE_PNP_VERSION_HI,
+};
+
+/** @brief What each report's Report Reference says: the report's ID, its type. */
+static const uint8_t s_hid_ref[BLE_HID_REPORTS][BLE_HID_REF_LEN] = {
+    [BLE_HID_REF_MOUSE] = { KDRV_BLE_HID_ID_MOUSE, BLE_HID_TYPE_INPUT },
+    [BLE_HID_REF_KEYS]  = { KDRV_BLE_HID_ID_KEYBOARD, BLE_HID_TYPE_INPUT },
+    [BLE_HID_REF_LEDS]  = { KDRV_BLE_HID_ID_KEYBOARD, BLE_HID_TYPE_OUTPUT },
+};
+
+/** @brief The print of the table this boot registers; KDRV_BLE_HID_PRINT_NONE without HID. */
+static uint32_t s_table_print;
+
+static const ble_uuid16_t s_gatt_svc_uuid     = BLE_UUID16_INIT(BLE_UUID_GATT_SVC);     /**< The GATT service's UUID. */
+static const ble_uuid16_t s_gatt_changed_uuid = BLE_UUID16_INIT(BLE_UUID_GATT_CHANGED); /**< Service Changed's.       */
+
+/** @brief One pass of the search for a stored subscription to forget. */
+typedef struct {
+    uint16_t                  keep;   /**< Service Changed's value handle: its subscriptions stay. */
+    bool                      found;  /**< The pass found one.                                     */
+    struct ble_store_key_cccd key;    /**< Its key.                                                */
+} cccd_prune_t;
 
 size_t kdrv_ble_app_host_bytes(void)
 {
@@ -1907,7 +2019,9 @@ static int batt_access(uint16_t conn_handle, uint16_t attr_handle,
 
     int rc = BLE_ATT_ERR_UNLIKELY;
 
-    if ( BLE_GATT_ACCESS_OP_READ_CHR == ctxt->op )
+    /* Before the first reading there is no level to give: an error reads as
+     * no battery, where a 0 would read as an empty one. */
+    if ( (BLE_GATT_ACCESS_OP_READ_CHR == ctxt->op) && atomic_load(&s_batt_known) )
     {
         uint8_t const pct = atomic_load(&s_batt_pct);
 
@@ -1937,10 +2051,497 @@ static void batt_notify(struct ble_npl_event *ev)
     }
 }
 
+/* ---- The HID service (host task) -------------------------------------------
+ * Served last in the table when a kind was chosen (kdrv_ble_hid_select()), so
+ * every other handle is the same with it and without it. The kinds, the
+ * report map, the reports' ring and the subscriptions are kdrv_ble_hid.c's. */
+
+/** @brief The HID service's part of the block; NULL before the block is taken. */
+static hid_host_t *hid_host(void)
+{
+    app_host_t *const a = app_host();
+    hid_host_t       *h = NULL;
+
+    if ( NULL != a )
+    {
+        h = &a->hid;
+    }
+    return h;
+}
+
+/**
+ * @brief Which report an access is about.
+ * @param h    The HID service's part of the block.
+ * @param attr The attribute's handle: a report's value for a characteristic.
+ * @param ctxt NimBLE's access context: the descriptor for a Report Reference.
+ * @return The report's place; BLE_HID_REPORTS when it is none.
+ */
+static uint8_t hid_ref_of(const hid_host_t *h, uint16_t attr,
+                          const struct ble_gatt_access_ctxt *ctxt)
+{
+    bool const dsc   = (BLE_GATT_ACCESS_OP_READ_DSC == ctxt->op)
+                       || (BLE_GATT_ACCESS_OP_WRITE_DSC == ctxt->op);
+    uint8_t    found = (uint8_t)BLE_HID_REPORTS;
+
+    for ( uint8_t i = 0U; (i < (uint8_t)BLE_HID_REPORTS) && ((uint8_t)BLE_HID_REPORTS == found); ++i )
+    {
+        if ( dsc )
+        {
+            if ( ctxt->dsc == &h->dsc[i][0] )
+            {
+                found = i;
+            }
+        }
+        else if ( (0U != h->handle[i]) && (h->handle[i] == attr) )
+        {
+            found = i;
+        }
+        else
+        {
+            /* not this report */
+        }
+    }
+    return found;
+}
+
+/**
+ * @brief The kind whose input report sits at @p ref.
+ * @param ref A report's place.
+ * @return KDRV_BLE_HID_MOUSE or KDRV_BLE_HID_KEYBOARD; 0 for the output report or none.
+ */
+static uint8_t hid_kind_of(uint8_t ref)
+{
+    uint8_t kind = 0U;
+
+    if ( (uint8_t)BLE_HID_REF_MOUSE == ref )
+    {
+        kind = (uint8_t)KDRV_BLE_HID_MOUSE;
+    }
+    else if ( (uint8_t)BLE_HID_REF_KEYS == ref )
+    {
+        kind = (uint8_t)KDRV_BLE_HID_KEYBOARD;
+    }
+    else
+    {
+        /* the output report, or none */
+    }
+    return kind;
+}
+
+/**
+ * @brief The word the log names @p kinds by.
+ * @param kinds One kind, or both.
+ * @return "mouse", "keyboard", or "mouse and keyboard".
+ */
+static const char *hid_kind_word(uint8_t kinds)
+{
+    const char *word = "mouse and keyboard";
+
+    if ( (uint8_t)KDRV_BLE_HID_MOUSE == kinds )
+    {
+        word = "mouse";
+    }
+    else if ( (uint8_t)KDRV_BLE_HID_KEYBOARD == kinds )
+    {
+        word = "keyboard";
+    }
+    else
+    {
+        /* both */
+    }
+    return word;
+}
+
+/**
+ * @brief The word the log says a subscription's state with.
+ * @param on Whether the host is subscribed.
+ * @return "on" or "off".
+ */
+static const char *hid_on_word(bool on)
+{
+    const char *word = "off";
+
+    if ( on )
+    {
+        word = "on";
+    }
+    return word;
+}
+
+/**
+ * @brief The kind whose input report's value is @p attr.
+ * @param attr An attribute handle.
+ * @return The kind; 0 when it is no input report's.
+ */
+static uint8_t hid_kind_at(uint16_t attr)
+{
+    const hid_host_t *const h    = hid_host();
+    uint8_t                 kind = 0U;
+
+    if ( (NULL != h) && (0U != attr) )
+    {
+        if ( h->handle[BLE_HID_REF_MOUSE] == attr )
+        {
+            kind = (uint8_t)KDRV_BLE_HID_MOUSE;
+        }
+        else if ( h->handle[BLE_HID_REF_KEYS] == attr )
+        {
+            kind = (uint8_t)KDRV_BLE_HID_KEYBOARD;
+        }
+        else
+        {
+            /* not an input report */
+        }
+    }
+    return kind;
+}
+
+/**
+ * @brief Append @p len bytes to a read's answer.
+ * @param ctxt NimBLE's access context.
+ * @param src  The bytes.
+ * @param len  Their count.
+ * @return 0, or the ATT error the central gets.
+ */
+static int hid_answer(struct ble_gatt_access_ctxt *ctxt, const void *src, size_t len)
+{
+    int rc = BLE_ATT_ERR_INSUFFICIENT_RES;
+
+    if ( os_mbuf_append(ctxt->om, src, (uint16_t)len) == 0 )
+    {
+        rc = 0;
+    }
+    return rc;
+}
+
+/**
+ * @brief A read of a value that never changes: HID Information, Report Map,
+ *        PnP ID or the maker's name. Host task.
+ * @param conn_handle Unused.
+ * @param attr_handle Unused: the characteristic's UUID says which.
+ * @param ctxt        NimBLE's access context.
+ * @param arg         Unused.
+ * @return 0, or the ATT error the central gets.
+ */
+static int hid_const_access(uint16_t conn_handle, uint16_t attr_handle,
+                            struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    int rc = BLE_ATT_ERR_UNLIKELY;
+
+    if ( BLE_GATT_ACCESS_OP_READ_CHR != ctxt->op )
+    {
+        /* read only: rc stays UNLIKELY */
+    }
+    else if ( ble_uuid_cmp(ctxt->chr->uuid, &s_hid_info_uuid.u) == 0 )
+    {
+        rc = hid_answer(ctxt, s_hid_info, sizeof(s_hid_info));
+    }
+    else if ( ble_uuid_cmp(ctxt->chr->uuid, &s_hid_map_uuid.u) == 0 )
+    {
+        uint8_t      map[KDRV_BLE_HID_MAP_MAX];
+        size_t const n = kdrv_ble_hid_report_map(kdrv_ble_hid_kinds(), map, sizeof(map));
+
+        /* The whole map: NimBLE sends the part from the read's offset. */
+        rc = hid_answer(ctxt, map, n);
+    }
+    else if ( ble_uuid_cmp(ctxt->chr->uuid, &s_dis_pnp_uuid.u) == 0 )
+    {
+        rc = hid_answer(ctxt, s_dis_pnp, sizeof(s_dis_pnp));
+    }
+    else if ( ble_uuid_cmp(ctxt->chr->uuid, &s_dis_maker_uuid.u) == 0 )
+    {
+        rc = hid_answer(ctxt, BLE_DIS_MAKER_NAME, sizeof(BLE_DIS_MAKER_NAME) - 1U);
+    }
+    else
+    {
+        /* none of the four: rc stays UNLIKELY */
+    }
+    return rc;
+}
+
+/**
+ * @brief A write to HID Control Point: the host suspends or wakes. Host task.
+ *
+ * Taken and not acted on: the board's rest is AO_LowPower's.
+ *
+ * @param conn_handle Unused.
+ * @param attr_handle Unused.
+ * @param ctxt        NimBLE's access context.
+ * @param arg         Unused.
+ * @return 0, or the ATT error the central gets.
+ */
+static int hid_ctrl_access(uint16_t conn_handle, uint16_t attr_handle,
+                           struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    int rc = BLE_ATT_ERR_UNLIKELY;
+
+    if ( BLE_GATT_ACCESS_OP_WRITE_CHR == ctxt->op )
+    {
+        rc = BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        if ( (uint16_t)BLE_HID_CTRL_LEN == OS_MBUF_PKTLEN(ctxt->om) )
+        {
+            rc = 0;
+        }
+    }
+    return rc;
+}
+
+/**
+ * @brief A read or a write of a report, or a read of its Report Reference. Host task.
+ *
+ * An input report reads as the last one sent on this link. The output report
+ * is the keyboard's LEDs, kept as the host wrote them.
+ *
+ * @param conn_handle Unused.
+ * @param attr_handle The attribute's handle.
+ * @param ctxt        NimBLE's access context.
+ * @param arg         Unused.
+ * @return 0, or the ATT error the central gets.
+ */
+static int hid_report_access(uint16_t conn_handle, uint16_t attr_handle,
+                             struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)arg;
+
+    const hid_host_t *const h   = hid_host();
+    uint8_t                 ref = (uint8_t)BLE_HID_REPORTS;
+    int                     rc  = BLE_ATT_ERR_UNLIKELY;
+
+    if ( NULL != h )
+    {
+        ref = hid_ref_of(h, attr_handle, ctxt);
+    }
+    if ( (uint8_t)BLE_HID_REPORTS <= ref )
+    {
+        /* not one of the reports: rc stays UNLIKELY */
+    }
+    else if ( BLE_GATT_ACCESS_OP_READ_DSC == ctxt->op )
+    {
+        rc = hid_answer(ctxt, s_hid_ref[ref], sizeof(s_hid_ref[ref]));
+    }
+    else if ( BLE_GATT_ACCESS_OP_READ_CHR == ctxt->op )
+    {
+        uint8_t  buf[KDRV_BLE_HID_REPORT_MAX];
+        uint16_t n = (uint16_t)BLE_HID_LEDS_LEN;
+
+        if ( (uint8_t)BLE_HID_REF_LEDS == ref )
+        {
+            buf[0] = kdrv_ble_hid_leds();
+        }
+        else
+        {
+            n = kdrv_ble_hid_last(hid_kind_of(ref), buf);
+        }
+        rc = hid_answer(ctxt, buf, n);
+    }
+    else if ( (BLE_GATT_ACCESS_OP_WRITE_CHR == ctxt->op) && ((uint8_t)BLE_HID_REF_LEDS == ref) )
+    {
+        uint8_t  leds   = 0U;
+        uint16_t copied = 0U;
+
+        if ( (uint16_t)BLE_HID_LEDS_LEN != OS_MBUF_PKTLEN(ctxt->om) )
+        {
+            rc = BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        else if ( ble_hs_mbuf_to_flat(ctxt->om, &leds, (uint16_t)BLE_HID_LEDS_LEN, &copied) == 0 )
+        {
+            kdrv_ble_hid_leds_set(leds);
+            rc = 0;
+        }
+        else
+        {
+            /* rc stays UNLIKELY */
+        }
+    }
+    else
+    {
+        /* an input report takes no write: rc stays UNLIKELY */
+    }
+    return rc;
+}
+
+/**
+ * @brief Fill one report's characteristic and its Report Reference.
+ * @param h     The HID service's part of the block.
+ * @param at    The characteristic's place in the service.
+ * @param ref   The report's place among the reports.
+ * @param flags The characteristic's flags.
+ */
+static void hid_report_def(hid_host_t *h, uint8_t at, uint8_t ref, ble_gatt_chr_flags flags)
+{
+    h->dsc[ref][0] = (struct ble_gatt_dsc_def){
+        .uuid      = &s_hid_ref_uuid.u,
+        .att_flags = (uint8_t)(BLE_ATT_F_READ | DSC_READ_ENC | BLE_ATT_F_READ_AUTHOR),
+        .access_cb = &hid_report_access,
+    };
+    h->dsc[ref][1] = (struct ble_gatt_dsc_def){ 0 };
+    h->chr[at] = (struct ble_gatt_chr_def){
+        .uuid        = &s_hid_report_uuid.u,
+        .access_cb   = &hid_report_access,
+        .flags       = flags,
+        .val_handle  = &h->handle[ref],
+        .descriptors = h->dsc[ref],
+    };
+}
+
+/**
+ * @brief Add the HID service and Device Information to the table.
+ * @param a     The block.
+ * @param n     Services the table holds already.
+ * @param kinds The kinds served, at least one.
+ * @param perm  The flags each property earns: the console's.
+ * @return Services the table holds now.
+ */
+static uint8_t hid_build_table(app_host_t *a, uint8_t n, uint8_t kinds,
+                               const kdrv_ble_app_perm_t *perm)
+{
+    hid_host_t *const h    = &a->hid;
+    uint8_t           at   = 0U;
+    uint8_t           svcs = n;
+    /* Every access of the service asks whose bond is on the link: a HID
+     * bond's alone gets in (BLE_GAP_EVENT_AUTHORIZE). */
+    ble_gatt_chr_flags const rd = (ble_gatt_chr_flags)(perm->read | BLE_GATT_CHR_F_READ_AUTHOR);
+    ble_gatt_chr_flags const wr = (ble_gatt_chr_flags)(perm->write | BLE_GATT_CHR_F_WRITE_AUTHOR);
+    ble_gatt_chr_flags const nt = (ble_gatt_chr_flags)(perm->notify
+                                                       | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHOR);
+
+    h->chr[at] = (struct ble_gatt_chr_def){
+        .uuid      = &s_hid_info_uuid.u,
+        .access_cb = &hid_const_access,
+        .flags     = rd,
+    };
+    ++at;
+    h->chr[at] = (struct ble_gatt_chr_def){
+        .uuid      = &s_hid_map_uuid.u,
+        .access_cb = &hid_const_access,
+        .flags     = rd,
+    };
+    ++at;
+    h->chr[at] = (struct ble_gatt_chr_def){
+        .uuid      = &s_hid_ctrl_uuid.u,
+        .access_cb = &hid_ctrl_access,
+        .flags     = (ble_gatt_chr_flags)(BLE_GATT_CHR_F_WRITE_NO_RSP | CHR_WRITE_ENC
+                                          | BLE_GATT_CHR_F_WRITE_AUTHOR),
+    };
+    ++at;
+    if ( 0U != (kinds & KDRV_BLE_HID_MOUSE) )
+    {
+        hid_report_def(h, at, (uint8_t)BLE_HID_REF_MOUSE, (ble_gatt_chr_flags)(rd | nt));
+        ++at;
+    }
+    if ( 0U != (kinds & KDRV_BLE_HID_KEYBOARD) )
+    {
+        hid_report_def(h, at, (uint8_t)BLE_HID_REF_KEYS, (ble_gatt_chr_flags)(rd | nt));
+        ++at;
+        hid_report_def(h, at, (uint8_t)BLE_HID_REF_LEDS,
+                       (ble_gatt_chr_flags)(rd | wr | BLE_GATT_CHR_F_WRITE_NO_RSP));
+        ++at;
+    }
+    h->chr[at] = (struct ble_gatt_chr_def){ 0 };
+    a->svc[svcs] = (struct ble_gatt_svc_def){
+        .type            = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid            = &s_hid_svc_uuid.u,
+        .characteristics = h->chr,
+    };
+    ++svcs;
+
+    /* What the board is, for the host that lists it: read without a bond. */
+    h->dis_chr[0] = (struct ble_gatt_chr_def){
+        .uuid      = &s_dis_pnp_uuid.u,
+        .access_cb = &hid_const_access,
+        .flags     = BLE_GATT_CHR_F_READ,
+    };
+    h->dis_chr[1] = (struct ble_gatt_chr_def){
+        .uuid      = &s_dis_maker_uuid.u,
+        .access_cb = &hid_const_access,
+        .flags     = BLE_GATT_CHR_F_READ,
+    };
+    h->dis_chr[BLE_DIS_CHRS] = (struct ble_gatt_chr_def){ 0 };
+    a->svc[svcs] = (struct ble_gatt_svc_def){
+        .type            = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid            = &s_dis_svc_uuid.u,
+        .characteristics = h->dis_chr,
+    };
+    ++svcs;
+    return svcs;
+}
+
+/**
+ * @brief Add a UUID's bytes to a table's print.
+ * @param print The print so far.
+ * @param uuid  The UUID, of 16 or of 128 bits.
+ * @return The print with it in.
+ */
+static uint32_t print_uuid(uint32_t print, const ble_uuid_t *uuid)
+{
+    uint32_t out = print;
+
+    if ( BLE_UUID_TYPE_16 == uuid->type )
+    {
+        /* cppcheck-suppress misra-c2012-11.3 ; NimBLE's own reading of a UUID by its type */
+        uint16_t const v = BLE_UUID16(uuid)->value;
+
+        out = kdrv_ble_hid_print_add(out, &v, sizeof(v));
+    }
+    else if ( BLE_UUID_TYPE_128 == uuid->type )
+    {
+        /* cppcheck-suppress misra-c2012-11.3 ; NimBLE's own reading of a UUID by its type */
+        out = kdrv_ble_hid_print_add(out, BLE_UUID128(uuid)->value, KDRV_BLE_UUID128_BYTES);
+    }
+    else
+    {
+        /* no table of this file's has a UUID of 32 bits */
+    }
+    return out;
+}
+
+/**
+ * @brief The print of the table @p defs: every service, characteristic and
+ *        descriptor in order, and each characteristic's flags.
+ *
+ * Two tables with one print give every attribute the same handle.
+ *
+ * @param defs The table, ended by a service of no type.
+ * @return The print.
+ */
+static uint32_t table_print(const struct ble_gatt_svc_def *defs)
+{
+    uint32_t print = KDRV_BLE_HID_PRINT_SEED;
+
+    for ( size_t s = 0U; BLE_GATT_SVC_TYPE_END != defs[s].type; ++s )
+    {
+        const struct ble_gatt_chr_def *const chrs = defs[s].characteristics;
+
+        print = print_uuid(print, defs[s].uuid);
+        for ( size_t c = 0U; (NULL != chrs) && (NULL != chrs[c].uuid); ++c )
+        {
+            const struct ble_gatt_dsc_def *const dscs = chrs[c].descriptors;
+
+            print = print_uuid(print, chrs[c].uuid);
+            print = kdrv_ble_hid_print_add(print, &chrs[c].flags, sizeof(chrs[c].flags));
+            for ( size_t d = 0U; (NULL != dscs) && (NULL != dscs[d].uuid); ++d )
+            {
+                print = print_uuid(print, dscs[d].uuid);
+            }
+        }
+    }
+    return print;
+}
+
 /**
  * @brief The table to register: the console's alone, or the console's with
- *        the app's after it when the app's is served, and Battery after
- *        those when KODE_BLE_BATTERY_SERVICE() asks for it.
+ *        the app's after it when the app's is served, Battery after those
+ *        when KODE_BLE_BATTERY_SERVICE() or the HID service asks for it, and
+ *        the HID service and Device Information last when a kind was chosen.
  *
  * Called after console_build_table(). The table with the app's service is
  * the block's own copy, so the console's static table stays two entries.
@@ -1957,7 +2558,16 @@ static const struct ble_gatt_svc_def *app_build_table(void)
         .notify = BLE_GATT_CHR_F_NOTIFY | CHR_NOTIFY_ENC,
     };
     bool const    served = kdrv_ble_app_build(kdrv_ble_app_fix(), &perm, &t);
-    app_host_t *const a  = app_host();
+
+    /* The HID service's structures live in the block: a board that asks for
+     * it takes the block, and one the block is refused to serves no HID. */
+    if ( (0U != kdrv_ble_hid_kinds()) && !kdrv_ble_app_block() )
+    {
+        KLOG_E(TAG, "hid: no PSRAM for the service; it is left out");
+        (void)kdrv_ble_hid_select(0U);
+    }
+    uint8_t const     hid = kdrv_ble_hid_fix();
+    app_host_t *const a   = app_host();
 
     if ( NULL != a )
     {
@@ -1965,7 +2575,9 @@ static const struct ble_gatt_svc_def *app_build_table(void)
         a->live        = false;
         a->batt_live   = false;
         a->batt_handle = 0U;
+        a->hid.live    = false;
         (void)memset(a->val_handle, 0, sizeof(a->val_handle));
+        (void)memset(a->hid.handle, 0, sizeof(a->hid.handle));
     }
     if ( served && (NULL != a) )
     {
@@ -1986,6 +2598,17 @@ static const struct ble_gatt_svc_def *app_build_table(void)
         }
         a->chr[t.count] = (struct ble_gatt_chr_def){ 0 };
         a->count        = t.count;
+    }
+    if ( 0U != hid )
+    {
+        /* The console's service is a console bond's alone, and the HID
+         * service a HID bond's: both ask who is on the link before each
+         * access. A table without HID asks nobody, and is as it was. */
+        s_chr_defs[0].flags |= BLE_GATT_CHR_F_WRITE_AUTHOR;
+        s_chr_defs[1].flags |= BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHOR;
+#if KDRV_BLE_MIRROR_PIPE
+        s_chr_defs[2].flags |= BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHOR;
+#endif
     }
     if ( (NULL != a) && (served || kdrv_ble_battery_declared()) )
     {
@@ -2020,9 +2643,14 @@ static const struct ble_gatt_svc_def *app_build_table(void)
             };
             ++n;
         }
+        if ( 0U != hid )
+        {
+            n = hid_build_table(a, n, hid, &perm);
+        }
         a->svc[n] = (struct ble_gatt_svc_def){ 0 };
         defs      = a->svc;
     }
+    s_table_print = kdrv_ble_hid_print_end(table_print(defs), 0U != hid);
     return defs;
 }
 
@@ -2114,13 +2742,98 @@ void kdrv_ble_app_kick(void)
     }
 }
 
+/**
+ * @brief Notify the reports the ring holds to the host. Runs on NimBLE's host task.
+ *
+ * Logs nothing, for console_drain()'s reason. A report the link refuses is
+ * counted dropped; one the stack has no buffer for stays, and a timer comes
+ * back for it.
+ *
+ * @param ev Unused; the ring is the payload.
+ */
+static void hid_drain(struct ble_npl_event *ev)
+{
+    (void)ev;
+
+    hid_host_t *const h    = hid_host();
+    uint16_t const    conn = s_ble.conn;
+    uint8_t           buf[KDRV_BLE_HID_REPORT_MAX];
+    uint8_t           kind = 0U;
+    uint16_t          len  = 0U;
+    bool              more = (NULL != h) && (BLE_HS_CONN_HANDLE_NONE != conn);
+
+    for ( uint32_t k = 0U; more && (KDRV_BLE_HID_RING_SLOTS > k); ++k )
+    {
+        more = kdrv_ble_hid_peek(&kind, buf, &len);
+        if ( more )
+        {
+            uint16_t        handle = h->handle[BLE_HID_REF_KEYS];
+            struct os_mbuf *om     = NULL;
+
+            if ( (uint8_t)KDRV_BLE_HID_MOUSE == kind )
+            {
+                handle = h->handle[BLE_HID_REF_MOUSE];
+            }
+            if ( 0U != handle )
+            {
+                om = ble_hs_mbuf_from_flat(buf, len);
+            }
+            if ( 0U == handle )
+            {
+                kdrv_ble_hid_pop(false);
+            }
+            else if ( NULL == om )
+            {
+                ++s_ble.tx_retry;
+                (void)ble_npl_callout_reset(&h->co, KDRV_BLE_RETRY_TICKS);
+                more = false;
+            }
+            else
+            {
+                int const rc = ble_gatts_notify_custom(conn, handle, om);
+
+                if ( BLE_HS_ENOMEM == rc )
+                {
+                    ++s_ble.tx_retry;
+                    (void)ble_npl_callout_reset(&h->co, KDRV_BLE_RETRY_TICKS);
+                    more = false;
+                }
+                else
+                {
+                    /* Freed by the callee on every path but this one, as
+                     * console_drain() says. */
+                    if ( BLE_HS_ENOTSUP == rc )
+                    {
+                        (void)os_mbuf_free_chain(om);
+                    }
+                    kdrv_ble_hid_pop(0 == rc);
+                }
+            }
+        }
+    }
+}
+
+void kdrv_ble_hid_kick(void)
+{
+    hid_host_t *const h = hid_host();
+
+    /* Posted to the host's own queue, as the console's wake-up is. */
+    if ( (NULL != h) && h->live && kdrv_ble_hid_queued() )
+    {
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &h->ev);
+    }
+}
+
 void kdrv_ble_battery_set(uint8_t pct)
 {
     app_host_t *const a = app_host();
 
     /* Posted to the host's own queue, as the drain's wake-up is, and only
      * for a level that moved: AO_Power publishes every reading. */
-    if ( (atomic_exchange(&s_batt_pct, pct) != pct) && (NULL != a) && a->batt_live )
+    bool const moved = (atomic_exchange(&s_batt_pct, pct) != pct);
+    bool const first = !atomic_exchange(&s_batt_known, true);
+
+    if ( (moved || first) && (NULL != a) && a->batt_live )
     {
         ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &a->batt_ev);
     }
@@ -2135,6 +2848,7 @@ static void app_quiet(void)
     {
         a->live      = false;
         a->batt_live = false;
+        a->hid.live  = false;
     }
 }
 
@@ -2147,6 +2861,10 @@ size_t kdrv_ble_app_host_bytes(void)
 }
 
 void kdrv_ble_app_kick(void)
+{
+}
+
+void kdrv_ble_hid_kick(void)
 {
 }
 
@@ -2206,7 +2924,147 @@ kode_status_t kdrv_ble_mirror_write(const uint8_t *data, size_t len)
 #if CONFIG_KODEOS_BLE_CONSOLE
 static ble_store_write_fn  *s_store_write;    /**< NimBLE's own, wrapped. */
 static ble_store_delete_fn *s_store_delete;   /**< NimBLE's own, wrapped. */
-#endif
+
+/* ---- What each bond was made for --------------------------------------------
+ * A bond is the console's or the HID service's, never both
+ * (kdrv_ble_hid_table.h): the mark is set when NimBLE writes the bond, by
+ * what the board serves then, and goes when the bond is deleted. It is kept
+ * by the device's identity address, the one the bond is stored under. In a
+ * table that serves HID the console's characteristics and the HID service's
+ * ask who is on the link before each access (BLE_GAP_EVENT_AUTHORIZE); a
+ * table without HID asks nobody. A device with a HID bond comes back by
+ * itself whenever it sees the board, and a boot that serves no HID hangs up
+ * on it. The host task's alone, but for kdrv_ble_unpair(), which runs with
+ * no link. */
+
+/** @brief The devices with a HID bond, as KDRV_BLE_HID_NVS_HOSTS keeps them. */
+static kdrv_ble_hid_hosts_t s_hid_hosts;
+
+/** @brief This link has been told, once, which service its bond does not open. */
+static bool s_author_said;
+
+/**
+ * @brief Write a device's identity address the way the hosts keep it.
+ * @param addr NimBLE's address.
+ * @param out  Receives KDRV_BLE_HID_ADDR_LEN bytes: the type, then the six bytes.
+ */
+static void hid_host_addr(const ble_addr_t *addr, uint8_t *out)
+{
+    out[0] = addr->type;
+    (void)memcpy(&out[1], addr->val, sizeof(addr->val));
+}
+
+_Static_assert(KDRV_BLE_HID_ADDR_LEN == (1U + sizeof(((ble_addr_t *)NULL)->val)),
+               "a host is kept as its address type and its six bytes");
+_Static_assert(KDRV_BLE_HID_HOSTS_MAX == (unsigned)CONFIG_BT_NIMBLE_MAX_BONDS,
+               "one host can be remembered for each bond");
+
+/**
+ * @brief Whether the device of @p conn has a HID bond.
+ * @param conn The connection.
+ * @return true for a HID bond; false for a console bond, or no such link.
+ */
+static bool hid_bond_of(uint16_t conn)
+{
+    struct ble_gap_conn_desc desc;
+    uint8_t                  addr[KDRV_BLE_HID_ADDR_LEN];
+    bool                     hid = false;
+
+    if ( ble_gap_conn_find(conn, &desc) == 0 )
+    {
+        hid_host_addr(&desc.peer_id_addr, addr);
+        hid = kdrv_ble_hid_hosts_has(&s_hid_hosts, addr);
+    }
+    return hid;
+}
+
+#ifdef CONFIG_KODEOS_BLE_CONSOLE_PAIRING
+/**
+ * @brief NimBLE wrote the bond of @p peer: mark it by what the board serves now.
+ * @param peer Its identity address.
+ */
+static void hid_bond_written(const ble_addr_t *peer)
+{
+    uint8_t addr[KDRV_BLE_HID_ADDR_LEN];
+
+    hid_host_addr(peer, addr);
+    if ( kdrv_ble_hid_bond_note(&s_hid_hosts, addr, kdrv_ble_hid_served()) )
+    {
+        kdrv_ble_hid_hosts_store(&s_hid_hosts);
+    }
+}
+
+/**
+ * @brief The bond of @p peer is being deleted: its mark goes with it.
+ * @param peer Its identity address.
+ */
+static void hid_bond_gone(const ble_addr_t *peer)
+{
+    uint8_t addr[KDRV_BLE_HID_ADDR_LEN];
+
+    hid_host_addr(peer, addr);
+    if ( kdrv_ble_hid_hosts_drop(&s_hid_hosts, addr) )
+    {
+        kdrv_ble_hid_hosts_store(&s_hid_hosts);
+    }
+}
+
+/**
+ * @brief kdrv_ble_hid_bonded_t: whether the bond store holds a bond for @p addr.
+ * @param addr The device's identity address.
+ * @param ctx  Unused.
+ * @return true when it does.
+ */
+static bool hid_host_bonded(const uint8_t *addr, void *ctx)
+{
+    (void)ctx;
+
+    struct ble_store_key_sec   key;
+    struct ble_store_value_sec sec;
+
+    (void)memset(&key, 0, sizeof(key));
+    key.peer_addr.type = addr[0];
+    (void)memcpy(key.peer_addr.val, &addr[1], sizeof(key.peer_addr.val));
+    return ble_store_read_peer_sec(&key, &sec) == 0;
+}
+
+/** @brief Read the marks the last boot kept, less the ones whose bond is gone. Host task. */
+static void hid_hosts_load(void)
+{
+    kdrv_ble_hid_hosts_load(&s_hid_hosts);
+    if ( kdrv_ble_hid_hosts_sift(&s_hid_hosts, &hid_host_bonded, NULL) )
+    {
+        kdrv_ble_hid_hosts_store(&s_hid_hosts);
+    }
+}
+
+/**
+ * @brief Judge the device of @p conn, whose link has just been encrypted.
+ *
+ * A device with a HID bond that comes back while no HID is served is hung up
+ * on, so the one link stays free for the console and the phone.
+ *
+ * @param conn The connection.
+ */
+static void hid_host_check(uint16_t conn)
+{
+    struct ble_gap_conn_desc desc;
+    uint8_t                  addr[KDRV_BLE_HID_ADDR_LEN];
+
+    if ( ble_gap_conn_find(conn, &desc) == 0 )
+    {
+        hid_host_addr(&desc.peer_id_addr, addr);
+        if ( KDRV_BLE_HID_HOST_HANG_UP
+             == kdrv_ble_hid_host_judge(&s_hid_hosts, addr, kdrv_ble_hid_served()) )
+        {
+            KLOG_N(TAG, "hid: a host of the board's mouse or keyboard came back and none "
+                        "is served; hung up, the link is free");
+            (void)ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+        }
+    }
+}
+#endif /* CONFIG_KODEOS_BLE_CONSOLE_PAIRING */
+#endif /* CONFIG_KODEOS_BLE_CONSOLE */
 
 #if CONFIG_KODEOS_BLE_CONSOLE_PAIRING
 /* ---- The bond store keeps tokens; the keys live on the C5 -----------------
@@ -2307,6 +3165,11 @@ static int ble_store_write_c5(int obj_type, const union ble_store_value *val)
     }
     int const err = s_store_write(obj_type, &v);
     (void)memset(&v, 0, sizeof(v));
+    if ( (0 == err) && (BLE_STORE_OBJ_TYPE_PEER_SEC == obj_type) )
+    {
+        /* A bond is written: it is the console's or the HID service's from here. */
+        hid_bond_written(&val->sec.peer_addr);
+    }
     return err;
 }
 
@@ -2326,6 +3189,10 @@ static int ble_store_delete_c5(int obj_type, const union ble_store_key *key)
             if ( 0U != v.sec.irk_present )
             {
                 ble_key_del(v.sec.irk);
+            }
+            if ( BLE_STORE_OBJ_TYPE_PEER_SEC == obj_type )
+            {
+                hid_bond_gone(&v.sec.peer_addr);
             }
         }
         (void)memset(&v, 0, sizeof(v));
@@ -2630,6 +3497,82 @@ static void ble_store_hook(void)
 #define BLE_ATT_HANDLE_FIRST  0x0001U
 #define BLE_ATT_HANDLE_LAST   0xFFFFU
 
+#ifdef CONFIG_KODEOS_BLE_CONSOLE
+/**
+ * @brief ble_store_iterate()'s callback: stop at the first stored
+ *        subscription that is not Service Changed's, and hand back its key.
+ * @param obj_type The object's type: a subscription.
+ * @param val      The stored subscription.
+ * @param cookie   A cccd_prune_t: the handle to keep, and where the key goes.
+ * @return 0 to go on; 1 once one was found.
+ */
+static int cccd_prune_find(int obj_type, union ble_store_value *val, void *cookie)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; the cookie is the cccd_prune_t this file passed */
+    cccd_prune_t *const p = (cccd_prune_t *)cookie;
+    int                 rc = 0;
+
+    if ( (BLE_STORE_OBJ_TYPE_CCCD == obj_type)
+        && kdrv_ble_hid_prune_takes(val->cccd.chr_val_handle, p->keep) )
+    {
+        ble_store_key_from_value_cccd(&p->key, &val->cccd);
+        p->found = true;
+        rc       = 1;
+    }
+    return rc;
+}
+
+/**
+ * @brief Forget the subscriptions the bonds stored on another table.
+ *
+ * NimBLE keeps a subscription by its characteristic's handle and applies it,
+ * when its bond comes back, to whichever characteristic has that handle now.
+ * A table with the HID service has a print, one without has none, and both
+ * are compared with the print the last boot left: when they differ, every
+ * stored subscription but Service Changed's goes, so that one still tells
+ * each bond to read the table again. A board that never serves HID compares
+ * none with none, and neither forgets nor writes anything. Host task.
+ */
+static void ble_cccd_prune(void)
+{
+    uint32_t was = KDRV_BLE_HID_PRINT_NONE;
+    size_t   len = sizeof(was);
+
+    if ( (khal_nvs_get_blob(BLE_PRINT_NS, BLE_PRINT_KEY, &was, &len) != KODE_OK)
+        || (sizeof(was) != len) )
+    {
+        was = KDRV_BLE_HID_PRINT_NONE;
+    }
+    if ( kdrv_ble_hid_prune_due(was, s_table_print) )
+    {
+        cccd_prune_t p      = { .keep = 0U, .found = true };
+        uint32_t     pruned = 0U;
+
+        (void)ble_gatts_find_chr(&s_gatt_svc_uuid.u, &s_gatt_changed_uuid.u, NULL, &p.keep);
+        for ( uint32_t i = 0U; p.found && ((uint32_t)CONFIG_BT_NIMBLE_MAX_CCCDS > i); ++i )
+        {
+            p.found = false;
+            (void)ble_store_iterate(BLE_STORE_OBJ_TYPE_CCCD, &cccd_prune_find, &p);
+            if ( p.found && (ble_store_delete_cccd(&p.key) == 0) )
+            {
+                ++pruned;
+            }
+        }
+        if ( KDRV_BLE_HID_PRINT_NONE == s_table_print )
+        {
+            (void)khal_nvs_erase(BLE_PRINT_NS, BLE_PRINT_KEY);
+        }
+        else
+        {
+            (void)khal_nvs_set_blob(BLE_PRINT_NS, BLE_PRINT_KEY, &s_table_print,
+                                    sizeof(s_table_print));
+        }
+        KLOG_N(TAG, "hid: the GATT table changed; %u stored subscription(s) forgotten",
+               (unsigned)pruned);
+    }
+}
+#endif /* CONFIG_KODEOS_BLE_CONSOLE */
+
 /** @brief The controller answered: from here the stack knows its own address. */
 static void ble_on_sync(void)
 {
@@ -2657,6 +3600,10 @@ static void ble_on_sync(void)
 #endif
     /* What the store holds at this start, after the old keys have moved. */
     ble_bonds_count();
+    ble_cccd_prune();
+#ifdef CONFIG_KODEOS_BLE_CONSOLE_PAIRING
+    hid_hosts_load();
+#endif
 #endif
     /* A bonded peer keeps the attribute table it found on its last visit,
      * and the table is not the same from one firmware to the next: kodeOS
@@ -2690,6 +3637,7 @@ static void ble_on_reset(int reason)
     /* The stack reported the scan's end before this callback, and the hook
      * was told then; the flag is cleared again in case it did not. */
     s_ble.hearing = false;
+    kdrv_ble_hid_link_reset();
     pulse_train_end();
     ble_set_state(KDRV_BLE_IDLE);
 }
@@ -2889,18 +3837,20 @@ static void ble_record(const struct ble_gap_disc_desc *d)
 /**
  * @brief Whether a new device may pair now.
  *
- * Never in an app: a new phone pairs in kodeOS, where the code is shown on
- * the glass, and the bonds made there reach the app through the C5's keys
- * and the P4's tokens, both of which survive the jump. In kodeOS only while
- * the board is visible: a board that serves its bonded devices and hides
- * from everyone else does not take a new one (kdrv_ble_adv_plan()).
+ * In an app only while it serves the HID service and its time to pair runs
+ * (kdrv_ble_hid_pair_window()): the app shows the code. Any other app pairs
+ * nobody: a new phone pairs in kodeOS, where the code is shown on the glass,
+ * and the bonds made there reach the app through the C5's keys and the P4's
+ * tokens, both of which survive the jump. In kodeOS only while the board is
+ * visible: a board that serves its bonded devices and hides from everyone
+ * else does not take a new one (kdrv_ble_adv_plan()).
  *
  * @return true when a pairing may go on.
  */
 static bool ble_pair_open(void)
 {
 #if CONFIG_KODEOS_BOOT_ROLE_APP
-    return false;
+    return kdrv_ble_hid_pair_open();
 #else
     return !s_ble.adv_hidden;
 #endif
@@ -2918,8 +3868,15 @@ static void ble_pair_refuse(uint16_t conn, bool forget)
     struct ble_gap_conn_desc desc;
 
 #if CONFIG_KODEOS_BOOT_ROLE_APP
-    KLOG_N(TAG, "pairing refused: a new phone pairs in kodeOS; this app "
-                "serves bonded phones");
+    if ( kdrv_ble_hid_served() )
+    {
+        KLOG_N(TAG, "pairing refused: the app's time to pair is not running");
+    }
+    else
+    {
+        KLOG_N(TAG, "pairing refused: a new phone pairs in kodeOS; this app "
+                    "serves bonded phones");
+    }
 #else
     KLOG_N(TAG, "pairing refused: the board is hidden; Pair new device "
                 "makes it visible");
@@ -2945,7 +3902,19 @@ static void ble_pair_refuse(uint16_t conn, bool forget)
  */
 static int ble_store_status(struct ble_store_status_event *event, void *arg)
 {
-    if ( (BLE_STORE_EVENT_FULL == event->event_code) && !ble_pair_open() )
+    bool make_room = ble_pair_open();
+
+#ifdef CONFIG_KODEOS_BOOT_ROLE_APP
+    /* Never in an app, whose time to pair shows no card on the glass: the
+     * oldest bond is the system's, and kodeOS is where one is given up. */
+    if ( make_room && (BLE_STORE_EVENT_FULL == event->event_code) )
+    {
+        KLOG_N(TAG, "pairing: the bond store is full and an app makes no room; "
+                    "forget a device in kodeOS");
+    }
+    make_room = false;
+#endif
+    if ( (BLE_STORE_EVENT_FULL == event->event_code) && !make_room )
     {
         return BLE_HS_ENOMEM;
     }
@@ -3119,6 +4088,12 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                 }
 #if CONFIG_KODEOS_BLE_CONSOLE
                 kdrv_ble_app_link_reset();
+                /* The HID service's subscriptions are not forgotten here: a
+                 * bonded host that encrypts at once has them restored before
+                 * this event, and writes them once in its life. The link's
+                 * end forgot the last host's. A report queued before the
+                 * handle above was known goes now. */
+                kdrv_ble_hid_kick();
 #endif
                 ble_set_state(KDRV_BLE_CONNECTED);
                 /* What a central offers by default is 30 ms, and this link is
@@ -3216,6 +4191,8 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 #endif
 #if CONFIG_KODEOS_BLE_CONSOLE
             kdrv_ble_app_link_reset();
+            kdrv_ble_hid_link_reset();
+            s_author_said    = false;
             s_ble.console_on = false;
             confirm_lost();   /* before tx_drop restarts under the mark */
             s_ble.tx_drop    = 0U;
@@ -3249,14 +4226,11 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 #if CONFIG_KODEOS_BLE_CONSOLE_PAIRING
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
         case BLE_GAP_EVENT_PASSKEY_ACTION: {
-#if CONFIG_KODEOS_BOOT_ROLE_APP
-            /* No code is picked and nothing is shown: an app has no card for
-             * it, and a number nobody sees would be a pairing nobody can
-             * finish. Whoever asked is hung up on. */
-            ble_pair_refuse(event->passkey.conn_handle, false);
-#else
             /* Hidden, the board serves the devices it knows: a new one
-             * pairs after Pair new device, not by asking.
+             * pairs after Pair new device, not by asking. An app picks no
+             * code unless it serves the HID service and opened its time to
+             * pair: a number nobody shows would be a pairing nobody can
+             * finish, so whoever asked is hung up on.
              *
              * This side declares DisplayOnly, so the only action it has any
              * business answering is "show a number". A comparison or an
@@ -3298,7 +4272,6 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                             "only board cannot answer",
                        (int)event->passkey.params.action);
             }
-#endif /* CONFIG_KODEOS_BOOT_ROLE_APP */
             break;
         }
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
@@ -3339,6 +4312,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             else if ( 0 == event->enc_change.status )
             {
                 KLOG_N(TAG, "bonded");
+                hid_host_check(event->enc_change.conn_handle);
             }
             else
             {
@@ -3394,6 +4368,40 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             break;
         }
 #endif /* CONFIG_KODEOS_BLE_CONSOLE_PAIRING */
+        case BLE_GAP_EVENT_AUTHORIZE: {
+            /* Asked only in a table that serves HID, for an attribute of the
+             * console's service or of the HID service: each is its own kind
+             * of bond's alone. The device is told why in the log, once a link. */
+            uint16_t   first    = 0U;
+            bool const hid_attr = (ble_gatts_find_svc(&s_hid_svc_uuid.u, &first) == 0)
+                                  && (first <= event->authorize.attr_handle);
+            bool const hid_bond = hid_bond_of(event->authorize.conn_handle);
+
+            event->authorize.out_response = BLE_GAP_AUTHORIZE_REJECT;
+            if ( kdrv_ble_hid_access_ok(hid_attr, hid_bond) )
+            {
+                event->authorize.out_response = BLE_GAP_AUTHORIZE_ACCEPT;
+            }
+            else if ( s_author_said )
+            {
+                /* refused, and said */
+            }
+            else if ( hid_bond )
+            {
+                s_author_said = true;
+                KLOG_N(TAG, "console refused: this device's bond was made for the mouse or "
+                            "keyboard; for the console, forget the board on it and pair "
+                            "again while no HID is served");
+            }
+            else
+            {
+                s_author_said = true;
+                KLOG_N(TAG, "hid: refused: this device's bond was made for the console; "
+                            "for the mouse or keyboard, forget the board on it and pair "
+                            "again while HID is served");
+            }
+            break;
+        }
         case BLE_GAP_EVENT_SUBSCRIBE:
             if ( event->subscribe.attr_handle == s_tx_val_handle )
             {
@@ -3413,11 +4421,22 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 #endif
             else
             {
-                uint8_t const i = app_index(event->subscribe.attr_handle);
+                uint8_t const i   = app_index(event->subscribe.attr_handle);
+                uint8_t const hid = hid_kind_at(event->subscribe.attr_handle);
 
                 if ( app_count() > i )
                 {
                     kdrv_ble_app_subscribed(i, 0U != event->subscribe.cur_notify);
+                }
+                else if ( 0U != hid )
+                {
+                    kdrv_ble_hid_subscribed(hid, 0U != event->subscribe.cur_notify);
+                    KLOG_N(TAG, "hid: the host's subscription to the %s's reports is %s",
+                           hid_kind_word(hid), hid_on_word(0U != event->subscribe.cur_notify));
+                }
+                else
+                {
+                    /* no characteristic of this file's */
                 }
             }
             break;
@@ -3554,8 +4573,8 @@ kode_status_t kdrv_ble_start(void)
      * great deal sooner than it used to. Round-robin is the vendor's own
      * answer; both esp-hosted NimBLE examples install it.
      *
-     * An app is the exception: no bond is made there, so a full store
-     * refuses the request and the oldest bond, made in kodeOS, stays. */
+     * An app is the exception: it never makes room, so a full store refuses
+     * the request and the oldest bond, made in kodeOS, stays. */
     ble_hs_cfg.store_status_cb = &ble_store_status;
 #endif /* CONFIG_KODEOS_BLE_CONSOLE_PAIRING */
 
@@ -3667,6 +4686,21 @@ kode_status_t kdrv_ble_start(void)
         (void)memset(&app->batt_ev, 0, sizeof(app->batt_ev));
         ble_npl_event_init(&app->batt_ev, &batt_notify, NULL);
         app->batt_live = true;
+    }
+
+    /* The HID service's drain, set up the same way, and what the board says
+     * it is in the GAP service: the appearance its advert carries. */
+    kdrv_ble_hid_link_reset();
+    if ( (NULL != app) && kdrv_ble_hid_served() )
+    {
+        (void)memset(&app->hid.ev, 0, sizeof(app->hid.ev));
+        (void)memset(&app->hid.co, 0, sizeof(app->hid.co));
+        ble_npl_event_init(&app->hid.ev, &hid_drain, NULL);
+        (void)ble_npl_callout_init(&app->hid.co, nimble_port_get_dflt_eventq(),
+                                   &hid_drain, NULL);
+        app->hid.live = true;
+        (void)ble_svc_gap_device_appearance_set(kdrv_ble_hid_appearance(kdrv_ble_hid_kinds()));
+        KLOG_N(TAG, "hid: the board is a %s to its hosts", hid_kind_word(kdrv_ble_hid_kinds()));
     }
 
     /* A value longer than a notification at the preferred MTU makes the host
@@ -3833,6 +4867,7 @@ kode_status_t kdrv_ble_stop(void)
     (void)esp_hosted_bt_controller_deinit(false);
 #if CONFIG_KODEOS_BLE_CONSOLE
     kdrv_ble_app_link_reset();
+    kdrv_ble_hid_link_reset();
 #endif
 
     s_ble.up     = false;
@@ -3860,6 +4895,7 @@ void kdrv_ble_forget(void)
     s_ble.tx_drop    = 0U;
     app_quiet();
     kdrv_ble_app_link_reset();
+    kdrv_ble_hid_link_reset();
 #endif
 }
 
@@ -3896,6 +4932,11 @@ kode_status_t kdrv_ble_unpair(void)
     /* ble_store_clear() forgets every bond without disconnecting anybody,
      * which is why the caller refuses this while a central is attached: the
      * phone would keep a link whose key no longer exists. */
+#ifdef CONFIG_KODEOS_BLE_CONSOLE
+    /* No bond, no host: nobody is connected, so the host task reads none. */
+    (void)memset(&s_hid_hosts, 0, sizeof(s_hid_hosts));
+    kdrv_ble_hid_hosts_store(&s_hid_hosts);
+#endif
     return (ble_store_clear() == 0) ? KODE_OK : KODE_ERROR;
 }
 
@@ -4031,41 +5072,75 @@ kode_status_t kdrv_ble_advertise(bool on)
      * what a bonded client filters on. */
     bool const hidden = s_ble.adv_hidden;
     struct ble_hs_adv_fields fields;
+    kdrv_ble_adv_ask_t       ask;
+    kdrv_ble_adv_shape_t     shape;
+
+    /* Which fields go is kdrv_ble_adv_shape()'s: a board that serves HID adds
+     * 0x1812 and its appearance and gives up the transmit power for them, so
+     * the 128-bit UUID stays for the clients that filter on it. */
+    (void)memset(&ask, 0, sizeof(ask));
+    ask.hidden = hidden;
+#ifdef CONFIG_KODEOS_BLE_CONSOLE
+    ask.console = true;
+    if ( kdrv_ble_hid_served() )
+    {
+        ask.hid = kdrv_ble_hid_kinds();
+    }
+#ifdef CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE
+    app_host_t *const app_adv = app_host();
+
+    ask.app_uuid = (NULL != app_adv) && (0U < app_adv->count);
+#endif
+#endif
+    kdrv_ble_adv_shape(&ask, &shape);
+
     (void)memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_BREDR_UNSUP;
-    if ( !hidden )
+    if ( shape.discoverable )
     {
         fields.flags |= BLE_HS_ADV_F_DISC_GEN;
     }
-    fields.tx_pwr_lvl_is_present = 1;
-    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+    if ( shape.tx_power )
+    {
+        fields.tx_pwr_lvl_is_present = 1;
+        fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+    }
 #if CONFIG_KODEOS_BLE_CONSOLE
     /* What clients filter on: requestDevice({filters:[{services}]}) in Web
      * Bluetooth, startDeviceScan([uuid]) in ble-plx. Without it a phone app
      * has to inspect every advertiser in the room. */
-    fields.uuids128 = &s_svc_uuid;
-#if CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE
+    if ( (uint8_t)KDRV_BLE_ADV_UUID128_NONE != shape.uuid128 )
     {
+        fields.uuids128 = &s_svc_uuid;
+#ifdef CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE
         /* The app's UUID in its place, for the phones that filter on the
          * app's protocol; only one 128-bit UUID fits. */
-        app_host_t *const a = app_host();
-
-        if ( (NULL != a) && (0U < a->count) )
+        if ( (uint8_t)KDRV_BLE_ADV_UUID128_APP == shape.uuid128 )
         {
-            fields.uuids128 = &a->uuid[0];
+            fields.uuids128 = &app_adv->uuid[0];
         }
+#endif
+        fields.num_uuids128 = 1U;
+        fields.uuids128_is_complete = 1;
+    }
+    if ( 0U != shape.uuid16 )
+    {
+        fields.uuids16             = &s_hid_svc_uuid;
+        fields.num_uuids16         = 1U;
+        fields.uuids16_is_complete = 1;
+    }
+    if ( 0U != shape.appearance )
+    {
+        fields.appearance            = shape.appearance;
+        fields.appearance_is_present = 1;
     }
 #endif
-    fields.num_uuids128 = 1U;
-    fields.uuids128_is_complete = 1;
-#else
-    if ( !hidden )
+    if ( shape.name )
     {
         fields.name = (uint8_t *)ble_svc_gap_device_name();
         fields.name_len = (uint8_t)strlen((const char *)fields.name);
         fields.name_is_complete = 1;
     }
-#endif
 
     int rc_n = ble_gap_adv_set_fields(&fields);
     if ( 0 != rc_n )

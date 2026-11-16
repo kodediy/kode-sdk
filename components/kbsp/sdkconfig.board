@@ -110,10 +110,10 @@ CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 # Enough mbufs for the console's notifications. (ESP-IDF)
 CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
 # One store keeps every bond's subscriptions: the three bonds of
-# BT_NIMBLE_MAX_BONDS times the seven one link can hold (Service Changed, the
-# console's TX, the mirror's pipe, an app's four characteristics). kdrv_ble.c
-# asserts the product fits. (ESP-IDF)
-CONFIG_BT_NIMBLE_MAX_CCCDS=21
+# BT_NIMBLE_MAX_BONDS times the ten one link can hold (Service Changed, the
+# console's TX, the mirror's pipe, an app's four characteristics, Battery Level
+# and the HID service's two reports). kdrv_ble.c asserts the product fits. (ESP-IDF)
+CONFIG_BT_NIMBLE_MAX_CCCDS=30
 
 # ---- Clocks -----------------------------------------------------------------
 # CPU at 400 MHz. (ESP-IDF)

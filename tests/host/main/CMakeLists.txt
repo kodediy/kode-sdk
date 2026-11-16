@@ -33,6 +33,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_app.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_find.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_bonds.c"
+    "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_hid.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_radio_note.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_radio_sleep_policy.c"
     "${SDK_DIR}/components/kdrv/storage/src/kdrv_storage.c"
@@ -477,6 +478,12 @@ set_source_files_properties(
 set_source_files_properties(
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_app.c"
     PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_BLE_CONSOLE=1")
+
+# And to kdrv_ble_hid.c, the HID service's rules: HID needs the console's
+# pairing, so without the symbol every choice of kinds would be refused.
+set_source_files_properties(
+    "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_hid.c"
+    PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_BLE_CONSOLE_PAIRING=1")
 
 # AO_AppMgr reads a fetched file out of AO_Net's stream buffers, which exist
 # only once a real AO_Net has opened a transfer. Its one call that reads them

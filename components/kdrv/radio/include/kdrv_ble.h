@@ -357,6 +357,46 @@ bool kdrv_ble_conn_params_ok(const kdrv_ble_conn_params_t *p);
  */
 kode_status_t kdrv_ble_conn_calm(bool rest);
 
+#define KDRV_BLE_ADV_UUID128_NONE     0U  /**< kdrv_ble_adv_shape_t.uuid128: no 128-bit UUID.            */
+#define KDRV_BLE_ADV_UUID128_CONSOLE  1U  /**< The console's service, which its clients filter on.       */
+#define KDRV_BLE_ADV_UUID128_APP      2U  /**< The app's service, in the console's place.                */
+
+/** @brief What decides the fields an advert carries. */
+typedef struct {
+    bool    console;   /**< The build serves the console's service.                          */
+    bool    hidden;    /**< The board hides from every device it is not bonded with.         */
+    bool    app_uuid;  /**< The app's service is served and its UUID takes the console's place
+                        *   (CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE).                         */
+    uint8_t hid;       /**< The kinds of HID device served; 0 for none.                      */
+} kdrv_ble_adv_ask_t;
+
+/** @brief The fields an advert carries. */
+typedef struct {
+    bool     discoverable;  /**< The flags say a new device may find the board.        */
+    bool     tx_power;      /**< The transmit power rides the advert.                  */
+    bool     name;          /**< The name rides the advert, not the scan response.     */
+    uint8_t  uuid128;       /**< KDRV_BLE_ADV_UUID128_NONE, _CONSOLE or _APP.          */
+    uint16_t uuid16;        /**< A 16-bit service UUID; 0 for none.                    */
+    uint16_t appearance;    /**< What the board looks like to a host; 0 for none.      */
+    uint8_t  bytes;         /**< The advert's length without a name, of KDRV_BLE_ADV_MAX. */
+} kdrv_ble_adv_shape_t;
+
+/**
+ * @brief Choose the fields of an advert.
+ *
+ * Without HID: the flags, the console's 128-bit UUID (or the app's) and the
+ * transmit power, 24 of the 31 bytes, or the flags, the name and the power in
+ * a build without the console's service. A board that serves HID adds 0x1812
+ * and its appearance, which a host lists it by, and gives up the transmit
+ * power for them: the 128-bit UUID stays, so the console's clients still find
+ * the board, in 29 bytes. Hidden, the advert is not discoverable and carries
+ * no name. Pure: no stack, no lock, any thread.
+ *
+ * @param ask What decides them.
+ * @param out Receives the fields.
+ */
+void kdrv_ble_adv_shape(const kdrv_ble_adv_ask_t *ask, kdrv_ble_adv_shape_t *out);
+
 /**
  * @brief Pack a name and manufacturer data the way a scan response carries them.
  *
