@@ -16,10 +16,10 @@
 #include "kode_log.h"
 
 #include "esp_app_desc.h"
-#include "bootloader_common.h"   /* bootloader_common_ota_select_crc(): an otadata entry's CRC */
 #include "esp_flash_partitions.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_rom_crc.h"
 #include "esp_system.h"
 /* espcoredump registers no component at all for the `linux` target (its
  * CMakeLists returns before declaring an include dir) - guard the header the
@@ -33,6 +33,11 @@
 #include "esp_flash.h"
 #include "spi_flash_mmap.h"
 #include "kapps_fmt.h"
+#endif
+
+#if CONFIG_KODEOS_BOOT_ROLE_APP
+_Static_assert(KSLOT_SEQ_STRIDE == SPI_FLASH_SEC_SIZE,
+               "otadata's entries are one flash sector apart");
 #endif
 
 #define TAG            "kdrv.slot"
@@ -451,12 +456,16 @@ bool kdrv_slot_newer(void)
     {
         esp_ota_select_entry_t e;
 
-        if ( esp_partition_read(ota, (size_t)i * (size_t)SPI_FLASH_SEC_SIZE, &e, sizeof(e))
+        if ( esp_partition_read(ota, (size_t)i * (size_t)KSLOT_SEQ_STRIDE, &e, sizeof(e))
             == ESP_OK )
         {
             seq[i]   = e.ota_seq;
+            /* The entry's CRC as the bootloader takes it: over ota_seq
+             * alone, seeded with all ones (bootloader_support, which has no
+             * linux build, so not called from here). */
             valid[i] = (UINT32_MAX != e.ota_seq)
-                       && (bootloader_common_ota_select_crc(&e) == e.crc);
+                       && (esp_rom_crc32_le(UINT32_MAX, (const uint8_t *)&e.ota_seq,
+                                            (uint32_t)sizeof(e.ota_seq)) == e.crc);
         }
     }
     return kslot_seq_newer(seq, valid,

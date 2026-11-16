@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #define KSLOT_SEQ_ENTRIES 2U   /**< otadata's entries, one per flash sector. */
+#define KSLOT_SEQ_STRIDE  4096U   /**< Bytes from one otadata entry to the next: a flash sector. */
 
 /**
  * @brief Whether the slot @p other was selected after the slot @p running.
