@@ -3,6 +3,7 @@
  * @file test_kdrv_image_check.c
  * @brief An image judged as its bytes arrive: the chain against the file, then the SHA-256 it carries.
  */
+#include <stddef.h>
 #include <string.h>
 
 #include "esp_image_format.h"
@@ -337,4 +338,83 @@ TEST_CASE("a segment of no bytes between two others passes", "[kdrv_image_check]
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_image_check_begin(off));
     TEST_ASSERT_TRUE(feed_in(img, off, 3U));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_image_check_end());
+}
+
+/* ---- The check behind the decoder ------------------------------------------
+ * AO_AppMgr reads a file through the decoder into this sink before an install
+ * gives anything up, so a container is judged as the image it carries.
+ */
+
+/**
+ * @brief Put @p img in an uncompressed container for an app, at @p out.
+ * @param out  At least KFW_HDR_LEN + @p ilen bytes.
+ * @param img  The image.
+ * @param ilen Its length.
+ * @return The container's length.
+ */
+static uint32_t container_make(uint8_t *out, const uint8_t *img, uint32_t ilen)
+{
+    kfw_hdr_t h;
+
+    (void)memset(&h, 0, sizeof(h));
+    h.magic       = KFW_MAGIC;
+    h.hdr_version = (uint16_t)KFW_HDR_VERSION;
+    h.hdr_len     = (uint16_t)KFW_HDR_LEN;
+    h.target      = (uint8_t)KFW_TARGET_APP;
+    h.comp        = (uint8_t)KFW_COMP_NONE;
+    h.payload_len = ilen;
+    h.image_len   = ilen;
+    kfw_sha256(img, ilen, h.sha256);
+    h.crc = kfw_crc32(&h, offsetof(kfw_hdr_t, crc));
+    (void)memcpy(out, &h, sizeof(h));
+    (void)memcpy(&out[KFW_HDR_LEN], img, ilen);
+    return (uint32_t)KFW_HDR_LEN + ilen;
+}
+
+TEST_CASE("a container whose image is whole passes through the check's sink",
+          "[kdrv_image_check][sink]")
+{
+    uint8_t        img[IMG_MAX];
+    uint8_t        cont[KFW_HDR_LEN + IMG_MAX];
+    uint32_t const len = container_make(cont, img, image_make(img, true));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_begin(kdrv_image_check_sink(), NULL,
+                                             KFW_TARGET_APP, len, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(cont, len));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_end());
+    kfw_abort();
+}
+
+TEST_CASE("a container cut inside its image fails through the check's sink",
+          "[kdrv_image_check][sink]")
+{
+    uint8_t        img[IMG_MAX];
+    uint8_t        cont[KFW_HDR_LEN + IMG_MAX];
+    uint32_t const len = container_make(cont, img, image_make(img, true));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_begin(kdrv_image_check_sink(), NULL,
+                                             KFW_TARGET_APP, len, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_feed(cont, len - 16U));
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(KODE_OK, kfw_end(),
+        "a container that ends inside its image was called whole");
+    TEST_ASSERT_TRUE(kfw_malformed());
+    kfw_abort();
+}
+
+TEST_CASE("an image whose hash does not match fails in the check's sink as it arrives",
+          "[kdrv_image_check][sink]")
+{
+    uint8_t        img[IMG_MAX];
+    uint8_t        cont[KFW_HDR_LEN + IMG_MAX];
+    uint32_t const ilen = image_make(img, true);
+
+    img[ilen - 1U] ^= 0x01U;                    /* the hash the image carries */
+    uint32_t const len = container_make(cont, img, ilen);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_begin(kdrv_image_check_sink(), NULL,
+                                             KFW_TARGET_APP, len, NULL, NULL));
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(KODE_OK, kfw_feed(cont, len),
+        "the check behind the decoder took a hash that does not match");
+    TEST_ASSERT_TRUE(kfw_sink_failed());
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, kfw_end());
+    kfw_abort();
 }

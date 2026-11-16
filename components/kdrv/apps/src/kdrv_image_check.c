@@ -326,3 +326,45 @@ void kdrv_image_check_abort(void)
     }
     (void)memset(&s_chk, 0, sizeof(s_chk));
 }
+
+/* ---- The check as a decoder's sink ---------------------------------------- */
+
+/** @brief The sink's begin: open a check for an image of @p img_len bytes. */
+static kode_status_t sink_begin(void *ctx, uint32_t img_len)
+{
+    (void)ctx;
+    return kdrv_image_check_begin(img_len);
+}
+
+/** @brief The sink's write: feed the check. */
+static kode_status_t sink_write(void *ctx, const void *data, size_t len)
+{
+    (void)ctx;
+    return kdrv_image_check_feed(data, len);
+}
+
+/** @brief The sink's end: the check's verdict. */
+static kode_status_t sink_end(void *ctx)
+{
+    (void)ctx;
+    return kdrv_image_check_end();
+}
+
+/** @brief The sink's abort: abandon the check. */
+static void sink_abort(void *ctx)
+{
+    (void)ctx;
+    kdrv_image_check_abort();
+}
+
+const kfw_sink_t *kdrv_image_check_sink(void)
+{
+    static const kfw_sink_t sink = {
+        .begin = sink_begin,
+        .write = sink_write,
+        .end   = sink_end,
+        .abort = sink_abort,
+    };
+
+    return &sink;
+}

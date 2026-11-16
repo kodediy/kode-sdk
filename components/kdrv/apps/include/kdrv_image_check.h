@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "kode_defs.h"
+#include "kdrv_kfw.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,20 @@ kode_status_t kdrv_image_check_end(void);
 
 /** @brief Abandon the check. Always safe. */
 void kdrv_image_check_abort(void);
+
+/**
+ * @brief The check as a decoder's sink: what the decoder hands it is judged
+ *        and written nowhere.
+ *
+ * Its begin opens a check for the image's length, its writes feed it, its end
+ * gives the verdict and its abort abandons it; the context is not read. Behind
+ * kfw_begin() a file is judged as the image it carries: a bare image as it is,
+ * a container as the image its payload decodes to, its digest compared at
+ * kfw_end() before the check's own verdict.
+ *
+ * @return The sink.
+ */
+const kfw_sink_t *kdrv_image_check_sink(void);
 
 #ifdef __cplusplus
 }

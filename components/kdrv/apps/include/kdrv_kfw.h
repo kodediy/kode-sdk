@@ -73,6 +73,7 @@ const kfw_sink_t *kfw_buf_sink(void);
  * correct transfer of a corrupt file.
  */
 
+/* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_kfw.c; the addon reads the header from a file that does not use it */
 #define KFW_MAGIC        0x3157464BU   /**< "KFW1" read little-endian.      */
 #define KFW_ESP_MAGIC    0xE9U         /**< First byte of a raw ESP image.  */
 #define KFW_HDR_VERSION  1U

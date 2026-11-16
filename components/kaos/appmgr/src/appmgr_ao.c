@@ -82,7 +82,6 @@
 #define APPMGR_NO_SEQ            0U       /**< No install number: install numbers start at 1. */
 #define APPMGR_US_PER_MS         1000ULL   /**< Microseconds in a millisecond: a wake's time is in microseconds. */
 #define APPMGR_KEEP_TMP_SUFFIX KODE_CARD_APP_TMP   /**< What a copy's name carries while it is written. */
-#define APPMGR_BYTE_BITS       8U       /**< Bits in a byte: a word read from a chunk shifts by it. */
 #define APPMGR_LOAN_BITS       8U       /**< Bits of to_return: one per buffer a medium can lend. */
 /* Re-publish the percent this often while the AO waits on the network: the
  * open of a download, a file that stops arriving, a data folder being fetched.
@@ -391,19 +390,18 @@ typedef struct {
     /* ---- Reading a file through before an install gives anything up ------
      * An install from a file that has to give up something installed (it
      * evicts, or drops the old copy of the app it replaces) stops at its plan
-     * and the file is read through once, by AppMgr_verifying: its chain
-     * against its length and the SHA-256 it carries. A file that does not hold
-     * together ends the install with nothing given up. A file that does starts
-     * the install again from the top with verify_done set, as the keep round
-     * does. A URL and a terminal install cannot be read twice; the mailbox is
-     * verified in place. A .kfw container is not read through: its decoder
-     * places the image, and so evicts, at its header, and compares the digest
-     * only at the end, so a cut container still costs what it gives up. */
+     * and the file is read through once, by AppMgr_verifying, through the
+     * decoder into kdrv_image_check's sink: a bare image as it is, a .kfw
+     * container as the image its payload decodes to, the container's digest
+     * compared at its end. A file that does not hold together ends the install
+     * with nothing given up. A file that does starts the install again from
+     * the top with verify_done set, as the keep round does. A URL and a
+     * terminal install cannot be read twice; the mailbox is verified in
+     * place. */
     bool        verify_pending;                /**< appmgr_place() deferred: read the file through first. */
     bool        verify_done;                   /**< The file was read through, or needs no reading. */
     bool        verify_restart;                /**< The next FLASH_REQ_SIG goes on with this install. */
     bool        verify_opened;                 /**< The read-through's own open has answered. */
-    bool        verify_first;                  /**< The next chunk is the file's first. */
 
     /* ---- The CRC of the victims before an eviction ----------------------
      * One round per install: the first plan that names victims abandons the
@@ -4955,7 +4953,6 @@ static QState verify_start(AppMgr * const me)
     keep_pause(me);
     me->verify_pending = false;
     me->verify_opened  = false;
-    me->verify_first   = true;
     storage_open_request(me->file, &me->super);
     return Q_TRAN(&AppMgr_verifying);
 }
@@ -7952,24 +7949,15 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
 }
 
 /**
- * @brief Whether a file's first bytes are a `.kfw` container's.
- * @param buf The first chunk.
- * @param len Its length.
- * @return true for the container's magic.
+ * @brief Open the read-through's decode session: the file into the check, written nowhere.
+ * @param me       The AO; the session is known by it.
+ * @param file_len The file's length.
+ * @return KODE_OK, or the decoder's refusal (a session already open).
  */
-static bool chunk_is_container(const uint8_t *buf, uint16_t len)
+static kode_status_t verify_begin(AppMgr * const me, uint32_t file_len)
 {
-    uint32_t magic = 0U;
-
-    if ( sizeof(magic) > len )
-    {
-        return false;
-    }
-    for ( uint32_t i = 0U; sizeof(magic) > i; ++i )
-    {
-        magic |= (uint32_t)buf[i] << (APPMGR_BYTE_BITS * i);   /* little-endian, as the container's */
-    }
-    return KFW_MAGIC == magic;
+    return kfw_begin(kdrv_image_check_sink(), me, KFW_TARGET_APP, file_len,
+                     NULL, NULL);
 }
 
 /**
@@ -7980,10 +7968,39 @@ static bool chunk_is_container(const uint8_t *buf, uint16_t len)
  */
 static QState verify_fail(AppMgr * const me, const char *why)
 {
-    kdrv_image_check_abort();
+    kfw_abort_owned(me);
     appmgr_inst_why(APPMGR_WHY_CORRUPT);
     flash_fail(me, why, KFAIL_WRITE);
     return Q_TRAN(&AppMgr_idle);
+}
+
+/**
+ * @brief End the read-through on the decoder's refusal, named for its cause.
+ *
+ * An image at fault, or one the check refused, is the file's; a decoder that
+ * could not run (no PSRAM for the inflater) is not, and says so.
+ *
+ * @param me The AO.
+ * @return AppMgr_idle.
+ */
+static QState verify_refused(AppMgr * const me)
+{
+    const char *why = "the file is cut or damaged; nothing was given up";
+
+    if ( kfw_foreign() )
+    {
+        appmgr_inst_why(APPMGR_WHY_WRONG_BOARD);
+    }
+    else if ( (!kfw_malformed()) && (!kfw_sink_failed()) )
+    {
+        appmgr_inst_why(APPMGR_WHY_OTHER);
+        why = "the file could not be read through; nothing was given up";
+    }
+    else
+    {
+        /* The file's own fault: verify_fail() notes it as corrupt. */
+    }
+    return verify_fail(me, why);
 }
 
 /**
@@ -8004,10 +8021,10 @@ static QState verify_resume(AppMgr * const me)
  * @brief Read the file through once, then start the install again.
  *
  * The chunks are the install's own, one buffer at a time, paced like
- * AppMgr_flashing's; they are fed to kdrv_image_check and written nowhere.
- * A .kfw container is not read through: its first bytes tell it apart and it
- * is left to its decoder, which places the image (and so evicts) at its header
- * and compares the digest only at the end.
+ * AppMgr_flashing's; they go through the decoder into kdrv_image_check's sink
+ * and are written nowhere. A .kfw container is judged as the image it
+ * carries, and its digest is compared before the file is called whole: the
+ * install's own pass places the image, and so evicts, at the header.
  */
 static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
 {
@@ -8026,7 +8043,7 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
             (void)QTimeEvt_disarm(&me->pacer);
             me->pacing    = false;
             me->to_return = 0U;
-            kdrv_image_check_abort();
+            kfw_abort_owned(me);
             status = Q_HANDLED();
             break;
         }
@@ -8048,7 +8065,7 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
             StorageOpenRspEvt const * const rsp = Q_EVT_CAST(StorageOpenRspEvt);
 
             if ( ((uint8_t)KODE_OK != rsp->status)
-                || (kdrv_image_check_begin(rsp->size) != KODE_OK) )
+                || (verify_begin(me, rsp->size) != KODE_OK) )
             {
                 status = verify_fail(me, "the file could not be read through; "
                                          "nothing was given up");
@@ -8084,12 +8101,17 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
             }
             if ( d->eof )
             {
-                if ( kdrv_image_check_end() != KODE_OK )
+                if ( kfw_end() != KODE_OK )
                 {
-                    status = verify_fail(me, "the file is cut or damaged; "
-                                             "nothing was given up");
+                    status = verify_refused(me);
                     break;
                 }
+                /* A container's block is the install's to take, on its own
+                 * pass: the one this pass kept goes now, not at the next
+                 * session's begin. */
+                kfw_appdata_t ad;
+                kfw_appdata_take(&ad);
+                kfw_appdata_release(&ad);
                 KLOG_I(TAG, "'%s' reads through whole", me->file);
                 status = verify_resume(me);
                 break;
@@ -8101,21 +8123,9 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
                                          "does not exist");
                 break;
             }
-            if ( me->verify_first )
+            if ( kfw_feed(buf, d->len) != KODE_OK )
             {
-                me->verify_first = false;
-                if ( chunk_is_container(buf, d->len) )
-                {
-                    KLOG_I(TAG, "'%s' is a container: it is not read through", me->file);
-                    kdrv_image_check_abort();
-                    status = verify_resume(me);
-                    break;
-                }
-            }
-            if ( kdrv_image_check_feed(buf, d->len) != KODE_OK )
-            {
-                status = verify_fail(me, "the file is cut or damaged; "
-                                         "nothing was given up");
+                status = verify_refused(me);
                 break;
             }
             (void)QTimeEvt_rearm(&me->idle, APPMGR_CHUNK_TICKS);
