@@ -1969,13 +1969,24 @@ void power_dump_request(void);
  * @brief Ask AO_Power for one reading, published as POWER_EVT_SIG, and for the
  *        wall clock to be kept if a keep is due. Logs nothing.
  *
- * What AO_LowPower asks every KODE_LOWPOWER_CABLE_LOOK_MS and each minute
- * while the P4 sleeps, ASLEEP or in the CPU part of an app's rest: the cable
- * shows in the reading, and the poll that keeps the clock does not run then.
- * A request that finds AO_Power's queue short of KQP_POWER_POST_MARGIN is
- * dropped; the next one asks again.
+ * What AO_LowPower asks once a minute while the board sleeps: the cable shows
+ * in the reading, and the poll that keeps the clock does not run asleep.
  */
 void power_peek_request(void);
+
+/**
+ * @brief Ask AO_Power whether a cable is in: one register of the BQ25896.
+ *
+ * A whole reading, published as POWER_EVT_SIG, follows only when the answer
+ * differs from the last reading published, or when none was. Logs nothing,
+ * reads no gauge and keeps no clock: what AO_LowPower asks every
+ * KODE_LOWPOWER_CABLE_LOOK_MS while the P4 sleeps, ASLEEP or in the CPU part
+ * of an app's rest, where nothing else reads the charger for a cable.
+ *
+ * @return true when the request was queued; false when the queue is within
+ *         KQP_POWER_POST_MARGIN, and nothing was queued.
+ */
+bool power_cable_request(void);
 
 /**
  * @brief Ask AO_Power to read, write or dump one field of one chip.

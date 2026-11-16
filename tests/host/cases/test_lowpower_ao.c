@@ -5331,6 +5331,46 @@ static unsigned bounces(void)
     return queued(AO_Log, LOG_BOUNCE_REQ_SIG);
 }
 
+/**
+ * @brief Empty AO_Power's queue, counting what was asked of it.
+ * @param peeks Receives how many whole readings were asked (POWER_PEEK_REQ_SIG).
+ * @return How many looks for a cable alone were asked (POWER_CABLE_REQ_SIG).
+ */
+static unsigned cable_looks(unsigned *peeks)
+{
+    const QEvt *e = NULL;
+    unsigned    looks = 0U;
+
+    *peeks = 0U;
+    while ( xQueueReceive(AO_Power->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)POWER_CABLE_REQ_SIG == e->sig )
+        {
+            looks++;
+        }
+        else if ( (QSignal)POWER_PEEK_REQ_SIG == e->sig )
+        {
+            (*peeks)++;
+        }
+        else
+        {
+            /* Not what this counts. */
+        }
+        QF_gc(e);
+    }
+    return looks;
+}
+
+/** @brief Fire the look's timer once and check it asked AO_Power for the cable alone. */
+static void look_fires_once(void)
+{
+    unsigned peeks = 0U;
+
+    TEST_ASSERT_TRUE(fake_time_periodic_fire_at(LOOK_US));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, cable_looks(&peeks), "the look asks whether a cable is in");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, peeks, "the look asks for no whole reading");
+}
+
 TEST_CASE("asleep, the charger is read every few seconds on a timer of its own; awake, it is not",
           "[lowpower_ao]")
 {
@@ -5340,8 +5380,7 @@ TEST_CASE("asleep, the charger is read every few seconds on a timer of its own; 
 
     TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "asleep, the look runs");
     TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running(), "and the tick does not");
-    TEST_ASSERT_TRUE(fake_time_periodic_fire_at(LOOK_US));
-    TEST_ASSERT_EQUAL_UINT(1U, queued(AO_Power, POWER_PEEK_REQ_SIG));
+    look_fires_once();
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_time_once_pending(), "the minute's one-shot is the only one");
 
     expander(LEVELS_BOT, CHANGED_BOT);
@@ -5535,8 +5574,8 @@ TEST_CASE("a dark wake keeps the look, and it runs on after", "[lowpower_ao]")
 
     dark_wake();
     TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "a cable must still be seen");
-    TEST_ASSERT_TRUE(fake_time_periodic_fire_at(LOOK_US));
-    TEST_ASSERT_EQUAL_UINT(1U, queued(AO_Power, POWER_PEEK_REQ_SIG));
+    (void)queued(AO_Power, POWER_CABLE_REQ_SIG);
+    look_fires_once();
 
     dark_done_all();
     dark_rest_both(expect_dark_rounds(), 0U);
@@ -5586,8 +5625,7 @@ TEST_CASE("the CPU part's rest reads the charger every few seconds, and its end 
 
     TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running_at(LOOK_US), "with the lock let go, the look runs");
     TEST_ASSERT_FALSE_MESSAGE(fake_time_periodic_running(), "and the tick does not");
-    TEST_ASSERT_TRUE(fake_time_periodic_fire_at(LOOK_US));
-    TEST_ASSERT_EQUAL_UINT(1U, queued(AO_Power, POWER_PEEK_REQ_SIG));
+    look_fires_once();
 
     expander(LEVELS_PAD_UP, CHANGED_PAD_UP);
     TEST_ASSERT_EQUAL_UINT(2U, s_hold_true);

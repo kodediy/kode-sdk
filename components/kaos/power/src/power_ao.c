@@ -156,9 +156,13 @@ void power_dump_request(void)
 void power_peek_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(POWER_PEEK_REQ_SIG);
-    /* Asked again within seconds, so a queue short of its margin drops it
-     * rather than assert. */
-    (void)QACTIVE_POST_X(AO_Power, &evt, KQP_POWER_POST_MARGIN, NULL);
+    QACTIVE_POST(AO_Power, &evt, NULL);
+}
+
+bool power_cable_request(void)
+{
+    static const QEvt evt = QEVT_INITIALIZER(POWER_CABLE_REQ_SIG);
+    return QACTIVE_POST_X(AO_Power, &evt, KQP_POWER_POST_MARGIN, NULL);
 }
 
 bool power_ship_request(void)
@@ -840,6 +844,36 @@ static bool power_read(Power * const me, reading_t *r, uint8_t *soc)
     *soc = soc_estimate(me, r->vbat_mv, r->current_ma, r->chrg);
     power_publish(me, r, *soc);
     return true;
+}
+
+/**
+ * @brief The look for a cable while the P4 sleeps: one register, and a whole
+ *        reading only when the cable came or went.
+ *
+ * AO_LowPower asks every KODE_LOWPOWER_CABLE_LOOK_MS. A whole reading that
+ * often would read the gauge and wake every POWER_EVT_SIG subscriber for
+ * nothing; the cable is power good, one bit of the PMIC. The minute's
+ * POWER_PEEK_REQ_SIG keeps the cell's reading and the clock. This task is the
+ * one that writes l_reading, so it reads it here without the lock.
+ *
+ * @param me The AO.
+ */
+static void power_cable_look(Power * const me)
+{
+    int32_t pg = 0;
+
+    if ( me->pmic && (kdrv_bq25896_get(KDRV_BQ_PG_STAT, &pg) == KODE_OK) )
+    {
+        bool const cable = (0 != pg);
+
+        if ( (!l_reading_valid) || (l_reading.vbus != cable) )
+        {
+            reading_t r;
+            uint8_t   soc = 0U;
+
+            (void)power_read(me, &r, &soc);
+        }
+    }
 }
 
 /* ---- Field requests ------------------------------------------------------ */
@@ -2776,13 +2810,17 @@ static QState Power_polling(Power * const me, QEvt const * const e)
         case POWER_PEEK_REQ_SIG: {
             reading_t r;
             uint8_t   soc = 0U;
-            /* AO_LowPower's look while the P4 sleeps, every few seconds
-             * and each minute: the poll that keeps the clock stops with the
-             * tick, so the keep happens here, and the reading is published
-             * for the cable. Nothing is logged and no chip is dumped, or
-             * every look would print a page. */
+            /* The minute's look while the board sleeps: the poll that keeps
+             * the clock stops with the tick, so the keep happens here, and
+             * the reading is published for the cable. Nothing is logged and
+             * no chip is dumped, or every minute asleep would print a page. */
             (void)kdrv_clocks_wall_keep(false);
             (void)power_read(me, &r, &soc);
+            status = Q_HANDLED();
+            break;
+        }
+        case POWER_CABLE_REQ_SIG: {
+            power_cable_look(me);
             status = Q_HANDLED();
             break;
         }

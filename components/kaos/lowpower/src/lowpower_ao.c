@@ -616,18 +616,19 @@ static bool state_retry_fire(LowPower * const me)
 /* ---- The look for a cable ------------------------------------------------------- */
 
 /**
- * @brief Runs in the timer task: ask AO_Power for a reading.
+ * @brief Runs in the timer task: ask AO_Power whether a cable is in.
  *
- * The reading is published, and one with a cable in it wakes the board
- * (POWER_EVT_SIG in LowPower_asleep) or ends the CPU part's rest
- * (part_wake_cause()).
+ * AO_Power reads one register and publishes a whole reading only when the
+ * cable came or went; one with a cable in it wakes the board (POWER_EVT_SIG in
+ * LowPower_asleep) or ends the CPU part's rest (part_wake_cause()). A request
+ * AO_Power's queue has no room for is dropped: the next look asks again.
  *
  * @param arg Unused.
  */
 static void cable_look_due_cb(void *arg)
 {
     (void)arg;
-    power_peek_request();
+    (void)power_cable_request();
 }
 
 /**
@@ -637,7 +638,7 @@ static void cable_look_due_cb(void *arg)
  * the cable port off the bus, in ASLEEP and in the CPU part's rest alike: a
  * host that plugs in then is not answered and gives the port up. From the
  * moment the lock is let go until the P4 is awake for good (a dark wake keeps
- * the look), AO_Power is asked for a reading every
+ * the look), AO_Power is asked whether a cable is in every
  * KODE_LOWPOWER_CABLE_LOOK_MS. The timer does not wake the P4 by itself: it
  * runs at the first wake after it is due, and the console reader wakes the P4
  * once a second while it sleeps (khal_console_rest()). It is a periodic timer
@@ -3842,8 +3843,9 @@ static uint32_t part_round_keep(LowPower * const me)
  * no settle runs and AO_Buttons publishes nothing. A touch does when the app
  * asked for it. Everything that needs the system's clock to be served does:
  * a console line, an MQTT message, a cable, a cell at its cut and any request
- * to this AO. The cable and the cell show in the readings the look for a
- * cable and the minute ask for (cable_look(), part_minute()).
+ * to this AO. A cable shows in the reading AO_Power publishes when the look
+ * for a cable finds it come (cable_look()), and the cell and the cable both
+ * in the one the minute asks for (part_minute()).
  *
  * @param me The AO, AWAKE, with the CPU part at rest.
  * @param e  The event.

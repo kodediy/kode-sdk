@@ -160,15 +160,21 @@ static void gauge_defaults(void)
     s_regs[GAUGE][0xABU] = 0x4AU;
 }
 
+/** @brief The register reads each chip answered, for the cases that count them; a case clears them. */
+static unsigned s_reads[2];
+
 static kode_status_t on_read(khal_i2c_dev_t dev, uint8_t reg, uint8_t *buf,
                              size_t len, int calls)
 {
+    unsigned const chip = chip_of(dev);
+
     (void)calls;
     if ( s_bus_dead )
     {
         return KODE_ERROR;
     }
-    (void)memcpy(buf, &s_regs[chip_of(dev)][reg], len);
+    ++s_reads[chip];
+    (void)memcpy(buf, &s_regs[chip][reg], len);
     return KODE_OK;
 }
 
@@ -693,18 +699,18 @@ TEST_CASE("the ship door posts while the queue has room and refuses within its m
     Mockkhal_i2c_Destroy();
 }
 
-/* AO_LowPower asks for a peek every few seconds while the P4 sleeps: one the
- * margin turns away is dropped without a word, and the next one asks again. */
-TEST_CASE("a peek within the queue's margin is dropped, and one above it is posted",
+/* AO_LowPower asks whether a cable is in every few seconds while the P4
+ * sleeps: one the margin turns away is dropped, and the next one asks again. */
+TEST_CASE("a look for a cable within the queue's margin is refused, and one above it is posted",
           "[power_ao]")
 {
     power_up_once();
     power_flush();
 
     power_fill_to_margin();
-    power_peek_request();
+    TEST_ASSERT_FALSE(power_cable_request());
     TEST_ASSERT_EQUAL_UINT(KQP_POWER_POST_MARGIN, uxQueueSpacesAvailable(AO_Power->eQueue));
-    TEST_ASSERT_FALSE_MESSAGE(power_queue_has(POWER_PEEK_REQ_SIG), "a dropped peek was queued");
+    TEST_ASSERT_FALSE_MESSAGE(power_queue_has(POWER_CABLE_REQ_SIG), "a refused look was queued");
 
     power_fill_to_margin();
     {
@@ -713,11 +719,122 @@ TEST_CASE("a peek within the queue's margin is dropped, and one above it is post
         TEST_ASSERT_TRUE(xQueueReceive(AO_Power->eQueue, &e, 0U) == pdTRUE);
         QF_gc(e);
     }
-    power_peek_request();
+    TEST_ASSERT_TRUE(power_cable_request());
     TEST_ASSERT_EQUAL_UINT(KQP_POWER_POST_MARGIN, uxQueueSpacesAvailable(AO_Power->eQueue));
-    TEST_ASSERT_TRUE(power_queue_has(POWER_PEEK_REQ_SIG));
+    TEST_ASSERT_TRUE(power_queue_has(POWER_CABLE_REQ_SIG));
 
     power_flush();
+    Mockkhal_i2c_Destroy();
+}
+
+/** @brief Publish one whole reading with the cable in or out, as the last one published. */
+static void cable_last_said(bool in)
+{
+    if ( in )
+    {
+        s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    }
+    else
+    {
+        s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_OFF_USB;
+    }
+    TEST_ASSERT_EQUAL(in, poll_once()->vbus);
+    ao_spy_drain();
+    fake_klog_reset();
+    s_reads[PMIC]  = 0U;
+    s_reads[GAUGE] = 0U;
+}
+
+/** @brief Dispatch one look for a cable, as AO_LowPower's request posts it. */
+static void cable_look_once(void)
+{
+    static const QEvt look = QEVT_INITIALIZER(POWER_CABLE_REQ_SIG);
+
+    QASM_DISPATCH(AO_Power, &look, 0U);
+}
+
+/* The look runs every few seconds asleep: what it costs is one register of
+ * the PMIC, and nobody hears of it while the cable stays as it was. */
+TEST_CASE("a look that finds the cable as last said reads one register and publishes nothing",
+          "[power_ao]")
+{
+    static const bool states[] = { false, true };
+
+    power_up_once();
+    for ( size_t i = 0U; (sizeof(states) / sizeof(states[0])) > i; i++ )
+    {
+        cable_last_said(states[i]);
+        cable_look_once();
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a look with no change published");
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_reads[PMIC], "a look reads one PMIC register");
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_reads[GAUGE], "a look reads no gauge");
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_klog_count(), "a look printed something");
+    }
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("a look that finds a cable come publishes one whole reading, and the next look nothing",
+          "[power_ao]")
+{
+    const PowerEvt *p;
+
+    power_up_once();
+    cable_last_said(false);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    cable_look_once();
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    p = (const PowerEvt *)ao_spy_take();
+    TEST_ASSERT_EQUAL_INT(POWER_EVT_SIG, p->super.sig);
+    TEST_ASSERT_TRUE(p->vbus);
+    TEST_ASSERT_TRUE_MESSAGE(0U < s_reads[GAUGE], "the reading a cable brings is whole: the gauge too");
+
+    ao_spy_drain();
+    s_reads[PMIC]  = 0U;
+    s_reads[GAUGE] = 0U;
+    cable_look_once();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the same cable was said twice");
+    TEST_ASSERT_EQUAL_UINT(1U, s_reads[PMIC]);
+
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("a look that finds the cable gone publishes one whole reading", "[power_ao]")
+{
+    const PowerEvt *p;
+
+    power_up_once();
+    cable_last_said(true);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_OFF_USB;
+    cable_look_once();
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    p = (const PowerEvt *)ao_spy_take();
+    TEST_ASSERT_FALSE(p->vbus);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* A look the PMIC does not answer says nothing: the minute's reading is the
+ * one that tells a dead bus. */
+TEST_CASE("a look the PMIC does not answer publishes nothing", "[power_ao]")
+{
+    power_up_once();
+    cable_last_said(false);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    s_bus_dead = true;
+    cable_look_once();
+    s_bus_dead = false;
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    ao_spy_drain();
     Mockkhal_i2c_Destroy();
 }
 
