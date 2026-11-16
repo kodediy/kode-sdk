@@ -6497,6 +6497,18 @@ static const karg_spec_t A_CRON[] = {
 };
 #endif
 
+#ifndef CONFIG_KODE_LOWPOWER
+/* `rest`'s keys, as lowpower_verbs.c declares them, with every value let
+ * through: the verb answers "not built" whatever it is asked. */
+static const karg_spec_t A_REST[] = {
+    { .key = "parts",    .required = false, .type = KARG_UINT, .min = 0U, .max = UINT32_MAX },
+    { .key = "touch",    .required = false, .type = KARG_BOOL },
+    { .key = "pin",      .required = false, .type = KARG_UINT, .min = 0U, .max = UINT32_MAX },
+    { .key = "level",    .required = false, .type = KARG_BOOL },
+    { .key = "after_ms", .required = false, .type = KARG_UINT, .min = 0U, .max = UINT32_MAX },
+};
+#endif
+
 static const karg_spec_t A_TAP[] = {
     { .key = "x", .required = true, .type = KARG_UINT,
       .min = 0U, .max = (uint32_t)(KBSP_LCD_H_RES - 1) },
@@ -6571,6 +6583,8 @@ static const kcmd_t CMDS[] = {
     /* AO_LowPower registers them when it is built (lowpower_verbs.c). */
     { "sleep",      NULL,        0U, h_not_built  },
     { "power_off",  NULL,        0U, h_not_built  },
+    { "rest",       A_REST,      (uint8_t)Q_DIM(A_REST), h_not_built  },
+    { "rest_end",   NULL,        0U, h_not_built  },
 #endif
 #if !CONFIG_KODE_SCHEDULER
     /* AO_Scheduler registers `cron` when it is built (scheduler_verbs.c). */
@@ -6952,6 +6966,7 @@ static QState Console_initial(Console * const me, void const * const par)
     }
     QActive_subscribe(&me->super, LOWPOWER_STATE_SIG);
     QActive_subscribe(&me->super, LOWPOWER_REFUSED_SIG);
+    QActive_subscribe(&me->super, LOWPOWER_PART_SIG);
 #endif
     QActive_subscribe(&me->super, STORAGE_ENTRY_SIG);
     QActive_subscribe(&me->super, STORAGE_LIST_END_SIG);

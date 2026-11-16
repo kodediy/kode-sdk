@@ -760,3 +760,118 @@ TEST_CASE("kode_sys_power_sleep requests ASLEEP and kode_sys_power_off requests 
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LOWPOWER_SRC_APP, o->src);
     QF_gc(&o->super);
 }
+
+/* ---- rest and rest_end ------------------------------------------------------------- */
+
+/** @brief Deliver news of an app's rest, as AO_LowPower publishes it. */
+static void rest_news(kode_lp_part_what_t what, uint8_t src, kode_status_t rc, uint8_t parts,
+                      const char *why)
+{
+    LowPowerPartEvt p;
+
+    (void)memset(&p, 0, sizeof(p));
+    p.super = (QEvt)QEVT_INITIALIZER(LOWPOWER_PART_SIG);
+    p.what  = (uint8_t)what;
+    p.rc    = (uint8_t)rc;
+    p.parts = parts;
+    p.src   = src;
+    (void)snprintf(p.why, sizeof(p.why), "%s", why);
+    QASM_DISPATCH(AO_Console, &p.super, 0U);
+}
+
+TEST_CASE("rest posts the parts and the wake sources, and closes on its own answer",
+          "[console_lowpower]")
+{
+    console_up();
+    type_line("rest parts=73 touch=on pin=3 level=on after_ms=5000");
+
+    const LowPowerPartReqEvt *r = (const LowPowerPartReqEvt *)posted();
+    TEST_ASSERT_NOT_NULL_MESSAGE(r, "nothing was posted to AO_LowPower");
+    TEST_ASSERT_EQUAL_INT(LOWPOWER_PART_REQ_SIG, r->super.sig);
+    TEST_ASSERT_EQUAL_HEX8(KODE_LP_PART_SCREEN | KODE_LP_PART_SOUND | KODE_LP_PART_CPU, r->parts);
+    TEST_ASSERT_FALSE(r->end);
+    TEST_ASSERT_TRUE(r->wake_touch);
+    TEST_ASSERT_TRUE(r->wake_level);
+    TEST_ASSERT_EQUAL_UINT8(3U, r->wake_pin);
+    TEST_ASSERT_EQUAL_UINT32(5000U, r->wake_after_ms);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CONSOLE_SRC_SERIAL, r->src);
+    QF_gc(&r->super);
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), "closed before the parts rested");
+
+    /* A wake, and another port's answer, are not this verb's. */
+    rest_news(KODE_LP_PART_WOKE, (uint8_t)KODE_CONSOLE_SRC_SERIAL, KODE_OK, 9U, "");
+    rest_news(KODE_LP_PART_ANSWER, (uint8_t)KODE_CONSOLE_SRC_BLE, KODE_OK, 9U, "");
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    rest_news(KODE_LP_PART_ANSWER, (uint8_t)KODE_CONSOLE_SRC_SERIAL, KODE_OK, 73U, "");
+    TEST_ASSERT_TRUE(replied(">|rest parts=73"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+TEST_CASE("rest says which part refused and why", "[console_lowpower]")
+{
+    console_up();
+    type_line("rest parts=24");
+    QF_gc(posted());
+
+    rest_news(KODE_LP_PART_ANSWER, (uint8_t)KODE_CONSOLE_SRC_SERIAL, KODE_DENIED, 8U,
+              "card: file write");
+
+    TEST_ASSERT_TRUE(replied(">err code=4 msg=\"card: file write\""));
+    TEST_ASSERT_FALSE(replied(">ok"));
+}
+
+/** @brief Places a case leaves free in AO_LowPower's queue: fewer than a verb's margin. */
+#define ROOM_LEFT 2U
+_Static_assert(ROOM_LEFT < KQP_LOWPOWER_CMD_MARGIN, "the room left must be under the verb's margin");
+
+/* The console is not the highest priority: AO_LowPower's queue can be full
+ * of an owner's answers when a line arrives. */
+TEST_CASE("rest with no room in AO_LowPower's queue answers busy and holds nothing", "[console_lowpower]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(LOWPOWER_INPUT_SIG);
+
+    console_up();
+    TEST_ASSERT_TRUE_MESSAGE(qf_support_queue_stuff(AO_LowPower, &filler), "the queue never filled");
+    /* Room for the note every console line posts, and for less than the verb's margin. */
+    for ( unsigned i = 0U; ROOM_LEFT > i; i++ )
+    {
+        const QEvt *e = NULL;
+
+        TEST_ASSERT_EQUAL_INT(pdTRUE, xQueueReceive(AO_LowPower->eQueue, &e, 0U));
+    }
+
+    type_line("rest parts=4");
+
+    TEST_ASSERT_TRUE_MESSAGE(replied(">err code=4 msg=busy"), "the line was not refused");
+    mailbox_empty(AO_LowPower);
+    fake_klog_reset();
+    type_line("rest parts=4");
+    TEST_ASSERT_FALSE_MESSAGE(replied("msg=busy"), "the refused line still holds the console");
+    QF_gc(posted());
+}
+
+TEST_CASE("rest refuses a mask that names no part, and one past the last", "[console_lowpower]")
+{
+    console_up();
+    type_line("rest parts=0");
+    TEST_ASSERT_NULL_MESSAGE(posted(), "a mask of nothing was posted");
+    type_line("rest parts=128");
+    TEST_ASSERT_NULL_MESSAGE(posted(), "a part that does not exist was posted");
+}
+
+TEST_CASE("rest_end asks for every part back", "[console_lowpower]")
+{
+    console_up();
+    type_line("rest_end");
+
+    const LowPowerPartReqEvt *r = (const LowPowerPartReqEvt *)posted();
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_INT(LOWPOWER_PART_REQ_SIG, r->super.sig);
+    TEST_ASSERT_TRUE(r->end);
+    QF_gc(&r->super);
+
+    rest_news(KODE_LP_PART_ANSWER, (uint8_t)KODE_CONSOLE_SRC_SERIAL, KODE_OK, 0U, "");
+    TEST_ASSERT_TRUE(replied(">|rest parts=0"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
