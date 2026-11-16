@@ -128,6 +128,11 @@ KAOS_WEAK kode_status_t kdrv_net_sntp_sync_now(void);
  * was empty. Not KCLI_TAP_HOLD_MS: changing the hold must not change this. */
 #define KCLI_INJ_RETRY_MS   60U
 
+/* How long the console holds a stop AO_Radio took, for a BLE advertisement
+ * stream no run reads, before it asks again: one stop for a queue of records,
+ * not one a record. */
+#define KCLI_HEARD_STOP_MS  1000U
+
 /* The limits of an injected swipe. A swipe is replayed at the touch sensor's
  * own rate, one sample a KODE_TOUCH_POLL_MS, so the shortest one is a single
  * sample; the longest two are far past any gesture a hand makes, and bound
@@ -484,6 +489,11 @@ typedef struct {
     bool        inj_stalled;/**< A sample has retried at least once; gates
                              *   the KLOG_W to once per stall.             */
     kcli_swipe_t swipe;     /**< KCLI_INJ_SWIPE: the plan.                 */
+#ifdef CONFIG_KODEOS_BLE
+    bool        heard_stop; /**< AO_Radio took a stop for a BLE advertisement
+                             *   stream no run reads.                      */
+    uint32_t    heard_stop_ms; /**< khal_time_ms() when it took it.        */
+#endif
 
     /* config: the setting asked about, the request's number, and whether
      * the whole table is being listed. */
@@ -8638,6 +8648,26 @@ static QState console_own(Console * const me, QEvt const * const e)
              * asked again by the next tick. Its answer comes here and is
              * nobody's. */
             (void)wifi_frames_request(&me->super, false, 0U);
+            status = Q_HANDLED();
+            break;
+        }
+#endif
+#ifdef CONFIG_KODEOS_BLE
+        case BLE_HEARD_SIG: {
+            /* The same for the advertisements: records go to the asker alone,
+             * and no `ble_heard` run reads this one, so a run ended while
+             * AO_Radio still held the console as its asker leaves a stream
+             * with nobody. It is stopped once for the records already in
+             * this queue, not once a record: a stop AO_Radio took is held
+             * for KCLI_HEARD_STOP_MS, and a refused post is asked again by
+             * the next record. */
+            uint32_t const now = khal_time_ms();
+
+            if ( (!me->heard_stop) || (KCLI_HEARD_STOP_MS <= (now - me->heard_stop_ms)) )
+            {
+                me->heard_stop    = ble_heard_request(&me->super, false);
+                me->heard_stop_ms = now;
+            }
             status = Q_HANDLED();
             break;
         }
