@@ -634,7 +634,6 @@ TEST_CASE("appdata_get says why no folder was made", "[console_appdata]")
         { APPDATA_GET_NAME,  ">err code=5 msg=name"  },
         { APPDATA_GET_FETCH, ">err code=5 msg=fetch" },
         { APPDATA_GET_JSON,  ">err code=5 msg=json"  },
-        { APPDATA_GET_ICON,  ">err code=5 msg=icon"  },
         { APPDATA_GET_FULL,  ">err code=5 msg=full"  },
         { APPDATA_GET_STORE, ">err code=5 msg=store" },
     };

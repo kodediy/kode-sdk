@@ -9678,7 +9678,7 @@ TEST_CASE("a fetch that fails before its put says why no folder was written",
     TEST_ASSERT_EQUAL_UINT(1U, klog_count("the data folder of 'snake' was not "
                                           "written"));
     TEST_ASSERT_TRUE(klog_has("the data folder of 'snake' was not written: "
-                              "its files could not be fetched"));
+                              "its app.json could not be fetched"));
     fetch_end();
 }
 
@@ -9839,6 +9839,8 @@ typedef struct {
     unsigned fails;           /**< APP_FLASH_FAIL_SIG.                    */
     unsigned answers;         /**< APPDATA_GET_RSP_SIG.                   */
     uint8_t  why;             /**< The last answer's appdata_get_why_t.   */
+    bool     icon;            /**< The last answer's icon.                */
+    uint8_t  fail_why;        /**< The last failure's kfail_t.            */
     enum_t   first;           /**< The first of the card's three, or 0.   */
     char     project[KODE_APP_PROJECT_MAX]; /**< The last report's.       */
 } card_seen_t;
@@ -9866,11 +9868,13 @@ static card_seen_t card_seen(void)
         else if ( sig == APP_FLASH_FAIL_SIG )
         {
             ++seen.fails;
+            seen.fail_why = ((AppFlashFailEvt const *)e)->why;
         }
         else if ( sig == APPDATA_GET_RSP_SIG )
         {
             ++seen.answers;
-            seen.why = ((AppDataGetRspEvt const *)e)->why;
+            seen.why  = ((AppDataGetRspEvt const *)e)->why;
+            seen.icon = ((AppDataGetRspEvt const *)e)->icon;
             continue;
         }
         else
@@ -10208,6 +10212,173 @@ TEST_CASE("the fetch's request carries whether an install follows",
     TEST_ASSERT_EQUAL_INT(APPDATA_GET_REQ_SIG, (int)e->sig);
     TEST_ASSERT_TRUE(((AppDataGetReqEvt const *)e)->install);
     QF_gc(e);
+    fetch_end();
+}
+
+/* ---- A fetch that loses its icon, and one that loses its folder ------------
+ * The folder is how an app looks, never what lets it install. An icon that
+ * does not come costs the icon alone: app.json is written without it. A folder
+ * that does not come ends its card with KFAIL_DATA, which no install failure
+ * carries. */
+
+/** @brief An app.json that names icon.k64. */
+#define GET_JSON_ICON_BODY \
+    "{\"kode\":\"1\",\"name\":\"Snake\",\"category\":\"games\",\"icon\":\"icon.k64\"}"
+
+/** @brief An icon's first bytes: what a chunk of one carries in these cases. */
+#define GET_ICON_PART_LEN 64U
+
+/**
+ * @brief Run a fetch of "snake" up to its icon's open: an app.json that names
+ *        icon.k64 arrives whole in one chunk. The spy hears the card.
+ */
+static void fetch_to_the_icon(void)
+{
+    StorageDataEvt d;
+    uint32_t const len = (uint32_t)(sizeof(GET_JSON_ICON_BODY) - 1U);
+
+    fetch_fresh();
+    card_listen();
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_OK, len);
+
+    (void)memcpy(s_net_chunk, GET_JSON_ICON_BODY, len);
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.len    = (uint16_t)len;
+    d.status = (uint8_t)KODE_OK;
+    d.eof    = true;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+
+    net_seen_t const n = net_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n.opens, "the icon was not asked for");
+    TEST_ASSERT_EQUAL_STRING(GET_URL "icon.k64", n.url);
+}
+
+/**
+ * @brief The end of a fetch whose icon was lost: AO_Storage is asked for
+ *        app.json alone, the fetch is answered ok with no icon, and its card
+ *        ends with the done.
+ */
+static void icon_lost_writes_the_json(void)
+{
+    const QEvt * const e = storage_take(APPDATA_PUT_REQ_SIG);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the app.json that came was not written");
+    AppDataPutEvt const * const put = (AppDataPutEvt const *)e;
+    TEST_ASSERT_EQUAL_STRING("snake", put->project);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)(sizeof(GET_JSON_ICON_BODY) - 1U),
+                             put->json_len);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(0U, put->icon_len, "a lost icon was written");
+    TEST_ASSERT_EQUAL_MEMORY(GET_JSON_ICON_BODY, put->buf, put->json_len);
+    put_done(e);
+    put_rsp("snake", KODE_OK);
+
+    card_seen_t const seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT(1U, seen.answers);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_OK, seen.why);
+    TEST_ASSERT_FALSE_MESSAGE(seen.icon, "the answer says an icon that never came");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.dones, "the card did not end with the done");
+    TEST_ASSERT_EQUAL_UINT(0U, seen.fails);
+
+    QActive_unsubscribeAll(ao_spy());
+    fetch_end();
+}
+
+TEST_CASE("a fetch whose icon does not open writes app.json alone",
+          "[appmgr_ao][appdata_get][icon]")
+{
+    fetch_to_the_icon();
+    fetch_opened((uint8_t)KODE_ERROR, 0U);              /* a 404 */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, net_seen().closes,
+        "nothing was opened: there is nothing to close");
+    icon_lost_writes_the_json();
+}
+
+TEST_CASE("a fetch whose icon has no length writes app.json alone",
+          "[appmgr_ao][appdata_get][icon]")
+{
+    fetch_to_the_icon();
+    fetch_opened((uint8_t)KODE_OK, 0U);
+    net_seen_t const n = net_seen();
+    TEST_ASSERT_EQUAL_UINT(0U, n.reads);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n.closes, "the transfer was left open");
+    icon_lost_writes_the_json();
+}
+
+TEST_CASE("a fetch whose icon is of a size the reader does not take writes "
+          "app.json alone", "[appmgr_ao][appdata_get][icon]")
+{
+    fetch_to_the_icon();
+    fetch_opened((uint8_t)KODE_OK, KAPP_ICON_HALF_BYTES + 1U);
+    net_seen_t const n = net_seen();
+    TEST_ASSERT_EQUAL_UINT(0U, n.reads);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n.closes, "the transfer was left open");
+    icon_lost_writes_the_json();
+}
+
+TEST_CASE("a fetch whose icon ends short writes app.json alone, and a late "
+          "chunk of it is taken for nothing", "[appmgr_ao][appdata_get][icon]")
+{
+    StorageDataEvt d;
+
+    fetch_to_the_icon();
+    fetch_opened((uint8_t)KODE_OK, KAPP_ICON_BYTES);
+    (void)net_seen();
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.len    = (uint16_t)GET_ICON_PART_LEN;
+    d.status = (uint8_t)KODE_OK;
+    d.eof    = true;                                    /* and nothing more */
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_seen().closes, "the transfer was left open");
+
+    d.eof = false;                       /* sent before the close was read */
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, net_seen().reads,
+        "a chunk of the lost icon was taken for a file");
+    icon_lost_writes_the_json();
+}
+
+TEST_CASE("a fetch whose icon never answers writes app.json alone, and the "
+          "open's late answer is taken for nothing", "[appmgr_ao][appdata_get][icon]")
+{
+    fetch_to_the_icon();
+    /* The card says its 0 % every second of the wait, and the spy that hears
+     * it must let those go, or they hold the pool the put needs. */
+    for ( unsigned waited = 0U; (APPMGR_OPEN_DEADLINE_TICKS + 2U) > waited;
+          waited += APPMGR_WAIT_BEAT_TICKS )
+    {
+        run_ticks(APPMGR_WAIT_BEAT_TICKS);
+        ao_spy_drain();
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_seen().closes, "the transfer was left open");
+
+    fetch_opened((uint8_t)KODE_OK, KAPP_ICON_BYTES);    /* crossed the close */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, net_seen().reads,
+        "the icon given up on was read all the same");
+    icon_lost_writes_the_json();
+}
+
+TEST_CASE("a fetch whose app.json does not come ends its card with KFAIL_DATA",
+          "[appmgr_ao][appdata_get][icon]")
+{
+    fetch_fresh();
+    card_listen();
+    ask_get("snake", GET_URL);
+    (void)net_seen();
+    fetch_opened((uint8_t)KODE_ERROR, 0U);              /* a 404 */
+
+    card_seen_t const seen = card_seen();
+    TEST_ASSERT_EQUAL_UINT(1U, seen.answers);
+    TEST_ASSERT_EQUAL_INT(APPDATA_GET_FETCH, seen.why);
+    TEST_ASSERT_EQUAL_UINT(0U, seen.dones);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen.fails, "the card the fetch raised is left up");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((uint8_t)KFAIL_DATA, seen.fail_why,
+        "the card ends as a write that failed");
+
+    QActive_unsubscribeAll(ao_spy());
     fetch_end();
 }
 

@@ -2389,6 +2389,10 @@ typedef enum {
     KFAIL_WRITE = 0,  /**< The write itself: the image, the medium, the flash. */
     KFAIL_BUSY,       /**< Nothing was written: an app this install would
                        *   remove has no copy on the card yet. Ask again.     */
+    KFAIL_DATA,       /**< An app's data folder did not come or could not be
+                       *   written. No app was installed or touched: the
+                       *   folder is how an app looks, never what lets it
+                       *   install.                                           */
 } kfail_t;
 
 /**

@@ -6760,15 +6760,11 @@ static void get_say(const char *project, appdata_get_why_t why)
             break;
         }
         case APPDATA_GET_FETCH: {
-            words = "its files could not be fetched";
+            words = "its app.json could not be fetched";
             break;
         }
         case APPDATA_GET_JSON: {
             words = "its app.json is not one the board reads";
-            break;
-        }
-        case APPDATA_GET_ICON: {
-            words = "its icon is not an icon of the one size";
             break;
         }
         default: {
@@ -6858,15 +6854,23 @@ static void get_open_file(AppMgr * const me, const char *file)
  *        announced.
  *
  * The done names no app, as a park's does: nothing was installed. A fetch
- * asked with `install` publishes neither, whatever its end: the folder is
- * what the install looks like, never what lets it happen, and the host sends
- * the install all the same. AppMgr_idle keeps the card up for it.
+ * that made no folder ends with KFAIL_DATA, which no install's failure
+ * carries, so the glass can let the card go without telling of a failed
+ * install. A fetch asked with `install` publishes neither, whatever its end:
+ * the folder is what the install looks like, never what lets it happen, and
+ * the host sends the install all the same. AppMgr_idle keeps the card up for
+ * it.
  *
  * @param me The AO.
  * @param ok The folder was written.
  */
 static void get_card_end(AppMgr * const me, bool ok)
 {
+    /* Nothing was installed or touched: the folder is not the app. */
+    static const AppFlashFailEvt data_fail = {
+        QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_DATA
+    };
+
     if ( me->get_install )
     {
         me->get_install = false;
@@ -6880,7 +6884,7 @@ static void get_card_end(AppMgr * const me, bool ok)
     }
     else
     {
-        QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);
+        QACTIVE_PUBLISH(&data_fail.super, &me->super);
     }
 }
 
@@ -6938,6 +6942,43 @@ static QState get_put(AppMgr * const me)
 }
 
 /**
+ * @brief The file in hand did not come whole.
+ *
+ * Without app.json there is no folder. The icon is only how the app looks,
+ * so losing it costs the icon alone: app.json is written without it, and the
+ * app wears the letters of its name. The transfer is closed and get_want
+ * set to 0, so a chunk of the lost icon still on its way is taken for
+ * nothing.
+ *
+ * @param me  The AO.
+ * @param why What went wrong, said when it was app.json.
+ * @return The state's answer.
+ */
+static QState get_lost(AppMgr * const me, appdata_get_why_t why)
+{
+    QState status;
+
+    if ( (uint8_t)GET_STEP_ICON == me->get_step )
+    {
+        if ( me->get_open )
+        {
+            net_stream_close_request();
+            me->get_open = false;
+        }
+        me->get_want     = 0U;
+        me->get_icon_len = 0U;
+        KLOG_W(TAG, "the icon of '%s' did not come; its app.json is written "
+                    "alone", me->get_project);
+        status = get_put(me);
+    }
+    else
+    {
+        status = get_fail(me, why);
+    }
+    return status;
+}
+
+/**
  * @brief The file in hand has arrived whole: check it and go on.
  *
  * app.json is read with the folder's own parser, so a file AO_Storage would
@@ -6991,16 +7032,23 @@ static QState get_file_done(AppMgr * const me)
  */
 static QState get_opened(AppMgr * const me, StorageOpenRspEvt const * const rsp)
 {
+    if ( ((uint8_t)GET_STEP_JSON != me->get_step)
+        && ((uint8_t)GET_STEP_ICON != me->get_step) )
+    {
+        /* An icon given up on at its deadline, answered on the way to the
+         * close that went with it: no file is in hand. */
+        return Q_HANDLED();
+    }
     if ( (uint8_t)KODE_OK != rsp->status )
     {
         me->get_open = false;                    /* nothing was opened */
-        return get_fail(me, APPDATA_GET_FETCH);
+        return get_lost(me, APPDATA_GET_FETCH);
     }
     if ( 0U == rsp->size )
     {
         KLOG_W(TAG, "the server gave no length for a file of '%s'",
                me->get_project);
-        return get_fail(me, APPDATA_GET_FETCH);
+        return get_lost(me, APPDATA_GET_FETCH);
     }
     if ( (uint8_t)GET_STEP_JSON == me->get_step )
     {
@@ -7014,7 +7062,7 @@ static QState get_opened(AppMgr * const me, StorageOpenRspEvt const * const rsp)
         KLOG_W(TAG, "the icon fetched for '%s' is %lu bytes, not %lu or %lu",
                me->get_project, (unsigned long)rsp->size,
                (unsigned long)KAPP_ICON_HALF_BYTES, (unsigned long)KAPP_ICON_BYTES);
-        return get_fail(me, APPDATA_GET_ICON);
+        return get_lost(me, APPDATA_GET_FETCH);
     }
     else
     {
@@ -7047,12 +7095,12 @@ static QState get_chunk(AppMgr * const me, StorageDataEvt const * const d)
     }
     if ( (uint8_t)KODE_OK != d->status )
     {
-        return get_fail(me, APPDATA_GET_FETCH);
+        return get_lost(me, APPDATA_GET_FETCH);
     }
     if ( (uint32_t)d->len > (me->get_want - me->get_fill) )
     {
         KLOG_W(TAG, "a file of '%s' brought more than it said", me->get_project);
-        return get_fail(me, APPDATA_GET_FETCH);
+        return get_lost(me, APPDATA_GET_FETCH);
     }
     /* app.json fills the buffer's start; the icon goes right after it. */
     size_t at = (size_t)me->get_fill;
@@ -7063,7 +7111,7 @@ static QState get_chunk(AppMgr * const me, StorageDataEvt const * const d)
     const uint8_t * const src = net_stream_buf(d->idx);
     if ( NULL == src )
     {
-        return get_fail(me, APPDATA_GET_FETCH);  /* a buffer AO_Net has not got */
+        return get_lost(me, APPDATA_GET_FETCH);  /* a buffer AO_Net has not got */
     }
     (void)memcpy(&me->get_buf[at], src, d->len);
     me->get_fill += (uint32_t)d->len;
@@ -7076,7 +7124,7 @@ static QState get_chunk(AppMgr * const me, StorageDataEvt const * const d)
     {
         KLOG_W(TAG, "a file of '%s' ended %lu bytes short", me->get_project,
                (unsigned long)(me->get_want - me->get_fill));
-        return get_fail(me, APPDATA_GET_FETCH);
+        return get_lost(me, APPDATA_GET_FETCH);
     }
     (void)QTimeEvt_rearm(&me->idle, APPMGR_OPEN_TICKS);
     net_stream_return(d->idx);                   /* and asks for the next */
@@ -7249,7 +7297,7 @@ static QState AppMgr_fetching(AppMgr * const me, QEvt const * const e)
             {
                 KLOG_W(TAG, "the data folder of '%s' was never answered",
                        me->get_project);
-                status = get_fail(me, APPDATA_GET_FETCH);
+                status = get_lost(me, APPDATA_GET_FETCH);
             }
             break;
         }

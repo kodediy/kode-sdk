@@ -4433,14 +4433,12 @@ typedef enum {
     APPDATA_GET_OK = 0,   /**< The folder is written.                           */
     APPDATA_GET_BUSY,     /**< AO_AppMgr or AO_Storage was busy with a write.   */
     APPDATA_GET_NAME,     /**< The project cannot name a folder.                */
-    APPDATA_GET_FETCH,    /**< A file did not come: no network, no 200, no
+    APPDATA_GET_FETCH,    /**< app.json did not come: no network, no 200, no
                            *   Content-Length, fewer bytes than it said, or
                            *   silence.                                         */
     APPDATA_GET_JSON,     /**< app.json is longer than KAPP_DATA_JSON_MAX, is
                            *   not what the board reads, or names an icon
                            *   other than icon.k64.                             */
-    APPDATA_GET_ICON,     /**< icon.k64 is neither KAPP_ICON_BYTES nor
-                           *   KAPP_ICON_HALF_BYTES long.                       */
     APPDATA_GET_FULL,     /**< The internal partition has no room for it.       */
     APPDATA_GET_STORE     /**< The folder could not be written.                 */
 } appdata_get_why_t;
@@ -4472,13 +4470,15 @@ typedef struct {
  * app is. Two files are read, `<url>app.json` and, when that names an icon,
  * `<url>icon.k64`; both must come with a Content-Length, and they are checked
  * as the folder's own reader checks them before AO_Storage writes the folder
- * (appdata_put_request()), replacing one that was there. One APPDATA_GET_RSP_SIG
+ * (appdata_put_request()), replacing one that was there. An icon that does not
+ * come whole, or is neither of the two sizes, costs the icon alone: app.json is
+ * written without it, and the answer says the folder holds none. One APPDATA_GET_RSP_SIG
  * to @p who, refusals included: AO_AppMgr does one thing at a time and answers
  * APPDATA_GET_BUSY while it writes an image. Any task or AO.
  *
  * A fetch that began shows like a write: APP_FLASH_PROGRESS_SIG at 0 % at once
  * and again every second while it waits on the network, ended by an unnamed
- * APP_FLASH_DONE_SIG or by APP_FLASH_FAIL_SIG.
+ * APP_FLASH_DONE_SIG or by APP_FLASH_FAIL_SIG with KFAIL_DATA.
  *
  * A fetch asked with @p install is the first step of an install, and its card
  * is the install's: whatever the fetch's end, neither event goes out. The card

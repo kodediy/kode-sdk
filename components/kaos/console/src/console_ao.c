@@ -2392,7 +2392,7 @@ static const char *ad_get_word(uint8_t why)
 {
     /* In appdata_get_why_t's order. */
     static const char *const WORDS[] = { "ok", "busy", "name", "fetch",
-                                         "json", "icon", "full", "store" };
+                                         "json", "full", "store" };
     _Static_assert((sizeof(WORDS) / sizeof(WORDS[0]))
                        == ((size_t)APPDATA_GET_STORE + 1U),
                    "one word for each way a fetch ends");
