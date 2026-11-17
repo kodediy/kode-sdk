@@ -16,8 +16,8 @@
 #                writes it with the cache off.
 #   apps       : The app region (directory + images). Format in kapps_fmt.h.
 #   storage    : The user's FAT volume, wear-levelled. kodeOS ships it with
-#                kode/ (Kody's pack) and c5_slave.bin (the release's C5
-#                image), and stores nothing else there.
+#                kode/ (Kody's pack) and .kode/ (the welcome app's data),
+#                and stores nothing else there.
 #   app_pending: Development mailbox, 6 MB at 0x1A00000, marked non-executable
 #                so the bootloader will never boot it under any circumstances.
 #                An image through it is at most 0x5FF000 (6 MB less the intent
