@@ -4476,6 +4476,17 @@ static void touch_rests_beside_another(void)
     ao_spy_drain();
 }
 
+/** @brief Bring AO_LowPower up with every owner joined, and the sound and the radio put away for an app. */
+static void radio_rests(void)
+{
+    rest_up();
+    rest_ask(KODE_LP_PART_SOUND | KODE_LP_PART_RADIO);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    say_ready(PART_WHO_RADIO, expect_part_round(KODE_LP_PART_RADIO), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, KODE_LP_PART_RADIO);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+}
+
 /** @brief Take the next event and insist it is the board's round for @p target, nobody's part. */
 static uint32_t expect_board_round(kode_lp_state_t target)
 {
@@ -4572,6 +4583,64 @@ TEST_CASE("an order for OFF takes the app's rest at once and asks everybody toge
     say_ready(1U, round, false, NULL);
     expect_state(KODE_LP_OFF, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     (void)qf_support_tick(AO_LowPower, QF_SUPPORT_STEPS(KODE_LOWPOWER_OFF_GRACE_MS + 10U));
+    lp_down();
+}
+
+/* AO_Radio asks for AWAKE when its sentinel stands down with the bus up: the
+ * C5 is awake, and only an AWAKE gives the radio back. AWAKE asked for is a
+ * state of the board's own, so the app's rest is over, and every owner hears it. */
+TEST_CASE("a request for AWAKE while an app rests parts takes the rest and says AWAKE again",
+          "[lowpower_ao]")
+{
+    radio_rests();
+    ask(KODE_LP_AWAKE);
+
+    (void)expect_news(KODE_LP_PART_TAKEN, KODE_OK, 0U);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the owners hear one AWAKE, published");
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    lp_down();
+}
+
+TEST_CASE("a request for AWAKE while a rest is being arranged answers it and takes the rest",
+          "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+    uint32_t round;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_TOUCH | KODE_LP_PART_CARD);
+    say_ready(PART_WHO_STORAGE, expect_part_round(KODE_LP_PART_CARD), false, NULL);
+    round = expect_part_round(KODE_LP_PART_TOUCH);
+
+    ask(KODE_LP_AWAKE);
+
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("board: takes the rest", n->why);
+    (void)expect_news(KODE_LP_PART_TAKEN, KODE_OK, 0U);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+
+    say_ready(PART_WHO_TOUCH, round, false, NULL);   /* nothing waits for it any more */
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    lp_down();
+}
+
+/* The same AWAKE given to a round that kept the app's rest for last: the
+ * round is given up, and the owners it had not asked yet restore with the rest. */
+TEST_CASE("a request for AWAKE in a round that kept the app's rest for last takes the rest as well",
+          "[lowpower_ao]")
+{
+    touch_rests_beside_another();
+
+    ask(KODE_LP_ASLEEP);
+    (void)expect_board_round(KODE_LP_ASLEEP);
+    ask(KODE_LP_AWAKE);
+
+    (void)expect_news(KODE_LP_PART_TAKEN, KODE_OK, 0U);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the owners hear one AWAKE, published");
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
     lp_down();
 }
 
@@ -5057,6 +5126,111 @@ TEST_CASE("a screen that sleeps after its time, with no room to wake it, is held
     rest_end();
     expect_glass_asked(false);
     glass_says(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    lp_down();
+}
+
+/**
+ * @brief Fill the owners' queue (the spy's) and leave @p room slots of it free.
+ *
+ * With one slot free a post with a margin of one finds no room, and a publish
+ * still fits.
+ *
+ * @param room The slots left free.
+ */
+static void owners_room(unsigned room)
+{
+    static const QEvt filler = QEVT_INITIALIZER(IMU_TEST_REQ_SIG);
+
+    TEST_ASSERT_TRUE_MESSAGE(qf_support_queue_stuff(ao_spy(), &filler), "the queue never filled");
+    for ( unsigned i = 0U; room > i; i++ )
+    {
+        (void)ao_spy_take();
+    }
+    ao_spy_release();
+}
+
+/* The radio's owner had no room for the end's AWAKE: the radio is not dropped
+ * from the rest with nobody to bring it back. It is held, and its owner is
+ * asked again a second later, as a busy owner is. */
+TEST_CASE("an owner with no room for the end's AWAKE is asked again a second later, "
+          "its part held until then", "[lowpower_ao]")
+{
+    lowpower_part_last_t last;
+
+    radio_rests();
+    owners_room(1U);
+    rest_end();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, (unsigned)uxQueueSpacesAvailable(ao_spy()->eQueue),
+                                   "the end was answered with the radio not told");
+    lowpower_part_last(&last);
+    TEST_ASSERT_TRUE_MESSAGE(last.open, "the end is still being arranged");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(KODE_LP_PART_RADIO, last.parts, "the radio was dropped from the rest");
+    ao_spy_drain();
+
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS - STEP_SLACK_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "asked again before its wait was over");
+    wait_real(STEP_SLACK_MS);
+    expect_awake_posted();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    lp_down();
+}
+
+TEST_CASE("an owner with no room for the end's AWAKE to the end of the window stops the end "
+          "there, its part still at rest", "[lowpower_ao]")
+{
+    lowpower_part_last_t last;
+    lowpower_info_t info;
+
+    radio_rests();
+    owners_room(1U);
+    rest_end();
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, (unsigned)uxQueueSpacesAvailable(ao_spy()->eQueue),
+                                   "the end was never answered");
+    ao_spy_drain();
+    lowpower_info_get(&info);
+    TEST_ASSERT_EQUAL_STRING("radio: out of events", info.part_why);
+    lowpower_part_last(&last);
+    TEST_ASSERT_FALSE(last.open);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(KODE_LP_PART_RADIO, last.parts, "the radio was dropped from the rest");
+
+    rest_end();
+    expect_awake_posted();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+    lp_down();
+}
+
+/* The same for a part that rested after its time, the rest ended since: held,
+ * as the glass is, so the next end of the rest brings it back. */
+TEST_CASE("a part that rests after its time, with no room to tell it to come back, is held for the next end",
+          "[lowpower_ao]")
+{
+    uint32_t round;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_RADIO | KODE_LP_PART_SOUND);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    round = expect_part_round(KODE_LP_PART_RADIO);
+    wait_ms(KODE_LOWPOWER_PART_STEP_MS + STEP_SLACK_MS);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    rest_end();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+
+    owners_room(0U);
+    say_ready(PART_WHO_RADIO, round, false, NULL);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(KODE_LP_PART_RADIO, parts_read(),
+                                   "the radio was dropped with nobody to bring it back");
+
+    rest_end();
+    expect_awake_posted();
     (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
     TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
     lp_down();

@@ -10370,6 +10370,31 @@ TEST_CASE("a sentinel that stands down while ASLEEP asks for AWAKE",
     lp_radio_awake();
 }
 
+/* The board is AWAKE through an app's rest: the AWAKE asked for is what ends
+ * the rest (AO_LowPower takes it), and that AWAKE gives the scans back. */
+TEST_CASE("a sentinel that stands down while an app rests the radio asks for AWAKE, "
+          "and the AWAKE gives the scans back", "[radio_ao][lowpower]")
+{
+    LowPowerReqEvt rq;
+
+    radio_fresh();
+    go_up();
+    lp_radio_part_rests();
+    ao_spy_drain();
+
+    fake_radio_sleep_note(KDRV_RADIO_WOKE_STOOD_DOWN, 0U);
+    drain();
+    TEST_ASSERT_TRUE_MESSAGE(lp_request_take(&rq), "the radio stays held with the bus up");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_LP_AWAKE, rq.target);
+
+    lp_radio_awake();
+    TEST_ASSERT_TRUE(wifi_scan_request(NULL));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    ao_spy_drain();
+}
+
 TEST_CASE("an OFF round waits for AO_Net, then answers with the link left up",
           "[radio_ao][lowpower]")
 {

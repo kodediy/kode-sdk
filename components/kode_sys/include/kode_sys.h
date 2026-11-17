@@ -498,8 +498,11 @@ kode_status_t kode_sys_power_off(void);
  * board that may be given up asks the owners of those parts last: one that
  * another owner refuses leaves the rest as it was, and one that goes through
  * says KODE_LP_PART_TAKEN before it asks them. An order for OFF, and a round
- * begun while a rest is being arranged, take the rest at once. While a round
- * runs a request is answered KODE_DENIED, `board: not awake`.
+ * begun while a rest is being arranged, take the rest at once. So does a
+ * request for AWAKE, which AO_Radio makes when the C5 stays up through its
+ * rest: KODE_LP_PART_TAKEN, then LOWPOWER_STATE_SIG says AWAKE over AWAKE and
+ * every part comes back. While a round runs a request is answered
+ * KODE_DENIED, `board: not awake`.
  *
  * Both calls are commands. Each one that returns KODE_OK ends in exactly one
  * LOWPOWER_PART_SIG (LowPowerPartEvt) with what KODE_LP_PART_ANSWER: its rc,
@@ -588,7 +591,10 @@ kode_status_t kode_sys_rest(uint32_t parts, const kode_sys_rest_wake_t *wake);
  * @brief Bring back what kode_sys_rest() put away: the CPU first, then the radio, the glass and the touch.
  *
  * The sound and the card are not held: they come back at their next use.
- * With nothing at rest the answer is KODE_OK at once.
+ * With nothing at rest the answer is KODE_OK at once. An owner with no room
+ * for its wake is asked again as one that answers busy is (kode_sys_rest());
+ * past the window the answer is KODE_DENIED, `part: out of events`, and the
+ * part stays at rest.
  *
  * @return As kode_sys_rest().
  */

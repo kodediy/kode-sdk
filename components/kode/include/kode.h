@@ -1768,8 +1768,9 @@ bool kode_power_off(void);
  * The app names the parts it does not use and the board puts them away, one
  * at a time, while everything else keeps running. They stay away until
  * kode_rest_end(). The board keeps the last word: when it goes to sleep or
- * switches off by itself, or the user holds the bottom button to go home,
- * the rest is over. A sleep the board begins by itself and gives up, because
+ * switches off by itself, when the radio chip cannot sleep through its rest,
+ * or the user holds the bottom button to go home, the rest is over and every
+ * part comes back. A sleep the board begins by itself and gives up, because
  * something is busy, leaves the rest as it was. One task asks at a time: two
  * that ask at once can each take the other's answer.
  */

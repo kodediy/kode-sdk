@@ -299,9 +299,10 @@ static QState LowPower_resting(LowPower * const me, QEvt const * const e);
 static QState LowPower_asleep(LowPower * const me, QEvt const * const e);
 static QState LowPower_dark(LowPower * const me, QEvt const * const e);
 static QState LowPower_off(LowPower * const me, QEvt const * const e);
-static void part_take(LowPower * const me);
+static bool part_take(LowPower * const me);
 static uint32_t part_round_keep(LowPower * const me);
-static void part_awake_post(LowPower * const me, uint8_t who);
+static bool part_awake_post(LowPower * const me, uint8_t who);
+static void part_busy(LowPower * const me, const char *why);
 
 /* ---- Names ---------------------------------------------------------------- */
 
@@ -553,7 +554,8 @@ static bool state_send(LowPower * const me, uint8_t state, uint8_t cause,
 }
 
 /**
- * @brief Publish a change of state (or, with state == prev, an abandoned round).
+ * @brief Publish a change of state (or, with state == prev, an abandoned round,
+ *        or an app's rest a request for AWAKE took).
  *
  * @param me    The AO.
  * @param state The state now.
@@ -563,8 +565,9 @@ static bool state_send(LowPower * const me, uint8_t state, uint8_t cause,
 static void publish_state(LowPower * const me, uint8_t state, uint8_t cause,
                           uint8_t prev)
 {
-    /* A round abandoned publishes AWAKE over AWAKE: not a change, so the time
-     * in the state and its cause (lowpower_info) stand. */
+    /* A round abandoned, or an app's rest taken by a request for AWAKE,
+     * publishes AWAKE over AWAKE: not a change, so the time in the state and
+     * its cause (lowpower_info) stand. */
     if ( state != prev )
     {
         me->since_us   = khal_time_us();
@@ -726,7 +729,7 @@ static QState round_done(LowPower * const me)
     me->waiting = 0U;
     /* The board has every part from here: an app's rest is over. */
     me->held = 0U;
-    part_take(me);
+    (void)part_take(me);
 
     if ( (uint8_t)KODE_LP_ASLEEP == me->target )
     {
@@ -774,7 +777,8 @@ static bool round_order(const LowPower *me)
  *
  * A round given up before it asked the owners of what an app has at rest
  * (round_begin()) tells each owner it did ask, and nobody else: those devices
- * stay at rest, and the app's rest is as it was.
+ * stay at rest, and the app's rest is as it was. A request for AWAKE takes
+ * the rest before it gives the round up, so everybody hears the AWAKE then.
  *
  * @param me    The AO.
  * @param cause What ended the round, a kode_lp_cause_t.
@@ -807,7 +811,7 @@ static void round_leave(LowPower * const me, uint8_t cause)
         {
             if ( (spared & (1U << i)) == 0U )
             {
-                part_awake_post(me, i);
+                (void)part_awake_post(me, i);
             }
         }
         KLOG_N(TAG, "the app's rest is as it was: its owners were not asked");
@@ -952,7 +956,7 @@ static bool round_held_ask(LowPower * const me)
     {
         me->waiting = me->held;
         me->held    = 0U;
-        part_take(me);
+        (void)part_take(me);
         round_post(me, me->waiting);
         asked = true;
     }
@@ -1011,7 +1015,7 @@ static QState round_begin(LowPower * const me, uint8_t target, uint8_t cause,
         if ( 0U == me->held )
         {
             /* The board has every part from here: an app's rest is over. */
-            part_take(me);
+            (void)part_take(me);
         }
         me->sealed = true;
         me->round += 1U;
@@ -1342,6 +1346,33 @@ static void awake_request_replaces(LowPower * const me, const LowPowerReqEvt *r)
 }
 
 /**
+ * @brief A request for AWAKE while AWAKE: an app's rest, if there is one, is over.
+ *
+ * AWAKE asked for is a state of the board's own, and ends an app's rest as
+ * ASLEEP and OFF do: the board takes it (part_take()), and STATE(AWAKE) goes
+ * out over AWAKE, which every owner of a part restores on. AO_Radio asks for
+ * it when its sleep sentinel stands down with the bus up: the C5 is awake, and
+ * this AWAKE is what gives it back. With nothing at rest and nothing being
+ * arranged it changes nothing.
+ *
+ * @param me The AO, AWAKE.
+ * @param r  The request, for AWAKE.
+ */
+static void awake_again(LowPower * const me, const LowPowerReqEvt *r)
+{
+    if ( part_take(me) )
+    {
+        KLOG_N(TAG, "request for AWAKE (source %u): the owners of the rest are told",
+               (unsigned)r->src);
+        publish_state(me, me->state, (uint8_t)KODE_LP_CAUSE_REQUEST, me->state);
+    }
+    else
+    {
+        KLOG_I(TAG, "already AWAKE");
+    }
+}
+
+/**
  * @brief A request while AWAKE.
  *
  * @param me The AO.
@@ -1362,7 +1393,7 @@ static QState awake_request(LowPower * const me, const LowPowerReqEvt *r)
         awake_request_replaces(me, r);
         if ( (uint8_t)KODE_LP_AWAKE == r->target )
         {
-            KLOG_I(TAG, "already AWAKE");
+            awake_again(me, r);
         }
         else if ( !me->power_ok )
         {
@@ -2760,10 +2791,13 @@ static void part_wakes_off(LowPower * const me)
  *
  * @param me  The AO.
  * @param who The participant.
+ * @return true when the owner has it; false when no event or no room in its
+ *         queue was left, and its device is still at rest.
  */
-static void part_awake_post(LowPower * const me, uint8_t who)
+static bool part_awake_post(LowPower * const me, uint8_t who)
 {
     LowPowerStateEvt *ev = Q_NEW_X(LowPowerStateEvt, 0U, LOWPOWER_STATE_SIG);
+    bool posted = false;
 
     if ( NULL == ev )
     {
@@ -2774,12 +2808,14 @@ static void part_awake_post(LowPower * const me, uint8_t who)
         ev->state = (uint8_t)KODE_LP_AWAKE;
         ev->cause = (uint8_t)KODE_LP_CAUSE_REQUEST;
         ev->prev  = (uint8_t)KODE_LP_AWAKE;
-        if ( !QACTIVE_POST_X(me->parts[who].ao, &ev->super, 1U, &me->super) )
+        posted = QACTIVE_POST_X(me->parts[who].ao, &ev->super, 1U, &me->super);
+        if ( !posted )
         {
             KLOG_E(TAG, "%s's queue is full; it was not told to come back",
                    me->parts[who].name);
         }
     }
+    return posted;
 }
 
 /**
@@ -2800,7 +2836,7 @@ static void part_cpu_restore(LowPower * const me)
 
         if ( KODE_LOWPOWER_WHO_NONE != who )
         {
-            part_awake_post(me, who);
+            (void)part_awake_post(me, who);
         }
     }
 }
@@ -3108,12 +3144,15 @@ static bool part_ask_down(LowPower * const me, uint8_t who, uint8_t part)
  * @brief Bring @p part back.
  *
  * Only the glass answers: the others restore on the AWAKE posted to them,
- * with retries of their own.
+ * with retries of their own. An owner with no room for the wake is busy
+ * (part_busy()): the part stays held, and the owner is asked again as long as
+ * the request's window allows, since nothing else would bring it back.
  *
  * @param me   The AO.
  * @param who  The owner; KODE_LOWPOWER_WHO_NONE when the build has none.
  * @param part One KODE_LP_PART_* bit.
- * @return true when an answer is awaited.
+ * @return true when an answer is awaited, or the step was stopped or waits
+ *         to ask again.
  */
 static bool part_ask_up(LowPower * const me, uint8_t who, uint8_t part)
 {
@@ -3128,19 +3167,31 @@ static bool part_ask_up(LowPower * const me, uint8_t who, uint8_t part)
     {
         me->part_rest &= (uint8_t)~part;
     }
-    else if ( glass )
-    {
-        if ( !part_glass_post(me, who, false) )
-        {
-            /* Left at rest: the request is answered with the reason. */
-            part_fail(me, lowpower_part_name(part), "out of events");
-        }
-        waiting = true;
-    }
     else
     {
-        part_awake_post(me, who);
-        me->part_rest &= (uint8_t)~part;
+        bool posted;
+
+        if ( glass )
+        {
+            posted = part_glass_post(me, who, false);
+        }
+        else
+        {
+            posted = part_awake_post(me, who);
+        }
+        if ( !posted )
+        {
+            part_busy(me, "out of events");
+            waiting = true;
+        }
+        else if ( glass )
+        {
+            waiting = true;
+        }
+        else
+        {
+            me->part_rest &= (uint8_t)~part;
+        }
     }
     return waiting;
 }
@@ -3286,7 +3337,7 @@ static void part_advance(LowPower * const me)
             if ( me->part_up )
             {
                 waiting = part_ask_up(me, who, part);
-                if ( waiting && (0U != me->part_step) )
+                if ( waiting && (0U != me->part_step) && (!me->part_again) )
                 {
                     tmo_start(&me->round_tmo, KODE_LOWPOWER_PART_STEP_MS);
                 }
@@ -3434,7 +3485,8 @@ static bool part_late_back(const LowPower * const me, uint8_t part)
  * same. While the app's rest wants the part, it is held from here and the
  * end of the rest brings it back. When the app has ended its rest since, or
  * asked for a rest without it, the owner is told to come back at once
- * (part_late_back()). A busy answer changes nothing.
+ * (part_late_back()), and held all the same when it has no room for that, so
+ * the next end of the rest brings it back. A busy answer changes nothing.
  *
  * @param me The AO, AWAKE.
  * @param a  The answer.
@@ -3455,7 +3507,14 @@ static bool part_late_ready(LowPower * const me, const LowPowerReadyEvt *a)
         {
             KLOG_N(TAG, "rest: the %s rested after its time and no rest wants it; it comes back",
                    lowpower_part_name(late));
-            part_awake_post(me, a->who);
+            if ( !part_awake_post(me, a->who) )
+            {
+                /* Owed, not dropped: held, so the next end of the rest brings it back. */
+                me->part_rest |= late;
+                KLOG_N(TAG, "rest: the %s stays at rest until the rest ends again",
+                       lowpower_part_name(late));
+                part_word_set(me);
+            }
         }
         else
         {
@@ -3471,10 +3530,11 @@ static bool part_late_ready(LowPower * const me, const LowPowerReadyEvt *a)
 /**
  * @brief The owner asked in this step is busy: ask it again later, or stop there.
  *
- * As a requested round is begun again (round_busy()), the owner is asked
- * again KODE_LOWPOWER_REQUEST_RETRY_MS later, on the step's own one-shot, as
- * long as that ask falls inside the request's window. Past it the sequence
- * stops with this reason, and what rested stays at rest.
+ * Busy is its answer, or no room for the wake that brings its part back
+ * (part_ask_up()). As a requested round is begun again (round_busy()), the
+ * owner is asked again KODE_LOWPOWER_REQUEST_RETRY_MS later, on the step's
+ * own one-shot, as long as that ask falls inside the request's window. Past
+ * it the sequence stops with this reason, and what rested stays at rest.
  *
  * @param me  The AO, a step open.
  * @param why The owner's reason.
@@ -3499,7 +3559,8 @@ static void part_busy(LowPower * const me, const char *why)
  * @brief The wait after a busy answer ran out: ask the owner of the step again.
  *
  * The part is not put away, so the sequence opens its step again, a round of
- * a new number; the CPU part asks its owners from the first.
+ * a new number; the CPU part asks its owners from the first. At the end, the
+ * part is still held, so its wake is sent again.
  *
  * @param me The AO, a step waiting (part_again).
  */
@@ -3766,13 +3827,18 @@ static void part_request(LowPower * const me, const LowPowerPartReqEvt *r)
  * @brief The board takes every part for a state of its own: the app's rest is over.
  *
  * Nothing is brought back here. The round asks the owners of the rest, the
- * ones at rest answer ready, and the AWAKE that ends it restores them all.
+ * ones at rest answer ready, and the AWAKE that ends it restores them all;
+ * for AWAKE asked for (awake_again()), the AWAKE published next.
  *
- * @param me The AO, in a round or about to begin one.
+ * @param me The AO, in a round or about to begin one, or AWAKE asked for.
+ * @return true when there was a rest to take: parts at rest, or a request
+ *         being arranged.
  */
-static void part_take(LowPower * const me)
+static bool part_take(LowPower * const me)
 {
-    if ( (0U != me->part_rest) || (0U != me->part_step) )
+    bool const taken = (0U != me->part_rest) || (0U != me->part_step);
+
+    if ( taken )
     {
         bool const open = (0U != me->part_step);
 
@@ -3801,6 +3867,7 @@ static void part_take(LowPower * const me)
         part_publish(me, (uint8_t)KODE_LP_PART_TAKEN, KODE_OK, (uint8_t)KODE_LP_WAKE_NONE,
                      (uint8_t)KODE_LOG_SRC_NONE, NULL);
     }
+    return taken;
 }
 
 /**
@@ -4461,6 +4528,10 @@ static QState LowPower_resting(LowPower * const me, QEvt const * const e)
 
             if ( ((uint8_t)KODE_LP_AWAKE == r->target) && (!round_order(me)) )
             {
+                /* AWAKE asked for ends an app's rest here too (awake_again()):
+                 * the owners kept for last hear the AWAKE with everybody. */
+                me->held = 0U;
+                (void)part_take(me);
                 refusal_set(WHO_REQUEST, "cancelled");
                 status = round_abort(me, (uint8_t)KODE_LP_CAUSE_REQUEST);
             }

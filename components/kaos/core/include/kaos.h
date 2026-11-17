@@ -4926,6 +4926,11 @@ QEvt const *lowpower_req_evt(kode_lp_state_t target, uint8_t src);
  * refuses it, and lowpower_last_refusal() says who and why. With the option
  * off it logs a refusal and does nothing.
  *
+ * A request for AWAKE gives up a round under way and ends an app's rest
+ * (KODE_LP_PART_TAKEN); with the board AWAKE already, STATE(AWAKE) goes out
+ * over AWAKE so the owners of that rest restore. AO_Radio asks for it when
+ * its sleep sentinel stands down with the bus up.
+ *
  * @param target The state wanted.
  * @param src    Who asked, for the log: KODE_CONSOLE_SRC_* for a command.
  */
@@ -4999,7 +5004,8 @@ const char *lowpower_last_refusal(void);
  * KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round is begun again,
  * while that ask falls inside KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS of the
  * request; busy past it, or silent for KODE_LOWPOWER_PART_STEP_MS, it ends
- * the request there.
+ * the request there. An owner with no room for the AWAKE that brings its
+ * part back is busy the same way, and its part stays held until it has it.
  *
  * With KODE_LP_PART_CPU the QP tick stops and the awake lock goes, as in
  * ASLEEP: no Active Object counts time until a wake. AO_LowPower keeps the
@@ -5020,7 +5026,8 @@ const char *lowpower_last_refusal(void);
  * that, it tells AWAKE to the owners it did ask and to nobody else, and the
  * rest is as it was, less the CPU part, which the round's clock ended. An
  * order for OFF, and a round begun while a rest is being arranged, take the
- * rest at once and are published as any round.
+ * rest at once and are published as any round. A request for AWAKE takes it
+ * whenever it comes (lowpower_request()).
  */
 
 /** @brief What lowpower_part_req_evt() asks for. */
