@@ -40,6 +40,25 @@
 /** @brief A whole, in per cent: what KDRV_AW_RATE_TOL_PCT is a part of. */
 #define HAPTIC_PCT_FULL    100U
 
+/** @brief The part of KDRV_AW_RATE_HZ a chip at the slow edge of its
+ *         tolerance plays, per cent. */
+#define HAPTIC_PCT_SLOW    (HAPTIC_PCT_FULL - KDRV_AW_RATE_TOL_PCT)
+
+/**
+ * @brief How late the drain may see a chip that left RTP on time, in
+ *        milliseconds.
+ *
+ * A feed period, because the drain reads GLB_STATE once a period. A
+ * millisecond because the board's clock reads whole milliseconds, so the time
+ * since GO it counts may be all but a millisecond more than the chip has
+ * played. And a millisecond because QP counts both timers from the first tick
+ * after they are armed, which may come at once. With all three the drain's
+ * look that finds the chip out of RTP lands on an earlier tick than the
+ * tail, never on the same one, so the order in which QP posts two timers
+ * that expire together decides nothing.
+ */
+#define HAPTIC_DRAIN_LATE_MS (KODE_HAPTIC_TICK_MS + 2U)
+
 /** @brief Bits one byte takes on I2C: eight and the acknowledge. */
 #define HAPTIC_BITS_PER_BYTE     9U
 
@@ -757,6 +776,23 @@ static bool play_feed(Haptic * const me, unsigned bursts)
 }
 
 /**
+ * @brief How much longer than @p held a chip at the slow edge of its
+ *        tolerance plays it, rounded up.
+ *
+ * Its oscillator runs KDRV_AW_RATE_TOL_PCT slow, so the buzz takes
+ * HAPTIC_PCT_FULL / HAPTIC_PCT_SLOW of its length: with a tolerance of 8 %,
+ * 8.7 % more, not 8.
+ *
+ * @param held The buzz's length at KDRV_AW_RATE_HZ, in milliseconds.
+ * @return The extra, in milliseconds.
+ */
+static uint32_t play_slow_ms(uint32_t held)
+{
+    return ((held * KDRV_AW_RATE_TOL_PCT) + (HAPTIC_PCT_SLOW - 1U))
+           / HAPTIC_PCT_SLOW;
+}
+
+/**
  * @brief The feed is over. Watch the chip play out what it STILL HOLDS.
  *
  * The chip holds up to its almost-full mark, about 130 ms, and leaves RTP by
@@ -765,8 +801,9 @@ static bool play_feed(Haptic * const me, unsigned bursts)
  * chip's clock, which nothing on the board measures, not the board's.
  *
  * The tail timer is only the bound for a chip that never leaves RTP: the
- * buzz's length less the time since GO, as the board's clock counts it, and
- * KDRV_AW_RATE_TOL_PCT of the length more for a chip that plays slow.
+ * buzz's length less the time since GO, as the board's clock counts it, what
+ * a chip at the slow edge of its tolerance plays more, and
+ * HAPTIC_DRAIN_LATE_MS for the drain to see it leave.
  *
  * @param me The AO.
  */
@@ -774,7 +811,7 @@ static void play_tail(Haptic * const me)
 {
     uint32_t const held  = kdrv_aw86233_playing_ms((size_t)me->play.fed);
     uint32_t const gone  = khal_time_ms() - me->play.t_go;
-    uint32_t       bound = (held * KDRV_AW_RATE_TOL_PCT) / HAPTIC_PCT_FULL;
+    uint32_t       bound = play_slow_ms(held) + HAPTIC_DRAIN_LATE_MS;
 
     if ( held > gone )
     {
@@ -1689,11 +1726,17 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
             if ( me->play.draining )
             {
                 /* The bound, not the chip: it still read RTP past the buzz's
-                 * length and the oscillator's tolerance. */
+                 * length at the slow edge of the oscillator's tolerance and
+                 * the drain's allowance. */
+                uint32_t const since = khal_time_ms() - me->play.t_go;
+
                 me->play.draining = false;
-                KLOG_W(TAG, "the chip still played %u%% past the buzz's length; "
-                            "stopped it",
-                       (unsigned)KDRV_AW_RATE_TOL_PCT);
+                KLOG_W(TAG, "the chip still read RTP %u ms after GO, past a "
+                            "%u ms buzz at %u%% of its rate and the drain's "
+                            "%u ms; stopped it",
+                       (unsigned)since,
+                       (unsigned)kdrv_aw86233_playing_ms((size_t)me->play.fed),
+                       HAPTIC_PCT_SLOW, HAPTIC_DRAIN_LATE_MS);
             }
             (void)kdrv_aw86233_rtp_end();
             /* And back to rest. This is the one site, because every way a buzz

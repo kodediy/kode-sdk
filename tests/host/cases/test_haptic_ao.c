@@ -3,6 +3,7 @@
  * @file test_haptic_ao.c
  * @brief AO_Haptic: the owner of the AW86233, over a register file.
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
@@ -59,6 +60,8 @@
 #define BURST_BUS_MS 2U
 /** @brief Microseconds in a second, for the chip's clock. */
 #define US_PER_S     1000000U
+/** @brief Microseconds in a millisecond, for a burst's cost on the bus. */
+#define US_PER_MS    1000U
 /** @brief What the chip's clock gives its FIFO: the depth the driver
  *         names, and a burst past it is a burst lost. */
 #define CHIP_FIFO    KDRV_AW_FIFO_DEPTH
@@ -74,6 +77,37 @@
  *         two offers a feed, one burst every other feed, 5.3 ms of playback
  *         per 8 ms - a chip that drains slower than it plays. */
 #define THROTTLE_READS 2U
+
+/** @brief The shortest buzz the short-buzz case plays, in milliseconds:
+ *         under kodeOS's shortest, its 6 ms tick. */
+#define SHORT_FIRST_MS 5U
+/** @brief The longest, past the 50 ms where 8 % first reaches a feed period. */
+#define SHORT_LAST_MS  60U
+/** @brief The step between them, in milliseconds: every length, so every
+ *         remainder of a feed period. */
+#define SHORT_STEP_MS  1U
+/** @brief Room for the length a short-buzz assertion names. */
+#define SHORT_MSG_MAX  32U
+/** @brief What the tail logs when the chip still played at the tail's bound. */
+#define OVERRUN_LINE   "still read RTP"
+
+/** @brief The part of the nominal rate a chip at the slow edge of its
+ *         tolerance plays, per cent. */
+#define PCT_SLOW       (PCT_FULL - KDRV_AW_RATE_TOL_PCT)
+/** @brief The rate of a chip at that edge, in Hz: rounded up, so the chip
+ *         stays inside its tolerance. */
+#define CHIP_SLOW_HZ   (((KDRV_AW_RATE_HZ * PCT_SLOW) + (PCT_FULL - 1U)) / PCT_FULL)
+/** @brief How much longer such a chip plays @p ms_, rounded up, in
+ *         milliseconds: what the AO's tail allows for it. */
+#define SLOW_MS(ms_)   ((((ms_) * KDRV_AW_RATE_TOL_PCT) + (PCT_SLOW - 1U)) / PCT_SLOW)
+/** @brief The rest of what the tail allows, in milliseconds, as the AO counts
+ *         it: the drain's period, a millisecond for the clock's whole
+ *         milliseconds and one for the QP tick's phase. */
+#define DRAIN_LATE_MS  (KODE_HAPTIC_TICK_MS + 2U)
+/** @brief What a burst costs the bus in the edge case, in microseconds: one
+ *         over BURST_BUS_MS, so the bursts end just past a millisecond's
+ *         edge. */
+#define EDGE_BURST_US  ((BURST_BUS_MS * US_PER_MS) + 1U)
 
 /** @brief How much of the RTPDATA stream a case can read back, in bytes. */
 #define FIFO_LOG_MAX 1024U
@@ -110,6 +144,7 @@ static bool     s_chip_dry;     /* the FIFO ran empty before the buzz ended */
 static bool     s_chip_over;    /* a burst landed past the FIFO's capacity */
 static uint32_t s_chip_rate_hz; /* what its oscillator really plays at     */
 static uint32_t s_chip_left_at_stop; /* samples still unplayed when STOP came */
+static uint32_t s_burst_us;     /* what a burst costs the fake clock, in us */
 
 static uint32_t chip_level(void);
 
@@ -243,7 +278,7 @@ static void chip_take(size_t len)
         s_chip_over = true;
     }
     s_chip_fed += (uint32_t)len;
-    fake_time_advance_ms(BURST_BUS_MS);
+    fake_time_advance_us(s_burst_us);
 }
 
 static kode_status_t on_write_regs(khal_i2c_dev_t dev, uint8_t reg,
@@ -310,6 +345,7 @@ static void bus_up(bool present)
     s_chip_over    = false;
     s_chip_rate_hz = KDRV_AW_RATE_HZ;
     s_chip_left_at_stop = 0U;
+    s_burst_us     = BURST_BUS_MS * US_PER_MS;
 }
 
 /* ---- Bringing the AO up --------------------------------------------------- */
@@ -514,6 +550,11 @@ static void test_req(void)
 
 /** @brief One QP tick is this many milliseconds. */
 #define TICK_MS 10U   /* one harness step */
+
+/** @brief How long STOP may follow the end of a 200 ms buzz on a chip that
+ *         never leaves RTP: the oscillator's slow edge, the drain's
+ *         allowance, and the harness's step. */
+#define TAIL_SLACK_MS (SLOW_MS(BUZZ_MS) + DRAIN_LATE_MS + TICK_MS)
 
 /** @brief Advance both clocks by @p ticks, letting the AO see what lands. */
 static void tick_ms(unsigned ticks)
@@ -794,10 +835,10 @@ TEST_CASE("a buzz feeds the FIFO in bursts of at most 64 and stops only after th
 
     /* And STOP lands when the chip has played the buzz, not a whole buzz after
      * it was fed. The tail counts from GO, so however soon the feed handed the
-     * last sample over, STOP follows the end of the playback by a tick or two,
-     * not by two hundred milliseconds. */
+     * last sample over, STOP follows the end of the playback by the tail's
+     * slack, not by two hundred milliseconds. */
     TEST_ASSERT_UINT_WITHIN_MESSAGE(
-        2U * TICK_MS, BUZZ_MS, khal_time_ms() - t_go,
+        TAIL_SLACK_MS, BUZZ_MS, khal_time_ms() - t_go,
         "the buzz was held for the feed AND the playback, one after the other");
 
     done = (const HapticDoneEvt *)spy_expect(HAPTIC_DONE_SIG);
@@ -858,6 +899,108 @@ TEST_CASE("the first feed lands before the chip has played what GO left it, "
     done = (const HapticDoneEvt *)spy_expect(HAPTIC_DONE_SIG);
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)done->rc);
     TEST_ASSERT_EQUAL_UINT32((uint32_t)BUZZ_SAMPLES, done->samples);
+    haptic_down();
+}
+
+/* The drain reads GLB_STATE once a feed period, so a chip that leaves RTP on
+ * time is seen up to a period later. Under 50 ms the chip's tolerance is
+ * shorter than that period, and a tail that does not count it blames a chip
+ * that played exactly what it was given. Every length from the shortest buzz
+ * to past that mark, on the latest chip the tolerance allows, with the two
+ * roundings at their worst:
+ * - the clock starts as many microseconds short of a millisecond's edge as
+ *   the buzz has bursts, and each burst costs one microsecond over
+ *   BURST_BUS_MS. So GO reads a millisecond that has all but passed, the last
+ *   burst ends on an edge, and the time since GO the AO reads is a
+ *   millisecond more than the chip has played, less a few microseconds;
+ * - the first QP tick after the last burst comes a microsecond after it, so
+ *   the drain's timer and the tail count from the arm itself.
+ * A chip that leaves earlier is seen at the same look or an earlier one. */
+TEST_CASE("a short buzz on a chip at the slow edge of its tolerance ends "
+          "without an overrun", "[haptic_ao]")
+{
+    for ( uint16_t ms = SHORT_FIRST_MS; SHORT_LAST_MS >= ms; ms += SHORT_STEP_MS )
+    {
+        uint32_t const       samples = KDRV_AW_SAMPLES((uint32_t)ms);
+        uint32_t const       bursts  = (samples + KDRV_AW_BURST - 1U) / KDRV_AW_BURST;
+        const HapticDoneEvt *done;
+        char                 what[SHORT_MSG_MAX];
+        bool                 armed   = false;
+        unsigned             i;
+
+        bus_up(true);
+        haptic_up();
+        s_chip_clock   = true;
+        s_chip_rate_hz = CHIP_SLOW_HZ;
+        s_burst_us     = EDGE_BURST_US;
+        (void)snprintf(what, sizeof(what), "a %u ms buzz", (unsigned)ms);
+
+        /* From wherever the length before left the clock. */
+        fake_time_advance_us((2U * US_PER_MS)
+                             - (uint32_t)(khal_time_us() % US_PER_MS) - bursts);
+        play_evt(ms, 50U);
+        for ( i = 0U; ((4U * (unsigned)ms) + 100U) > i; ++i )
+        {
+            if ( AW_STOP == s_regs[REG_PLAYCFG4] )
+            {
+                break;
+            }
+            if ( (samples > s_chip_fed) || armed )
+            {
+                fake_time_advance_ms(1U);
+            }
+            else
+            {
+                /* The step just run fed the last burst and armed the tail,
+                 * on a millisecond's edge. */
+                TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+                    0U, (uint32_t)(khal_time_us() % US_PER_MS), what);
+                armed = true;
+                fake_time_advance_us(1U);
+            }
+            (void)qf_support_tick_1ms(AO_Haptic);
+        }
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE(AW_STOP, s_regs[REG_PLAYCFG4], what);
+        TEST_ASSERT_FALSE_MESSAGE(logged(OVERRUN_LINE), what);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_chip_left_at_stop, what);
+        done = (const HapticDoneEvt *)spy_expect(HAPTIC_DONE_SIG);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, (int)done->rc, what);
+        haptic_down();
+    }
+}
+
+/* The other side of the same bound: a chip that never leaves RTP is still
+ * stopped, and said to have played past the buzz, once the drain has had its
+ * look after the buzz's end. */
+TEST_CASE("a short buzz on a chip that stays in RTP is stopped and said to "
+          "have overrun", "[haptic_ao]")
+{
+    uint32_t t_go;
+    unsigned i;
+
+    bus_up(true);
+    haptic_up();
+
+    play_evt(SHORT_FIRST_MS, 50U);
+    t_go = khal_time_ms();
+    for ( i = 0U; 200U > i; ++i )
+    {
+        if ( AW_STOP == s_regs[REG_PLAYCFG4] )
+        {
+            break;
+        }
+        fake_time_advance_ms(1U);
+        (void)qf_support_tick_1ms(AO_Haptic);
+    }
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(AW_STOP, s_regs[REG_PLAYCFG4],
+                                   "a chip stuck in RTP was never stopped");
+    TEST_ASSERT_TRUE_MESSAGE(logged(OVERRUN_LINE),
+                             "a chip that never left RTP was not reported");
+    TEST_ASSERT_TRUE_MESSAGE((khal_time_ms() - t_go)
+                             > (uint32_t)(SHORT_FIRST_MS + KODE_HAPTIC_TICK_MS),
+                             "the chip was blamed before the drain had a look "
+                             "after the buzz's end");
+    (void)spy_expect(HAPTIC_DONE_SIG);
     haptic_down();
 }
 
@@ -1557,8 +1700,8 @@ TEST_CASE("a slowly draining FIFO does not add the feed's time to the tail",
 
     /* The chip finished playing long before the feed finished handing it
      * samples, so there is nothing left to wait out: STOP follows the last
-     * sample by a tick, not by a whole buzz. */
-    TEST_ASSERT_TRUE_MESSAGE((khal_time_ms() - fed_at) <= (2U * TICK_MS),
+     * sample by the tail's slack, not by a whole buzz. */
+    TEST_ASSERT_TRUE_MESSAGE((khal_time_ms() - fed_at) <= TAIL_SLACK_MS,
                              "the tail waited out playback the chip had already "
                              "done");
 

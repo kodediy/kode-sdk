@@ -47,6 +47,11 @@ void fake_time_advance_ms(uint32_t ms)
     s_now_us += (uint64_t)ms * 1000U;
 }
 
+void fake_time_advance_us(uint32_t us)
+{
+    s_now_us += (uint64_t)us;
+}
+
 uint64_t khal_time_us(void)
 {
     return s_now_us;

@@ -663,6 +663,16 @@ void fake_time_delay_hook(void (*hook)(void));
 /** @brief Move the clock forward without sleeping. @param ms Milliseconds. */
 void fake_time_advance_ms(uint32_t ms);
 
+/**
+ * @brief Move the clock forward by part of a millisecond.
+ *
+ * For a case that has to place a reading of khal_time_ms() just before or
+ * just after a millisecond's edge.
+ *
+ * @param us Microseconds.
+ */
+void fake_time_advance_us(uint32_t us);
+
 /** @brief Forget the stops and starts khal_timer_periodic_run() has counted. */
 void fake_time_periodic_forget(void);
 
