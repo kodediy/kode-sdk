@@ -407,10 +407,11 @@ typedef struct {
     bool    ble_stop_pending;
     bool    wifi_start_pending;
     bool    ble_start_pending;
-    /* A refusal of the pairing on the glass that waits for the worker: the
-     * driver hangs up through NimBLE's host lock, which only the worker may
-     * wait on. Kept across the link's loss, paid by the settle, and dropped
-     * by the next pairing record, which is newer than the code refused. */
+    /* The hang-up of a pairing refused on the glass, waiting for the worker:
+     * the driver hangs up through NimBLE's host lock, which only the worker
+     * may wait on. The refusal itself was said at once (radio_pair_refuse()).
+     * Kept across the link's loss and paid by the settle; the driver hangs up
+     * on nobody once that link or its code is gone. */
     bool    ble_reject_owed;
 
     /* The production row. `test_pending` is its debt, paid by the same
@@ -4911,9 +4912,6 @@ static void ble_publish_pair(Radio * const me)
     {
         return;
     }
-    /* The pairing moved since a refusal was asked: the code that was
-     * refused is gone, and an owed refusal would hit the next one. */
-    me->ble_reject_owed = false;
 
     BlePairEvt *ev = Q_NEW_X(BlePairEvt, 0U, BLE_PAIR_SIG);
     if ( NULL == ev )
@@ -4934,6 +4932,29 @@ static void ble_publish_pair(Radio * const me)
         kdrv_ble_hid_pair_window(false);
     }
     QACTIVE_PUBLISH(&ev->super, &me->super);
+}
+
+/**
+ * @brief BLE_PAIR_REJECT_REQ_SIG: refuse the pairing on the glass at once,
+ *        and owe its hang-up to the worker.
+ *
+ * The refusal takes no lock of NimBLE's, so it is said here, and a peer that
+ * finishes typing the code afterwards is undone by the driver. The hang-up
+ * takes NimBLE's host lock, which the worker may hold for seconds while it
+ * writes a key: a job, paid by the next radio_settle().
+ *
+ * @param me The AO.
+ * @return true when a pairing was there to refuse and its hang-up is owed.
+ */
+static bool radio_pair_refuse(Radio * const me)
+{
+    bool const refused = (KODE_OK == kdrv_ble_pair_reject());
+
+    if ( refused )
+    {
+        me->ble_reject_owed = true;
+    }
+    return refused;
 }
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
 #endif /* CONFIG_KODEOS_BLE */
@@ -8084,8 +8105,8 @@ static void radio_settle(Radio * const me)
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
     if ( me->ble_reject_owed )
     {
-        /* First of all: somebody is looking at the code, and the job is
-         * short. */
+        /* First of all: a refused peer still holds the one link, and the
+         * job is short. */
         if ( radio_submit(me, KDRV_RADIO_JOB_BLE_PAIR_REJECT) )
         {
             me->ble_reject_owed = false;
@@ -11359,10 +11380,12 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             break;
         }
         case BLE_PAIR_REJECT_REQ_SIG: {
-            /* Owed to the link: the driver hangs up on the worker, and the
-             * worker takes jobs while the link is up. */
-            me->ble_reject_owed = true;
-            KLOG_N(TAG, "pairing: the refusal waits for the link");
+            /* Said at once; the hang-up is owed to the link: the driver hangs
+             * up on the worker, and the worker takes jobs while the link is up. */
+            if ( radio_pair_refuse(me) )
+            {
+                KLOG_N(TAG, "pairing: the hang-up waits for the link");
+            }
             status = Q_HANDLED();
             break;
         }
@@ -12646,12 +12669,14 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             break;
         }
         case RADIO_OUT_BLE_PAIR_REJECT_DONE: {
-            /* The driver's own note says REJECTED; KODE_DENIED is a pairing
-             * that ended before the job ran, which nobody needs told. */
+            /* The refusal was said when it was asked; KODE_DENIED is a hang-up
+             * with nobody left to hang up on (the link ended, a new code
+             * replaced the refused one, or the driver undid the pairing),
+             * which nobody needs told. */
             me->busy = false;
             if ( ((uint8_t)KODE_OK != job->status) && ((uint8_t)KODE_DENIED != job->status) )
             {
-                KLOG_W(TAG, "pairing: the refusal failed (%u)", (unsigned)job->status);
+                KLOG_W(TAG, "pairing: the hang-up failed (%u)", (unsigned)job->status);
             }
             status = Q_HANDLED();
             break;
@@ -13732,12 +13757,14 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             break;
         }
         case BLE_PAIR_REJECT_REQ_SIG: {
-            /* A job, as every call that takes NimBLE's host lock: the worker
-             * may hold that lock for seconds while it writes a key, and
-             * AO_Radio waits on nothing. Sent now, or when the job in flight
-             * ends. */
-            me->ble_reject_owed = true;
-            radio_settle(me);
+            /* Said at once; the hang-up is a job, as every call that takes
+             * NimBLE's host lock: the worker may hold that lock for seconds
+             * while it writes a key, and AO_Radio waits on nothing. Sent now,
+             * or when the job in flight ends. */
+            if ( radio_pair_refuse(me) )
+            {
+                radio_settle(me);
+            }
             status = Q_HANDLED();
             break;
         }
@@ -14959,6 +14986,19 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+        case BLE_PAIR_REJECT_REQ_SIG: {
+            /* Said at once, so the peer cannot finish pairing; the hang-up
+             * waits, as every job does, for the update to end: the next
+             * settle sends it, or the link's end leaves nobody to hang up on. */
+            if ( radio_pair_refuse(me) )
+            {
+                KLOG_N(TAG, "pairing: the hang-up waits for the update");
+            }
+            status = Q_HANDLED();
+            break;
+        }
+#endif
         case BLE_SCAN_REQ_SIG: {
             /* Apart from the others because it closes on a different event:
              * `ble_scan` waits for the scan's end marker, exactly as

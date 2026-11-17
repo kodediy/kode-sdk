@@ -101,9 +101,9 @@ typedef enum {
                                   *   kdrv_radio_probe_result().            */
     KDRV_RADIO_JOB_BLE_HEAR,     /**< Start or stop a passive scan with no
                                   *   end (req.on): kdrv_ble_hear().      */
-    KDRV_RADIO_JOB_BLE_PAIR_REJECT, /**< Refuse the pairing whose code is
-                                  *   on the glass and hang up on its peer:
-                                  *   kdrv_ble_pair_reject(). Refused in a
+    KDRV_RADIO_JOB_BLE_PAIR_REJECT, /**< Hang up on the peer whose pairing
+                                  *   kdrv_ble_pair_reject() refused:
+                                  *   kdrv_ble_pair_hang_up(). Refused in a
                                   *   build without
                                   *   CONFIG_KODEOS_BLE_PAIRING_PASSKEY.    */
 #if CONFIG_KODE_LOWPOWER

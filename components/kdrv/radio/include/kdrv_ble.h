@@ -130,14 +130,28 @@ kode_status_t kdrv_ble_set_pair_cb(kdrv_ble_pair_cb_t cb);
 bool kdrv_ble_pair_take(kdrv_ble_pair_t *out);
 
 /**
- * @brief Refuse the pairing in flight: hang up on the peer that asked.
+ * @brief Refuse the pairing in flight, at once.
  *
- * Records KDRV_BLE_PAIR_REJECTED and terminates the connection, which is
- * what kdrv_ble_quiet() already does from a thread that is not NimBLE's.
+ * Records KDRV_BLE_PAIR_REJECTED and marks the link refused. It takes no lock
+ * of NimBLE's, so the AO that decides calls it. A peer that finishes typing
+ * the code afterwards has its bond forgotten and its link closed by the host
+ * task. The hang-up itself is kdrv_ble_pair_hang_up().
  *
  * @return KODE_OK when a pairing was there to refuse, KODE_DENIED otherwise.
  */
 kode_status_t kdrv_ble_pair_reject(void);
+
+/**
+ * @brief Hang up on the peer whose pairing kdrv_ble_pair_reject() refused.
+ *
+ * Takes NimBLE's host lock, which the radio's worker may hold for seconds
+ * while it writes a key: a job of that worker (KDRV_RADIO_JOB_BLE_PAIR_REJECT).
+ *
+ * @return KODE_OK when it hung up; KODE_DENIED when there is nobody to hang
+ *         up on: the link ended, a new code replaced the refused one, or the
+ *         host task undid the pairing.
+ */
+kode_status_t kdrv_ble_pair_hang_up(void);
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
 
 /**

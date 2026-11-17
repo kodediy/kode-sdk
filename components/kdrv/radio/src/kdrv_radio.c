@@ -1080,7 +1080,7 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
         case KDRV_RADIO_JOB_BLE_PAIR_REJECT:
             /* The hang-up takes NimBLE's host lock: here it waits on the
              * worker, never on the AO that asked. */
-            *rc = kdrv_ble_pair_reject();
+            *rc = kdrv_ble_pair_hang_up();
             break;
 #endif
         default:

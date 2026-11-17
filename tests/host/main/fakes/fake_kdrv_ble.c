@@ -637,7 +637,9 @@ static struct {
     kdrv_ble_pair_t    rec;
     kdrv_ble_pair_cb_t cb;
     bool               live;
+    bool               refused;
     unsigned           rejects;
+    unsigned           hangups;
 } s_p;
 
 void fake_ble_pair_reset(void)
@@ -651,6 +653,7 @@ void fake_ble_pair_reset(void)
 
 void fake_ble_pair_show(uint32_t passkey)
 {
+    s_p.refused       = false;   /* as the driver: a new code ends the refused one */
     s_p.live          = true;
     s_p.rec.phase     = KDRV_BLE_PAIR_SHOW;
     s_p.rec.passkey   = passkey;
@@ -676,6 +679,11 @@ void fake_ble_pair_end(kdrv_ble_pair_outcome_t how)
 unsigned fake_ble_pair_rejects(void)
 {
     return s_p.rejects;
+}
+
+unsigned fake_ble_pair_hangups(void)
+{
+    return s_p.hangups;
 }
 
 kode_status_t kdrv_ble_set_pair_cb(kdrv_ble_pair_cb_t cb)
@@ -706,11 +714,24 @@ kode_status_t kdrv_ble_pair_reject(void)
         return KODE_DENIED;
     }
     ++s_p.rejects;
-    /* The real driver clears the flag, records REJECTED and then hangs up,
-     * and the hang-up's own disconnect must NOT report GONE on top of it.
-     * fake_ble_pair_end() reproduces the first two; nothing here fabricates
-     * the third, which is what a case is for. */
+    /* The real driver marks the link refused, clears the flag and records
+     * REJECTED; the hang-up is kdrv_ble_pair_hang_up(), and its disconnect
+     * must NOT report GONE on top of it. fake_ble_pair_end() reproduces the
+     * record; nothing here fabricates the disconnect, which is what a case
+     * is for. */
+    s_p.refused = true;
     fake_ble_pair_end(KDRV_BLE_PAIR_REJECTED);
+    return KODE_OK;
+}
+
+kode_status_t kdrv_ble_pair_hang_up(void)
+{
+    if ( !s_p.refused )
+    {
+        return KODE_DENIED;
+    }
+    s_p.refused = false;
+    ++s_p.hangups;
     return KODE_OK;
 }
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */

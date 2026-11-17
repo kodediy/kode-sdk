@@ -673,6 +673,18 @@ static kdrv_ble_pair_cb_t s_pair_cb;
  */
 static bool s_pair_live;
 
+/**
+ * @brief The pairing on this link was refused, and the peer is not hung up
+ *        on yet.
+ *
+ * kdrv_ble_pair_reject() sets it at once, and the hang-up waits for the
+ * radio's worker (kdrv_ble_pair_hang_up()). A peer that finishes typing the
+ * code in between is undone by the host task (ble_pair_refused_undo()). A new
+ * code on the glass and the link's end clear it: the next pairing is not the
+ * one refused. A single bool, written as s_pair_live is.
+ */
+static bool s_pair_refused;
+
 /** @brief Pick the six digits the peer will be asked to type. */
 static uint32_t ble_passkey_pick(void)
 {
@@ -745,18 +757,34 @@ kode_status_t kdrv_ble_pair_reject(void)
     {
         return KODE_DENIED;
     }
-    /* Clear the flag BEFORE hanging up. The disconnect this provokes runs on
-     * the host task, and with the flag still set it would report GONE - the
-     * peer walking away - for something this board did on purpose. */
-    s_pair_live = false;
+    /* Refused BEFORE the flag clears: an encryption change the host task
+     * handles in between finds one of the two set. And the flag is clear
+     * before the hang-up: with it still set, the disconnect would report
+     * GONE - the peer walking away - for something this board did on
+     * purpose. */
+    s_pair_refused = true;
+    s_pair_live    = false;
     KLOG_N(TAG, "pairing refused here");
     pair_note(KDRV_BLE_PAIR_DONE, KDRV_BLE_PAIR_REJECTED, 0U);
-
-    if ( BLE_HS_CONN_HANDLE_NONE != s_ble.conn )
-    {
-        (void)ble_gap_terminate(s_ble.conn, BLE_ERR_REM_USER_CONN_TERM);
-    }
     return KODE_OK;
+}
+
+kode_status_t kdrv_ble_pair_hang_up(void)
+{
+    kode_status_t rc = KODE_DENIED;
+
+    /* Nothing to hang up on once the link ended, a new code replaced the
+     * refused one, or the host task undid the pairing itself. */
+    if ( s_pair_refused )
+    {
+        s_pair_refused = false;
+        if ( BLE_HS_CONN_HANDLE_NONE != s_ble.conn )
+        {
+            (void)ble_gap_terminate(s_ble.conn, BLE_ERR_REM_USER_CONN_TERM);
+        }
+        rc = KODE_OK;
+    }
+    return rc;
 }
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
 
@@ -3956,6 +3984,41 @@ static bool ble_refuse_unproven(uint16_t conn, int status)
 #endif
     return false;
 }
+
+/**
+ * @brief Undo a pairing that finished after it was refused on the glass.
+ *
+ * kdrv_ble_pair_reject() says the refusal at once and leaves the hang-up to
+ * the radio's worker, which may be busy for seconds: a peer that types the
+ * code in between would end bonded. Here, on the host task, its bond is
+ * forgotten and the link closed.
+ *
+ * @param conn   The connection whose encryption changed.
+ * @param status The status of the change; only 0 is a link.
+ * @return true when the link was refused and its peer forgotten.
+ */
+static bool ble_pair_refused_undo(uint16_t conn, int status)
+{
+    bool undone = false;
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    struct ble_gap_conn_desc link;
+
+    if ( s_pair_refused && (0 == status) )
+    {
+        s_pair_refused = false;
+        if ( ble_gap_conn_find(conn, &link) == 0 )
+        {
+            (void)ble_store_util_delete_peer(&link.peer_id_addr);
+        }
+        (void)ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+        undone = true;
+    }
+#else
+    (void)conn;
+    (void)status;
+#endif
+    return undone;
+}
 #endif /* CONFIG_KODEOS_BLE_CONSOLE_PAIRING */
 
 #if CONFIG_KODE_LOWPOWER
@@ -4188,6 +4251,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                 s_pair_live = false;
                 pair_note(KDRV_BLE_PAIR_DONE, KDRV_BLE_PAIR_GONE, 0U);
             }
+            s_pair_refused = false;   /* nobody left to hang up on */
 #endif
 #if CONFIG_KODEOS_BLE_CONSOLE
             kdrv_ble_app_link_reset();
@@ -4251,7 +4315,10 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 
                 if ( ble_sm_inject_io(event->passkey.conn_handle, &io) == 0 )
                 {
-                    s_pair_live = true;
+                    /* A new code is the user's to judge again: the one
+                     * refused is gone, and its hang-up with it. */
+                    s_pair_refused = false;
+                    s_pair_live    = true;
                     /* The digits are NOT logged, here or anywhere. This line
                      * travels the BLE console itself, and a peer that is
                      * already bonded would read the next peer's code out of
@@ -4277,7 +4344,9 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
         case BLE_GAP_EVENT_ENC_CHANGE: {
             bool const refused = ble_key_refused_for(event->enc_change.conn_handle);
-            s_ble.secure = (0 == event->enc_change.status) && !refused;
+            bool const undone  = ble_pair_refused_undo(event->enc_change.conn_handle,
+                                                       event->enc_change.status);
+            s_ble.secure = (0 == event->enc_change.status) && !refused && !undone;
 #if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
             if ( s_pair_live )
             {
@@ -4290,8 +4359,12 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                 pair_note(KDRV_BLE_PAIR_DONE, how, 0U);
             }
 #endif
-            if ( ble_refuse_unproven(event->enc_change.conn_handle,
-                                    event->enc_change.status) )
+            if ( undone )
+            {
+                KLOG_N(TAG, "a refused pairing finished anyway; it is undone");
+            }
+            else if ( ble_refuse_unproven(event->enc_change.conn_handle,
+                                         event->enc_change.status) )
             {
                 KLOG_D(TAG, "a link without a code was undone");
             }
@@ -4643,8 +4716,9 @@ kode_status_t kdrv_ble_start(void)
             return KODE_NO_RESOURCES;
         }
     }
-    s_pair.phase = KDRV_BLE_PAIR_NONE;
-    s_pair_live  = false;
+    s_pair.phase   = KDRV_BLE_PAIR_NONE;
+    s_pair_live    = false;
+    s_pair_refused = false;
 #endif
     ring_init(&s_ring, s_ring_store, KDRV_BLE_RING_BYTES);
     s_pend_len = 0U;

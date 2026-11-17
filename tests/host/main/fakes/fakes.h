@@ -966,6 +966,10 @@ void fake_ble_pair_end(kdrv_ble_pair_outcome_t how);
  *         to refuse - a refusal with nothing in flight does not count, which
  *         is what makes "the request reached the driver" assertable. */
 unsigned fake_ble_pair_rejects(void);
+
+/** @brief How many times kdrv_ble_pair_hang_up() found a refused peer to hang
+ *         up on. */
+unsigned fake_ble_pair_hangups(void);
 #endif
 
 /* ---- The C5 link's driver (fake_kdrv_radio.c) -----------------------------
