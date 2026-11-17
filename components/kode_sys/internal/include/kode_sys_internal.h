@@ -672,17 +672,19 @@ typedef bool (*kode_sys_wifi_ap_cb)(const kode_sys_wifi_ap_t *ap, void *ctx);
  * answer out (at most @p ms) before it lends the storage again.
  *
  * @note Blocks for the sweep, about 38 s; never from an AO.
- * @param cb  Offered each network the sweep kept, in the driver's order.
- * @param ctx Handed to @p cb.
- * @param ms  How long to wait for the end.
+ * @param cb   Offered each network the sweep kept, in the driver's order.
+ * @param ctx  Handed to @p cb.
+ * @param ms   How long to wait for the end.
+ * @param rest Out, or NULL: true when the answer is KODE_DENIED because an
+ *             app rests the radio (ScanRspEvt.rest), false otherwise.
  * @return KODE_OK once every row was offered (none is no failure); KODE_ERROR
  *         for a NULL @p cb, a sweep that failed or a link that went;
  *         KODE_NO_RESOURCES when another scan holds the radio or this file's
  *         storage, an abandoned answer is still owed, AO_Radio had no room or
  *         no PSRAM was left; KODE_TIMEOUT when @p ms ran out; KODE_DENIED
- *         without CONFIG_KODEOS_WIFI.
+ *         while an app rests the radio, or without CONFIG_KODEOS_WIFI.
  */
-kode_status_t kode_block_wifi_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms);
+kode_status_t kode_block_wifi_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms, bool *rest);
 
 /* ---- Bluetooth: a scan, AO_Radio's ---- */
 
@@ -706,16 +708,18 @@ typedef bool (*kode_sys_ble_device_cb)(const kode_sys_ble_device_t *dev, void *c
  * @param ctx     Handed to @p cb.
  * @param ms      How long to listen, KODE_SYS_BLE_SCAN_MS_MIN..KODE_SYS_BLE_SCAN_MS_MAX.
  * @param wait_ms How long to wait for the end.
+ * @param rest    Out, or NULL: true when the answer is KODE_DENIED because an
+ *                app rests the radio (ScanRspEvt.rest), false otherwise.
  * @return KODE_OK once every device was offered (none is no failure);
  *         KODE_ERROR for a NULL @p cb, a listen that failed or a link that
- *         went; KODE_DENIED for @p ms out of range, Bluetooth off in Settings
- *         or a build without CONFIG_KODEOS_BLE; KODE_NO_RESOURCES when a scan
- *         holds the radio or this file's storage, an abandoned answer is still
- *         owed, AO_Radio had no room or no PSRAM was left; KODE_TIMEOUT when
- *         @p wait_ms ran out.
+ *         went; KODE_DENIED for @p ms out of range, an app's rest of the radio,
+ *         Bluetooth off in Settings or a build without CONFIG_KODEOS_BLE;
+ *         KODE_NO_RESOURCES when a scan holds the radio or this file's
+ *         storage, an abandoned answer is still owed, AO_Radio had no room or
+ *         no PSRAM was left; KODE_TIMEOUT when @p wait_ms ran out.
  */
 kode_status_t kode_block_ble_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t ms,
-                                  uint32_t wait_ms);
+                                  uint32_t wait_ms, bool *rest);
 
 /**
  * @brief Set, or set and notify, one value of the app's service, or push a

@@ -240,19 +240,16 @@ static bool ble_scan_keep(const kode_sys_ble_device_t *dev, void *ctx)
 
 /**
  * @brief Keep why the listen failed as the task's error.
- * @param rc What the facade answered.
- * @param ms How long it was asked to listen.
+ * @param rc   What the facade answered.
+ * @param ms   How long it was asked to listen.
+ * @param rest The answer says an app rests the radio.
  */
-static void ble_scan_fail(kode_status_t rc, uint32_t ms)
+static void ble_scan_fail(kode_status_t rc, uint32_t ms, bool rest)
 {
-    uint8_t parts = 0U;
-
     switch ( rc )
     {
     case KODE_DENIED:
-        /* AO_Radio refuses for the rest before it looks at Settings. */
-        (void)kode_block_rest_answers(NULL, &parts, NULL, NULL);
-        if ( 0U != (parts & KODE_SYS_REST_RADIO) )
+        if ( rest )
         {
             kode_err_set("kode_ble_scan: the radio is at rest; kode_rest_end() first");
         }
@@ -304,10 +301,11 @@ int kode_ble_scan(kode_ble_device_t *out, size_t cap, uint32_t ms)
     else
     {
         ble_scan_keep_t keep = { out, cap, 0U };
+        bool            rest = false;
 
         khal_mutex_lock(s_ble_lock);
         kode_status_t const rc = kode_block_ble_scan(&ble_scan_keep, &keep, ms,
-                                                     ms + BLE_SCAN_SLACK_MS);
+                                                     ms + BLE_SCAN_SLACK_MS, &rest);
         khal_mutex_unlock(s_ble_lock);
         if ( KODE_OK == rc )
         {
@@ -315,7 +313,7 @@ int kode_ble_scan(kode_ble_device_t *out, size_t cap, uint32_t ms)
         }
         else
         {
-            ble_scan_fail(rc, ms);
+            ble_scan_fail(rc, ms, rest);
         }
     }
     return found;

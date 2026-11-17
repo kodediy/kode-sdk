@@ -1804,8 +1804,9 @@ typedef struct {
 } kode_rest_wake_t;
 
 /** @brief How long kode_rest() and kode_rest_end() wait for the board, in ms: three
- *         seconds a part, and the ten seconds a busy part is asked again for. */
-#define KODE_REST_BOUND_MS 34000U
+ *         seconds a part, the ten seconds a busy part is asked again for, and three
+ *         seconds of margin. */
+#define KODE_REST_BOUND_MS 37000U
 
 /**
  * @brief Put the named parts away and keep them away until kode_rest_end().

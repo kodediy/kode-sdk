@@ -83,11 +83,9 @@ const char *seam_event_wifi_lost(void);
 /** @brief Rows the scripted scan offers at most. */
 #define SEAM_SCAN_MAX 16U
 
-static kode_status_t seam_block_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms);
+static kode_status_t seam_block_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms, bool *rest);
 int seam_wifi_scan(kode_wifi_network_t *out, size_t cap);
-static uint16_t seam_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, const char **why);
 
-#define kode_block_rest_answers  seam_rest_answers
 #define kode_block_wifi_scan     seam_block_scan
 #define kode_wifi_scan           seam_wifi_scan
 #define kode_sys_wifi_status     seam_status
@@ -109,31 +107,22 @@ static uint16_t seam_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open,
 #undef kode_wifi_disconnect
 #undef kode_block_wifi_scan
 #undef kode_wifi_scan
-#undef kode_block_rest_answers
 
 static kode_sys_wifi_ap_t s_seam_rows[SEAM_SCAN_MAX];  /**< What the scripted scan offers.   */
 static uint32_t           s_seam_rows_n;               /**< How many rows it offers.         */
 static kode_status_t      s_seam_scan_rc;              /**< What it answers.                 */
 static uint32_t           s_seam_scans;                /**< Scans it was asked for.          */
 static uint32_t           s_seam_scan_ms;              /**< The bound it was handed.         */
-static uint8_t            s_seam_rest_parts;           /**< The parts an app's rest holds.  */
+static bool               s_seam_scan_rest;            /**< Its answer says the radio rests. */
 
-static uint16_t seam_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, const char **why)
-{
-    (void)rc;
-    (void)open;
-    (void)why;
-    if ( NULL != parts )
-    {
-        *parts = s_seam_rest_parts;
-    }
-    return 0U;
-}
-
-static kode_status_t seam_block_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms)
+static kode_status_t seam_block_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms, bool *rest)
 {
     s_seam_scans++;
     s_seam_scan_ms = ms;
+    if ( NULL != rest )
+    {
+        *rest = s_seam_scan_rest;
+    }
     if ( KODE_OK == s_seam_scan_rc )
     {
         for ( uint32_t i = 0U; i < s_seam_rows_n; i++ )
@@ -163,10 +152,11 @@ static void seam_scan_script(const int8_t *rssi, uint32_t n, kode_status_t rc)
         s_seam_rows[i].channel = (uint8_t)(1U + i);
         s_seam_rows[i].open    = (i % 2U) == 0U;
     }
-    s_seam_rows_n  = n;
-    s_seam_scan_rc = rc;
-    s_seam_scans   = 0U;
-    s_seam_scan_ms = 0U;
+    s_seam_rows_n    = n;
+    s_seam_scan_rc   = rc;
+    s_seam_scans     = 0U;
+    s_seam_scan_ms   = 0U;
+    s_seam_scan_rest = false;
 }
 
 static kode_status_t seam_status(kode_sys_wifi_status_t *out)
@@ -306,7 +296,6 @@ static void fresh(void)
     radio_flush();
     fake_sem_reset();
     fake_time_reset();
-    s_seam_rest_parts = 0U;
 }
 
 /** @brief The case's world: the driver started, readied and idle, the clock at zero. */
@@ -712,19 +701,20 @@ TEST_CASE("scan with room for more than were found returns them all, in order", 
     TEST_ASSERT_EQUAL_STRING("", kode_error());
 }
 
-TEST_CASE("scan denied while an app rests the radio says the rest", "[kode_wifi]")
+/* AO_Radio's refusal and AO_LowPower's parts can differ for a while (a board
+ * round over the app's rest): the text follows the answer, never the parts. */
+TEST_CASE("scan denied says the rest when its answer does, and only then", "[kode_wifi]")
 {
     static const int8_t rssi[1] = { -50 };
     kode_wifi_network_t out[1];
 
     fresh();
-    s_seam_rest_parts = (uint8_t)(KODE_SYS_REST_RADIO | KODE_SYS_REST_SOUND);
     seam_scan_script(rssi, 1U, KODE_DENIED);
+    s_seam_scan_rest = true;
     TEST_ASSERT_EQUAL_INT(-1, seam_wifi_scan(out, 1U));
     TEST_ASSERT_EQUAL_STRING("kode_wifi_scan: the radio is at rest; kode_rest_end() first", kode_error());
 
-    /* Another part at rest is no reason. */
-    s_seam_rest_parts = (uint8_t)KODE_SYS_REST_SOUND;
+    s_seam_scan_rest = false;
     TEST_ASSERT_EQUAL_INT(-1, seam_wifi_scan(out, 1U));
     TEST_ASSERT_EQUAL_STRING("this firmware has no Wi-Fi", kode_error());
 }

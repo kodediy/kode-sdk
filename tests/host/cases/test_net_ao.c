@@ -3732,7 +3732,7 @@ TEST_CASE("test_chan_stale_bound: an expiry queued behind the console's end of t
 }
 
 /* The retry of a line the console did not take has the same two meanings and
- * the same hazard: its expiry, queued, must not read as the 30 s bound. */
+ * the same hazard: its expiry, queued, must not read as the line's bound. */
 TEST_CASE("test_chan_stale_retry: a retry expiry queued behind a new line does not "
           "drop the head that was handed back", "[net_ao]")
 {

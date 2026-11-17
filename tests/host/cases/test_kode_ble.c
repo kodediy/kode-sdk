@@ -30,7 +30,7 @@ static bool          seam_enabled(void);
 static kode_status_t seam_set_name(const char *name);
 static kode_status_t seam_set_data(const uint8_t *data, size_t len);
 static kode_status_t seam_block_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t ms,
-                                     uint32_t wait_ms);
+                                     uint32_t wait_ms, bool *rest);
 static kode_status_t seam_block_value(const char *chr, uint8_t op, const void *data,
                                       size_t len);
 static bool          seam_fault(char *why, size_t cap);
@@ -64,9 +64,7 @@ bool seam_ble_hid_keys(uint8_t modifiers, const uint8_t *keys);
 bool seam_ble_pair_open(void);
 const char *seam_event_ble_pair_code(void);
 const char *seam_event_ble_pair_done(void);
-static uint16_t seam_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, const char **why);
 
-#define kode_block_rest_answers     seam_rest_answers
 #define kode_sys_ble_enabled        seam_enabled
 #define kode_sys_ble_set_name       seam_set_name
 #define kode_sys_ble_set_data       seam_set_data
@@ -104,7 +102,6 @@ static uint16_t seam_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open,
 #define kode_event_ble_pair_code    seam_event_ble_pair_code
 #define kode_event_ble_pair_done    seam_event_ble_pair_done
 #include "kode_ble.c"
-#undef kode_block_rest_answers
 #undef kode_sys_ble_hid_select
 #undef kode_sys_ble_hid_ready
 #undef kode_sys_ble_hid_mouse
@@ -153,6 +150,7 @@ static kode_status_t         s_seam_scan_rc;             /**< What it answers.  
 static uint32_t              s_seam_scans;               /**< Listens it was asked for.         */
 static uint32_t              s_seam_scan_ms;             /**< The listen it was handed.         */
 static uint32_t              s_seam_wait_ms;             /**< The bound it was handed.          */
+static bool                  s_seam_scan_rest;           /**< Its answer says the radio rests.  */
 static kode_status_t         s_seam_value_rc;            /**< What set_value and notify answer. */
 static uint32_t              s_seam_values;              /**< Values and notifies handed down.  */
 static uint32_t              s_seam_notifies;            /**< Of those, the notifies.           */
@@ -165,19 +163,6 @@ static uint32_t              s_seam_hid_calls;           /**< HID doors and pair
 static uint8_t               s_seam_hid_kinds;           /**< The kinds the last select named.  */
 static uint8_t               s_seam_hid_rep[8];          /**< The last report's arguments.      */
 static bool                  s_seam_hid_keys_null;       /**< The last keyboard report had no keys. */
-static uint8_t               s_seam_rest_parts;          /**< The parts an app's rest holds.   */
-
-static uint16_t seam_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, const char **why)
-{
-    (void)rc;
-    (void)open;
-    (void)why;
-    if ( NULL != parts )
-    {
-        *parts = s_seam_rest_parts;
-    }
-    return 0U;
-}
 
 static bool seam_enabled(void)
 {
@@ -229,11 +214,15 @@ static bool seam_fault(char *why, size_t cap)
 }
 
 static kode_status_t seam_block_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t ms,
-                                     uint32_t wait_ms)
+                                     uint32_t wait_ms, bool *rest)
 {
     s_seam_scans++;
     s_seam_scan_ms = ms;
     s_seam_wait_ms = wait_ms;
+    if ( NULL != rest )
+    {
+        *rest = s_seam_scan_rest;
+    }
     if ( KODE_OK == s_seam_scan_rc )
     {
         for ( uint32_t i = 0U; i < s_seam_devs_n; i++ )
@@ -263,11 +252,12 @@ static void seam_scan_script(const int8_t *rssi, uint32_t n, kode_status_t rc)
                        "c0:00:00:00:00:%02" PRIx32, i);
         s_seam_devs[i].rssi = rssi[i];
     }
-    s_seam_devs_n  = n;
-    s_seam_scan_rc = rc;
-    s_seam_scans   = 0U;
-    s_seam_scan_ms = 0U;
-    s_seam_wait_ms = 0U;
+    s_seam_devs_n    = n;
+    s_seam_scan_rc   = rc;
+    s_seam_scans     = 0U;
+    s_seam_scan_ms   = 0U;
+    s_seam_wait_ms   = 0U;
+    s_seam_scan_rest = false;
 }
 
 static kode_status_t seam_hid_select(uint8_t kinds)
@@ -349,7 +339,6 @@ static void fresh(void)
     s_seam_hid_calls     = 0U;
     s_seam_hid_kinds     = 0U;
     s_seam_hid_keys_null = false;
-    s_seam_rest_parts    = 0U;
     (void)memset(s_seam_hid_rep, 0, sizeof(s_seam_hid_rep));
     seam_scan_script(NULL, 0U, KODE_OK);
 }
@@ -497,19 +486,21 @@ TEST_CASE("a listen that fails says why and returns -1", "[kode_ble]")
     TEST_ASSERT_EQUAL_STRING("", kode_error());
 }
 
-TEST_CASE("a listen denied while an app rests the radio says the rest, not Settings", "[kode_ble]")
+/* A link that came back awake during the app's rest leaves AO_LowPower holding
+ * the radio and AO_Radio refusing for Settings: the text follows the answer. */
+TEST_CASE("a listen denied says the rest when its answer does, Settings otherwise",
+          "[kode_ble]")
 {
     static const int8_t rssi[1] = { -50 };
     kode_ble_device_t   out[1];
 
     fresh();
-    s_seam_rest_parts = (uint8_t)(KODE_SYS_REST_RADIO | KODE_SYS_REST_SOUND);
     seam_scan_script(rssi, 1U, KODE_DENIED);
+    s_seam_scan_rest = true;
     TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 1U, SEAM_LISTEN_MS));
     TEST_ASSERT_EQUAL_STRING("kode_ble_scan: the radio is at rest; kode_rest_end() first", kode_error());
 
-    /* Another part at rest is no reason: Settings is. */
-    s_seam_rest_parts = (uint8_t)KODE_SYS_REST_SOUND;
+    s_seam_scan_rest = false;
     TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 1U, SEAM_LISTEN_MS));
     TEST_ASSERT_EQUAL_STRING("kode_ble_scan: Bluetooth is off in Settings", kode_error());
 }

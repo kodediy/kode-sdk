@@ -9946,6 +9946,113 @@ TEST_CASE("while an app rests the radio a BLE listen is refused at once and runs
     ble_case_end();
 }
 
+/* The facade picks its words from the answer: the rest, or Settings, never a guess. */
+TEST_CASE("an asked scan refused for an app's rest says so in its answer; refused for "
+          "Bluetooth off, it does not", "[radio_ao][lowpower][ask]")
+{
+    kdrv_wifi_ap_t wrows[KDRV_WIFI_SCAN_MAX];
+    kdrv_ble_dev_t brows[KDRV_BLE_SCAN_MAX];
+    ScanWaiter     w;
+    scan_seen_t    s;
+    ble_seen_t     b;
+
+    ble_on_up();
+    lp_radio_part_rests();
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_wifi_scan(ao_spy()));
+    pump();
+    s = scan_take_spy();
+    TEST_ASSERT_EQUAL_UINT(1U, s.ends);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_DENIED, s.end->rc);
+    TEST_ASSERT_TRUE_MESSAGE(s.end->rest, "the AO's answer does not say the radio rests");
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, ble_scan_ask(ao_spy(), BLE_ASK_MS));
+    pump();
+    b = ble_take_spy();
+    TEST_ASSERT_EQUAL_UINT(1U, b.ends);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_DENIED, b.end->rc);
+    TEST_ASSERT_TRUE_MESSAGE(b.end->rest, "the AO's answer does not say the radio rests");
+    ao_spy_drain();
+
+    (void)memset(&w, 0, sizeof(w));
+    w.done = khal_sem_create();
+    w.rows = wrows;
+    w.cap  = (uint8_t)KDRV_WIFI_SCAN_MAX;
+    wifi_scan_request_wait(&w, 5U);
+    pump();
+    TEST_ASSERT_EQUAL_UINT32(5U, w.ack);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, w.rc);
+    TEST_ASSERT_TRUE_MESSAGE(w.rest, "the waiter does not say the radio rests");
+
+    w.rows = brows;
+    w.cap  = (uint8_t)KDRV_BLE_SCAN_MAX;
+    w.rest = false;
+    ble_scan_request_wait(&w, 6U, BLE_ASK_MS);
+    pump();
+    TEST_ASSERT_EQUAL_UINT32(6U, w.ack);
+    TEST_ASSERT_TRUE_MESSAGE(w.rest, "the waiter does not say the radio rests");
+
+    /* The rest over, Bluetooth off in Settings: denied as well, and not for a rest. */
+    lp_radio_awake();
+    (void)radio_service_set(KSET_KEY_BLE, false);
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, ble_scan_ask(ao_spy(), BLE_ASK_MS));
+    pump();
+    b = ble_take_spy();
+    TEST_ASSERT_EQUAL_UINT(1U, b.ends);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_DENIED, b.end->rc);
+    TEST_ASSERT_FALSE_MESSAGE(b.end->rest, "Bluetooth off was told as a rest");
+    ao_spy_drain();
+
+    w.rest = true;
+    ble_scan_request_wait(&w, 7U, BLE_ASK_MS);
+    pump();
+    TEST_ASSERT_EQUAL_UINT32(7U, w.ack);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, w.rc);
+    TEST_ASSERT_FALSE_MESSAGE(w.rest, "Bluetooth off was told as a rest");
+    khal_sem_delete(w.done);
+    ble_case_end();
+}
+
+/* sleep, the order to go OFF or an app's idle time: AO_LowPower takes the app's
+ * rest for the board's, and the radio answers that round with no parts. */
+TEST_CASE("a board round over an app's rest of the radio ends the refusal of scans",
+          "[radio_ao][lowpower][ask]")
+{
+    kdrv_wifi_ap_t rows[KDRV_WIFI_SCAN_MAX];
+    ScanWaiter     w;
+
+    radio_fresh();
+    go_up();
+    lp_radio_part_rests();
+
+    lp_radio_round(KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    lp_expect_no_more();
+    ao_spy_drain();
+
+    (void)memset(&w, 0, sizeof(w));
+    w.done = khal_sem_create();
+    w.rows = rows;
+    w.cap  = (uint8_t)KDRV_WIFI_SCAN_MAX;
+    wifi_scan_request_wait(&w, 8U);
+    pump();
+    TEST_ASSERT_FALSE_MESSAGE((8U == w.ack) && ((uint32_t)KODE_DENIED == w.rc),
+                              "refused for an app's rest the board has taken");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT32(8U, w.ack);
+    khal_sem_delete(w.done);
+    lp_radio_awake();
+    ao_spy_drain();
+}
+
 TEST_CASE("a round answered with no link leaves scans to a link that comes up awake",
           "[radio_ao][lowpower]")
 {

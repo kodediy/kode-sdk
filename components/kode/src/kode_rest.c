@@ -20,7 +20,7 @@ _Static_assert((uint32_t)KODE_REST_SOUND == KODE_SYS_REST_SOUND, "the parts are 
 _Static_assert((uint32_t)KODE_REST_CARD == KODE_SYS_REST_CARD, "the parts are the system's");
 _Static_assert((uint32_t)KODE_REST_RADIO == KODE_SYS_REST_RADIO, "the parts are the system's");
 _Static_assert((uint32_t)KODE_REST_CPU == KODE_SYS_REST_CPU, "the parts are the system's");
-_Static_assert(KODE_REST_BOUND_MS == KODE_LOWPOWER_PART_WAIT_MS, "the wait kode.h promises is the system's");
+_Static_assert(KODE_REST_BOUND_MS == KODE_LOWPOWER_PART_BOUND_MS, "the wait kode.h promises is the system's");
 
 /** @brief What one kode_rest() or kode_rest_end() is waiting for. */
 typedef struct {

@@ -368,10 +368,13 @@
 #define KODE_LOWPOWER_PART_ASKS        8U      /**< Owners the longest rest asks, one after the other: one a part,
                                                 *   and the CPU part asks a second for its wake time. */
 #define KODE_LOWPOWER_PART_WAIT_MS     ((KODE_LOWPOWER_PART_ASKS * KODE_LOWPOWER_PART_STEP_MS) \
-                                        + KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS) /**< Longest kode_rest() and
-                                                *   kode_rest_end() wait for their answer: busy owners asked again
-                                                *   for the whole window, then every owner of the longest rest
-                                                *   silent to the end of its step. */
+                                        + KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS) /**< Longest a rest's answer
+                                                *   takes: busy owners asked again for the whole window, then
+                                                *   every owner of the longest rest silent to the end of its step. */
+#define KODE_LOWPOWER_PART_BOUND_MS    (KODE_LOWPOWER_PART_WAIT_MS + KODE_LOWPOWER_PART_STEP_MS) /**< Longest
+                                                *   kode_rest(), kode_rest_end() and the verbs `rest` and
+                                                *   `rest_end` wait for that answer: one step over the worst case,
+                                                *   for the steps' timers rounded to ticks. */
 /* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
 #define KODE_LOWPOWER_PART_TIMERS      2U      /**< One-shots a rest's wake time may have out at once; a time
                                                 *   that would need another is refused. */
@@ -705,11 +708,14 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  * console is busy wait here, and go to it one at a time, in order. */
 #define KODE_CHAN_QUEUE_MAX     32U   /**< Lines the channel holds for the console, the one it is running
                                        *   included; a line past it is answered `>err code=4 msg=busy`.  */
-#define KODE_CHAN_LINE_BOUND_MS 30000U /**< The longest AO_Net waits for the console to answer a line before
+#define KODE_CHAN_LINE_BOUND_MS 45000U /**< The longest AO_Net waits for the console to answer a line before
                                        *   it gives the next one: one that never answers (a reset, `sleep`)
-                                       *   cannot hold the queue for ever. A verb that runs longer (`cp`, a
-                                       *   dual-band scan, `install`) is passed at the bound, and its late
-                                       *   end is ignored: it carries the sequence of a line no longer out. */
+                                       *   cannot hold the queue for ever. It holds `rest` and `rest_end`,
+                                       *   whose console deadline is KODE_LOWPOWER_PART_BOUND_MS and the
+                                       *   console's default on top (lowpower_verbs.c checks it). A verb that
+                                       *   runs longer (`cp`, a dual-band scan, `install`) is passed at the
+                                       *   bound, and its late end is ignored: it carries the sequence of a
+                                       *   line no longer out. */
 /* The screen upload's two event bounds: the token an order carries and the
  * id a 201 answers with. kaos.h holds the rest of the upload's limits. */
 #define KSHOT_TOKEN_MAX        128U   /**< Characters of an upload token.    */

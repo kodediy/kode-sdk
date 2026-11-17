@@ -4882,10 +4882,12 @@ typedef struct {
                          *   over;
                          *   KODE_NO_RESOURCES, the radio was busy with a
                          *   scan, a test row or an install: ask again;
-                         *   KODE_DENIED, a BLE scan with Bluetooth off in
-                         *   Settings.                                     */
+                         *   KODE_DENIED, an app rests the radio (@c rest),
+                         *   or a BLE scan with Bluetooth off in Settings.  */
     uint8_t seen;       /**< Networks or devices handed over, 255 at most.  */
     bool    more;       /**< true: entries were left out, the queue full.   */
+    bool    rest;       /**< true: KODE_DENIED because an app rests the
+                         *   radio; ask again once the rest ends.           */
 } ScanRspEvt;
 
 /**
@@ -4906,6 +4908,7 @@ typedef struct {
                          *   what the scan kept, in the driver's order.     */
     uint8_t    cap;     /**< Rows @c rows holds.                            */
     uint8_t    got;     /**< Rows written; 0 unless @c rc is KODE_OK.       */
+    bool       rest;    /**< As ScanRspEvt.rest.                            */
 } ScanWaiter;
 
 /**

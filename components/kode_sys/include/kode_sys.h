@@ -1606,9 +1606,9 @@ typedef WifiScanEntryEvt kode_sys_wifi_scan_entry_t;
  * @brief Answers kode_sys_wifi_scan() (WIFI_SCAN_RSP_SIG): @c rc, KODE_OK when the sweep
  *        ended, KODE_ERROR when it failed or the link went, KODE_NO_RESOURCES when the
  *        radio was busy (ask again), KODE_DENIED with the radio at rest for the app
- *        (ask again after kode_sys_rest_end()), KODE_CANCELLED when a newer Wi-Fi request
- *        took its place (do not ask again at once); @c seen, the networks the sweep handed
- *        over; @c more, entries left out.
+ *        (@c rest true; ask again after kode_sys_rest_end()), KODE_CANCELLED when a newer
+ *        Wi-Fi request took its place (do not ask again at once); @c seen, the networks the
+ *        sweep handed over; @c more, entries left out.
  */
 typedef ScanRspEvt kode_sys_wifi_scan_answer_t;
 
@@ -1717,10 +1717,10 @@ typedef BleScanEvt kode_sys_ble_scan_entry_t;
 /**
  * @brief Answers kode_sys_ble_scan() (BLE_SCAN_RSP_SIG): @c rc, KODE_OK when the listen
  *        ended, KODE_ERROR when it failed or the link went, KODE_NO_RESOURCES when the
- *        radio was busy (ask again), KODE_DENIED with the radio at rest for the app or
- *        Bluetooth off in Settings, KODE_CANCELLED when a newer Bluetooth request took its
- *        place (do not ask again at once); @c seen, the devices handed over; @c more,
- *        entries left out.
+ *        radio was busy (ask again), KODE_DENIED with the radio at rest for the app
+ *        (@c rest true) or Bluetooth off in Settings (@c rest false), KODE_CANCELLED when a
+ *        newer Bluetooth request took its place (do not ask again at once); @c seen, the
+ *        devices handed over; @c more, entries left out.
  */
 typedef ScanRspEvt kode_sys_ble_scan_answer_t;
 

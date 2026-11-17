@@ -1347,6 +1347,7 @@ static kode_status_t scan_ask(QActive *who, uint8_t kind, QSignal sig, uint32_t 
     a->rc   = (uint8_t)KODE_NO_RESOURCES;
     a->seen = 0U;
     a->more = false;
+    a->rest = false;
     e->ask  = who;
     e->rsp  = a;
     e->wait = NULL;
@@ -1364,8 +1365,9 @@ static kode_status_t scan_ask(QActive *who, uint8_t kind, QSignal sig, uint32_t 
  */
 static void scan_wait_refuse(ScanWaiter *wait, uint32_t gen, kode_status_t rc)
 {
-    wait->rc  = (uint8_t)rc;
-    wait->got = 0U;
+    wait->rc   = (uint8_t)rc;
+    wait->got  = 0U;
+    wait->rest = false;
     scan_ack_write(&wait->ack, gen);
     khal_sem_signal(wait->done);
 }
@@ -3087,9 +3089,10 @@ static uint8_t scan_rows_copy(uint8_t kind, ScanWaiter *w)
  * @param kind What the rows are.
  * @param rc   The answer.
  * @param copy Copy the rows the scan kept into the waiter first.
+ * @param rest As ScanWaiter.rest: refused because an app rests the radio.
  */
 static void scan_ask_wait_answer(ScanWaiter *w, uint32_t gen, uint8_t kind,
-                                 kode_status_t rc, bool copy)
+                                 kode_status_t rc, bool copy, bool rest)
 {
     uint8_t got = 0U;
 
@@ -3097,8 +3100,9 @@ static void scan_ask_wait_answer(ScanWaiter *w, uint32_t gen, uint8_t kind,
     {
         got = scan_rows_copy(kind, w);
     }
-    w->rc  = (uint8_t)rc;
-    w->got = got;
+    w->rc   = (uint8_t)rc;
+    w->got  = got;
+    w->rest = rest;
     scan_ack_write(&w->ack, gen);
     khal_sem_signal(w->done);
 }
@@ -3111,9 +3115,10 @@ static void scan_ask_wait_answer(ScanWaiter *w, uint32_t gen, uint8_t kind,
  * @param seen Networks or devices handed over.
  * @param rc   As ScanRspEvt.rc.
  * @param more Entries were left out.
+ * @param rest As ScanRspEvt.rest.
  */
 static void scan_ask_ao_answer(uint8_t kind, QActive *who, ScanRspEvt *rsp, uint16_t seen,
-                               kode_status_t rc, bool more)
+                               kode_status_t rc, bool more, bool rest)
 {
     rsp->seen = (uint8_t)SCAN_SEEN_MAX;
     if ( SCAN_SEEN_MAX > seen )
@@ -3122,26 +3127,29 @@ static void scan_ask_ao_answer(uint8_t kind, QActive *who, ScanRspEvt *rsp, uint
     }
     rsp->rc   = (uint8_t)rc;
     rsp->more = more;
+    rsp->rest = rest;
     kaos_ask_answer(scan_door(kind), who, &rsp->super, AO_Radio);
 }
 
 /**
  * @brief Refuse an asked scan at once, in its own shape.
- * @param e  The RADIO_SCAN_ASK_SIG.
- * @param rc KODE_NO_RESOURCES, the radio is busy, ask again; KODE_DENIED,
- *           an app rests the radio or Bluetooth is off in Settings.
+ * @param e    The RADIO_SCAN_ASK_SIG.
+ * @param rc   KODE_NO_RESOURCES, the radio is busy, ask again; KODE_DENIED,
+ *             an app rests the radio or Bluetooth is off in Settings.
+ * @param rest true for the app's rest: the answer says so, and the asker
+ *             need not guess which of the two it was.
  */
-static void scan_ask_refuse(QEvt const * const e, kode_status_t rc)
+static void scan_ask_refuse(QEvt const * const e, kode_status_t rc, bool rest)
 {
     ScanAskEvt const * const a = Q_EVT_CAST(ScanAskEvt);
 
     if ( NULL != a->wait )
     {
-        scan_ask_wait_answer(a->wait, a->gen, a->kind, rc, false);
+        scan_ask_wait_answer(a->wait, a->gen, a->kind, rc, false, rest);
     }
     else
     {
-        scan_ask_ao_answer(a->kind, a->ask, a->rsp, 0U, rc, false);
+        scan_ask_ao_answer(a->kind, a->ask, a->rsp, 0U, rc, false, rest);
     }
 }
 
@@ -3165,7 +3173,7 @@ static bool scan_ask_refuse_off(Radio const * const me, QEvt const * const e)
     if ( ((uint8_t)KQP_SCAN_BLE == a->kind) && !me->ble_want )
     {
         KLOG_N(TAG, "Bluetooth is off in Settings; a BLE scan is refused");
-        scan_ask_refuse(e, KODE_DENIED);
+        scan_ask_refuse(e, KODE_DENIED, false);
         off = true;
     }
     return off;
@@ -3251,7 +3259,7 @@ static bool scan_ask_take(Radio * const me, QEvt const * const e)
         /* KODE_DENIED, which stays true until the app ends its rest: asking
          * again before that is refused once more. */
         KLOG_N(TAG, "an app rests the radio; a %s is refused", scan_ask_name(a->kind));
-        scan_ask_refuse(e, KODE_DENIED);
+        scan_ask_refuse(e, KODE_DENIED, true);
         return false;
     }
     if ( scan_ask_refuse_off(me, e) )
@@ -3262,14 +3270,14 @@ static bool scan_ask_take(Radio * const me, QEvt const * const e)
     {
         KLOG_N(TAG, "the radio is busy with a round, a test or an install; "
                     "a %s is refused", scan_ask_name(a->kind));
-        scan_ask_refuse(e, KODE_NO_RESOURCES);
+        scan_ask_refuse(e, KODE_NO_RESOURCES, false);
         return false;
     }
     if ( scan_alive(me, scan_other(a->kind)) )
     {
         /* A request ends the scan of its own radio and no other. */
         KLOG_N(TAG, "the other radio scans; a %s is refused", scan_ask_name(a->kind));
-        scan_ask_refuse(e, KODE_NO_RESOURCES);
+        scan_ask_refuse(e, KODE_NO_RESOURCES, false);
         return false;
     }
     radio_scan_replace(me, a->kind, false);
@@ -3308,12 +3316,12 @@ static void scan_ask_end(Radio * const me, kode_status_t rc)
     me->ask_scan = (uint8_t)SCAN_ASK_NONE;
     if ( NULL != me->ask_wait )
     {
-        scan_ask_wait_answer(me->ask_wait, me->ask_gen, me->ask_kind, rc, KODE_OK == rc);
+        scan_ask_wait_answer(me->ask_wait, me->ask_gen, me->ask_kind, rc, KODE_OK == rc, false);
     }
     else
     {
         scan_ask_ao_answer(me->ask_kind, me->ask_who, me->ask_rsp, me->ask_seen, rc,
-                           me->ask_cut);
+                           me->ask_cut, false);
     }
     me->ask_who  = NULL;
     me->ask_rsp  = NULL;
@@ -10620,6 +10628,9 @@ static void radio_lp_round(Radio * const me, const LowPowerRoundEvt * const r)
     if ( 0U == r->parts )
     {
         me->lp_rest  = true;     /* AWAKE says when it was abandoned */
+        /* The board has taken the app's rest for its own (part_take()): no app
+         * holds the radio from here, so no scan is refused in its name. */
+        me->lp_part  = false;
     }
     else
     {
@@ -11278,7 +11289,7 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             if ( !scan_ask_refuse_off(me, e) )
             {
                 KLOG_N(TAG, "the link is going down; a scan is refused");
-                scan_ask_refuse(e, KODE_NO_RESOURCES);
+                scan_ask_refuse(e, KODE_NO_RESOURCES, false);
             }
             status = Q_HANDLED();
             break;
@@ -14325,7 +14336,7 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
             if ( !scan_ask_refuse_off(me, e) )
             {
                 radio_say_busy("a scan", RADIO_BUSY_NO);
-                scan_ask_refuse(e, KODE_NO_RESOURCES);
+                scan_ask_refuse(e, KODE_NO_RESOURCES, false);
             }
             status = Q_HANDLED();
             break;
@@ -14982,7 +14993,7 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
             if ( !scan_ask_refuse_off(me, e) )
             {
                 radio_say_busy("a scan", RADIO_BUSY_NO);
-                scan_ask_refuse(e, KODE_NO_RESOURCES);
+                scan_ask_refuse(e, KODE_NO_RESOURCES, false);
             }
             status = Q_HANDLED();
             break;

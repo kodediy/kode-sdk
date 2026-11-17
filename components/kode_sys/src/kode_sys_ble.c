@@ -606,8 +606,12 @@ static void ble_scan_offer(kode_sys_ble_device_cb cb, void *ctx)
 }
 
 kode_status_t kode_block_ble_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t ms,
-                                  uint32_t wait_ms)
+                                  uint32_t wait_ms, bool *rest)
 {
+    if ( NULL != rest )
+    {
+        *rest = false;
+    }
     if ( NULL == cb )
     {
         return KODE_ERROR;
@@ -629,6 +633,14 @@ kode_status_t kode_block_ble_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t
     if ( KODE_OK == rc )
     {
         ble_scan_offer(cb, ctx);
+    }
+    else if ( (KODE_DENIED == rc) && (NULL != rest) )
+    {
+        *rest = s_ble_scan.wait.rest;
+    }
+    else
+    {
+        /* Nothing more to hand over. */
     }
     kode_sys_scan_release(&s_ble_scan);
     return rc;
@@ -660,9 +672,13 @@ kode_status_t kode_sys_ble_scan(QActive *me, uint32_t ms)
 }
 
 kode_status_t kode_block_ble_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t ms,
-                                  uint32_t wait_ms)
+                                  uint32_t wait_ms, bool *rest)
 {
     (void)cb; (void)ctx; (void)ms; (void)wait_ms;
+    if ( NULL != rest )
+    {
+        *rest = false;
+    }
     return KODE_DENIED;
 }
 

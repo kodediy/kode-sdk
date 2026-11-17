@@ -256,7 +256,8 @@ typedef struct {
                                    *   not stay at rest among them.             */
     uint8_t     part_cpu_stage;   /**< Owners of the CPU part asked so far.     */
     uint8_t     part_late;        /**< The part whose owner ran out of time: an answer that comes
-                                   *   late still counts. 0 for none.           */
+                                   *   late still counts, whatever was asked since. 0 for none:
+                                   *   cleared once that answer comes, or the board takes the rest. */
     uint8_t     part_late_who;    /**< The participant that owes that answer.   */
     bool        part_pin_free;    /**< The header's position was free, not an input, before it was armed. */
     khal_gpio_pull_t part_pin_pulled; /**< The pull that input had: it gets it back. */
@@ -3230,8 +3231,10 @@ static void part_step_done(LowPower * const me)
  * @brief LOWPOWER_READY_SIG outside a step: the answer of one that ran out of time.
  *
  * An owner that did put its part away after its time has it away all the
- * same, and the end of the rest must bring it back: the part is held from
- * here. A busy answer changes nothing.
+ * same. While the app still has its rest, the part is held from here and the
+ * end of the rest brings it back. When the app has ended its rest since, the
+ * owner is told to come back at once: nothing else would ever tell it. A busy
+ * answer changes nothing.
  *
  * @param me The AO, AWAKE.
  * @param a  The answer.
@@ -3244,7 +3247,17 @@ static bool part_late_ready(LowPower * const me, const LowPowerReadyEvt *a)
 
     if ( mine )
     {
-        if ( (!a->busy) && lowpower_part_stays(me->part_late) )
+        if ( a->busy || !lowpower_part_stays(me->part_late) )
+        {
+            /* Nothing to hold, nothing to bring back. */
+        }
+        else if ( me->part_up )
+        {
+            KLOG_N(TAG, "rest: the %s rested after its time and after the end; it comes back",
+                   lowpower_part_name(me->part_late));
+            part_awake_post(me, a->who);
+        }
+        else
         {
             me->part_rest |= me->part_late;
             KLOG_N(TAG, "rest: the %s rested after its time; parts 0x%02x stay at rest",
@@ -3399,11 +3412,23 @@ static void part_glass_answer(LowPower * const me, const DisplaySleepEvt *s)
     }
     else if ( (KODE_LP_PART_SCREEN == me->part_late) && ((uint8_t)KODE_OK == s->rc) && s->asleep )
     {
-        me->part_late  = 0U;
-        me->part_rest |= KODE_LP_PART_SCREEN;
-        KLOG_N(TAG, "rest: the screen rested after its time; parts 0x%02x stay at rest",
-               (unsigned)me->part_rest);
-        part_word_set(me);
+        me->part_late = 0U;
+        if ( me->part_up )
+        {
+            /* The rest ended before the glass slept: it wakes, as the end would have woken it. */
+            KLOG_N(TAG, "rest: the screen rested after its time and after the end; it wakes");
+            if ( !part_glass_post(me, me->part_late_who, false) )
+            {
+                KLOG_E(TAG, "rest: out of events; the screen stays asleep");
+            }
+        }
+        else
+        {
+            me->part_rest |= KODE_LP_PART_SCREEN;
+            KLOG_N(TAG, "rest: the screen rested after its time; parts 0x%02x stay at rest",
+                   (unsigned)me->part_rest);
+            part_word_set(me);
+        }
     }
     else
     {
@@ -3475,7 +3500,6 @@ static void part_request(LowPower * const me, const LowPowerPartReqEvt *r)
         me->part_src  = r->src;
         me->part_up   = true;
         me->part_us   = khal_time_us();
-        me->part_late = 0U;
         part_advance(me);
     }
     else
@@ -3517,7 +3541,6 @@ static void part_request(LowPower * const me, const LowPowerPartReqEvt *r)
             me->part_us   = khal_time_us();
             me->part_want = parts;
             me->part_done = 0U;
-            me->part_late = 0U;
             if ( (parts & KODE_LP_PART_CPU) != 0U )
             {
                 part_wakes_off(me);

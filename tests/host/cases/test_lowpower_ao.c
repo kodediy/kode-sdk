@@ -4894,6 +4894,81 @@ TEST_CASE("an owner that answers after its time has its part held all the same",
     lp_down();
 }
 
+/* The radio's round waited behind a stop to a silent C5: kode_rest() gave up
+ * on it, the app ended its rest, and the ready came after. Nothing holds the
+ * radio for the app any more, so its owner is told to come back. */
+TEST_CASE("a part that rests after its time, the rest ended since, is told to come back",
+          "[lowpower_ao]")
+{
+    const LowPowerPartEvt *n;
+    uint32_t round;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_RADIO | KODE_LP_PART_SOUND);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    round = expect_part_round(KODE_LP_PART_RADIO);
+    wait_ms(KODE_LOWPOWER_PART_STEP_MS + STEP_SLACK_MS);
+    n = expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+    TEST_ASSERT_EQUAL_STRING("radio: no answer", n->why);
+
+    rest_end();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);   /* nothing was held to bring back */
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    say_ready(PART_WHO_RADIO, round, false, NULL);
+    expect_awake_posted();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "more than the one AWAKE");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, parts_read(), "a part held for a rest that is over");
+    lp_down();
+}
+
+/* The same for the glass: asleep after its time and after the end, it is woken. */
+TEST_CASE("a screen that sleeps after its time, the rest ended since, is woken", "[lowpower_ao]")
+{
+    rest_up();
+    rest_ask(KODE_LP_PART_SCREEN);
+    expect_glass_asked(true);
+    wait_ms(KODE_LOWPOWER_PART_STEP_MS + STEP_SLACK_MS);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+
+    rest_end();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+
+    glass_says(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    expect_glass_asked(false);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_HEX8(0U, parts_read());
+
+    glass_says(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);   /* its answer: nothing waits for it */
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    lp_down();
+}
+
+/* A new rest is no end: the late part is held, and that rest's end brings it back. */
+TEST_CASE("a part that rests after its time while the next rest is asked is held for that rest's end",
+          "[lowpower_ao]")
+{
+    uint32_t round;
+
+    rest_up();
+    rest_ask(KODE_LP_PART_TOUCH);
+    round = expect_part_round(KODE_LP_PART_TOUCH);
+    wait_ms(KODE_LOWPOWER_PART_STEP_MS + STEP_SLACK_MS);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_DENIED, 0U);
+
+    rest_ask(KODE_LP_PART_SOUND);
+    say_ready(PART_WHO_AUDIO, expect_part_round(KODE_LP_PART_SOUND), false, NULL);
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+
+    say_ready(PART_WHO_TOUCH, round, false, NULL);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(KODE_LP_PART_TOUCH, parts_read(), "the late part was dropped");
+
+    rest_end();
+    expect_awake_posted();
+    (void)expect_news(KODE_LP_PART_ANSWER, KODE_OK, 0U);
+    lp_down();
+}
+
 /* The app's own door (kode_sys_screen_sleep()) answers on the same signal. */
 TEST_CASE("an answer to the app's own display request is not this rest's", "[lowpower_ao]")
 {
@@ -5088,7 +5163,7 @@ TEST_CASE("kode_rest that nobody answers is false after its bound, and says how 
 
     TEST_ASSERT_FALSE(kode_rest(KODE_REST_SOUND, NULL));
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_REST_BOUND_MS, kode_sys_time_ms());
-    TEST_ASSERT_EQUAL_STRING("the rest did not begin in 34000 ms", kode_error());
+    TEST_ASSERT_EQUAL_STRING("the rest did not begin in 37000 ms", kode_error());
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, queued(AO_LowPower, LOWPOWER_PART_REQ_SIG),
                                    "the request was posted more than once");
     task_rest_down();

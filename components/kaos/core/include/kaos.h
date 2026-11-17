@@ -2235,7 +2235,7 @@ kode_status_t wifi_scan_ask(QActive *who);
  * @brief Scan for a blocked task; kode_block_wifi_scan()'s request.
  *
  * As wifi_scan_ask(), answered in @p wait instead: the rows the sweep kept
- * copied into @c wait->rows, @c rc and @c got set, @p gen stamped into
+ * copied into @c wait->rows, @c rc, @c got and @c rest set, @p gen stamped into
  * @c wait->ack, then @c wait->done signalled. With the pool dry or AO_Radio's
  * queue within KQP_RADIO_CMD_MARGIN it is answered the same way at once,
  * KODE_NO_RESOURCES. @p wait must outlive the answer.
@@ -2505,7 +2505,7 @@ kode_status_t ble_scan_ask(QActive *who, uint32_t ms);
  * @brief Listen for a blocked task; kode_block_ble_scan()'s request.
  *
  * As ble_scan_ask(), answered in @p wait: devices (kdrv_ble_dev_t) in @c wait->rows,
- * @c rc and @c got set, @p gen in @c wait->ack, then @c wait->done. A dry pool or
+ * @c rc, @c got and @c rest set, @p gen in @c wait->ack, then @c wait->done. A dry pool or
  * full queue answers at once KODE_NO_RESOURCES; @p ms out of range, KODE_DENIED.
  * @p wait must outlive the answer.
  *

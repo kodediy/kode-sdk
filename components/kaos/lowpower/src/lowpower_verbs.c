@@ -86,9 +86,11 @@ static void h_power_off(const kverb_t *c, const karg_val_t *v)
     lowpower_ask(c, KODE_LP_OFF);
 }
 
-/** @brief The deadline of `rest` and `rest_end`: every part's step, one after
- *         the other, and the default deadline as the margin on top. */
-#define LP_V_PART_TIMEOUT_MS  (KODE_LOWPOWER_PART_WAIT_MS + (uint32_t)CONSOLE_CMD_TIMEOUT_MS_N)
+/** @brief The deadline of `rest` and `rest_end`: the bound kode_rest() waits,
+ *         and the default deadline as the margin on top. */
+#define LP_V_PART_TIMEOUT_MS  (KODE_LOWPOWER_PART_BOUND_MS + (uint32_t)CONSOLE_CMD_TIMEOUT_MS_N)
+_Static_assert(LP_V_PART_TIMEOUT_MS < KODE_CHAN_LINE_BOUND_MS,
+               "the Kode channel passes a line at its bound: rest must end before it");
 
 /* Where `rest`'s keys land in the parsed values. */
 #define LP_REST_ARG_PARTS  0U   /**< `parts`: the mask of KODE_LP_PART_*.            */
