@@ -535,7 +535,17 @@ enum KodeSignals {
                                  *   newer request's @c gen). The entries
                                  *   before it are that sweep's; one
                                  *   WIFI_SCAN_END_SIG closes the listing, the
-                                 *   newest sweep's. Last of the published
+                                 *   newest sweep's.                         */
+    POWER_CRITICAL_SIG,         /**< AO_Power: the cell is critical on battery,
+                                 *   or no longer (PowerCriticalEvt). Said once
+                                 *   per fall: at KODE_POWER_CRITICAL_PCT or
+                                 *   under, or at the first reading under the
+                                 *   cut, whichever comes first, so it always
+                                 *   comes before the readings that end in ship
+                                 *   mode. Over when a cable comes or the level
+                                 *   climbs KODE_POWER_CRITICAL_REARM_PCT above
+                                 *   the mark. kscreen shows its notice for it
+                                 *   (kscreen_critical()). Last of the published
                                  *   signals, so the ones before it keep their
                                  *   numbers.                                */
     /* Published signals end here: QF sizes subscriber lists by it; a publish above asserts. */
@@ -3362,6 +3372,19 @@ typedef struct {
     uint8_t  ntc;          /**< NTC_FAULT, live: 0 normal, 2 warm, 3 cool, 5 cold, 6 hot.
                             *   Not 0, charging is held (AO_Power's charge guard). */
 } PowerEvt;
+
+/**
+ * @brief The cell is critical on battery, or no longer (POWER_CRITICAL_SIG).
+ *
+ * One of two static events: it cannot fail to allocate, and the reading that
+ * decided it is the POWER_EVT_SIG published just before it.
+ */
+typedef struct {
+    QEvt super;
+    bool critical;   /**< true: plug in a cable before the board switches
+                      *   itself off; false: a cable came, or the cell
+                      *   climbed back.                                   */
+} PowerCriticalEvt;
 
 /* What a field request asks of a chip. Three verbs, shared by every chip
  * driver that carries a field table - the PMIC, the gauge, the expander - so

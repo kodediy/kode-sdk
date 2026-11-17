@@ -717,6 +717,7 @@ static QState KodeStandard_running(KodeStandard * const me, QEvt const * const e
         case DISPLAY_STATE_SIG:
         case DISPLAY_REPAINT_SIG:
         case DISPLAY_PARK_SIG:
+        case POWER_CRITICAL_SIG:
         case KODE_SCREEN_TICK_SIG:
         case KODE_SCREEN_REQ_SIG: {
             status = screen_forward(me, e);

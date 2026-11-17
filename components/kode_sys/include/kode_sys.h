@@ -2367,6 +2367,19 @@ typedef struct {
  */
 kode_status_t kode_sys_battery_read(kode_sys_battery_t *out);
 
+/* cppcheck-suppress misra-c2012-2.3 ; an announcement's name for the apps that read it, never used inside the SDK */
+/**
+ * @brief Says the cell is critical on battery, or no longer
+ *        (POWER_CRITICAL_SIG, published): @c critical.
+ *
+ * Once per fall, at KODE_POWER_CRITICAL_PCT or under, and always before the
+ * readings that switch the board off; over when a cable comes or the level
+ * climbs back. AO_Power always runs, so subscribing is all it takes. A
+ * kscreen app shows kscreen's notice by handing the event to
+ * kscreen_critical(), or its own by handling it itself.
+ */
+typedef PowerCriticalEvt kode_sys_battery_critical_t;
+
 /* ---- The expansion header J3: positions 1..14 in the connector's order ----
  * The first call below claims J3 for the app. None switches the module's
  * supply: that is kode_sys_exp_power(), a command.

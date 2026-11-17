@@ -2587,7 +2587,9 @@ bool kode_touch_read(int16_t *x, int16_t *y);
  * screen is behind it waits up to KODE_SCREEN_BUSY_MS, after any screen calls
  * of other tasks ahead of it, so a wait can be longer. The calls live in the
  * kode_screen component: an app that draws adds it to its REQUIRES, and one
- * that does not links no LVGL. Not available in the kodeOS image. */
+ * that does not links no LVGL. Not available in the kodeOS image.
+ * When the cell is critical on battery, before the board switches itself off,
+ * a notice covers the screen until a tap closes it or a cable comes. */
 
 #define KODE_WIDGETS_MAX      32U    /**< Widgets on one screen.                              */
 #define KODE_WIDGET_TEXT_MAX  128U   /**< Bytes of a title or a widget's text, NUL included.  */

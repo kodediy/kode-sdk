@@ -59,6 +59,8 @@ typedef struct {
                              *   kscreen's own.                           */
     uint32_t      frame_drawn; /**< Draws of one LVGL drew instead.
                              *   kscreen's own.                           */
+    lv_obj_t     *critical; /**< The critical battery notice while it is
+                             *   up, else NULL. kscreen's own.            */
 } kscreen_t;
 
 /**
@@ -77,10 +79,11 @@ void kscreen_ctor(kscreen_t *s, QActive *owner, enum_t tick_sig);
  * @brief Subscribe the owner to the panel and the touch feed, then ask for
  *        the panel's announcement.
  *
- * Subscribes to DISPLAY_STATE_SIG, DISPLAY_REPAINT_SIG, DISPLAY_PARK_SIG and
- * TOUCH_EVT_SIG, in that order, before display_state_request(): the answer can
- * come the instant the request is posted. The owner hands each to its call:
- * kscreen_open(), kscreen_repaint(), kscreen_park() and kscreen_touch(). Call from the owner's initial transition, which runs
+ * Subscribes to DISPLAY_STATE_SIG, DISPLAY_REPAINT_SIG, DISPLAY_PARK_SIG,
+ * POWER_CRITICAL_SIG and TOUCH_EVT_SIG, in that order, before
+ * display_state_request(): the answer can come the instant the request is
+ * posted. The owner hands each to its call: kscreen_open(), kscreen_repaint(),
+ * kscreen_park(), kscreen_critical() and kscreen_touch(). Call from the owner's initial transition, which runs
  * after kode_init() has returned - the condition the request needs.
  *
  * @param s The renderer.
@@ -160,6 +163,27 @@ void kscreen_repaint(kscreen_t *s);
  * @param seq The DisplayParkEvt's @c seq.
  */
 void kscreen_park(kscreen_t *s, uint32_t seq);
+
+/**
+ * @brief Answer POWER_CRITICAL_SIG: put the critical battery notice over the
+ *        app's screen, or take it down.
+ *
+ * AO_Power says the cell is critical on battery once per fall, before the
+ * readings that switch the board off. The notice is a card on LVGL's top
+ * layer, over whatever the app draws: "Battery", "Critical", "Plug in the
+ * cable before it switches off." A tap anywhere on it closes it and reaches
+ * nothing under it. It also comes down by itself when the event says the cell
+ * is no longer critical: a cable came, or the level climbed back. Before
+ * kscreen_open() has succeeded nothing is shown.
+ *
+ * This is the default notice, and handing the event here is what shows it.
+ * An app with a notice of its own handles POWER_CRITICAL_SIG itself and never
+ * calls this: that is the default turned off.
+ *
+ * @param s The renderer.
+ * @param e The PowerCriticalEvt.
+ */
+void kscreen_critical(kscreen_t *s, PowerCriticalEvt const *e);
 
 /**
  * @brief Turn the glass: 0, 90, 180 or 270 degrees, now or at any later time.

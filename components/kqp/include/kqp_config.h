@@ -1693,6 +1693,18 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
                                          *   same pace asleep. */
 #define KODE_POWER_FIRST_MS     1500U
 
+/**
+ * @brief The critical mark: at this level or under, on battery, AO_Power says
+ *        POWER_CRITICAL_SIG.
+ *
+ * kodeOS's own critical card uses the same figure. On the cell's curve 10 % is
+ * about 3.59 V, well above the 3.3 V cut (KBSP_CELL_CUT_MV), so a person has
+ * time to read the notice and plug a cable in.
+ */
+#define KODE_POWER_CRITICAL_PCT       10U
+/** @brief How far above the critical mark the level climbs before it is over. */
+#define KODE_POWER_CRITICAL_REARM_PCT 3U
+
 /* ---- The gauge row (`test component=gauge`) ---------------------------------
  * A CW2217 in shutdown (the cell just connected) takes about 1.5 s from
  * AO_Power's wake to report ready (0xA7). A row asked sooner waits for it,

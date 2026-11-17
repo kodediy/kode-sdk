@@ -86,6 +86,8 @@ static char              s_op_text[OP_KINDS][OP_TEXT_MAX];
 static atomic_bool       s_prepare_ok = true;   /**< prepare() has memory to give.     */
 static _Atomic uint32_t  s_park_n;              /**< DISPLAY_PARK_SIG the fake was handed. */
 static _Atomic uint32_t  s_park_seq;            /**< The number the last park carried.   */
+static _Atomic uint32_t  s_crit_n;              /**< POWER_CRITICAL_SIG the fake was handed. */
+static atomic_bool       s_crit;                /**< What the last one said.             */
 
 /** @brief The fake's prepare: the screen's memory, or none. */
 static bool fake_prepare(void)
@@ -191,6 +193,13 @@ static bool fake_event(QEvt const *e)
     {
         atomic_store(&s_park_seq, ((const DisplayParkEvt *)(const void *)e)->seq);
         (void)atomic_fetch_add(&s_park_n, 1U);
+        (void)xSemaphoreGive(s_seen);
+        handled = true;
+    }
+    else if ( (QSignal)POWER_CRITICAL_SIG == e->sig )
+    {
+        atomic_store(&s_crit, ((const PowerCriticalEvt *)(const void *)e)->critical);
+        (void)atomic_fetch_add(&s_crit_n, 1U);
         (void)xSemaphoreGive(s_seen);
         handled = true;
     }
@@ -2528,4 +2537,29 @@ TEST_CASE("the display's call to stop drawing reaches the screen", "[kode_screen
     TEST_ASSERT_EQUAL_UINT32(before + 1U, atomic_load(&s_park_n));
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(TEST_PARK_SEQ, atomic_load(&s_park_seq),
                                      "the park's number did not reach the screen");
+}
+
+/* ---- The critical cell, over the app's screen ------------------------------- */
+
+TEST_CASE("the critical cell and its end reach the screen", "[kode_screen]")
+{
+    static const PowerCriticalEvt low  = { QEVT_INITIALIZER(POWER_CRITICAL_SIG), true };
+    static const PowerCriticalEvt over = { QEVT_INITIALIZER(POWER_CRITICAL_SIG), false };
+
+    screen_case();
+    TEST_ASSERT_TRUE(kode_screen_new("Critical"));
+    TEST_ASSERT_TRUE(seen_wait(1U));
+
+    const uint32_t before = atomic_load(&s_crit_n);
+
+    /* Posted, not published, so no other subscriber in this binary hears it. */
+    QACTIVE_POST(AO_KodeStandard, &low.super, NULL);
+    TEST_ASSERT_TRUE(seen_wait(1U));
+    TEST_ASSERT_EQUAL_UINT32(before + 1U, atomic_load(&s_crit_n));
+    TEST_ASSERT_TRUE_MESSAGE(atomic_load(&s_crit), "the screen was not told the cell is critical");
+
+    QACTIVE_POST(AO_KodeStandard, &over.super, NULL);
+    TEST_ASSERT_TRUE(seen_wait(1U));
+    TEST_ASSERT_EQUAL_UINT32(before + 2U, atomic_load(&s_crit_n));
+    TEST_ASSERT_FALSE_MESSAGE(atomic_load(&s_crit), "the screen was not told it is over");
 }

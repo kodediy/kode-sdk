@@ -82,6 +82,8 @@ typedef struct {
     QActive  super;
     QTimeEvt poll_tmo;     /**< Power_polling's one-shot: the next reading.  */
     uint8_t  low_reads;    /**< Readings in a row under POWER_CUT_MV.       */
+    bool     critical;     /**< POWER_CRITICAL_SIG last said the cell is
+                            *   critical.                                  */
     bool     pmic;         /**< The BQ25896 answered and took the policy.   */
     bool     gauge;        /**< The CW2217 answered at startup.            */
     bool     gauge_ready;  /**< Its algorithm has reported ready since.    */
@@ -320,6 +322,7 @@ void Power_ctor(void)
     me->ship_counting = false;
     me->vbus_known    = false;
     me->low_reads     = 0U;
+    me->critical      = false;
     me->vbus_last     = false;
     me->bt_who        = NULL;
     me->bt_status     = (uint8_t)KODE_OK;
@@ -818,6 +821,53 @@ static void led_write_step(Power * const me, bool writing)
     }
 }
 
+/**
+ * @brief Say POWER_CRITICAL_SIG when the cell falls to the critical mark on
+ *        battery, and say again when that is over.
+ *
+ * Once per fall, at KODE_POWER_CRITICAL_PCT or under, or at the first reading
+ * the cut counts, whichever comes first. The level is slewed and the cut reads
+ * the cell itself, so a cell that sags can reach the cut with the level above
+ * the mark: counting the cut's readings is what keeps the warning ahead of
+ * ship mode. Over when a cable comes, or when the level is
+ * KODE_POWER_CRITICAL_REARM_PCT above the mark and the cut counts nothing.
+ * Two static events, so a busy pool never loses one.
+ *
+ * @param me  The AO; low_reads already counts this reading.
+ * @param r   The reading.
+ * @param soc Its level.
+ */
+static void power_critical_watch(Power * const me, const reading_t *r, uint8_t soc)
+{
+    static const PowerCriticalEvt low  = { QEVT_INITIALIZER(POWER_CRITICAL_SIG), true };
+    static const PowerCriticalEvt over = { QEVT_INITIALIZER(POWER_CRITICAL_SIG), false };
+
+    if ( !me->critical )
+    {
+        if ( (!r->vbus) && ((uint16_t)GAUGE_MIN_MV < r->vbat_mv)
+            && (((uint8_t)KODE_POWER_CRITICAL_PCT >= soc) || (0U < me->low_reads)) )
+        {
+            me->critical = true;
+            KLOG_W(TAG, "the cell is critical on battery (%u %%, %u mV): a cable, or the "
+                        "board switches itself off", (unsigned)soc, (unsigned)r->vbat_mv);
+            QACTIVE_PUBLISH(&low.super, &me->super);
+        }
+    }
+    else if ( r->vbus
+             || (((uint8_t)(KODE_POWER_CRITICAL_PCT + KODE_POWER_CRITICAL_REARM_PCT) <= soc)
+                 && (0U == me->low_reads)) )
+    {
+        me->critical = false;
+        KLOG_I(TAG, "the cell is no longer critical (%u %%, %u mV)",
+               (unsigned)soc, (unsigned)r->vbat_mv);
+        QACTIVE_PUBLISH(&over.super, &me->super);
+    }
+    else
+    {
+        /* still critical, and said already */
+    }
+}
+
 /** @brief One complete reading, published; false when the PMIC did not answer. */
 static bool power_read(Power * const me, reading_t *r, uint8_t *soc)
 {
@@ -844,6 +894,7 @@ static bool power_read(Power * const me, reading_t *r, uint8_t *soc)
     me->vbat_mv = r->vbat_mv;
     *soc = soc_estimate(me, r->vbat_mv, r->current_ma, r->chrg);
     power_publish(me, r, *soc);
+    power_critical_watch(me, r, *soc);
     return true;
 }
 

@@ -83,6 +83,15 @@ _Static_assert((KSCREEN_BUF_BYTES - KSCREEN_BUF_ROW_BYTES) < ((size_t)KBSP_LCD_H
  */
 #define KSCREEN_FLUSH_TIMEOUT_MS 500U
 
+/* The critical battery notice, worded as kodeOS's own critical card. Every
+ * line was measured against the kit's faces to fit its place on one line. */
+#define KSCREEN_CRIT_TITLE      "Battery"                 /**< The card's title.                  */
+#define KSCREEN_CRIT_SUB        "Critical"                /**< Under it, in the danger colour.    */
+#define KSCREEN_CRIT_LINE1      "Plug in the cable"       /**< What it asks for...                */
+#define KSCREEN_CRIT_LINE2      "before it switches off." /**< ...and why.                        */
+#define KSCREEN_CRIT_NOTE       "Tap to close."           /**< How it goes without a cable.       */
+#define KSCREEN_CRIT_SHIELD_PCT 100                       /**< The shield covers the whole notice. */
+
 #if defined(CONFIG_KODE_COMPOSE)
 /** @brief The renderer kscreen_open() bound to a display: one per image. */
 static kscreen_t *l_opened = NULL;
@@ -386,6 +395,7 @@ void kscreen_ctor(kscreen_t *s, QActive *owner, enum_t tick_sig)
     s->parked  = false;
     s->frame_copied = 0U;
     s->frame_drawn  = 0U;
+    s->critical     = NULL;
 }
 
 void kscreen_start(kscreen_t *s)
@@ -393,6 +403,7 @@ void kscreen_start(kscreen_t *s)
     QActive_subscribe(s->owner, DISPLAY_STATE_SIG);
     QActive_subscribe(s->owner, DISPLAY_REPAINT_SIG);
     QActive_subscribe(s->owner, DISPLAY_PARK_SIG);
+    QActive_subscribe(s->owner, POWER_CRITICAL_SIG);
     touch_subscribe(s->owner);
 #if CONFIG_KODE_TEST_DOT
     QActive_subscribe(s->owner, TEST_DOT_SCREEN_REQ_SIG);
@@ -633,6 +644,126 @@ void kscreen_park(kscreen_t *s, uint32_t seq)
              * starts the pass again. */
             KLOG_E(TAG, "could not tell the display the screen stopped drawing");
         }
+    }
+}
+
+/**
+ * @brief A tap on the critical notice: close it, and let the tap reach
+ *        nothing else.
+ *
+ * Deleted later rather than here, inside its own event.
+ *
+ * @param e The event; its user data is the renderer.
+ */
+static void critical_tap_cb(lv_event_t *e)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; the user data is the kscreen_t critical_show() passed */
+    kscreen_t * const s = (kscreen_t *)lv_event_get_user_data(e);
+
+    if ( NULL != s->critical )
+    {
+        lv_obj_delete_async(s->critical);
+        s->critical = NULL;
+        KLOG_I(TAG, "critical battery: notice closed by a tap");
+    }
+}
+
+/**
+ * @brief Show one named child of the notice's card with @p text.
+ * @param card The card.
+ * @param name The child's name, a label of kui_sheet_create().
+ * @param text What it says.
+ * @return The label, or NULL when the card has no such child.
+ */
+static lv_obj_t *critical_line(const lv_obj_t *card, const char *name, const char *text)
+{
+    lv_obj_t * const l = lv_obj_find_by_name(card, name);
+
+    if ( NULL != l )
+    {
+        lv_label_set_text_static(l, text);
+        lv_obj_set_hidden(l, false);
+    }
+    return l;
+}
+
+/**
+ * @brief Build the critical notice on the top layer: the kit's sheet, said
+ *        as kodeOS's own critical card says it, under a shield that takes
+ *        every touch.
+ * @param s The renderer; open, and no notice up.
+ */
+static void critical_show(kscreen_t *s)
+{
+    lv_obj_t * const root = kui_sheet_create(lv_layer_top());
+    const lv_obj_t * const card = lv_obj_find_by_name(root, "card");
+
+    if ( NULL != card )
+    {
+        lv_obj_t * const handle = lv_obj_find_by_name(card, "handle");
+        lv_obj_t * const img    = lv_obj_find_by_name(card, "hdr_img");
+        lv_obj_t * const sub    = critical_line(card, "hdr_sub", KSCREEN_CRIT_SUB);
+
+        /* Nothing on the card drags or answers: the shield over it does. */
+        if ( NULL != handle )
+        {
+            lv_obj_set_hidden(handle, true);
+        }
+        if ( NULL != img )
+        {
+            lv_image_set_src(img, &kui_glyph_power_40);
+            lv_obj_set_style_image_recolor(img, KUI_COLOR_DANGER, 0);
+            lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
+            lv_obj_set_hidden(img, false);
+        }
+        if ( NULL != sub )
+        {
+            lv_obj_set_style_text_color(sub, KUI_COLOR_DANGER, 0);
+        }
+        (void)critical_line(card, "hdr_title", KSCREEN_CRIT_TITLE);
+        (void)critical_line(card, "line1", KSCREEN_CRIT_LINE1);
+        (void)critical_line(card, "line2", KSCREEN_CRIT_LINE2);
+        (void)critical_line(card, "note", KSCREEN_CRIT_NOTE);
+    }
+
+    /* Last, so it lies over the card and every press lands on it: a tap
+     * closes the notice and presses nothing of the app's underneath. */
+    lv_obj_t * const shield = lv_obj_create(root);
+
+    lv_obj_remove_style_all(shield);
+    lv_obj_set_size(shield, lv_pct(KSCREEN_CRIT_SHIELD_PCT), lv_pct(KSCREEN_CRIT_SHIELD_PCT));
+    lv_obj_set_scrollable(shield, false);
+    (void)lv_obj_add_event_cb(shield, &critical_tap_cb, LV_EVENT_CLICKED, s);
+    s->critical = root;
+}
+
+void kscreen_critical(kscreen_t *s, PowerCriticalEvt const *e)
+{
+    if ( e->critical )
+    {
+        if ( NULL == s->disp )
+        {
+            KLOG_W(TAG, "critical battery said before the glass is open; no notice");
+        }
+        else if ( NULL == s->critical )
+        {
+            critical_show(s);
+            KLOG_N(TAG, "critical battery: notice up");
+        }
+        else
+        {
+            /* up already */
+        }
+    }
+    else if ( NULL != s->critical )
+    {
+        lv_obj_delete(s->critical);
+        s->critical = NULL;
+        KLOG_N(TAG, "critical battery over: notice down");
+    }
+    else
+    {
+        /* nothing up, nothing to take down */
     }
 }
 

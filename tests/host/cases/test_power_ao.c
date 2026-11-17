@@ -2652,6 +2652,124 @@ TEST_CASE("a cell that falls below the mark is one battery_low, and one again af
     Mockkhal_i2c_Destroy();
 }
 
+/* ---- The critical mark, before the cut -------------------------------------- */
+
+#define CELL_CRITICAL_MV 3550U   /**< 8 % on the curve: at or under the critical mark. */
+#define CELL_SAG_MV      3200U   /**< Under the cut: a reading that counts towards ship mode. */
+
+/** @brief What the polls of a case said on POWER_CRITICAL_SIG. */
+typedef struct {
+    unsigned on;    /**< Events that said the cell is critical. */
+    unsigned off;   /**< Events that said it is no longer.      */
+} crit_said_t;
+
+/**
+ * @brief @p n polls at a cell of @p mv; add what they said on
+ *        POWER_CRITICAL_SIG to @p said.
+ */
+static void crit_polls(uint16_t mv, uint32_t n, crit_said_t *said)
+{
+    static const QEvt poll = QEVT_INITIALIZER(POWER_POLL_SIG);
+
+    cell_reads(mv);
+    for ( uint32_t i = 0U; i < n; ++i )
+    {
+        ao_spy_drain();
+        QASM_DISPATCH(AO_Power, &poll, 0U);
+        for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+        {
+            if ( (QSignal)POWER_CRITICAL_SIG == e->sig )
+            {
+                if ( ((const PowerCriticalEvt *)(const void *)e)->critical )
+                {
+                    said->on += 1U;
+                }
+                else
+                {
+                    said->off += 1U;
+                }
+            }
+        }
+    }
+    ao_spy_drain();
+}
+
+/** @brief On battery with no current, at a full cell, and whatever an earlier case left said is over. */
+static void crit_case(void)
+{
+    crit_said_t before = { 0U, 0U };
+
+    power_up_once();
+    power_flush();
+    ao_spy_subscribe(POWER_CRITICAL_SIG);
+    s_regs[PMIC][BQ_REG0B_STATUS]    = REG0B_OFF_USB;
+    s_regs[GAUGE][CW_CURRENT_H]      = 0x00U;
+    s_regs[GAUGE][CW_CURRENT_H + 1U] = 0x00U;
+    crit_polls(CELL_FULL_MV, POLLS_TO_SETTLE, &before);
+}
+
+/** @brief Undo crit_case(): the cable back, the spy deaf to the mark. */
+static void crit_done(void)
+{
+    QActive_unsubscribe(ao_spy(), POWER_CRITICAL_SIG);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* The level is the curve's, slewed, so the fall takes many polls; the event
+ * comes once in all of them. A cable ends it at once, and the cable leaving
+ * with the cell still low is the next fall. */
+TEST_CASE("a cell that falls to the critical mark on battery is said once per fall",
+          "[power_ao]")
+{
+    crit_said_t said = { 0U, 0U };
+
+    crit_case();
+    crit_polls(CELL_FULL_MV, 1U, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, said.on + said.off, "a full cell said something");
+
+    fake_klog_reset();
+    crit_polls(CELL_CRITICAL_MV, POLLS_TO_SETTLE, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said.on, "the fall said it once, however many polls it took");
+    TEST_ASSERT_EQUAL_UINT(0U, said.off);
+    TEST_ASSERT_TRUE(logged("critical"));
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    crit_polls(CELL_CRITICAL_MV, POLLS_TO_SETTLE, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said.off, "the cable ended it, once");
+    TEST_ASSERT_EQUAL_UINT(1U, said.on);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_OFF_USB;
+    crit_polls(CELL_CRITICAL_MV, POLLS_TO_SETTLE, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, said.on, "the cable left a low cell: the next fall");
+
+    crit_polls(CELL_NEAR_FULL_MV, POLLS_TO_SETTLE, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, said.off, "the climb ended it, once");
+    TEST_ASSERT_EQUAL_UINT(2U, said.on);
+
+    crit_done();
+}
+
+/* The level is slewed and the cut reads the cell itself, so a cell that sags
+ * under the cut can do it with the level well above the mark. The count
+ * towards ship mode starts at that reading, and so does the warning. */
+TEST_CASE("a cell under the cut is said critical before the board ships, whatever the level",
+          "[power_ao]")
+{
+    crit_said_t said = { 0U, 0U };
+
+    crit_case();
+    crit_polls(CELL_SAG_MV, 1U, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said.on, "the first reading under the cut said nothing");
+    TEST_ASSERT_FALSE_MESSAGE(power_queue_has(POWER_SHIP_REQ_SIG), "one reading asked for ship mode");
+
+    crit_polls(CELL_FULL_MV, 1U, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said.off, "the cell came back and the warning stayed");
+
+    crit_done();
+}
+
 /* ---- The board's rest ------------------------------------------------------- */
 
 /** @brief How many writes since the reset went to chip @p chip. */
