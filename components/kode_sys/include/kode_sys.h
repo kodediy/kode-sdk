@@ -733,7 +733,9 @@ kode_status_t kode_sys_home_now(void);
  *
  * The call waits on no flash, so an Active Object and a kode_worker job may
  * make it. Both strings are copied before it returns. Nobody is answered: a
- * pair the store refuses is a warning in the log. The pairs are written in
+ * pair the store refuses is a warning in the log, and so is one that would
+ * take the apps' keys past their share of the store, KODE_NVS_SHARE_MAX
+ * bytes, which is not written. The pairs are written in
  * the order they are asked, and one asked before kode_sys_exit_to_os() or
  * kode_sys_home_now() is written before the board leaves; one that reaches
  * AO_Boot once the board is leaving, or during a factory reset, is dropped

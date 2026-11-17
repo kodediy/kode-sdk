@@ -1890,7 +1890,9 @@ bool kode_power_set_charge_current(uint16_t ma);
 /* A few strings the board keeps by name across resets and visits to kodeOS.
  * Names are exact: "Name" and "name" are two settings. The calls block, one
  * task at a time, and fail on a task whose stack is in PSRAM: use app_main or
- * a task of your own. Anyone who can read this board can read them: keep no
+ * a task of your own. Every app's settings share one part of the store, so
+ * kodeOS keeps room for its own: a set past it fails, and kode_error() says
+ * how big it is. Anyone who can read this board can read them: keep no
  * secrets here. */
 
 #define KODE_SETTING_KEY_MAX   16U   /**< Bytes of a name, NUL included.  */

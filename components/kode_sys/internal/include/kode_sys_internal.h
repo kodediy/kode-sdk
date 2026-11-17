@@ -413,7 +413,9 @@ kode_status_t kode_block_rfid_emulate_stop(void);
  * @param value At most KODE_SYS_NVS_VALUE_MAX - 1 characters; the empty string is a value.
  * @return KODE_ERROR when either is NULL or over its ceiling (refused whole, never
  *         shortened). KODE_DENIED from a kode_worker job, with an error line in
- *         the log. Otherwise the store's status.
+ *         the log. KODE_NO_RESOURCES when the apps' keys would pass their share
+ *         of the store, KODE_NVS_SHARE_MAX bytes; nothing is written. Otherwise
+ *         the store's status.
  */
 kode_status_t kode_block_nvs_set(const char *key, const char *value);
 

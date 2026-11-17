@@ -767,6 +767,16 @@ void fake_nvs_set_hook(void (*hook)(void));
 /** @brief The key of the write a hook is run inside; "" outside one. */
 const char *fake_nvs_set_key(void);
 
+/** @brief Make khal_nvs_set_str_within() answer KODE_NO_RESOURCES and write
+ *         nothing while @p full holds, as a namespace at its share would. */
+void fake_nvs_full(bool full);
+
+/** @brief The share the last khal_nvs_set_str_within() was given; 0 if none. */
+size_t fake_nvs_last_share(void);
+
+/** @brief What khal_nvs_erased() answers until the next fake_nvs_reset(). */
+void fake_nvs_erased_set(bool erased);
+
 /** @brief How many lines reached the capture sink. */
 unsigned fake_klog_count(void);
 

@@ -53,7 +53,7 @@ kode_status_t kode_block_nvs_set(const char *key, const char *value)
     {
         return KODE_ERROR;
     }
-    return khal_nvs_set_str(KODE_NVS_NAMESPACE, key, value);
+    return khal_nvs_set_str_within(KODE_NVS_NAMESPACE, key, value, KODE_NVS_SHARE_MAX);
 }
 
 kode_status_t kode_sys_nvs_get(const char *key, char *out, size_t cap)

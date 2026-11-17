@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file test_console_apps.c
- * @brief `nvs_del`, `app_erase` and `app_list`: the lines that remove things.
+ * @brief `nvs_set`, held to the apps' share, and the lines that remove things:
+ *        `nvs_del`, `app_erase` and `app_list`.
  */
 #include <stdio.h>
 #include <string.h>
@@ -185,6 +186,37 @@ static bool nvs_has(const char *key)
     char v[KODE_SYS_NVS_VALUE_MAX];
 
     return khal_nvs_get_str(KODE_NVS_NAMESPACE, key, v, sizeof(v)) == KODE_OK;
+}
+
+/* ---- nvs_set ----------------------------------------------------------------- */
+
+/* The console writes where the apps do, so it is held to the same share. */
+TEST_CASE("nvs_set stores the pair, held to the apps' share", "[console_apps]")
+{
+    console_up();
+
+    ask("nvs_set key=\"" KEY_DOOMED "\" value=\"" VALUE_KEPT "\"");
+
+    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_TRUE(nvs_has(KEY_DOOMED));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_NVS_SHARE_MAX, (uint32_t)fake_nvs_last_share());
+
+    console_end();
+}
+
+TEST_CASE("nvs_set past the apps' share is refused as full and keeps nothing",
+          "[console_apps]")
+{
+    console_up();
+    fake_nvs_full(true);
+
+    ask("nvs_set key=\"" KEY_DOOMED "\" value=\"" VALUE_KEPT "\"");
+
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=full"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+    TEST_ASSERT_FALSE(nvs_has(KEY_DOOMED));
+
+    console_end();
 }
 
 /* ---- nvs_del ----------------------------------------------------------------- */

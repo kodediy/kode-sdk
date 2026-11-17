@@ -757,6 +757,10 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  * so a longer verb never has to move this number. */
 #define KODE_SYS_NVS_KEY_MAX        16U
 #define KODE_SYS_NVS_VALUE_MAX     192U
+/* The most bytes of the store every app's keys may take together: a quarter
+ * of the 64 KB nvs partition, so kodeOS's own keys and the bonds keep their
+ * room. Every write into KODE_NVS_NAMESPACE is held to it. */
+#define KODE_NVS_SHARE_MAX     (16U * 1024U)
 /* How many keys one `nvs_list` may answer with. The whole burst is in flight
  * at once - AO_Log's queue is what absorbs it - and unlike `ps`, whose record
  * count is fixed by the AO table, this one is whatever an operator has

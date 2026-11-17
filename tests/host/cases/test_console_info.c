@@ -334,6 +334,31 @@ TEST_CASE("info reports an undecodable dump as present but unclaimed, with "
     Mockkdrv_slot_Destroy();
 }
 
+/* A store this boot found unreadable was erased whole, and every setting went
+ * back to its default: info says so for the rest of that boot. */
+TEST_CASE("info says whether this boot erased the settings store", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    kdrv_c5_forget();
+    fake_nvs_reset();
+
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|nvs erased=no"));
+    TEST_ASSERT_TRUE(reply_index(">|nvs") < reply_index(">ok"));
+
+    fake_klog_reset();
+    fake_nvs_erased_set(true);
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|nvs erased=yes"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    fake_nvs_reset();
+    Mockkdrv_slot_Destroy();
+}
+
 TEST_CASE("info prints what the coprocessor's snapshot says, and how the P4 "
           "recognises it", "[console_info]")
 {

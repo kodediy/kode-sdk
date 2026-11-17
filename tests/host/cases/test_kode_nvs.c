@@ -80,6 +80,33 @@ TEST_CASE("the store cannot reach the settings namespace", "[kode_nvs]")
     TEST_ASSERT_EQUAL_STRING("100", out);
 }
 
+/* ---- The apps' share -----------------------------------------------------
+ *
+ * Every app writes into the one namespace, and that namespace may take only
+ * its share of the store, so kodeOS's own settings always have room.
+ */
+
+TEST_CASE("a write through the facade is held to the apps' share", "[kode_nvs]")
+{
+    fake_nvs_reset();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_nvs_set("netid", "dot-07"));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_NVS_SHARE_MAX, (uint32_t)fake_nvs_last_share());
+}
+
+TEST_CASE("a write past the apps' share is refused as no room, and nothing is kept",
+          "[kode_nvs]")
+{
+    char out[64];
+
+    fake_nvs_reset();
+    fake_nvs_full(true);
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_nvs_set("netid", "dot-07"));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_nvs_get("netid", out, sizeof(out)));
+    fake_nvs_reset();
+}
+
 /* ---- Absence -------------------------------------------------------------
  *
  * The same distinction the seam underneath makes: denied means "nothing was

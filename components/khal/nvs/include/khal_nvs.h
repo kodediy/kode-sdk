@@ -6,6 +6,7 @@
 #ifndef KHAL_NVS_H_
 #define KHAL_NVS_H_
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -19,12 +20,23 @@ extern "C" {
  * @brief Prepare the backing store. Idempotent; call before the rest.
  *
  * A partition of another NVS version, or one out of pages, is erased whole:
- * settings and app data go back to their defaults rather than fail the boot.
+ * settings and app data go back to their defaults rather than fail the boot,
+ * and khal_nvs_erased() says so.
  * Every call here answers KODE_DENIED from a task whose stack is in PSRAM; to a
  * getter that reads as a missing key, and only the error log line tells them apart.
  * @return KODE_OK, or KODE_ERROR when the store cannot be used.
  */
 kode_status_t khal_nvs_init(void);
+
+/**
+ * @brief Whether khal_nvs_init() erased the partition in this boot.
+ *
+ * The same answer for every asker until the board resets; the next boot says
+ * false unless it erases again. Reads no flash.
+ * @return true when this boot erased it; false otherwise, and before
+ *         khal_nvs_init() has run.
+ */
+bool khal_nvs_erased(void);
 
 /**
  * @brief Read a string.
@@ -49,6 +61,26 @@ kode_status_t khal_nvs_get_str(const char *ns, const char *key,
  */
 kode_status_t khal_nvs_set_str(const char *ns, const char *key,
                                const char *value);
+
+/**
+ * @brief Write a string and commit it, unless @p ns would then take more than
+ *        @p share bytes of the store.
+ *
+ * Counted as the store counts its space, in whole entries: a key's header
+ * and its string, NUL included. What @p key held before counts as freed, so
+ * a value no longer than the one it replaces always fits. The count and the
+ * write are two steps: two writers at once may each pass by one value.
+ *
+ * @param ns    Namespace, at most 15 characters.
+ * @param key   Key, at most 15 characters.
+ * @param value The string; NULL is refused.
+ * @param share The most bytes @p ns may take once @p value is in.
+ * @return KODE_OK; KODE_NO_RESOURCES when @p ns would pass @p share, with
+ *         nothing written; KODE_DENIED when the caller's stack is in PSRAM;
+ *         KODE_ERROR when the store refused.
+ */
+kode_status_t khal_nvs_set_str_within(const char *ns, const char *key,
+                                      const char *value, size_t share);
 
 /**
  * @brief Read one byte - the scalar a settings record is made of.

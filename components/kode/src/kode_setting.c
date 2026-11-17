@@ -191,10 +191,23 @@ bool kode_setting_set(const char *key, const char *value)
     {
         if ( key_ok(key) && value_ok(key, value) && stack_ok() )
         {
-            kept = (kode_block_nvs_set(key, value) == KODE_OK);
-            if ( !kept )
+            const kode_status_t rc = kode_block_nvs_set(key, value);
+
+            kept = (KODE_OK == rc);
+            if ( KODE_NO_RESOURCES == rc )
+            {
+                const uint32_t share = KODE_NVS_SHARE_MAX;
+
+                kode_err_set("setting '%s' could not be kept: the apps' share of the store "
+                             "(%" PRIu32 " bytes) is full", key, share);
+            }
+            else if ( !kept )
             {
                 kode_err_set("setting '%s' could not be kept", key);
+            }
+            else
+            {
+                /* Kept: nothing to say. */
             }
         }
         setting_leave();

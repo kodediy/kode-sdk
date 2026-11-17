@@ -3734,7 +3734,12 @@ static bool nvs_key_ok(const char *key)
     return true;
 }
 
-/** @brief nvs_set key=<k> value=<v>: remember one string under one name. */
+/**
+ * @brief nvs_set key=<k> value=<v>: remember one string under one name.
+ *
+ * Held to the apps' share of the store, as an app's own write is: one past it
+ * answers `>err code=5 msg=full` and writes nothing.
+ */
 static void h_nvs_set(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     (void)me;
@@ -3751,7 +3756,14 @@ static void h_nvs_set(Console *me, const kcmd_t *c, const karg_val_t *v)
         console_reply_err(KCLI_ERR_VALUE, "value");
         return;
     }
-    if ( khal_nvs_set_str(KODE_NVS_NAMESPACE, v[0].s, v[1].s) != KODE_OK )
+    kode_status_t const rc = khal_nvs_set_str_within(KODE_NVS_NAMESPACE, v[0].s,
+                                                     v[1].s, KODE_NVS_SHARE_MAX);
+    if ( KODE_NO_RESOURCES == rc )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "full");
+        return;
+    }
+    if ( KODE_OK != rc )
     {
         console_reply_err(KCLI_ERR_REJECT, c->verb);
         return;
@@ -4073,7 +4085,8 @@ static void info_fw(const char *kodeos)
  * number; `mac_c5` is the C5's, which the serial encodes. A board with no
  * identity is not a refusal: its record carries `-` placeholders and closes
  * with `>ok`. After the partitions, `>|fw` gives the two releases on the
- * board, kodeOS's and kode_c5's (info_fw()).
+ * board, kodeOS's and kode_c5's (info_fw()). `>|nvs erased=yes` says this boot
+ * found the settings store unreadable and erased it whole.
  */
 static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
@@ -4190,6 +4203,17 @@ static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
         {
             console_reply(">|coredump=none");
         }
+    }
+
+    /* Whether this boot found the settings store unreadable and erased it:
+     * every setting is then back to its default. */
+    if ( khal_nvs_erased() )
+    {
+        console_reply(">|nvs erased=yes");
+    }
+    else
+    {
+        console_reply(">|nvs erased=no");
     }
 
     /* What the owners add, in registration order: the coprocessor's

@@ -802,16 +802,22 @@ static void leave_drop(void)
  * @brief Write a pair to the app's store for an asker that waits for no answer.
  *
  * kode_sys_nvs_set() posted it and its caller went on, so a pair the store
- * refuses is a warning here and nothing else. The value is the app's own and
- * is not logged.
+ * refuses, or one past the apps' share of it, is a warning here and nothing
+ * else. The value is the app's own and is not logged.
  *
  * @param e The pair, both strings NUL-terminated.
  */
 static void store_set(BootNvsSetEvt const * const e)
 {
-    kode_status_t const rc = khal_nvs_set_str(KODE_NVS_NAMESPACE, e->key, e->value);
+    kode_status_t const rc = khal_nvs_set_str_within(KODE_NVS_NAMESPACE, e->key,
+                                                     e->value, KODE_NVS_SHARE_MAX);
 
-    if ( KODE_OK != rc )
+    if ( KODE_NO_RESOURCES == rc )
+    {
+        KLOG_W(TAG, "'%s' is not kept: the apps' share of the store (%u bytes) "
+                    "is full", e->key, KODE_NVS_SHARE_MAX);
+    }
+    else if ( KODE_OK != rc )
     {
         KLOG_W(TAG, "the store refused '%s' (status %d); it is not kept",
                e->key, (int)rc);

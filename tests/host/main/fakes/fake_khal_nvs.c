@@ -26,6 +26,9 @@ static bool           s_fail_next_set;
 static unsigned       s_sets;   /**< Writes asked for since the reset. */
 static void         (*s_set_hook)(void); /**< Run inside every write, or NULL. */
 static const char    *s_set_key = "";      /**< The key of the write in progress. */
+static bool           s_full;       /**< khal_nvs_set_str_within() finds no room. */
+static size_t         s_last_share; /**< The share its last call was given.        */
+static bool           s_erased;     /**< What khal_nvs_erased() answers.            */
 
 /**
  * @brief Find a record by namespace and key.
@@ -73,6 +76,24 @@ void fake_nvs_reset(void)
     s_fail_next_set = false;
     s_sets          = 0U;
     s_set_hook      = NULL;
+    s_full          = false;
+    s_last_share    = 0U;
+    s_erased        = false;
+}
+
+void fake_nvs_full(bool full)
+{
+    s_full = full;
+}
+
+size_t fake_nvs_last_share(void)
+{
+    return s_last_share;
+}
+
+void fake_nvs_erased_set(bool erased)
+{
+    s_erased = erased;
 }
 
 void fake_nvs_set_hook(void (*hook)(void))
@@ -122,6 +143,11 @@ unsigned fake_nvs_count(void)
 kode_status_t khal_nvs_init(void)
 {
     return KODE_OK;
+}
+
+bool khal_nvs_erased(void)
+{
+    return s_erased;
 }
 
 kode_status_t khal_nvs_get_blob(const char *ns, const char *key,
@@ -205,6 +231,19 @@ kode_status_t khal_nvs_set_str(const char *ns, const char *key,
         return KODE_ERROR;
     }
     return khal_nvs_set_blob(ns, key, value, strlen(value) + 1U);
+}
+
+/* The share's arithmetic is the real store's, tested over it in host_nvs;
+ * here a case says whether there is room. */
+kode_status_t khal_nvs_set_str_within(const char *ns, const char *key,
+                                      const char *value, size_t share)
+{
+    s_last_share = share;
+    if ( s_full )
+    {
+        return KODE_NO_RESOURCES;
+    }
+    return khal_nvs_set_str(ns, key, value);
 }
 
 kode_status_t khal_nvs_get_u8(const char *ns, const char *key, uint8_t *out)

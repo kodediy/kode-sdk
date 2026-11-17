@@ -18,7 +18,7 @@ idf_component_register(
                  ${khal_includes}
                  "${SDK_DIR}/components/kdefs/include"
                  "${SDK_DIR}/components/klog/include"
-    REQUIRES unity nvs_flash
+    REQUIRES unity nvs_flash esp_partition esp_rom
     WHOLE_ARCHIVE)
 
 # Sanitizers, only when KODE_SANITIZE is set; see tests/sanitize.cmake.

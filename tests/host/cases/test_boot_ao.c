@@ -4522,6 +4522,29 @@ TEST_CASE("a setting the store refuses leaves a warning and the next is written"
     store_down();
 }
 
+/* The apps share one part of the store: AO_Boot holds every pair to it, and a
+ * pair past it is a warning that says why. */
+TEST_CASE("a setting past the apps' share is not kept, and the warning says why",
+          "[boot_ao][nvs]")
+{
+    char want[96];
+
+    store_up();
+    fake_klog_reset();
+    fake_nvs_full(true);
+    (void)snprintf(want, sizeof(want), "'netid' is not kept: the apps' share of "
+                   "the store (%u bytes) is full", (unsigned)KODE_NVS_SHARE_MAX);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_nvs_set("netid", "first"));
+    reset_pump();
+    TEST_ASSERT_FALSE(store_holds("netid", "first"));
+    TEST_ASSERT_TRUE_MESSAGE(klog_has(want), "the warning names the key and the share");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_NVS_SHARE_MAX, (uint32_t)fake_nvs_last_share());
+
+    fake_nvs_full(false);
+    store_down();
+}
+
 /* A board on its way out writes nothing more: the setting that arrives behind
  * the restart request is dropped, and said. */
 TEST_CASE("a setting asked while the board leaves is dropped", "[boot_ao][nvs]")
