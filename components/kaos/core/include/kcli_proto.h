@@ -98,7 +98,15 @@ typedef enum {
                            *   last channel, by `wifi_scan_stop` or by a
                            *   job that needed the radio - the networks
                            *   before it were heard, the rest of the air
-                           *   was not swept. */
+                           *   was not swept. ls's listing: cut, when it
+                           *   stopped before the folder's end - a page
+                           *   AO_Storage could not list or be asked for,
+                           *   one that brought nothing, or a folder past
+                           *   what a page's 16-bit skip counts; the
+                           *   entries before it were listed, the rest
+                           *   were not. nvs_set: full, when the apps'
+                           *   keys would pass their share of the store
+                           *   (KODE_NVS_SHARE_MAX); nothing is written. */
     KCLI_ERR_TIMEOUT = 6, /**< The owning AO never answered: the command's
                            *   closing event did not arrive in time. The
                            *   console is idle again. msg = the verb.      */

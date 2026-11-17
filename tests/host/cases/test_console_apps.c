@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file test_console_apps.c
- * @brief `nvs_del`, `app_erase` and `app_list`: the lines that remove things.
+ * @brief `nvs_set`, held to the apps' share, and the lines that remove things:
+ *        `nvs_del`, `app_erase` and `app_list`.
  */
 #include <stdio.h>
 #include <string.h>
@@ -96,6 +97,18 @@ static void type_line(const char *text)
     QASM_DISPATCH(AO_Console, &e.super, 0U);
 }
 
+/** @brief Send @p text in as a line from the port @p src (KODE_CONSOLE_SRC_*). */
+static void type_line_from(const char *text, uint8_t src)
+{
+    ConsoleLineEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CONSOLE_LINE_SIG);
+    e.src   = src;
+    (void)snprintf(e.line, sizeof(e.line), "%s", text);
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
 /** @brief Type @p text with the captured replies cleared first. */
 static void ask(const char *text)
 {
@@ -173,6 +186,37 @@ static bool nvs_has(const char *key)
     char v[KODE_SYS_NVS_VALUE_MAX];
 
     return khal_nvs_get_str(KODE_NVS_NAMESPACE, key, v, sizeof(v)) == KODE_OK;
+}
+
+/* ---- nvs_set ----------------------------------------------------------------- */
+
+/* The console writes where the apps do, so it is held to the same share. */
+TEST_CASE("nvs_set stores the pair, held to the apps' share", "[console_apps]")
+{
+    console_up();
+
+    ask("nvs_set key=\"" KEY_DOOMED "\" value=\"" VALUE_KEPT "\"");
+
+    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_TRUE(nvs_has(KEY_DOOMED));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_NVS_SHARE_MAX, (uint32_t)fake_nvs_last_share());
+
+    console_end();
+}
+
+TEST_CASE("nvs_set past the apps' share is refused as full and keeps nothing",
+          "[console_apps]")
+{
+    console_up();
+    fake_nvs_full(true);
+
+    ask("nvs_set key=\"" KEY_DOOMED "\" value=\"" VALUE_KEPT "\"");
+
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=full"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+    TEST_ASSERT_FALSE(nvs_has(KEY_DOOMED));
+
+    console_end();
 }
 
 /* ---- nvs_del ----------------------------------------------------------------- */
@@ -264,6 +308,150 @@ TEST_CASE("nvs_del with a key too long for the store is refused", "[console_apps
     TEST_ASSERT_TRUE(nvs_has(KEY_DOOMED));
 
     console_end();
+}
+
+/* ---- app_run ------------------------------------------------------------------ */
+
+/** @brief Hand the console AO_AppMgr's verdict on a request, as it posts it. */
+static void verdict(app_req_verdict_t v)
+{
+    AppReqRspEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super   = (QEvt)QEVT_INITIALIZER(APP_REQ_RSP_SIG);
+    e.verdict = (uint8_t)v;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief The one request of kind @p sig AO_AppMgr's queue holds, or NULL; the caller frees. */
+static const QEvt *appmgr_took(enum_t sig)
+{
+    const QEvt *e = NULL;
+
+    if ( (xQueueReceive(AO_AppMgr->eQueue, &e, 0U) == pdTRUE) && ((enum_t)e->sig != sig) )
+    {
+        QF_gc(e);
+        e = NULL;
+    }
+    return e;
+}
+
+/* `>ok` on an `app_run` says AO_AppMgr has the app on its way to boot. A name
+ * nobody installed, or an AO_AppMgr with work in hand, is told to the person
+ * who typed it. */
+TEST_CASE("app_run waits for AO_AppMgr's verdict on the installed app it names",
+          "[console_apps]")
+{
+    console_up();
+    ask("app_run name=\"scope\"");
+
+    const AppFlashEvt * const req = (const AppFlashEvt *)appmgr_took(APP_RUN_REQ_SIG);
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_EQUAL_STRING("scope", req->file);
+    TEST_ASSERT_TRUE_MESSAGE(AO_Console == req->who,
+        "the request does not say who is waiting for the verdict");
+    QF_gc(&req->super);
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), "the line answered before the verdict");
+
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_TRUE(replied(">ok"));
+    console_end();
+}
+
+TEST_CASE("app_run of an app that is not installed, or while AO_AppMgr is busy, is an error",
+          "[console_apps]")
+{
+    console_up();
+    ask("app_run name=\"ghost\"");
+    appmgr_queue_drained();
+    verdict(APP_REQ_MISSING);
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=missing"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    ask("app_run name=\"scope\"");
+    appmgr_queue_drained();
+    verdict(APP_REQ_BUSY);
+    TEST_ASSERT_TRUE(replied(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+    console_end();
+}
+
+TEST_CASE("app_run of a .bin asks for it to be installed and booted, and waits the same way",
+          "[console_apps]")
+{
+    console_up();
+    ask("app_run name=\"scope.bin\"");
+
+    const FlashReqEvt * const req = (const FlashReqEvt *)appmgr_took(FLASH_REQ_SIG);
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_EQUAL_STRING("scope.bin", req->src);
+    TEST_ASSERT_TRUE(req->launch);
+    TEST_ASSERT_TRUE(AO_Console == req->who);
+    QF_gc(&req->super);
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    verdict(APP_REQ_MISSING);
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=missing"));
+    console_end();
+}
+
+/* `install_info` is AO_AppMgr's to answer: the records are its, and it writes
+ * them to the port the command came on before the console ends the line. */
+TEST_CASE("install_info asks AO_AppMgr for the records, from the port it came on, "
+          "and ends on its answer", "[console_apps]")
+{
+    console_up();
+    ask("install_info");
+
+    const InstallInfoReqEvt * const req =
+        (const InstallInfoReqEvt *)appmgr_took(INSTALL_INFO_REQ_SIG);
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_TRUE(AO_Console == req->who);
+    TEST_ASSERT_EQUAL_UINT8(KODE_CONSOLE_SRC_SERIAL, req->src);
+    QF_gc(&req->super);
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), "the line answered before the records");
+
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_TRUE(replied(">ok"));
+    console_end();
+}
+
+/* The port a command came on is the one its records go to: `install` and
+ * `install_info` from BLE name BLE to AO_AppMgr. */
+TEST_CASE("install and install_info from BLE name BLE as the asker",
+          "[console_apps]")
+{
+    console_up();
+    fake_klog_reset();
+    type_line_from("install_info", (uint8_t)KODE_CONSOLE_SRC_BLE);
+    const InstallInfoReqEvt * const info =
+        (const InstallInfoReqEvt *)appmgr_took(INSTALL_INFO_REQ_SIG);
+    uint8_t info_src = (uint8_t)KODE_LOG_SRC_NONE;
+    if ( NULL != info )
+    {
+        info_src = info->src;
+        QF_gc(&info->super);
+    }
+    verdict(APP_REQ_TAKEN);
+    console_end();
+
+    console_up();
+    fake_klog_reset();
+    type_line_from("install src=\"sd:/notes.bin\" dst=app", (uint8_t)KODE_CONSOLE_SRC_BLE);
+    const FlashReqEvt * const req = (const FlashReqEvt *)appmgr_took(FLASH_REQ_SIG);
+    uint8_t req_src = (uint8_t)KODE_LOG_SRC_NONE;
+    if ( NULL != req )
+    {
+        req_src = req->asker_src;
+        QF_gc(&req->super);
+    }
+    verdict(APP_REQ_MISSING);
+    console_end();
+
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_CONSOLE_SRC_BLE, info_src,
+        "install_info from BLE named another port");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_CONSOLE_SRC_BLE, req_src,
+        "install from BLE named another port as its asker");
 }
 
 /* ---- app_erase --------------------------------------------------------------- */

@@ -41,6 +41,11 @@ enum KodeSignals {
                                  *   place in the region (AppEvictedEvt), one
                                  *   event per app, before the write starts.
                                  *   The app it replaces is not one.          */
+    APP_CARD_FULL_SIG,          /**< AO_AppMgr: the copy of an app does not fit
+                                 *   the card, and that app has none. Published
+                                 *   once for each card mounted; bare and
+                                 *   static. The interface says the card is
+                                 *   full when it is in sight.                */
     RECV_READY_SIG,             /**< The console's receive protocol: sent by
                                  *   whichever AO is receiving, once its
                                  *   destination is open and the console is in
@@ -95,6 +100,11 @@ enum KodeSignals {
     RECV_FAIL_SIG,              /**< The receive protocol: refused, or the
                                  *   bytes did not survive the trip - kcli
                                  *   error 5.                                 */
+    RECV_AGAIN_SIG,             /**< The receive protocol: AO_AppMgr refused the
+                                 *   stream for now and nothing was armed - an
+                                 *   app the image would evict has no copy on
+                                 *   the card yet. Ask again: kcli error 4.
+                                 *   Bare and static, as the endings beside it. */
     RECV_STALL_SIG,             /**< The receive protocol: the host stopped
                                  *   sending and never came back - kcli
                                  *   error 6.                                 */
@@ -146,6 +156,14 @@ enum KodeSignals {
                                  *   the button is still down. The console's
                                  *   `btn ... state=hold` publishes it on
                                  *   request.                                 */
+    BUTTON_HOME_HOLD_SIG,       /**< AO_Buttons: the bottom button has been
+                                 *   down for KODE_HOME_HOLD_MS (ButtonHoldEvt,
+                                 *   @c id always KDRV_BTN_BOT). Once per
+                                 *   press, after that press's
+                                 *   BUTTON_HOLD_SIG and while the button is
+                                 *   still down. The console's
+                                 *   `btn id=bot state=hold` publishes it on
+                                 *   request.                                 */
     BUTTON_DOUBLE_SIG,          /**< AO_Buttons: the top button was pressed
                                  *   twice in quick succession
                                  *   (ButtonDoubleEvt). Published right after
@@ -158,7 +176,10 @@ enum KodeSignals {
                                  *   whoever draws: kgui's launcher in kodeOS,
                                  *   an app's own AO in an app - where it also
                                  *   means the board is about to reset unless
-                                 *   kode_sys_home_defer() says otherwise.       */
+                                 *   kode_sys_home_defer() says otherwise.
+                                 *   With CONFIG_KODEOS_HOME_HOLD it follows
+                                 *   BUTTON_HOME_HOLD_SIG; without, the bottom
+                                 *   button's BUTTON_HOLD_SIG.                */
     IOEXP_INPUT_SIG,            /**< AO_IoExp: what the expander's eight pins
                                  *   read (IoexpInputEvt). Every read of the
                                  *   input register goes out here - on the
@@ -231,10 +252,10 @@ enum KodeSignals {
                                  *   change - a phone connecting is news
                                  *   nobody asked for - and on request.      */
     BLE_PAIR_SIG,               /**< AO_Radio: a pairing wants a code shown,
-                                 *   or has ended (BlePairEvt). One signal
-                                 *   with a phase rather than two, because
-                                 *   both halves are the same exchange told
-                                 *   at two moments.                         */
+                                 *   has ended, or was refused with no code
+                                 *   (BlePairEvt). One signal with a phase
+                                 *   rather than three, because each is the
+                                 *   same exchange told at another moment.   */
     BLE_SCAN_ENTRY_SIG,         /**< AO_Radio: one device seen (BleScanEvt). */
     BLE_SCAN_END_SIG,           /**< AO_Radio: that was the last one
                                  *   (WifiScanEndEvt: a count and whether
@@ -297,6 +318,13 @@ enum KodeSignals {
                                  *   (ChannelStateEvt). Every change of state,
                                  *   and on request - the MQTT_STATE_SIG
                                  *   pattern.                                */
+    CONSOLE_SENT_SIG,           /**< AO_Log (BLE) or AO_Net (the Kode
+                                 *   channel): a line written with
+                                 *   kode_log_reply_confirm() left the board on
+                                 *   that port, or could not (ConsoleSentEvt).
+                                 *   It answers the last such line sent there,
+                                 *   and every line before it: two confirmed
+                                 *   lines close together may get one.     */
     CONSOLE_LINE_SIG,           /**< AO_Log: a finished command line. Published
                                  *   rather than posted to AO_Console: AO_Log
                                  *   owns the device, not the policy, and must
@@ -321,12 +349,24 @@ enum KodeSignals {
                                  *   prints it, the GUI draws it.             */
     BOOT_STATE_SIG,             /**< AO_Boot: the boot state, in answer to
                                  *   BOOT_INFO_REQ_SIG (BootStateEvt).        */
+    BOOT_STABLE_SIG,            /**< AO_Boot: the kodeOS running has stayed
+                                 *   up KODE_BOOT_STABLE_MS: where it runs and
+                                 *   what became of the other slot
+                                 *   (BootStableEvt). Once per boot, OS role
+                                 *   only.                                    */
+    BOOT_OS_SWITCH_FAIL_SIG,    /**< AO_Boot: a BOOT_OS_SWITCH_SIG could not
+                                 *   point otadata at the other slot; the
+                                 *   board stays on this one. A bare static
+                                 *   QEvt.                                    */
     GUI_STATE_SIG,              /**< AO_Gui: what state the interface is in,
                                  *   in answer to GUI_DUMP_REQ_SIG
                                  *   (GuiStateEvt).                           */
     STORAGE_INFO_SIG,           /**< AO_Storage: one medium's mount state and
                                  *   usage, in answer to STORAGE_OP_INFO
                                  *   (StorageInfoEvt).                        */
+    STORAGE_CARD_SIG,           /**< AO_Storage: the card was mounted, is
+                                 *   mounted no more, or was put away by an
+                                 *   app's rest (StorageCardEvt).             */
     STORAGE_TEST_SIG,           /**< AO_Storage: one phase of the card test
                                  *   (StorageTestEvt) - what it did and what
                                  *   it measured. The console prints it.      */
@@ -437,6 +477,17 @@ enum KodeSignals {
                                  *   The firmware's LVGL owner builds it and
                                  *   answers test_dot_screen_done() once it
                                  *   is on the panel.                       */
+    DISPLAY_PARK_SIG,           /**< AO_Display: the glass is about to sleep
+                                 *   for kode_sys_screen_sleep()
+                                 *   (DisplayParkEvt). Whoever draws stops
+                                 *   drawing and says so with
+                                 *   kode_sys_screen_parked(seq), within
+                                 *   KODE_LOWPOWER_GLYPHS_WAIT_MS, and draws
+                                 *   nothing until DISPLAY_REPAINT_SIG.     */
+    DISPLAY_SLEEP_SIG,          /**< AO_Display: how one request to sleep or
+                                 *   wake the glass ended (DisplaySleepEvt).
+                                 *   Once per DISPLAY_SLEEP_REQ_SIG, done or
+                                 *   refused.                               */
 #if CONFIG_KODE_LOWPOWER
     LOWPOWER_ROUND_SIG,         /**< Published by AO_LowPower: a round of
                                  *   readiness is open for a target state,
@@ -444,13 +495,19 @@ enum KodeSignals {
                                  *   participant rests its device on it, from
                                  *   AWAKE or, for an OFF round, from the
                                  *   ASLEEP rest, and answers exactly once
-                                 *   with lowpower_ready().                 */
+                                 *   with lowpower_ready(). A round begun
+                                 *   over an app's rest is posted to the
+                                 *   participants instead, the owners of the
+                                 *   rest last: who did not join does not
+                                 *   hear that one.                         */
     LOWPOWER_STATE_SIG,         /**< Published by AO_LowPower on every change
                                  *   of the board's state (LowPowerStateEvt).
                                  *   A participant restores its device on
                                  *   state AWAKE, which also arrives with
                                  *   prev == AWAKE when a round was abandoned
-                                 *   (so the restore must be idempotent), and
+                                 *   (so the restore must be idempotent; one
+                                 *   abandoned over an app's rest posts it to
+                                 *   the participants it had asked), and
                                  *   starts no QTimeEvt on state ASLEEP: the
                                  *   tick is stopped by then.               */
     LOWPOWER_REFUSED_SIG,       /**< Published by AO_LowPower when a request
@@ -458,12 +515,39 @@ enum KodeSignals {
                                  *   a busy owner, a person at the board
                                  *   (LowPowerRefusedEvt). What the console
                                  *   closes `sleep` and `power_off` with.   */
+    LOWPOWER_PART_SIG,          /**< Published by AO_LowPower: news of the
+                                 *   parts an app put away with
+                                 *   kode_sys_rest() (LowPowerPartEvt). The
+                                 *   one answer to each request, and, unasked,
+                                 *   a wake of the P4 and the board taking
+                                 *   the rest over. The board's state stays
+                                 *   AWAKE throughout.                      */
 #endif
     BOOT_KEEP_SIG,              /**< AO_Boot: a restart into kodeOS is a moment
                                  *   away. The panel's owner leaves the frame on
                                  *   the glass and says so to the next boot
                                  *   (kdrv_display_keep_for_restart()); nobody
                                  *   answers, and a refusal is the old way.   */
+    WIFI_SCAN_AGAIN_SIG,        /**< AO_Radio: the Wi-Fi listing in flight ended
+                                 *   early for a newer `wifi_scan` and starts
+                                 *   again (WifiScanEndEvt: @c cut, how many
+                                 *   entries the cut sweep published, and the
+                                 *   newer request's @c gen). The entries
+                                 *   before it are that sweep's; one
+                                 *   WIFI_SCAN_END_SIG closes the listing, the
+                                 *   newest sweep's.                         */
+    POWER_CRITICAL_SIG,         /**< AO_Power: the cell is critical on battery,
+                                 *   or no longer (PowerCriticalEvt). Said once
+                                 *   per fall: at KODE_POWER_CRITICAL_PCT or
+                                 *   under, or at the first reading under the
+                                 *   cut, whichever comes first, so it always
+                                 *   comes before the readings that end in ship
+                                 *   mode. Over when a cable comes or the level
+                                 *   climbs KODE_POWER_CRITICAL_REARM_PCT above
+                                 *   the mark. kscreen shows its notice for it
+                                 *   (kscreen_critical()). Last of the published
+                                 *   signals, so the ones before it keep their
+                                 *   numbers.                                */
     /* Published signals end here: QF sizes subscriber lists by it; a publish above asserts. */
     MAX_PUB_SIG,
 
@@ -536,15 +620,35 @@ enum KodeSignals {
                                  *   three owns the transfer.                 */
     APP_RECV_IDLE_SIG,          /**< AO_AppMgr private QTimeEvt: no chunk for
                                  *   KODE_RECV_IDLE_MS - the host is gone.    */
+    APP_BACKUP_TMO_SIG,         /**< AO_AppMgr private QTimeEvt, one-shot: the
+                                 *   wait, the pace or the deadline of the
+                                 *   copy to the card in hand.                */
     APP_RECV_LAUNCH_SIG,        /**< AO_AppMgr private QTimeEvt: the drain
                                  *   delay after a successful install is
                                  *   over - boot it (AppMgr_launching).       */
     APP_TIDY_TIMEOUT_SIG,       /**< AO_AppMgr private QTimeEvt: AO_Storage
                                  *   did not answer a folder request in
                                  *   APPMGR_TIDY_MS (AppMgr_tidying).         */
+    APP_UNDO_STEP_SIG,          /**< AO_AppMgr private: verify the next app a
+                                 *   reset cut out of an install. Posted to
+                                 *   self, one per app, never by anything
+                                 *   external.                                */
+    APP_BEAT_SIG,               /**< AO_AppMgr private QTimeEvt: a second of
+                                 *   waiting on the network, or for the
+                                 *   install a fetch announced, has gone by -
+                                 *   report the write's percent again, so the
+                                 *   glass and the LED stay up.               */
     FLASH_REQ_SIG,              /**< AO_AppMgr: one source-to-sink transfer
                                  *   (FlashReqEvt). The only way to ask for
                                  *   an image to be written.                 */
+    APP_REQ_RSP_SIG,            /**< To the asker: whether AO_AppMgr took an
+                                 *   install (FLASH_REQ_SIG) or run
+                                 *   (APP_RUN_REQ_SIG) request that named one
+                                 *   (AppReqRspEvt). Posted, not published.   */
+    INSTALL_INFO_REQ_SIG,       /**< AO_AppMgr: write the records of the
+                                 *   last app install and the last kodeOS
+                                 *   update to the asker's port, then post
+                                 *   it APP_REQ_RSP_SIG (InstallInfoReqEvt). */
     STORAGE_CMD_SIG,            /**< AO_Storage: do StorageCmdEvt.op.         */
     STORAGE_LIST_PAGE_SIG,      /**< AO_Storage: post a page of the bootable
                                  *   images on every medium to the asker
@@ -568,6 +672,8 @@ enum KodeSignals {
     STORAGE_WRITE_NEXT_SIG,     /**< AO_Storage private self-post: the next
                                  *   chunk of the write in progress.         */
     STORAGE_WRITE_RSP_SIG,      /**< To the writer (StorageWriteRspEvt).      */
+    STORAGE_WRITE_ABANDON_REQ_SIG, /**< AO_Storage: the writer ends its write
+                                 *   in flight (StorageWriteAbandonEvt).      */
     STORAGE_DESC_REQ_SIG,       /**< AO_Storage: read the manifest out of the
                                  *   front of one file (StorageDescReqEvt).
                                  *   Posted directly, never published: the
@@ -582,21 +688,22 @@ enum KodeSignals {
                                  *   launcher or the console.                 */
     APPDATA_FIELDS_SIG,         /**< To the asker: the folder's fields
                                  *   (AppDataFieldsEvt).                      */
-    APPDATA_ICON_SIG,           /**< To the asker: one third of the icon
+    APPDATA_ICON_SIG,           /**< To the asker: one piece of the icon
                                  *   (AppDataIconEvt).                        */
     APPDATA_END_SIG,            /**< To the asker: the conversation is
                                  *   over.                                    */
     APPDATA_RM_REQ_SIG,         /**< AO_Storage: delete one app's data folder
-                                 *   on the INTERNAL partition (AppDataReqEvt
-                                 *   again - the request is the same two
-                                 *   fields). The card is never touched:
+                                 *   from the medium the reader finds it on
+                                 *   (AppDataReqEvt again - the request is the
+                                 *   same two fields):
                                  *   https://docs.kode.diy/sdk/kdrv/apps.  */
     APPDATA_RM_RSP_SIG,         /**< To the asker: how that delete ended
                                  *   (AppDataRmRspEvt).                       */
     APPDATA_PUT_REQ_SIG,        /**< AO_Storage: write one app's data folder
-                                 *   on the INTERNAL partition (AppDataPutEvt:
-                                 *   app.json, then the icon when there is
-                                 *   one). Posted directly, never published.  */
+                                 *   on the medium appdata_put_request() says
+                                 *   (AppDataPutEvt: app.json, then the icon
+                                 *   when there is one). Posted directly,
+                                 *   never published.                         */
     APPDATA_PUT_NEXT_SIG,       /**< AO_Storage private self-post: the icon's
                                  *   step of a put in progress.               */
     APPDATA_PUT_RSP_SIG,        /**< To the asker: how that put ended
@@ -605,7 +712,8 @@ enum KodeSignals {
                                  *   off both media (AppDataReqEvt again): the
                                  *   images at a medium's root whose descriptor
                                  *   names the project, and its data folder.
-                                 *   Posted directly, never published.        */
+                                 *   With `others`, every app's files but that
+                                 *   one's. Posted directly, never published. */
     STORAGE_APP_WIPE_NEXT_SIG,  /**< AO_Storage private QTimeEvt: the next
                                  *   file of the wipe in progress.            */
     STORAGE_APP_WIPE_RSP_SIG,   /**< To the asker: what went and what stayed
@@ -701,6 +809,12 @@ enum KodeSignals {
                                  *   StorageRecvEvt.who rather than published;
                                  *   see RECV_READY_SIG for why the two
                                  *   receivers differ there.                   */
+    RECV_BUSY_SIG,              /**< AO_Storage -> whoever asked for a file:
+                                 *   the transfer in flight did not end within
+                                 *   KODE_STORAGE_TURN_MS, so this one never
+                                 *   started - kcli error 4. POSTED, never
+                                 *   published, and bare and static like the
+                                 *   three endings of the receive protocol.   */
     STORAGE_TEST_NEXT_SIG,      /**< AO_Storage private QTimeEvt: the next
                                  *   step of the card test. One chunk per
                                  *   step, for the reason STORAGE_WRITE_NEXT_
@@ -711,6 +825,9 @@ enum KodeSignals {
                                  *   STORAGE_CAT_LINES_PER_STEP per step, for
                                  *   the same reason STORAGE_WRITE_NEXT_SIG
                                  *   exists.                                  */
+    STORAGE_SWEEP_NEXT_SIG,     /**< AO_Storage private QTimeEvt: the next
+                                 *   pass over the card's root for what a cut
+                                 *   copy of an app left there.               */
     STORAGE_COPY_NEXT_SIG,      /**< AO_Storage private QTimeEvt: the next
                                  *   chunk of the `cp` in progress. One 32 KB
                                  *   chunk per step, for the same reason
@@ -740,6 +857,18 @@ enum KodeSignals {
                                  *   whoever waits for it is told it failed.
                                  *   The guard stays up until the call does
                                  *   return.                                  */
+    STORAGE_TURN_TO_SIG,        /**< AO_Storage private QTimeEvt: a request
+                                 *   that waits for the transfer in flight to
+                                 *   end has waited KODE_STORAGE_TURN_MS, so
+                                 *   it is refused as busy.                   */
+    STORAGE_READ_TO_SIG,        /**< AO_Storage private QTimeEvt: the reads of
+                                 *   a data folder that wait for the transfer
+                                 *   in flight have waited KODE_STORAGE_TURN_MS
+                                 *   from the first, so they are answered as
+                                 *   they are during one.                     */
+    STORAGE_READ_RETRY_SIG,     /**< AO_Storage private QTimeEvt: the pause
+                                 *   after a folder read found no event block
+                                 *   for its icon is over; try again.         */
 
     BOOT_OS_SWITCH_SIG,         /**< AO_Boot: point otadata at the inactive
                                  *   kodeOS slot, reset.                      */
@@ -767,6 +896,10 @@ enum KodeSignals {
                                  *   Kode channel for the jump - the client
                                  *   stopped cleanly, or there was none. One
                                  *   per NET_LEAVE_REQ_SIG.                   */
+    BOOT_LOG_FLUSHED_SIG,       /**< AO_Boot private (direct post, from
+                                 *   boot_log_flushed()): AO_Log has written
+                                 *   every line posted before the leave began.
+                                 *   One per LOG_FLUSH_REQ_SIG.               */
     BOOT_LEAVE_TMO_SIG,         /**< AO_Boot private QTimeEvt: the step of the
                                  *   leave that is running ran out of time.   */
     FACTORY_RESET_REQ_SIG,      /**< AO_Boot: forget everything the board
@@ -788,6 +921,11 @@ enum KodeSignals {
                                  *   then long enough to forget its crashes.  */
     BOOT_RESET_AGAIN_SIG,       /**< AO_Boot private QTimeEvt: ask AO_Radio
                                  *   again for the wipe it refused as busy.   */
+    BOOT_NVS_SET_SIG,           /**< AO_Boot: write BootNvsSetEvt's pair to
+                                 *   the app's store. Posted by
+                                 *   kode_sys_nvs_set(); nobody is answered,
+                                 *   and a pair the store refuses is a warning
+                                 *   in the log.                              */
     LOG_LINE_SIG,               /**< AO_Log: put LogEvt.line on the console.  */
     CONSOLE_TIMEOUT_SIG,        /**< AO_Console private QTimeEvt: the command
                                  *   in flight never got its closing answer.  */
@@ -829,6 +967,10 @@ enum KodeSignals {
     DISPLAY_STATE_REQ_SIG,      /**< AO_Display: publish DISPLAY_STATE_SIG
                                  *   again, for whoever started too late to
                                  *   have heard the first one.                */
+    DISPLAY_SLEEP_REQ_SIG,      /**< AO_Display: put the glass to sleep or
+                                 *   wake it (DisplaySleepReqEvt). Posted by
+                                 *   kode_sys_screen_sleep(); answered with
+                                 *   one DISPLAY_SLEEP_SIG.                   */
     DISPLAY_CAPTURE_REQ_SIG,    /**< AO_Display: copy the frame on the glass
                                  *   and say how big it is
                                  *   (DisplayCaptureReqEvt).                  */
@@ -868,6 +1010,8 @@ enum KodeSignals {
     TOUCH_TEST_TMO_SIG,         /**< AO_Touch private one-shot QTimeEvt: the
                                  *   operator did not tap the target a step
                                  *   showed in time.                          */
+    TOUCH_INJECT_SIG,           /**< AO_Touch private: a console injection moved
+                                 *   the finger, for the test's judge (a TouchEvt). */
     DISPLAY_MIRROR_TICK_SIG,    /**< AO_Display private: one-shot, re-armed
                                  *   after every pass - the mirror's own
                                  *   pacer, paired with the credit window
@@ -901,6 +1045,9 @@ enum KodeSignals {
     BUTTONS_PAD_IDLE_SIG,       /**< AO_Buttons private: an injected release
                                  *   left the pad idle; a turn that waited for
                                  *   it may apply now.                        */
+    BUTTONS_INJECT_SIG,         /**< AO_Buttons private: a console injection moved
+                                 *   a button, for the test's judge (a ButtonEvt
+                                 *   with the board's own button in `id`). */
     IOEXP_INT_SIG,              /**< AO_IoExp private: the TCA6408A's INT line
                                  *   went low - an input changed since the
                                  *   register was last read. Posted from the
@@ -1219,6 +1366,12 @@ enum KodeSignals {
                                  *   codec after a quiet spell, and the close
                                  *   it existed for was audible (2026-09-16 -
                                  *   see AO_Audio.md).                      */
+    AUDIO_STREAM_IDLE_SIG,      /**< AO_Audio private one-shot QTimeEvt: time
+                                 *   to read how long the open stream has gone
+                                 *   without a write. At
+                                 *   KODE_SYS_AUDIO_STREAM_IDLE_MS the stream
+                                 *   is closed; short of it the timer counts
+                                 *   what is left.                           */
     IMU_READ_REQ_SIG,           /**< AO_Imu: one sample into the caller's own
                                  *   struct (ImuReadEvt), answered inside the
                                  *   step that receives it; the blocking facade's. */
@@ -1301,6 +1454,10 @@ enum KodeSignals {
     POWER_PEEK_REQ_SIG,         /**< AO_Power: take one reading, publish it and keep
                                  *   the wall clock; log nothing and dump no chip.
                                  *   AO_LowPower asks it once a minute asleep. */
+    POWER_CABLE_REQ_SIG,        /**< AO_Power: read whether a cable is in, and
+                                 *   publish a whole reading only when that
+                                 *   differs from the last one published
+                                 *   (power_cable_request()). Static event. */
     POWER_SHIP_REQ_SIG,         /**< AO_Power: ship mode - open the BATFET and
                                  *   cut the battery from VSYS. On battery the
                                  *   board dies handling this event; waking is
@@ -1342,10 +1499,11 @@ enum KodeSignals {
     RADIO_JOB_GUARD_SIG,        /**< AO_Radio private QTimeEvt: the job with
                                  *   the radio worker never came back.        */
     RADIO_LINK_LOST_SIG,        /**< AO_Radio private: the link to the C5 is
-                                 *   gone (RadioLostEvt). Posted by the
-                                 *   driver's notification, from esp-hosted's
-                                 *   event task or from the worker, never by
-                                 *   an AO.                                  */
+                                 *   gone. A knock: one static event, posted
+                                 *   on the driver's notification, from
+                                 *   esp-hosted's event task or from the
+                                 *   worker, never by an AO; AO_Radio keeps
+                                 *   the reason.                             */
     RADIO_SVC_JOB_SIG,          /**< AO_Radio private: a KODE request came
                                  *   back from the service worker
                                  *   (KqpWorkerDoneEvt). The sends have a
@@ -1439,6 +1597,12 @@ enum KodeSignals {
     C5_BOOT_SIG,                /**< AO_Radio private one-shot QTimeEvt: the
                                  *   C5 it just let go has had its boot
                                  *   time.                                  */
+    RADIO_UPDATED_SIG,          /**< AO_Radio private one-shot QTimeEvt: the
+                                 *   C5 has restarted into the update it was
+                                 *   given and booted it; AO_Boot is asked to
+                                 *   reset the board, so the next link
+                                 *   reaches the new image before any reset
+                                 *   of the C5.                             */
     EXP_PULSE_SIG,              /**< AO_Radio private one-shot QTimeEvt: the
                                  *   C5 reset that switches the expansion
                                  *   header's supply on has lasted long
@@ -1502,6 +1666,21 @@ enum KodeSignals {
                                  *   with a margin from esp-hosted's thread):
                                  *   a batch of frames waits in kdrv_frames'
                                  *   ring.                                    */
+    BLE_HEARD_REQ_SIG,          /**< AO_Radio: start or stop telling an AO about
+                                 *   the BLE advertisements the stack hears
+                                 *   (BleHeardReqEvt), ble_heard_request().
+                                 *   Answered to the asker in every state,
+                                 *   always, with BLE_HEARD_STATE_SIG.       */
+    BLE_HEARD_STATE_SIG,        /**< To the asker: listening or not, why, and
+                                 *   the totals (BleHeardStateEvt). Posted,
+                                 *   never published.                        */
+    BLE_HEARD_SIG,              /**< To the asker: one advertisement heard
+                                 *   (BleHeardEvt). Posted, never published. */
+    RADIO_HEARD_KNOCK_SIG,      /**< AO_Radio private (a static event from
+                                 *   NimBLE's host task, owed when the queue
+                                 *   has no room): kdrv_ble_heard's ring holds
+                                 *   records, or the stack ended the stream's
+                                 *   scan.                                   */
     WIFI_JOIN_REQ_SIG,          /**< AO_Radio: join WifiJoinEvt's network
                                  *   and remember it if it works.            */
     WIFI_LEAVE_REQ_SIG,         /**< AO_Radio: leave, and keep the stored
@@ -1555,14 +1734,21 @@ enum KodeSignals {
                                  *   (BleRspReqEvt). Never stored.           */
     BLE_APP_VALUE_REQ_SIG,      /**< AO_Radio: set or notify a value of the
                                  *   app's own service (BleAppValueReqEvt). */
+    BLE_HID_REPORT_REQ_SIG,     /**< AO_Radio: queue one input report of the
+                                 *   HID service for its host
+                                 *   (BleHidReportEvt). With no report, a
+                                 *   knock (a static event, owed when the
+                                 *   queue has no room): wake the drain for
+                                 *   a report of zeroes owed.                */
     BLE_STOP_REQ_SIG,           /**< AO_Radio: take the BLE stack down.      */
     BLE_STATE_REQ_SIG,          /**< AO_Radio: publish BLE_STATE_SIG now. A
                                  *   question, with no effect of its own.    */
     BLE_LINK_SIG,               /**< AO_Radio, from the driver's callback: a
-                                 *   central arrived or left. Publishes like
-                                 *   the question above AND restores the
-                                 *   advertising invariant, which is why the
-                                 *   two are not one signal.                 */
+                                 *   central arrived or left, or the count of
+                                 *   bonds moved. Publishes like the question
+                                 *   above AND restores the advertising
+                                 *   invariant, which is why the two are not
+                                 *   one signal. A knock: one waits at a time. */
     BLE_PAIR_TAKE_SIG,          /**< AO_Radio to itself, from the driver's
                                  *   callback: collect the pairing record and
                                  *   publish it. Never leaves that AO, and
@@ -1603,6 +1789,13 @@ enum KodeSignals {
                                  *   Answerable with no network at all: an
                                  *   address of 0.0.0.0 is an answer.        */
     NET_STREAM_OPEN_REQ_SIG,    /**< AO_Net: open NetStreamOpenEvt.url.       */
+    NET_STREAM_OPEN_FROM_SIG,   /**< AO_Net: open NetStreamFromEvt.url from
+                                 *   its offset on. Answered with
+                                 *   NET_STREAM_FROM_RSP_SIG; read and closed
+                                 *   as NET_STREAM_OPEN_REQ_SIG's transfer.   */
+    NET_STREAM_FROM_RSP_SIG,    /**< To the opener of
+                                 *   NET_STREAM_OPEN_FROM_SIG
+                                 *   (NetStreamFromRspEvt).                   */
     NET_STREAM_READ_REQ_SIG,    /**< AO_Net: fill a free buffer and send it.  */
     NET_STREAM_NEXT_SIG,        /**< AO_Net: a borrowed buffer, handed back
                                  *   (StorageBufEvt).                        */
@@ -1611,6 +1804,23 @@ enum KodeSignals {
     NET_STREAM_DATA_SIG,        /**< To the reader (StorageDataEvt) - the
                                  *   same conversation AO_Storage has, because
                                  *   over here a URL is just another medium.  */
+    HTTP_FILE_REQ_SIG,          /**< AO_Storage: download a URL into a file
+                                 *   (HttpFileReqEvt). Posted by
+                                 *   storage_fetch_ask(); answered with
+                                 *   HTTP_FILE_PROGRESS_SIG per chunk and one
+                                 *   HTTP_FILE_RSP_SIG, to the asker.         */
+    HTTP_FILE_STOP_SIG,         /**< AO_Storage: end the download its asker
+                                 *   started (HttpFileStopEvt).               */
+    HTTP_FILE_RETRY_SIG,        /**< AO_Storage private QTimeEvt: try again the
+                                 *   chunk that found another transfer holding
+                                 *   the file handle.                         */
+    HTTP_FILE_STALL_SIG,        /**< AO_Storage private QTimeEvt: AO_Net has
+                                 *   said nothing of the download for
+                                 *   KODE_HTTP_FILE_STALL_MS.                 */
+    HTTP_FILE_PROGRESS_SIG,     /**< To the asker: a chunk of its download is
+                                 *   in the file (HttpFileEvt).               */
+    HTTP_FILE_RSP_SIG,          /**< To the asker: its download ended
+                                 *   (HttpFileEvt).                           */
     NET_TEST_REQ_SIG,           /**< AO_Net: run the `test component=net`
                                  *   self-test; answers TEST_RESULT_SIG.     */
     NET_JOB_SIG,                /**< AO_Net private: a job came back from
@@ -1686,8 +1896,14 @@ enum KodeSignals {
                                  *   scheduler's `mqtt` entry falls due
                                  *   (NetCheckAtEvt).                         */
     NET_CHECK_TMO_SIG,          /**< AO_Net private QTimeEvt, one-shot: the
-                                 *   dwell of a radio wake for that check has
+                                 *   dwell of a dark wake for that check has
                                  *   run out.                                 */
+    NET_JOB_FAST_SIG,           /**< AO_Net private QTimeEvt, one-shot: no job
+                                 *   with either worker for NET_FAST_JOB_HOLD_MS,
+                                 *   so the jobs' hold of the fast mode ends. */
+    NET_FAST_RETRY_SIG,         /**< AO_Net private QTimeEvt, one-shot: a
+                                 *   fast-mode wish AO_Radio had no room for
+                                 *   is asked again.                          */
 
     DISPLAY_TEST_REQ_SIG,       /**< AO_Display: `test component=display`;
                                  *   answers a published TEST_RESULT_SIG. No
@@ -1729,6 +1945,10 @@ enum KodeSignals {
                                  *   RGB565 and copy the JPEG into its buffer
                                  *   (DisplayJpegReqEvt),
                                  *   display_jpeg_request().                  */
+    DISPLAY_COMPOSE_REQ_SIG,    /**< AO_Display: run one pass of the pixel
+                                 *   accelerator on the requester's pictures
+                                 *   (DisplayComposeReqEvt),
+                                 *   display_compose_run().                   */
 
     NET_SHOT_REQ_SIG,           /**< AO_Net (direct post, from
                                  *   net_shot_request()): upload the glass to
@@ -1776,6 +1996,17 @@ enum KodeSignals {
                                  *   Private to kode_standard_ao.c.          */
 
     DISPLAY_HEALTH_SIG,         /**< AO_Display private QTimeEvt: the glass is looked at. */
+    DISPLAY_GLYPHS_SIG,         /**< AO_Display (from display_glyphs_hand()):
+                                 *   the renderer has stopped drawing, for
+                                 *   a round or an app's sleep, and hands
+                                 *   the glyph strip the minute is drawn
+                                 *   from, or none (DisplayGlyphsEvt).      */
+    DISPLAY_GLYPHS_TMO_SIG,     /**< AO_Display private QTimeEvt, one-shot:
+                                 *   the renderer handed nothing in
+                                 *   KODE_LOWPOWER_GLYPHS_WAIT_MS.          */
+    DISPLAY_RESTORE_SIG,        /**< AO_Display private QTimeEvt, one-shot:
+                                 *   try again to put the glass back after
+                                 *   a wake it could not carry out.         */
 
 #if CONFIG_KODE_LOWPOWER
     LOWPOWER_REQ_SIG,           /**< AO_LowPower (direct post, from
@@ -1809,24 +2040,15 @@ enum KodeSignals {
                                  *   AO_LowPower): light the glass for the
                                  *   minute's glyphs and let it go dark
                                  *   again. Static event, no payload.       */
-    DISPLAY_GLYPHS_SIG,         /**< AO_Display (from display_glyphs_hand()):
-                                 *   the glyph strip the minute is drawn
-                                 *   from (DisplayGlyphsEvt).               */
     RADIO_SLEEP_NOTE_SIG,       /**< AO_Radio private: the C5 woke the P4, or
                                  *   the P4 woke it (RadioSleepNoteEvt).    */
     RADIO_NET_LEFT_SIG,         /**< AO_Radio (direct post, from
                                  *   radio_net_left()): AO_Net has closed its
                                  *   sessions for an OFF round, so the link
                                  *   may go down (RadioNetLeftEvt).         */
-    DISPLAY_GLYPHS_TMO_SIG,     /**< AO_Display private QTimeEvt, one-shot:
-                                 *   the renderer handed no glyphs in
-                                 *   KODE_LOWPOWER_GLYPHS_WAIT_MS.          */
     TOUCH_RESTORE_SIG,          /**< AO_Touch private QTimeEvt, one-shot:
                                  *   try again to write the controller back
                                  *   to its awake settings.                 */
-    DISPLAY_RESTORE_SIG,        /**< AO_Display private QTimeEvt, one-shot:
-                                 *   try again to put the glass back after
-                                 *   an AWAKE it could not carry out.       */
     LOWPOWER_STATE_RETRY_SIG,   /**< AO_LowPower private QTimeEvt, one-shot:
                                  *   publish the state change again, the
                                  *   event pool having had none to carry it. */
@@ -1834,16 +2056,30 @@ enum KodeSignals {
                                  *   lowpower_wake_at()): an owner has work
                                  *   due at a real time; asleep, the board
                                  *   wakes for it (LowPowerWakeAtEvt).      */
-    LOWPOWER_RADIO_DONE_SIG,    /**< AO_LowPower (direct post, from
-                                 *   lowpower_radio_done()): a radio owner's
-                                 *   work in a radio wake is finished
-                                 *   (LowPowerRadioDoneEvt).                */
-    LOWPOWER_RADIO_TMO_SIG,     /**< AO_LowPower private QTimeEvt, one-shot:
-                                 *   a radio wake ran KODE_LOWPOWER_RADIO_MAX_MS. */
+    LOWPOWER_DARK_DONE_SIG,     /**< AO_LowPower (direct post, from
+                                 *   lowpower_dark_done()): a dark-wake owner's
+                                 *   work in a dark wake is finished
+                                 *   (LowPowerDarkDoneEvt).                */
+    LOWPOWER_DARK_TMO_SIG,      /**< AO_LowPower private QTimeEvt, one-shot:
+                                 *   a dark wake ran KODE_LOWPOWER_DARK_MAX_MS. */
     LOWPOWER_RETRY_TMO_SIG,     /**< AO_LowPower private QTimeEvt, one-shot:
                                  *   begin a requested round again, an owner
                                  *   having been busy or silent in the last
                                  *   one (KODE_LOWPOWER_REQUEST_RETRY_MS). */
+    LOWPOWER_PART_REQ_SIG,      /**< AO_LowPower (direct post, from
+                                 *   lowpower_part_req_evt()): put parts
+                                 *   away, or bring them all back
+                                 *   (LowPowerPartReqEvt).                  */
+    LOWPOWER_PART_WAKE_SIG,     /**< AO_LowPower (direct post, from the wake
+                                 *   line's interrupt and the wake timer): a
+                                 *   source the app chose woke the P4. One
+                                 *   static event per source
+                                 *   (LowPowerPartWakeEvt).                 */
+    DISPLAY_SUPPLY_REQ_SIG,     /**< AO_Display (direct post, from
+                                 *   display_supply_off_request()): take the
+                                 *   supply of a panel already asleep for an
+                                 *   app (DisplaySupplyReqEvt). Answered with
+                                 *   lowpower_ready().                      */
 #endif
 
     SCHED_SET_REQ_SIG,          /**< AO_Scheduler (direct post, from
@@ -1916,6 +2152,18 @@ enum KodeSignals {
                                  *   with LOG_DOCK_SIG.                       */
     LOG_DOCK_SIG,               /**< To the asker: the dock's pins are lent or
                                  *   back (LogDockEvt).                       */
+    LOG_FLUSH_REQ_SIG,          /**< AO_Log: answer AO_Boot with
+                                 *   boot_log_flushed() (log_flush_request()).
+                                 *   Its place in the queue is the point: every
+                                 *   line posted before it is on its ports
+                                 *   first.                                   */
+    LOG_BOUNCE_REQ_SIG,         /**< AO_Log: a cable came while the cable
+                                 *   port was off the bus; show the port to
+                                 *   the host again unless frames come
+                                 *   (log_bounce_request()). Static event.    */
+    LOG_BOUNCE_TMO_SIG,         /**< AO_Log private QTimeEvt, one-shot: the
+                                 *   wait for a frame, or the pad's time off
+                                 *   the bus, ran out.                        */
     TEST_DOT_REQ_SIG,           /**< AO_TestDot: a station verb from the
                                  *   console (TestDotReqEvt). Answered with
                                  *   TEST_DOT_REC_SIG records and one
@@ -1984,6 +2232,8 @@ typedef struct {
     QEvt super;
     char file[KODE_APP_FILE_MAX];
     bool launch;   /**< Boot the slot as soon as the write succeeds. */
+    QActive *who;  /**< APP_RUN_REQ_SIG only: where the verdict is posted
+                    *   (AppReqRspEvt), or NULL for none.              */
 } AppFlashEvt;
 
 /**
@@ -2137,8 +2387,12 @@ typedef struct {
 /** @brief Why a write failed, as far as the glass needs to know. */
 typedef enum {
     KFAIL_WRITE = 0,  /**< The write itself: the image, the medium, the flash. */
-    KFAIL_KEEP,       /**< Nothing was written: the card could not keep an app
-                       *   this install would have removed.                  */
+    KFAIL_BUSY,       /**< Nothing was written: an app this install would
+                       *   remove has no copy on the card yet. Ask again.     */
+    KFAIL_DATA,       /**< An app's data folder did not come or could not be
+                       *   written. No app was installed or touched: the
+                       *   folder is how an app looks, never what lets it
+                       *   install.                                           */
 } kfail_t;
 
 /**
@@ -2160,12 +2414,52 @@ typedef struct {
  * time AO_AppMgr reads this.
  */
 typedef struct {
-    QEvt    super;
-    uint8_t src_kind;                  /**< kfw_src_t, as a plain integer.  */
-    uint8_t dst_kind;                  /**< kfw_target_t, likewise.         */
-    bool    launch;                    /**< Boot it once written.           */
-    char    src[KODE_FLASH_SRC_MAX];   /**< File name, or a URL.            */
+    QEvt     super;
+    uint8_t  src_kind;                 /**< kfw_src_t, as a plain integer.  */
+    uint8_t  dst_kind;                 /**< kfw_target_t, likewise.         */
+    bool     launch;                   /**< Boot it once written.           */
+    uint8_t  asker_src;                /**< KODE_CONSOLE_SRC_* of the command
+                                        *   that asked, where the install's
+                                        *   record goes; KODE_LOG_SRC_NONE
+                                        *   when no command did.            */
+    QActive *who;                      /**< Where AO_AppMgr's verdict is
+                                        *   posted (AppReqRspEvt), or NULL
+                                        *   for none.                       */
+    char     src[KODE_FLASH_SRC_MAX];  /**< File name, or a URL.            */
 } FlashReqEvt;
+
+/** @brief What AO_AppMgr made of a request that asked for a verdict (AppReqRspEvt.verdict). */
+typedef enum {
+    APP_REQ_TAKEN = 0,   /**< Taken: the install is under way, or the app is on its way to boot. */
+    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand, or an app the install would evict
+                          *   has no copy on the card yet: ask again.                          */
+    APP_REQ_MISSING,     /**< The file is not on the medium, or the app is not installed.      */
+    APP_REQ_EMPTY,       /**< The mailbox holds nothing to install.                            */
+    APP_REQ_REFUSED      /**< Refused for another reason, which the log gives.                 */
+} app_req_verdict_t;
+
+/**
+ * @brief AO_AppMgr's verdict on an install or run request (APP_REQ_RSP_SIG).
+ *
+ * Posted to the asker alone, once, never published: only the asker waits for
+ * it.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t verdict;   /**< app_req_verdict_t. */
+} AppReqRspEvt;
+
+/**
+ * @brief Ask AO_AppMgr for the records of its last installs (INSTALL_INFO_REQ_SIG).
+ *
+ * AO_AppMgr writes them to @c src itself, so they reach the port before the
+ * APP_REQ_RSP_SIG it posts @c who after them.
+ */
+typedef struct {
+    QEvt     super;
+    QActive *who;   /**< Where APP_REQ_RSP_SIG is posted once the records are out. */
+    uint8_t  src;   /**< KODE_CONSOLE_SRC_* of the command that asked.             */
+} InstallInfoReqEvt;
 
 /**
  * @brief One installed app, in answer to APP_LIST_REQ_SIG (APP_ENTRY_SIG).
@@ -2184,7 +2478,8 @@ typedef struct {
                             *   directory entry's own number, and the one
                             *   boot_app_offset() answers with.            */
     /* From the app's own manifest; both empty when it carries none, which
-     * every app built before manifests existed does. */
+     * every app built before manifests existed does, and the category empty
+     * when the manifest names none. */
     char     display[KODE_APP_DISPLAY_MAX];
     char     category[KODE_APP_CATEGORY_MAX];
     /* From IDF's descriptor in the image: when it was built, as the compiler
@@ -2426,6 +2721,84 @@ typedef struct {
     QActive *who;       /**< Where the response and the data go.              */
 } NetStreamOpenEvt;
 
+/**
+ * @brief Open this URL for reading from an offset on (NET_STREAM_OPEN_FROM_SIG).
+ *
+ * NetStreamOpenEvt fills its block to the byte, so the offset has an event of
+ * its own, with a URL four bytes shorter beside it. Its answer is
+ * NetStreamFromRspEvt; the reads, the loan and the close are NetStreamOpenEvt's.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t offset;    /**< Where the body is wanted from: what a cut
+                         *   download already has; 0 for all of it.          */
+    QActive *who;       /**< Where the response and the data go.              */
+    char     url[KODE_NET_FETCH_URL_MAX];
+} NetStreamFromEvt;
+
+/**
+ * @brief How far a download into a file is (HTTP_FILE_PROGRESS_SIG), and how
+ *        it ended (HTTP_FILE_RSP_SIG).
+ */
+typedef struct {
+    QEvt     super;
+    uint8_t  rc;       /**< kode_status_t. The end: KODE_OK when the body is
+                        *   all in the file, or kode_sys_http_file_stop()
+                        *   ended it; KODE_DENIED for a server that ignores
+                        *   ranges asked for the rest of a file (@c status
+                        *   200), no network, another download or transfer in
+                        *   the way, or a file that never had its turn;
+                        *   KODE_TIMEOUT for a
+                        *   body that stopped; otherwise the file's or the
+                        *   network's refusal. Progress: KODE_OK.            */
+    bool     stopped;  /**< The end: kode_sys_http_file_stop() ended it.    */
+    uint16_t status;   /**< The server's status: 200 for a body from its
+                        *   start, 206 for the rest of one, 416 for a file
+                        *   that was whole already; 0 when none answered.    */
+    uint32_t written;  /**< Bytes this download has appended to the file.   */
+    uint32_t size;     /**< The file's length now.                          */
+    uint32_t total;    /**< The length the file will have; 0 when the server
+                        *   did not say.                                     */
+} HttpFileEvt;
+
+/**
+ * @brief Download a URL into a file (HTTP_FILE_REQ_SIG).
+ *
+ * The URL and the path do not fit an event together, so they travel in a
+ * block of PSRAM the door fills and AO_Storage owns from the post on: it
+ * frees it when the download ends.
+ */
+typedef struct {
+    QEvt         super;
+    void        *job;   /**< The download's record, handed over.            */
+    QActive     *who;   /**< The asking AO.                                  */
+    HttpFileEvt *rsp;   /**< Its end's answer, taken with the request.      */
+} HttpFileReqEvt;
+
+/** @brief End a download (HTTP_FILE_STOP_SIG). */
+typedef struct {
+    QEvt     super;
+    QActive *who;       /**< The AO that asked for the download.             */
+} HttpFileStopEvt;
+
+/**
+ * @brief Whether an open from an offset worked (NET_STREAM_FROM_RSP_SIG).
+ *
+ * The server's status rides with the verdict, because the opener of a resumed
+ * download reads a refusal by it: a 200 is a server that ignores ranges, a
+ * 416 a body with nothing past the offset.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t size;      /**< What is left of the body from the offset on; for a
+                         *   416, the resource's whole length; 0 when the
+                         *   server did not say, and for any other refusal. */
+    uint16_t http;      /**< The server's status code, also when the open is
+                         *   refused; 0 when no server answered.             */
+    uint8_t  status;    /**< kode_status_t: KODE_OK when the body is ready to
+                         *   read from the offset.                           */
+} NetStreamFromRspEvt;
+
 /** @brief Whether the open worked, and how big the file is (STORAGE_OPEN_RSP_SIG). */
 typedef struct {
     QEvt     super;
@@ -2475,15 +2848,37 @@ typedef struct {
     const void *data;
     uint32_t    len;
     QActive    *who;    /**< Where the response goes.                         */
+    uint32_t    tag;    /**< The writer's own number for this write, given back
+                         *   in the answer; KODE_STORAGE_TAG_NONE when one write
+                         *   at a time is all the writer has. */
+    bool        yields; /**< The write gives way to a download: refused while
+                         *   one runs, and cut between two chunks when one is
+                         *   asked for. Set by storage_write_yield_request(). */
 } StorageWriteEvt;
 
 /** @brief How a write ended (STORAGE_WRITE_RSP_SIG). */
 typedef struct {
     QEvt     super;
     uint32_t written;
-    uint8_t  status;    /**< kode_status_t                                    */
+    uint8_t  status;    /**< kode_status_t. Before the file is opened:
+                         *   KODE_NO_RESOURCES for a path whose volume has
+                         *   less room than the file is long, KODE_ERROR for a
+                         *   write that gives way on a card that has not
+                         *   proved it takes a write, KODE_DENIED for any
+                         *   other refusal. After: KODE_DENIED for a write
+                         *   that gave way to a download, KODE_NO_RESOURCES
+                         *   for one that gives way and found the card full,
+                         *   else how the medium failed. */
     uint8_t  medium;    /**< Where it landed.                                 */
+    uint32_t tag;       /**< The request's tag: a late answer to a write given
+                         *   up on is told from the answer to the write in hand. */
 } StorageWriteRspEvt;
+
+/** @brief The writer gives up its write in flight (STORAGE_WRITE_ABANDON_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    QActive *who;       /**< The AO that asked for the write; no other can end it. */
+} StorageWriteAbandonEvt;
 
 /**
  * @brief Ask what one file says it is (STORAGE_DESC_REQ_SIG).
@@ -2504,7 +2899,8 @@ typedef struct {
     char    name[KODE_APP_FILE_MAX];             /**< Echoed: answers can cross. */
     char    project[32];                         /**< esp_app_desc_t.project_name. */
     char    display[KODE_APP_DISPLAY_MAX];       /**< Empty when unmanifested.   */
-    char    category[KODE_APP_CATEGORY_MAX];     /**< Empty when unmanifested.   */
+    char    category[KODE_APP_CATEGORY_MAX];     /**< Empty when none is named.  */
+    uint8_t build[KODE_APP_BUILD_LEN];           /**< The image's build id; zero when it has none. */
     uint8_t status;                              /**< kode_status_t of the read. */
 } StorageDescRspEvt;
 
@@ -2513,6 +2909,8 @@ typedef struct {
     QEvt     super;
     char     project[32];
     QActive *who;
+    bool     others;   /**< STORAGE_APP_WIPE_REQ_SIG only: take every app's
+                        *   files but @c project's, instead of its own. */
 } AppDataReqEvt;
 
 /** @brief Where an app's folder lives, or that it does not. */
@@ -2538,17 +2936,20 @@ typedef struct {
 } AppDataFieldsEvt;         /* 208 bytes plus QEvt: the medium tier */
 
 /**
- * @brief One third of the icon, back to `who` (APPDATA_ICON_SIG).
+ * @brief One piece of the icon, back to `who` (APPDATA_ICON_SIG).
  *
- * KAPP_ICON_BYTES (12288) does not fit one KODE_RECV_CHUNK-wide jumbo block,
- * so the icon travels as three: seq 0..2, each a full 4096-byte third.
+ * The icon is KODE_APP_ICON_BYTES, far more than one KODE_RECV_CHUNK-wide
+ * jumbo block holds, so it travels as KODE_APP_ICON_PIECES: seq 0 up, each a
+ * full KODE_APP_ICON_PIECE bytes, laid end to end in the order they arrive.
+ * A piece is wider than the jumbo tier's block, so it is served from the
+ * icon tier, which is in PSRAM.
  */
 typedef struct {
     QEvt     super;
     char     project[32];
-    uint8_t  seq;          /**< 0..2: which 4096-byte third.               */
-    uint8_t  data[KODE_RECV_CHUNK];
-} AppDataIconEvt;           /* the jumbo tier's second tenant */
+    uint8_t  seq;          /**< 0..KODE_APP_ICON_PIECES-1: which piece.   */
+    uint8_t  data[KODE_APP_ICON_PIECE];
+} AppDataIconEvt;           /* the icon tier's only tenant */
 
 /**
  * @brief How a delete of one app's data folder ended (APPDATA_RM_RSP_SIG).
@@ -2575,16 +2976,26 @@ typedef enum {
     APP_WIPE_FOLDER_LEFT        /**< It is there and something in it would not go. */
 } AppWipeFolder;
 
-/** @brief What a wipe of one app did on one medium. */
+/**
+ * @brief What a wipe did on one medium: of one app's files, or for a clear,
+ *        of every app's but the kept one's (storage_apps_clear_request()).
+ */
 typedef struct {
-    bool    present;   /**< The medium was mounted and its root was walked.   */
-    uint8_t files;     /**< Images of the project removed.                    */
-    uint8_t left;      /**< Images of the project that would not go.          */
-    uint8_t folder;    /**< AppWipeFolder.                                    */
+    bool    present;   /**< The medium was mounted and its root read.         */
+    uint8_t files;     /**< Images removed: the project's, or a clear's.      */
+    uint8_t left;      /**< Images the wipe took that would not go; for a
+                        *   clear, also those listed that would not read.    */
+    uint8_t folder;    /**< AppWipeFolder; for a clear, LEFT when any folder
+                        *   stayed, else REMOVED when any went.               */
+    bool    cut;       /**< Some of the medium was never looked at: its root
+                        *   or a tree would not read, held more than the
+                        *   wipe walks, or held an image whose name is too
+                        *   long to look at.                                  */
 } AppWipeMedium;
 
 /**
- * @brief How a wipe of one app's files ended (STORAGE_APP_WIPE_RSP_SIG).
+ * @brief How a wipe of one app's files, or a clear, ended
+ *        (STORAGE_APP_WIPE_RSP_SIG).
  *
  * KODE_OK says the wipe ran to its end, and the two media say what it found
  * and whether it went: a file left behind is in `left`, not in the status.
@@ -2593,7 +3004,9 @@ typedef struct {
  */
 typedef struct {
     QEvt          super;
-    char          project[KODE_APP_PROJECT_MAX]; /**< Echoed: answers can cross. */
+    char          project[KODE_APP_PROJECT_MAX]; /**< Echoed, the kept one's for
+                                                  *   a clear: answers can
+                                                  *   cross.                  */
     uint8_t       status;  /**< kode_status_t, as the lines above read it.     */
     AppWipeMedium fs;      /**< The internal partition.                        */
     AppWipeMedium sd;      /**< The card.                                      */
@@ -2718,6 +3131,8 @@ typedef struct {
 #define AUTOTEST_ID_NFC_CARD   33U
 #define AUTOTEST_ID_RFID_CARD  34U
 #define AUTOTEST_ID_PSRAM      35U
+/* cppcheck-suppress misra-c2012-2.5 ; its row is built with CONFIG_KODE_COMPOSE */
+#define AUTOTEST_ID_COMPOSE    36U
 
 /** @brief The most rows one run may hold. */
 #define AUTOTEST_RUN_MAX       24U
@@ -2851,6 +3266,18 @@ typedef struct {
     kboot_run_mode_t mode;
 } BootRunEvt;
 
+/**
+ * @brief A pair for the app's store (BOOT_NVS_SET_SIG).
+ *
+ * Both strings are copies: the asker's buffers are its own again once
+ * kode_sys_nvs_set() returns.
+ */
+typedef struct {
+    QEvt super;
+    char key[KODE_SYS_NVS_KEY_MAX];     /**< NUL-terminated, never empty.  */
+    char value[KODE_SYS_NVS_VALUE_MAX]; /**< NUL-terminated; may be empty. */
+} BootNvsSetEvt;
+
 /** @brief Ask AO_Boot for a factory reset (FACTORY_RESET_REQ_SIG). */
 typedef struct {
     QEvt     super;
@@ -2881,14 +3308,17 @@ typedef struct {
                          *   unsigned subtraction of two stamps. */
 } ButtonEvt;
 
-/** @brief The top or the bottom button is being held (BUTTON_HOLD_SIG).
+/** @brief The top or the bottom button is being held (BUTTON_HOLD_SIG,
+ *        BUTTON_HOME_HOLD_SIG).
  *
- * Published once per press, KODE_BUTTON_HOLD_MS after the debounce
- * confirmed it and only if the button is still down at that moment. The
- * release that follows arrives as the usual ButtonEvt. The console's
- * `btn id=top|bot state=hold` publishes the same event on request, with no
- * press before it and no release after it: a host reproducing a thumb sends
- * the press, the hold and the release. */
+ * BUTTON_HOLD_SIG is published once per press, KODE_BUTTON_HOLD_MS after the
+ * debounce confirmed it and only if the button is still down at that moment.
+ * The bottom button, held on, publishes BUTTON_HOME_HOLD_SIG once more,
+ * KODE_HOME_HOLD_MS after the same confirmation. The release that follows
+ * arrives as the usual ButtonEvt. The console's `btn id=top|bot state=hold`
+ * publishes the same events on request, with no press before them and no
+ * release after: a host reproducing a thumb sends the press, the hold and
+ * the release. */
 typedef struct {
     QEvt    super;
     uint8_t id;        /**< kdrv_button_t: KDRV_BTN_TOP or KDRV_BTN_BOT. */
@@ -2946,6 +3376,19 @@ typedef struct {
     uint8_t  ntc;          /**< NTC_FAULT, live: 0 normal, 2 warm, 3 cool, 5 cold, 6 hot.
                             *   Not 0, charging is held (AO_Power's charge guard). */
 } PowerEvt;
+
+/**
+ * @brief The cell is critical on battery, or no longer (POWER_CRITICAL_SIG).
+ *
+ * One of two static events: it cannot fail to allocate, and the reading that
+ * decided it is the POWER_EVT_SIG published just before it.
+ */
+typedef struct {
+    QEvt super;
+    bool critical;   /**< true: plug in a cable before the board switches
+                      *   itself off; false: a cable came, or the cell
+                      *   climbed back.                                   */
+} PowerCriticalEvt;
 
 /* What a field request asks of a chip. Three verbs, shared by every chip
  * driver that carries a field table - the PMIC, the gauge, the expander - so
@@ -4231,14 +4674,6 @@ typedef struct {
                           *   tries are coming until somebody asks.           */
 } RadioStateEvt;
 
-/** @brief The link to the C5 is gone (RADIO_LINK_LOST_SIG). */
-typedef struct {
-    QEvt    super;
-    uint8_t status;      /**< kode_status_t: KODE_ERROR when the transport
-                          *   dropped by itself, KODE_TIMEOUT when a job
-                          *   failed over a C5 that stopped answering.       */
-} RadioLostEvt;
-
 /** @brief RADIO_PARK_REQ_SIG: a jump is about to restart the board. */
 typedef struct {
     QEvt    super;
@@ -4422,18 +4857,46 @@ typedef struct {
     uint8_t channel;
     uint8_t authmode;   /**< 0 = open.                                      */
     uint8_t bssid[6];   /**< The access point's MAC, as on the air.         */
+    uint8_t gen;        /**< The listing's generation, as WifiScanEndEvt.gen;
+                         *   0 in an entry posted to an asker.              */
 } WifiScanEntryEvt;
 
-/** @brief The end of a scan (WIFI_SCAN_END_SIG, WIFI_SAVED_END_SIG). */
+/** @brief WifiScanEndEvt.gen and its like: no generation, taken by every listener. */
+#define KQP_SCAN_GEN_NONE  0U
+
+/**
+ * @brief The console's Wi-Fi listing, asked for (WIFI_SCAN_REQ_SIG).
+ *
+ * The generation is what tells a listing's entries and end from the ones of
+ * a listing before it that are still in a listener's queue.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t gen;        /**< The request's generation, from wifi_scan_request();
+                         *   KQP_SCAN_GEN_NONE for none.                    */
+} WifiScanReqEvt;
+
+/** @brief The end of a scan (WIFI_SCAN_END_SIG, WIFI_SCAN_AGAIN_SIG, BLE_SCAN_END_SIG, WIFI_SAVED_END_SIG). */
 typedef struct {
     QEvt    super;
     uint8_t count;      /**< How many entries were published.               */
     bool    ok;         /**< false: the scan itself failed; count is 0.     */
     bool    busy;       /**< true: not started, the C5 was busy with another
                          *   job (ok is false, count 0); ask again.          */
-    bool    cut;        /**< true: a Wi-Fi sweep ended before its last step,
-                         *   for a stop or for a job that needed the radio
-                         *   (ok is false); count is what it had heard.      */
+    bool    cut;        /**< true: the scan ended before its end, for a
+                         *   stop or for a newer request that needed the
+                         *   radio (ok is false); count is what it had
+                         *   published.                                      */
+    uint8_t gen;        /**< The generation of the newest request this
+                         *   listing answers: generations go up by one a
+                         *   request, both radios together, and wrap past
+                         *   255 to 1. A listener that waits for its own
+                         *   request skips an end older than it.
+                         *   KQP_SCAN_GEN_NONE: not told.                    */
+    bool    rest;       /**< true: not started, an app's rest has the radio
+                         *   (ok and busy are false, count 0); ask again
+                         *   once the rest ends. @c gen is the refused
+                         *   request's, as with @c busy.                     */
 } WifiScanEndEvt;
 
 /** @brief ScanAskEvt.kind: the Wi-Fi sweep; the rows are kdrv_wifi_ap_t. */
@@ -4452,12 +4915,17 @@ typedef struct {
     QEvt    super;
     uint8_t rc;         /**< kode_status_t: KODE_OK, the scan ended;
                          *   KODE_ERROR, it failed or the link went;
+                         *   KODE_CANCELLED, a newer radio request took
+                         *   its place, and @c seen is what it had handed
+                         *   over;
                          *   KODE_NO_RESOURCES, the radio was busy with a
                          *   scan, a test row or an install: ask again;
-                         *   KODE_DENIED, a BLE scan with Bluetooth off in
-                         *   Settings.                                     */
+                         *   KODE_DENIED, an app rests the radio (@c rest),
+                         *   or a BLE scan with Bluetooth off in Settings.  */
     uint8_t seen;       /**< Networks or devices handed over, 255 at most.  */
     bool    more;       /**< true: entries were left out, the queue full.   */
+    bool    rest;       /**< true: KODE_DENIED because an app rests the
+                         *   radio; ask again once the rest ends.           */
 } ScanRspEvt;
 
 /**
@@ -4478,6 +4946,7 @@ typedef struct {
                          *   what the scan kept, in the driver's order.     */
     uint8_t    cap;     /**< Rows @c rows holds.                            */
     uint8_t    got;     /**< Rows written; 0 unless @c rc is KODE_OK.       */
+    bool       rest;    /**< As ScanRspEvt.rest.                            */
 } ScanWaiter;
 
 /**
@@ -4561,12 +5030,13 @@ typedef struct {
     uint32_t heard;     /**< Frames heard since the start.                  */
     uint16_t mgmt;      /**< Management frames in the period.               */
     uint16_t data;      /**< Data frames in the period.                     */
-    uint32_t dropped;   /**< Frames lost since the start: the ring's, and
+    uint32_t dropped;   /**< Frames lost since the start: the ring's, a
+                         *   batch's whose records were not whole, and
                          *   those the asker's queue had no room for.       */
 } WifiFramesTickEvt;
 
 /** @brief Bytes of a frame's header kept after the MAC header (kode_wire.h's KODE_SNIFF_HEAD_LEN). */
-#define KWIFI_FRAME_HEAD_LEN  8U
+#define KWIFI_FRAME_HEAD_LEN  48U
 
 /** @brief Bytes of a frame's frame control (kdrv_frames.h's KDRV_FRAME_FC_LEN). */
 #define KWIFI_FRAME_FC_LEN    2U
@@ -4582,9 +5052,83 @@ typedef struct {
     uint8_t  fc[KWIFI_FRAME_FC_LEN];       /**< Frame control, as on the air.     */
     uint8_t  addr1[KWIFI_FRAME_ADDR_LEN];  /**< Address 1, as on the air.         */
     uint8_t  addr2[KWIFI_FRAME_ADDR_LEN];  /**< Address 2; zeros when it has none. */
+    uint8_t  addr3[KWIFI_FRAME_ADDR_LEN];  /**< Address 3 - the network's in a
+                                            *   management frame; in a data
+                                            *   frame, the one its To DS and
+                                            *   From DS bits name; zeros when it
+                                            *   has none, and with a @c head_len
+                                            *   of 8.                            */
     uint16_t len;                          /**< The frame's length on the air.    */
-    uint8_t  head[KWIFI_FRAME_HEAD_LEN];   /**< After the MAC header; zeros past its end. */
+    uint8_t  head_len;                     /**< Bytes of @c head kept:
+                                            *   KWIFI_FRAME_HEAD_LEN, 8 from a
+                                            *   C5 older than the longer head,
+                                            *   0 in a data frame.               */
+    uint8_t  head[KWIFI_FRAME_HEAD_LEN];   /**< After the MAC header; zeros past
+                                            *   the frame's end, past
+                                            *   @c head_len and in a data
+                                            *   frame. In a beacon: 12
+                                            *   fixed bytes (the capabilities
+                                            *   at 10, privacy their bit 4),
+                                            *   then the name's element.         */
 } WifiFrameEvt;
+
+/** @brief Bytes of an advertisement's payload (kdrv_ble_heard.h's KDRV_BLE_HEARD_DATA_MAX); radio_heard.c asserts the two equal. */
+#define KBLE_HEARD_DATA_MAX     31U
+
+/** @brief Bytes of an advertiser's address (kdrv_ble_heard.h's KDRV_BLE_HEARD_ADDR_LEN); radio_heard.c asserts the two equal. */
+#define KBLE_HEARD_ADDR_LEN     6U
+
+#define KBLE_HEARD_RSSI_NONE    127 /**< BleHeardEvt.rssi: the controller gave no level. */
+
+#define KBLE_HEARD_ADDR_PUBLIC  0U  /**< BleHeardEvt.addr_type: a public address. */
+#define KBLE_HEARD_ADDR_RANDOM  1U  /**< BleHeardEvt.addr_type: a random address. */
+
+#define KBLE_HEARD_PDU_CONN     0U  /**< BleHeardEvt.pdu: ADV_IND, connectable and scannable. */
+#define KBLE_HEARD_PDU_DIRECT   1U  /**< BleHeardEvt.pdu: ADV_DIRECT_IND.                     */
+#define KBLE_HEARD_PDU_SCAN     2U  /**< BleHeardEvt.pdu: ADV_SCAN_IND, scannable only.       */
+#define KBLE_HEARD_PDU_NONCONN  3U  /**< BleHeardEvt.pdu: ADV_NONCONN_IND.                    */
+#define KBLE_HEARD_PDU_SCAN_RSP 4U  /**< BleHeardEvt.pdu: SCAN_RSP; a passive stream hears none. */
+#define KBLE_HEARD_PDU_OTHER    5U  /**< BleHeardEvt.pdu: anything else the stack reports.    */
+
+/** @brief Why an advertisement stream is, or is not, listening (BleHeardStateEvt.why). */
+typedef enum {
+    KBLE_HEARD_OK = 0,      /**< Listening, or stopped as asked.                                       */
+    KBLE_HEARD_NO_LINK,     /**< The C5 link is down, or went down under the stream.                   */
+    KBLE_HEARD_BLE_OFF,     /**< Bluetooth is off in Settings or its stack is not up, or went off.     */
+    KBLE_HEARD_BUSY,        /**< Something that is not cut holds the radio: a Wi-Fi scan, a row, an update. */
+    KBLE_HEARD_MEMORY,      /**< No room for the ring.                                                 */
+    KBLE_HEARD_REFUSED,     /**< The stack refused the scan, or ended it by itself.                    */
+    KBLE_HEARD_RESTING,     /**< The board is going to rest.                                           */
+    KBLE_HEARD_CANCELLED    /**< Ended early: a newer Bluetooth request took its place.                */
+} kble_heard_why_t;
+
+/** @brief BLE_HEARD_REQ_SIG: start or stop, and who to tell. */
+typedef struct {
+    QEvt     super;
+    QActive *who;       /**< Where every answer goes.                       */
+    bool     on;        /**< true to listen, false to stop.                 */
+} BleHeardReqEvt;
+
+/** @brief BLE_HEARD_STATE_SIG: the answer to every request, and the end of a stream. */
+typedef struct {
+    QEvt     super;
+    bool     on;        /**< Listening now.                                          */
+    uint8_t  why;       /**< kble_heard_why_t.                                       */
+    uint32_t heard;     /**< Advertisements heard since the start.                   */
+    uint32_t dropped;   /**< Not handed over since the start: the ring's, the queue's, the pool's. */
+} BleHeardStateEvt;
+
+/** @brief BLE_HEARD_SIG: one advertisement, as the stack reported it. */
+typedef struct {
+    QEvt     super;
+    uint8_t  addr[KBLE_HEARD_ADDR_LEN]; /**< As printed.                                   */
+    uint8_t  addr_type;                 /**< KBLE_HEARD_ADDR_PUBLIC or _RANDOM.            */
+    int8_t   rssi;                      /**< dBm; KBLE_HEARD_RSSI_NONE when not measured.  */
+    uint8_t  pdu;                       /**< KBLE_HEARD_PDU_*.                             */
+    uint8_t  len;                       /**< Bytes in data.                                */
+    uint8_t  data[KBLE_HEARD_DATA_MAX]; /**< The payload as on the air; zeros past len.    */
+    uint32_t dropped;                   /**< The stream's dropped total at this hand-over. */
+} BleHeardEvt;
 
 /** @brief Bytes of a network name in the radio check: 32 characters and the terminator. */
 #define RADIO_PROBE_SSID_BYTES  33U
@@ -4699,18 +5243,22 @@ typedef struct {
 } BleStateEvt;
 
 /**
- * @brief A pairing wants a code shown, or has ended (BLE_PAIR_SIG).
+ * @brief A pairing wants a code shown, has ended, or was refused with no
+ *        code (BLE_PAIR_SIG).
  *
  * The two enums are kdrv_ble's, carried as plain integers exactly as
  * BleStateEvt carries kdrv_ble_state_t: this header cannot include a driver
  * one, and the subscriber names the values from kdrv_ble.h, which it already
- * includes for the state.
+ * includes for the state. A refusal is told at most once in
+ * KODE_BLE_PAIR_REFUSED_QUIET_MS, and changes nothing on the board.
  */
 typedef struct {
     QEvt     super;
-    uint8_t  phase;    /**< kdrv_ble_pair_phase_t: SHOW or DONE.           */
+    uint8_t  phase;    /**< kdrv_ble_pair_phase_t: SHOW, DONE or REFUSED.  */
     uint32_t passkey;  /**< Six digits, 0..999999. Valid in SHOW.          */
-    uint8_t  outcome;  /**< kdrv_ble_pair_outcome_t. Valid in DONE.        */
+    uint8_t  outcome;  /**< kdrv_ble_pair_outcome_t. Valid in DONE, and in
+                        *   REFUSED, where it says why: HIDDEN or
+                        *   APP_CLOSED.                                     */
 } BlePairEvt;
 
 /** @brief How long to listen (BLE_SCAN_REQ_SIG). */
@@ -4719,6 +5267,9 @@ typedef struct {
     uint32_t ms;         /**< 0 = KODE_BLE_SCAN_MS; otherwise
                           *   KODE_BLE_SCAN_MIN_MS..KODE_BLE_SCAN_MAX_MS,
                           *   and anything else is refused.              */
+    uint8_t  gen;        /**< The request's generation, from
+                          *   ble_scan_request(); KQP_SCAN_GEN_NONE for
+                          *   none.                                      */
 } BleScanReqEvt;
 
 /**
@@ -4756,6 +5307,9 @@ typedef struct {
     uint8_t  mfg[KQP_BLE_MFG_MAX];   /**< Maker data, company id (LE) first. */
     uint8_t  svc_n;      /**< Entries in @c svc16.                          */
     uint16_t svc16[KQP_BLE_SVC_MAX]; /**< 16-bit service UUIDs.             */
+    uint8_t  gen;        /**< The listing's generation, as
+                          *   WifiScanEndEvt.gen; 0 in an entry posted to
+                          *   an asker.                                     */
 } BleScanEvt;
 
 /** @brief Bytes of a characteristic's name in the app's service, NUL included. */
@@ -4834,6 +5388,23 @@ typedef struct {
     QEvt super;
     bool connected;   /**< true: a link began; false: it ended. */
 } BleAppLinkEvt;
+
+#define KQP_BLE_HID_REPORT_MAX  8U   /**< Bytes of the longest HID input report. */
+
+/**
+ * @brief One input report of the HID service for its host (BLE_HID_REPORT_REQ_SIG).
+ *
+ * Its sender holds a slot of the driver's ring for it, and one more for a
+ * tap's second report (kdrv_ble_hid_claim()), which AO_Radio's pushes give back.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t kind;                          /**< The kind of device the report is of. */
+    bool    tap;                           /**< A report of zeroes follows it: what it
+                                            *   pressed is let go.                    */
+    uint8_t len;                           /**< Bytes in @c data.                    */
+    uint8_t data[KQP_BLE_HID_REPORT_MAX];  /**< The report.                          */
+} BleHidReportEvt;
 
 /** @brief A read took the oldest value of a queued characteristic (BLE_APP_TAKEN_SIG). */
 typedef struct {
@@ -4988,7 +5559,13 @@ typedef struct {
     int32_t  content_length; /**< As declared; -1 when chunked or absent.   */
     uint32_t body_len;       /**< What the body actually held.              */
     uint32_t kept;           /**< What fitted in the caller's buffer.       */
-    bool     truncated;      /**< body_len > kept.                          */
+    bool     truncated;      /**< body_len > kept; for a range, the body
+                              *   went on past the buffer and was left
+                              *   unread.                                    */
+    int64_t  range_total;    /**< A range: the length of the whole resource,
+                              *   from the server's Content-Range; -1 when
+                              *   it sent none, and for a plain GET or a
+                              *   POST.                                      */
 } NetHttpResult;
 
 /** @brief Answers kode_sys_net_lookup() (NET_LOOKUP_RSP_SIG, @c stats.ip4 alone) and
@@ -5024,6 +5601,8 @@ typedef struct {
 typedef struct {
     QEvt           super;
     bool           post;    /**< POST @c body; false GETs.                   */
+    bool           ranged;  /**< A GET of the @c cap bytes from @c offset on. */
+    uint64_t       offset;  /**< A range's first byte.                       */
     char           url[KODE_NET_URL_MAX];
     char           ctype[KODE_NET_CTYPE_MAX]; /**< A POST's Content-Type; empty sends none. */
     const void    *body;    /**< A POST's body, read in place.               */
@@ -5096,6 +5675,13 @@ typedef struct {
     uint8_t state;      /**< kdrv_mqtt_state_t                              */
     uint8_t err;        /**< kdrv_mqtt_err_t: meaningful when not up.       */
 } MqttStateEvt;
+
+/** @brief Whether a confirmed console line left the board (CONSOLE_SENT_SIG). */
+typedef struct {
+    QEvt    super;
+    uint8_t src;        /**< KODE_CONSOLE_SRC_BLE or KODE_CONSOLE_SRC_NET.  */
+    bool    ok;         /**< true: the far end has it; false: it is lost.   */
+} ConsoleSentEvt;
 
 /** @brief Where the Kode channel stands (CHANNEL_STATE_SIG). */
 typedef struct {
@@ -5196,6 +5782,106 @@ typedef struct {
                           *   already listening to.
                           *   Meaningless when @c up is false.              */
 } DisplayStateEvt;
+
+#define DISPLAY_SLEEP_WHO_APP   0U  /**< A request through kode_sys_screen_sleep().       */
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
+#define DISPLAY_SLEEP_WHO_REST  1U  /**< AO_LowPower's, for the screen of an app's rest.  */
+
+/** @brief Put the glass to sleep or wake it (DISPLAY_SLEEP_REQ_SIG). */
+typedef struct {
+    QEvt    super;
+    bool    sleep;  /**< true: the panel in sleep-in and its link down. false:
+                     *   both back, the glass at the brightness it had.      */
+    uint8_t who;    /**< DISPLAY_SLEEP_WHO_*: the door it came through. The
+                     *   answer carries it back, so neither door takes the
+                     *   other's answer for its own.                        */
+} DisplaySleepReqEvt;
+
+/** @brief Why a request to sleep or wake the glass ended as it did (DisplaySleepEvt::why). */
+typedef enum {
+    DISPLAY_SLEEP_WHY_NONE = 0,   /**< The glass is as asked.                          */
+    DISPLAY_SLEEP_WHY_NO_PANEL,   /**< The panel is not up.                            */
+    DISPLAY_SLEEP_WHY_LENT,       /**< A screenshot or the mirror is reading the glass. */
+    DISPLAY_SLEEP_WHY_TEST,       /**< The panel's test row is on the glass.           */
+    DISPLAY_SLEEP_WHY_RENDERER,   /**< Whoever draws did not stop in
+                                   *   KODE_LOWPOWER_GLYPHS_WAIT_MS.                  */
+    DISPLAY_SLEEP_WHY_PANEL,      /**< The panel or its link refused a step.          */
+    DISPLAY_SLEEP_WHY_BOARD,      /**< The board's own rest has the glass.            */
+    DISPLAY_SLEEP_WHY_UNDERWAY,   /**< An earlier request is still being carried out. */
+    DISPLAY_SLEEP_WHY_WOKEN,      /**< A wake came before the glass slept.            */
+    DISPLAY_SLEEP_WHY_EVENTS,     /**< No event was free to ask the renderer to stop. */
+    DISPLAY_SLEEP_WHY_COUNT       /**< How many reasons there are.                    */
+} display_sleep_why_t;
+
+/**
+ * @brief How one request to sleep or wake the glass ended (DISPLAY_SLEEP_SIG).
+ *
+ * Published once per DISPLAY_SLEEP_REQ_SIG, when AO_Display has done its part
+ * or refused: asleep is the panel in sleep-in with its link down; awake is
+ * both back, the brightness given and DISPLAY_REPAINT_SIG published. The first
+ * frame is the renderer's, after it.
+ */
+typedef struct {
+    QEvt    super;
+    bool    asleep;   /**< Whether the glass is at rest now.                  */
+    uint8_t rc;       /**< A kode_status_t: KODE_OK when the glass is as the
+                       *   request asked.                                     */
+    uint8_t why;      /**< A display_sleep_why_t: why not, when @c rc is not
+                       *   KODE_OK.                                           */
+    uint8_t who;      /**< The DISPLAY_SLEEP_WHO_* of the request answered.   */
+} DisplaySleepEvt;
+
+/**
+ * @brief Stop drawing: the glass is about to sleep for an app (DISPLAY_PARK_SIG).
+ *
+ * The renderer answers with kode_sys_screen_parked(seq). AO_Display settles
+ * the sleep only with the number of the park it is waiting for, so an answer
+ * that comes late, or one that never comes, leaves the next sleep its own.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t seq;   /**< This park's number, never 0.                         */
+} DisplayParkEvt;
+
+/**
+ * @brief What the renderer hands AO_Display once it has stopped drawing
+ *        (DISPLAY_GLYPHS_SIG): for a round, the glyphs the minute is drawn
+ *        from; for an app's sleep, none.
+ *
+ * The one exception to rule 7 that this event makes, and the reason: the
+ * eleven glyphs (0 to 9 and the colon) of a large font are far more than an
+ * event can carry, and copying them into the pool for every hand-over would
+ * only move the same bytes twice. @c strip is in PSRAM, owned by the sender,
+ * and valid from the hand-over until the board is AWAKE again: AO_Display
+ * reads it and never frees or writes it.
+ */
+typedef struct {
+    QEvt            super;
+    const uint16_t *strip;    /**< The glyphs, RGB565, in one row: the ten
+                               *   digits 0 to 9, glyph_w wide each, then the
+                               *   colon, colon_w wide; the row is
+                               *   10 * glyph_w + colon_w pixels wide and
+                               *   glyph_h tall. NULL: the renderer is parked
+                               *   and has no glyphs to give.                */
+    uint16_t        glyph_w;  /**< One digit's width, pixels.                 */
+    uint16_t        glyph_h;  /**< One digit's height, pixels.                */
+    uint16_t        x;        /**< Left edge of the time on the glass.        */
+    uint16_t        y;        /**< Top edge of the time on the glass.         */
+    uint16_t        colon_w;  /**< The colon's width, pixels.                 */
+    uint8_t         rest_pct; /**< The glass's brightness while ASLEEP.       */
+    bool            h12;      /**< true: the hour is read on a 12 h dial, 1 to
+                               *   12 with no AM or PM, and an hour of one
+                               *   figure leaves the tens cell blank, the
+                               *   way the renderer's own clock does. false:
+                               *   00 to 23.                                 */
+    uint8_t         adv[11];  /**< From a figure to the next, the ten digits
+                               *   then the colon, so the time keeps the
+                               *   renderer's own spacing. All 0: fixed cells. */
+    uint32_t        park;     /**< The DisplayParkEvt this answers, set by
+                               *   kode_sys_screen_parked(); 0 for a round's
+                               *   hand-over, which display_glyphs_hand()
+                               *   always sends.                             */
+} DisplayGlyphsEvt;
 
 /** @brief Copy the frame on the glass for @c who (DISPLAY_CAPTURE_REQ_SIG). */
 typedef struct {
@@ -5303,6 +5989,65 @@ typedef struct {
     uint32_t       *ack;   /**< Where @c gen is written back, just before
                             *   @c done.                                   */
 } DisplayJpegReqEvt;
+
+#define DISPLAY_COMPOSE_FILL   0U  /**< Paint a block of @c dst one colour.          */
+#define DISPLAY_COMPOSE_SCALE  1U  /**< Copy a block of @c src into @c dst, scaled.  */
+#define DISPLAY_COMPOSE_BLEND  2U  /**< Lay a block of @c src over @c dst.           */
+
+/** @brief A picture a compose pass reads or writes: RGB565, @c w * 2 bytes a row. */
+typedef struct {
+    uint8_t *px;     /**< The pixels: the requester's, held until the answer. */
+    uint32_t bytes;  /**< The allocation's size.                              */
+    uint16_t w;      /**< Width in pixels.                                    */
+    uint16_t h;      /**< Height in pixels.                                   */
+} display_pic_t;
+
+/** @brief What display_compose_run() runs: one pass, as kdrv_compose.h takes it. */
+typedef struct {
+    uint8_t       op;       /**< DISPLAY_COMPOSE_*.                              */
+    bool          glass;    /**< The source is the frame on the glass, not
+                             *   @c src: a scale only.                           */
+    display_pic_t dst;      /**< The picture written.                            */
+    display_pic_t src;      /**< The picture read; unused by a fill.             */
+    uint16_t      dst_x;    /**< Column of @c dst the block lands on.            */
+    uint16_t      dst_y;    /**< Row of @c dst the block lands on.               */
+    uint16_t      x;        /**< The block's first column: of @c src, or of
+                             *   @c dst for a fill.                              */
+    uint16_t      y;        /**< The block's first row, likewise.                */
+    uint16_t      w;        /**< The block's columns.                            */
+    uint16_t      h;        /**< The block's rows.                               */
+    uint16_t      scale_x;  /**< A scale's horizontal factor, in sixteenths.     */
+    uint16_t      scale_y;  /**< Its vertical factor.                            */
+    uint32_t      colour;   /**< A fill's colour, 0xAARRGGBB; the alpha is not
+                             *   used.                                           */
+    uint8_t       opa;      /**< A blend's opacity, 0..255.                      */
+    uint8_t       turns;    /**< A scale's quarter turns counter-clockwise, 0..3. */
+} display_compose_t;
+
+#if defined(CONFIG_KODE_COMPOSE)
+/**
+ * @brief Run one pass of the pixel accelerator (DISPLAY_COMPOSE_REQ_SIG).
+ *
+ * The blocking request of a renderer inside its own pass, or of a worker:
+ * AO_Display owns the accelerator and runs the pass in its step. The answer
+ * is display_jpeg_request()'s shape: @c rc and @c us written, @c gen stamped
+ * into @c ack, then @c done signalled - and nothing at all for a request
+ * whose @c gen no longer matches @c cur. AO_Display marks @c cur as it takes
+ * the request, so its asker cannot give up on a pass that is running.
+ */
+typedef struct {
+    QEvt              super;
+    display_compose_t job;   /**< The pass.                                  */
+    uint32_t         *rc;    /**< Receives the kode_status_t.                */
+    uint32_t         *us;    /**< Receives the microseconds the pass took.   */
+    khal_sem_t        done;  /**< Signalled once @c rc and @c us are written. */
+    uint32_t          gen;   /**< The requester's tag for this request.      */
+    uint32_t         *cur;   /**< The requester's current tag; marked while
+                              *   this request's pass runs.                  */
+    uint32_t         *ack;   /**< Where @c gen is written back, just before
+                              *   @c done.                                   */
+} DisplayComposeReqEvt;
+#endif
 
 /**
  * @brief A shot, ready to be read (DISPLAY_SHOT_RSP_SIG).
@@ -5939,9 +6684,12 @@ typedef struct {
  * without AO_Haptic knowing who did - the AUDIO_FILE_RSP_SIG arrangement.
  * @c starved says the RTP FIFO refused a burst at least once during the
  * feed - the chip was ahead of it, not dry - which is the one thing a caller
- * cannot read out of the status code. It is how close a buzz came to the
- * FIFO's own back-pressure, and a buzz that ends KODE_OK with it set played
- * out whole.
+ * cannot read out of the status code. The feed is paced by that refusal, so
+ * every buzz long enough to fill the FIFO to its almost-full mark, about
+ * 75 ms of one, sets it, and a buzz that ends KODE_OK with it set played out
+ * whole. A chip found out of RTP with samples still owed - its FIFO ran
+ * dry - ends the buzz with KODE_IO_ERROR, and @c samples is what it was fed
+ * up to then.
  */
 typedef struct {
     QEvt     super;
@@ -6073,6 +6821,19 @@ typedef struct {
                              *   boot ended.                                 */
 } BootStateEvt;
 
+/**
+ * @brief The kodeOS running has stayed up a minute (BOOT_STABLE_SIG).
+ *
+ * What settles a kodeOS update: the install's owner compares @c running with
+ * the slot it wrote, and when they differ @c other says why.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t running;       /**< Where the partition running starts.         */
+    uint8_t  other;         /**< kboot_other_t: what became of the slot that
+                             *   is not running.                             */
+} BootStableEvt;
+
 /* Where the interface's drag is, kode_gui_gesture_t.drag. */
 #define KODE_GUI_DRAG_IDLE    0U  /**< No drag is on.                       */
 #define KODE_GUI_DRAG_PENDING 1U  /**< A finger is down and the recognizer
@@ -6186,10 +6947,30 @@ typedef struct {
     uint8_t  medium;        /**< kdrv_medium_t                               */
     bool     mounted;
     bool     usage_known;   /**< false: total/free could not be read.        */
+    uint8_t  why;           /**< kdrv_sd_why_t: why the card is not mounted;
+                             *   KDRV_SD_WHY_NONE while it is, and for the
+                             *   internal partition.                         */
     uint32_t total_kb;      /**< The volume's size.                          */
     uint32_t free_kb;
     uint32_t card_mb;       /**< The card's own capacity; 0 when unknown.    */
 } StorageInfoEvt;
+
+/**
+ * @brief The card's mount changed (STORAGE_CARD_SIG).
+ *
+ * Published when a card is mounted, the same one again or another, when the
+ * mounted card is mounted no more, and when a card an app's rest put away is
+ * no longer taken to be in (its wake found none). A change of either field is
+ * published. What was known of its files is to be asked again: a card can be
+ * changed while its supply is off.
+ */
+typedef struct {
+    QEvt super;
+    bool mounted;           /**< A card is mounted now.                      */
+    bool rested;            /**< Not mounted because an app's rest put it
+                             *   away, and still in as far as is known: the
+                             *   next request that needs it brings it back. */
+} StorageCardEvt;
 
 /**
  * @brief Read, write or dump one field of the card (STORAGE_FIELD_REQ_SIG).
@@ -6340,7 +7121,9 @@ typedef struct {
     uint32_t max;                  /**< CAT only: ceiling on bytes read,
                                      *   already bounded by the console's own
                                      *   key spec. Ignored by every other op. */
-    uint32_t offset;               /**< CAT only: first byte to read. */
+    uint32_t offset;               /**< CAT: first byte to read. An ask's or
+                                     *   a blocked task's LIST: the entries
+                                     *   to skip. Ignored by every other op. */
     StorageWaiter *wait;           /**< A blocked task's own storage, or NULL
                                      *   when `who` is an Active Object.     */
     uint32_t gen;                  /**< This request's tag, echoed into
@@ -6348,8 +7131,7 @@ typedef struct {
                                      *   `wait`.                             */
     FileRspEvt *rsp;               /**< An ask's answer, taken with the
                                      *   request and posted to `who`; NULL
-                                     *   otherwise. An ask's LIST counts
-                                     *   `offset` as the entries to skip.    */
+                                     *   otherwise.                          */
     void    *buf;                  /**< An ask's CAT: the lent buffer, `max`
                                      *   bytes, written before the answer.   */
 } StoragePathEvt;
@@ -6696,8 +7478,8 @@ typedef enum {
     KODE_LP_AWAKE = 0,   /**< Everything runs; the CPU holds its lock.       */
     KODE_LP_ASLEEP,      /**< Light sleep whenever every task is idle.       */
     KODE_LP_OFF,         /**< Deep sleep; the pins held at rest.             */
-    KODE_LP_RADIO        /**< A radio wake inside ASLEEP: the tick runs and the
-                          *   lock is held for the radio owners alone, and the
+    KODE_LP_DARK         /**< A dark wake inside ASLEEP: the tick runs and the
+                          *   lock is held for the dark-wake owners alone, and the
                           *   glass stays asleep. Published as a state, never
                           *   a target, and never what the board is said to be
                           *   in (lowpower_info says asleep).                 */
@@ -6719,6 +7501,49 @@ typedef enum {
     KODE_LP_CAUSE_BOOT        /**< The board has just started.               */
 /* cppcheck-suppress misra-c2012-2.3 ; a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
 } kode_lp_cause_t;
+
+/* ---- The parts of a rest an app asks for --------------------------------
+ * An app names the parts it does not use and AO_LowPower puts them away one
+ * at a time, while the board stays AWAKE for everything else. The bits are
+ * here for the facade, which uses them whether the option is on or not.
+ */
+#define KODE_LP_PART_SCREEN  0x01U  /**< The panel in sleep-in, its link down.          */
+#define KODE_LP_PART_PANEL   0x02U  /**< And the panel's supply off; takes the touch.   */
+#define KODE_LP_PART_TOUCH   0x04U  /**< The touch controller in auto-sleep, no interrupt. */
+#define KODE_LP_PART_SOUND   0x08U  /**< The amplifier off and the codec closed.        */
+#define KODE_LP_PART_CARD    0x10U  /**< The card unmounted and its supply off.         */
+#define KODE_LP_PART_RADIO   0x20U  /**< The C5 asleep between wakes.                   */
+#define KODE_LP_PART_CPU     0x40U  /**< The P4 light-sleeps when every task is idle.   */
+#define KODE_LP_PART_ALL     0x7FU  /**< Every part there is.                           */
+
+/** @brief What a LowPowerPartEvt tells. */
+/* cppcheck-suppress misra-c2012-2.4 ; the tag of a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
+typedef enum {
+    KODE_LP_PART_ANSWER = 0,  /**< How one request ended.                      */
+    KODE_LP_PART_WOKE,        /**< A wake source ended the CPU part.           */
+    KODE_LP_PART_TAKEN        /**< The board asked for a state of its own: the
+                               *   rest is over and the board has every part. */
+/* cppcheck-suppress misra-c2012-2.3 ; a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
+} kode_lp_part_what_t;
+
+/** @brief What ended the CPU part of a rest. */
+/* cppcheck-suppress misra-c2012-2.4 ; the tag of a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
+typedef enum {
+    KODE_LP_WAKE_NONE = 0,    /**< Nothing: not a wake.                        */
+    KODE_LP_WAKE_BUTTON,      /**< A button: the bottom one, the pad or the top. */
+    KODE_LP_WAKE_TOUCH,       /**< A touch, when the app asked for it.         */
+    KODE_LP_WAKE_PIN,         /**< The expansion header's line the app named.  */
+    KODE_LP_WAKE_TIMER,       /**< The time the app gave.                      */
+    KODE_LP_WAKE_CONSOLE,     /**< A console line, on any port.                */
+    KODE_LP_WAKE_MQTT,        /**< An MQTT message.                            */
+    KODE_LP_WAKE_CABLE,       /**< A USB cable appeared.                       */
+    KODE_LP_WAKE_REQUEST,     /**< A request to AO_LowPower itself.            */
+    KODE_LP_WAKE_OWNER,       /**< Work of the board's own fell due: an entry
+                               *   of the scheduler, an owner's time.          */
+    KODE_LP_WAKE_BATTERY      /**< The cell is at its cut: AO_Power is about to
+                               *   open the battery path.                      */
+/* cppcheck-suppress misra-c2012-2.3 ; a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
+} kode_lp_wake_t;
 
 /** @brief What woke the P4 from a sleep with the C5 involved. */
 /* cppcheck-suppress misra-c2012-2.4 ; the tag of a public enum, used where CONFIG_KODE_LOWPOWER is set, which cppcheck does not read */
@@ -7023,6 +7848,10 @@ typedef struct {
 typedef struct {
     QEvt     super;
     uint8_t  target;   /**< The kode_lp_state_t being prepared.               */
+    uint8_t  parts;    /**< 0 for a round of the board. Otherwise the round is
+                        *   an app's rest, posted to this owner alone while
+                        *   the board stays AWAKE, and this is the
+                        *   KODE_LP_PART_* it is asked for.                  */
     uint32_t round;    /**< The round's number; answers carry it back.        */
 } LowPowerRoundEvt;
 
@@ -7036,12 +7865,12 @@ typedef struct {
  * and began from ASLEEP), for owners that had already rested. state ASLEEP is
  * published before the QP tick stops, so nobody may arm a QTimeEvt on it.
  *
- * state RADIO says an owner's work fell due while ASLEEP and that the radio
+ * state DARK says an owner's work fell due while ASLEEP and that the dark-wake
  * owners alone are to do it: the tick runs and the lock is held, but the
  * glass and the other devices stay at rest. Only the owners that joined with
- * lowpower_join_radio() act on it (they restore as for AWAKE); everyone else
+ * lowpower_join_dark() act on it (they restore as for AWAKE); everyone else
  * ignores any state that is not AWAKE. The wake ends with state ASLEEP and
- * prev RADIO, or with AWAKE when something real used the board.
+ * prev DARK, or with AWAKE when something real used the board.
  */
 typedef struct {
     QEvt    super;
@@ -7084,11 +7913,11 @@ typedef struct {
     uint8_t  who;      /**< The id lowpower_join() gave the owner, for the log. */
 } LowPowerWakeAtEvt;
 
-/** @brief A radio owner's work in a radio wake is finished (LOWPOWER_RADIO_DONE_SIG). */
+/** @brief A dark-wake owner's work in a dark wake is finished (LOWPOWER_DARK_DONE_SIG). */
 typedef struct {
     QEvt    super;
-    uint8_t who;       /**< The id lowpower_join_radio() gave the owner.     */
-} LowPowerRadioDoneEvt;
+    uint8_t who;       /**< The id lowpower_join_dark() gave the owner.     */
+} LowPowerDarkDoneEvt;
 
 /** @brief A request to go to a state (LOWPOWER_REQ_SIG). */
 typedef struct {
@@ -7113,38 +7942,48 @@ typedef struct {
 } LowPowerReadyEvt;
 
 /**
- * @brief The glyphs the minute is drawn from (DISPLAY_GLYPHS_SIG).
+ * @brief Put parts away, or bring them all back (LOWPOWER_PART_REQ_SIG).
  *
- * The one exception to rule 7 that this event makes, and the reason: the
- * eleven glyphs (0 to 9 and the colon) of a large font are far more than an
- * event can carry, and copying them into the pool for every hand-over would
- * only move the same bytes twice. @c strip is in PSRAM, owned by the sender,
- * and valid from the hand-over until the board is AWAKE again: AO_Display
- * reads it and never frees or writes it.
+ * The wake fields matter only with KODE_LP_PART_CPU among the parts.
  */
 typedef struct {
-    QEvt            super;
-    const uint16_t *strip;    /**< The glyphs, RGB565, in one row: the ten
-                               *   digits 0 to 9, glyph_w wide each, then the
-                               *   colon, colon_w wide; the row is
-                               *   10 * glyph_w + colon_w pixels wide and
-                               *   glyph_h tall. NULL: the renderer is parked
-                               *   and has no glyphs to give.                */
-    uint16_t        glyph_w;  /**< One digit's width, pixels.                 */
-    uint16_t        glyph_h;  /**< One digit's height, pixels.                */
-    uint16_t        x;        /**< Left edge of the time on the glass.        */
-    uint16_t        y;        /**< Top edge of the time on the glass.         */
-    uint16_t        colon_w;  /**< The colon's width, pixels.                 */
-    uint8_t         rest_pct; /**< The glass's brightness while ASLEEP.       */
-    bool            h12;      /**< true: the hour is read on a 12 h dial, 1 to
-                               *   12 with no AM or PM, and an hour of one
-                               *   figure leaves the tens cell blank, the
-                               *   way the renderer's own clock does. false:
-                               *   00 to 23.                                 */
-    uint8_t         adv[11];  /**< From a figure to the next, the ten digits
-                               *   then the colon, so the time keeps the
-                               *   renderer's own spacing. All 0: fixed cells. */
-} DisplayGlyphsEvt;
+    QEvt     super;
+    uint8_t  parts;          /**< The KODE_LP_PART_* to put away; unused when @c end. */
+    bool     end;            /**< true: bring every part back.                  */
+    bool     wake_touch;     /**< A touch ends the CPU part.                    */
+    bool     wake_level;     /**< The level of @c wake_pin that ends it.        */
+    uint8_t  wake_pin;       /**< A position of the expansion header; 0 for none. */
+    uint8_t  src;            /**< Who asked, for the log and the answer.        */
+    uint32_t wake_after_ms;  /**< A time that ends the CPU part; 0 for none.    */
+} LowPowerPartReqEvt;
+
+/**
+ * @brief News of an app's rest (LOWPOWER_PART_SIG).
+ *
+ * @c why is a copy, as rule 7 asks. An answer that is not KODE_OK names the
+ * part and the reason, "part: why"; the parts that had rested stay at rest.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t what;      /**< A kode_lp_part_what_t.                            */
+    uint8_t rc;        /**< ANSWER: the request's kode_status_t.              */
+    uint8_t parts;     /**< The KODE_LP_PART_* at rest now.                   */
+    uint8_t cause;     /**< WOKE: the kode_lp_wake_t.                         */
+    uint8_t src;       /**< ANSWER: the source of the request answered.       */
+    char    why[KODE_LOWPOWER_REFUSAL_MAX]; /**< ANSWER refused: "part: why". */
+} LowPowerPartEvt;
+
+/** @brief A wake source the app chose woke the P4 (LOWPOWER_PART_WAKE_SIG). */
+typedef struct {
+    QEvt    super;
+    uint8_t cause;     /**< KODE_LP_WAKE_PIN or KODE_LP_WAKE_TIMER.           */
+} LowPowerPartWakeEvt;
+
+/** @brief Take the supply of a panel asleep for an app (DISPLAY_SUPPLY_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    uint32_t round;    /**< The round lowpower_ready() answers with.          */
+} DisplaySupplyReqEvt;
 
 /**
  * @brief A wake of the P4 that involved the C5 (RADIO_SLEEP_NOTE_SIG).

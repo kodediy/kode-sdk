@@ -36,6 +36,11 @@ _Static_assert(offsetof(kfw_hdr_t, name)   == 56U, "name sits at 0x38");
  * number; the two headers must agree or a mailbox image stops being seen. */
 _Static_assert(KAPPS_KFW_MAGIC == KFW_MAGIC, "kapps_fmt.h and kdrv_kfw.h must name the same container magic");
 
+/* kapp_desc.h names the P4's chip id without ESP-IDF's headers; this file has
+ * them, so the two are held equal here. */
+_Static_assert(KAPP_CHIP_ESP32P4 == (unsigned)ESP_CHIP_ID_ESP32P4,
+               "KAPP_CHIP_ESP32P4 is not esp_app_format.h's ESP32-P4");
+
 /* ---- The buffer sink ----------------------------------------------------- */
 
 /**
@@ -236,7 +241,8 @@ kode_status_t kfw_hdr_parse(const void *buf, size_t len, kfw_hdr_t *out)
 /**
  * @brief Whether a block's two lengths are the ones a block may carry.
  * @param h  The block's header.
- * @return true when json_len is 1..KFW_AD_JSON_MAX and icon_len is 0 or KFW_AD_ICON_LEN.
+ * @return true when json_len is 1..KFW_AD_JSON_MAX and icon_len is 0, KFW_AD_ICON_LEN
+ *         or KFW_AD_ICON_LEN_HALF.
  */
 static bool ad_sizes_ok(const kfw_ad_hdr_t *h)
 {
@@ -246,7 +252,8 @@ static bool ad_sizes_ok(const kfw_ad_hdr_t *h)
     {
         ok = false;
     }
-    if ( (0U != h->icon_len) && ((uint16_t)KFW_AD_ICON_LEN != h->icon_len) )
+    if ( (0U != h->icon_len) && ((uint16_t)KFW_AD_ICON_LEN != h->icon_len)
+        && ((uint16_t)KFW_AD_ICON_LEN_HALF != h->icon_len) )
     {
         ok = false;
     }
@@ -388,6 +395,10 @@ static struct {
     kfw_ad_hdr_t            ad_hdr;     /**< The block's header, once read.        */
     uint32_t                ad_fill;    /**< Block header or body bytes seen so far. */
     bool                    ad_skip;    /**< The block's bytes are stepped over, not kept. */
+    bool                    ad_dropped; /**< A block was there and was not believed: not the same as none. */
+    bool                    foreign;    /**< The image was refused as another chip's or target's. */
+    bool                    malformed;  /**< The image was refused as not well formed. */
+    bool                    sink_failed; /**< The destination refused to open or a write. */
 } s_kfw;
 
 bool kfw_busy(void)
@@ -398,6 +409,21 @@ bool kfw_busy(void)
 uint32_t kfw_produced(void)
 {
     return s_kfw.produced;
+}
+
+bool kfw_foreign(void)
+{
+    return s_kfw.foreign;
+}
+
+bool kfw_malformed(void)
+{
+    return s_kfw.malformed;
+}
+
+bool kfw_sink_failed(void)
+{
+    return s_kfw.sink_failed;
 }
 
 /**
@@ -466,6 +492,7 @@ static kode_status_t emit(const uint8_t *data, size_t len)
          * best. Stop it before it runs past the sink's session, not after. */
         KLOG_E(TAG, "the payload produces more than the %u bytes it declared",
                (unsigned)s_kfw.hdr.image_len);
+        s_kfw.malformed = true;
         return KODE_ERROR;
     }
     if ( s_kfw.sha_open )
@@ -476,6 +503,14 @@ static kode_status_t emit(const uint8_t *data, size_t len)
     if ( KODE_OK == st )
     {
         s_kfw.produced += (uint32_t)len;
+    }
+    else if ( KODE_NO_RESOURCES != st )
+    {
+        s_kfw.sink_failed = true;
+    }
+    else
+    {
+        /* a full buffer: drain, then offer this run again */
     }
     return st;
 }
@@ -520,6 +555,7 @@ static kode_status_t inflate_feed(const uint8_t *in, size_t len)
         if ( (int)ts < 0 )
         {
             KLOG_E(TAG, "the deflate payload is corrupt (tinfl %d)", (int)ts);
+            s_kfw.malformed = true;
             return KODE_ERROR;
         }
         if ( (0U == len) && (0U == out_bytes) )
@@ -545,6 +581,34 @@ static uint16_t target_chip(kfw_target_t t)
         chip = (uint16_t)ESP_CHIP_ID_ESP32C5;
     }
     return chip;
+}
+
+/**
+ * @brief How long a raw image says its first segment is.
+ *
+ * The one fact about an image's size its first bytes hold: the first
+ * segment's header follows the image header at once, and its length is how
+ * many bytes of the file that segment takes.
+ *
+ * @param prefix  The first bytes of the image.
+ * @param len     How many bytes @p prefix holds.
+ * @param seg_len The first segment's declared length in bytes; left alone
+ *                when the read is refused.
+ * @return true when the prefix starts with the ESP image magic and holds the
+ *         first segment's header.
+ */
+static bool raw_first_seg(const uint8_t *prefix, size_t len, uint32_t *seg_len)
+{
+    esp_image_segment_header_t seg;
+
+    if ( ((sizeof(esp_image_header_t) + sizeof(seg)) > len)
+        || (KFW_ESP_MAGIC != prefix[0]) )
+    {
+        return false;
+    }
+    (void)memcpy(&seg, &prefix[sizeof(esp_image_header_t)], sizeof(seg));
+    *seg_len = seg.data_len;
+    return true;
 }
 
 kode_status_t kfw_feed(const void *data, size_t len)
@@ -587,6 +651,26 @@ kode_status_t kfw_feed(const void *data, size_t len)
                         KLOG_E(TAG, "that image was built for chip id 0x%04x, "
                                     "not this target's 0x%04x", (unsigned)chip,
                                (unsigned)target_chip(s_kfw.want));
+                        s_kfw.foreign = true;
+                        s_kfw.st = KFW_ST_DEAD;
+                        return KODE_ERROR;
+                    }
+                    /* A file cut short inside its first segment is refused
+                     * here for the same reason: the header says how long that
+                     * segment is and the source how long the file is. A cut
+                     * further on, or a source of no stated length, is the
+                     * end's to judge. */
+                    uint32_t seg0 = 0U;
+                    if ( (0U != s_kfw.src_len)
+                        && raw_first_seg(p, len, &seg0)
+                        && (((uint64_t)sizeof(esp_image_header_t)
+                             + (uint64_t)sizeof(esp_image_segment_header_t)
+                             + (uint64_t)seg0) > (uint64_t)s_kfw.src_len) )
+                    {
+                        KLOG_E(TAG, "that image's first segment is %u bytes and "
+                                    "the file holds %u: it was cut short",
+                               (unsigned)seg0, (unsigned)s_kfw.src_len);
+                        s_kfw.malformed = true;
                         s_kfw.st = KFW_ST_DEAD;
                         return KODE_ERROR;
                     }
@@ -603,6 +687,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                     }
                     if ( s_kfw.sink->begin(s_kfw.ctx, s_kfw.src_len) != KODE_OK )
                     {
+                        s_kfw.sink_failed = true;
                         s_kfw.st = KFW_ST_DEAD;
                         return KODE_ERROR;
                     }
@@ -625,6 +710,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                     != KODE_OK )
                 {
                     KLOG_E(TAG, "this is neither a container nor an ESP image");
+                    s_kfw.malformed = true;
                     s_kfw.st = KFW_ST_DEAD;
                     return KODE_ERROR;
                 }
@@ -633,6 +719,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                     KLOG_E(TAG, "the container is for target %u, but %u was "
                                 "asked for", (unsigned)s_kfw.hdr.target,
                            (unsigned)s_kfw.want);
+                    s_kfw.foreign = true;
                     s_kfw.st = KFW_ST_DEAD;
                     return KODE_ERROR;
                 }
@@ -679,6 +766,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                 }
                 if ( s_kfw.sink->begin(s_kfw.ctx, s_kfw.hdr.image_len) != KODE_OK )
                 {
+                    s_kfw.sink_failed = true;
                     s_kfw.st = KFW_ST_DEAD;
                     return KODE_ERROR;
                 }
@@ -719,6 +807,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                      * followed any further. */
                     KLOG_E(TAG, "app data: %s - the payload cannot be found",
                            kfw_ad_status_name(KFW_AD_BAD_MAGIC));
+                    s_kfw.malformed = true;
                     s_kfw.st = KFW_ST_DEAD;
                     return KODE_ERROR;
                 }
@@ -728,6 +817,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                 {
                     KLOG_W(TAG, "app data dropped: %s",
                            kfw_ad_status_name(KFW_AD_BAD_SIZE));
+                    s_kfw.ad_dropped = true;
                 }
                 else
                 {
@@ -739,6 +829,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                     if ( NULL == s_ad.buf )
                     {
                         KLOG_W(TAG, "app data dropped: no PSRAM for it");
+                        s_kfw.ad_dropped = true;
                     }
                     else
                     {
@@ -780,6 +871,7 @@ kode_status_t kfw_feed(const void *data, size_t len)
                         KLOG_W(TAG, "app data dropped: %s",
                                kfw_ad_status_name(ast));
                         ad_drop();
+                        s_kfw.ad_dropped = true;
                     }
                     else
                     {
@@ -815,6 +907,27 @@ kode_status_t kfw_feed(const void *data, size_t len)
     return KODE_OK;
 }
 
+/**
+ * @brief Close the destination, which reads back what it holds and judges it.
+ *
+ * The sink's end writes nothing (the slot's OTA session and the region's
+ * write session have no tail to flush without flash encryption, which this
+ * firmware does not use): a refusal is the image failing its destination's
+ * verification where it lies, so it is the image's fault.
+ *
+ * @return The sink's answer.
+ */
+static kode_status_t sink_end_judged(void)
+{
+    kode_status_t const rc = s_kfw.sink->end(s_kfw.ctx);
+
+    if ( KODE_OK != rc )
+    {
+        s_kfw.malformed = true;
+    }
+    return rc;
+}
+
 kode_status_t kfw_end(void)
 {
     kode_status_t rc = KODE_OK;
@@ -822,7 +935,7 @@ kode_status_t kfw_end(void)
     switch ( s_kfw.st )
     {
         case KFW_ST_RAW:
-            rc = s_kfw.sink->end(s_kfw.ctx);
+            rc = sink_end_judged();
             break;
 
         case KFW_ST_BODY: {
@@ -831,6 +944,7 @@ kode_status_t kfw_end(void)
                 KLOG_E(TAG, "the stream ended at %u of %u bytes",
                        (unsigned)s_kfw.produced, (unsigned)s_kfw.hdr.image_len);
                 s_kfw.sink->abort(s_kfw.ctx);
+                s_kfw.malformed = true;
                 rc = KODE_ERROR;
                 break;
             }
@@ -858,15 +972,17 @@ kode_status_t kfw_end(void)
                  * needed staging in the first place. */
                 KLOG_E(TAG, "the image does not match the digest it carries");
                 s_kfw.sink->abort(s_kfw.ctx);
+                s_kfw.malformed = true;
                 rc = KODE_ERROR;
                 break;
             }
-            rc = s_kfw.sink->end(s_kfw.ctx);
+            rc = sink_end_judged();
             break;
         }
 
         case KFW_ST_SNIFF:
             KLOG_E(TAG, "the stream ended inside the header");
+            s_kfw.malformed = true;
             rc = KODE_ERROR;
             break;
 
@@ -874,6 +990,7 @@ kode_status_t kfw_end(void)
         case KFW_ST_ADBODY:
             KLOG_E(TAG, "the stream ended inside the app data block");
             s_kfw.sink->abort(s_kfw.ctx);
+            s_kfw.malformed = true;
             rc = KODE_ERROR;
             break;
 
@@ -884,10 +1001,11 @@ kode_status_t kfw_end(void)
         default:
             return KODE_DENIED;
     }
-
     /* What the owner may take: only from an image that went in whole. A raw
-     * image says so, so the folder is left alone; a container says block or
-     * none by whether a checked block survived. Anything else frees it. */
+     * image says so, so the folder is left alone; a container says block, none
+     * or dropped by whether a checked block survived and, when none did,
+     * whether one was there to be believed: a block that could not be read
+     * says nothing about the folder. Anything else frees it. */
     if ( KODE_OK != rc )
     {
         ad_drop();
@@ -900,6 +1018,10 @@ kode_status_t kfw_end(void)
     else if ( NULL != s_ad.buf )
     {
         s_ad.kind = KFW_AD_BLOCK;
+    }
+    else if ( s_kfw.ad_dropped )
+    {
+        s_ad.kind = KFW_AD_DROPPED;
     }
     else
     {
@@ -1176,7 +1298,7 @@ kode_status_t kfw_selftest(void)
 
     if ( selftest_inflate()
         && selftest_block(false, KFW_AD_BLOCK)
-        && selftest_block(true, KFW_AD_NONE) )
+        && selftest_block(true, KFW_AD_DROPPED) )
     {
         rc = KODE_OK;
     }

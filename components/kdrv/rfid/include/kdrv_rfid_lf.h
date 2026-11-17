@@ -65,16 +65,18 @@ kode_status_t kdrv_rfid_lf_field_on(bool boost);
 /**
  * @brief Take the carrier down and release the ADC handle and the LDO.
  *
- * At rest after this: carrier off, the ADC2 continuous handle deleted, the
- * read buffers handed back to PSRAM, VO4 not held. RFID_PULL is left as it
- * was: kdrv_rfid_lf_rest() is what lets it go.
+ * At rest after this: carrier off, RFID_OUT held low by its LEDC channel, the
+ * ADC2 continuous handle deleted, the read buffers handed back to PSRAM, VO4
+ * not held. RFID_PULL and the channel are left as they were: the next field
+ * starts on the same channel, and kdrv_rfid_lf_rest() is what lets both go.
  *
  * @return KODE_OK, always.
  */
 kode_status_t kdrv_rfid_lf_field_off(void);
 
 /**
- * @brief Let RFID_PULL go high while nothing uses the receiver.
+ * @brief Let RFID_PULL go high and the carrier's LEDC channel go while nothing
+ *        uses the receiver.
  *
  * Held low, RFID_PULL sinks 3.3 V through R11 (10 k, on the main PCB): about
  * 0.33 mA for as long as it stays low. High it costs nothing, since it drives

@@ -450,7 +450,9 @@ TEST_CASE("the three ways a cd fails say three different things",
 
 /* `ls` is a STAT and then, only once that says directory, a LIST - two
  * round trips to AO_Storage, not one, so every case below settles twice:
- * once for the STAT, once for the burst the STAT's answer asks for. */
+ * once for the STAT, once for the page the STAT's answer asks for. A folder
+ * longer than a page takes one more round trip for each page past the
+ * first. */
 
 TEST_CASE("ls of the root names both volumes", "[console_fs]")
 {
@@ -513,10 +515,103 @@ TEST_CASE("ls with no path lists the working directory", "[console_fs]")
         replied_line(">|name=\"notes.txt\" type=file size=5 medium=fs"));
 }
 
-/* A listing answers with an unconditional terminator and no return code, so
- * a path naming no volume would otherwise come back as an empty, cheerful
- * `>ok` - which reads as "that directory is empty" and is not. This one
- * never reaches a second round trip: the STAT itself is refused. */
+/** @brief Files for two whole pages of a listing and part of a third. */
+#define LS_MANY_FILES    ((KODE_STORAGE_LIST_MAX * 2U) + 3U)
+/** @brief Round trips enough for the STAT and every page of LS_MANY_FILES. */
+#define LS_MANY_SETTLES  16U
+/** @brief The words of a listed record around its name, with the terminator. */
+#define LS_RECORD_WORDS  48U
+/** @brief Room for one listed record, quoted name and all, whatever the name's length. */
+#define LS_RECORD_MAX    (KODE_APP_FILE_MAX + LS_RECORD_WORDS)
+
+/**
+ * @brief The index of the first reply that ENDS with @p needle, as
+ *        replied_line() matches it.
+ * @return The index, or -1 when no reply does.
+ */
+static int replied_at(const char *needle)
+{
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const l  = fake_klog_line(i);
+        const char        *at = NULL;
+        if ( NULL != l )
+        {
+            at = strstr(l, needle);
+        }
+        if ( NULL == at )
+        {
+            continue;
+        }
+        char const after = at[strlen(needle)];
+        if ( ('\0' == after) || ('\r' == after) || ('\n' == after)
+            || ('\x1b' == after) )
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* A folder longer than one page of AO_Storage's listing. `ls` asks for the
+ * next page itself, from where the last one ended, and answers `>ok` only
+ * after the last entry: an `>ok` after the first page alone reads as the
+ * whole folder, and a script looking for a file past it misses the file. */
+TEST_CASE("ls lists a folder longer than a page whole, then says ok",
+          "[console_fs]")
+{
+    char name[KODE_APP_FILE_MAX];
+    char want[LS_RECORD_MAX];
+
+    console_up_once();
+    for ( unsigned i = 0U; LS_MANY_FILES > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "f%02u.txt", i);
+        fake_media_put_fs_file(name, "x");
+    }
+
+    type_line("ls path=\"/storage\"");
+    for ( unsigned n = 0U; LS_MANY_SETTLES > n; ++n )
+    {
+        settle();
+    }
+
+    int const ok = replied_at(">ok");
+    TEST_ASSERT_TRUE_MESSAGE(0 <= ok, "the listing never ended with >ok");
+    TEST_ASSERT_FALSE_MESSAGE(replied(">err"), "a whole folder is no error");
+    for ( unsigned i = 0U; LS_MANY_FILES > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "f%02u.txt", i);
+        (void)snprintf(want, sizeof(want),
+                       ">|name=\"%s\" type=file size=1 medium=fs", name);
+        int const at = replied_at(want);
+        TEST_ASSERT_TRUE_MESSAGE(0 <= at, name);
+        TEST_ASSERT_TRUE_MESSAGE(at < ok, name);
+    }
+}
+
+/* A listing that cannot go on says so. The folder goes between the STAT and
+ * its page, so AO_Storage cannot list the page, and `ls` ends `cut`: an
+ * `>ok` there would read as a folder with nothing in it. */
+TEST_CASE("ls of a folder that goes before its page ends cut, never ok",
+          "[console_fs]")
+{
+    console_up_once();
+    fake_media_put_fs_dir("gone");
+
+    type_line("ls path=\"/storage/gone\"");
+    settle();
+    TEST_ASSERT_FALSE_MESSAGE(replied(">err") || replied_line(">ok"),
+                              "the page is still to come");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_rmdir("/storage/gone"));
+    settle();
+    TEST_ASSERT_TRUE(replied_line(">err code=5 msg=cut"));
+    TEST_ASSERT_FALSE(replied_line(">ok"));
+}
+
+/* A path naming no volume must not come back as an empty, cheerful `>ok` -
+ * which reads as "that directory is empty" and is not. This one never
+ * reaches a second round trip: the STAT itself is refused. */
 TEST_CASE("ls of a path on no volume is refused, not answered empty",
           "[console_fs]")
 {
@@ -2184,19 +2279,20 @@ TEST_CASE("file_put warns about the card before it opens the destination",
 }
 
 /* The console refuses a second command before it looks at the line, so
- * nothing an operator types can reach AO_Storage's OWN refusal - and that
- * refusal still has to exist and still has to answer, because the console is
- * not the only thing that can ask. `kode_sys_file_*` will ask from an app's thread,
- * and any Active Object may. So this is posted directly, the way the stray
- * close below is, and the asker here is the spy rather than the console.
+ * nothing an operator types can reach AO_Storage's OWN handling of a transfer
+ * that meets another - and that handling still has to exist and still has to
+ * answer, because the console is not the only thing that can ask.
+ * `kode_sys_file_*` will ask from an app's thread, and any Active Object may.
+ * So this is posted directly, the way the stray close below is, and the asker
+ * here is the spy rather than the console.
  *
- * Two things have to be true and they are easy to get wrong in opposite
- * directions: the refusal is ANSWERED (a request that went silent would leave
- * its asker waiting for a `>|ready` that is never coming, with no watchdog of
- * its own to fall back on), and the transfer already running is left
- * completely alone - it still takes its payload and still lands its file. */
-TEST_CASE("a transfer asked for while one is in flight is refused, and the "
-          "one already running is untouched", "[console_fs]")
+ * The request waits for the transfer in flight, which is left completely
+ * alone - it still takes its payload and still lands its file - and starts
+ * when that one ends. The wait is bounded and its end is ANSWERED, because a
+ * request that went silent would leave its asker waiting for a `>|ready` that
+ * is never coming, with no watchdog of its own to fall back on. */
+TEST_CASE("a transfer asked for while one is in flight waits for it, and the "
+          "one already running is untouched", "[console_fs][turn]")
 {
     static const uint8_t body[6] = { 'h', 'e', 'l', 'l', 'o', '\n' };
     uint32_t const crc = khal_crc32(KHAL_CRC32_INIT, body, sizeof(body));
@@ -2213,28 +2309,104 @@ TEST_CASE("a transfer asked for while one is in flight is refused, and the "
                                           0U,
                                           (uint8_t)KODE_CONSOLE_SRC_SERIAL));
     settle();
-    TEST_ASSERT_EQUAL_INT_MESSAGE(RECV_FAIL_SIG, (int)ao_spy_next_sig(),
-        "a refused transfer must be refused OUT LOUD - its asker has no "
-        "watchdog of its own to fall back on");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)ao_spy_next_sig(),
+        "the second transfer was answered while the first still ran");
 
-    /* And the first transfer never noticed. */
+    /* The first transfer never noticed. */
     fake_klog_reset();
     feed(body, (uint16_t)sizeof(body));
     console_step();
     TEST_ASSERT_TRUE(replied_line(">ok"));
 
+    /* The second one began when the first ended: its wire is being armed. */
+    settle();
+    TEST_ASSERT_TRUE_MESSAGE(log_saw(CONSOLE_RAW_REQ_SIG),
+        "the waiting transfer did not start when the one in flight ended");
+
+    /* It is given up on, which leaves the AO free to read the first back. */
+    console_release();
     fake_klog_reset();
     type_line("cat path=\"/storage/first.txt\"");
     settle();
     settle();
     TEST_ASSERT_TRUE(replied_line(">|line=\"hello\""));
 
-    /* The one that was refused opened nothing. */
+    /* And the one that waited opened nothing. */
     fake_klog_reset();
     type_line("stat path=\"/storage/second.txt\"");
     settle();
     TEST_ASSERT_TRUE(replied_line(">err code=5 msg=missing"));
 
+    console_release();
+}
+
+/** @brief Hold AO_Storage's reader slot, the way a transfer in flight does. */
+static void hold_reader(void)
+{
+    static StorageOpenEvt e;
+
+    fake_media_put_fs_file("held.bin", "0123456789abcdef");
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(STORAGE_OPEN_REQ_SIG);
+    (void)snprintf(e.name, sizeof(e.name), "%s", "held.bin");
+    e.who = ao_spy();
+    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+    ao_spy_drain();
+}
+
+/** @brief End that transfer and let what waited for it run. */
+static void release_reader(void)
+{
+    storage_close_request();
+    (void)qf_support_pump(AO_Storage, 8U);
+}
+
+TEST_CASE("file_put typed while a transfer runs waits for it and starts when it "
+          "ends", "[console_fs][turn]")
+{
+    console_up_once();
+    hold_reader();
+
+    type_line("file_put path=\"/storage/new.bin\" size=8 crc32=0");
+    settle();
+    TEST_ASSERT_FALSE_MESSAGE(replied(">err"), "refused instead of waiting");
+    TEST_ASSERT_FALSE_MESSAGE(replied(">|ready"), NOT_READY_WHY);
+    TEST_ASSERT_FALSE_MESSAGE(log_saw(CONSOLE_RAW_REQ_SIG),
+        "the wire was handed over with a transfer still running");
+
+    release_reader();
+    TEST_ASSERT_TRUE_MESSAGE(log_saw(CONSOLE_RAW_REQ_SIG),
+        "the file_put did not start when the transfer ended");
+    raw_armed(true);
+    console_step();
+    TEST_ASSERT_TRUE(replied(">|ready"));
+
+    console_release();
+}
+
+TEST_CASE("file_put whose wait for the transfer runs out says busy, and hands "
+          "nothing over", "[console_fs][turn]")
+{
+    console_up_once();
+    hold_reader();
+
+    type_line("file_put path=\"/storage/new.bin\" size=8 crc32=0");
+    settle();
+    qf_support_time_passes(KQP_TICKS_PER_MS(KODE_STORAGE_TURN_MS) + 10U);
+    settle();
+    settle();
+
+    TEST_ASSERT_TRUE(replied_line(">err code=4 msg=busy"));
+    TEST_ASSERT_FALSE_MESSAGE(replied(">|ready"), NOT_READY_WHY);
+    TEST_ASSERT_FALSE_MESSAGE(log_saw(CONSOLE_RAW_REQ_SIG),
+        "a refused file_put must never hand the wire over");
+
+    /* The console is free again. */
+    fake_klog_reset();
+    type_line("pwd");
+    TEST_ASSERT_TRUE(replied_line(">ok"));
+
+    release_reader();
     console_release();
 }
 

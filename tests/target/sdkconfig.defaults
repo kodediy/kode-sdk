@@ -17,6 +17,9 @@ CONFIG_KODEOS_CHANNEL=y
 # AO_Scheduler, so the target build compiles it. (kaos)
 CONFIG_KODE_SCHEDULER=y
 
+# The pixel accelerator's passes for a renderer, so the target build compiles them. (kaos)
+CONFIG_KODE_COMPOSE=y
+
 # The NimBLE host, which the board file leaves off. The rest of its lines are
 # the board file's, and the controller, the VHCI transport and SM_SC_ONLY=0
 # are what a build with esp-hosted and NimBLE defaults to. (ESP-IDF)

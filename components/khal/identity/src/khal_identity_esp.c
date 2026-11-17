@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file khal_identity_esp.c
- * @brief khal_identity: the serial from the C5's MAC, cached in NVS.
+ * @brief khal_identity: the serial from the C5's MAC, cached in NVS, and the
+ *        hardware revision production writes beside it.
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "kbsp_identity.h"
@@ -21,6 +23,13 @@
 #define ID_SYMBOL_MASK  ((1U << ID_SYMBOL_BITS) - 1U) /**< One symbol's bits. */
 #define ID_RADIX        32U   /**< Symbols in the alphabet: Luhn mod 32 for the check. */
 #define ID_GROUP_DASHES 3U    /**< The dashes of the printed 4-4-3 grouping. */
+
+/** Room for one character more than a revision may have, so a longer value
+ *  that the store hands back cut still reads as too long. */
+#define REV_READ_LEN    (KHAL_ID_BOARD_REV_LEN + 1U)
+
+/** The most characters of a revision kept: the room, its NUL excluded. */
+#define REV_PRECISION   ((int)KHAL_ID_BOARD_REV_LEN - 1)
 
 /** Crockford Base32: no I, L, O or U, so nothing reads as a 0 or a 1. */
 static const char ID_ALPHABET[ID_RADIX + 1U] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -41,7 +50,67 @@ static struct {
     char    pretty[KHAL_ID_PRETTY_LEN];
     uint8_t mac[KHAL_ID_MAC_LEN];
     bool    valid;
+    char    rev[KHAL_ID_BOARD_REV_LEN];   /**< The hardware revision; "" for none. */
 } s_id;
+
+/** @brief Whether @p c is a decimal digit. */
+static bool rev_digit(char c)
+{
+    return ('0' <= c) && ('9' >= c);
+}
+
+/**
+ * @brief Whether @p rev is a hardware revision: digits, one dot, digits, and
+ *        short enough to keep.
+ * @param rev A string, or NULL.
+ * @return true when it is one.
+ */
+static bool rev_is_one(const char *rev)
+{
+    size_t   len    = 0U;
+    uint8_t  dots   = 0U;
+    bool     ok     = (NULL != rev);
+    bool     digit  = false;   /* the part being read has a digit */
+
+    while ( ok && ('\0' != rev[len]) )
+    {
+        if ( rev_digit(rev[len]) )
+        {
+            digit = true;
+        }
+        else if ( ('.' == rev[len]) && digit && (0U == dots) )
+        {
+            ++dots;
+            digit = false;
+        }
+        else
+        {
+            ok = false;
+        }
+        ++len;
+        if ( KHAL_ID_BOARD_REV_LEN <= len )
+        {
+            ok = false;
+        }
+    }
+    return ok && digit && (1U == dots);
+}
+
+/** @brief Read the revision from the store; what is not one is none. */
+static void rev_load(void)
+{
+    char rev[REV_READ_LEN];
+
+    (void)memset(rev, 0, sizeof(rev));
+    s_id.rev[0] = '\0';
+    if ( (khal_nvs_get_str(KHAL_IDENTITY_NVS_NS, KHAL_ID_BOARD_REV_KEY, rev,
+                           sizeof(rev)) == KODE_OK)
+        && rev_is_one(rev) )
+    {
+        /* rev_is_one() has bounded it below the room; the precision says so. */
+        (void)snprintf(s_id.rev, sizeof(s_id.rev), "%.*s", REV_PRECISION, rev);
+    }
+}
 
 /**
  * @brief The Luhn mod 32 check over @p n symbol values.
@@ -156,6 +225,9 @@ kode_status_t khal_identity_init(void)
     uint8_t mac[KHAL_ID_MAC_LEN];
     size_t  len = sizeof(mac);
 
+    /* The revision does not depend on the name: a board production wrote one
+     * for has it before its C5 has ever been seen. */
+    rev_load();
     if ( (khal_nvs_get_blob(KHAL_IDENTITY_NVS_NS, ID_KEY, mac, &len) != KODE_OK)
         || (sizeof(mac) != len) || mac_is_zero(mac) )
     {
@@ -249,5 +321,27 @@ kode_status_t khal_identity_mac(uint8_t mac[KHAL_ID_MAC_LEN])
         return KODE_ERROR;
     }
     (void)memcpy(mac, s_id.mac, sizeof(s_id.mac));
+    return KODE_OK;
+}
+
+const char *khal_identity_board_rev(void)
+{
+    return s_id.rev;
+}
+
+kode_status_t khal_identity_set_board_rev(const char *rev)
+{
+    if ( !rev_is_one(rev) )
+    {
+        return KODE_DENIED;
+    }
+    if ( khal_nvs_set_str(KHAL_IDENTITY_NVS_NS, KHAL_ID_BOARD_REV_KEY, rev)
+        != KODE_OK )
+    {
+        KLOG_W(TAG, "the hardware revision %s could not be stored", rev);
+        return KODE_IO_ERROR;
+    }
+    (void)snprintf(s_id.rev, sizeof(s_id.rev), "%s", rev);
+    KLOG_N(TAG, "hardware revision %s stored", rev);
     return KODE_OK;
 }

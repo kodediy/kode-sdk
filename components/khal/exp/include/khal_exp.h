@@ -41,6 +41,8 @@ typedef struct {
     bool            lp;       /**< It is an LP pin.                      */
     khal_exp_mode_t mode;     /**< What it is doing.                     */
     const char     *tag;      /**< LENT: who holds it. NULL otherwise.   */
+    khal_gpio_pull_t pulled;  /**< IN: the pull it was made an input with. */
+    bool            irq;      /**< IN: an interrupt is attached to it.   */
 } khal_exp_info_t;
 
 /**

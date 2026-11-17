@@ -53,7 +53,7 @@ static struct {
     bool     app_desc;       /**< The descriptor group is filled.           */
     bool     project_kode;
     char     project[32];
-    char     version[32];
+    char     version[KDRV_C5_VERSION_MAX];
     char     idf_ver[32];
     char     date[16];
     char     time[16];
@@ -625,11 +625,12 @@ kode_status_t kdrv_c5_refresh(void)
     refresh_heap();
     refresh_pins();
 
-    KLOG_I(TAG, "%s, esp-hosted %lu.%lu.%lu, project %s, SDIO %u-bit @%lukHz",
+    KLOG_I(TAG, "%s, esp-hosted %lu.%lu.%lu, project %s %s, SDIO %u-bit @%lukHz",
            s_c5.target,
            (unsigned long)s_c5.fw_major, (unsigned long)s_c5.fw_minor,
            (unsigned long)s_c5.fw_patch,
            or_dash(s_c5.app_desc, s_c5.project),
+           or_dash(s_c5.app_desc, s_c5.version),
            (unsigned)s_c5.sdio_width, (unsigned long)s_c5.sdio_khz);
     return KODE_OK;
 }

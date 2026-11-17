@@ -71,6 +71,8 @@ extern const kode_sys_row_t kode_sys_rows[KODE_SYS_ROWS];
  * @brief Start every linked row in order, then park every absent one.
  *
  * A park waits for the last start, so the core it may ask (AO_IoExp) is up.
+ * The calling task runs the walk at KODE_PRIO_BOOT_WALK and has the priority
+ * it came with back when the walk ends.
  * @param rows The rows, in order.
  * @param n    How many.
  */

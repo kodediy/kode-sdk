@@ -80,8 +80,10 @@ typedef struct {
 
 typedef struct {
     QActive  super;
-    QTimeEvt poll;
+    QTimeEvt poll_tmo;     /**< Power_polling's one-shot: the next reading.  */
     uint8_t  low_reads;    /**< Readings in a row under POWER_CUT_MV.       */
+    bool     critical;     /**< POWER_CRITICAL_SIG last said the cell is
+                            *   critical.                                  */
     bool     pmic;         /**< The BQ25896 answered and took the policy.   */
     bool     gauge;        /**< The CW2217 answered at startup.            */
     bool     gauge_ready;  /**< Its algorithm has reported ready since.    */
@@ -123,6 +125,7 @@ typedef struct {
     QActive *bt_who;       /**< Who asked the delivery test's boost; NULL
                             *   when no answer is owed.                    */
     uint8_t  bt_status;    /**< The kode_status_t that answer carries.     */
+    uint32_t bt_ms;        /**< khal_time_ms() at that request's write.    */
     bool     lim_raised;   /**< BOOST_LIM holds the delivery test's limit,
                             *   not the board's.                           */
 } Power;
@@ -156,6 +159,13 @@ void power_peek_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(POWER_PEEK_REQ_SIG);
     QACTIVE_POST(AO_Power, &evt, NULL);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a door kaos.h declares for another AO: AO_LowPower asks it, and a build without CONFIG_KODE_LOWPOWER has no asker */
+bool power_cable_request(void)
+{
+    static const QEvt evt = QEVT_INITIALIZER(POWER_CABLE_REQ_SIG);
+    return QACTIVE_POST_X(AO_Power, &evt, KQP_POWER_POST_MARGIN, NULL);
 }
 
 bool power_ship_request(void)
@@ -300,7 +310,7 @@ void Power_ctor(void)
 {
     Power * const me = &l_power;
     QActive_ctor(&me->super, Q_STATE_CAST(&Power_initial));
-    QTimeEvt_ctorX(&me->poll, &me->super, POWER_POLL_SIG, 0U);
+    QTimeEvt_ctorX(&me->poll_tmo, &me->super, POWER_POLL_SIG, 0U);
     QTimeEvt_ctorX(&me->ctrl, &me->super, POWER_CTRL_TICK_SIG, 0U);
     QTimeEvt_ctorX(&me->pulse, &me->super, POWER_PULSE_SIG, 0U);
     QTimeEvt_ctorX(&me->plug, &me->super, POWER_TEST_STEP_SIG, 0U);
@@ -312,9 +322,11 @@ void Power_ctor(void)
     me->ship_counting = false;
     me->vbus_known    = false;
     me->low_reads     = 0U;
+    me->critical      = false;
     me->vbus_last     = false;
     me->bt_who        = NULL;
     me->bt_status     = (uint8_t)KODE_OK;
+    me->bt_ms         = 0U;
     me->lim_raised    = false;
     me->pmic          = false;
     me->gauge         = false;
@@ -809,6 +821,53 @@ static void led_write_step(Power * const me, bool writing)
     }
 }
 
+/**
+ * @brief Say POWER_CRITICAL_SIG when the cell falls to the critical mark on
+ *        battery, and say again when that is over.
+ *
+ * Once per fall, at KODE_POWER_CRITICAL_PCT or under, or at the first reading
+ * the cut counts, whichever comes first. The level is slewed and the cut reads
+ * the cell itself, so a cell that sags can reach the cut with the level above
+ * the mark: counting the cut's readings is what keeps the warning ahead of
+ * ship mode. Over when a cable comes, or when the level is
+ * KODE_POWER_CRITICAL_REARM_PCT above the mark and the cut counts nothing.
+ * Two static events, so a busy pool never loses one.
+ *
+ * @param me  The AO; low_reads already counts this reading.
+ * @param r   The reading.
+ * @param soc Its level.
+ */
+static void power_critical_watch(Power * const me, const reading_t *r, uint8_t soc)
+{
+    static const PowerCriticalEvt low  = { QEVT_INITIALIZER(POWER_CRITICAL_SIG), true };
+    static const PowerCriticalEvt over = { QEVT_INITIALIZER(POWER_CRITICAL_SIG), false };
+
+    if ( !me->critical )
+    {
+        if ( (!r->vbus) && ((uint16_t)GAUGE_MIN_MV < r->vbat_mv)
+            && (((uint8_t)KODE_POWER_CRITICAL_PCT >= soc) || (0U < me->low_reads)) )
+        {
+            me->critical = true;
+            KLOG_W(TAG, "the cell is critical on battery (%u %%, %u mV): a cable, or the "
+                        "board switches itself off", (unsigned)soc, (unsigned)r->vbat_mv);
+            QACTIVE_PUBLISH(&low.super, &me->super);
+        }
+    }
+    else if ( r->vbus
+             || (((uint8_t)(KODE_POWER_CRITICAL_PCT + KODE_POWER_CRITICAL_REARM_PCT) <= soc)
+                 && (0U == me->low_reads)) )
+    {
+        me->critical = false;
+        KLOG_I(TAG, "the cell is no longer critical (%u %%, %u mV)",
+               (unsigned)soc, (unsigned)r->vbat_mv);
+        QACTIVE_PUBLISH(&over.super, &me->super);
+    }
+    else
+    {
+        /* still critical, and said already */
+    }
+}
+
 /** @brief One complete reading, published; false when the PMIC did not answer. */
 static bool power_read(Power * const me, reading_t *r, uint8_t *soc)
 {
@@ -835,7 +894,38 @@ static bool power_read(Power * const me, reading_t *r, uint8_t *soc)
     me->vbat_mv = r->vbat_mv;
     *soc = soc_estimate(me, r->vbat_mv, r->current_ma, r->chrg);
     power_publish(me, r, *soc);
+    power_critical_watch(me, r, *soc);
     return true;
+}
+
+/**
+ * @brief The look for a cable while the P4 sleeps: one register, and a whole
+ *        reading only when the cable came or went.
+ *
+ * AO_LowPower asks every KODE_LOWPOWER_CABLE_LOOK_MS. A whole reading that
+ * often would read the gauge and wake every POWER_EVT_SIG subscriber for
+ * nothing; the cable is power good, one bit of the PMIC. The minute's
+ * POWER_PEEK_REQ_SIG keeps the cell's reading and the clock. This task is the
+ * one that writes l_reading, so it reads it here without the lock.
+ *
+ * @param me The AO.
+ */
+static void power_cable_look(Power * const me)
+{
+    int32_t pg = 0;
+
+    if ( me->pmic && (kdrv_bq25896_get(KDRV_BQ_PG_STAT, &pg) == KODE_OK) )
+    {
+        bool const cable = (0 != pg);
+
+        if ( (!l_reading_valid) || (l_reading.vbus != cable) )
+        {
+            reading_t r;
+            uint8_t   soc = 0U;
+
+            (void)power_read(me, &r, &soc);
+        }
+    }
 }
 
 /* ---- Field requests ------------------------------------------------------ */
@@ -1896,8 +1986,9 @@ static void boost_lim_restore(Power * const me)
  * @brief The pads delivery test's boost: on raises BOOST_LIM and starts it,
  *        off stops it and puts the limit back.
  *
- * The answer waits for the next poll, which carries the load's current; a
- * refusal is answered at once. Nothing is stored: the board's limit comes back
+ * The answer waits for the first poll taken KODE_TEST_DOT_BOOST_SETTLE_MS
+ * or more after the write, which carries the charger's status once it has
+ * caught up and the load's current; a refusal is answered at once. Nothing is stored: the board's limit comes back
  * on the cable's fall, at AO_Power's start and at the station's end.
  *
  * @param me The AO.
@@ -1944,6 +2035,7 @@ static void boost_test(Power * const me, PowerBoostTestReqEvt const * const r)
     }
     me->bt_who    = r->who;
     me->bt_status = (uint8_t)rc;
+    me->bt_ms     = khal_time_ms();
     if ( KODE_OK != rc )
     {
         PowerBoostTestEvt * const ev = Q_NEW_X(PowerBoostTestEvt, 0U, POWER_BOOST_TEST_SIG);
@@ -1961,7 +2053,9 @@ static void boost_test(Power * const me, PowerBoostTestReqEvt const * const r)
 }
 
 /**
- * @brief After a reading: answer the delivery test's boost with it, once.
+ * @brief After a reading: answer the delivery test's boost with it, once,
+ *        when it was taken KODE_TEST_DOT_BOOST_SETTLE_MS or more after the
+ *        write; a reading taken sooner leaves the answer to the next poll.
  * @param me The AO.
  * @param r  The reading.
  */
@@ -1969,7 +2063,8 @@ static void boost_test_answer(Power * const me, const reading_t *r)
 {
     QActive * const who = me->bt_who;
 
-    if ( NULL != who )
+    if ( (NULL != who)
+        && ((khal_time_ms() - me->bt_ms) >= KODE_TEST_DOT_BOOST_SETTLE_MS) )
     {
         PowerBoostTestEvt * const ev = Q_NEW_X(PowerBoostTestEvt, 0U, POWER_BOOST_TEST_SIG);
 
@@ -2596,21 +2691,21 @@ static QState Power_polling(Power * const me, QEvt const * const e)
              * margin, and a periodic one goes on posting whether or not this
              * AO has run, so a stall of a few periods fills the queue and
              * resets the board. One waits at most. */
-            QTimeEvt_armX(&me->poll, KQP_TICKS_PER_MS(KODE_POWER_FIRST_MS), 0U);
+            QTimeEvt_armX(&me->poll_tmo, KQP_TICKS_PER_MS(KODE_POWER_FIRST_MS), 0U);
             status = Q_HANDLED();
             break;
         }
         case Q_EXIT_SIG: {
-            (void)QTimeEvt_disarm(&me->poll);
+            (void)QTimeEvt_disarm(&me->poll_tmo);
             (void)QTimeEvt_disarm(&me->pulse);
             (void)QTimeEvt_disarm(&me->ship);
             status = Q_HANDLED();
             break;
         }
         case POWER_POLL_SIG: {
-            (void)QTimeEvt_rearm(&me->poll,
+            (void)QTimeEvt_rearm(&me->poll_tmo,
                                  KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
-            /* A radio wake runs the tick while the ADC is rested: its
+            /* A dark wake runs the tick while the ADC is rested: its
              * registers are stale and the minute's peek keeps the clock, so
              * there is nothing to read. */
             if ( !power_resting(me) )
@@ -2773,6 +2868,11 @@ static QState Power_polling(Power * const me, QEvt const * const e)
              * no chip is dumped, or every minute asleep would print a page. */
             (void)kdrv_clocks_wall_keep(false);
             (void)power_read(me, &r, &soc);
+            status = Q_HANDLED();
+            break;
+        }
+        case POWER_CABLE_REQ_SIG: {
+            power_cable_look(me);
             status = Q_HANDLED();
             break;
         }

@@ -118,6 +118,12 @@ static uint32_t    s_rec_file_ms;             /**< Length the last one asked for
 static char        s_rec_file_path[KODE_PATH_MAX]; /**< Path the last one asked for.           */
 static uint8_t     s_rec_body[TEST_REC_FILE_BYTES]; /**< The file the stand-in makes.          */
 
+static uint32_t    s_stream_now;              /**< The driver's number of its open stream; 0: none. */
+static uint32_t    s_stream_serial;           /**< The number of the stream it opened last.    */
+static uint32_t    s_take_max;                /**< Frames one stream write takes at most.      */
+static uint32_t    s_last_ms;                 /**< The wait the last stream write was given.   */
+static uint8_t     s_last_channels;           /**< The channels the last stream write named.   */
+
 /** @brief The capture: every frame the stream was given, in order. */
 static int16_t  s_cap[TEST_CAP_FRAMES];
 static uint32_t s_cap_n;                      /**< Frames captured.                            */
@@ -347,11 +353,18 @@ static void audio_answer(void)
         {
         case AUDIO_STREAM_OPEN_REQ_SIG:
             s_opens++;
+            if ( KODE_OK == s_open_rc )
+            {
+                /* The driver numbers the stream AO_Audio opens. */
+                s_stream_serial++;
+                s_stream_now = s_stream_serial;
+            }
             /* cppcheck-suppress misra-c2012-11.3 ; the signal says which event this is */
             buf_answer((const AudioBufEvt *)e, s_open_rc);
             break;
         case AUDIO_STREAM_CLOSE_REQ_SIG:
             s_closes++;
+            s_stream_now = 0U;
             /* cppcheck-suppress misra-c2012-11.3 ; the signal says which event this is */
             buf_answer((const AudioBufEvt *)e, KODE_OK);
             break;
@@ -392,6 +405,13 @@ static void audio_answer(void)
     }
 }
 
+/** @brief Which stream the codec has open, as the stand-in's opens and closes left it. */
+static uint32_t on_stream_id(int ncalls)
+{
+    (void)ncalls;
+    return s_stream_now;
+}
+
 static void settle(void);
 
 /** @brief Arm the hook for the next wait of a sys call. */
@@ -418,12 +438,17 @@ static void settle(void)
 }
 
 /** @brief The stream write of the codec: capture the frames, and park when told to. */
-static kode_status_t on_stream_write(const int16_t *frames, size_t n, uint8_t channels,
-                                     uint32_t ms, size_t *taken, int calls)
+static kode_status_t on_stream_write(uint32_t id, const int16_t *frames, size_t n,
+                                     uint8_t channels, uint32_t ms, size_t *taken, int calls)
 {
-    (void)ms;
     (void)calls;
+    if ( id != s_stream_now )
+    {
+        s_fault = "a write for a stream that is not the one open";
+    }
     s_writes++;
+    s_last_ms       = ms;
+    s_last_channels = channels;
     if ( s_cap_off && (KODE_OK == s_write_rc) )
     {
         s_seen += (uint32_t)n;
@@ -434,6 +459,14 @@ static kode_status_t on_stream_write(const int16_t *frames, size_t n, uint8_t ch
     {
         s_fault = "a write that is not mono frames within the capture";
         return KODE_DENIED;
+    }
+    if ( (KODE_OK == s_write_rc) && (s_take_max < n) )
+    {
+        /* A ring with room for part of it: that part goes in, and the wait runs out. */
+        (void)memcpy(&s_cap[s_cap_n], frames, s_take_max * sizeof(int16_t));
+        s_cap_n += s_take_max;
+        *taken   = s_take_max;
+        return KODE_TIMEOUT;
     }
     if ( KODE_OK == s_write_rc )
     {
@@ -518,6 +551,7 @@ static void audio_fresh(void)
 
     Mockkdrv_es8311_Init();
     kdrv_es8311_stream_write_StubWithCallback(&on_stream_write);
+    kdrv_es8311_stream_id_StubWithCallback(&on_stream_id);
     (void)kdrv_storage_close();
     qf_support_init();
     (void)ao_spy();
@@ -549,6 +583,10 @@ static void audio_fresh(void)
     s_answer_audio = true;
     s_open_rc      = KODE_OK;
     s_write_rc     = KODE_OK;
+    s_stream_now   = 0U;
+    s_take_max     = UINT32_MAX;
+    s_last_ms      = 0U;
+    s_last_channels = 0U;
     s_opens        = 0U;
     s_closes       = 0U;
     s_cap_off      = false;
@@ -2358,5 +2396,272 @@ TEST_CASE("a sound or a tone during a background recording is refused at once an
     /* Settings still work, and the recording is still there. */
     TEST_ASSERT_TRUE_MESSAGE(kode_audio_set("volume", TEST_VOLUME_PCT), kode_error());
     TEST_ASSERT_TRUE(kode_audio_record_status().recording);
+    audio_done();
+}
+
+/* ---- The stream a task writes itself -------------------------------------------
+ *
+ * kode_audio_stream_open(), _write() and _close(): the speaker stays open
+ * between the writes, so sound made a piece at a time has no gap in it. The
+ * stream is the app's one: while it is open every other sound is refused at
+ * once, and AO_Audio closes it after KODE_AUDIO_STREAM_IDLE_MS without a write.
+ */
+
+#define TEST_STREAM_FRAMES 960U   /**< Frames one write of a stream case carries: 20 ms. */
+#define TEST_STREAM_MS     250U   /**< How long such a write may wait for room, ms.      */
+#define TEST_STREAM_FITS   100U   /**< Frames a ring that is nearly full still takes.    */
+
+/** @brief What every call fails with while the app's stream is open. */
+#define TEST_STREAM_BUSY "audio is busy: a stream is open"
+
+/** @brief What a write or a close fails with when there is no stream. */
+#define TEST_STREAM_NONE "no stream is open"
+
+/** @brief What the first write into a stream AO_Audio closed fails with. */
+#define TEST_STREAM_GONE "the stream is no longer open: it was closed, or went 10 s without a write"
+
+/** @brief Fill @p out with @p n frames of pattern @p seed, from frame @p from on. */
+static void stream_fill(int16_t *out, uint32_t seed, uint32_t from, uint32_t n)
+{
+    for ( uint32_t i = 0U; i < n; i++ )
+    {
+        out[i] = smp(seed, from + i);
+    }
+}
+
+TEST_CASE("a stream written in two pieces plays them in order through one open and one close",
+          "[kode_audio_standard][stream]")
+{
+    static int16_t a[TEST_STREAM_FRAMES];
+    static int16_t b[TEST_STREAM_FRAMES];
+    uint32_t       taken = 0U;
+
+    stream_fill(a, TEST_SEED_A, 0U, TEST_STREAM_FRAMES);
+    stream_fill(b, TEST_SEED_A, TEST_STREAM_FRAMES, TEST_STREAM_FRAMES);
+    audio_fresh();
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_opens);
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_write(a, TEST_STREAM_FRAMES, TEST_STREAM_MS, &taken),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_STREAM_FRAMES, taken);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(TEST_STREAM_MS, s_last_ms, "the wait is the caller's");
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_write(b, TEST_STREAM_FRAMES, TEST_STREAM_MS, NULL),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_opens, "the speaker stays open between writes");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_closes, "and is not closed between them");
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_opens);
+    TEST_ASSERT_EQUAL_UINT32(1U, s_closes);
+    TEST_ASSERT_EQUAL_UINT32(2U, s_writes);
+    TEST_ASSERT_EQUAL_UINT32(2U * TEST_STREAM_FRAMES, s_cap_n);
+    TEST_ASSERT_TRUE(cap_is(0U, TEST_SEED_A, 0U, 2U * TEST_STREAM_FRAMES));
+    audio_done();
+}
+
+TEST_CASE("a stream opened with two channels hands the speaker left-right pairs",
+          "[kode_audio_standard][stream]")
+{
+    static int16_t pairs[2U * TEST_STREAM_FRAMES];
+
+    audio_fresh();
+    s_cap_off = true;
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(2U), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_write(pairs, TEST_STREAM_FRAMES, TEST_STREAM_MS, NULL),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT8(2U, s_last_channels);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(TEST_STREAM_FRAMES, s_seen, "frames, not samples");
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    audio_done();
+}
+
+TEST_CASE("a stream of neither one nor two channels is refused before anything is asked",
+          "[kode_audio_standard][stream]")
+{
+    audio_fresh();
+    TEST_ASSERT_FALSE(kode_audio_stream_open(0U));
+    TEST_ASSERT_EQUAL_STRING("a stream has 1 or 2 channels", kode_error());
+    TEST_ASSERT_FALSE(kode_audio_stream_open(3U));
+    TEST_ASSERT_EQUAL_STRING("a stream has 1 or 2 channels", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_opens);
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Audio->eQueue));
+    audio_done();
+}
+
+TEST_CASE("a write or a close with no stream open is refused and reaches nothing",
+          "[kode_audio_standard][stream]")
+{
+    static int16_t frames[TEST_STREAM_FRAMES];
+    uint32_t       taken = TEST_STREAM_FRAMES;
+
+    audio_fresh();
+    TEST_ASSERT_FALSE(kode_audio_stream_write(frames, TEST_STREAM_FRAMES, TEST_STREAM_MS, &taken));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_NONE, kode_error());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, taken, "a refused write took nothing");
+    TEST_ASSERT_FALSE(kode_audio_stream_close());
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_NONE, kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_writes);
+    TEST_ASSERT_EQUAL_UINT32(0U, s_closes);
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+    TEST_ASSERT_FALSE(kode_audio_stream_write(NULL, TEST_STREAM_FRAMES, TEST_STREAM_MS, &taken));
+    TEST_ASSERT_EQUAL_STRING("no frames to write", kode_error());
+    TEST_ASSERT_FALSE(kode_audio_stream_write(frames, 0U, TEST_STREAM_MS, &taken));
+    TEST_ASSERT_EQUAL_STRING("no frames to write", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_writes);
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    audio_done();
+}
+
+TEST_CASE("a second open while the stream is open is refused at once",
+          "[kode_audio_standard][stream]")
+{
+    audio_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+
+    fake_time_reset();
+    TEST_ASSERT_FALSE(kode_audio_stream_open(1U));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_BUSY, kode_error());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, kode_sys_time_ms(), "it does not wait for the speaker");
+    TEST_ASSERT_EQUAL_UINT32(1U, s_opens);
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    TEST_ASSERT_EQUAL_UINT32(2U, s_opens);
+    audio_done();
+}
+
+/* A writer that does not wait reads how much went in and keeps the rest: the
+ * stream stays open, and what follows goes in behind what was taken. */
+TEST_CASE("a full stream takes what fits, says how much, and stays open",
+          "[kode_audio_standard][stream]")
+{
+    static int16_t frames[TEST_STREAM_FRAMES];
+    uint32_t       taken = 0U;
+
+    stream_fill(frames, TEST_SEED_B, 0U, TEST_STREAM_FRAMES);
+    audio_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+
+    s_take_max = TEST_STREAM_FITS;
+    TEST_ASSERT_FALSE(kode_audio_stream_write(frames, TEST_STREAM_FRAMES, 0U, &taken));
+    TEST_ASSERT_EQUAL_UINT32(TEST_STREAM_FITS, taken);
+    TEST_ASSERT_EQUAL_STRING("the stream is full: 100 of 960 frames written", kode_error());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_last_ms, "no wait was asked for");
+
+    s_take_max = UINT32_MAX;
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_write(&frames[taken], TEST_STREAM_FRAMES - taken,
+                                                     TEST_STREAM_MS, &taken),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32(TEST_STREAM_FRAMES - TEST_STREAM_FITS, taken);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_opens, "the stream was not opened again");
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    TEST_ASSERT_TRUE(cap_is(0U, TEST_SEED_B, 0U, TEST_STREAM_FRAMES));
+    audio_done();
+}
+
+TEST_CASE("every other sound and recording is refused at once while the stream is open",
+          "[kode_audio_standard][stream]")
+{
+    static int16_t buf[TEST_SAMPLES_FRAMES];
+
+    audio_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+
+    fake_time_reset();
+    TEST_ASSERT_FALSE(kode_audio_play("flash/a.wav"));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_BUSY, kode_error());
+    TEST_ASSERT_FALSE(kode_audio_play_start("flash/a.wav"));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_BUSY, kode_error());
+    TEST_ASSERT_FALSE(kode_audio_tone(TEST_TONE_HZ, TEST_SHORT_TONE_MS));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_BUSY, kode_error());
+    TEST_ASSERT_FALSE(kode_audio_play_samples(buf, TEST_SAMPLES_FRAMES));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_BUSY, kode_error());
+    TEST_ASSERT_FALSE(kode_audio_record_file("flash/r.wav", TEST_REC_MS));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_BUSY, kode_error());
+    TEST_ASSERT_FALSE(kode_audio_record_samples(buf, TEST_SAMPLES_FRAMES, TEST_REC_MS, NULL));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_BUSY, kode_error());
+    TEST_ASSERT_FALSE(kode_audio_record_start(TEST_REC_MS));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_BUSY, kode_error());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, kode_sys_time_ms(), "none of them waited");
+    TEST_ASSERT_EQUAL_UINT32(1U, s_opens);
+    TEST_ASSERT_EQUAL_UINT32(0U, s_recs);
+    TEST_ASSERT_EQUAL_UINT32(0U, s_rec_files);
+
+    /* The settings take no turn, and the speaker is free once it is closed. */
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_set("volume", TEST_VOLUME_PCT), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_tone(TEST_TONE_HZ, TEST_SHORT_TONE_MS), kode_error());
+    audio_done();
+}
+
+/* AO_Audio closes a stream nobody writes to. The task that left it finds out
+ * on its next write, once, and from then on there is no stream. */
+TEST_CASE("a stream closed for silence says so on the next write, and a new one opens",
+          "[kode_audio_standard][stream]")
+{
+    static int16_t frames[TEST_STREAM_FRAMES];
+    uint32_t       taken = TEST_STREAM_FRAMES;
+
+    audio_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+
+    s_stream_now = 0U;   /* AO_Audio closed it */
+    TEST_ASSERT_FALSE(kode_audio_stream_write(frames, TEST_STREAM_FRAMES, TEST_STREAM_MS, &taken));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_GONE, kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, taken);
+    TEST_ASSERT_FALSE(kode_audio_stream_write(frames, TEST_STREAM_FRAMES, TEST_STREAM_MS, &taken));
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_NONE, kode_error());
+    TEST_ASSERT_FALSE(kode_audio_stream_close());
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_NONE, kode_error());
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_writes, "nothing reached the speaker");
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+    TEST_ASSERT_EQUAL_UINT32(2U, s_opens);
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_write(frames, TEST_STREAM_FRAMES, TEST_STREAM_MS, &taken),
+                             kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    audio_done();
+}
+
+/* The task that forgot its stream never writes again and never closes: the
+ * speaker is everybody's again all the same. */
+TEST_CASE("a forgotten stream closed for silence does not keep the speaker",
+          "[kode_audio_standard][stream]")
+{
+    audio_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+
+    s_stream_now = 0U;   /* AO_Audio closed it */
+    fake_time_reset();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_tone(TEST_TONE_HZ, TEST_SHORT_TONE_MS), kode_error());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2U, s_opens, "the tone had the speaker");
+    TEST_ASSERT_TRUE_MESSAGE(kode_sys_time_ms() < KODE_AUDIO_BUSY_MS, "without waiting for it");
+
+    TEST_ASSERT_FALSE(kode_audio_stream_close());
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_NONE, kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
+    audio_done();
+}
+
+TEST_CASE("a speaker that never answers a stream's open is reported, and the next open works",
+          "[kode_audio_standard][stream]")
+{
+    audio_fresh();
+    s_answer_audio = false;
+    TEST_ASSERT_FALSE(kode_audio_stream_open(1U));
+    TEST_ASSERT_EQUAL_STRING("the speaker did not answer", kode_error());
+    TEST_ASSERT_FALSE(kode_audio_stream_close());
+    TEST_ASSERT_EQUAL_STRING(TEST_STREAM_NONE, kode_error());
+    drain(AO_Audio);
+
+    s_answer_audio = true;
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_open(1U), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_stream_close(), kode_error());
     audio_done();
 }

@@ -131,6 +131,7 @@ static kode_status_t off_cmd(void)      { return kode_sys_power_off(); }
 #endif
 static kode_status_t home_now(void)     { return kode_sys_home_now(); }
 static kode_status_t exit_os(void)      { return kode_sys_exit_to_os(); }
+static kode_status_t nvs_set(void)      { return kode_sys_nvs_set("k", "v"); }
 #if CONFIG_KODEOS_APPMGR
 static kode_status_t flash(void)        { return kode_sys_flash("fs:x.bin", "app", false); }
 #endif
@@ -143,6 +144,7 @@ static kode_status_t wifi_auto(void)    { return kode_sys_wifi_connect(NULL, NUL
 static kode_status_t wifi_leave(void)   { return kode_sys_wifi_disconnect(); }
 #endif
 #if CONFIG_KODEOS_NET
+static kode_status_t file_stop(void)    { return kode_sys_http_file_stop(AO_Storage); }
 static kode_status_t mqtt_up(void)      { return kode_sys_mqtt_connect("mqtt://broker", NULL, NULL); }
 static kode_status_t mqtt_down(void)    { return kode_sys_mqtt_disconnect(); }
 static kode_status_t mqtt_pub(void)     { return kode_sys_mqtt_publish("t", "x", 1U); }
@@ -194,6 +196,12 @@ TEST_CASE("the going-home commands in a loop are refused past the margin, then t
 {
     loop_past_margin(AO_Boot, &home_now, KQP_BOOT_CMD_MARGIN);
     loop_past_margin(AO_Boot, &exit_os, KQP_BOOT_CMD_MARGIN);
+}
+
+TEST_CASE("the store's command in a loop is refused past the margin, then taken again",
+          "[kode_sys_cmd]")
+{
+    loop_past_margin(AO_Boot, &nvs_set, KQP_BOOT_CMD_MARGIN);
 }
 
 #if CONFIG_KODEOS_APPMGR
@@ -290,7 +298,7 @@ TEST_CASE("a command with the pools dry is KODE_NO_RESOURCES and posts nothing",
     /* Both pools: an event too big for the ordinary block takes a jumbo one. */
     s_held_n = 0U;
     pool_take_all((uint_fast16_t)sizeof(LedEvt));
-    pool_take_all((uint_fast16_t)sizeof(AppDataIconEvt));
+    pool_take_all((uint_fast16_t)sizeof(RecvDataEvt));
 
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_led_set(true));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_led_toggle());
@@ -326,3 +334,14 @@ TEST_CASE("a command with the pools dry is KODE_NO_RESOURCES and posts nothing",
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_power_boost(false), "the pool is back");
     queue_drain(AO_Power);
 }
+
+#if CONFIG_KODEOS_NET
+/* The stop of a download is a command to AO_Storage: in a loop it is refused
+ * past the margin like any other, and a stop with no download to end is
+ * read and dropped. */
+TEST_CASE("the download's stop in a loop is refused past the margin, then taken again",
+          "[kode_sys_cmd]")
+{
+    loop_past_margin(AO_Storage, &file_stop, KQP_STORAGE_CMD_MARGIN);
+}
+#endif

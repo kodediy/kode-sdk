@@ -219,6 +219,30 @@ TEST_CASE("mqtt_pub, mqtt_sub and mqtt_unsub with no network are an error, not a
     }
 }
 
+TEST_CASE("mqtt_pub, mqtt_sub and mqtt_unsub with no broker are an error, not an ok",
+          "[console_mqtt]")
+{
+    static const char *const LINES[3] = {
+        "mqtt_pub topic=\"a/b\" data=\"x\"",
+        "mqtt_sub topic=\"a/b\"",
+        "mqtt_unsub topic=\"a/b\"",
+    };
+
+    console_up();
+    net_mailbox_drain();
+
+    for ( unsigned i = 0U; 3U > i; ++i )
+    {
+        fake_klog_reset();
+        type_line(LINES[i]);
+        net_mailbox_drain();
+        state_from_net((uint8_t)KDRV_MQTT_DOWN, (uint8_t)KDRV_MQTT_ERR_REFUSED);
+
+        TEST_ASSERT_TRUE(replied(">err code=5 msg=no_broker"));
+        TEST_ASSERT_FALSE(replied(">ok"));
+    }
+}
+
 TEST_CASE("mqtt_up with no network is an error; mqtt_info and mqtt_down still report the state",
           "[console_mqtt]")
 {

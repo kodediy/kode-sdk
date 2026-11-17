@@ -11,6 +11,7 @@ file(GLOB khal_includes LIST_DIRECTORIES true "${SDK_DIR}/components/khal/*/incl
 idf_component_register(
     SRCS "runner.c"
          "log_stub.c"
+         "app_desc_stub.c"
          ${CASE_SOURCES}
          "${SDK_DIR}/components/kdrv/apps/src/kdrv_slot.c"
     INCLUDE_DIRS "."

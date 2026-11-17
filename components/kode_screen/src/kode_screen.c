@@ -1023,7 +1023,7 @@ static void screen_attach(QActive *ao)
 }
 
 /**
- * @brief The table's event(): kscreen's five signals and the screen's requests.
+ * @brief The table's event(): kscreen's signals and the screen's requests.
  * @param e The event.
  * @return true when handled.
  */
@@ -1052,6 +1052,14 @@ static bool screen_event(QEvt const *e)
             }
             case DISPLAY_REPAINT_SIG: {
                 kscreen_repaint(&s->screen);
+                break;
+            }
+            case DISPLAY_PARK_SIG: {
+                kscreen_park(&s->screen, Q_EVT_CAST(DisplayParkEvt)->seq);
+                break;
+            }
+            case POWER_CRITICAL_SIG: {
+                kscreen_critical(&s->screen, Q_EVT_CAST(PowerCriticalEvt));
                 break;
             }
             case KODE_SCREEN_TICK_SIG: {

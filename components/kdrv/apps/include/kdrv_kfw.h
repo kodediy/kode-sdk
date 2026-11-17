@@ -73,6 +73,7 @@ const kfw_sink_t *kfw_buf_sink(void);
  * correct transfer of a corrupt file.
  */
 
+/* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_kfw.c; the addon reads the header from a file that does not use it */
 #define KFW_MAGIC        0x3157464BU   /**< "KFW1" read little-endian.      */
 #define KFW_ESP_MAGIC    0xE9U         /**< First byte of a raw ESP image.  */
 #define KFW_HDR_VERSION  1U
@@ -130,7 +131,7 @@ typedef struct {
  *
  *   0x00  4   magic "KAD1"
  *   0x04  2   json_len   1..KFW_AD_JSON_MAX
- *   0x06  2   icon_len   0, or KFW_AD_ICON_LEN
+ *   0x06  2   icon_len   0, KFW_AD_ICON_LEN or KFW_AD_ICON_LEN_HALF
  *   0x08  4   CRC32 (kfw_crc32) of the json_len + icon_len bytes that follow
  *   0x0C      app.json, then icon.k64
  *
@@ -149,13 +150,15 @@ typedef struct {
 /* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_kfw.c; the addon reads the header from a file that does not use it */
 #define KFW_AD_JSON_MAX    KAPP_DATA_JSON_MAX   /**< Longest app.json a block carries. */
 /* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_kfw.c; the addon reads the header from a file that does not use it */
-#define KFW_AD_ICON_LEN    KAPP_ICON_BYTES      /**< The one icon size: 64x64, RGB565 + A8. */
+#define KFW_AD_ICON_LEN    KAPP_ICON_BYTES      /**< The icon the board holds: 128x128, RGB565 + A8. */
+/* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_kfw.c; the addon reads the header from a file that does not use it */
+#define KFW_AD_ICON_LEN_HALF KAPP_ICON_HALF_BYTES  /**< The smaller icon a block may carry: 64x64, RGB565 + A8. */
 
 /** @brief The block's header, exactly as it sits in the stream. */
 typedef struct {
     uint32_t magic;       /**< KFW_AD_MAGIC.                                    */
     uint16_t json_len;    /**< Bytes of app.json: 1..KFW_AD_JSON_MAX.           */
-    uint16_t icon_len;    /**< Bytes of icon.k64: 0 or KFW_AD_ICON_LEN.         */
+    uint16_t icon_len;    /**< Bytes of icon.k64: 0, KFW_AD_ICON_LEN or KFW_AD_ICON_LEN_HALF. */
     uint32_t crc;         /**< CRC32 of the json_len + icon_len bytes after it. */
 } kfw_ad_hdr_t;
 
@@ -183,8 +186,9 @@ typedef enum {
 /** @brief What a finished session has for the folder. */
 typedef enum {
     KFW_AD_RAW = 0,       /**< A bare image: the folder is left as it is.       */
-    KFW_AD_NONE,          /**< A container with no block, or a dropped one: the folder goes. */
-    KFW_AD_BLOCK          /**< A checked block: the folder becomes this.        */
+    KFW_AD_NONE,          /**< A container that carries no block: the folder goes. */
+    KFW_AD_BLOCK,         /**< A checked block: the folder becomes this.        */
+    KFW_AD_DROPPED        /**< A container whose block was dropped (size, CRC, syntax, no PSRAM): the folder is left as it is, like a bare image's. */
 } kfw_ad_kind_t;
 
 /** @brief The block a session kept, and who owns it now. */
@@ -192,7 +196,7 @@ typedef struct {
     kfw_ad_kind_t kind;       /**< Which of the three answers this is.          */
     uint8_t      *buf;        /**< PSRAM: json_len bytes of app.json, then icon_len of icon.k64; NULL unless BLOCK. */
     uint16_t      json_len;   /**< Bytes of app.json at the head of @p buf.     */
-    uint16_t      icon_len;   /**< Bytes of icon.k64 after it: 0 or KFW_AD_ICON_LEN. */
+    uint16_t      icon_len;   /**< Bytes of icon.k64 after it: 0, KFW_AD_ICON_LEN or KFW_AD_ICON_LEN_HALF. */
 } kfw_appdata_t;
 
 /**
@@ -319,6 +323,47 @@ bool kfw_busy(void);
  * to count the image rather than what carried it.
  */
 uint32_t kfw_produced(void);
+
+/**
+ * @brief Whether the session refused its image as another chip's or another
+ *        target's.
+ *
+ * Read after kfw_feed() refused a chunk, to tell an image for some other
+ * board from one that could not be written. A new kfw_begin() clears it.
+ *
+ * @return true when the image was for another chip or target.
+ */
+bool kfw_foreign(void);
+
+/**
+ * @brief Whether the session refused its image as not well formed.
+ *
+ * Neither a container nor an ESP image, a container header that does not
+ * verify or says what this firmware cannot obey, a deflate stream that does
+ * not decode, a payload longer than its header declared, an app data block
+ * whose payload cannot be found, or a raw image the file cuts inside its first
+ * segment. At kfw_end(), a stream that ends inside the header, the app data
+ * block or short of the image its header declared, an image that fails its
+ * digest, or one its destination does not verify where it lies (the sink's
+ * end writes nothing; it reads back and judges). Read after kfw_feed() or
+ * kfw_end() refused, to tell a bad image from one that could not be written.
+ * A new kfw_begin() clears it.
+ *
+ * @return true when the image itself was at fault.
+ */
+bool kfw_malformed(void);
+
+/**
+ * @brief Whether the session's destination refused to open or to take a write.
+ *
+ * The sink's begin, or a write other than a full buffer's KODE_NO_RESOURCES.
+ * Read after kfw_feed() refused a chunk, to tell a write that failed from an
+ * image at fault or a decoder that could not run (no PSRAM for the inflater,
+ * no hash). A new kfw_begin() clears it.
+ *
+ * @return true when the destination failed.
+ */
+bool kfw_sink_failed(void);
 
 /**
  * @brief Parse, refuse and decode, checked by hand: the console's `test kfw`.

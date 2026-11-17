@@ -50,6 +50,7 @@
 #include "kset.h"
 #include "lowpower_cases.h"
 #include "qf_support.h"
+#include "radio_knocks.h"
 
 /* ---- Fixture ----------------------------------------------------------------- */
 
@@ -263,8 +264,19 @@ static void dispatch_evt(const QEvt *e)
 
 static void dispatch(enum_t sig)
 {
-    QEvt e = QEVT_INITIALIZER(sig);
-    dispatch_evt(&e);
+    if ( (enum_t)WIFI_SCAN_REQ_SIG == sig )
+    {
+        /* The one bare request with a field of its own: its generation. */
+        WifiScanReqEvt r = { QEVT_INITIALIZER(WIFI_SCAN_REQ_SIG), (uint8_t)KQP_SCAN_GEN_NONE };
+
+        dispatch_evt(&r.super);
+    }
+    else
+    {
+        QEvt e = QEVT_INITIALIZER(sig);
+
+        dispatch_evt(&e);
+    }
 }
 
 /** @brief Whether a job is inside the radio worker, waiting to be ended. */
@@ -527,6 +539,10 @@ static void finish_whatever_runs(void)
         case KDRV_RADIO_JOB_BLE_STOP:   finish(KDRV_RADIO_JOB_BLE_STOP, KODE_OK); break;
         case KDRV_RADIO_JOB_BLE_UNPAIR: finish(KDRV_RADIO_JOB_BLE_UNPAIR, KODE_OK); break;
         case KDRV_RADIO_JOB_BLE_RSP:    finish(KDRV_RADIO_JOB_BLE_RSP, KODE_OK); break;
+        case KDRV_RADIO_JOB_BLE_HEAR:   finish(KDRV_RADIO_JOB_BLE_HEAR, KODE_OK); break;
+        case KDRV_RADIO_JOB_BLE_PAIR_REJECT:
+            finish(KDRV_RADIO_JOB_BLE_PAIR_REJECT, KODE_OK);
+            break;
         case KDRV_RADIO_JOB_EXP_POWER:  finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK); break;
         case KDRV_RADIO_JOB_AMP:        finish(KDRV_RADIO_JOB_AMP, KODE_OK); break;
         case KDRV_RADIO_JOB_SLEEP:      finish(KDRV_RADIO_JOB_SLEEP, KODE_OK); break;
@@ -662,6 +678,9 @@ static void settle_to_off(void)
 static void radio_fresh(void)
 {
     radio_up_once();
+    /* The AO outlives the case, and a case may have emptied its queue by
+     * hand: a knock whose event went that way would fold every later post. */
+    radio_knocks_reset();
     radio_lp_expect_net(true);   /* the rounds wait for AO_Net, as on the board */
     s_gate_auto = true;
     settle_to_off();

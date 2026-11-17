@@ -26,13 +26,21 @@ extern "C" {
  */
 #define KDRV_SLOT_PROJECT_MAX 32U /**< Bytes of a project name, with its NUL, as
                                     *   esp_app_desc_t holds it.             */
+#define KDRV_SLOT_VERSION_MAX 32U /**< Bytes of a version, with its NUL, as
+                                    *   esp_app_desc_t holds it.             */
+#define KDRV_SLOT_DATE_MAX    16U /**< Bytes of a build date, with its NUL, as
+                                    *   esp_app_desc_t holds it.             */
+#define KDRV_SLOT_TIME_MAX    16U /**< Bytes of a build time, with its NUL, as
+                                    *   esp_app_desc_t holds it.             */
+#define KDRV_SLOT_IDF_MAX     32U /**< Bytes of an ESP-IDF version, with its
+                                    *   NUL, as esp_app_desc_t holds it.     */
 
 typedef struct {
     char project[KDRV_SLOT_PROJECT_MAX];
-    char version[32];
-    char date[16];
-    char time[16];
-    char idf_ver[32];
+    char version[KDRV_SLOT_VERSION_MAX];
+    char date[KDRV_SLOT_DATE_MAX];
+    char time[KDRV_SLOT_TIME_MAX];
+    char idf_ver[KDRV_SLOT_IDF_MAX];
 } kdrv_slot_desc_t;
 
 /* ---- The slot ------------------------------------------------------------ */
@@ -65,7 +73,16 @@ kode_status_t kdrv_slot_begin(void);
 /** @brief Append to the open session. */
 kode_status_t kdrv_slot_write(const void *data, size_t len);
 
-/** @brief Close the session and verify what was written. */
+/**
+ * @brief Close the session and verify what was written.
+ *
+ * An image is taken only when it is sound and its description names the
+ * project that is running: the slot is this firmware's own update, and an
+ * app's image there would boot in its place.
+ *
+ * @return KODE_OK; KODE_DENIED with no session open; KODE_ERROR for an image
+ *         that fails its checks, has no description or is another project's.
+ */
 kode_status_t kdrv_slot_end(void);
 
 /** @brief Abandon the session, leaving the slot invalid. */
@@ -143,8 +160,22 @@ typedef enum {
     KDRV_SLOT_STATE_OTHER          /**< Anything else - worth saying out loud. */
 } kdrv_slot_state_t;
 
-/** @brief Read the slot's recorded state. Call before clearing otadata. */
+/** @brief Read the slot's recorded state. Call before clearing otadata.
+ *         A slot selected and never launched reads UNDEFINED. */
 kdrv_slot_state_t kdrv_slot_state(void);
+
+/**
+ * @brief Whether otadata selected the slot after the running one.
+ *
+ * Its state is that selection's only then; otherwise it is an earlier
+ * update's, and the last switch to the slot never took effect. Call before
+ * clearing otadata.
+ *
+ * @return true when the slot's latest entry is newer than the running
+ *         slot's; false from factory, with no entry naming it, or when otadata
+ *         cannot be read.
+ */
+bool kdrv_slot_newer(void);
 
 /* ---- Every app partition, by id ------------------------------------------ */
 
@@ -158,13 +189,16 @@ typedef enum {
 
 /**
  * @brief One app partition as `info` describes it: where it is, whether the
- *        board is running from it, and what image it holds.
+ *        board is running from it, whether otadata names it, and what image
+ *        it holds.
  */
 typedef struct {
     const char       *label;     /**< The partition table's name.            */
     uint32_t          address;   /**< Flash offset.                          */
     uint32_t          size;      /**< In bytes.                              */
     bool              running;   /**< This boot came from it.                */
+    bool              boot;      /**< otadata names it: the next boot that is
+                                  *   not an app's starts it.                */
     bool              has_image; /**< A descriptor could be read from it.    */
     kdrv_slot_desc_t  desc;      /**< That descriptor; all "" when there is
                                   *   none.                                  */

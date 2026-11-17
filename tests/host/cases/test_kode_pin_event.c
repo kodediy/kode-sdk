@@ -638,3 +638,22 @@ TEST_CASE("one listener added twice and removed once leaves the pin free", "[kod
     TEST_ASSERT_FALSE(kode_event_remove_listener(PIN_EVENT, &listener_rec));
     pin_event_done();
 }
+
+/* A wake line would take the pin's interrupt and its pull from under the
+ * listener, and nothing could put the listener back while it still counts. */
+TEST_CASE("a pin with a listener is refused as what wakes a rest, at once and untouched",
+          "[kode_pin_event]")
+{
+    kode_rest_wake_t const wake = { .pin = PIN_POS, .pin_level = true };
+
+    pin_event_fresh();
+    TEST_ASSERT_TRUE(kode_event_add_listener(PIN_EVENT, &listener_rec));
+
+    TEST_ASSERT_FALSE(kode_rest(KODE_REST_CPU, &wake));
+    TEST_ASSERT_EQUAL_STRING("the rest did not begin: pin: listened to", kode_error());
+    TEST_ASSERT_EQUAL(KODE_SYS_EXP_IN, pin_mode(PIN_POS));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, atomic_load(&s_attach_n[PIN_GPIO]), "the listener lost its interrupt");
+
+    TEST_ASSERT_TRUE(kode_event_remove_listener(PIN_EVENT, &listener_rec));
+    pin_event_done();
+}

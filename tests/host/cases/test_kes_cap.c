@@ -15,27 +15,27 @@
 /** @brief One register step, in tenth-dB. */
 #define LAW_X10_STEP        5
 
-TEST_CASE("the cap is under full scale, on a register step, and covers the "
-          "fitted 82K", "[kes_cap]")
+TEST_CASE("the cap is one step under full scale, on a register step, for "
+          "the fitted 270K", "[kes_cap]")
 {
     int32_t cap = KDRV_ES8311_OUT_DB_X10_MAX;
 
     TEST_ASSERT_TRUE_MESSAGE(0 > cap,
-        "a cap at or above full scale caps nothing");
+        "at full scale the highest feedback resistor measured takes the "
+        "speaker past 0.5 W");
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, cap % LAW_X10_STEP,
         "the register moves in half-decibels; a cap between two steps is "
         "truncated by the codec layer to the one below, and reads back wrong");
-    TEST_ASSERT_TRUE_MESSAGE(-106 >= cap,
-        "the fitted 82K needs 10.6 dB at the worst feedback resistor");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0xA9U,
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0xBEU,
         (uint32_t)((cap - LAW_X10_AT_ZERO) / LAW_X10_STEP),
-        "the bench's acceptance reading: volume 100 leaves 0x32 at 0xA9");
+        "R2/R10 are 270K on every board that ships: volume 100 leaves 0x32 "
+        "at 0xBE, one step under full scale");
 }
 
 TEST_CASE("volume 100 reads back as the cap, through the chip's own law",
           "[kes_cap]")
 {
-    static uint8_t reg32 = 0xA9U;
+    static uint8_t reg32 = 0xBEU;
     int32_t        db    = 0;
 
     Mockkdrv_es8311_Init();
@@ -56,7 +56,7 @@ TEST_CASE("the three writes that could lift the speaker past its cap are "
 
     /* No write is expected: the strict mock fails the case if one reaches the chip. */
     TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_DENIED,
-        kdrv_es8311_set(KDRV_ES_REG32, 0xBF), "full scale, raw");
+        kdrv_es8311_set(KDRV_ES_REG32, 0xFF), "past full scale, raw");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_DENIED,
         kdrv_es8311_set(KDRV_ES_REG34, 0x86), "the compressor, as its byte");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_DENIED,

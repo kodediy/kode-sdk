@@ -30,7 +30,7 @@ static bool          seam_enabled(void);
 static kode_status_t seam_set_name(const char *name);
 static kode_status_t seam_set_data(const uint8_t *data, size_t len);
 static kode_status_t seam_block_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t ms,
-                                     uint32_t wait_ms);
+                                     uint32_t wait_ms, bool *rest);
 static kode_status_t seam_block_value(const char *chr, uint8_t op, const void *data,
                                       size_t len);
 static bool          seam_fault(char *why, size_t cap);
@@ -48,6 +48,22 @@ const char *seam_event_ble_connected(void);
 const char *seam_event_ble_disconnected(void);
 const char *seam_event_ble_written(void);
 bool seam_ble_service_select(const kode_ble_service_t *service);
+static kode_status_t seam_hid_select(uint8_t kinds);
+static bool          seam_hid_ready(void);
+static kode_status_t seam_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel);
+static kode_status_t seam_hid_keys(uint8_t modifiers, const uint8_t *keys);
+static kode_status_t seam_pair_open(void);
+static kode_status_t seam_hid_tap(uint8_t modifiers, uint8_t key);
+static kode_status_t seam_hid_click(uint8_t buttons);
+bool seam_ble_hid_tap(uint8_t modifiers, uint8_t key);
+bool seam_ble_hid_click(uint8_t buttons);
+bool seam_ble_hid_select(uint8_t kinds);
+bool seam_ble_hid_ready(void);
+bool seam_ble_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel);
+bool seam_ble_hid_keys(uint8_t modifiers, const uint8_t *keys);
+bool seam_ble_pair_open(void);
+const char *seam_event_ble_pair_code(void);
+const char *seam_event_ble_pair_done(void);
 
 #define kode_sys_ble_enabled        seam_enabled
 #define kode_sys_ble_set_name       seam_set_name
@@ -69,7 +85,39 @@ bool seam_ble_service_select(const kode_ble_service_t *service);
 #define kode_event_ble_disconnected seam_event_ble_disconnected
 #define kode_event_ble_written      seam_event_ble_written
 #define kode_ble_service_select     seam_ble_service_select
+#define kode_sys_ble_hid_select     seam_hid_select
+#define kode_sys_ble_hid_ready      seam_hid_ready
+#define kode_sys_ble_hid_mouse      seam_hid_mouse
+#define kode_sys_ble_hid_keys       seam_hid_keys
+#define kode_sys_ble_pair_open      seam_pair_open
+#define kode_sys_ble_hid_tap        seam_hid_tap
+#define kode_sys_ble_hid_click      seam_hid_click
+#define kode_ble_hid_tap            seam_ble_hid_tap
+#define kode_ble_hid_click          seam_ble_hid_click
+#define kode_ble_hid_select         seam_ble_hid_select
+#define kode_ble_hid_ready          seam_ble_hid_ready
+#define kode_ble_hid_mouse          seam_ble_hid_mouse
+#define kode_ble_hid_keys           seam_ble_hid_keys
+#define kode_ble_pair_open          seam_ble_pair_open
+#define kode_event_ble_pair_code    seam_event_ble_pair_code
+#define kode_event_ble_pair_done    seam_event_ble_pair_done
 #include "kode_ble.c"
+#undef kode_sys_ble_hid_select
+#undef kode_sys_ble_hid_ready
+#undef kode_sys_ble_hid_mouse
+#undef kode_sys_ble_hid_keys
+#undef kode_sys_ble_pair_open
+#undef kode_sys_ble_hid_tap
+#undef kode_sys_ble_hid_click
+#undef kode_ble_hid_tap
+#undef kode_ble_hid_click
+#undef kode_ble_hid_select
+#undef kode_ble_hid_ready
+#undef kode_ble_hid_mouse
+#undef kode_ble_hid_keys
+#undef kode_ble_pair_open
+#undef kode_event_ble_pair_code
+#undef kode_event_ble_pair_done
 #undef kode_sys_ble_enabled
 #undef kode_sys_ble_set_name
 #undef kode_sys_ble_set_data
@@ -102,6 +150,7 @@ static kode_status_t         s_seam_scan_rc;             /**< What it answers.  
 static uint32_t              s_seam_scans;               /**< Listens it was asked for.         */
 static uint32_t              s_seam_scan_ms;             /**< The listen it was handed.         */
 static uint32_t              s_seam_wait_ms;             /**< The bound it was handed.          */
+static bool                  s_seam_scan_rest;           /**< Its answer says the radio rests.  */
 static kode_status_t         s_seam_value_rc;            /**< What set_value and notify answer. */
 static uint32_t              s_seam_values;              /**< Values and notifies handed down.  */
 static uint32_t              s_seam_notifies;            /**< Of those, the notifies.           */
@@ -109,6 +158,11 @@ static uint8_t               s_seam_last_op;             /**< The last request's
 static kode_status_t         s_seam_room_rc;             /**< What the room door answers.       */
 static size_t                s_seam_room;                /**< The room it reports.              */
 static const char           *s_seam_fault;               /**< The reason the service is left out; NULL: served. */
+static kode_status_t         s_seam_hid_rc;              /**< What the HID doors answer.        */
+static uint32_t              s_seam_hid_calls;           /**< HID doors and pairing doors asked. */
+static uint8_t               s_seam_hid_kinds;           /**< The kinds the last select named.  */
+static uint8_t               s_seam_hid_rep[8];          /**< The last report's arguments.      */
+static bool                  s_seam_hid_keys_null;       /**< The last keyboard report had no keys. */
 
 static bool seam_enabled(void)
 {
@@ -160,11 +214,15 @@ static bool seam_fault(char *why, size_t cap)
 }
 
 static kode_status_t seam_block_scan(kode_sys_ble_device_cb cb, void *ctx, uint32_t ms,
-                                     uint32_t wait_ms)
+                                     uint32_t wait_ms, bool *rest)
 {
     s_seam_scans++;
     s_seam_scan_ms = ms;
     s_seam_wait_ms = wait_ms;
+    if ( NULL != rest )
+    {
+        *rest = s_seam_scan_rest;
+    }
     if ( KODE_OK == s_seam_scan_rc )
     {
         for ( uint32_t i = 0U; i < s_seam_devs_n; i++ )
@@ -194,11 +252,67 @@ static void seam_scan_script(const int8_t *rssi, uint32_t n, kode_status_t rc)
                        "c0:00:00:00:00:%02" PRIx32, i);
         s_seam_devs[i].rssi = rssi[i];
     }
-    s_seam_devs_n  = n;
-    s_seam_scan_rc = rc;
-    s_seam_scans   = 0U;
-    s_seam_scan_ms = 0U;
-    s_seam_wait_ms = 0U;
+    s_seam_devs_n    = n;
+    s_seam_scan_rc   = rc;
+    s_seam_scans     = 0U;
+    s_seam_scan_ms   = 0U;
+    s_seam_wait_ms   = 0U;
+    s_seam_scan_rest = false;
+}
+
+static kode_status_t seam_hid_select(uint8_t kinds)
+{
+    ++s_seam_hid_calls;
+    s_seam_hid_kinds = kinds;
+    return s_seam_hid_rc;
+}
+
+static bool seam_hid_ready(void)
+{
+    return KODE_OK == s_seam_hid_rc;
+}
+
+static kode_status_t seam_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
+{
+    ++s_seam_hid_calls;
+    s_seam_hid_rep[0] = buttons;
+    s_seam_hid_rep[1] = (uint8_t)dx;
+    s_seam_hid_rep[2] = (uint8_t)dy;
+    s_seam_hid_rep[3] = (uint8_t)wheel;
+    return s_seam_hid_rc;
+}
+
+static kode_status_t seam_hid_keys(uint8_t modifiers, const uint8_t *keys)
+{
+    ++s_seam_hid_calls;
+    s_seam_hid_rep[0]    = modifiers;
+    s_seam_hid_keys_null = (NULL == keys);
+    if ( NULL != keys )
+    {
+        (void)memcpy(&s_seam_hid_rep[1], keys, KODE_BLE_HID_KEYS_MAX);
+    }
+    return s_seam_hid_rc;
+}
+
+static kode_status_t seam_pair_open(void)
+{
+    ++s_seam_hid_calls;
+    return s_seam_hid_rc;
+}
+
+static kode_status_t seam_hid_tap(uint8_t modifiers, uint8_t key)
+{
+    ++s_seam_hid_calls;
+    s_seam_hid_rep[0] = modifiers;
+    s_seam_hid_rep[1] = key;
+    return s_seam_hid_rc;
+}
+
+static kode_status_t seam_hid_click(uint8_t buttons)
+{
+    ++s_seam_hid_calls;
+    s_seam_hid_rep[0] = buttons;
+    return s_seam_hid_rc;
 }
 
 /** @brief A fresh case: the system up, Bluetooth on, every door answering OK. */
@@ -221,6 +335,11 @@ static void fresh(void)
     s_seam_room_rc  = KODE_OK;
     s_seam_room     = 0U;
     s_seam_fault    = NULL;
+    s_seam_hid_rc        = KODE_OK;
+    s_seam_hid_calls     = 0U;
+    s_seam_hid_kinds     = 0U;
+    s_seam_hid_keys_null = false;
+    (void)memset(s_seam_hid_rep, 0, sizeof(s_seam_hid_rep));
     seam_scan_script(NULL, 0U, KODE_OK);
 }
 
@@ -346,8 +465,14 @@ TEST_CASE("a listen that fails says why and returns -1", "[kode_ble]")
 
     seam_scan_script(rssi, 2U, KODE_NO_RESOURCES);
     TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 4U, SEAM_LISTEN_MS));
-    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: the radio is busy with a scan, a self-test or an "
-                             "install; try again", kode_error());
+    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: the radio is busy with another scan, a network "
+                             "search, a self-test, an install or the board's rest; try again",
+                             kode_error());
+
+    seam_scan_script(rssi, 2U, KODE_CANCELLED);
+    TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 4U, SEAM_LISTEN_MS));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: a newer Bluetooth request ended the listen early",
+                             kode_error());
 
     seam_scan_script(rssi, 2U, KODE_TIMEOUT);
     TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 4U, SEAM_LISTEN_MS));
@@ -360,6 +485,25 @@ TEST_CASE("a listen that fails says why and returns -1", "[kode_ble]")
     seam_scan_script(rssi, 2U, KODE_OK);
     TEST_ASSERT_EQUAL_INT(2, seam_ble_scan(out, 4U, SEAM_LISTEN_MS));
     TEST_ASSERT_EQUAL_STRING("", kode_error());
+}
+
+/* A link that came back awake during the app's rest leaves AO_LowPower holding
+ * the radio and AO_Radio refusing for Settings: the text follows the answer. */
+TEST_CASE("a listen denied says the rest when its answer does, Settings otherwise",
+          "[kode_ble]")
+{
+    static const int8_t rssi[1] = { -50 };
+    kode_ble_device_t   out[1];
+
+    fresh();
+    seam_scan_script(rssi, 1U, KODE_DENIED);
+    s_seam_scan_rest = true;
+    TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 1U, SEAM_LISTEN_MS));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: the radio is at rest; kode_rest_end() first", kode_error());
+
+    s_seam_scan_rest = false;
+    TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 1U, SEAM_LISTEN_MS));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: Bluetooth is off in Settings", kode_error());
 }
 
 /* ---- The app's own service ---------------------------------------------------- */
@@ -504,4 +648,138 @@ TEST_CASE("the four Bluetooth event constants name their events", "[kode_ble]")
     TEST_ASSERT_EQUAL_STRING("ble_disconnected", seam_event_ble_disconnected());
     TEST_ASSERT_EQUAL_STRING("ble_written", seam_event_ble_written());
     TEST_ASSERT_EQUAL_STRING("ble_taken", seam_event_ble_taken());
+}
+
+/* ---- The board as a mouse and a keyboard ------------------------------------- */
+
+TEST_CASE("choosing the kinds hands them down, with Bluetooth off too", "[kode_ble][hid]")
+{
+    fresh();
+    s_seam_on = false;
+    TEST_ASSERT_TRUE(seam_ble_hid_select(KODE_BLE_HID_MOUSE | KODE_BLE_HID_KEYBOARD));
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_hid_calls);
+    TEST_ASSERT_EQUAL_UINT8(KODE_BLE_HID_MOUSE | KODE_BLE_HID_KEYBOARD, s_seam_hid_kinds);
+}
+
+TEST_CASE("a choice the radio refuses says the table is registered", "[kode_ble][hid]")
+{
+    fresh();
+    s_seam_hid_rc = KODE_DENIED;
+    TEST_ASSERT_FALSE(seam_ble_hid_select(KODE_BLE_HID_MOUSE));
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "kode_ble_hid_select"));
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "registered its table"));
+}
+
+TEST_CASE("a mouse report hands its buttons and steps down", "[kode_ble][hid]")
+{
+    fresh();
+    TEST_ASSERT_TRUE(seam_ble_hid_ready());
+    TEST_ASSERT_TRUE(seam_ble_hid_mouse(1U, 10, -10, 1));
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_hid_calls);
+    TEST_ASSERT_EQUAL_HEX8(0x01U, s_seam_hid_rep[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x0AU, s_seam_hid_rep[1]);
+    TEST_ASSERT_EQUAL_HEX8(0xF6U, s_seam_hid_rep[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x01U, s_seam_hid_rep[3]);
+}
+
+TEST_CASE("a keyboard report hands its modifiers and keys down, and no keys as none",
+          "[kode_ble][hid]")
+{
+    static const uint8_t KEYS[KODE_BLE_HID_KEYS_MAX] = { 0x04U, 0x05U, 0U, 0U, 0U, 0U };
+
+    fresh();
+    TEST_ASSERT_TRUE(seam_ble_hid_keys(0x02U, KEYS));
+    TEST_ASSERT_EQUAL_HEX8(0x02U, s_seam_hid_rep[0]);
+    TEST_ASSERT_EQUAL_MEMORY(KEYS, &s_seam_hid_rep[1], sizeof(KEYS));
+    TEST_ASSERT_FALSE(s_seam_hid_keys_null);
+    TEST_ASSERT_TRUE(seam_ble_hid_keys(0U, NULL));
+    TEST_ASSERT_TRUE(s_seam_hid_keys_null);
+}
+
+TEST_CASE("with Bluetooth off, a report and the time to pair fail and ask the radio nothing",
+          "[kode_ble][hid]")
+{
+    fresh();
+    s_seam_on = false;
+    TEST_ASSERT_FALSE(seam_ble_hid_mouse(0U, 1, 1, 0));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_hid_mouse: Bluetooth is off in Settings", kode_error());
+    TEST_ASSERT_FALSE(seam_ble_hid_keys(0U, NULL));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_hid_keys: Bluetooth is off in Settings", kode_error());
+    TEST_ASSERT_FALSE(seam_ble_pair_open());
+    TEST_ASSERT_EQUAL_STRING("kode_ble_pair_open: Bluetooth is off in Settings", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_seam_hid_calls);
+}
+
+TEST_CASE("a report with the queue full fails naming it; with no computer it names that",
+          "[kode_ble][hid]")
+{
+    fresh();
+    s_seam_hid_rc = KODE_NO_RESOURCES;
+    TEST_ASSERT_FALSE(seam_ble_hid_mouse(0U, 1, 1, 0));
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "16 reports already wait for the link"));
+    s_seam_hid_rc = KODE_DENIED;
+    TEST_ASSERT_FALSE(seam_ble_hid_ready());
+    TEST_ASSERT_FALSE(seam_ble_hid_keys(0U, NULL));
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "no computer takes the keyboard's reports"));
+}
+
+TEST_CASE("the time to pair is asked for, and refused to an app that chose no kind",
+          "[kode_ble][hid]")
+{
+    fresh();
+    TEST_ASSERT_TRUE(seam_ble_pair_open());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_hid_calls);
+    s_seam_hid_rc = KODE_DENIED;
+    TEST_ASSERT_FALSE(seam_ble_pair_open());
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "kode_ble_hid_select() chose a kind"));
+    s_seam_hid_rc = KODE_NO_RESOURCES;
+    TEST_ASSERT_FALSE(seam_ble_pair_open());
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "the radio is busy; ask again"));
+}
+
+TEST_CASE("the two pairing event constants name their events", "[kode_ble][hid]")
+{
+    TEST_ASSERT_EQUAL_STRING("ble_pair_code", seam_event_ble_pair_code());
+    TEST_ASSERT_EQUAL_STRING("ble_pair_done", seam_event_ble_pair_done());
+}
+
+TEST_CASE("typing a key hands its modifiers and the key down; a key out of range says which",
+          "[kode_ble][hid]")
+{
+    fresh();
+    TEST_ASSERT_TRUE(seam_ble_hid_tap(0x02U, 0x04U));
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_hid_calls);
+    TEST_ASSERT_EQUAL_HEX8(0x02U, s_seam_hid_rep[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x04U, s_seam_hid_rep[1]);
+    s_seam_hid_rc = KODE_DENIED;
+    TEST_ASSERT_FALSE(seam_ble_hid_tap(0U, 102U));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_hid_tap: key 102 is not one of 1 to 101", kode_error());
+    TEST_ASSERT_FALSE(seam_ble_hid_tap(0U, 4U));
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "no computer takes the keyboard's reports"));
+    s_seam_hid_rc = KODE_NO_RESOURCES;
+    TEST_ASSERT_FALSE(seam_ble_hid_tap(0U, 4U));
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "reports already wait for the link"));
+}
+
+TEST_CASE("a click hands its buttons down; no button says so", "[kode_ble][hid]")
+{
+    fresh();
+    TEST_ASSERT_TRUE(seam_ble_hid_click(0x01U));
+    TEST_ASSERT_EQUAL_HEX8(0x01U, s_seam_hid_rep[0]);
+    s_seam_hid_rc = KODE_DENIED;
+    TEST_ASSERT_FALSE(seam_ble_hid_click(0U));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_hid_click: no button to click", kode_error());
+    TEST_ASSERT_FALSE(seam_ble_hid_click(0x02U));
+    TEST_ASSERT_NOT_NULL(strstr(kode_error(), "no computer takes the mouse's reports"));
+}
+
+TEST_CASE("with Bluetooth off, a tap and a click fail and ask the radio nothing", "[kode_ble][hid]")
+{
+    fresh();
+    s_seam_on = false;
+    TEST_ASSERT_FALSE(seam_ble_hid_tap(0U, 4U));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_hid_tap: Bluetooth is off in Settings", kode_error());
+    TEST_ASSERT_FALSE(seam_ble_hid_click(1U));
+    TEST_ASSERT_EQUAL_STRING("kode_ble_hid_click: Bluetooth is off in Settings", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_seam_hid_calls);
 }

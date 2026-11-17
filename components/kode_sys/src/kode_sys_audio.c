@@ -58,6 +58,9 @@ static uint32_t     s_audio_info_ack;         /**< Whose info answer that is.   
 static kdrv_es8311_info_t s_audio_info;       /**< What AO_Audio answers an info call into. */
 static uint32_t     s_audio_bytes;            /**< The length kode_block_audio_record_file() is told. */
 static int16_t     *s_audio_stage;            /**< See audio_stage().                 */
+static bool         s_stream_on;              /**< The claim is an open stream's. Guarded by s_audio_lock. */
+static uint32_t     s_stream_id;              /**< The driver's number of that stream. Guarded by s_audio_lock. */
+static uint8_t      s_stream_channels;        /**< What its writer said it writes. Guarded by s_audio_lock. */
 
 /** @brief How long kode_block_audio_info() waits for AO_Audio: a liveness bound. */
 #define KODE_AUDIO_INFO_WAIT_MS  100U
@@ -108,7 +111,31 @@ static uint32_t audio_gen_bump(void)
 }
 
 /**
+ * @brief Whether the stream this file opened is the one the driver has open.
+ *        Call with s_audio_lock held.
+ *
+ * The driver numbers its streams: one that ended has no number, and one an
+ * Active Object opened afterwards has another.
+ *
+ * @return true while that stream takes writes.
+ */
+static bool stream_alive(void)
+{
+    uint32_t const now = kdrv_es8311_stream_id();
+
+    return (0U != now) && (s_stream_id == now);
+}
+
+/**
  * @brief Take the audio claim and draw a generation for this call.
+ *
+ * A stream holds the claim from its open to its close. AO_Audio closes one
+ * nobody writes to (KODE_SYS_AUDIO_STREAM_IDLE_MS) and cannot say so here, so
+ * a claim whose stream is no longer the one the driver has open is nobody's,
+ * and this call takes it. kode_block_audio_stream_close() gives up the
+ * stream's mark before it shuts the ring, so a close that is draining is
+ * never read that way.
+ *
  * @param[out] gen This call's own tag.
  * @return true when this caller took it, and must release it again.
  */
@@ -117,6 +144,11 @@ static bool audio_claim(uint32_t *gen)
     bool took = false;
 
     khal_mutex_lock(s_audio_lock);
+    if ( s_audio_busy && s_stream_on && !stream_alive() )
+    {
+        s_stream_on  = false;
+        s_audio_busy = false;
+    }
     if ( !s_audio_busy )
     {
         s_audio_busy = true;
@@ -312,9 +344,6 @@ kode_status_t kode_block_audio_record_file(const char *path, uint32_t ms,
 
 /* ---- The stream: the open takes the audio claim and the close gives it back ---- */
 
-static bool    s_stream_on;       /**< Open, and the claim is the stream's.  */
-static uint8_t s_stream_channels; /**< What its writer said it writes.       */
-
 kode_status_t kode_block_audio_stream_open(uint32_t rate_hz, uint8_t channels)
 {
     kode_status_t rc  = KODE_TIMEOUT;
@@ -343,8 +372,11 @@ kode_status_t kode_block_audio_stream_open(uint32_t rate_hz, uint8_t channels)
     }
     if ( KODE_OK == rc )
     {
+        khal_mutex_lock(s_audio_lock);
         s_stream_on       = true;
+        s_stream_id       = kdrv_es8311_stream_id();
         s_stream_channels = channels;
+        khal_mutex_unlock(s_audio_lock);
     }
     else
     {
@@ -356,30 +388,50 @@ kode_status_t kode_block_audio_stream_open(uint32_t rate_hz, uint8_t channels)
 kode_status_t kode_block_audio_stream_write(const int16_t *frames, size_t n,
                                       uint32_t ms, size_t *taken)
 {
+    bool     on;
+    uint8_t  channels;
+    uint32_t id;
+
     if ( NULL != taken )
     {
         *taken = 0U;
     }
-    if ( !s_stream_on )
+    /* A stream AO_Audio closed for silence is not this file's any more, and
+     * neither is the one an Active Object opened after it. */
+    khal_mutex_lock(s_audio_lock);
+    on       = s_stream_on && stream_alive();
+    channels = s_stream_channels;
+    id       = s_stream_id;
+    khal_mutex_unlock(s_audio_lock);
+    if ( !on )
     {
         return KODE_DENIED;
     }
-    return kdrv_es8311_stream_write(frames, n, s_stream_channels, ms, taken);
+    /* The driver asks for the number again while it waits for room. */
+    return kdrv_es8311_stream_write(id, frames, n, channels, ms, taken);
 }
 
 kode_status_t kode_block_audio_stream_close(void)
 {
-    kode_status_t rc = KODE_TIMEOUT;
-    uint32_t      gen;
+    kode_status_t rc  = KODE_TIMEOUT;
+    uint32_t      gen = 0U;
+    bool          on;
 
-    if ( !s_stream_on )
+    /* The stream's mark goes first: from here the claim is this call's until
+     * it returns, whatever the ring says while it drains (audio_claim()). A
+     * generation of its own, so the open's answer is never taken for this one. */
+    khal_mutex_lock(s_audio_lock);
+    on          = s_stream_on;
+    s_stream_on = false;
+    if ( on )
+    {
+        gen = audio_gen_bump();
+    }
+    khal_mutex_unlock(s_audio_lock);
+    if ( !on )
     {
         return KODE_DENIED;
     }
-    /* A generation of its own, so the open's answer is never taken for this one. */
-    khal_mutex_lock(s_audio_lock);
-    gen = audio_gen_bump();
-    khal_mutex_unlock(s_audio_lock);
 
     s_audio_rc = (uint32_t)KODE_ERROR;
     audio_stream_close_request(&s_audio_rc, s_audio_sem, gen, &s_audio_ack);
@@ -389,9 +441,18 @@ kode_status_t kode_block_audio_stream_close(void)
     {
         rc = (kode_status_t)s_audio_rc;
     }
-    s_stream_on = false;
     audio_release();
     return rc;
+}
+
+bool kode_block_audio_stream_is_open(void)
+{
+    bool on;
+
+    khal_mutex_lock(s_audio_lock);
+    on = s_stream_on && stream_alive();
+    khal_mutex_unlock(s_audio_lock);
+    return on;
 }
 
 /* ---- kode_sys's requests: AO_Audio answers the asking AO; frames are lent ---- */
@@ -468,7 +529,8 @@ kode_status_t kode_sys_audio_stream_write(QActive const *me, const int16_t *fram
     {
         return KODE_DENIED;
     }
-    return kdrv_es8311_stream_write(frames, n, channels, 0U, taken);
+    /* An Active Object never waits, so the stream open now is the one. */
+    return kdrv_es8311_stream_write(kdrv_es8311_stream_id(), frames, n, channels, 0U, taken);
 }
 
 kode_status_t kode_sys_audio_stream_close(QActive *me)

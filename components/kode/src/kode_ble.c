@@ -240,19 +240,30 @@ static bool ble_scan_keep(const kode_sys_ble_device_t *dev, void *ctx)
 
 /**
  * @brief Keep why the listen failed as the task's error.
- * @param rc What the facade answered.
- * @param ms How long it was asked to listen.
+ * @param rc   What the facade answered.
+ * @param ms   How long it was asked to listen.
+ * @param rest The answer says an app rests the radio.
  */
-static void ble_scan_fail(kode_status_t rc, uint32_t ms)
+static void ble_scan_fail(kode_status_t rc, uint32_t ms, bool rest)
 {
     switch ( rc )
     {
     case KODE_DENIED:
-        kode_err_set("kode_ble_scan: Bluetooth is off in Settings");
+        if ( rest )
+        {
+            kode_err_set("kode_ble_scan: the radio is at rest; kode_rest_end() first");
+        }
+        else
+        {
+            kode_err_set("kode_ble_scan: Bluetooth is off in Settings");
+        }
         break;
     case KODE_NO_RESOURCES:
-        kode_err_set("kode_ble_scan: the radio is busy with a scan, a self-test or an install; "
-                     "try again");
+        kode_err_set("kode_ble_scan: the radio is busy with another scan, a network search, "
+                     "a self-test, an install or the board's rest; try again");
+        break;
+    case KODE_CANCELLED:
+        kode_err_set("kode_ble_scan: a newer Bluetooth request ended the listen early");
         break;
     case KODE_TIMEOUT:
         kode_err_set("kode_ble_scan: no answer to the listen within %" PRIu32 " s",
@@ -290,10 +301,11 @@ int kode_ble_scan(kode_ble_device_t *out, size_t cap, uint32_t ms)
     else
     {
         ble_scan_keep_t keep = { out, cap, 0U };
+        bool            rest = false;
 
         khal_mutex_lock(s_ble_lock);
         kode_status_t const rc = kode_block_ble_scan(&ble_scan_keep, &keep, ms,
-                                                     ms + BLE_SCAN_SLACK_MS);
+                                                     ms + BLE_SCAN_SLACK_MS, &rest);
         khal_mutex_unlock(s_ble_lock);
         if ( KODE_OK == rc )
         {
@@ -301,7 +313,7 @@ int kode_ble_scan(kode_ble_device_t *out, size_t cap, uint32_t ms)
         }
         else
         {
-            ble_scan_fail(rc, ms);
+            ble_scan_fail(rc, ms, rest);
         }
     }
     return found;
@@ -515,6 +527,194 @@ bool kode_ble_queue_clear(const char *chr)
         }
     }
     return ok;
+}
+
+/* ---- The board as a mouse and a keyboard ----------------------------------- */
+
+_Static_assert(KODE_BLE_HID_MOUSE == KODE_SYS_BLE_HID_MOUSE, "the mouse is kode_sys's");
+_Static_assert(KODE_BLE_HID_KEYBOARD == KODE_SYS_BLE_HID_KEYBOARD, "the keyboard is kode_sys's");
+_Static_assert(KODE_BLE_HID_KEYS_MAX == KODE_SYS_BLE_HID_KEYS_MAX, "a report's keys are kode_sys's");
+_Static_assert(KODE_BLE_HID_RING_SLOTS == KODE_SYS_BLE_HID_RING_SLOTS, "the queue is kode_sys's");
+_Static_assert(KODE_BLE_HID_KEY_MAX == KODE_SYS_BLE_HID_KEY_MAX, "the last key is kode_sys's");
+
+/**
+ * @brief Say why a report was not queued.
+ * @param api  The public name of the call.
+ * @param what The device the report is of: "mouse" or "keyboard".
+ * @param rc   What the system answered.
+ */
+static void ble_hid_fail(const char *api, const char *what, kode_status_t rc)
+{
+    if ( KODE_NO_RESOURCES == rc )
+    {
+        kode_err_set("%s: %u reports already wait for the link; send it again", api,
+                     (unsigned)KODE_BLE_HID_RING_SLOTS);
+    }
+    else
+    {
+        kode_err_set("%s: no computer takes the %s's reports, or kode_ble_hid_select() "
+                     "did not choose the %s", api, what, what);
+    }
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_hid_select(uint8_t kinds)
+{
+    /* Before kode_enter(), which starts the system the first time it is
+     * called, the radio with it: the choice is kept before Bluetooth can
+     * register its table. */
+    kode_status_t const rc = kode_sys_ble_hid_select(kinds);
+    bool                ok = false;
+
+    /* kode_enter() alone: Bluetooth off in Settings keeps the choice too. */
+    if ( kode_enter("kode_ble_hid_select") )
+    {
+        ok = (KODE_OK == rc);
+        if ( !ok )
+        {
+            kode_err_set("kode_ble_hid_select: no such kind, or Bluetooth has registered "
+                         "its table already; choose before it starts");
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_hid_ready(void)
+{
+    return kode_sys_ble_hid_ready();
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
+{
+    static const char api[] = "kode_ble_hid_mouse";
+    bool              ok     = false;
+
+    if ( ble_enter(api) )
+    {
+        kode_status_t const rc = kode_sys_ble_hid_mouse(buttons, dx, dy, wheel);
+
+        ok = (KODE_OK == rc);
+        if ( !ok )
+        {
+            ble_hid_fail(api, "mouse", rc);
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_hid_keys(uint8_t modifiers, const uint8_t *keys)
+{
+    static const char api[] = "kode_ble_hid_keys";
+    bool              ok     = false;
+
+    if ( ble_enter(api) )
+    {
+        kode_status_t const rc = kode_sys_ble_hid_keys(modifiers, keys);
+
+        ok = (KODE_OK == rc);
+        if ( !ok )
+        {
+            ble_hid_fail(api, "keyboard", rc);
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_hid_click(uint8_t buttons)
+{
+    static const char api[] = "kode_ble_hid_click";
+    bool              ok     = false;
+
+    if ( ble_enter(api) )
+    {
+        kode_status_t const rc = kode_sys_ble_hid_click(buttons);
+
+        ok = (KODE_OK == rc);
+        if ( !ok && (0U == (buttons & KODE_BLE_HID_BUTTONS)) )
+        {
+            kode_err_set("%s: no button to click", api);
+        }
+        else if ( !ok )
+        {
+            ble_hid_fail(api, "mouse", rc);
+        }
+        else
+        {
+            /* clicked */
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_hid_tap(uint8_t modifiers, uint8_t key)
+{
+    static const char api[] = "kode_ble_hid_tap";
+    bool              ok     = false;
+
+    if ( ble_enter(api) )
+    {
+        kode_status_t const rc = kode_sys_ble_hid_tap(modifiers, key);
+
+        ok = (KODE_OK == rc);
+        if ( !ok && ((0U == key) || (KODE_BLE_HID_KEY_MAX < key)) )
+        {
+            kode_err_set("%s: key %u is not one of 1 to %u", api, (unsigned)key,
+                         (unsigned)KODE_BLE_HID_KEY_MAX);
+        }
+        else if ( !ok )
+        {
+            ble_hid_fail(api, "keyboard", rc);
+        }
+        else
+        {
+            /* typed */
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_ble_pair_open(void)
+{
+    bool ok = false;
+
+    if ( ble_enter("kode_ble_pair_open") )
+    {
+        kode_status_t const rc = kode_sys_ble_pair_open();
+
+        ok = (KODE_OK == rc);
+        if ( KODE_NO_RESOURCES == rc )
+        {
+            kode_err_set("kode_ble_pair_open: the radio is busy; ask again");
+        }
+        else if ( !ok )
+        {
+            kode_err_set("kode_ble_pair_open: an app pairs a device only once "
+                         "kode_ble_hid_select() chose a kind");
+        }
+        else
+        {
+            /* asked */
+        }
+    }
+    return ok;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+const char *kode_event_ble_pair_code(void)
+{
+    return KODE_EVENT_BLE_PAIR_CODE_NAME;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+const char *kode_event_ble_pair_done(void)
+{
+    return KODE_EVENT_BLE_PAIR_DONE_NAME;
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */

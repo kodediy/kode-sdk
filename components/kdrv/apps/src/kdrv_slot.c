@@ -6,16 +6,20 @@
 #include "kdrv_slot.h"
 #include "kdrv_desc_fill.h"
 #include "kdrv_bounce.h"
+#include "kdrv_image_walk.h"
 
 #include "kdrv_kfw.h"
+#include "kdrv_slot_seq.h"
 
 #include <string.h>
 
 #include "kode_log.h"
 
 #include "esp_app_desc.h"
+#include "esp_flash_partitions.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_rom_crc.h"
 #include "esp_system.h"
 /* espcoredump registers no component at all for the `linux` target (its
  * CMakeLists returns before declaring an include dir) - guard the header the
@@ -29,6 +33,11 @@
 #include "esp_flash.h"
 #include "spi_flash_mmap.h"
 #include "kapps_fmt.h"
+#endif
+
+#if CONFIG_KODEOS_BOOT_ROLE_APP
+_Static_assert(KSLOT_SEQ_STRIDE == SPI_FLASH_SEC_SIZE,
+               "otadata's entries are one flash sector apart");
 #endif
 
 #define TAG            "kdrv.slot"
@@ -181,11 +190,59 @@ kode_status_t kdrv_slot_write(const void *data, size_t len)
     return KODE_OK;
 }
 
+/**
+ * @brief Tell whether the image in the slot is the project that is running.
+ *
+ * The slot is where this firmware's own update goes, and the next boot hands
+ * the board to whatever it holds. esp_ota_end() accepts any image built for
+ * the chip, an app's included, so the project's name is what tells an update
+ * from something else.
+ *
+ * @return KODE_OK; KODE_ERROR when the slot's description cannot be read or
+ *         names another project.
+ */
+static kode_status_t slot_is_ours(void)
+{
+    const esp_partition_t * const p   = slot_part();
+    const esp_app_desc_t  * const run = esp_app_get_description();
+    esp_app_desc_t                desc;
+
+    if ( (NULL == p) || (NULL == run)
+        || (esp_ota_get_partition_description(p, &desc) != ESP_OK) )
+    {
+        KLOG_E(TAG, "the image written has no description to read; "
+                    "it is not an update");
+        return KODE_ERROR;
+    }
+    if ( strncmp(desc.project_name, run->project_name,
+                 sizeof(desc.project_name)) != 0 )
+    {
+        KLOG_E(TAG, "the image written is '%.*s', not %s; it is not an update",
+               (int)sizeof(desc.project_name), desc.project_name,
+               run->project_name);
+        return KODE_ERROR;
+    }
+    return KODE_OK;
+}
+
 kode_status_t kdrv_slot_end(void)
 {
     if ( 0 == s_ota )
     {
         return KODE_DENIED;
+    }
+    /* esp_ota_end() hashes the image by the lengths its own header declares
+     * (see kdrv_image_walk.h): one whose segments leave the slot is refused
+     * here, unhashed, and the session given up. */
+    const esp_partition_t * const p = slot_part();
+
+    if ( (NULL == p) || (0U == kdrv_image_walk_len(p, 0U, p->size)) )
+    {
+        KLOG_E(TAG, "the image written does not hold together in the slot; "
+                    "it is not an update");
+        (void)esp_ota_abort(s_ota);
+        s_ota = 0;
+        return KODE_ERROR;
     }
     esp_err_t const err = esp_ota_end(s_ota);
     s_ota = 0;                      /* consumed by esp_ota_end either way */
@@ -194,7 +251,7 @@ kode_status_t kdrv_slot_end(void)
         KLOG_E(TAG, "esp_ota_end: %s", esp_err_to_name(err));
         return KODE_ERROR;
     }
-    return KODE_OK;
+    return slot_is_ours();
 }
 
 void kdrv_slot_abort(void)
@@ -251,7 +308,7 @@ static kode_status_t slot_sink_write(void *ctx, const void *data, size_t len)
  * @brief Close the slot's OTA session and verify what was written.
  * @param ctx Unused.
  * @return KODE_OK; KODE_DENIED with no session open; KODE_ERROR when
- *         esp_ota_end() refuses the image.
+ *         kdrv_slot_end() refuses the image.
  */
 static kode_status_t slot_sink_end(void *ctx)
 {
@@ -375,9 +432,46 @@ kdrv_slot_state_t kdrv_slot_state(void)
     switch ( state )
     {
         case ESP_OTA_IMG_ABORTED:   return KDRV_SLOT_STATE_ABORTED;
+        case ESP_OTA_IMG_NEW:       return KDRV_SLOT_STATE_UNDEFINED;  /* selected, never launched */
         case ESP_OTA_IMG_UNDEFINED: return KDRV_SLOT_STATE_UNDEFINED;
         default:                    return KDRV_SLOT_STATE_OTHER;
     }
+}
+
+bool kdrv_slot_newer(void)
+{
+    const esp_partition_t * const ota = otadata_part();
+    const esp_partition_t * const run = esp_ota_get_running_partition();
+    const esp_partition_t * const p   = slot_part();
+    uint32_t seq[KSLOT_SEQ_ENTRIES]   = { 0U, 0U };
+    bool     valid[KSLOT_SEQ_ENTRIES] = { false, false };
+
+    if ( (NULL == ota) || (NULL == run) || (NULL == p)
+        || (ESP_PARTITION_SUBTYPE_APP_OTA_MIN > run->subtype)
+        || (ESP_PARTITION_SUBTYPE_APP_OTA_MAX <= run->subtype) )
+    {
+        return false;   /* factory, or no table to read */
+    }
+    for ( uint32_t i = 0U; KSLOT_SEQ_ENTRIES > i; ++i )
+    {
+        esp_ota_select_entry_t e;
+
+        if ( esp_partition_read(ota, (size_t)i * (size_t)KSLOT_SEQ_STRIDE, &e, sizeof(e))
+            == ESP_OK )
+        {
+            seq[i]   = e.ota_seq;
+            /* The entry's CRC as the bootloader takes it: over ota_seq
+             * alone, seeded with all ones (bootloader_support, which has no
+             * linux build, so not called from here). */
+            valid[i] = (UINT32_MAX != e.ota_seq)
+                       && (esp_rom_crc32_le(UINT32_MAX, (const uint8_t *)&e.ota_seq,
+                                            (uint32_t)sizeof(e.ota_seq)) == e.crc);
+        }
+    }
+    return kslot_seq_newer(seq, valid,
+                           (uint32_t)p->subtype - (uint32_t)ESP_PARTITION_SUBTYPE_APP_OTA_MIN,
+                           (uint32_t)run->subtype - (uint32_t)ESP_PARTITION_SUBTYPE_APP_OTA_MIN,
+                           (uint32_t)esp_ota_get_app_partition_count());
 }
 
 /* ---- Every app partition, by id ------------------------------------------ */
@@ -411,6 +505,12 @@ kode_status_t kdrv_slot_info(kdrv_slot_id_t id, kdrv_slot_info_t *out)
      * of one place must still agree. */
     const esp_partition_t *run = esp_ota_get_running_partition();
     out->running = (NULL != run) && (run->address == p->address);
+
+    /* IDF's reading of otadata, the bootloader's own rule with no rollback:
+     * the factory while otadata is blank, NULL with no otadata at all. An
+     * app is never named, so in an app this is the kodeOS it goes home to. */
+    const esp_partition_t * const boot = esp_ota_get_boot_partition();
+    out->boot = (NULL != boot) && (boot->address == p->address);
 
     esp_app_desc_t desc;
     if ( esp_ota_get_partition_description(p, &desc) == ESP_OK )

@@ -8,12 +8,14 @@
 
 #include "fakes.h"
 #include "kdrv_ble.h"
+#include "kdrv_ble_hid.h"
 
 static struct {
     bool             up;
     bool             synced;
     bool             fail_start;
     bool             fail_scan;
+    bool             scan_abort;   /* kdrv_ble_scan_abort(): a listen ends cut */
     kdrv_ble_state_t state;
     uint8_t          addr[6];
     kdrv_ble_cb_t    cb;
@@ -29,6 +31,7 @@ static struct {
     uint16_t         adv_itvl;
     uint32_t         adv_ms;
     bool             adv_hidden;
+    bool             adv_pulsed;
     bool             secure;
     char             name[KDRV_BLE_ADV_MAX];  /**< What set_scan_rsp() named. */
     unsigned         conn_rest;   /**< kdrv_ble_conn_calm(true) calls.  */
@@ -71,6 +74,19 @@ unsigned fake_ble_app_kicks(void)
     return s_app_kicks;
 }
 
+/** @brief Wake-ups asked of the HID drain; not cleared by fake_ble_reset(). */
+static unsigned s_hid_kicks;
+
+void kdrv_ble_hid_kick(void)
+{
+    s_hid_kicks++;
+}
+
+unsigned fake_ble_hid_kicks(void)
+{
+    return s_hid_kicks;
+}
+
 /** @brief Whether the app declared the Battery service; not cleared by fake_ble_reset(). */
 static bool s_batt_declared;
 
@@ -79,7 +95,8 @@ static int16_t s_batt_pct = -1;
 
 bool kdrv_ble_battery_declared(void)
 {
-    return s_batt_declared;
+    /* As the driver: a HID device serves its battery whether declared or not. */
+    return s_batt_declared || (0U != kdrv_ble_hid_kinds());
 }
 
 void kdrv_ble_battery_set(uint8_t pct)
@@ -218,6 +235,27 @@ kode_status_t kdrv_ble_set_cb(kdrv_ble_cb_t cb)
     return KODE_OK;
 }
 
+/** @brief The hear hook AO_Radio installed; installed once per binary, so not part of s_b. */
+static kdrv_ble_hear_cb_t s_hear_cb;
+
+kode_status_t kdrv_ble_set_hear_cb(kdrv_ble_hear_cb_t cb)
+{
+    if ( NULL == cb )
+    {
+        return KODE_DENIED;
+    }
+    s_hear_cb = cb;
+    return KODE_OK;
+}
+
+void fake_ble_hear_note(kdrv_ble_hear_note_t note)
+{
+    if ( NULL != s_hear_cb )
+    {
+        s_hear_cb(note);
+    }
+}
+
 kode_status_t kdrv_ble_start(void)
 {
     ++s_b.starts;
@@ -250,11 +288,12 @@ kode_status_t kdrv_ble_stop(void)
     return KODE_OK;
 }
 
-void kdrv_ble_adv_plan(uint16_t itvl, uint32_t ms, bool hidden)
+void kdrv_ble_adv_plan(uint16_t itvl, uint32_t ms, bool hidden, bool pulsed)
 {
-    s_b.adv_itvl   = itvl;
-    s_b.adv_ms     = ms;
-    s_b.adv_hidden = hidden;
+    s_b.adv_itvl    = itvl;
+    s_b.adv_ms      = ms;
+    s_b.adv_hidden  = hidden;
+    s_b.adv_pulsed  = pulsed;
 }
 
 bool fake_ble_adv_hidden(void)
@@ -262,9 +301,25 @@ bool fake_ble_adv_hidden(void)
     return s_b.adv_hidden;
 }
 
+bool fake_ble_adv_pulsed(void)
+{
+    return s_b.adv_pulsed;
+}
+
 void fake_ble_set_bonds(uint8_t n)
 {
     s_b.bonds = n;
+}
+
+void fake_ble_bonds_changed(uint8_t n)
+{
+    bool const moved = s_b.bonds != n;
+
+    s_b.bonds = n;
+    if ( moved && (NULL != s_b.cb) )
+    {
+        s_b.cb(s_b.state);
+    }
 }
 
 uint16_t fake_ble_adv_itvl(void)
@@ -279,10 +334,11 @@ uint32_t fake_ble_adv_ms(void)
 
 kode_status_t kdrv_ble_adv_calm(uint32_t ms)
 {
-    if ( (KDRV_BLE_ADVERTISING == s_b.state) && (0U != s_b.adv_itvl)
-        && ((uint16_t)KDRV_BLE_ITVL_SLOW > s_b.adv_itvl) )
+    if ( (KDRV_BLE_ADVERTISING == s_b.state)
+        && (s_b.adv_pulsed
+            || ((0U != s_b.adv_itvl) && ((uint16_t)KDRV_BLE_ITVL_SLOW > s_b.adv_itvl))) )
     {
-        kdrv_ble_adv_plan((uint16_t)KDRV_BLE_ITVL_SLOW, ms, s_b.adv_hidden);
+        kdrv_ble_adv_plan((uint16_t)KDRV_BLE_ITVL_SLOW, ms, s_b.adv_hidden, false);
     }
     return KODE_OK;
 }
@@ -349,6 +405,11 @@ kode_status_t kdrv_ble_advertise(bool on)
     return KODE_OK;
 }
 
+void kdrv_ble_scan_abort(bool on)
+{
+    s_b.scan_abort = on;
+}
+
 kode_status_t kdrv_ble_scan(uint32_t ms)
 {
     kode_status_t const rc = kdrv_ble_start();
@@ -359,6 +420,10 @@ kode_status_t kdrv_ble_scan(uint32_t ms)
     if ( KODE_OK != rc )
     {
         return rc;
+    }
+    if ( s_b.scan_abort )
+    {
+        return KODE_DENIED;
     }
     if ( s_b.fail_scan )
     {
@@ -477,9 +542,16 @@ bool kdrv_ble_console_attached(void)
     return s_attached;
 }
 
+static uint16_t s_console_backlog;
+
+void fake_ble_console_set_backlog(uint16_t bytes)
+{
+    s_console_backlog = bytes;
+}
+
 uint16_t kdrv_ble_console_backlog(void)
 {
-    return 0U;
+    return s_console_backlog;
 }
 
 uint16_t kdrv_ble_console_retry(void)
@@ -510,6 +582,36 @@ kode_status_t kdrv_ble_console_write(const char *buf, size_t len)
     return KODE_OK;
 }
 
+static unsigned                s_confirmed;   /* lines written confirmed */
+static kdrv_ble_console_sent_t s_sent_cb;
+
+kode_status_t kdrv_ble_console_write_confirmed(const char *buf, size_t len)
+{
+    (void)buf;
+    (void)len;
+    ++s_confirmed;
+    return KODE_OK;
+}
+
+kode_status_t kdrv_ble_console_set_sent_cb(kdrv_ble_console_sent_t cb)
+{
+    s_sent_cb = cb;
+    return KODE_OK;
+}
+
+unsigned fake_ble_console_confirmed(void)
+{
+    return s_confirmed;
+}
+
+void fake_ble_console_answer(bool ok)
+{
+    if ( NULL != s_sent_cb )
+    {
+        s_sent_cb(ok);
+    }
+}
+
 kode_status_t kdrv_ble_console_selftest(void)
 {
     return KODE_OK;
@@ -535,7 +637,9 @@ static struct {
     kdrv_ble_pair_t    rec;
     kdrv_ble_pair_cb_t cb;
     bool               live;
+    bool               refused;
     unsigned           rejects;
+    unsigned           hangups;
 } s_p;
 
 void fake_ble_pair_reset(void)
@@ -549,6 +653,7 @@ void fake_ble_pair_reset(void)
 
 void fake_ble_pair_show(uint32_t passkey)
 {
+    s_p.refused       = false;   /* as the driver: a new code ends the refused one */
     s_p.live          = true;
     s_p.rec.phase     = KDRV_BLE_PAIR_SHOW;
     s_p.rec.passkey   = passkey;
@@ -571,9 +676,27 @@ void fake_ble_pair_end(kdrv_ble_pair_outcome_t how)
     }
 }
 
+void fake_ble_pair_refuse(kdrv_ble_pair_outcome_t why)
+{
+    /* As ble_pair_refuse(): a note of its own, with no code and nothing in
+     * flight to end. */
+    s_p.rec.phase   = KDRV_BLE_PAIR_REFUSED;
+    s_p.rec.passkey = 0U;
+    s_p.rec.outcome = why;
+    if ( NULL != s_p.cb )
+    {
+        s_p.cb();
+    }
+}
+
 unsigned fake_ble_pair_rejects(void)
 {
     return s_p.rejects;
+}
+
+unsigned fake_ble_pair_hangups(void)
+{
+    return s_p.hangups;
 }
 
 kode_status_t kdrv_ble_set_pair_cb(kdrv_ble_pair_cb_t cb)
@@ -604,11 +727,24 @@ kode_status_t kdrv_ble_pair_reject(void)
         return KODE_DENIED;
     }
     ++s_p.rejects;
-    /* The real driver clears the flag, records REJECTED and then hangs up,
-     * and the hang-up's own disconnect must NOT report GONE on top of it.
-     * fake_ble_pair_end() reproduces the first two; nothing here fabricates
-     * the third, which is what a case is for. */
+    /* The real driver marks the link refused, clears the flag and records
+     * REJECTED; the hang-up is kdrv_ble_pair_hang_up(), and its disconnect
+     * must NOT report GONE on top of it. fake_ble_pair_end() reproduces the
+     * record; nothing here fabricates the disconnect, which is what a case
+     * is for. */
+    s_p.refused = true;
     fake_ble_pair_end(KDRV_BLE_PAIR_REJECTED);
+    return KODE_OK;
+}
+
+kode_status_t kdrv_ble_pair_hang_up(void)
+{
+    if ( !s_p.refused )
+    {
+        return KODE_DENIED;
+    }
+    s_p.refused = false;
+    ++s_p.hangups;
     return KODE_OK;
 }
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */

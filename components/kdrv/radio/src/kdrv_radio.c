@@ -97,6 +97,13 @@ void kdrv_radio_note_leave(kdrv_radio_note_t target)
     kdrv_radio_note_reg_write(kradio_note_pack((uint32_t)target));
 }
 
+bool kdrv_radio_note_update_waits(void)
+{
+    kradio_note_t const note = kradio_note_unpack(kdrv_radio_note_reg_read());
+
+    return kradio_note_is_update(&note, esp_reset_reason() == ESP_RST_SW);
+}
+
 bool kdrv_radio_adopted(void)
 {
     return s_radio.adopted;
@@ -525,6 +532,10 @@ static kode_status_t radio_platform_init(void)
  * every later one resets the C5. Runs before esp-hosted takes the line, which
  * is the only time kdrv_radio_c5_hold() is allowed.
  *
+ * A C5 kept for an update is not parked: it booted the new image by itself
+ * and nobody has spoken to it yet, so it is kept only so that the first
+ * request reaches that image, and there is nothing of it to adopt.
+ *
  * @param wants_wifi This boot wants Wi-Fi.
  * @return true when the C5 was left running, parked by the last firmware.
  */
@@ -544,6 +555,11 @@ static bool radio_c5_decide(bool wants_wifi)
 
     kdrv_radio_note_reg_write(0U);
 
+    if ( !held && kradio_note_is_update(&note, reset_was_sw) )
+    {
+        KLOG_N(TAG, "C5 kept: it runs an update its first request confirms");
+        return false;
+    }
     if ( !held &&
         kradio_note_keeps_c5(&note, reset_was_sw, role_is_os, wants_wifi) )
     {
@@ -690,7 +706,7 @@ static kode_status_t radio_do_connect(bool wants_wifi)
         s_radio.fw.minor = fw.minor1;
         s_radio.fw.patch = fw.patch1;
         s_radio.fw_known = true;
-        KLOG_N(TAG, "link up; C5 slave firmware v%lu.%lu.%lu",
+        KLOG_N(TAG, "link up; esp-hosted v%lu.%lu.%lu on the C5",
                (unsigned long)s_radio.fw.major,
                (unsigned long)s_radio.fw.minor,
                (unsigned long)s_radio.fw.patch);
@@ -844,7 +860,8 @@ static kode_status_t radio_do_ota_finish(void)
  * marked down here, before anything else can send an RPC into it, and the
  * owner is told with KODE_TIMEOUT, which is how it tells a mute C5 from a
  * transport that dropped by itself. The job's own status is returned either
- * way; the owner drops it, knowing the link went.
+ * way; the owner drops it, knowing the link went, whether it hears of the
+ * loss before the job's end or after it.
  *
  * @param st What the job returned.
  * @return @p st.
@@ -933,7 +950,7 @@ static bool radio_run_wifi(const kdrv_radio_req_t *req, kode_status_t *rc)
                                                  KDRV_RADIO_JOIN_MS));
             break;
         case KDRV_RADIO_JOB_WIFI_PREPARE:
-            *rc = radio_answer(kdrv_wifi_prepare(req->ssid));
+            *rc = radio_answer(kdrv_wifi_prepare(req->ssid, req->channel));
             break;
         case KDRV_RADIO_JOB_WIFI_AWAIT:
             *rc = radio_answer(kdrv_wifi_await(req->ssid, KDRV_RADIO_JOIN_MS));
@@ -1034,12 +1051,15 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
         case KDRV_RADIO_JOB_BLE_ADV:
             if ( req->on )
             {
-                kdrv_ble_adv_plan(req->itvl, req->len, req->hidden);
+                kdrv_ble_adv_plan(req->itvl, req->len, req->hidden, req->pulsed);
             }
             *rc = radio_answer(kdrv_ble_advertise(req->on));
             break;
         case KDRV_RADIO_JOB_BLE_SCAN:
             *rc = radio_answer(kdrv_ble_scan(req->len));
+            break;
+        case KDRV_RADIO_JOB_BLE_HEAR:
+            *rc = radio_answer(kdrv_ble_hear(req->on));
             break;
         case KDRV_RADIO_JOB_BLE_UNPAIR:
             *rc = radio_answer(kdrv_ble_unpair());
@@ -1056,6 +1076,13 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
         case KDRV_RADIO_JOB_BLE_RSP:
             *rc = radio_ble_rsp_set(req);
             break;
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+        case KDRV_RADIO_JOB_BLE_PAIR_REJECT:
+            /* The hang-up takes NimBLE's host lock: here it waits on the
+             * worker, never on the AO that asked. */
+            *rc = kdrv_ble_pair_hang_up();
+            break;
+#endif
         default:
             mine = false;
             break;

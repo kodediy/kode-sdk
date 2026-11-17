@@ -47,6 +47,20 @@ const char *kdrv_storage_probe(kdrv_medium_t m);
 /** @brief Unmount @p m. */
 void kdrv_storage_unmount(kdrv_medium_t m);
 
+/**
+ * @brief Put the card away: unmounted, and its supply off.
+ *
+ * For an app's rest. A card that was mounted is forgotten as tried, so the
+ * next kdrv_storage_probe() powers and mounts it again; a slot that had no
+ * card stays as it was, and is not probed again. Blocks for
+ * KDRV_SD_POWER_OFF_MS after the supply goes, the least a supply cycle keeps
+ * the card off, so no mount can follow sooner: a worker's call, not an
+ * Active Object's.
+ *
+ * @return KODE_OK, or KODE_ERROR when the supply would not switch.
+ */
+kode_status_t kdrv_storage_card_rest(void);
+
 /** @brief Whether @p m is mounted right now. */
 bool kdrv_storage_mounted(kdrv_medium_t m);
 
@@ -55,6 +69,14 @@ const char *kdrv_storage_mount_point(kdrv_medium_t m);
 
 /** @brief Total and free bytes on @p m. */
 kode_status_t kdrv_storage_usage(kdrv_medium_t m, uint64_t *total, uint64_t *free_bytes);
+
+/**
+ * @brief The allocation unit of @p m's volume: what a file of one byte takes.
+ *
+ * @param m The medium.
+ * @return The cluster size in bytes, or 0 when it is not known.
+ */
+uint32_t kdrv_storage_cluster_bytes(kdrv_medium_t m);
 
 /** @brief Log what @p m is - for the console's `sd info` / `fs info`. */
 void kdrv_storage_dump(kdrv_medium_t m);
@@ -85,9 +107,10 @@ typedef struct {
  * @param path Absolute, normalised, virtual: "/", "/sdcard/..." or
  *             "/storage/...". Never a host path.
  * @param out  Filled on KODE_OK. Required.
- * @return KODE_OK when the question was answered; KODE_DENIED for a malformed
- *         path, a NULL argument or a path naming no volume; KODE_ERROR when
- *         the volume will not mount.
+ * @return KODE_OK when the question was answered, "not there" included;
+ *         KODE_DENIED for a malformed path, a NULL argument or a path naming
+ *         no volume; KODE_ERROR when the volume will not mount or will not
+ *         say (an I/O error, a path that does not resolve).
  */
 kode_status_t kdrv_storage_stat(const char *path, kdrv_stat_t *out);
 
@@ -155,6 +178,55 @@ typedef bool (*kdrv_path_entry_cb)(const char *name, bool is_dir,
  */
 kode_status_t kdrv_storage_list_path(const char *path,
                                      kdrv_path_entry_cb cb, void *ctx);
+
+/**
+ * @brief Called once per name of a directory, files and directories alike.
+ *
+ * @param name One path component, not a path. Valid for this call only.
+ * @param ctx  Whatever the caller handed kdrv_storage_names_next().
+ * @return false to end this call: the walk goes on at the next name.
+ */
+typedef bool (*kdrv_name_cb)(const char *name, void *ctx);
+
+/** @brief A walk over one directory by name, a few names a call. */
+typedef struct {
+    void *dir;   /**< The directory open for the walk; NULL when none is. */
+} kdrv_names_t;
+
+/**
+ * @brief Open @p path for a walk by name.
+ *
+ * kdrv_storage_list_path() without the stat of each entry, and a few names at
+ * a time: what a step can afford over a directory of any size. The directory
+ * stays open until kdrv_storage_names_close(); a walk is closed before its
+ * volume is unmounted.
+ *
+ * @param path Absolute, normalised, virtual; a directory on a volume.
+ * @param walk Receives the walk. Required; one already open is closed first.
+ * @return KODE_OK, KODE_DENIED for a bad path or a NULL walk, KODE_ERROR when
+ *         the volume will not mount or the directory will not open.
+ */
+kode_status_t kdrv_storage_names_open(const char *path, kdrv_names_t *walk);
+
+/**
+ * @brief The walk's next names: @p cb for each, at most @p max of them.
+ *
+ * "." and ".." are left out, and not counted.
+ *
+ * @param walk The walk; one that is not open has no names.
+ * @param max  The most names this call reads.
+ * @param cb   Called once per name. Required.
+ * @param ctx  Passed through unexamined.
+ * @return true while the directory may have names left; false once it has
+ *         none, or would not be read.
+ */
+bool kdrv_storage_names_next(kdrv_names_t *walk, uint32_t max, kdrv_name_cb cb, void *ctx);
+
+/**
+ * @brief End a walk: its directory is closed.
+ * @param walk The walk; one that is not open is left as it is.
+ */
+void kdrv_storage_names_close(kdrv_names_t *walk);
 
 /* ---- Changing the tree -----------------------------------------------
  * The four ways the console may reorganise a volume. Every one of them is
@@ -226,11 +298,15 @@ kode_status_t kdrv_storage_rmdir(const char *path);
  * not. The two volumes are compared with kdrv_storage_medium_of() before
  * either path is touched, so a refused crossing never opens anything.
  *
+ * FAT never replaces a file: a @p to that is another object than @p from is
+ * refused, and the caller removes it first.
+ *
  * @param from Absolute, normalised, virtual.
  * @param to   Absolute, normalised, virtual.
  * @return KODE_OK; KODE_DENIED for a malformed path, either path naming no
  *         volume, or the two paths naming different volumes; KODE_ERROR when
- *         the volume will not mount or the rename itself fails.
+ *         the volume will not mount, @p to is there, or the rename itself
+ *         fails.
  */
 kode_status_t kdrv_storage_rename(const char *from, const char *to);
 
@@ -316,18 +392,12 @@ kode_status_t kdrv_storage_seek(uint32_t offset);
  * section's own note on why the old refusal was an accident of one handle
  * rather than a rule.
  *
- * Reading looks at the card first and writing does **not**, and the asymmetry
- * is the point: those are different questions. A read asks where somebody is
- * most likely to have put a file, and somebody who went to the trouble of
- * inserting a card meant it. A write asks where the bytes will actually
- * survive, and the answer is the medium the board owns - always present,
- * always writable, and impossible to swap for a counterfeit.
- *
- * That is not a hypothetical. Writing to one of the fake cards some units
- * shipped with does not merely fail: FATFS is left holding dirty sectors it
- * can never flush, and every later read of that volume comes back as a
- * zero-length file. One capture written to the card cost the rest of the
- * session's reads from it.
+ * Reading has one order for everybody, the card first; writing takes its
+ * order from @p first, because the caller is the one who knows where these
+ * bytes belong. kdrv_sd_took_write() is what a caller weighs before it puts the
+ * card first: writing to one of the fake cards some units shipped with does
+ * not merely fail, it leaves FATFS holding dirty sectors it can never flush,
+ * and every later read of that volume comes back as a zero-length file.
  *
  * @param[out] medium  Where it was created. May be NULL.
  * @return KODE_OK; KODE_DENIED for a NULL name or a file already open for

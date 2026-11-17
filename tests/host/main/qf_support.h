@@ -192,6 +192,20 @@ void qf_support_register(QActive *ao);
 unsigned qf_support_tick(QActive *ao, unsigned ticks);
 
 /**
+ * @brief Run one millisecond of QF's ticks, then dispatch what landed in
+ *        @p ao's own queue, as qf_support_tick() does for a 10 ms step.
+ *
+ * For a case whose subject paces itself in fewer than ten milliseconds: a
+ * 10 ms step delivers every expiry of that window in one batch, at its end,
+ * which hides how late each one is. The fake clock is the caller's to
+ * advance, as with the other calls.
+ *
+ * @param ao The Active Object whose queue is the subject.
+ * @return How many events @p ao dispatched.
+ */
+unsigned qf_support_tick_1ms(QActive *ao);
+
+/**
  * @brief Balance the critical section a jump out of a tick left entered.
  *
  * khal_restart() is noreturn and the fake leaves by longjmp, so a case that
@@ -221,6 +235,20 @@ void qf_support_tick_escaped(void);
  * ended without another tick.
  */
 void qf_support_reap_timers(void);
+
+/**
+ * @brief Disarm every time event @p ao owns, so a case that ended with one
+ *        armed cannot break the next.
+ *
+ * A case that fails stops where it is, and an Active Object it left with a
+ * time event armed is constructed again by the next case: QF's list of armed
+ * time events then runs in a cycle, and the next tick never returns. A case
+ * that rebuilds an AO calls this before qf_support_reap_timers(), which then
+ * takes the disarmed events out of the list.
+ *
+ * @param ao The Active Object whose time events are disarmed.
+ */
+void qf_support_disarm_timers(QActive *ao);
 
 /**
  * @brief Let @p ticks of QP time pass and dispatch nothing.

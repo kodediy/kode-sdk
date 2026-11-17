@@ -1056,7 +1056,7 @@ TEST_CASE("list offers every entry of a directory to the callback",
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-                          kode_block_file_list_each(FS_VOL, &list_collect, &cap));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_collect, &cap));
     TEST_ASSERT_EQUAL_UINT(2U, cap.calls);
     TEST_ASSERT_TRUE(cap.saw_file);
     TEST_ASSERT_FALSE(cap.file_is_dir);
@@ -1100,7 +1100,7 @@ TEST_CASE("list stops offering entries once the callback says so",
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-                          kode_block_file_list_each(FS_VOL, &list_stop_after_one, &calls));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_stop_after_one, &calls));
     TEST_ASSERT_EQUAL_UINT32(1U, calls);
 }
 
@@ -1123,7 +1123,7 @@ TEST_CASE("list says so when there was more than it could carry", "[kode_fs]")
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES,
-                          kode_block_file_list_each(FS_VOL, &list_count_only, &calls));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_count_only, &calls));
     TEST_ASSERT_EQUAL_UINT32(KODE_STORAGE_LIST_MAX, calls);
 }
 
@@ -1143,7 +1143,7 @@ TEST_CASE("list of exactly the ceiling is not a truncation", "[kode_fs]")
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-                          kode_block_file_list_each(FS_VOL, &list_count_only, &calls));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_count_only, &calls));
     TEST_ASSERT_EQUAL_UINT32(KODE_STORAGE_LIST_MAX, calls);
 }
 
@@ -1172,7 +1172,7 @@ TEST_CASE("list refuses a path that is not there before ever asking",
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_DENIED,
-                          kode_block_file_list_each(FS_VOL "/nope", &list_never_called,
+                          kode_block_file_list_each(FS_VOL "/nope", 0U, &list_never_called,
                                        &ran));
     TEST_ASSERT_FALSE_MESSAGE(ran,
         "the callback ran for a listing that should have been refused first");
@@ -1187,7 +1187,7 @@ TEST_CASE("list refuses a file the same way cd refuses one", "[kode_fs]")
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_DENIED,
-                          kode_block_file_list_each(FS_VOL "/notes.txt",
+                          kode_block_file_list_each(FS_VOL "/notes.txt", 0U,
                                        &list_never_called, &ran));
     TEST_ASSERT_FALSE_MESSAGE(ran,
         "the callback ran for a listing that should have been refused first");
@@ -1212,7 +1212,7 @@ TEST_CASE("a facade listing puts nothing on the bus", "[kode_fs]")
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-                          kode_block_file_list_each(FS_VOL, &list_collect, &cap));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_collect, &cap));
     TEST_ASSERT_EQUAL_UINT(1U, cap.calls);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
         "a facade listing reached the bus, where an operator's own `ls` and "
@@ -1328,7 +1328,7 @@ static void every_call_again_then_settle(void)
     static char           buf[16];
 
     s_call_rc[0] = kode_block_file_status(FS_VOL "/f.txt", &st);
-    s_call_rc[1] = kode_block_file_list_each(FS_VOL, &list_stop_after_one,
+    s_call_rc[1] = kode_block_file_list_each(FS_VOL, 0U, &list_stop_after_one,
                                  &s_call_list_calls);
     s_call_rc[2] = kode_block_file_create_folder(FS_VOL "/d");
     s_call_rc[3] = kode_block_file_delete(FS_VOL "/f.txt");

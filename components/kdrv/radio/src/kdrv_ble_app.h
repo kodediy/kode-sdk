@@ -84,6 +84,13 @@ void kdrv_ble_app_select_forget(void);
 size_t kdrv_ble_app_host_bytes(void);
 
 /**
+ * @brief Take the block for a service that is not the app's: kdrv_ble.c's
+ *        structures for the HID service live in its part of it.
+ * @return true when the block exists.
+ */
+bool kdrv_ble_app_block(void);
+
+/**
  * @brief kdrv_ble.c's part of the block, kdrv_ble_app_host_bytes() of them,
  *        aligned for any type and zeroed when the block was taken.
  * @return It; NULL before the block is taken.

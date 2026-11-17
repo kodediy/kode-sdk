@@ -128,6 +128,12 @@ void fake_mutex_real(bool on);
  */
 void fake_env_release_hook(void (*hook)(void));
 
+/** @brief Set the priority khal_task_priority_set() reports the calling task had. */
+void fake_task_priority_set(uint32_t priority);
+
+/** @brief The priority khal_task_priority_set() last left the calling task at. */
+uint32_t fake_task_priority(void);
+
 /** @brief Forget every captured line and re-install the capture sink. */
 void fake_klog_reset(void);
 
@@ -332,7 +338,7 @@ bool fake_lowpower_wake_take(LowPowerWakeAtEvt *out);
  *
  * @return The count.
  */
-unsigned fake_lowpower_radio_done_count(void);
+unsigned fake_lowpower_dark_done_count(void);
 
 /**
  * @brief How many requests to rest (lowpower_request_rest()) reached AO_LowPower since the last ask.
@@ -438,6 +444,15 @@ void fake_sdmmc_set_card(const khal_sdmmc_card_t *card);
 void fake_sdmmc_default_card(khal_sdmmc_card_t *out);
 
 /**
+ * @brief Make the card in the slot one nobody has judged: the same card, with
+ *        a serial no earlier card of the run had.
+ *
+ * Every reset does this, so a verdict the driver kept on one case's card is
+ * about a card no later case has.
+ */
+void fake_sdmmc_fresh_card(void);
+
+/**
  * @brief The widest mount that succeeds.
  * @param width 1 makes a 4-bit mount fail, which is the counterfeit card's
  *        signature and what the driver's fallback exists for.
@@ -456,6 +471,16 @@ void fake_sdmmc_set_alias(uint32_t real_sectors);
  * @param total_mb 0 derives it from the card's capacity, as a format would.
  */
 void fake_sdmmc_set_total_mb(uint32_t total_mb);
+
+/** @brief The allocation unit a reset gives the card's volume. */
+#define FAKE_SD_CLUSTER_BYTES  4096U
+
+/**
+ * @brief Set the allocation unit the card's volume reports.
+ * @param bytes What khal_sdmmc_cluster_bytes() says while a card is mounted;
+ *              fake_sdmmc_reset() puts back FAKE_SD_CLUSTER_BYTES.
+ */
+void fake_sdmmc_set_cluster(uint32_t bytes);
 
 /** @brief Make every raw sector write fail. */
 void fake_sdmmc_fail_writes(bool fail);
@@ -485,6 +510,71 @@ void fake_sdmmc_set_read_ms(uint32_t ms);
 
 /** @brief Make the format fail, which leaves nothing mounted. */
 void fake_sdmmc_fail_format(bool fail);
+
+/**
+ * @brief Let @p ok more raw sector reads succeed, then make every one fail.
+ *
+ * A card whose first read after the mount's own check is the one that does
+ * not complete. Disarmed by fake_sdmmc_reset().
+ *
+ * @param ok How many reads succeed first.
+ */
+void fake_sdmmc_fail_reads_after(unsigned ok);
+
+/**
+ * @brief Make every raw sector write fail while the mount is on more than one
+ *        data line.
+ *
+ * The counterfeit card, exactly: it reads on four lines and fails the first
+ * write there, and takes the same write on one.
+ */
+void fake_sdmmc_fail_wide_writes(bool fail);
+
+/** @brief Make every raw sector read fail while the mount is on more than one
+ *         data line. */
+void fake_sdmmc_fail_wide_reads(bool fail);
+
+/**
+ * @brief Make a delete of a file on the card fail while the mount is on
+ *        @p from_width data lines or more.
+ *
+ * The counterfeit card, again: it lists and reads its files on four lines and
+ * fails the write a delete is, and takes the same delete on one.
+ *
+ * @param from_width The fewest lines a mount refusing deletes is on: 4 for the
+ *                   counterfeit card, 1 for a card that deletes nothing, 0 to
+ *                   let every delete through.
+ */
+void fake_sdmmc_fail_removes(uint8_t from_width);
+
+/**
+ * @brief Make the next @p n mounts asked on @p width fail with KODE_TIMEOUT,
+ *        as a card that has not recovered from a failed transfer does.
+ * @param width Data lines the failing mounts ask for.
+ * @param n     How many of them fail; the one after answers as the card does.
+ */
+void fake_sdmmc_fail_mounts(uint8_t width, unsigned n);
+
+/** @brief Forget the calls the seam has traced and the writes it has counted. */
+void fake_sdmmc_trace_reset(void);
+
+/** @brief How many calls the seam has traced since the last forget. */
+unsigned fake_sdmmc_trace_count(void);
+
+/**
+ * @brief One traced call, in the order they were made: `mount <width>`,
+ *        `unmount`, `read <sector>`, `write <sector>`, or a note.
+ * @param idx 0-based.
+ * @return The text, or NULL past the last.
+ */
+const char *fake_sdmmc_trace_line(unsigned idx);
+
+/** @brief Put a line of a case's own into the trace, such as the card's supply
+ *         going off, so the order of everything shows in one list. */
+void fake_sdmmc_trace_note(const char *what);
+
+/** @brief Raw sector writes the seam has taken since the trace was last forgotten. */
+unsigned fake_sdmmc_raw_writes(void);
 
 /**
  * @brief Take the controller away, as a hosted mount finds it while the C5's
@@ -524,6 +614,10 @@ const char *fake_media_fs_dir(void);
 /** @brief What the internal partition reports as free from now on;
  *         fake_media_reset() puts back its 8 MB. */
 void fake_media_set_fs_free(uint64_t free_bytes);
+
+/** @brief The allocation unit the internal partition reports from now on;
+ *         fake_media_reset() puts back the board's 4096. */
+void fake_media_set_fs_cluster(uint32_t bytes);
 
 /**
  * @brief Does @p name exist under @p dir?
@@ -582,17 +676,51 @@ void fake_time_delay_hook(void (*hook)(void));
 /** @brief Move the clock forward without sleeping. @param ms Milliseconds. */
 void fake_time_advance_ms(uint32_t ms);
 
+/**
+ * @brief Move the clock forward by part of a millisecond.
+ *
+ * For a case that has to place a reading of khal_time_ms() just before or
+ * just after a millisecond's edge.
+ *
+ * @param us Microseconds.
+ */
+void fake_time_advance_us(uint32_t us);
+
 /** @brief Forget the stops and starts khal_timer_periodic_run() has counted. */
 void fake_time_periodic_forget(void);
 
-/** @brief How many times the periodic timer was told to stop since the last forget. */
+/** @brief How many times the QP tick's periodic timer was told to stop since the last forget. */
 unsigned fake_time_periodic_stops(void);
 
-/** @brief How many times the periodic timer was told to run since the last forget. */
+/** @brief How many times the QP tick's periodic timer was told to run since the last forget. */
 unsigned fake_time_periodic_starts(void);
 
-/** @brief Whether the fake's periodic timer is running now. */
+/** @brief Whether the QP tick's periodic timer is running now. */
 bool fake_time_periodic_running(void);
+
+/**
+ * @brief Whether the periodic timer started with @p period_us is running now.
+ * @param period_us Its period, microseconds.
+ * @return false when none was started with it, or it is stopped.
+ */
+bool fake_time_periodic_running_at(uint64_t period_us);
+
+/**
+ * @brief How many times khal_timer_periodic() made the timer started with @p period_us.
+ *
+ * Counted since the binary started, as a timer is made once per boot.
+ *
+ * @param period_us Its period, microseconds.
+ * @return 0 when none was started with it.
+ */
+unsigned fake_time_periodic_made_at(uint64_t period_us);
+
+/**
+ * @brief Run the periodic timer started with @p period_us once, as the timer task would.
+ * @param period_us Its period, microseconds.
+ * @return false, and nothing run, when none was started with it or it is stopped.
+ */
+bool fake_time_periodic_fire_at(uint64_t period_us);
 
 /** @brief How many khal_timer_once() one-shots are armed and not yet fired. */
 unsigned fake_time_once_pending(void);
@@ -648,6 +776,19 @@ unsigned fake_nvs_set_count(void);
 /** @brief Run @p hook inside every write the fake is asked for (NULL: none);
  *         what another task would see while the store is being written. */
 void fake_nvs_set_hook(void (*hook)(void));
+
+/** @brief The key of the write a hook is run inside; "" outside one. */
+const char *fake_nvs_set_key(void);
+
+/** @brief Make khal_nvs_set_str_within() answer KODE_NO_RESOURCES and write
+ *         nothing while @p full holds, as a namespace at its share would. */
+void fake_nvs_full(bool full);
+
+/** @brief The share the last khal_nvs_set_str_within() was given; 0 if none. */
+size_t fake_nvs_last_share(void);
+
+/** @brief What khal_nvs_erased() answers until the next fake_nvs_reset(). */
+void fake_nvs_erased_set(bool erased);
 
 /** @brief How many lines reached the capture sink. */
 unsigned fake_klog_count(void);
@@ -705,6 +846,18 @@ void fake_console_feed_byte(int c);
 /** @brief What khal_console_rest() was told last. */
 bool fake_console_resting(void);
 
+/** @brief Set the frame count khal_console_frame() reads next; fake_console_reset() makes it 0. */
+void fake_console_set_frame(uint32_t frame);
+
+/** @brief Whether the cable port's pad is on the bus, as khal_console_pad() left it. */
+bool fake_console_pad_on(void);
+
+/** @brief How many times khal_console_pad() took the pad off the bus since fake_console_reset(). */
+unsigned fake_console_pad_offs(void);
+
+/** @brief How many times khal_console_pad() put the pad on the bus since fake_console_reset(). */
+unsigned fake_console_pad_ons(void);
+
 /** @brief What khal_watch_rest() was told last. */
 bool fake_watch_resting(void);
 
@@ -743,6 +896,13 @@ void fake_ble_reset(void);
  *         the host would. */
 void fake_ble_set_sync(bool synced);
 
+/** @brief Lines kdrv_ble_console_write_confirmed() was given since boot. */
+unsigned fake_ble_console_confirmed(void);
+
+/** @brief Call the confirmation callback the console installed, as NimBLE's
+ *         host task would once the central answered (@p ok) or did not. */
+void fake_ble_console_answer(bool ok);
+
 /** @brief Make kdrv_ble_start() fail - a controller the C5 would not bring up. */
 void fake_ble_fail_start(bool fail);
 
@@ -775,8 +935,14 @@ uint32_t fake_ble_adv_ms(void);
 /** @brief Whether the last advert planned hides the board. */
 bool fake_ble_adv_hidden(void);
 
+/** @brief Whether the last advert planned goes on the air in pulses. */
+bool fake_ble_adv_pulsed(void);
+
 /** @brief Set the count of bonded peers kdrv_ble_bonds() reports. */
 void fake_ble_set_bonds(uint8_t n);
+
+/** @brief The store changed, as the driver tells it: the count is set and, when it moved, the state callback is called. */
+void fake_ble_bonds_changed(uint8_t n);
 
 /** @brief How many times kdrv_ble_conn_calm() was asked for the rest set
  *         (@p rest) or the awake one since the reset. */
@@ -791,6 +957,16 @@ void fake_ble_adv_end(void);
 /** @brief How many times kdrv_ble_start() has been called since the reset. */
 unsigned fake_ble_starts(void);
 
+/**
+ * @brief NimBLE's host task tells the hear hook @p note; nothing when none was installed.
+ *
+ * The hook is installed once per binary by AO_Radio's initial transition and
+ * stays across fake_ble_reset().
+ *
+ * @param note KDRV_BLE_HEAR_RECORD or KDRV_BLE_HEAR_ENDED.
+ */
+void fake_ble_hear_note(kdrv_ble_hear_note_t note);
+
 /** @brief Declare the app's service kdrv_ble_app_declared() finds, NULL for
  *         none; it stays across fake_ble_reset(), so a case that sets one
  *         puts NULL back. fake_ble_central(true) counts a link
@@ -799,6 +975,9 @@ void fake_ble_app_service_set(const kdrv_ble_app_service_t *svc);
 
 /** @brief How many times kdrv_ble_app_kick() was called since boot. */
 unsigned fake_ble_app_kicks(void);
+
+/** @brief How many times kdrv_ble_hid_kick() was called since boot. */
+unsigned fake_ble_hid_kicks(void);
 
 /** @brief Declare the Battery service kdrv_ble_battery_declared() reports, and
  *         forget the level; it stays across fake_ble_reset(), so a case that
@@ -820,6 +999,11 @@ void fake_ble_mirror_reset(void);
 
 /** @brief Whether kdrv_ble_mirror_attached() reports a central subscribed. */
 void fake_ble_mirror_set_attached(bool attached);
+
+/** @brief What kdrv_ble_console_backlog() answers: the console's bytes the
+ *         link has not carried yet. 0 until a case says otherwise; a case
+ *         that sets one puts 0 back. */
+void fake_ble_console_set_backlog(uint16_t bytes);
 
 /** @brief Every kdrv_ble_mirror_write() from here answers KODE_DENIED - the
  *         unretryable "nobody is subscribed any more" a dropped central
@@ -847,10 +1031,18 @@ void fake_ble_pair_show(uint32_t passkey);
 /** @brief Play the host task's part: the pairing ended this way. */
 void fake_ble_pair_end(kdrv_ble_pair_outcome_t how);
 
+/** @brief Play the host task's part: a device asked to pair and was hung up
+ *         on with no code, for @p why (ble_pair_refuse()). */
+void fake_ble_pair_refuse(kdrv_ble_pair_outcome_t why);
+
 /** @brief How many times kdrv_ble_pair_reject() was called and had something
  *         to refuse - a refusal with nothing in flight does not count, which
  *         is what makes "the request reached the driver" assertable. */
 unsigned fake_ble_pair_rejects(void);
+
+/** @brief How many times kdrv_ble_pair_hang_up() found a refused peer to hang
+ *         up on. */
+unsigned fake_ble_pair_hangups(void);
 #endif
 
 /* ---- The C5 link's driver (fake_kdrv_radio.c) -----------------------------
@@ -922,6 +1114,9 @@ uint32_t fake_radio_note_last(void);
 
 /** @brief What kdrv_radio_adopted() answers. */
 void fake_radio_set_adopted(bool adopted);
+
+/** @brief What kdrv_radio_note_update_waits() answers; a power cycle keeps it. */
+void fake_radio_set_update_waits(bool waits);
 
 /** @brief Whether a CONNECT that succeeds leaves J3's supply unswitched
  *         (kdrv_radio_exp_switched() false); fake_radio_reset() clears it. */

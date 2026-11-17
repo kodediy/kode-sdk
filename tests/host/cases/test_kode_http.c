@@ -93,7 +93,8 @@ static void world_up(void)
     esp_wifi_start_IgnoreAndReturn(ESP_OK);
     esp_wifi_disconnect_IgnoreAndReturn(ESP_OK);
     esp_wifi_sta_get_ap_info_IgnoreAndReturn(ESP_FAIL);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("net"));
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("net", KDRV_WIFI_CHANNEL_ANY));
     Mockkdrv_net_Init();
 }
 
@@ -404,6 +405,129 @@ TEST_CASE("the scheme takes any case and a 255-byte address is accepted", "[kode
     edge[HTTP_URL_EDGE] = '\0';
     expect_get(edge, KODE_OK, &res, "c");
     TEST_ASSERT_EQUAL_STRING("c", kode_http_get(edge));
+    world_down();
+}
+
+/* ---- A range of a resource too big for one answer --------------------------- */
+
+#define RANGE_CAP     64U          /**< Room of the caller's buffer in the range cases. */
+#define RANGE_AT      100000U      /**< Where their range starts.                       */
+#define RANGE_TOTAL   250000       /**< The length of the whole, as the server says it. */
+#define HTTP_PARTIAL  206U         /**< The status of a served range.                   */
+#define HTTP_NO_RANGE 416U         /**< The status of a range past the end.             */
+
+/** @brief What the driver answers a range with. */
+static kdrv_net_http_result_t drv_range(uint16_t status, uint32_t kept, bool truncated, int64_t total)
+{
+    kdrv_net_http_result_t r = drv_result(status, kept, kept, truncated);
+
+    r.range_total = total;
+    return r;
+}
+
+/** @brief Expect one ranged GET from @p offset and script the driver's answer. */
+static void expect_range(uint64_t offset, kode_status_t rc, kdrv_net_http_result_t *res,
+                         const char *bytes)
+{
+    kdrv_net_http_get_range_ExpectAndReturn(HTTP_URL, offset, NULL, RANGE_CAP, NULL,
+                                            KODE_HTTP_TIMEOUT_MS, rc);
+    kdrv_net_http_get_range_IgnoreArg_buf();
+    kdrv_net_http_get_range_IgnoreArg_out();
+    kdrv_net_http_get_range_ReturnThruPtr_out(res);
+    if ( NULL != bytes )
+    {
+        kdrv_net_http_get_range_ReturnMemThruPtr_buf(bytes_of(bytes), (uint32_t)strlen(bytes));
+    }
+}
+
+TEST_CASE("a range fills the caller's buffer and says how long the whole is", "[kode_http]")
+{
+    const char             part[] = "0123456789";
+    uint8_t                buf[RANGE_CAP];
+    uint32_t               got   = 0U;
+    kode_http_off_t        total = 0U;
+    kdrv_net_http_result_t res   = drv_range(HTTP_PARTIAL, (uint32_t)strlen(part), false, RANGE_TOTAL);
+
+    online_up();
+    expect_range(RANGE_AT, KODE_OK, &res, part);
+    TEST_ASSERT_TRUE_MESSAGE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, &total),
+                             kode_error());
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)strlen(part), got);
+    TEST_ASSERT_EQUAL_MEMORY(part, buf, strlen(part));
+    TEST_ASSERT_TRUE((kode_http_off_t)RANGE_TOTAL == total);
+    TEST_ASSERT_EQUAL_UINT16(HTTP_PARTIAL, kode_http_status());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    world_down();
+}
+
+/* The server's word is an answer, not a failure: a 200 says the bytes start at
+ * 0 because it ignores ranges, a 416 that nothing lies past the offset. */
+TEST_CASE("a range a server ignores or cannot serve is true, with the status that says so",
+          "[kode_http]")
+{
+    uint8_t                buf[RANGE_CAP];
+    uint32_t               got     = 99U;
+    kode_http_off_t        total   = 99U;
+    kdrv_net_http_result_t ignored = drv_range(HTTP_OK, RANGE_CAP, true, -1);
+    kdrv_net_http_result_t past    = drv_range(HTTP_NO_RANGE, 0U, false, RANGE_TOTAL);
+
+    online_up();
+    expect_range(RANGE_AT, KODE_OK, &ignored, NULL);
+    TEST_ASSERT_TRUE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, &total));
+    TEST_ASSERT_EQUAL_UINT16(HTTP_OK, kode_http_status());
+    TEST_ASSERT_EQUAL_UINT32(RANGE_CAP, got);
+    TEST_ASSERT_TRUE_MESSAGE(0U == total, "nobody said how long the whole is");
+
+    expect_range(RANGE_AT, KODE_OK, &past, NULL);
+    TEST_ASSERT_TRUE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, NULL));
+    TEST_ASSERT_EQUAL_UINT16(HTTP_NO_RANGE, kode_http_status());
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    world_down();
+}
+
+TEST_CASE("a range that gets no answer is false, with nothing got and the reason", "[kode_http]")
+{
+    uint8_t                buf[RANGE_CAP];
+    uint32_t               got   = 99U;
+    kode_http_off_t        total = 99U;
+    kdrv_net_http_result_t none  = drv_range(0U, 0U, false, -1);
+
+    online_up();
+    expect_range(0U, KODE_TIMEOUT, &none, NULL);
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, RANGE_CAP, &got, &total));
+    TEST_ASSERT_EQUAL_STRING(HTTP_URL ": no answer in time", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    TEST_ASSERT_TRUE(0U == total);
+    TEST_ASSERT_EQUAL_UINT16(0U, kode_http_status());
+    world_down();
+}
+
+TEST_CASE("a range with a bad address or nowhere to go is refused before anything is asked",
+          "[kode_http]")
+{
+    uint8_t  buf[RANGE_CAP];
+    uint32_t got = 99U;
+
+    online_up();
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL_BAD, 0U, buf, RANGE_CAP, &got, NULL));
+    TEST_ASSERT_EQUAL_STRING("bad URL '" HTTP_URL_BAD "'", kode_error());
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, NULL, RANGE_CAP, &got, NULL));
+    TEST_ASSERT_EQUAL_STRING("no buffer for the range", kode_error());
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, 0U, &got, NULL));
+    TEST_ASSERT_EQUAL_STRING("no buffer for the range", kode_error());
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, KODE_HTTP_OFF_MAX, buf, RANGE_CAP, &got, NULL));
+    TEST_ASSERT_EQUAL_STRING("the range runs past the last offset", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, got);
+    world_down();
+}
+
+TEST_CASE("a range on a board with no address calls nothing and says to connect", "[kode_http]")
+{
+    uint8_t buf[RANGE_CAP];
+
+    world_up();
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, RANGE_CAP, NULL, NULL));
+    TEST_ASSERT_EQUAL_STRING(NO_NETWORK, kode_error());
     world_down();
 }
 

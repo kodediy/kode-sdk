@@ -160,15 +160,21 @@ static void gauge_defaults(void)
     s_regs[GAUGE][0xABU] = 0x4AU;
 }
 
+/** @brief The register reads each chip answered, for the cases that count them; a case clears them. */
+static unsigned s_reads[2];
+
 static kode_status_t on_read(khal_i2c_dev_t dev, uint8_t reg, uint8_t *buf,
                              size_t len, int calls)
 {
+    unsigned const chip = chip_of(dev);
+
     (void)calls;
     if ( s_bus_dead )
     {
         return KODE_ERROR;
     }
-    (void)memcpy(buf, &s_regs[chip_of(dev)][reg], len);
+    ++s_reads[chip];
+    (void)memcpy(buf, &s_regs[chip][reg], len);
     return KODE_OK;
 }
 
@@ -693,6 +699,145 @@ TEST_CASE("the ship door posts while the queue has room and refuses within its m
     Mockkhal_i2c_Destroy();
 }
 
+/* AO_LowPower asks whether a cable is in every few seconds while the P4
+ * sleeps: one the margin turns away is dropped, and the next one asks again. */
+TEST_CASE("a look for a cable within the queue's margin is refused, and one above it is posted",
+          "[power_ao]")
+{
+    power_up_once();
+    power_flush();
+
+    power_fill_to_margin();
+    TEST_ASSERT_FALSE(power_cable_request());
+    TEST_ASSERT_EQUAL_UINT(KQP_POWER_POST_MARGIN, uxQueueSpacesAvailable(AO_Power->eQueue));
+    TEST_ASSERT_FALSE_MESSAGE(power_queue_has(POWER_CABLE_REQ_SIG), "a refused look was queued");
+
+    power_fill_to_margin();
+    {
+        const QEvt *e = NULL;
+
+        TEST_ASSERT_TRUE(xQueueReceive(AO_Power->eQueue, &e, 0U) == pdTRUE);
+        QF_gc(e);
+    }
+    TEST_ASSERT_TRUE(power_cable_request());
+    TEST_ASSERT_EQUAL_UINT(KQP_POWER_POST_MARGIN, uxQueueSpacesAvailable(AO_Power->eQueue));
+    TEST_ASSERT_TRUE(power_queue_has(POWER_CABLE_REQ_SIG));
+
+    power_flush();
+    Mockkhal_i2c_Destroy();
+}
+
+/** @brief Publish one whole reading with the cable in or out, as the last one published. */
+static void cable_last_said(bool in)
+{
+    if ( in )
+    {
+        s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    }
+    else
+    {
+        s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_OFF_USB;
+    }
+    TEST_ASSERT_EQUAL(in, poll_once()->vbus);
+    ao_spy_drain();
+    fake_klog_reset();
+    s_reads[PMIC]  = 0U;
+    s_reads[GAUGE] = 0U;
+}
+
+/** @brief Dispatch one look for a cable, as AO_LowPower's request posts it. */
+static void cable_look_once(void)
+{
+    static const QEvt look = QEVT_INITIALIZER(POWER_CABLE_REQ_SIG);
+
+    QASM_DISPATCH(AO_Power, &look, 0U);
+}
+
+/* The look runs every few seconds asleep: what it costs is one register of
+ * the PMIC, and nobody hears of it while the cable stays as it was. */
+TEST_CASE("a look that finds the cable as last said reads one register and publishes nothing",
+          "[power_ao]")
+{
+    static const bool states[] = { false, true };
+
+    power_up_once();
+    for ( size_t i = 0U; (sizeof(states) / sizeof(states[0])) > i; i++ )
+    {
+        cable_last_said(states[i]);
+        cable_look_once();
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a look with no change published");
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_reads[PMIC], "a look reads one PMIC register");
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_reads[GAUGE], "a look reads no gauge");
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_klog_count(), "a look printed something");
+    }
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("a look that finds a cable come publishes one whole reading, and the next look nothing",
+          "[power_ao]")
+{
+    const PowerEvt *p;
+
+    power_up_once();
+    cable_last_said(false);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    cable_look_once();
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    p = (const PowerEvt *)ao_spy_take();
+    TEST_ASSERT_EQUAL_INT(POWER_EVT_SIG, p->super.sig);
+    TEST_ASSERT_TRUE(p->vbus);
+    TEST_ASSERT_TRUE_MESSAGE(0U < s_reads[GAUGE], "the reading a cable brings is whole: the gauge too");
+
+    ao_spy_drain();
+    s_reads[PMIC]  = 0U;
+    s_reads[GAUGE] = 0U;
+    cable_look_once();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the same cable was said twice");
+    TEST_ASSERT_EQUAL_UINT(1U, s_reads[PMIC]);
+
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("a look that finds the cable gone publishes one whole reading", "[power_ao]")
+{
+    const PowerEvt *p;
+
+    power_up_once();
+    cable_last_said(true);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_OFF_USB;
+    cable_look_once();
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    p = (const PowerEvt *)ao_spy_take();
+    TEST_ASSERT_FALSE(p->vbus);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* A look the PMIC does not answer says nothing: the minute's reading is the
+ * one that tells a dead bus. */
+TEST_CASE("a look the PMIC does not answer publishes nothing", "[power_ao]")
+{
+    power_up_once();
+    cable_last_said(false);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    s_bus_dead = true;
+    cable_look_once();
+    s_bus_dead = false;
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
 #if CONFIG_KODE_LOWPOWER
 /** @brief Empty AO_LowPower's queue, giving it one first when it has none. */
 static void lowpower_flush(void)
@@ -730,7 +875,7 @@ static bool lowpower_queue_has(kode_lp_state_t target)
 /** @brief Fill AO_LowPower's queue until only its command margin is free. */
 static void lowpower_fill_to_margin(void)
 {
-    static const QEvt filler = QEVT_INITIALIZER(LOWPOWER_RADIO_DONE_SIG);
+    static const QEvt filler = QEVT_INITIALIZER(LOWPOWER_DARK_DONE_SIG);
 
     for ( uint32_t guard = 0U;
          (POWER_FILL_MAX > guard)
@@ -2507,6 +2652,124 @@ TEST_CASE("a cell that falls below the mark is one battery_low, and one again af
     Mockkhal_i2c_Destroy();
 }
 
+/* ---- The critical mark, before the cut -------------------------------------- */
+
+#define CELL_CRITICAL_MV 3550U   /**< 8 % on the curve: at or under the critical mark. */
+#define CELL_SAG_MV      3200U   /**< Under the cut: a reading that counts towards ship mode. */
+
+/** @brief What the polls of a case said on POWER_CRITICAL_SIG. */
+typedef struct {
+    unsigned on;    /**< Events that said the cell is critical. */
+    unsigned off;   /**< Events that said it is no longer.      */
+} crit_said_t;
+
+/**
+ * @brief @p n polls at a cell of @p mv; add what they said on
+ *        POWER_CRITICAL_SIG to @p said.
+ */
+static void crit_polls(uint16_t mv, uint32_t n, crit_said_t *said)
+{
+    static const QEvt poll = QEVT_INITIALIZER(POWER_POLL_SIG);
+
+    cell_reads(mv);
+    for ( uint32_t i = 0U; i < n; ++i )
+    {
+        ao_spy_drain();
+        QASM_DISPATCH(AO_Power, &poll, 0U);
+        for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+        {
+            if ( (QSignal)POWER_CRITICAL_SIG == e->sig )
+            {
+                if ( ((const PowerCriticalEvt *)(const void *)e)->critical )
+                {
+                    said->on += 1U;
+                }
+                else
+                {
+                    said->off += 1U;
+                }
+            }
+        }
+    }
+    ao_spy_drain();
+}
+
+/** @brief On battery with no current, at a full cell, and whatever an earlier case left said is over. */
+static void crit_case(void)
+{
+    crit_said_t before = { 0U, 0U };
+
+    power_up_once();
+    power_flush();
+    ao_spy_subscribe(POWER_CRITICAL_SIG);
+    s_regs[PMIC][BQ_REG0B_STATUS]    = REG0B_OFF_USB;
+    s_regs[GAUGE][CW_CURRENT_H]      = 0x00U;
+    s_regs[GAUGE][CW_CURRENT_H + 1U] = 0x00U;
+    crit_polls(CELL_FULL_MV, POLLS_TO_SETTLE, &before);
+}
+
+/** @brief Undo crit_case(): the cable back, the spy deaf to the mark. */
+static void crit_done(void)
+{
+    QActive_unsubscribe(ao_spy(), POWER_CRITICAL_SIG);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* The level is the curve's, slewed, so the fall takes many polls; the event
+ * comes once in all of them. A cable ends it at once, and the cable leaving
+ * with the cell still low is the next fall. */
+TEST_CASE("a cell that falls to the critical mark on battery is said once per fall",
+          "[power_ao]")
+{
+    crit_said_t said = { 0U, 0U };
+
+    crit_case();
+    crit_polls(CELL_FULL_MV, 1U, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, said.on + said.off, "a full cell said something");
+
+    fake_klog_reset();
+    crit_polls(CELL_CRITICAL_MV, POLLS_TO_SETTLE, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said.on, "the fall said it once, however many polls it took");
+    TEST_ASSERT_EQUAL_UINT(0U, said.off);
+    TEST_ASSERT_TRUE(logged("critical"));
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    crit_polls(CELL_CRITICAL_MV, POLLS_TO_SETTLE, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said.off, "the cable ended it, once");
+    TEST_ASSERT_EQUAL_UINT(1U, said.on);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_OFF_USB;
+    crit_polls(CELL_CRITICAL_MV, POLLS_TO_SETTLE, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, said.on, "the cable left a low cell: the next fall");
+
+    crit_polls(CELL_NEAR_FULL_MV, POLLS_TO_SETTLE, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, said.off, "the climb ended it, once");
+    TEST_ASSERT_EQUAL_UINT(2U, said.on);
+
+    crit_done();
+}
+
+/* The level is slewed and the cut reads the cell itself, so a cell that sags
+ * under the cut can do it with the level well above the mark. The count
+ * towards ship mode starts at that reading, and so does the warning. */
+TEST_CASE("a cell under the cut is said critical before the board ships, whatever the level",
+          "[power_ao]")
+{
+    crit_said_t said = { 0U, 0U };
+
+    crit_case();
+    crit_polls(CELL_SAG_MV, 1U, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said.on, "the first reading under the cut said nothing");
+    TEST_ASSERT_FALSE_MESSAGE(power_queue_has(POWER_SHIP_REQ_SIG), "one reading asked for ship mode");
+
+    crit_polls(CELL_FULL_MV, 1U, &said);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said.off, "the cell came back and the warning stayed");
+
+    crit_done();
+}
+
 /* ---- The board's rest ------------------------------------------------------- */
 
 /** @brief How many writes since the reset went to chip @p chip. */
@@ -2581,7 +2844,7 @@ TEST_CASE("a rested AO_Power still answers the minute's dump with the cable as i
     Mockkhal_i2c_Destroy();
 }
 
-/* A radio wake runs the tick while the AO is rested: the ADC is idle, so a
+/* A dark wake runs the tick while the AO is rested: the ADC is idle, so a
  * poll that comes then has nothing true to read. */
 TEST_CASE("a rested AO_Power runs no poll, and the first one after AWAKE does",
           "[power_ao][lowpower]")
@@ -2674,9 +2937,9 @@ TEST_CASE("a control request waiting on the chip refuses the round", "[power_ao]
     Mockkhal_i2c_Destroy();
 }
 
-/* A radio wake is not AWAKE: the ADC stays idle, and the conversion the first
+/* A dark wake is not AWAKE: the ADC stays idle, and the conversion the first
  * poll reads is started by AWAKE alone. */
-TEST_CASE("STATE(RADIO) leaves a rested AO_Power alone; AWAKE still starts a conversion",
+TEST_CASE("STATE(DARK) leaves a rested AO_Power alone; AWAKE still starts a conversion",
           "[power_ao][lowpower]")
 {
     power_up_once();
@@ -2686,15 +2949,15 @@ TEST_CASE("STATE(RADIO) leaves a rested AO_Power alone; AWAKE still starts a con
     s_nwrites = 0U;
     ao_spy_drain();
 
-    lp_radio(AO_Power);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nwrites, "the radio wake wrote a chip");
+    lp_dark(AO_Power);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nwrites, "the dark wake wrote a chip");
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_regs[PMIC][BQ_REG02_ADC] & BQ_CONV_START,
-                                   "the radio wake started a conversion");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the radio wake published something");
+                                   "the dark wake started a conversion");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the dark wake published something");
 
     lp_awake(AO_Power);
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(BQ_CONV_START, s_regs[PMIC][BQ_REG02_ADC] & BQ_CONV_START,
-                                   "AWAKE after the radio wake started no conversion");
+                                   "AWAKE after the dark wake started no conversion");
     ao_spy_drain();
     Mockkhal_i2c_Destroy();
 }
@@ -2706,6 +2969,7 @@ TEST_CASE("STATE(RADIO) leaves a rested AO_Power alone; AWAKE still starts a con
 #define BQ_OTG_BIT        0x20U   /**< REG03[5]: OTG_CONFIG.                     */
 #define REG0B_NO_INPUT    0x02U   /**< REG0B: no input, PG 0.                    */
 #define REG0B_CABLE       0x56U   /**< REG0B: adapter, fast charge, power good.  */
+#define REG0B_BOOST       0xE0U   /**< REG0B: VBUS_STAT 111, the boost running.  */
 #define CELL_BOOST_OK_MV  3720U   /**< A cell well above the boost's floor.      */
 
 /** @brief Hand the AO one poll and take the delivery test's answer, if it came. */
@@ -2753,8 +3017,9 @@ TEST_CASE("test_boost_test_restores_the_limit_on_unplug", "[power_ao][test_dot]"
                                    "the limit raised before the boost");
     TEST_ASSERT_EQUAL_HEX8(BQ_OTG_BIT, s_regs[PMIC][BQ_REG03_CTRL] & BQ_OTG_BIT);
     gauge_reads(3700, -700);
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
     const PowerBoostTestEvt *a = boost_test_poll();
-    TEST_ASSERT_NOT_NULL_MESSAGE(a, "answered at the next poll");
+    TEST_ASSERT_NOT_NULL_MESSAGE(a, "answered at the next poll past the settle");
     TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
     TEST_ASSERT_TRUE_MESSAGE(0 > a->current_ma, "the reading's discharge");
     TEST_ASSERT_NULL_MESSAGE(boost_test_poll(), "answered once");
@@ -2790,10 +3055,72 @@ TEST_CASE("test_boost_test_off_puts_the_limit_back_and_answers", "[power_ao][tes
     boost_test_ask(false);
     TEST_ASSERT_EQUAL_HEX8(0x00U, s_regs[PMIC][BQ_REG03_CTRL] & BQ_OTG_BIT);
     TEST_ASSERT_EQUAL_HEX8(KBSP_CELL_BOOST_LIM_CODE, boost_lim());
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
     const PowerBoostTestEvt * const a = boost_test_poll();
     TEST_ASSERT_NOT_NULL(a);
     TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
     TEST_ASSERT_FALSE(a->boost);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    ship_done();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("test_boost_test_on_answers_with_a_reading_past_the_settle", "[power_ao][test_dot]")
+{
+    power_up_once();
+    pmic_on_the_line();
+    cell_reads(CELL_BOOST_OK_MV);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    (void)boost_test_poll();
+
+    boost_test_ask(true);
+    /* A poll a few milliseconds after the write: the status shows no boost yet. */
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS - 1U);
+    TEST_ASSERT_NULL_MESSAGE(boost_test_poll(), "a reading inside the settle is not the answer");
+
+    /* The next poll, past the settle, shows the boost and answers with it. */
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_BOOST;
+    gauge_reads(3700, -1180);
+    fake_time_advance_ms(1U);
+    const PowerBoostTestEvt * const a = boost_test_poll();
+    TEST_ASSERT_NOT_NULL_MESSAGE(a, "the first reading past the settle answers");
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
+    TEST_ASSERT_TRUE_MESSAGE(a->boost, "the answer shows the boost");
+    TEST_ASSERT_TRUE_MESSAGE(0 > a->current_ma, "the reading's discharge");
+    TEST_ASSERT_NULL_MESSAGE(boost_test_poll(), "answered once");
+
+    boost_test_ask(false);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
+    (void)boost_test_poll();
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    ship_done();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("test_boost_test_off_answers_with_a_reading_past_the_settle", "[power_ao][test_dot]")
+{
+    power_up_once();
+    pmic_on_the_line();
+    cell_reads(CELL_BOOST_OK_MV);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    (void)boost_test_poll();
+    boost_test_ask(true);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_BOOST;
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
+    (void)boost_test_poll();
+
+    boost_test_ask(false);
+    /* A poll right after the write: the status still shows the boost. */
+    TEST_ASSERT_NULL_MESSAGE(boost_test_poll(), "a reading inside the settle is not the answer");
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
+    const PowerBoostTestEvt * const a = boost_test_poll();
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
+    TEST_ASSERT_FALSE_MESSAGE(a->boost, "the answer shows the boost gone");
 
     s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
     ship_done();

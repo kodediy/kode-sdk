@@ -821,6 +821,12 @@ kode_status_t kdrv_ble_app_queue_room(const char *chr, size_t *room)
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; external, not static: kdrv_ble.c calls it from its own translation unit, kept apart from this one so the host suite compiles these rules without NimBLE */
+bool kdrv_ble_app_block(void)
+{
+    return app_mem_ensure();
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; external, not static: kdrv_ble.c calls it from its own translation unit, kept apart from this one so the host suite compiles these rules without NimBLE */
 void *kdrv_ble_app_host(void)
 {
     void *p = NULL;

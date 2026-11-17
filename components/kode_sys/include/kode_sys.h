@@ -19,6 +19,7 @@
 #include "kapp_cat.h"
 #include "kqp.h"
 #include "kode_init.h"
+#include "kode_http_off.h"   /* kode_http_off_t, KODE_HTTP_OFF_MAX */
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,6 +91,48 @@ kode_status_t kode_sys_led_set_rgb(uint8_t r, uint8_t g, uint8_t b);
  * @return As the commands' rule above; KODE_DENIED for a level out of range.
  */
 kode_status_t kode_sys_screen_brightness(uint8_t pct);
+
+/**
+ * @brief Put the display to sleep, or wake it.
+ *
+ * Asleep is the panel in sleep-in and its link to the processor down: the
+ * glass is dark, nothing is drawn, and the touch keeps reporting. That is what
+ * a brightness of 0 leaves running. The saving is the panel's and the link's
+ * own draw.
+ *
+ * To sleep, AO_Display first asks whoever draws to stop, with
+ * DISPLAY_PARK_SIG (DisplayParkEvt): a kscreen renderer answers in
+ * kscreen_park(), one of the app's own with kode_sys_screen_parked(), and
+ * neither draws again before DISPLAY_REPAINT_SIG. A renderer is whoever has
+ * asked for the panel's state (display_state_request()) or flushed, drawn
+ * yet or not. Every park carries a number, and only the answer that names
+ * the park in hand settles the sleep: one that comes late, or never, leaves
+ * the next sleep its own. The link goes down only after that answer, and a
+ * renderer that gives none in KODE_LOWPOWER_GLYPHS_WAIT_MS leaves the glass
+ * lit. To wake, the link and the panel come back, the brightness is the one
+ * the glass had, and DISPLAY_REPAINT_SIG has the renderer paint it whole.
+ *
+ * Each call that returns KODE_OK ends in one DISPLAY_SLEEP_SIG (DisplaySleepEvt)
+ * on the bus: KODE_OK when the glass is as asked, also when it already was;
+ * otherwise the reason. A wake the panel refuses is tried again every
+ * KODE_DISPLAY_RESTORE_RETRY_MS and answered when it works. With AO_LowPower
+ * the board's rest has the glass first: a round takes it as it finds it, and
+ * the AWAKE that ends the rest wakes it, with no DISPLAY_SLEEP_SIG of its own:
+ * DISPLAY_REPAINT_SIG says the glass is back.
+ *
+ * @param sleep true to sleep, false to wake.
+ * @return As the commands' rule above.
+ */
+kode_status_t kode_sys_screen_sleep(bool sleep);
+
+/**
+ * @brief Tell AO_Display the app's renderer has stopped drawing: the answer to DISPLAY_PARK_SIG.
+ * @note For a renderer of the app's own. kscreen answers in kscreen_park().
+ * @param seq The DisplayParkEvt's @c seq: each park is answered with its own.
+ * @return As the commands' rule above; KODE_DENIED for a @p seq of 0, which no
+ *         park carries.
+ */
+kode_status_t kode_sys_screen_parked(uint32_t seq);
 
 /* ---- Infrared: to AO_Ir; without KODEOS_RADIO (the block is on the C5) AO_Ir refuses ----
  * The C5 link, for this command and the infrared requests below: one that
@@ -415,7 +458,7 @@ kode_status_t kode_sys_ble_queue_clear(const char *chr);
  * commands: the answer is the state the board ends up in, published as
  * LOWPOWER_STATE_SIG, or the refusal, published as LOWPOWER_REFUSED_SIG (an
  * app with an AO of its own subscribes to them). The same signal also says
- * RADIO when the radio alone wakes in ASLEEP: ignore any state that is not
+ * DARK when a dark wake runs in ASLEEP: ignore any state that is not
  * AWAKE, ASLEEP or OFF. While a cable is in the board does not sleep or switch
  * off: the request is refused and the board stays awake.
  *
@@ -445,6 +488,117 @@ kode_status_t kode_sys_power_sleep(void);
  * @return As kode_sys_power_sleep().
  */
 kode_status_t kode_sys_power_off(void);
+
+/* ---- An app's rest, part by part: to AO_LowPower ----
+ * The app names the parts it does not use and AO_LowPower puts them away one
+ * at a time, asking each owner alone. The board stays AWAKE for everything
+ * else: LOWPOWER_STATE_SIG says nothing and the owners that are not named
+ * go on as they were. The parts stay away until kode_sys_rest_end(), until
+ * the board reaches a state of its own, or until a restart. A round of the
+ * board that may be given up asks the owners of those parts last: one that
+ * another owner refuses leaves the rest as it was, and one that goes through
+ * says KODE_LP_PART_TAKEN before it asks them. An order for OFF, and a round
+ * begun while a rest is being arranged, take the rest at once. So does a
+ * request for AWAKE, which AO_Radio makes when the C5 stays up through its
+ * rest: KODE_LP_PART_TAKEN, then LOWPOWER_STATE_SIG says AWAKE over AWAKE and
+ * every part comes back. While a round runs a request is answered
+ * KODE_DENIED, `board: not awake`.
+ *
+ * Both calls are commands. Each one that returns KODE_OK ends in exactly one
+ * LOWPOWER_PART_SIG (LowPowerPartEvt) with what KODE_LP_PART_ANSWER: its rc,
+ * the parts at rest now and, when it did not go through, "part: why". The
+ * parts that had rested before a part refused stay at rest. The same signal
+ * says, unasked, KODE_LP_PART_WOKE when a wake ends the CPU part, and
+ * KODE_LP_PART_TAKEN when the board takes the rest over.
+ *
+ * kode_sys_screen_sleep(false) wakes a glass the rest put to sleep, and its
+ * supply with it: the screen and the panel are then no longer held, and
+ * LowPowerPartEvt::parts says so at the next answer. With the radio at rest
+ * AO_Radio goes on as with the board AWAKE: Wi-Fi joins its network again
+ * and a C5 link that fell is built again; only the C5 sleeps between wakes.
+ * A scan, Wi-Fi or BLE, would fail on a C5 asleep between wakes, so it is
+ * answered KODE_DENIED at once instead.
+ */
+
+#define KODE_SYS_REST_SCREEN 0x01U /**< The panel in sleep-in and its link down, as kode_sys_screen_sleep().        */
+#define KODE_SYS_REST_PANEL  0x02U /**< And the panel's supply off: reset low, then the supply. Takes the screen
+                                    *   and the touch with it, whose reset line it shares.                        */
+#define KODE_SYS_REST_TOUCH  0x04U /**< The touch controller in auto-sleep, with no interrupt.                      */
+#define KODE_SYS_REST_SOUND  0x08U /**< The amplifier off and the codec closed, once: the next sound opens them
+                                    *   again, so it is never among the parts held at rest.                        */
+#define KODE_SYS_REST_CARD   0x10U /**< The card unmounted and its supply off, once: the next file on it mounts it
+                                    *   again, so it is never among the parts held at rest.                        */
+#define KODE_SYS_REST_RADIO  0x20U /**< The C5 asleep between wakes, its sessions kept. Needs the sound in the same
+                                    *   request: the amplifier's enable is a line of the C5.                       */
+#define KODE_SYS_REST_CPU    0x40U /**< The P4 light-sleeps when every task is idle. Needs the screen at rest, and
+                                    *   no cable.                                                                  */
+
+/** @brief What ends the CPU part of a rest, besides the buttons. */
+typedef struct {
+    bool     touch;     /**< A touch; refused with the touch or the panel at rest.          */
+    uint8_t  pin;       /**< A position of the expansion header, KODE_SYS_EXP_POS_MIN to
+                         *   KODE_SYS_EXP_POS_MAX; 0 for none. It must be free or an input
+                         *   with no interrupt attached: an output, a PWM, an analog input, a
+                         *   loan or an input somebody listens to refuses the request,
+                         *   `pin: in use`. It becomes an input pulled toward the other level;
+                         *   when the CPU part ends it is free again, or an input with the
+                         *   pull it had.                                                     */
+    bool     pin_level; /**< The level of that position that wakes.                         */
+    uint32_t after_ms;  /**< A time from the answer, in ms; 0 for none.                     */
+} kode_sys_rest_wake_t;
+
+/**
+ * @brief Put the named parts away, in the order sound, card, touch, screen, panel, radio, CPU.
+ *
+ * A request that cannot be is refused whole and nothing moves: no part or an
+ * unknown one, KODE_SYS_REST_RADIO without KODE_SYS_REST_SOUND beside it, and
+ * KODE_SYS_REST_CPU with the screen up, on a cable, with a touch asked as a
+ * wake source while the touch rests, or with a position the header does not
+ * have or that is in use. Asked again while parts rest, it adds the ones that
+ * are missing and takes the new wake sources. It brings no device back, but
+ * any request ends the CPU part, as every request to AO_LowPower does: the P4
+ * sleeps again only when the request names KODE_SYS_REST_CPU.
+ * A request made while another is being arranged is answered KODE_DENIED,
+ * `rest: underway`, and the one in hand goes on to its own answer. One asker
+ * at a time: the answer carries no number, so two of the app's that ask at
+ * once cannot tell their answers apart. An owner that answers busy is asked
+ * again KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round is begun
+ * again, while that ask falls inside KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS of
+ * the request; busy past it, the answer is KODE_DENIED with `part: why`, and
+ * the parts that rested stay at rest. An owner that does not answer in
+ * KODE_LOWPOWER_PART_STEP_MS is answered `part: no answer`, and not asked again.
+ *
+ * With KODE_SYS_REST_CPU the system's clock stops, as in the board's ASLEEP:
+ * no Active Object counts time, so work in flight in an owner that was not
+ * named stands still until the wake, and a QTimeEvt of the app's does not
+ * expire. What always ends the CPU part, whatever @p wake says: any button,
+ * a console line, an MQTT message, a request to AO_LowPower, and what the
+ * minute AO_LowPower keeps meanwhile finds - a cable, the cell at its cut
+ * (AO_Power's ship mode), an entry of the scheduler or an owner's time that
+ * has come. That minute also counts `off_after` from the moment the P4 went
+ * to rest and takes the board OFF when it is reached. The other parts stay
+ * away after a wake. Ask again to let the P4 sleep again.
+ *
+ * @param parts A mask of KODE_SYS_REST_*.
+ * @param wake  What ends the CPU part besides the buttons; NULL for nothing
+ *              more. Not read without KODE_SYS_REST_CPU.
+ * @return As the commands' rule above; KODE_DENIED in a build without
+ *         CONFIG_KODE_LOWPOWER, which logs `low power not built`.
+ */
+kode_status_t kode_sys_rest(uint32_t parts, const kode_sys_rest_wake_t *wake);
+
+/**
+ * @brief Bring back what kode_sys_rest() put away: the CPU first, then the radio, the glass and the touch.
+ *
+ * The sound and the card are not held: they come back at their next use.
+ * With nothing at rest the answer is KODE_OK at once. An owner with no room
+ * for its wake is asked again as one that answers busy is (kode_sys_rest());
+ * past the window the answer is KODE_DENIED, `part: out of events`, and the
+ * part stays at rest.
+ *
+ * @return As kode_sys_rest().
+ */
+kode_status_t kode_sys_rest_end(void);
 
 /* ---- Power: to AO_Power, which owns the PMIC; the outcome shows in its log and in POWER_CTRL_SIG / POWER_EVT_SIG ---- */
 
@@ -550,11 +704,14 @@ kode_status_t kode_sys_exp_power(bool on);
 kode_status_t kode_sys_exit_to_os(void);
 
 /*
- * With CONFIG_KODEOS_HOME_HOLD (on by default in an app) holding BOT publishes
- * HOME_SIG and resets the board KODE_SYS_HOME_GRACE_MS later, as
- * kode_sys_exit_to_os() does. An app with something to save defers from its
- * HOME_SIG handler, writes, then resets; the wait is capped at
- * KODE_SYS_HOME_DEFER_MAX_MS from the hold.
+ * With CONFIG_KODEOS_HOME_HOLD (on by default in an app) holding BOT for
+ * KODE_HOME_HOLD_MS publishes HOME_SIG and resets the board
+ * KODE_SYS_HOME_GRACE_MS later, as kode_sys_exit_to_os() does. The ordinary
+ * hold of the same press, KODE_BUTTON_HOLD_MS in, is BUTTON_HOLD_SIG and the
+ * app's own. An app with something to save defers from its HOME_SIG handler,
+ * writes, then resets; the wait is capped at KODE_SYS_HOME_DEFER_MAX_MS from
+ * HOME_SIG. Without the option HOME_SIG goes out at the ordinary hold and
+ * nothing resets.
  */
 
 /**
@@ -574,6 +731,27 @@ kode_status_t kode_sys_home_defer(void);
  * @return As the commands' rule above.
  */
 kode_status_t kode_sys_home_now(void);
+
+/* ---- The store: to AO_Boot, which writes it from its own thread ---- */
+
+/**
+ * @brief Store @p value under @p key, for kode_sys_nvs_get() to read back.
+ *
+ * The call waits on no flash, so an Active Object and a kode_worker job may
+ * make it. Both strings are copied before it returns. Nobody is answered: a
+ * pair the store refuses is a warning in the log, and so is one that would
+ * take the apps' keys past their share of the store, KODE_NVS_SHARE_MAX
+ * bytes, which is not written. The pairs are written in
+ * the order they are asked, and one asked before kode_sys_exit_to_os() or
+ * kode_sys_home_now() is written before the board leaves; one that reaches
+ * AO_Boot once the board is leaving, or during a factory reset, is dropped
+ * with a notice in the log.
+ * @param key   At most KODE_SYS_NVS_KEY_MAX - 1 characters, not empty.
+ * @param value At most KODE_SYS_NVS_VALUE_MAX - 1 characters; may be empty.
+ * @return As the commands' rule above; KODE_DENIED for an unusable @p key or
+ *         @p value.
+ */
+kode_status_t kode_sys_nvs_set(const char *key, const char *value);
 
 /* =========================================================================
  * Requests
@@ -732,6 +910,12 @@ kode_status_t kode_sys_ir_last(QActive *me);
 /** @brief The frames the stream holds ahead of the speaker (200 ms); it holds the codec from open to close. */
 #define KODE_SYS_AUDIO_STREAM_FRAMES  9600U
 
+/* The canonical value is kqp_config.h's; guarded so a file seeing both has one. */
+#ifndef KODE_SYS_AUDIO_STREAM_IDLE_MS
+/** @brief How long an open stream may go without a write before AO_Audio closes it. */
+#define KODE_SYS_AUDIO_STREAM_IDLE_MS  10000U
+#endif
+
 /** @brief The longest path a recording into a file names, NUL included. */
 #define KODE_SYS_AUDIO_PATH_MAX  96U
 
@@ -802,6 +986,11 @@ kode_status_t kode_sys_audio_record_file(QActive *me, const char *path, uint32_t
 /**
  * @brief Open the stream at KODE_SYS_AUDIO_RATE_HZ; it holds the codec until closed.
  * @note Only @p me writes (kode_sys_audio_stream_write()) and closes the stream it opened.
+ * @note AO_Audio closes a stream that goes KODE_SYS_AUDIO_STREAM_IDLE_MS
+ *       without a write that put frames in, counted from the open while there
+ *       has been none. Nobody is answered: @p me stops being its writer, so
+ *       its next write is KODE_DENIED. A close asked while that close drains
+ *       is answered with it; one asked after it is KODE_DENIED.
  * @param me The asking AO; AUDIO_STREAM_OPEN_RSP_SIG answers it once the stream plays.
  * @return As the requests' rules above.
  */
@@ -1218,7 +1407,7 @@ kode_status_t kode_sys_file_write(QActive *me, const char *path, const void *dat
 /** @brief What a ping session added up to: @c ip4, @c tx, @c rx, @c min_ms, @c avg_ms, @c max_ms. */
 typedef NetPingStats kode_sys_ping_stats_t;
 
-/** @brief What an HTTP request came back with: @c status, @c content_length, @c body_len, @c kept, @c truncated. */
+/** @brief What an HTTP request came back with: @c status, @c content_length, @c body_len, @c kept, @c truncated, @c range_total. */
 typedef NetHttpResult kode_sys_http_result_t;
 
 /** @brief The longest host a request names, NUL included. */
@@ -1276,6 +1465,83 @@ kode_status_t kode_sys_net_ping(QActive *me, const char *host, uint8_t count);
 kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap);
 
 /**
+ * @brief GET the @p cap bytes of a URL from @p offset on: a resource too big
+ *        for one buffer, a range at a time.
+ * @note LENT: AO_Net's worker writes @p buf until NET_HTTP_RSP_SIG arrives.
+ * @note The answer's @c result.status says where the bytes start: 206, at
+ *       @p offset, and @c range_total is then the length of the whole
+ *       resource when the server says it; 200, at byte 0 - the server ignores
+ *       ranges and sent the body from its start, of which only @p cap bytes
+ *       were read (@c truncated says more followed), kept only when @p offset
+ *       is 0; 416, nowhere - @p offset is past the end. Any other status (a
+ *       404, a 403, a redirect, which is not followed) is the server's page,
+ *       not the resource: its body is left unread and @c kept is 0, as for a
+ *       416 and for a 200 to an @p offset above 0. Each range is a connection of its own, and shares
+ *       kode_sys_http_get()'s turn: one GET or range per AO at a time.
+ * @param me     The asking AO; NET_HTTP_RSP_SIG answers it.
+ * @param url    Shorter than KODE_SYS_NET_URL_MAX.
+ * @param offset The first byte wanted.
+ * @param buf    Where the bytes go.
+ * @param cap    Its room, above 0.
+ * @return As the requests' rules above; KODE_DENIED also for a NULL @p buf, a
+ *         zero @p cap, or a range that runs past KODE_HTTP_OFF_MAX.
+ */
+kode_status_t kode_sys_http_get_range(QActive *me, const char *url, kode_http_off_t offset,
+                                      void *buf, uint32_t cap);
+
+/** @brief The longest URL a download into a file names, NUL included. */
+#define KODE_SYS_HTTP_FILE_URL_MAX  256U
+
+/* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
+/** @brief A download's progress (HTTP_FILE_PROGRESS_SIG) and its end (HTTP_FILE_RSP_SIG):
+ *         @c rc, @c stopped, @c status, @c written, @c size, @c total. */
+typedef HttpFileEvt kode_sys_http_file_answer_t;
+
+/**
+ * @brief Download a URL into a file, however big, and take it up again where
+ *        a cut left it.
+ *
+ * AO_Storage asks for the body from the length the file at @p path already
+ * has - nothing, for a new file - and appends what arrives, 32 KiB at a time,
+ * over one connection. @p me is posted one HTTP_FILE_PROGRESS_SIG per chunk
+ * in the file and one HTTP_FILE_RSP_SIG at the end. If the link drops or the
+ * medium refuses a chunk, the end says so and the file keeps what it has:
+ * the same call again goes on from there. To start over, delete the file
+ * first.
+ *
+ * @note The end's @c status says how the server took it: 200, the body from
+ *       its start; 206, the rest of it; 416 with KODE_OK, the file is as long
+ *       as the resource already; 416 with KODE_DENIED, the file is longer, or
+ *       the server did not say how long the resource is; 200 with
+ *       KODE_DENIED, a server that ignores ranges was asked for the rest. A
+ *       refusal leaves the file as it was. A redirect is not followed: it
+ *       ends the download with KODE_ERROR and its status.
+ * @note The rest is asked for by length alone: a file that is not the start
+ *       of this resource is taken up all the same.
+ * @note One download at a time on the board: a second, and kodeOS's install
+ *       from a URL while one runs, are refused KODE_DENIED. The board does not
+ *       rest while one runs. A file can hold 4 GB at most (FAT32).
+ * @param me   The asking AO.
+ * @param url  http:// or https://, shorter than KODE_SYS_HTTP_FILE_URL_MAX.
+ * @param path Where it goes: absolute and virtual, in a folder that exists,
+ *             or a bare name, which goes on the card when the card has
+ *             proved it takes a write and inside otherwise; shorter than
+ *             KODE_SYS_FILE_PATH_MAX with the volume's root in front.
+ * @return As the requests' rules above; KODE_DENIED without CONFIG_KODEOS_NET.
+ */
+kode_status_t kode_sys_http_get_file(QActive *me, const char *url, const char *path);
+
+/**
+ * @brief End the download @p me started; its HTTP_FILE_RSP_SIG follows with
+ *        @c stopped true and what was written kept.
+ * @param me The AO that called kode_sys_http_get_file().
+ * @return KODE_OK when AO_Storage took it, also with no download to end;
+ *         KODE_DENIED for a NULL @p me or without CONFIG_KODEOS_NET;
+ *         KODE_NO_RESOURCES when its queue has no room.
+ */
+kode_status_t kode_sys_http_file_stop(QActive *me);
+
+/**
  * @brief POST @p body to a URL and keep the answer's body in @p buf.
  * @note LENT: @p body is read and @p buf written in place until NET_HTTP_RSP_SIG.
  * @param me    The asking AO; NET_HTTP_RSP_SIG answers it, @c post true.
@@ -1309,12 +1575,22 @@ kode_status_t kode_sys_udp_send(QActive *me, const char *host, uint16_t port, co
  * and switches no service on. The networks are a listing: AO_Radio posts one
  * WIFI_SCAN_ENTRY_SIG per network to @p me while its queue keeps
  * KODE_SYS_LIST_FREE_SLOTS free - the queue rule above, with AO_Radio
- * (KODE_PRIO_RADIO) in AO_Storage's place - then the answer. A scan waits for
- * the link's bring-up and the reconcile chain, seconds, and nothing longer:
- * while a sweep holds the radio (another asked scan, of this or any AO, the
- * console's, the boot's autojoin round), or a Bluetooth listen (asked, or the
- * console's `ble_scan`), the production row or an install does, it is
- * answered at once with @c rc KODE_NO_RESOURCES. Without
+ * (KODE_PRIO_RADIO) in AO_Storage's place - then the answer. The newest
+ * Wi-Fi request wins: a Wi-Fi scan somebody asked for that is in flight or
+ * waiting (another asked scan, of any AO or task, the console's `wifi_scan`)
+ * ends for this one, and its asker is told at once; this one ends the same
+ * way for a newer Wi-Fi request - a scan, a join, Wi-Fi switched - with
+ * @c rc KODE_CANCELLED. An asker answered KODE_CANCELLED does not scan again
+ * at once: whoever ended its scan has the radio, and two askers that each
+ * scan again the moment they are ended never let a sweep finish. It scans
+ * again after a pause, or when it next needs the list. A scan waits for the
+ * link's bring-up, the reconcile chain, a join and the scan it replaces to
+ * leave the radio, seconds, and nothing longer: while a Bluetooth listen,
+ * the boot's autojoin round (running or owed), the production row or an
+ * install holds the radio it is answered at once with @c rc
+ * KODE_NO_RESOURCES. While an app's rest has the radio (KODE_SYS_REST_RADIO)
+ * it is answered at once with @c rc KODE_DENIED: the C5 sleeps between wakes
+ * too long for a sweep, and kode_sys_rest_end() brings it back. Without
  * CONFIG_KODEOS_WIFI the request is refused at once with KODE_DENIED.
  */
 
@@ -1337,8 +1613,10 @@ typedef WifiScanEntryEvt kode_sys_wifi_scan_entry_t;
 /**
  * @brief Answers kode_sys_wifi_scan() (WIFI_SCAN_RSP_SIG): @c rc, KODE_OK when the sweep
  *        ended, KODE_ERROR when it failed or the link went, KODE_NO_RESOURCES when the
- *        radio was busy (ask again); @c seen, the networks the sweep handed over;
- *        @c more, entries left out.
+ *        radio was busy (ask again), KODE_DENIED with the radio at rest for the app
+ *        (@c rest true; ask again after kode_sys_rest_end()), KODE_CANCELLED when a newer
+ *        Wi-Fi request took its place (do not ask again at once); @c seen, the networks the
+ *        sweep handed over; @c more, entries left out.
  */
 typedef ScanRspEvt kode_sys_wifi_scan_answer_t;
 
@@ -1358,7 +1636,8 @@ kode_status_t kode_sys_wifi_scan(QActive *me);
  * listens on the network's own channel or refuses. One AO listens at a time.
  * AO_Radio posts the answers to @p me, never publishes them, and keeps
  * KQP_FRAMES_MARGIN slots of its queue free: what does not fit is counted in
- * the next tick's @c dropped. That count is this chip's alone: a frame the
+ * the next tick's @c dropped, as are the records of a batch that did not come
+ * whole. That count is this chip's alone: a frame the
  * C5 could not queue or fit in a batch is in @c heard and in no drop count,
  * and a tick this chip could not post is counted nowhere. A tick's
  * @c channel is the radio's when the batch was sent, so frames heard while a
@@ -1377,7 +1656,20 @@ typedef WifiFramesStateEvt kode_sys_wifi_frames_state_t;
 typedef WifiFramesTickEvt kode_sys_wifi_frames_tick_t;
 
 /* cppcheck-suppress misra-c2012-2.3 ; a frame's name for the apps that read it, never used inside the SDK */
-/** @brief One frame heard (WIFI_FRAME_SIG): @c channel, @c rssi, @c fc, @c addr1, @c addr2, @c len and @c head. */
+/** @brief One frame heard (WIFI_FRAME_SIG): @c channel, @c rssi, @c fc, @c addr1, @c addr2, @c addr3, @c len,
+ *         @c head_len and @c head.
+ *
+ * @c head is the first KWIFI_FRAME_HEAD_LEN bytes after the MAC header of a
+ * management or a control frame. In a beacon and a probe response that is the
+ * 12 fixed bytes - the capabilities at 10, privacy their bit 4 - and the first
+ * element, the network's name, whole up to its 32 bytes. A data frame's
+ * @c head is zeros and its @c head_len 0, from any C5: what follows its
+ * header is a third party's traffic.
+ * @c addr3 is the network's address in a management frame, a
+ * deauthentication among them; in a data frame it is the address its To DS
+ * and From DS bits (@c fc[1], bits 0 and 1) give it. @c head_len says how
+ * many bytes of @c head are kept: 8, with @c addr3 zeros, from a C5 older
+ * than the longer head - the name is not in those. */
 typedef WifiFrameEvt kode_sys_wifi_frame_t;
 
 /**
@@ -1397,15 +1689,19 @@ kode_status_t kode_sys_wifi_frames(QActive *me, bool on, uint8_t channel);
  * advertises repeatedly is listed once, at its strongest. The devices are a
  * listing: AO_Radio posts one BLE_SCAN_ENTRY_SIG per device to @p me while
  * its queue keeps KODE_SYS_LIST_FREE_SLOTS free, then the answer. It shares
- * the Wi-Fi scan's one slot and rules: it waits for the link's bring-up and
- * the reconcile chain, and nothing longer; with another scan of either kind
- * held, or the console's, the autojoin round, the production row or an
- * install holding the radio, it is answered at once with @c rc
+ * the Wi-Fi scan's one slot and rules, for its own radio: the newest
+ * Bluetooth request wins, and a newer one - a listen, Bluetooth switched -
+ * ends this one with @c rc KODE_CANCELLED, after which its asker does not
+ * listen again at once; it waits for the link's bring-up, the reconcile
+ * chain, a join and the listen it replaces, and nothing longer; with a Wi-Fi
+ * scan, the autojoin round, the production row or an install holding the
+ * radio, it is answered at once with @c rc
  * KODE_NO_RESOURCES. The autojoin round runs each time the link comes up with
  * Wi-Fi on, and a listen owed behind that bring-up is refused when the round
  * starts, so the first listen asked on a cold link with Wi-Fi on is nearly
  * always busy: ask again once the round ends. With Bluetooth off in Settings
- * it is answered at once with @c rc KODE_DENIED, in every state. Without
+ * it is answered at once with @c rc KODE_DENIED, in every state, and so it is
+ * while the app's rest has the radio (KODE_SYS_REST_RADIO). Without
  * CONFIG_KODEOS_BLE the request is refused at once with KODE_DENIED.
  */
 
@@ -1429,8 +1725,10 @@ typedef BleScanEvt kode_sys_ble_scan_entry_t;
 /**
  * @brief Answers kode_sys_ble_scan() (BLE_SCAN_RSP_SIG): @c rc, KODE_OK when the listen
  *        ended, KODE_ERROR when it failed or the link went, KODE_NO_RESOURCES when the
- *        radio was busy (ask again), KODE_DENIED with Bluetooth off in Settings; @c seen,
- *        the devices handed over; @c more, entries left out.
+ *        radio was busy (ask again), KODE_DENIED with the radio at rest for the app
+ *        (@c rest true) or Bluetooth off in Settings (@c rest false), KODE_CANCELLED when a
+ *        newer Bluetooth request took its place (do not ask again at once); @c seen, the
+ *        devices handed over; @c more, entries left out.
  */
 typedef ScanRspEvt kode_sys_ble_scan_answer_t;
 
@@ -1442,6 +1740,57 @@ typedef ScanRspEvt kode_sys_ble_scan_answer_t;
  * @return As the requests' rules above; KODE_DENIED also for @p ms out of range.
  */
 kode_status_t kode_sys_ble_scan(QActive *me, uint32_t ms);
+
+/* ---- Bluetooth advertisements, AO_Radio: hearing every one around ----
+ * The host stack can listen passively, with no end, and say what it hears:
+ * one record per advertisement, as the stack reported it (the advertiser's
+ * address and its kind, the level and the payload as on the air). Nothing is
+ * sent, no device is connected to and none is listed once: a device that
+ * advertises ten times a second is ten records. The radio listens all the
+ * time while the stream is on, so a BLE console goes slower meanwhile.
+ * AO_Radio posts the records to @p me, never publishes them, the first
+ * after the answer that says on, and keeps half of its queue free
+ * (KQP_HEARD_MARGIN slots at least, so @p me needs a queue longer than
+ * that): what does not fit is dropped and counted in the next record's
+ * @c dropped and in the stream's last answer, never asserted. It never
+ * brings Bluetooth up: with it off in Settings, or its stack down, the
+ * answer is KBLE_HEARD_BLE_OFF.
+ *
+ * One AO listens at a time, and the newest Bluetooth request wins, as it
+ * does between two listens (kode_sys_ble_scan()). A start ends the listen
+ * somebody asked for, whose answer says KODE_CANCELLED, and another AO's
+ * request takes the stream. A newer listen ends the stream in turn, and so
+ * do the radio check's name find and the production row's scan as they
+ * start: @p me is told KBLE_HEARD_CANCELLED at once. A Wi-Fi request ends
+ * nothing of it. Behind what is not cut (a Wi-Fi scan somebody asked for,
+ * the board's own round, the radio check, the production row, an install,
+ * an update) a start is answered KBLE_HEARD_BUSY: ask again. So the radio
+ * check and the production row end a stream, and a stream never ends them:
+ * the host has one scan, and a check of the board does not wait on an app. Bluetooth switched off, the board's rest, a C5 update and the link
+ * going end the stream too, each with its reason. A stream that was ended
+ * does not come back by itself: ask again. For an Active Object only: a
+ * task has no such call. Without CONFIG_KODEOS_BLE the request is refused at
+ * once with KODE_DENIED.
+ */
+
+/* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
+/** @brief Answers every request and ends every stream (BLE_HEARD_STATE_SIG): @c on, @c why (kble_heard_why_t), @c heard since the start and @c dropped. A stop the worker could not take is @c on with @c why KBLE_HEARD_BUSY: ask again. A stop asked again while the first is still being served shares its answer. */
+typedef BleHeardStateEvt kode_sys_ble_heard_state_t;
+
+/* cppcheck-suppress misra-c2012-2.3 ; a record's name for the apps that read it, never used inside the SDK */
+/** @brief One advertisement heard (BLE_HEARD_SIG): @c addr, @c addr_type (KBLE_HEARD_ADDR_*), @c rssi (KBLE_HEARD_RSSI_NONE when not measured), @c pdu (KBLE_HEARD_PDU_*), @c len, @c data and @c dropped, the stream's total so far. */
+typedef BleHeardEvt kode_sys_ble_heard_t;
+
+/**
+ * @brief Start or stop hearing every BLE advertisement around. Passive: nothing is sent.
+ * @param me The asking AO; the two signals above come to it, the answer
+ *           always, in every state of the link.
+ * @param on true to listen, false to stop.
+ * @return As the requests' rules of this header: KODE_DENIED without
+ *         CONFIG_KODEOS_BLE or for a NULL @p me, KODE_NO_RESOURCES when the
+ *         request could not be posted, KODE_OK.
+ */
+kode_status_t kode_sys_ble_heard(QActive *me, bool on);
 
 /* =========================================================================
  * Immediate calls
@@ -1567,6 +1916,14 @@ bool kode_sys_nfc_is_emulating(void);
  */
 bool kode_sys_rfid_is_emulating(void);
 
+/* ---- The screen: AO_Display's word on the glass ---- */
+
+/**
+ * @brief Whether the display is asleep: by kode_sys_screen_sleep(), or by the board's own rest.
+ * @return true from the moment the link is down until the glass is back.
+ */
+bool kode_sys_screen_is_asleep(void);
+
 /* ---- Touch: AO_Touch's reports of the finger ---- */
 
 /**
@@ -1606,7 +1963,8 @@ bool kode_sys_console_congested(void);
 /**
  * @brief Read back what is stored under @p key.
  * @note Waits on the store's lock while another task writes or erases flash.
- *       Not from a kode_worker job. kode.h's kode_setting_set() stores a value.
+ *       Not from a kode_worker job. The command kode_sys_nvs_set() stores a
+ *       value from an Active Object, kode.h's kode_setting_set() from a task.
  * @param key At most KODE_SYS_NVS_KEY_MAX - 1 characters, not empty.
  * @param out Destination, NUL-terminated on KODE_OK and untouched otherwise.
  * @param cap Size of @p out; a value that does not fit is an error, not a truncation. KODE_SYS_NVS_VALUE_MAX always fits.
@@ -1631,7 +1989,7 @@ bool kode_sys_mqtt_is_connected(void);
 
 #define KODE_SYS_MQTT_ERR_NONE     0U  /**< No failure.                                  */
 #define KODE_SYS_MQTT_ERR_NO_NET   1U  /**< The board has no address.                    */
-#define KODE_SYS_MQTT_ERR_REFUSED  2U  /**< The broker or the transport said no.         */
+#define KODE_SYS_MQTT_ERR_REFUSED  2U  /**< The broker or the transport said no, or no client was up to take a publish, subscribe or unsubscribe. */
 #define KODE_SYS_MQTT_ERR_TIMEOUT  3U  /**< Nothing answered in time.                    */
 #define KODE_SYS_MQTT_ERR_BUSY     4U  /**< The Kode channel holds the client.           */
 
@@ -1863,6 +2221,138 @@ kode_status_t kode_sys_ble_service_select(const kode_sys_ble_service_t *svc);
  */
 kode_status_t kode_sys_ble_queue_room(const char *chr, size_t *room);
 
+/* ---- The board as a Bluetooth mouse and keyboard --------------------------
+ * HID over GATT, served only when asked: kode_sys_ble_hid_select() names the
+ * kinds before Bluetooth registers its GATT table, and the table then
+ * carries the HID service (0x1812) with the SDK's own report map, Battery
+ * and Device Information after the console's and the app's services. A
+ * computer or a phone pairs with the board from its own Bluetooth settings.
+ * While HID is served the advert carries 0x1812 and the appearance beside
+ * the console's UUID, in place of its transmit power. The board takes one
+ * link: while a host uses it as a mouse, neither the console nor a phone
+ * gets in, and a host bonded as one comes back by itself whenever it sees
+ * the board. A firmware that serves no HID hangs up on such a host, so the
+ * link stays free.
+ *
+ * A bond is the console's or the HID service's, by what the board was when
+ * it was made, and opens that one alone. A device paired while HID is served
+ * is a host: it gets the reports and never the console. A device paired
+ * while it is not, the phone for one, has the console and is never sent a
+ * report, whichever image made the bond. To use the console from a computer
+ * that is a host, forget the board on it and pair again while no HID is
+ * served.
+ *
+ * Security is the console's, so with the passkey (the default) a host pairs
+ * with a code. In an app that is the one case a new device pairs outside
+ * kodeOS: kode_sys_ble_pair_open() opens the time to pair, the code arrives
+ * as BLE_PAIR_SIG to the AOs subscribed with kode_sys_ble_pair_subscribe(),
+ * and the app shows it. HID needs CONFIG_KODEOS_BLE_CONSOLE_PAIRING.
+ *
+ * A report is a command to AO_Radio that never blocks: it waits in a ring of
+ * KODE_SYS_BLE_HID_RING_SLOTS for the link, and a full ring refuses it. A
+ * keyboard report says which keys are down now, so the one that lets them go
+ * follows it. That one, a report with nothing down, is never refused for
+ * want of room: it is sent behind what is queued. kode_sys_ble_hid_tap() and
+ * kode_sys_ble_hid_click() press and let go in one call, both or neither. */
+
+#define KODE_SYS_BLE_HID_MOUSE       0x01U  /**< A mouse: three buttons, x, y and a wheel.     */
+#define KODE_SYS_BLE_HID_KEYBOARD    0x02U  /**< A keyboard: eight modifiers and six keys.     */
+#define KODE_SYS_BLE_HID_KEYS_MAX    6U     /**< Keys one keyboard report holds down.          */
+#define KODE_SYS_BLE_HID_KEY_MAX     101U   /**< The last key the report map declares, a usage ID. */
+#define KODE_SYS_BLE_HID_RING_SLOTS  16U    /**< Reports that wait for the link.               */
+#define KODE_SYS_BLE_PAIR_SHOW       1U     /**< kode_sys_ble_pair_t.phase: show @c passkey.   */
+#define KODE_SYS_BLE_PAIR_DONE       2U     /**< kode_sys_ble_pair_t.phase: it ended, @c outcome says how. */
+#define KODE_SYS_BLE_PAIR_REFUSED    3U     /**< kode_sys_ble_pair_t.phase: a device asked outside the time to pair and was hung up on, with no code. */
+#define KODE_SYS_BLE_PAIR_OK         0U     /**< kode_sys_ble_pair_t.outcome: bonded.          */
+
+/* cppcheck-suppress misra-c2012-2.3 ; an event's name for the apps that read it, never used inside the SDK */
+/**
+ * @brief A pairing wants a code shown, has ended, or was refused (BLE_PAIR_SIG):
+ *        @c phase; @c passkey, six digits, in SHOW; @c outcome in DONE. A
+ *        refusal is told at most once in KODE_BLE_PAIR_REFUSED_QUIET_MS.
+ */
+typedef BlePairEvt kode_sys_ble_pair_t;
+
+/**
+ * @brief Choose the kinds of HID device the board is; 0 for none.
+ *
+ * Read once, when the radio registers its GATT table at Bluetooth's first
+ * start in the boot: call it before that, at the app's start. Not stored:
+ * the app makes this call at each start.
+ *
+ * @param kinds KODE_SYS_BLE_HID_MOUSE, KODE_SYS_BLE_HID_KEYBOARD, both, or 0.
+ * @return KODE_OK when the choice is kept; KODE_DENIED for a kind that does
+ *         not exist, once the table is registered, or in a build without
+ *         CONFIG_KODEOS_BLE_CONSOLE_PAIRING.
+ */
+kode_status_t kode_sys_ble_hid_select(uint8_t kinds);
+
+/**
+ * @brief Whether a host is subscribed to the reports of every kind served.
+ * @return true when a report sent now reaches the host; from any task.
+ */
+bool kode_sys_ble_hid_ready(void);
+
+/**
+ * @brief Send one mouse report. Movement and wheel are relative.
+ * @param buttons Bit 0 left, bit 1 right, bit 2 middle.
+ * @param dx      Right, -127 to 127.
+ * @param dy      Down, -127 to 127.
+ * @param wheel   Up, -127 to 127.
+ * @return KODE_OK when queued for the link; KODE_DENIED when the mouse is not
+ *         served or no host is subscribed to it; KODE_NO_RESOURCES when the
+ *         ring is full: send it again, or the sum. A report of no button and
+ *         no movement is never refused for want of room.
+ */
+kode_status_t kode_sys_ble_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel);
+
+/**
+ * @brief Press the mouse's buttons and let them go: two reports, both queued or neither.
+ * @param buttons Bit 0 left, bit 1 right, bit 2 middle; at least one.
+ * @return As kode_sys_ble_hid_mouse(); KODE_DENIED for no button too.
+ */
+kode_status_t kode_sys_ble_hid_click(uint8_t buttons);
+
+/**
+ * @brief Send one keyboard report: the keys held down now.
+ * @param modifiers The eight modifier bits, left Control first.
+ * @param keys      KODE_SYS_BLE_HID_KEYS_MAX usage IDs up to
+ *                  KODE_SYS_BLE_HID_KEY_MAX, 0 for none; copied. NULL for no
+ *                  key down.
+ * @return As kode_sys_ble_hid_mouse(), for the keyboard. A report with
+ *         nothing down is never refused for want of room.
+ */
+kode_status_t kode_sys_ble_hid_keys(uint8_t modifiers, const uint8_t *keys);
+
+/**
+ * @brief Press one key with its modifiers and let it go: two reports, both queued or neither.
+ * @param modifiers The eight modifier bits, left Control first.
+ * @param key       A usage ID, 1 to KODE_SYS_BLE_HID_KEY_MAX.
+ * @return As kode_sys_ble_hid_mouse(), for the keyboard; KODE_DENIED for a
+ *         key out of range too.
+ */
+kode_status_t kode_sys_ble_hid_tap(uint8_t modifiers, uint8_t key);
+
+/**
+ * @brief Open the time to pair a new device: five minutes, as kodeOS's Pair new device.
+ *
+ * In an app only while the HID service is served; the code to show arrives
+ * as BLE_PAIR_SIG. With a device connected the time starts when it leaves.
+ *
+ * @return KODE_OK when asked; KODE_DENIED in an app that serves no HID, or
+ *         without CONFIG_KODEOS_BLE; KODE_NO_RESOURCES when AO_Radio's
+ *         queue had no room, and nothing was asked.
+ */
+kode_status_t kode_sys_ble_pair_open(void);
+
+/**
+ * @brief Subscribe @p me to the pairings: BLE_PAIR_SIG, and link AO_Radio.
+ * @param me The listening AO, started.
+ * @return KODE_OK; KODE_DENIED when @p me is NULL or not started, or without
+ *         CONFIG_KODEOS_BLE.
+ */
+kode_status_t kode_sys_ble_pair_subscribe(QActive *me);
+
 /* ---- The battery: AO_Power's last reading ---- */
 
 #define KODE_SYS_CHARGE_NONE  0U  /**< Not charging.                     */
@@ -1886,6 +2376,19 @@ typedef struct {
  *         and when @p out is NULL.
  */
 kode_status_t kode_sys_battery_read(kode_sys_battery_t *out);
+
+/* cppcheck-suppress misra-c2012-2.3 ; an announcement's name for the apps that read it, never used inside the SDK */
+/**
+ * @brief Says the cell is critical on battery, or no longer
+ *        (POWER_CRITICAL_SIG, published): @c critical.
+ *
+ * Once per fall, at KODE_POWER_CRITICAL_PCT or under, and always before the
+ * readings that switch the board off; over when a cable comes or the level
+ * climbs back. AO_Power always runs, so subscribing is all it takes. A
+ * kscreen app shows kscreen's notice by handing the event to
+ * kscreen_critical(), or its own by handling it itself.
+ */
+typedef PowerCriticalEvt kode_sys_battery_critical_t;
 
 /* ---- The expansion header J3: positions 1..14 in the connector's order ----
  * The first call below claims J3 for the app. None switches the module's

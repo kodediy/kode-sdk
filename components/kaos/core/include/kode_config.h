@@ -38,6 +38,8 @@ typedef struct {
     int32_t            max;     /**< KODE_TYPE_INT only.                     */
     const char *const *enums;   /**< KODE_TYPE_ENUM: the words, each a valid name. */
     uint8_t            n_enums; /**< 1..KODE_VALUE_ENUMS_MAX.                */
+    bool               wire;    /**< A set is taken from the cable or BLE alone:
+                                 *   refused to the network and the scheduler. */
 } kode_config_t;
 
 /**

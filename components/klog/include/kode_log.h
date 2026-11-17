@@ -174,12 +174,37 @@ void kode_log_reply(const char *line);
 void kode_log_reply_src(const char *line, uint8_t src);
 
 /**
+ * @brief OR-ed into a port's tag by kode_log_reply_confirm(): whoever owns the
+ *        port says when the line has left the board.
+ *
+ * A port's tag is a KODE_CONSOLE_SRC_*, all below this bit. KODE_LOG_SRC_NONE
+ * has it set and is no port, so a sink reads the bit only from a tag that is
+ * not KODE_LOG_SRC_NONE.
+ */
+#define KODE_LOG_SRC_CONFIRM  0x80U
+
+/**
+ * @brief kode_log_reply_src(), and the port's owner publishes CONSOLE_SENT_SIG
+ *        once the line has left the board on @p src, or could not.
+ *
+ * For a port that can lose a line after taking it: the Kode channel (the
+ * broker's PUBACK) and the BLE console (the central's answer to a request
+ * sent after the line). The cable is written in place, and nothing is
+ * published for it.
+ *
+ * @param line As for kode_log_reply_src().
+ * @param src  KODE_CONSOLE_SRC_* of the command answered.
+ */
+void kode_log_reply_confirm(const char *line, uint8_t src);
+
+/**
  * @brief Where finished lines go: AO_Log's hook, which posts them on.
  *
  * @param line The finished line, newline included; valid during the call only.
  * @param len  Its length, newline included.
  * @param src  The tag kode_log_reply_src() was given; KODE_LOG_SRC_NONE for a
- *             log line and for kode_log_reply().
+ *             log line and for kode_log_reply(). kode_log_reply_confirm()
+ *             adds KODE_LOG_SRC_CONFIRM to it.
  */
 typedef void (*kode_log_sink_t)(const char *line, size_t len, uint8_t src);
 

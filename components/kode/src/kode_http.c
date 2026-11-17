@@ -211,9 +211,10 @@ static void http_fail(const char *url, kode_status_t rc)
  * @param body The text to post; NULL for a GET.
  * @return The answer's text; "" with the error set when there is none.
  */
-static const char *http_exchange(struct kode_http_state *s, const char *url, const char *body)
+static const char *http_text_exchange(struct kode_http_state *s, const char *url,
+                                      const char *body)
 {
-    kode_sys_http_result_t res  = { 0U, -1, 0U, 0U, false };
+    kode_sys_http_result_t res  = { .content_length = -1, .range_total = -1 };
     const char            *text = s_no_text;
     kode_status_t          rc;
 
@@ -287,7 +288,7 @@ static const char *http_request(const char *name, const char *url, const char *b
             }
             else if ( kode_net_ready() && body_ensure(s) )
             {
-                text = http_exchange(s, url, body);
+                text = http_text_exchange(s, url, body);
             }
             else
             {
@@ -307,6 +308,122 @@ const char *kode_http_get(const char *url)
 const char *kode_http_post(const char *url, const char *body)
 {
     return http_request("kode_http_post", url, body, true);
+}
+
+/**
+ * @brief The length of a whole resource as the caller's type holds it.
+ * @param total The server's word; negative for none.
+ * @return 0 for none; KODE_HTTP_OFF_MAX for one longer than the type holds.
+ */
+static kode_http_off_t total_of(int64_t total)
+{
+    kode_http_off_t out = 0U;
+
+    if ( 0 < total )
+    {
+        if ( (uint64_t)total > (uint64_t)KODE_HTTP_OFF_MAX )
+        {
+            out = KODE_HTTP_OFF_MAX;
+        }
+        else
+        {
+            out = (kode_http_off_t)total;
+        }
+    }
+    return out;
+}
+
+/**
+ * @brief The ranged exchange itself, under the HTTP lock.
+ * @param s      The task's state.
+ * @param url    The address.
+ * @param offset The first byte wanted.
+ * @param buf    Where the bytes go.
+ * @param cap    Its room.
+ * @param got    Out, may be NULL: the bytes written.
+ * @param total  Out, may be NULL: the length of the whole, 0 for none.
+ * @return true when the server answered; false with the error set.
+ */
+static bool range_exchange(struct kode_http_state *s, const char *url, kode_http_off_t offset,
+                           void *buf, uint32_t cap, uint32_t *got, kode_http_off_t *total)
+{
+    kode_sys_http_result_t res = { .content_length = -1, .range_total = -1 };
+    kode_status_t const    rc  = kode_block_http_get_range(url, (uint64_t)offset, buf, cap, &res);
+
+    if ( KODE_OK != rc )
+    {
+        http_fail(url, rc);
+    }
+    else
+    {
+        s->status = res.status;
+        if ( NULL != got )
+        {
+            *got = res.kept;
+        }
+        if ( NULL != total )
+        {
+            *total = total_of(res.range_total);
+        }
+    }
+    return KODE_OK == rc;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_http_get_range(const char *url, kode_http_off_t offset, void *buf, uint32_t cap,
+                         uint32_t *got, kode_http_off_t *total)
+{
+    bool answered = false;
+
+    if ( NULL != got )
+    {
+        *got = 0U;
+    }
+    if ( NULL != total )
+    {
+        *total = 0U;
+    }
+    if ( http_enter("kode_http_get_range") )
+    {
+        struct kode_http_state *const s = http_state_ensure();
+
+        if ( NULL == s )
+        {
+            kode_err_set("kode_http_get_range: no memory for the answer");
+        }
+        else
+        {
+            s->status = 0U;
+            if ( !url_ok(url) )
+            {
+                const char *shown = KODE_HTTP_NULL_SHOWN;
+
+                if ( NULL != url )
+                {
+                    shown = url;
+                }
+                kode_err_set("bad URL '%s'", shown);
+            }
+            else if ( (NULL == buf) || (0U == cap) )
+            {
+                kode_err_set("no buffer for the range");
+            }
+            else if ( offset > (KODE_HTTP_OFF_MAX - ((kode_http_off_t)cap - 1U)) )
+            {
+                kode_err_set("the range runs past the last offset");
+            }
+            else if ( kode_net_ready() )
+            {
+                answered = range_exchange(s, url, offset, buf, cap, got, total);
+            }
+            else
+            {
+                /* the error is set */
+            }
+        }
+        http_leave();
+    }
+    return answered;
 }
 
 uint16_t kode_http_status(void)

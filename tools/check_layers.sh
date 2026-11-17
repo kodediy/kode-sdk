@@ -2,11 +2,12 @@
 #
 # The layer cake, checked rather than described.
 #
-# Twenty rules, all of them about what happens inside this SDK: where ESP-IDF
+# Twenty-one rules, all of them about what happens inside this SDK: where ESP-IDF
 # stops, where QP/C stops, where the board is described, where stdio stops,
 # where the RMT stops, where the expansion header's ADC stops, where the LEDC
 # stops, where the C5's RPC stops, where the host's network stack stops,
-# where the I2S stops, where the buses stop, where LVGL stops, where the ROM's inflater stops,
+# where the I2S stops, where the buses stop, where the pixel accelerator stops,
+# where LVGL stops, where the ROM's inflater stops,
 # where the camera stops,
 # where cJSON stops, where the standard layer stops, who may use its seam, who
 # may call the blocking calls it is built from, what the sys header may
@@ -204,6 +205,18 @@ report "IDF's I2C, SPI and UART headers only in their seven drivers, each its ow
   "$(scan '#include *[<"]driver/\(i2c\|i2c_master\|i2c_slave\|i3c_master\|i3c_master_i2c\|spi_common\|spi_master\|spi_slave\|spi_slave_hd\|sdspi_host\|uart\|uart_select\|uhci\)\.h[>"]' \
           '^components/(kdrv/exp_bus/src/kdrv_exp_bus\.c:[0-9]+:#include "driver/(i2c_master|spi_master|uart)\.h"|khal/i2c/src/khal_i2c_esp\.c:[0-9]+:#include "driver/i2c_master\.h"|kdrv/nfc/src/kdrv_st25r3916\.c:[0-9]+:#include "driver/spi_master\.h"|khal/console/src/khal_console_esp\.c:[0-9]+:#include "driver/uart\.h"|kdrv/ov5640/src/kdrv_ov5640\.c:[0-9]+:#include "driver/i2c_master\.h"|kdrv/station/src/kdrv_station_i2c\.c:[0-9]+:#include "driver/i2c_master\.h"|kdrv/station/src/kdrv_dock_loop\.c:[0-9]+:#include "driver/uart\.h")')"
 
+# ---- 8c. The pixel accelerator stops at its driver ------------------------
+# Rule 1 keeps driver/ inside kdrv, and that is not enough here: the PPA is
+# one engine with one owner, AO_Display, and every pass on it goes through
+# kdrv_compose.c - the mirror's scaled copy, and what a renderer composes
+# through kscreen. A second file registering a client would be a second user
+# of the engine that its owner knows nothing about, arriving as an include
+# rather than as a claim. Both #include spellings are read.
+report "driver/ppa.h only in kdrv_compose.c" \
+  "The accelerator has one owner, AO_Display; a renderer composes through kscreen." \
+  "$(scan '#include *[<"]driver/ppa\.h[>"]' \
+          '^components/kdrv/compose/src/kdrv_compose\.c:[0-9]+:#include "driver/ppa\.h"')"
+
 # ---- 9. LVGL stops at the UI kit and the renderer -------------------------
 # The rule is about threads, not files: there is no lock around LVGL, because
 # one task drives it (AO_Gui in kodeOS, the app's own renderer elsewhere).
@@ -327,9 +340,10 @@ report "kode_sys_internal.h only in kode_sys and kode" \
 # app-description headers kdrv carries (kapp_desc.h, kapp_cat.h), the console
 # tables kaos carries (kode_variables.h, kode_functions.h, kode_config.h), and
 # kqp.h, which brings QP/C and every system event with it (and so khal_sync.h,
-# the `done` of the blocking requests). Any other include is a new dependency
+# the `done` of the blocking requests), and the two kode_sys headers that
+# kode.h shares with it, kode_init.h and kode_http_off.h. Any other include is a new dependency
 # of every app, and is added here in the same commit, where a reviewer sees it.
-sys_includes='^(stddef|stdint|stdbool|kode_defs|kode_log|kapp_desc|kode_variables|kode_functions|kode_config|kapp_cat|kqp|kode_init)\.h$'
+sys_includes='^(stddef|stdint|stdbool|kode_defs|kode_log|kapp_desc|kode_variables|kode_functions|kode_config|kapp_cat|kqp|kode_init|kode_http_off)\.h$'
 report "kode_sys.h includes only the headers named here" \
   "A driver type in the sys contract binds the app to the driver; give it a kode_sys_ type and convert in its kode_sys_<module>.c." \
   "$(grep -nE '^#include ' components/kode_sys/include/kode_sys.h \

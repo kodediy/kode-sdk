@@ -40,6 +40,7 @@ set(srcs
     "haptic/src/haptic_ao.c"
     "power/src/power_ao.c"
     "display/src/display_ao.c"
+    "display/src/display_sleep.c"
     "touch/src/touch_ao.c"
     # The touch test's record, which the console writes with: its own file,
     # so the console does not link AO_Touch into an app that never uses it.
@@ -62,7 +63,10 @@ set(priv_incs
     "scheduler/src")
 
 if(CONFIG_KODEOS_APPMGR)
-    list(APPEND srcs "appmgr/src/appmgr_ao.c")
+    list(APPEND srcs "appmgr/src/appmgr_ao.c"
+                     "appmgr/src/appmgr_backup.c")
+    # The record of the last install of each kind, told to the port that asked.
+    list(APPEND srcs "appmgr/src/appmgr_outcome.c")
 endif()
 if(CONFIG_KODEOS_NFC)
     # AO_Nfc. Off, the reader is the app's: nothing here starts or parks it.
@@ -76,6 +80,9 @@ if(CONFIG_KODE_LOWPOWER)
     list(APPEND srcs "lowpower/src/lowpower_ao.c")
     # The summary of the last rest: a ring of gauge samples over khal_nvs.
     list(APPEND srcs "lowpower/src/lowpower_last.c")
+    # The rules of an app's rest: which parts may rest together and in what
+    # order. Arithmetic on masks, no event, so the host suite compiles it alone.
+    list(APPEND srcs "lowpower/src/lowpower_part.c")
     # The time's rectangle for the glass at rest: arithmetic over the
     # renderer's glyph strip, no panel, so the host suite compiles it alone.
     list(APPEND srcs "display/src/display_clock.c")
@@ -83,6 +90,13 @@ else()
     # The facade calls exist either way, so an app's source compiles; with the
     # option off they refuse.
     list(APPEND srcs "lowpower/src/lowpower_none.c")
+endif()
+if(CONFIG_KODE_COMPOSE)
+    # The pixel accelerator behind AO_Display: the request, its answer and the row.
+    list(APPEND srcs "display/src/display_compose.c")
+else()
+    # The call exists either way, so a renderer's source links; it refuses.
+    list(APPEND srcs "display/src/display_compose_none.c")
 endif()
 if(CONFIG_KODE_SCHEDULER)
     # AO_Scheduler: the table of cron entries and the lines it runs.
@@ -140,6 +154,16 @@ if(CONFIG_KODEOS_RADIO)
     list(APPEND srcs "radio/src/radio_ao.c")
     # The Wi-Fi frames door: its asker, its request and what it posts.
     list(APPEND srcs "radio/src/radio_frames.c")
+    # A knock's steps, with no queue of their own, so the host suite walks every order of them.
+    list(APPEND srcs "radio/src/radio_knock.c")
+    # The three knocks other tasks reach AO_Radio with.
+    list(APPEND srcs "radio/src/radio_knocks.c")
+    # The BLE advertisement door: the same, for what the host stack hears.
+    if(CONFIG_KODEOS_BLE)
+        list(APPEND srcs "radio/src/radio_heard.c")
+        # The HID door: the reports AO_Radio queues, and kodeOS's stored kinds.
+        list(APPEND srcs "radio/src/radio_hid.c")
+    endif()
     if(CONFIG_KODEOS_CONSOLE)
         list(APPEND srcs "radio/src/radio_verbs.c")
     endif()
@@ -148,6 +172,9 @@ if(CONFIG_KODEOS_RADIO)
         # AO_Radio asks it through kdrv_c5svc.
         if(CONFIG_KODEOS_NET)
             list(APPEND srcs "net/src/net_ao.c")
+            # The download into a file: AO_Storage's steps over AO_Net's
+            # stream, linked only into an app that asks for one.
+            list(APPEND srcs "storage/src/storage_fetch.c")
             # The Kode channel's text: the api's answers, the bodies it is
             # sent, the verdict on an error and the back-off. Pure, so the
             # host suite compiles it on its own.

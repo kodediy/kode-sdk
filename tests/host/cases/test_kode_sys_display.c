@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file test_kode_sys_display.c
- * @brief kode_sys_screen_brightness(): the command to AO_Display, its range and its margin.
+ * @brief The screen's commands to AO_Display: the brightness, its range and
+ *        its margin; the sleep, the renderer's answer and the word a task reads.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -11,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
+#include "display_sleep.h"
 #include "kaos.h"
 #include "kode_sys.h"
 #include "kqp.h"
@@ -21,6 +23,9 @@
 
 /** @brief Slots left in AO_Display's queue after the filler, for the full-queue case. */
 #define TEST_ROOM_LEFT KQP_DISPLAY_CMD_MARGIN
+
+/** @brief A park's number, any but 0. */
+#define TEST_PARK_SEQ  7U
 
 /** @brief A static event no owner sees: it only takes a slot. */
 static const QEvt s_filler = QEVT_INITIALIZER(Q_USER_SIG);
@@ -117,4 +122,80 @@ TEST_CASE("a queue within the margin is KODE_NO_RESOURCES and the event goes bac
     display_drain();
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_screen_brightness(TEST_LEVEL));
     display_drain();
+}
+
+/**
+ * @brief Check the next event asks for the glass asleep or awake.
+ * @param sleep What it must ask.
+ */
+static void expect_sleep_request(bool sleep)
+{
+    const QEvt *e = NULL;
+
+    TEST_ASSERT_EQUAL_INT(pdTRUE, xQueueReceive(AO_Display->eQueue, &e, 0U));
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SLEEP_REQ_SIG, e->sig);
+    TEST_ASSERT_EQUAL_INT(sleep, ((const DisplaySleepReqEvt *)(const void *)e)->sleep);
+    QF_gc(e);
+}
+
+TEST_CASE("a sleep and a wake are each posted to AO_Display", "[kode_sys_display]")
+{
+    display_fresh();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_screen_sleep(true));
+    TEST_ASSERT_EQUAL_UINT32(1U, display_count());
+    expect_sleep_request(true);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_screen_sleep(false));
+    expect_sleep_request(false);
+    display_drain();
+}
+
+TEST_CASE("a sleep that finds the queue within the margin is KODE_NO_RESOURCES", "[kode_sys_display]")
+{
+    display_fresh();
+    while ( (uint32_t)uxQueueSpacesAvailable(AO_Display->eQueue) > TEST_ROOM_LEFT )
+    {
+        TEST_ASSERT_TRUE(QACTIVE_POST_X(AO_Display, &s_filler, 0U, NULL));
+    }
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_screen_sleep(true));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_screen_parked(TEST_PARK_SEQ));
+    TEST_ASSERT_EQUAL_UINT32(TEST_ROOM_LEFT, (uint32_t)uxQueueSpacesAvailable(AO_Display->eQueue));
+
+    display_drain();
+}
+
+TEST_CASE("a renderer of the app's own says it has parked with a hand-over of no glyphs",
+          "[kode_sys_display]")
+{
+    const QEvt *e = NULL;
+
+    display_fresh();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_screen_parked(TEST_PARK_SEQ));
+    TEST_ASSERT_EQUAL_INT(pdTRUE, xQueueReceive(AO_Display->eQueue, &e, 0U));
+    TEST_ASSERT_EQUAL_INT(DISPLAY_GLYPHS_SIG, e->sig);
+    TEST_ASSERT_NULL(((const DisplayGlyphsEvt *)(const void *)e)->strip);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(TEST_PARK_SEQ, ((const DisplayGlyphsEvt *)(const void *)e)->park,
+                                     "the hand-over does not name the park it answers");
+    QF_gc(e);
+    display_drain();
+}
+
+TEST_CASE("a hand-over naming park 0, a round's, is refused and posts nothing", "[kode_sys_display]")
+{
+    display_fresh();
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_screen_parked(0U));
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Display->eQueue));
+    display_drain();
+}
+
+TEST_CASE("whether the screen is asleep is AO_Display's word", "[kode_sys_display]")
+{
+    display_sleep_glass_set(true);
+    TEST_ASSERT_TRUE(kode_sys_screen_is_asleep());
+    display_sleep_glass_set(false);
+    TEST_ASSERT_FALSE(kode_sys_screen_is_asleep());
 }

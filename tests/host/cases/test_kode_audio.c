@@ -291,6 +291,199 @@ TEST_CASE("kode_audio_stream refuses another rate, a channel count, or no stream
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_audio_stream_close());
 }
 
+/* ---- A stream AO_Audio closed for silence ---------------------------------
+ *
+ * AO_Audio closes a stream nobody writes to (KODE_SYS_AUDIO_STREAM_IDLE_MS),
+ * and it cannot reach in here to say so. The facade's claim on the audio path
+ * is still the stream's then, so the next call that wants the path asks the
+ * driver whether the stream takes writes, and takes over a claim whose stream
+ * is shut.
+ */
+
+/** @brief What the stream stand-in answers. */
+static kode_status_t s_stream_rc;
+
+/** @brief The driver's number of the stream it has open; 0 for none. */
+static uint32_t s_stream_now;
+
+/** @brief The number the driver gave the stream it opened last. */
+static uint32_t s_stream_serial;
+
+/** @brief The driver saying which stream takes writes. */
+static uint32_t say_stream_id(int ncalls)
+{
+    (void)ncalls;
+    return s_stream_now;
+}
+
+/** @brief What a call made from inside the close's wait answered. */
+static kode_status_t s_nested_rc;
+
+/** @brief AO_Audio answering a stream's open or close with s_stream_rc, by hand. */
+static void answer_stream(void)
+{
+    const QEvt *e = NULL;
+
+    if ( xQueueReceive(AO_Audio->eQueue, &e, 0U) != pdTRUE )
+    {
+        s_hook_fault = "the call posted nothing to AO_Audio";
+    }
+    else if ( ((QSignal)AUDIO_STREAM_OPEN_REQ_SIG != e->sig)
+              && ((QSignal)AUDIO_STREAM_CLOSE_REQ_SIG != e->sig) )
+    {
+        s_hook_fault = "the call posted something that is not the stream's";
+        QF_gc(e);
+    }
+    else
+    {
+        AudioBufEvt const * const q = (AudioBufEvt const *)e;
+
+        /* The driver, as AO_Audio drives it: a stream opened has a new
+         * number, and a close leaves none. */
+        if ( ((QSignal)AUDIO_STREAM_OPEN_REQ_SIG == e->sig) && (KODE_OK == s_stream_rc) )
+        {
+            s_stream_serial += 1U;
+            s_stream_now     = s_stream_serial;
+        }
+        if ( (QSignal)AUDIO_STREAM_CLOSE_REQ_SIG == e->sig )
+        {
+            s_stream_now = 0U;
+        }
+        if ( NULL != q->rc )
+        {
+            *q->rc = (uint32_t)s_stream_rc;
+        }
+        if ( NULL != q->ack )
+        {
+            *q->ack = q->gen;
+        }
+        khal_sem_signal(q->done);
+        QF_gc(e);
+    }
+}
+
+/** @brief A stream opened through the facade, with AO_Audio saying yes. */
+static void stream_opened(void)
+{
+    kdrv_es8311_stream_id_StubWithCallback(&say_stream_id);
+    s_stream_rc = KODE_OK;
+    fake_sem_wait_hook(&answer_stream);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kode_block_audio_stream_open(KODE_SYS_AUDIO_RATE_HZ, KODE_SYS_AUDIO_CHANNELS_MONO));
+    hook_verdict();
+}
+
+/** @brief Close it, with AO_Audio answering @p rc. */
+static kode_status_t stream_closed(kode_status_t rc)
+{
+    s_stream_rc = rc;
+    fake_sem_wait_hook(&answer_stream);
+    return kode_block_audio_stream_close();
+}
+
+TEST_CASE("the facade says its stream is open only while it is the driver's open one",
+          "[kode_audio]")
+{
+    audio_fresh();
+    TEST_ASSERT_FALSE_MESSAGE(kode_block_audio_stream_is_open(), "before any open");
+
+    stream_opened();
+    TEST_ASSERT_TRUE(kode_block_audio_stream_is_open());
+    s_stream_now = 0U;
+    TEST_ASSERT_FALSE_MESSAGE(kode_block_audio_stream_is_open(),
+                              "AO_Audio shut it for silence");
+    s_stream_serial += 1U;
+    s_stream_now     = s_stream_serial;
+    TEST_ASSERT_FALSE_MESSAGE(kode_block_audio_stream_is_open(),
+                              "and the stream an Active Object opened next is not it");
+
+    s_stream_now = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, stream_closed(KODE_DENIED));
+    hook_verdict();
+    TEST_ASSERT_FALSE_MESSAGE(kode_block_audio_stream_is_open(), "after its close");
+}
+
+TEST_CASE("an open stream keeps the audio path, and one closed for silence gives it up",
+          "[kode_audio]")
+{
+    audio_fresh();
+    stream_opened();
+
+    /* The stream is alive: its claim stands and nothing is posted. */
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+        kode_block_audio_stream_open(KODE_SYS_AUDIO_RATE_HZ, KODE_SYS_AUDIO_CHANNELS_MONO));
+    TEST_ASSERT_EQUAL_UINT(0U, (unsigned)uxQueueMessagesWaiting(AO_Audio->eQueue));
+
+    /* AO_Audio closed it and its writer never came back: the next call has
+     * the path. */
+    s_stream_now = 0U;
+    stream_opened();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, stream_closed(KODE_OK));
+    hook_verdict();
+}
+
+/* The writer that left its stream comes back after an Active Object has opened
+ * one of its own: what it writes must not land in that stream. */
+TEST_CASE("a write into a stream closed for silence is refused, whoever has the speaker now",
+          "[kode_audio]")
+{
+    static const int16_t frames[4] = { 0 };
+    size_t               taken     = 99U;
+
+    audio_fresh();
+    stream_opened();
+
+    s_stream_now = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+                          kode_block_audio_stream_write(frames, 4U, 0U, &taken));
+    TEST_ASSERT_EQUAL_size_t(0U, taken);
+    s_stream_serial += 1U;
+    s_stream_now     = s_stream_serial;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+        kode_block_audio_stream_write(frames, 4U, 0U, &taken),
+        "another stream is open, and it is not this writer's");
+
+    /* AO_Audio has no stream of this caller's to close; the claim is given
+     * back all the same. */
+    s_stream_now = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, stream_closed(KODE_DENIED));
+    hook_verdict();
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_audio_stream_close());
+
+    stream_opened();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, stream_closed(KODE_OK));
+    hook_verdict();
+}
+
+/** @brief Inside the close's wait: another task asks for the path, then AO_Audio answers the close. */
+static void close_raced(void)
+{
+    s_nested_rc = kode_block_audio_stream_open(KODE_SYS_AUDIO_RATE_HZ,
+                                               KODE_SYS_AUDIO_CHANNELS_MONO);
+    answer_stream();
+}
+
+/* A close shuts the ring first and answers when it has drained. In between
+ * the driver takes no writes, and that must not read as a stream AO_Audio
+ * closed for silence: the claim is the closing call's until it returns. */
+TEST_CASE("a close that is draining still holds the audio path", "[kode_audio]")
+{
+    audio_fresh();
+    stream_opened();
+
+    s_stream_now = 0U;   /* the ring is shut while it drains */
+    s_stream_rc  = KODE_OK;
+    s_nested_rc  = KODE_OK;
+    fake_sem_wait_hook(&close_raced);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_audio_stream_close());
+    hook_verdict();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, s_nested_rc,
+        "a call made while the close drains is refused");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, (unsigned)uxQueueMessagesWaiting(AO_Audio->eQueue),
+        "and it posted nothing");
+}
+
 /* The mirror image, which the audit did not name but which is the same fault:
  * AO_Audio is free the moment a recording ends and runs above the calling
  * task, so a copy OUT of the driver's buffer could come after a recording to a

@@ -206,6 +206,7 @@ static void on_more(void)
 /** @brief Point the whole stack at the stubs above. */
 static void install_stubs(void)
 {
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
     esp_wifi_get_country_Stub(&country_now);
     esp_wifi_scan_start_Stub(&scan_start_now);
     esp_wifi_scan_get_ap_num_Stub(&ap_num_now);

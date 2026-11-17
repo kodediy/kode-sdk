@@ -15,6 +15,9 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/khal/zlib/src/khal_zlib_esp.c"
     "${SDK_DIR}/components/khal/exp/src/khal_exp.c"
     "${SDK_DIR}/components/khal/identity/src/khal_identity_esp.c"
+    "${SDK_DIR}/components/kdrv/compose/src/kdrv_compose_check.c"
+    # kscreen's arithmetic for a composed picture: no LVGL in it.
+    "${SDK_DIR}/components/kscreen/src/kscreen_geom.c"
     "${SDK_DIR}/components/kdrv/led/src/kdrv_led.c"
     "${SDK_DIR}/components/kdrv/power/src/kdrv_bq25896.c"
     "${SDK_DIR}/components/kdrv/power/src/kdrv_cw2217.c"
@@ -29,6 +32,8 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_adv.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_app.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_find.c"
+    "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_bonds.c"
+    "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_hid.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_radio_note.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_radio_sleep_policy.c"
     "${SDK_DIR}/components/kdrv/storage/src/kdrv_storage.c"
@@ -49,6 +54,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kode_sys/src/kode_sys_files.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_flash.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_net.c"
+    "${SDK_DIR}/components/kode_sys/src/kode_sys_http_file.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_mqtt.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi_status.c"
@@ -56,6 +62,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kode_sys/src/kode_sys_wifi_frames.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_scan.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_ble.c"
+    "${SDK_DIR}/components/kode_sys/src/kode_sys_ble_heard.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_power.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_exp.c"
     "${SDK_DIR}/components/kode_sys/src/kode_sys_exp_power.c"
@@ -90,6 +97,8 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kode/src/kode_pin_power.c"
     "${SDK_DIR}/components/kode/src/kode_rfid.c"
     "${SDK_DIR}/components/kode/src/kode_screen_bright.c"
+    "${SDK_DIR}/components/kode/src/kode_screen_sleep.c"
+    "${SDK_DIR}/components/kode/src/kode_rest.c"
     "${SDK_DIR}/components/kode/src/kode_setting.c"
     "${SDK_DIR}/components/kode/src/kode_standard_ao.c"
     "${SDK_DIR}/components/kode/src/kode_system.c"
@@ -125,16 +134,28 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kaos/haptic/src/haptic_ao.c"
     "${SDK_DIR}/components/kaos/lowpower/src/lowpower_ao.c"
     "${SDK_DIR}/components/kaos/lowpower/src/lowpower_last.c"
+    "${SDK_DIR}/components/kaos/lowpower/src/lowpower_part.c"
     "${SDK_DIR}/components/kaos/display/src/display_ao.c"
+    "${SDK_DIR}/components/kaos/display/src/display_sleep.c"
+    "${SDK_DIR}/components/kaos/display/src/display_compose.c"
+    "${SDK_DIR}/components/kaos/display/src/display_compose_none.c"
     "${SDK_DIR}/components/kaos/display/src/display_clock.c"
     "${SDK_DIR}/components/kaos/storage/src/storage_ao.c"
+    "${SDK_DIR}/components/kaos/storage/src/storage_fetch.c"
     "${SDK_DIR}/components/kaos/net/src/net_ao.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_ao.c"
     "${SDK_DIR}/components/kaos/radio/src/radio_frames.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_knock.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_knocks.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_heard.c"
+    "${SDK_DIR}/components/kaos/radio/src/radio_hid.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_c5svc.c"
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_frames.c"
+    "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_heard.c"
     "${SDK_DIR}/components/kaos/appmgr/src/appmgr_ao.c"
+    "${SDK_DIR}/components/kaos/appmgr/src/appmgr_outcome.c"
+    "${SDK_DIR}/components/kaos/appmgr/src/appmgr_backup.c"
     "${SDK_DIR}/components/kaos/autotest/src/autotest_ao.c"
     "${SDK_DIR}/components/kaos/autotest/src/autotest_psram.c"
     "${SDK_DIR}/components/kaos/scheduler/src/sched_cron.c"
@@ -183,6 +204,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/klog/src/klog.c"
     "${SDK_DIR}/components/kdrv/apps/src/kdrv_apps.c"
     "${SDK_DIR}/components/kdrv/apps/src/kdrv_kfw.c"
+    "${SDK_DIR}/components/kdrv/apps/src/kdrv_image_check.c"
     "${SDK_DIR}/components/kdrv/mirror/src/kmirror_proto.c"
     "${SDK_DIR}/components/kdrv/ir/src/knec.c"
     "${SDK_DIR}/components/kdrv/audio/src/kes_fields.c"
@@ -259,6 +281,9 @@ idf_component_register(
                  "${SDK_DIR}/components/kdrv/audio/include"
                  "${SDK_DIR}/components/kdrv/buttons/include"
                  "${SDK_DIR}/components/kdrv/clocks/include"
+                 "${SDK_DIR}/components/kdrv/compose/include"
+                 # kdrv_compose_check.h is private to the driver
+                 "${SDK_DIR}/components/kdrv/compose/src"
                  "${SDK_DIR}/components/kdrv/cst820/include"
                  "${SDK_DIR}/components/kdrv/display/include"
                  "${SDK_DIR}/components/kdrv/exp_bus/include"
@@ -288,6 +313,8 @@ idf_component_register(
                  "${SDK_DIR}/components/kbsp/board/include"
                  "${SDK_DIR}/components/kbsp/owners/include"
                  "${SDK_DIR}/components/kbsp/exp/include"
+                 # kscreen_geom.h is private to the component
+                 "${SDK_DIR}/components/kscreen/src"
                  "${SDK_DIR}/components/kui/core/include"
                  "${SDK_DIR}/components/kui/drag/include"
                  "${SDK_DIR}/components/kui/glass/include"
@@ -309,10 +336,15 @@ idf_component_register(
                  "${SDK_DIR}/components/kode_sys/src"
                  # console_fs.h is private to the component
                  "${SDK_DIR}/components/kaos/console/src"
+                 # appmgr_outcome.h and appmgr_backup.h are private to the component
+                 "${SDK_DIR}/components/kaos/appmgr/src"
                  "${SDK_DIR}/components/kaos/core/src"
                  "${SDK_DIR}/components/kaos/autotest/src"
                  "${SDK_DIR}/components/kaos/net/src"
+                 # radio_knock.h, radio_knocks.h and radio_heard.h are private to the component
+                 "${SDK_DIR}/components/kaos/radio/src"
                  "${SDK_DIR}/components/kaos/scheduler/src"
+                 "${SDK_DIR}/components/kaos/lowpower/src"
                  "${SDK_DIR}/components/kaos/display/src"
                  "${SDK_DIR}/components/kqp/include"
                  # kqp_watch_judge.h is private to the component
@@ -371,6 +403,9 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     # AO_Scheduler, off in the SDK and on in kodeOS, spelled out for the same
     # reason: without it test_scheduler_ao.c would compile out and pass.
     "CONFIG_KODE_SCHEDULER=1"
+    # The compose passes behind AO_Display, off in the SDK: on here, or the
+    # cases in test_display_ao.c would ask a call that only refuses.
+    "CONFIG_KODE_COMPOSE=1"
     # The console is compiled here as a loose source, so this symbol is what
     # the registry reads to know there is a console to reach the table at
     # all; without it every kode_variables_add() and kode_functions_add()
@@ -435,6 +470,11 @@ set_source_files_properties(
     "${SDK_DIR}/components/kaos/display/src/display_ao.c"
     PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_BLE_CONSOLE=1")
 
+# The compose call of an image without CONFIG_KODE_COMPOSE, compiled beside the real one under another name.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/display/src/display_compose_none.c"
+    PROPERTIES COMPILE_DEFINITIONS "display_compose_run=display_compose_run_none")
+
 # And to kdrv_ble_app.c, the app's own service's rules: the service rides
 # beside the console's, so without the symbol every table would be judged
 # left out and the cases in test_kdrv_ble_app_table.c would assert about that
@@ -442,6 +482,40 @@ set_source_files_properties(
 set_source_files_properties(
     "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_app.c"
     PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_BLE_CONSOLE=1")
+
+# And to kdrv_ble_hid.c, the HID service's rules: HID needs the console's
+# pairing, so without the symbol every choice of kinds would be refused.
+set_source_files_properties(
+    "${SDK_DIR}/components/kdrv/radio/src/kdrv_ble_hid.c"
+    PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_BLE_CONSOLE_PAIRING=1")
+
+# AO_AppMgr reads a fetched file out of AO_Net's stream buffers, which exist
+# only once a real AO_Net has opened a transfer. Its one call that reads them
+# is renamed here, for this source alone, to a function test_appmgr_ao.c
+# defines over a buffer of its own. The same property switches on the BLE
+# console: a launch after a terminal install over BLE waits for the console's
+# outbound bytes to leave and asks kdrv_ble_console_backlog() - the one call
+# into kdrv_ble.h this file makes, answered by the fake. One property, because
+# a second set_source_files_properties() replaces the first.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/appmgr/src/appmgr_ao.c"
+    PROPERTIES COMPILE_DEFINITIONS
+        "net_stream_buf=host_net_stream_buf;CONFIG_KODEOS_BLE_CONSOLE=1")
+
+# AO_Storage's download reads its chunks out of the same stream buffers, for
+# the same reason: its one call that reads them is renamed to a function
+# test_storage_ao.c defines over a buffer of its own.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/storage/src/storage_fetch.c"
+    PROPERTIES COMPILE_DEFINITIONS "net_stream_buf=host_fetch_stream_buf")
+
+# The install records wait for the port their command came on: the Kode
+# channel and the BLE console are on for this source, so the cases can bring
+# either down and up and see the record told when it comes back.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/appmgr/src/appmgr_outcome.c"
+    PROPERTIES COMPILE_DEFINITIONS
+        "CONFIG_KODEOS_CHANNEL=1;CONFIG_KODEOS_BLE_CONSOLE=1")
 
 # The standard layer's Active Object is built for the APP role only, and the
 # project-wide role above is the OS one. This source is the app build, so the
@@ -484,12 +558,14 @@ set_property(SOURCE
     "${SDK_DIR}/components/kaos/console/src/console_ao.c"
     APPEND PROPERTY COMPILE_DEFINITIONS "CONFIG_KODEOS_CHANNEL=1")
 
-# AO_Log hands the replies of the channel's commands to the ring. Without the
-# option its case file would assert about a push that was compiled out.
+# AO_Log hands the replies of the channel's commands to the ring, and writes
+# every line to the BLE console, a confirmed one through the driver's
+# confirmed write. Without the options its case file would assert about a
+# push and a write that were compiled out.
 set_source_files_properties(
     "${SDK_DIR}/components/kaos/log/src/log_ao.c"
     "${CMAKE_CURRENT_LIST_DIR}/../cases/test_log_ao.c"
-    PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_CHANNEL=1")
+    PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_CHANNEL=1;CONFIG_KODEOS_BLE_CONSOLE=1")
 
 # Scoped to the two front ends' AOs and their case files the same way. The
 # real CONFIG_KODEOS_NFC_CERT builds the certification app's maximum-drive

@@ -6,6 +6,7 @@
 #include "kdrv_storage.h"
 
 #include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +15,7 @@
 #include <unistd.h>
 
 #include "kdrv_sd.h"
+#include "khal_time.h"
 #include "kdrv_fs.h"
 #include "kode_log.h"
 
@@ -76,6 +78,23 @@ void kdrv_storage_unmount(kdrv_medium_t m)
     }
 }
 
+kode_status_t kdrv_storage_card_rest(void)
+{
+    kode_status_t rc;
+
+    if ( kdrv_sd_mounted() )
+    {
+        kdrv_sd_unmount();
+        /* It was there: the next look for a file brings it back. */
+        s_sd_tried = false;
+    }
+    rc = kdrv_sd_park();
+    /* A file asked for at once would power the card again before it had
+     * lost its supply: it stays off for as long as a supply cycle keeps it. */
+    khal_delay_ms(KDRV_SD_POWER_OFF_MS);
+    return rc;
+}
+
 bool kdrv_storage_mounted(kdrv_medium_t m)
 {
     return (KDRV_MEDIUM_SD == m) ? kdrv_sd_mounted() : kdrv_fs_mounted();
@@ -94,6 +113,25 @@ kode_status_t kdrv_storage_usage(kdrv_medium_t m, uint64_t *total,
      * existed. */
     return (KDRV_MEDIUM_SD == m) ? kdrv_sd_usage(total, free_bytes)
                                  : kdrv_fs_usage(total, free_bytes);
+}
+
+uint32_t kdrv_storage_cluster_bytes(kdrv_medium_t m)
+{
+    uint32_t bytes = 0U;
+
+    if ( KDRV_MEDIUM_FS == m )
+    {
+        bytes = kdrv_fs_cluster_bytes();
+    }
+    else if ( KDRV_MEDIUM_SD == m )
+    {
+        bytes = kdrv_sd_cluster_bytes();
+    }
+    else
+    {
+        /* no such medium */
+    }
+    return bytes;
 }
 
 void kdrv_storage_dump(kdrv_medium_t m)
@@ -316,6 +354,50 @@ static bool vpath_of(kdrv_medium_t m, const char *name, char *out, size_t cap)
     return true;
 }
 
+/**
+ * @brief Turn the errno a failed create left behind into a status.
+ *
+ * Shared by kdrv_storage_mkdir() and kdrv_storage_create_path() because the
+ * two ask libc the same question - "make this name" - and get the same set of
+ * answers back. One table beats two splits that have to be kept in step.
+ * kdrv_storage_stat() reads its own failure through it too: a missing
+ * component (KODE_ERROR) or a file where a folder should be (KODE_NOT_DIR)
+ * is "not there", and every other answer is no answer.
+ *
+ * The distinction the four named errnos buy is the whole point: only
+ * KODE_IO_ERROR asserts that the medium refused, and a caller that turns a
+ * status into a word for an operator must not send them to check a directory
+ * that was never the problem, nor blame a card for a name that is simply
+ * taken. Everything left over is genuinely the device answering no - ESP-IDF's
+ * FATFS VFS maps a disk error to EIO, and it never invents ENOTDIR for a path
+ * that is merely missing, which is FR_NO_PATH and arrives as ENOENT.
+ *
+ * @param err The errno value, read immediately after the failed call.
+ * @return KODE_ERROR for a missing parent, KODE_EXISTS for a taken name,
+ *         KODE_NOT_DIR when a component of the path is a file, KODE_IS_DIR
+ *         when the path itself is a directory, KODE_IO_ERROR otherwise.
+ */
+static kode_status_t status_of_create_errno(int err)
+{
+    if ( ENOENT == err )
+    {
+        return KODE_ERROR;
+    }
+    if ( EEXIST == err )
+    {
+        return KODE_EXISTS;
+    }
+    if ( ENOTDIR == err )
+    {
+        return KODE_NOT_DIR;
+    }
+    if ( EISDIR == err )
+    {
+        return KODE_IS_DIR;
+    }
+    return KODE_IO_ERROR;
+}
+
 kode_status_t kdrv_storage_stat(const char *path, kdrv_stat_t *out)
 {
     if ( (NULL == path) || (NULL == out) )
@@ -344,7 +426,14 @@ kode_status_t kdrv_storage_stat(const char *path, kdrv_stat_t *out)
     struct stat st;
     if ( stat(real, &st) != 0 )
     {
-        return KODE_OK;             /* not there IS the answer */
+        /* Not there IS the answer; anything else (an I/O error, a path that
+         * will not resolve) is no answer at all. */
+        kode_status_t const why = status_of_create_errno(errno);
+        if ( (KODE_ERROR == why) || (KODE_NOT_DIR == why) )
+        {
+            return KODE_OK;
+        }
+        return KODE_ERROR;
     }
     out->exists = true;
     out->is_dir = S_ISDIR(st.st_mode);
@@ -520,6 +609,75 @@ kode_status_t kdrv_storage_list_path(const char *path,
     return KODE_OK;
 }
 
+kode_status_t kdrv_storage_names_open(const char *path, kdrv_names_t *walk)
+{
+    char          real[KDRV_REAL_PATH_MAX];
+    kode_status_t rc = KODE_DENIED;
+
+    if ( NULL != walk )
+    {
+        kdrv_storage_names_close(walk);
+        if ( NULL != path )
+        {
+            rc = real_path(path, real, sizeof(real));
+        }
+    }
+    if ( KODE_OK == rc )
+    {
+        /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+        walk->dir = opendir(real);
+        if ( NULL == walk->dir )
+        {
+            rc = KODE_ERROR;
+        }
+    }
+    return rc;
+}
+
+bool kdrv_storage_names_next(kdrv_names_t *walk, uint32_t max, kdrv_name_cb cb, void *ctx)
+{
+    bool     more = (NULL != walk) && (NULL != walk->dir) && (NULL != cb);
+    bool     go   = more;
+    uint32_t read = 0U;
+
+    while ( go && (read < max) )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; walk->dir is the DIR opendir() gave */
+        DIR * const dir = (DIR *)walk->dir;
+        /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+        const struct dirent * const ent = readdir(dir);
+
+        if ( NULL == ent )
+        {
+            more = false;
+            go   = false;
+        }
+        else if ( (strcmp(ent->d_name, ".") != 0) && (strcmp(ent->d_name, "..") != 0) )
+        {
+            read += 1U;
+            go    = cb(ent->d_name, ctx);
+        }
+        else
+        {
+            /* not a name of the directory's own */
+        }
+    }
+    return more;
+}
+
+void kdrv_storage_names_close(kdrv_names_t *walk)
+{
+    if ( (NULL != walk) && (NULL != walk->dir) )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; walk->dir is the DIR opendir() gave */
+        DIR * const dir = (DIR *)walk->dir;
+
+        /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+        (void)closedir(dir);
+        walk->dir = NULL;
+    }
+}
+
 /* ---- Changing the tree ---------------------------------------------------
  * mkdir, rm, rmdir and rename/mv. Every one of them but kdrv_storage_unlink()
  * is exactly real_path() then one libc call - the mapping is the only thing
@@ -530,47 +688,6 @@ kode_status_t kdrv_storage_list_path(const char *path,
  * comment gives; kdrv_storage_unlink() is the other, and its own comment
  * says why.
  */
-
-/**
- * @brief Turn the errno a failed create left behind into a status.
- *
- * Shared by kdrv_storage_mkdir() and kdrv_storage_create_path() because the
- * two ask libc the same question - "make this name" - and get the same set of
- * answers back. One table beats two splits that have to be kept in step.
- *
- * The distinction the four named errnos buy is the whole point: only
- * KODE_IO_ERROR asserts that the medium refused, and a caller that turns a
- * status into a word for an operator must not send them to check a directory
- * that was never the problem, nor blame a card for a name that is simply
- * taken. Everything left over is genuinely the device answering no - ESP-IDF's
- * FATFS VFS maps a disk error to EIO, and it never invents ENOTDIR for a path
- * that is merely missing, which is FR_NO_PATH and arrives as ENOENT.
- *
- * @param err The errno value, read immediately after the failed call.
- * @return KODE_ERROR for a missing parent, KODE_EXISTS for a taken name,
- *         KODE_NOT_DIR when a component of the path is a file, KODE_IS_DIR
- *         when the path itself is a directory, KODE_IO_ERROR otherwise.
- */
-static kode_status_t status_of_create_errno(int err)
-{
-    if ( ENOENT == err )
-    {
-        return KODE_ERROR;
-    }
-    if ( EEXIST == err )
-    {
-        return KODE_EXISTS;
-    }
-    if ( ENOTDIR == err )
-    {
-        return KODE_NOT_DIR;
-    }
-    if ( EISDIR == err )
-    {
-        return KODE_IS_DIR;
-    }
-    return KODE_IO_ERROR;
-}
 
 kode_status_t kdrv_storage_mkdir(const char *path)
 {
@@ -649,6 +766,28 @@ kode_status_t kdrv_storage_rmdir(const char *path)
     return KODE_OK;
 }
 
+/**
+ * @brief Whether two names are the same but for the case of their letters.
+ *
+ * FAT does not tell such names apart, so a rename between them is the same
+ * object under another spelling, which FatFs allows.
+ *
+ * @param a A name.
+ * @param b Another.
+ * @return true when they are equal ignoring case; also when they are equal.
+ */
+static bool same_name_in_case(const char *a, const char *b)
+{
+    size_t i = 0U;
+
+    while ( ('\0' != a[i]) && ('\0' != b[i])
+           && (tolower((unsigned char)a[i]) == tolower((unsigned char)b[i])) )
+    {
+        ++i;
+    }
+    return ('\0' == a[i]) && ('\0' == b[i]);
+}
+
 kode_status_t kdrv_storage_rename(const char *from, const char *to)
 {
     if ( (NULL == from) || (NULL == to) )
@@ -683,6 +822,18 @@ kode_status_t kdrv_storage_rename(const char *from, const char *to)
     if ( KODE_OK != rc )
     {
         return rc;
+    }
+
+    /* FatFs refuses a rename onto a name that is there (FR_EXIST) and the
+     * VFS passes it on, where POSIX's rename() replaces the target. Said
+     * here, so a caller that forgot to remove the target fails on the host as
+     * it does on the board. A name that only differs in case is the same
+     * object: FAT does not tell the two apart, and FatFs renames it. */
+    kdrv_stat_t taken;
+    if ( (kdrv_storage_stat(to, &taken) == KODE_OK) && taken.exists
+        && !same_name_in_case(from, to) )
+    {
+        return KODE_ERROR;
     }
 
     if ( rename(real_from, real_to) != 0 )

@@ -89,9 +89,9 @@ void console_fs_enter(void);
 /**
  * @brief STAT @p in, the first half of `ls`, answering to @p who.
  *
- * The LIST terminator carries no status, so without the STAT an empty
- * directory and a missing one would look the same. Once the answer says
- * directory, console_fs_list_begin() lists it.
+ * The STAT tells a missing directory from an empty one and refuses it the
+ * way `cd` does. Once the answer says directory, console_fs_list_page()
+ * lists it.
  *
  * @param who Where STORAGE_PATH_RSP_SIG is posted.
  * @param in  Absolute or relative. NULL means the current directory.
@@ -101,12 +101,19 @@ void console_fs_enter(void);
 kode_status_t console_fs_ls(QActive *who, const char *in);
 
 /**
- * @brief List console_fs_target(), once its STAT has said directory.
+ * @brief Ask for one page of console_fs_target()'s listing, once its STAT
+ *        has said directory: storage_list_ask().
  *
- * @param who The requester. The entries are published, so they reach every
- *            subscriber.
+ * Up to KODE_STORAGE_LIST_MAX STORAGE_ENTRY_SIG, then FILE_LIST_END_SIG with
+ * the page's `count` and whether `more` entries follow, all posted to @p who
+ * alone. The next page starts at @p skip plus that count.
+ *
+ * @param who  The asker.
+ * @param skip Entries the earlier pages brought.
+ * @return KODE_OK when the page was asked for; otherwise as storage_list_ask(),
+ *         and nothing will answer.
  */
-void console_fs_list_begin(QActive *who);
+kode_status_t console_fs_list_page(QActive *who, uint16_t skip);
 
 /**
  * @brief Ask AO_Storage what @p in is, answering to @p who.
@@ -229,7 +236,8 @@ kode_status_t console_fs_write(QActive *who, const char *in, const char *text,
  *        receive a payload arriving on the console into it.
  *
  * AO_Storage answers @p who with RECV_READY_SIG, a RECV_ACK_SIG per chunk, and
- * one of RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG. A failed transfer
+ * one of RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG, or with RECV_BUSY_SIG
+ * alone when a transfer in flight outlasted its wait. A failed transfer
  * leaves nothing on disk. No STAT phase: an existing file is replaced. Raw
  * mode takes the port @p src names; verified on the cable, untried on BLE.
  *

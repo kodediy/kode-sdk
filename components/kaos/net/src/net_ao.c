@@ -90,6 +90,12 @@ typedef enum {
  *         because this AO submits only while no job is in flight. */
 #define NET_WORKER_DEPTH       1U
 
+/** @brief The fast mode outlives the last job that held it by this long (5 s). */
+#define NET_FAST_JOB_HOLD_MS   5000U
+
+/** @brief A fast-mode wish AO_Radio had no room for is asked again after this long. */
+#define NET_FAST_RETRY_MS      100U
+
 /** @brief The network worker's task name. */
 #define NET_WORKER_NAME        "net_worker"
 
@@ -112,11 +118,19 @@ typedef enum {
     NETS_CLOSE      /**< The download's close.                              */
 } net_stream_kind_t;
 
-/** @brief What a download job is given. The worker reads it for as long as
- *         the job runs; the sizes a job measures come back in the done
- *         event's value. */
+/** @brief What a download job is given, and the one thing besides its value
+ *         it gives back. The worker reads the inputs for as long as the job
+ *         runs and writes @c code; the AO reads that after the done event.
+ *         The sizes a job measures come back in the done event's value. */
 typedef struct {
     uint8_t  kind;                    /**< net_stream_kind_t.                 */
+    uint16_t code;                    /**< NETS_OPEN out: the server's status;
+                                       *   0 when none answered.              */
+    uint32_t offset;                  /**< NETS_OPEN: where the body is wanted
+                                       *   from; 0 for all of it.             */
+    bool     from;                    /**< NETS_OPEN: asked with an offset
+                                       *   (NET_STREAM_OPEN_FROM_SIG), so
+                                       *   answered with the server's status. */
     char     url[KODE_FLASH_SRC_MAX]; /**< NETS_OPEN: the URL, as long as a
                                        *   request carries one.               */
     uint8_t *buf;                     /**< NETS_READ: where the chunk goes,
@@ -141,6 +155,8 @@ static kaos_ask_door_t s_net_doors[NET_ASK_KINDS];
 typedef struct {
     uint8_t                kind;   /**< NET_ASK_*.                               */
     bool                   post;   /**< HTTP: a POST.                            */
+    bool                   ranged; /**< HTTP: a GET of @c cap bytes from @c offset. */
+    uint64_t               offset; /**< HTTP: a range's first byte.              */
     uint8_t                count;  /**< PING: echoes.                            */
     uint16_t               port;   /**< UDP: the port.                           */
     uint16_t               dlen;   /**< UDP: bytes at @c data.                   */
@@ -168,6 +184,8 @@ typedef struct {
     NetAskJob      ask;               /**< Or an ask's job with @c worker.    */
     NetStreamJob   s;                 /**< The download job with @c sworker.  */
     char           purl[KODE_FLASH_SRC_MAX]; /**< The staged open's URL.      */
+    uint32_t       poffset;           /**< The staged open's offset.          */
+    bool           pfrom;             /**< The staged open was asked with one. */
     kdrv_mqtt_msg_t rx;               /**< The message being taken from the
                                        *   driver's ring: one copy, off the
                                        *   AO's stack.                         */
@@ -349,6 +367,8 @@ typedef struct {
     char                held[KODE_LOG_LINE_MAX]; /**< A reply line taken from
                                     *   the ring and not yet published.      */
     uint16_t            held_len;  /**< Its length; 0 when there is none.   */
+    bool                held_ack;  /**< It waits for the broker's PUBACK
+                                    *   (kode_log_reply_confirm()).          */
     char                cq[KODE_CHAN_QUEUE_MAX][KODE_CONSOLE_LINE_MAX]; /**<
                                     *   The lines that arrived on cmd/in and
                                     *   have not ended, oldest first from
@@ -413,20 +433,33 @@ typedef struct {
     uint16_t sseq;     /**< Sequence number of that job.                    */
     KqpWorker sworker; /**< Runs the download's jobs, on a PSRAM stack.     */
     NetGuard  sguard;  /**< NET_STREAM_GUARD_SIG.                           */
+    QTimeEvt jtmo;     /**< One-shot: the jobs' hold, which outlives the last
+                        *   job by NET_FAST_JOB_HOLD_MS. Delivers
+                        *   NET_JOB_FAST_SIG.                                */
+    QTimeEvt fretry;   /**< One-shot: a fast-mode wish AO_Radio had no room
+                        *   for is asked again after NET_FAST_RETRY_MS.
+                        *   Delivers NET_FAST_RETRY_SIG.                     */
+    bool     jfast;    /**< The jobs hold the fast mode: a worker has a job,
+                        *   or the tail of the last one is running.          */
+    bool     fast_asked; /**< AO_Radio was last asked for the fast mode, and
+                          *   is believed to hold that wish: on while the
+                          *   channel or the jobs hold it.                    */
     bool     leaving;  /**< A leave was asked: no channel session starts
                         *   again this boot.                                 */
     bool     leave_owed; /**< BOOT_NET_LEFT_SIG is owed to AO_Boot.          */
+    uint16_t leave_left; /**< Reply lines the leave may still publish before
+                          *   it says offline; 0 while it is not draining.  */
 #if CONFIG_KODE_LOWPOWER
-    uint8_t  lp_who;   /**< The id lowpower_join_radio() gave.              */
+    uint8_t  lp_who;   /**< The id lowpower_join_dark() gave.              */
     bool     lp_rest;  /**< The board sleeps: nothing new is started.       */
-    bool     lp_radio; /**< A radio wake is on and this AO has not said it is done. */
+    bool     lp_dark;  /**< A dark wake is on and this AO has not said it is done. */
     bool     lp_owed;  /**< An OFF round waits for the sessions to close.   */
     bool     lp_rejoin;/**< The channel is joined at the next AWAKE: its
                         *   sessions were closed for an OFF round, or its
                         *   start came while the board slept.                */
     uint32_t lp_round; /**< That round's number.                            */
     int64_t  chk_s;    /**< Unix seconds the scheduler's `mqtt` check falls due; -1 for none. */
-    bool     chk_dwell;/**< The check is due in this radio wake and its dwell has not run out. */
+    bool     chk_dwell;/**< The check is due in this dark wake and its dwell has not run out. */
     bool     link_up;  /**< AO_Radio says the C5 link is up.                */
     QTimeEvt chk_tmo;  /**< NET_CHECK_TMO_SIG: the dwell.                   */
 #endif
@@ -485,8 +518,10 @@ typedef struct {
     bool      cup_set;       /**< cup_us means something.                    */
     bool      stop_pending;  /**< The client must be stopped when the worker
                               *   is free.                                   */
-    bool      cfast;         /**< The fast mode is on: AO_Radio was asked for
-                              *   no power save.                             */
+    bool      cfast;         /**< The channel holds the fast mode: a cmd/in
+                              *   line, or a frame of a stream, came within
+                              *   CHAN_FAST_HOLD_MS. What `channel_info`
+                              *   reports; the jobs' hold is @c jfast.       */
     bool      chan_on;       /**< `chan`: join whenever there is Wi-Fi.      */
     uint32_t  keep_s;        /**< `chan_keep`, in seconds: the session age the
                               *   next connect asks for.                     */
@@ -639,8 +674,26 @@ kode_status_t net_ping_ask(QActive *who, const char *host, uint8_t count)
     return host_ask(who, true, host, count);
 }
 
-kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void *body,
-                           uint32_t len, const char *ctype, void *buf, uint32_t cap)
+/** @brief What an HTTP ask carries besides its URL. */
+typedef struct {
+    bool        post;    /**< POST @c body; false GETs.              */
+    bool        ranged;  /**< A GET of @c cap bytes from @c offset.  */
+    uint64_t    offset;  /**< A range's first byte.                  */
+    const void *body;    /**< A POST's body, lent.                   */
+    uint32_t    len;     /**< Its bytes.                             */
+    const char *ctype;   /**< A POST's Content-Type; NULL for none.  */
+    void       *buf;     /**< Where the answer's body goes, lent.    */
+    uint32_t    cap;     /**< Its room.                              */
+} http_ask_t;
+
+/**
+ * @brief Post a GET, a range or a POST to AO_Net through the HTTP door.
+ * @param who The asking AO.
+ * @param url Shorter than KODE_NET_URL_MAX; copied.
+ * @param q   The rest of the request.
+ * @return As the asks.
+ */
+static kode_status_t http_ask(QActive *who, const char *url, const http_ask_t *q)
 {
     kode_status_t  rc = kaos_ask_take(&s_net_doors[NET_ASK_HTTP], who);
     NetHttpRspEvt *a;
@@ -660,22 +713,42 @@ kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void 
     {
         return kaos_ask_cancel(&s_net_doors[NET_ASK_HTTP], who, &a->super);
     }
-    a->post = post;
-    e->post = post;
+    a->post   = q->post;
+    e->post   = q->post;
+    e->ranged = q->ranged;
+    e->offset = q->offset;
     (void)snprintf(e->url, sizeof(e->url), "%s", url);
     e->ctype[0] = '\0';
-    if ( NULL != ctype )
+    if ( NULL != q->ctype )
     {
-        (void)snprintf(e->ctype, sizeof(e->ctype), "%s", ctype);
+        (void)snprintf(e->ctype, sizeof(e->ctype), "%s", q->ctype);
     }
-    e->body = body;
-    e->len  = len;
-    e->buf  = buf;
-    e->cap  = cap;
+    e->body = q->body;
+    e->len  = q->len;
+    e->buf  = q->buf;
+    e->cap  = q->cap;
     e->who  = who;
     e->rsp  = a;
     return kaos_ask_post(&s_net_doors[NET_ASK_HTTP], who, AO_Net, &e->super, &a->super,
                          KQP_NET_CMD_MARGIN);
+}
+
+kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void *body,
+                           uint32_t len, const char *ctype, void *buf, uint32_t cap)
+{
+    http_ask_t const q = { .post = post, .ranged = false, .offset = 0U, .body = body,
+                           .len = len, .ctype = ctype, .buf = buf, .cap = cap };
+
+    return http_ask(who, url, &q);
+}
+
+kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset, void *buf,
+                                 uint32_t cap)
+{
+    http_ask_t const q = { .post = false, .ranged = true, .offset = offset, .body = NULL,
+                           .len = 0U, .ctype = NULL, .buf = buf, .cap = cap };
+
+    return http_ask(who, url, &q);
 }
 
 kode_status_t net_udp_ask(QActive *who, const char *host, uint16_t port, const void *data,
@@ -709,12 +782,24 @@ kode_status_t net_udp_ask(QActive *who, const char *host, uint16_t port, const v
                          KQP_NET_CMD_MARGIN);
 }
 
+/** @brief A channel state ask the queue refused: AO_Net answers it before its next event. */
+static _Atomic bool s_chan_ask_owed;
+
 /* cppcheck-suppress misra-c2012-8.7 ; called by kgui, a consumer outside this component */
 bool channel_state_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(CHANNEL_STATE_REQ_SIG);
-    QACTIVE_POST(AO_Net, &evt, NULL);
-    return true;
+    bool const posted = QACTIVE_POST_X(AO_Net, &evt, KQP_NET_CMD_MARGIN, NULL);
+
+    if ( !posted )
+    {
+        /* The queue is that full only with events waiting, so the answer
+         * comes before the first of them is handled. */
+        atomic_store_explicit(&s_chan_ask_owed, true, memory_order_release);
+        KLOG_W(TAG, "no room for the channel state ask in AO_Net's queue; "
+                    "it is answered before the next event");
+    }
+    return posted;
 }
 
 #if CONFIG_KODEOS_CHANNEL
@@ -993,6 +1078,7 @@ static bool net_on_mqtt(kdrv_net_mqtt_evt_t evt, const kdrv_mqtt_msg_t *msg,
     }
     else
     {
+        bool linked = false;
         NetMqttLinkEvt *e = Q_NEW_X(NetMqttLinkEvt, 0U, NET_MQTT_LINK_SIG);
         if ( NULL != e )
         {
@@ -1000,7 +1086,13 @@ static bool net_on_mqtt(kdrv_net_mqtt_evt_t evt, const kdrv_mqtt_msg_t *msg,
             e->session_present = session_present;
             /* A tighter margin than the messages get: a lost DISCONNECTED
              * leaves the channel believing in a dead session. */
-            (void)QACTIVE_POST_X(AO_Net, &e->super, KQP_NET_LINK_MARGIN, NULL);
+            linked = QACTIVE_POST_X(AO_Net, &e->super, KQP_NET_LINK_MARGIN, NULL);
+        }
+        if ( (!linked) && (KDRV_NET_MQTT_ACKED == evt) )
+        {
+            /* Its record stays owed: told again when the channel comes up. */
+            KLOG_W(TAG, "no room for a reply's PUBACK in AO_Net's queue; "
+                        "the record it confirms stays owed");
         }
     }
     return posted;
@@ -1278,6 +1370,13 @@ static void mqtt_publish_taken(void)
     mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_NONE);
 }
 
+/** @brief Close an mqtt_pub, mqtt_sub or mqtt_unsub the client did not take:
+ *         there is no broker to take it to. */
+static void mqtt_publish_refused(void)
+{
+    mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_REFUSED);
+}
+
 #if CONFIG_KODEOS_CHANNEL
 /** @brief Refuse an MQTT request because the Kode channel holds the client.
  *
@@ -1384,12 +1483,11 @@ static kode_status_t net_job_run(void *arg, uint32_t *value)
  * @param value Receives the one word the AO is told besides the status.
  * @return What the driver answered.
  */
-/* cppcheck-suppress constParameterCallback ; KqpJobFn fixes the signature, and its argument is void * */
 static kode_status_t net_stream_run(void *arg, uint32_t *value)
 {
     /* cppcheck-suppress misra-c2012-11.5 ; the worker hands back the pointer it was given, which is the AO's job storage */
-    NetStreamJob const * const j  = (NetStreamJob const *)arg;
-    kode_status_t              st = KODE_DENIED;
+    NetStreamJob * const j  = (NetStreamJob *)arg;
+    kode_status_t        st = KODE_DENIED;
 
     *value = 0U;
     switch ( (net_stream_kind_t)j->kind )
@@ -1398,8 +1496,9 @@ static kode_status_t net_stream_run(void *arg, uint32_t *value)
             uint32_t total = 0U;
             uint16_t code  = 0U;
 
-            st     = kdrv_net_stream_open(j->url, &total, &code);
-            *value = total;
+            st      = kdrv_net_stream_open(j->url, j->offset, &total, &code);
+            j->code = code;
+            *value  = total;
             break;
         }
         case NETS_READ: {
@@ -1422,6 +1521,137 @@ static kode_status_t net_stream_run(void *arg, uint32_t *value)
         }
     }
     return st;
+}
+
+/* ---- The fast mode ---------------------------------------------------------
+ * AO_Radio lifts Wi-Fi's power save while something waits for an answer that
+ * the board did not just ask for: a command line of the channel
+ * (chan_fast_set()) and a job with either worker. AO_Radio is asked once for
+ * each edge of the two holds together.
+ */
+
+/**
+ * @brief Make what AO_Radio was asked match the holds, once for each change.
+ *
+ * The fast mode is wanted while the channel holds it (@c cfast) or the jobs
+ * do (@c jfast). Asking for what was asked already does nothing, so the first
+ * hold to begin is one request and the last to end is one. A request
+ * AO_Radio had no room for is not counted as asked, and is asked again after
+ * NET_FAST_RETRY_MS whether or not the holds change by then.
+ *
+ * @param me The AO.
+ */
+static void net_fast_eval(Net * const me)
+{
+    bool want = me->jfast;
+
+#if CONFIG_KODEOS_CHANNEL
+    want = want || me->cfast;
+#endif
+    if ( want != me->fast_asked )
+    {
+        if ( wifi_fast_request(want) )
+        {
+            me->fast_asked = want;
+        }
+        else
+        {
+            (void)QTimeEvt_disarm(&me->fretry);
+            QTimeEvt_armX(&me->fretry, KQP_TICKS_PER_MS(NET_FAST_RETRY_MS), 0U);
+        }
+    }
+}
+
+/**
+ * @brief A job went to a worker: the jobs hold the fast mode, and the tail of
+ *        the last one is off.
+ *
+ * Nothing begins without an address or in the rest: a client's stop on the
+ * way out of either is a job, and has nobody to speed up.
+ *
+ * @param me The AO.
+ */
+static void net_fast_job_begin(Net * const me)
+{
+    bool allowed = me->online;
+
+#if CONFIG_KODE_LOWPOWER
+    allowed = allowed && (!me->lp_rest);
+#endif
+    if ( allowed )
+    {
+        (void)QTimeEvt_disarm(&me->jtmo);
+        if ( !me->jfast )
+        {
+            me->jfast = true;
+            KLOG_D(TAG, "jobs: fast mode held");
+        }
+        net_fast_eval(me);
+    }
+}
+
+/**
+ * @brief A job came back: when neither worker has one, the tail begins.
+ *
+ * Called after the steps the answer leads to, which may have handed a worker
+ * the next job.
+ *
+ * @param me The AO.
+ */
+static void net_fast_job_end(Net * const me)
+{
+    if ( me->jfast && (!me->busy) && (!me->sbusy) )
+    {
+        (void)QTimeEvt_disarm(&me->jtmo);
+        QTimeEvt_armX(&me->jtmo, KQP_TICKS_PER_MS(NET_FAST_JOB_HOLD_MS), 0U);
+    }
+}
+
+/**
+ * @brief The jobs' hold ends now, tail and all; AO_Radio is asked for the
+ *        default when nothing else holds the fast mode.
+ *
+ * @param me The AO.
+ */
+static void net_fast_job_drop(Net * const me)
+{
+    (void)QTimeEvt_disarm(&me->jtmo);
+    if ( me->jfast )
+    {
+        me->jfast = false;
+        KLOG_D(TAG, "jobs: fast mode released");
+        net_fast_eval(me);
+    }
+}
+
+/**
+ * @brief The tail ran out: the jobs' hold ends, unless a worker has a job.
+ *
+ * @param me The AO.
+ */
+static void net_fast_job_tail(Net * const me)
+{
+    if ( (!me->busy) && (!me->sbusy) )
+    {
+        net_fast_job_drop(me);
+    }
+}
+
+/**
+ * @brief The address is gone: the jobs hold nothing, and AO_Radio is not asked.
+ *
+ * AO_Radio drops its own wish when the association ends, so a request now
+ * would only leave one behind for the next. What was asked is forgotten, which
+ * makes the first hold after the address returns ask again.
+ *
+ * @param me The AO.
+ */
+static void net_fast_gone(Net * const me)
+{
+    (void)QTimeEvt_disarm(&me->jtmo);
+    (void)QTimeEvt_disarm(&me->fretry);
+    me->jfast      = false;
+    me->fast_asked = false;
 }
 
 /**
@@ -1450,6 +1680,7 @@ static bool net_worker_give(Net * const me, KqpJobFn fn, void *arg)
     me->wreplied = false;
     me->busy     = true;
     net_guard_start(&me->wguard, KODE_NET_GUARD_MS);
+    net_fast_job_begin(me);
     return true;
 }
 
@@ -1507,6 +1738,7 @@ static bool stream_job_start(Net * const me, net_stream_kind_t kind,
     me->sreplied = false;
     me->sbusy    = true;
     net_guard_start(&me->sguard, guard_ms);
+    net_fast_job_begin(me);
     return true;
 }
 
@@ -1586,6 +1818,11 @@ static kode_status_t net_ask_run(void *arg, uint32_t *value)
         st = kdrv_net_http_post(j->url, j->body, j->len, ctype, j->buf, j->cap,
                                 &j->result, KODE_HTTP_TIMEOUT_MS);
     }
+    else if ( j->ranged )
+    {
+        st = kdrv_net_http_get_range(j->url, j->offset, j->buf, j->cap, &j->result,
+                                     KODE_HTTP_TIMEOUT_MS);
+    }
     else
     {
         st = kdrv_net_http_get(j->url, j->buf, j->cap, &j->result, KODE_HTTP_TIMEOUT_MS);
@@ -1643,6 +1880,7 @@ static void http_reply(QActive *who, NetHttpRspEvt *a, kode_status_t rc, NetAskJ
     a->rc = (uint8_t)rc;
     (void)memset(&a->result, 0, sizeof(a->result));
     a->result.content_length = -1;
+    a->result.range_total    = -1;
     if ( NULL != j )
     {
         a->result.status         = j->result.status;
@@ -1650,6 +1888,7 @@ static void http_reply(QActive *who, NetHttpRspEvt *a, kode_status_t rc, NetAskJ
         a->result.body_len       = j->result.body_len;
         a->result.kept           = j->result.kept;
         a->result.truncated      = j->result.truncated;
+        a->result.range_total    = j->result.range_total;
     }
     kaos_ask_answer(&s_net_doors[NET_ASK_HTTP], who, &a->super, AO_Net);
 }
@@ -1719,6 +1958,7 @@ static void ask_take(Net * const me, QEvt const * const e)
     j = &me->jobs->ask;
     (void)memset(j, 0, sizeof(*j));
     j->result.content_length = -1;
+    j->result.range_total    = -1;
     if ( (QSignal)NET_HOST_ASK_SIG == e->sig )
     {
         NetHostAskEvt const * const q = Q_EVT_CAST(NetHostAskEvt);
@@ -1737,8 +1977,10 @@ static void ask_take(Net * const me, QEvt const * const e)
     {
         NetHttpAskEvt const * const q = Q_EVT_CAST(NetHttpAskEvt);
 
-        j->kind = (uint8_t)NET_ASK_HTTP;
-        j->post = q->post;
+        j->kind   = (uint8_t)NET_ASK_HTTP;
+        j->post   = q->post;
+        j->ranged = q->ranged;
+        j->offset = q->offset;
         (void)snprintf(j->url, sizeof(j->url), "%s", q->url);
         (void)snprintf(j->ctype, sizeof(j->ctype), "%s", q->ctype);
         /* cppcheck-suppress misra-c2012-11.5 ; the asker lends its body as bytes, untyped in the event */
@@ -1981,7 +2223,7 @@ static void chan_due_arm(Net * const me)
 }
 
 #if CONFIG_KODE_LOWPOWER
-static void net_lp_radio_check(Net * const me);
+static void net_lp_dark_check(Net * const me);
 #endif
 
 /**
@@ -1995,22 +2237,23 @@ static void chan_wait(Net * const me, uint32_t ms)
     me->cdue_us = khal_time_us() + ((uint64_t)ms * CHAN_US_PER_MS);
     chan_due_arm(me);
 #if CONFIG_KODE_LOWPOWER
-    net_lp_radio_check(me);   /* a join that ended in a wait is the work done */
+    net_lp_dark_check(me);   /* a join that ended in a wait is the work done */
 #endif
 }
 
 /**
- * @brief Turn the fast mode on or off, once: AO_Radio is asked, a NOTICE says so.
+ * @brief Begin or end the channel's hold of the fast mode, once: a NOTICE says so.
  *
- * Off also ends the hold. Asking for what already is does nothing, so a
- * burst of lines is one request and one line in the log.
+ * AO_Radio is asked by net_fast_eval(), and only on the edge of the channel's
+ * hold and the jobs' together, so a burst of lines is one request and one
+ * line in the log. Off also ends the hold's timer.
  */
 static void chan_fast_set(Net * const me, bool on)
 {
     if ( me->cfast != on )
     {
         me->cfast = on;
-        wifi_fast_request(on);
+        net_fast_eval(me);
         if ( on )
         {
             KLOG_N(TAG, "channel: fast mode on (no Wi-Fi power save)");
@@ -2280,7 +2523,7 @@ static void chan_refused(Net * const me, const char *why)
     chan_set(me, CHAN_REFUSED, why);
     KLOG_N(TAG, "channel: refused (%s)", why);
 #if CONFIG_KODE_LOWPOWER
-    net_lp_radio_check(me);
+    net_lp_dark_check(me);
 #endif
 }
 
@@ -2300,7 +2543,7 @@ static void chan_no_identity(Net * const me)
     chan_set(me, CHAN_NO_IDENTITY, "no_identity");
     KLOG_N(TAG, "channel: no identity in the C5");
 #if CONFIG_KODE_LOWPOWER
-    net_lp_radio_check(me);
+    net_lp_dark_check(me);
 #endif
 }
 
@@ -2591,7 +2834,7 @@ static void chan_halt(Net * const me)
         }
     }
 #if CONFIG_KODE_LOWPOWER
-    net_lp_radio_check(me);   /* a channel that ended is no work left */
+    net_lp_dark_check(me);   /* a channel that ended is no work left */
 #endif
 }
 
@@ -3390,6 +3633,72 @@ static void chan_after_job(Net * const me)
 /** @brief Wait before the drain tries again after its own post was refused. */
 #define CHAN_OUT_RETRY_MS  100U
 
+/** @brief Reply lines a leave publishes at most, CHAN_OUT_BURST a step, before
+ *         it says offline; any left after them are dropped with the session,
+ *         counted. */
+#define CHAN_OUT_FLUSH_MAX  256U
+
+/**
+ * @brief Hand up to @p max lines from the ring to the client, oldest first.
+ *
+ * A confirmed line goes at QoS 1, and its PUBACK comes back as
+ * KDRV_NET_MQTT_ACKED; one the client refuses is published as not sent.
+ *
+ * @param me  The AO; the session is up.
+ * @param max Lines at most.
+ * @return true when it stopped at @p max, with lines that may still wait;
+ *         false when the ring is drained or the client just went down.
+ */
+static bool chan_out_publish(Net * const me, uint16_t max)
+{
+    /* A confirmed reply line could not be handed to the client. */
+    static const ConsoleSentEvt s_chan_unsent = {
+        .super = QEVT_INITIALIZER(CONSOLE_SENT_SIG),
+        .src   = (uint8_t)KODE_CONSOLE_SRC_NET,
+        .ok    = false,
+    };
+    ChanWork * const cw = me->cw;
+
+    for ( uint16_t i = 0U; max > i; i++ )
+    {
+        kode_status_t rc;
+
+        if ( 0U == cw->held_len )
+        {
+            cw->held_len = (uint16_t)kchan_out_pop(cw->held, sizeof(cw->held),
+                                                   &cw->held_ack);
+        }
+        if ( 0U == cw->held_len )
+        {
+            return false;   /* drained */
+        }
+        if ( cw->held_ack )
+        {
+            rc = kdrv_net_mqtt_publish_acked(cw->sess.t_out, cw->held,
+                                             cw->held_len);
+        }
+        else
+        {
+            rc = kdrv_net_mqtt_publish(cw->sess.t_out, cw->held, cw->held_len,
+                                       false);
+        }
+        if ( KODE_DENIED == rc )
+        {
+            return false;   /* the client just went down: its LINK event follows */
+        }
+        cw->held_len = 0U;
+        if ( KODE_OK != rc )
+        {
+            kchan_out_lose(1U);
+            if ( cw->held_ack )
+            {
+                QACTIVE_PUBLISH(&s_chan_unsent.super, &me->super);
+            }
+        }
+    }
+    return true;
+}
+
 /** @brief Slots AO_Console's queue keeps free when a line off the channel is posted to it. */
 #define CHAN_LINE_MARGIN  2U
 
@@ -3443,31 +3752,8 @@ static void chan_out_step(Net * const me)
     {
         return;   /* joining, waiting or renewing: the next CONNECTED comes back */
     }
-    for ( uint8_t i = 0U; CHAN_OUT_BURST > i; i++ )
-    {
-        ChanWork * const cw = me->cw;
-        kode_status_t    rc;
-
-        if ( 0U == cw->held_len )
-        {
-            cw->held_len = (uint16_t)kchan_out_pop(cw->held, sizeof(cw->held));
-        }
-        if ( 0U == cw->held_len )
-        {
-            return;   /* drained */
-        }
-        rc = kdrv_net_mqtt_publish(cw->sess.t_out, cw->held, cw->held_len, false);
-        if ( KODE_DENIED == rc )
-        {
-            return;   /* the client just went down: its LINK event follows */
-        }
-        cw->held_len = 0U;
-        if ( KODE_OK != rc )
-        {
-            kchan_out_lose(1U);
-        }
-    }
-    if ( kchan_out_pending() && (!chan_out_wake()) )
+    if ( chan_out_publish(me, CHAN_OUT_BURST) && kchan_out_pending()
+        && (!chan_out_wake()) )
     {
         /* The queue has no room for the next step (a post keeps one slot
          * free): come back on a timer, the ring holds the lines meanwhile. */
@@ -4611,8 +4897,9 @@ static void shot_put_expired(Net * const me)
 #endif /* CONFIG_KODEOS_CHANNEL */
 
 /* ---- Leaving for a jump --------------------------------------------------
- * AO_Boot asks once before it restarts the board. The channel says "offline"
- * and stops its client, then BOOT_NET_LEFT_SIG lets the jump go on. `leaving`
+ * AO_Boot asks once before it restarts the board. The replies already in the
+ * ring go out first, CHAN_OUT_BURST a step; then the channel says "offline"
+ * and stops its client, and BOOT_NET_LEFT_SIG lets the jump go on. `leaving`
  * stays set for the rest of the boot, so no join starts before the reset.
  */
 
@@ -4640,7 +4927,65 @@ static void net_leave_settle(Net * const me)
 }
 
 /**
- * @brief Leave the channel: end the join, stop the client, answer AO_Boot.
+ * @brief The leave's last part: say offline, stop the client, and answer
+ *        AO_Boot once nothing is on its way down.
+ *
+ * @param me The AO.
+ */
+static void net_leave_close(Net * const me)
+{
+    me->leave_left = 0U;
+#if CONFIG_KODEOS_CHANNEL
+    if ( chan_active(me) )
+    {
+        chan_leave(me, "leaving");   /* says offline first, then ends the join */
+        chan_stop_client(me);
+    }
+#endif
+    net_leave_settle(me);
+}
+
+#if CONFIG_KODEOS_CHANNEL
+/**
+ * @brief One step of the leave's drain: up to CHAN_OUT_BURST reply lines, then
+ *        the next step, or the close.
+ *
+ * What the console answered before the leave goes out before the offline
+ * notice, an install's last record among it. The close comes once the ring is
+ * empty, the session cannot take a line, CHAN_OUT_FLUSH_MAX lines are out, or
+ * the queue has no room for the next step (rule 5: each step stays short).
+ *
+ * @param me The AO.
+ */
+static void net_leave_drain(Net * const me)
+{
+    uint16_t burst = CHAN_OUT_BURST;
+    bool     more  = false;
+    bool     next  = false;
+
+    if ( burst > me->leave_left )
+    {
+        burst = me->leave_left;
+    }
+    if ( chan_active(me) && chan_out_ready(me) )
+    {
+        more = chan_out_publish(me, burst) && kchan_out_pending();
+    }
+    me->leave_left = (uint16_t)(me->leave_left - burst);
+    if ( more && (0U < me->leave_left) )
+    {
+        next = chan_out_wake();
+    }
+    if ( !next )
+    {
+        net_leave_close(me);
+    }
+}
+#endif
+
+/**
+ * @brief Leave the channel: publish the replies waiting, end the join, stop
+ *        the client, answer AO_Boot.
  *
  * A second ask while the first one's answer is owed is logged and dropped;
  * one asked after the answer is answered again at once.
@@ -4657,13 +5002,14 @@ static void net_leave(Net * const me)
     me->leaving    = true;
     me->leave_owed = true;
 #if CONFIG_KODEOS_CHANNEL
-    if ( chan_active(me) )
+    if ( chan_active(me) && chan_out_ready(me) && kchan_out_pending() )
     {
-        chan_leave(me, "leaving");   /* says offline first, then ends the join */
-        chan_stop_client(me);
+        me->leave_left = (uint16_t)CHAN_OUT_FLUSH_MAX;
+        net_leave_drain(me);
+        return;
     }
 #endif
-    net_leave_settle(me);
+    net_leave_close(me);
 }
 
 #if CONFIG_KODE_LOWPOWER
@@ -4813,7 +5159,7 @@ static void net_chk_serve(Net * const me)
  *        is connected.
  *
  * @param me The AO.
- * @return true when a radio wake for the scheduler's check has anything to do.
+ * @return true when a dark wake for the scheduler's check has anything to do.
  */
 static bool net_chk_listens(Net const * const me)
 {
@@ -4826,7 +5172,7 @@ static bool net_chk_listens(Net const * const me)
 }
 
 /**
- * @brief A wake begins (a radio wake, or a whole one from ASLEEP): a check
+ * @brief A wake begins (a dark wake, or a whole one from ASLEEP): a check
  *        that is due is made after its dwell when something listens, and at
  *        once when nothing does. A dwell already on is kept.
  *
@@ -4855,7 +5201,7 @@ static void net_chk_begin(Net * const me)
  *        the channel's deadline and the scheduler's check.
  *
  * The check counts only when something listens (net_chk_listens()); with
- * nothing to listen to there is nothing for a radio wake to do.
+ * nothing to listen to there is nothing for a dark wake to do.
  *
  * @param me The AO.
  * @return false when no event was left to carry the note; true otherwise, also
@@ -4887,7 +5233,7 @@ static bool net_lp_wake_note(Net const * const me)
 }
 
 /**
- * @brief Whether AO_Net has nothing left to do in a radio wake.
+ * @brief Whether AO_Net has nothing left to do in a dark wake.
  *
  * Nothing is in the way of resting, and the channel is either not in use or
  * waiting for a time further off than CHAN_LP_SETTLE_MS.
@@ -4895,7 +5241,7 @@ static bool net_lp_wake_note(Net const * const me)
  * @param me The AO.
  * @return true when the board can go back to sleep for this AO.
  */
-static bool net_lp_radio_settled(Net const * const me)
+static bool net_lp_dark_settled(Net const * const me)
 {
     bool settled = (net_lp_busy_why(me, true) == NULL);
 
@@ -4910,18 +5256,18 @@ static bool net_lp_radio_settled(Net const * const me)
 }
 
 /**
- * @brief Tell AO_LowPower the work of a radio wake is finished, once, when it is.
+ * @brief Tell AO_LowPower the work of a dark wake is finished, once, when it is.
  *
  * Called when the wake begins and at every end of a step of the channel.
  *
  * @param me The AO.
  */
-static void net_lp_radio_check(Net * const me)
+static void net_lp_dark_check(Net * const me)
 {
-    if ( me->lp_radio && net_lp_radio_settled(me) )
+    if ( me->lp_dark && net_lp_dark_settled(me) )
     {
-        me->lp_radio = false;
-        lowpower_radio_done(me->lp_who);
+        me->lp_dark = false;
+        lowpower_dark_done(me->lp_who);
     }
 }
 
@@ -5012,7 +5358,7 @@ static void net_lp_round(Net * const me, const LowPowerRoundEvt * const r)
 
     me->lp_round = r->round;
     me->lp_owed  = false;
-    me->lp_radio = false;   /* a round ends the radio wake's work */
+    me->lp_dark  = false;   /* a round ends the dark wake's work */
     if ( (NULL == why) && ((uint8_t)KODE_LP_OFF != r->target) )
     {
         net_chk_serve(me);
@@ -5026,6 +5372,7 @@ static void net_lp_round(Net * const me, const LowPowerRoundEvt * const r)
         me->lp_rest   = true;
         me->lp_rejoin = true;
         me->lp_owed   = true;
+        net_fast_job_drop(me);
         net_lp_close(me);
         net_lp_settle(me);
     }
@@ -5042,6 +5389,7 @@ static void net_lp_round(Net * const me, const LowPowerRoundEvt * const r)
     else
     {
         me->lp_rest = true;
+        net_fast_job_drop(me);
 #if CONFIG_KODEOS_CHANNEL
         if ( chan_due_pending(me) )
         {
@@ -5055,25 +5403,25 @@ static void net_lp_round(Net * const me, const LowPowerRoundEvt * const r)
 }
 
 /**
- * @brief LOWPOWER_STATE_SIG: on AWAKE, or on a radio wake, start working again.
+ * @brief LOWPOWER_STATE_SIG: on AWAKE, or on a dark wake, start working again.
  *
  * It may repeat, and an answer owed to a round that is over is not given. The
  * long timer counts its real time again and a start that waited begins. A
- * radio wake is the same work with the glass asleep (net_lp_radio_check()).
+ * dark wake is the same work with the glass asleep (net_lp_dark_check()).
  *
  * @param me The AO.
  * @param s  The change.
  */
 static void net_lp_state(Net * const me, const LowPowerStateEvt * const s)
 {
-    bool const radio = ((uint8_t)KODE_LP_RADIO == s->state);
+    bool const dark = ((uint8_t)KODE_LP_DARK == s->state);
 
-    if ( ((uint8_t)KODE_LP_AWAKE == s->state) || radio )
+    if ( ((uint8_t)KODE_LP_AWAKE == s->state) || dark )
     {
         me->lp_rest  = false;
         me->lp_owed  = false;
-        me->lp_radio = radio;
-        if ( radio || ((uint8_t)KODE_LP_AWAKE != s->prev) )
+        me->lp_dark  = dark;
+        if ( dark || ((uint8_t)KODE_LP_AWAKE != s->prev) )
         {
             net_chk_begin(me);
         }
@@ -5085,7 +5433,7 @@ static void net_lp_state(Net * const me, const LowPowerStateEvt * const s)
         chan_lp_resume(me);
 #endif
         net_lp_rejoin(me);
-        net_lp_radio_check(me);
+        net_lp_dark_check(me);
     }
 }
 
@@ -5113,12 +5461,12 @@ static void net_lp_check_at(Net * const me, const NetCheckAtEvt * const c)
     }
     else
     {
-        net_lp_radio_check(me);
+        net_lp_dark_check(me);
     }
 }
 
 /**
- * @brief NET_CHECK_TMO_SIG: the dwell of the check's radio wake has run out.
+ * @brief NET_CHECK_TMO_SIG: the dwell of the check's dark wake has run out.
  *
  * @param me The AO.
  */
@@ -5127,7 +5475,7 @@ static void net_lp_check_dwelled(Net * const me)
     if ( me->chk_dwell )
     {
         net_chk_pass(me);
-        net_lp_radio_check(me);
+        net_lp_dark_check(me);
     }
 }
 
@@ -5290,6 +5638,10 @@ void Net_ctor(void)
     QTimeEvt_ctorX(&me->tmo, &me->super, NET_TMO_SIG, 0U);
     QTimeEvt_ctorX(&me->wguard.te, &me->super, NET_JOB_GUARD_SIG, 0U);
     QTimeEvt_ctorX(&me->sguard.te, &me->super, NET_STREAM_GUARD_SIG, 0U);
+    QTimeEvt_ctorX(&me->jtmo, &me->super, NET_JOB_FAST_SIG, 0U);
+    QTimeEvt_ctorX(&me->fretry, &me->super, NET_FAST_RETRY_SIG, 0U);
+    me->jfast      = false;
+    me->fast_asked = false;
     me->phase = (uint8_t)MQTT_IDLE;
     me->err   = (uint8_t)KDRV_MQTT_ERR_NONE;
     me->sntp_asked = false;
@@ -5313,10 +5665,11 @@ void Net_ctor(void)
     me->pwho          = NULL;
     me->leaving    = false;
     me->leave_owed = false;
+    me->leave_left = 0U;
 #if CONFIG_KODE_LOWPOWER
     me->lp_who     = KODE_LOWPOWER_WHO_NONE;
     me->lp_rest    = false;
-    me->lp_radio   = false;
+    me->lp_dark    = false;
     me->lp_owed    = false;
     me->lp_rejoin  = false;
     me->lp_round   = 0U;
@@ -5439,6 +5792,28 @@ void net_stream_open_request(const char *url, QActive *who)
     (void)snprintf(e->url, sizeof(e->url), "%s", url);
     e->who = who;
     QACTIVE_POST(AO_Net, &e->super, NULL);
+}
+
+bool net_stream_open_from_request(const char *url, uint32_t offset, QActive *who)
+{
+    NetStreamFromEvt *e;
+
+    /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+    if ( (NULL == url) || (strnlen(url, KODE_NET_FETCH_URL_MAX) >= KODE_NET_FETCH_URL_MAX) )
+    {
+        return false;
+    }
+    e = Q_NEW_X(NetStreamFromEvt, 0U, NET_STREAM_OPEN_FROM_SIG);
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "out of events; stream open dropped");
+        return false;
+    }
+    (void)snprintf(e->url, sizeof(e->url), "%s", url);
+    e->offset = offset;
+    e->who    = who;
+    QACTIVE_POST(AO_Net, &e->super, NULL);
+    return true;
 }
 
 void net_stream_read_request(void)
@@ -5581,25 +5956,53 @@ static void net_expired_net(Net * const me)
 /**
  * @brief Answer an open request.
  *
+ * An open asked with an offset is answered with the server's status beside
+ * the verdict (NetStreamFromRspEvt); a plain one as a file's open is.
+ *
  * @param who  Who asked.
  * @param rc   How it went.
- * @param size The Content-Length, 0 when there is none to report.
+ * @param size The Content-Length; for a 416, the resource's whole length;
+ *             0 when there is none to report.
+ * @param http The server's status code; 0 when no server was asked.
+ * @param from Whether the open was asked with an offset.
  */
 static void stream_reply_open(QActive * const who, kode_status_t rc,
-                              uint32_t size)
+                              uint32_t size, uint16_t http, bool from)
 {
-    StorageOpenRspEvt * const rsp = Q_NEW_X(StorageOpenRspEvt, 0U,
-                                            NET_STREAM_OPEN_RSP_SIG);
-
-    if ( NULL == rsp )
+    if ( from )
     {
-        KLOG_E(TAG, "out of events; an open's answer was dropped");
-        return;
+        NetStreamFromRspEvt * const rsp = Q_NEW_X(NetStreamFromRspEvt, 0U,
+                                                  NET_STREAM_FROM_RSP_SIG);
+
+        if ( NULL == rsp )
+        {
+            KLOG_E(TAG, "out of events; an open's answer was dropped");
+        }
+        else
+        {
+            rsp->size   = size;
+            rsp->http   = http;
+            rsp->status = (uint8_t)rc;
+            QACTIVE_POST(who, &rsp->super, AO_Net);
+        }
     }
-    rsp->medium = (uint8_t)KDRV_MEDIUM_COUNT;   /* neither card nor FAT */
-    rsp->size   = size;
-    rsp->status = (uint8_t)rc;
-    QACTIVE_POST(who, &rsp->super, AO_Net);
+    else
+    {
+        StorageOpenRspEvt * const rsp = Q_NEW_X(StorageOpenRspEvt, 0U,
+                                                NET_STREAM_OPEN_RSP_SIG);
+
+        if ( NULL == rsp )
+        {
+            KLOG_E(TAG, "out of events; an open's answer was dropped");
+        }
+        else
+        {
+            rsp->medium = (uint8_t)KDRV_MEDIUM_COUNT;   /* neither card nor FAT */
+            rsp->size   = size;
+            rsp->status = (uint8_t)rc;
+            QACTIVE_POST(who, &rsp->super, AO_Net);
+        }
+    }
 }
 
 /**
@@ -5660,12 +6063,14 @@ static uint8_t stream_free(const Net * const me)
  * @brief Open the transfer for @p who, or refuse it. The worker is free and no
  *        close is owed.
  *
- * @param me  The AO.
- * @param who Who asked; told how it went.
- * @param url The URL.
+ * @param me     The AO.
+ * @param who    Who asked; told how it went.
+ * @param url    The URL.
+ * @param offset Where the body is wanted from; 0 for all of it.
+ * @param from   Whether it was asked with an offset.
  */
 static void stream_begin_open(Net * const me, QActive * const who,
-                              const char *url)
+                              const char *url, uint32_t offset, bool from)
 {
     kode_status_t rc = KODE_OK;
 
@@ -5685,6 +6090,9 @@ static void stream_begin_open(Net * const me, QActive * const who,
     else
     {
         (void)snprintf(me->jobs->s.url, sizeof(me->jobs->s.url), "%s", url);
+        me->jobs->s.offset = offset;
+        me->jobs->s.from   = from;
+        me->jobs->s.code   = 0U;
         me->swho  = who;
         me->sheld = true;
         if ( !stream_job_start(me, NETS_OPEN, NET_STREAM_OPEN_GUARD_MS) )
@@ -5696,11 +6104,23 @@ static void stream_begin_open(Net * const me, QActive * const who,
     }
     if ( KODE_OK != rc )
     {
-        stream_reply_open(who, rc, 0U);
+        stream_reply_open(who, rc, 0U, 0U, from);
     }
 }
 
 static void stream_forget(Net * const me);
+
+/** @brief Whether the open with the worker was asked with an offset. */
+static bool stream_job_from(const Net * const me)
+{
+    return (NULL != me->jobs) && me->jobs->s.from;
+}
+
+/** @brief Whether the open that waits its turn was asked with an offset. */
+static bool stream_staged_from(const Net * const me)
+{
+    return (NULL != me->jobs) && me->jobs->pfrom;
+}
 
 /**
  * @brief One step of starting the next download job.
@@ -5743,7 +6163,7 @@ static bool stream_pump_once(Net * const me)
 
         me->popen = false;
         me->pwho  = NULL;
-        stream_begin_open(me, who, me->jobs->purl);
+        stream_begin_open(me, who, me->jobs->purl, me->jobs->poffset, me->jobs->pfrom);
     }
     else if ( me->sopen && (NULL != me->reader) && (0U < me->sreads) )
     {
@@ -5819,13 +6239,13 @@ static void stream_forget(Net * const me)
 
         me->popen = false;
         me->pwho  = NULL;
-        stream_reply_open(who, KODE_DENIED, 0U);
+        stream_reply_open(who, KODE_DENIED, 0U, 0U, stream_staged_from(me));
     }
     if ( me->sbusy && (!me->sreplied) )
     {
         if ( ((uint8_t)NETS_OPEN == me->skind) && (NULL != me->swho) )
         {
-            stream_reply_open(me->swho, KODE_DENIED, 0U);
+            stream_reply_open(me->swho, KODE_DENIED, 0U, 0U, stream_job_from(me));
         }
         me->sreplied = true;
     }
@@ -5859,11 +6279,14 @@ static void stream_abandon(Net * const me)
  * owed or a forgotten transfer's job is out, the open waits, staged in
  * @c jobs, and runs when the worker is free.
  *
- * @param me  The AO.
- * @param req The request.
+ * @param me     The AO.
+ * @param who    Who asked.
+ * @param url    The URL.
+ * @param offset Where the body is wanted from; 0 for all of it.
+ * @param from   Whether it was asked with an offset.
  */
-static void stream_open_request(Net * const me,
-                                NetStreamOpenEvt const * const req)
+static void stream_open_request(Net * const me, QActive * const who,
+                                const char *url, uint32_t offset, bool from)
 {
     bool const opening = me->sbusy && ((uint8_t)NETS_OPEN == me->skind)
                          && (!me->sreplied);
@@ -5871,25 +6294,26 @@ static void stream_open_request(Net * const me,
     if ( me->sopen || opening || me->popen )
     {
         KLOG_E(TAG, "a transfer is already open");
-        stream_reply_open(req->who, KODE_DENIED, 0U);
+        stream_reply_open(who, KODE_DENIED, 0U, 0U, from);
     }
     else if ( me->sbusy || me->sclose_owed )
     {
         if ( NULL == me->jobs )
         {
-            stream_reply_open(req->who, KODE_NO_RESOURCES, 0U);
+            stream_reply_open(who, KODE_NO_RESOURCES, 0U, 0U, from);
         }
         else
         {
-            (void)snprintf(me->jobs->purl, sizeof(me->jobs->purl), "%s",
-                           req->url);
-            me->pwho  = req->who;
-            me->popen = true;
+            (void)snprintf(me->jobs->purl, sizeof(me->jobs->purl), "%s", url);
+            me->jobs->poffset = offset;
+            me->jobs->pfrom   = from;
+            me->pwho          = who;
+            me->popen         = true;
         }
     }
     else
     {
-        stream_begin_open(me, req->who, req->url);
+        stream_begin_open(me, who, url, offset, from);
     }
 }
 
@@ -5955,14 +6379,22 @@ static void stream_open_done(Net * const me, kode_status_t rc, uint32_t total,
     }
     if ( (!replied) && (NULL != who) )
     {
-        if ( KODE_OK != rc )
+        /* The server's word goes with the verdict either way, and with an
+         * offset its length too: the opener of a resumed download reads a
+         * refusal by them. */
+        uint16_t http = 0U;
+
+        if ( NULL != me->jobs )
         {
-            stream_reply_open(who, rc, 0U);
+            http = me->jobs->s.code;
         }
-        else
+        uint32_t size = total;
+
+        if ( (KODE_OK != rc) && !stream_job_from(me) )
         {
-            stream_reply_open(who, rc, total);
+            size = 0U;   /* a file's open that failed carries no length */
         }
+        stream_reply_open(who, rc, size, http, stream_job_from(me));
     }
 }
 
@@ -6144,8 +6576,9 @@ static void net_job_done(Net * const me, KqpWorkerDoneEvt const * const j)
 #if CONFIG_KODE_LOWPOWER
     net_lp_settle(me);
     net_lp_rejoin(me);   /* an AWAKE that came while the stop was out */
-    net_lp_radio_check(me);
+    net_lp_dark_check(me);
 #endif
+    net_fast_job_end(me);
 }
 
 /**
@@ -6198,6 +6631,7 @@ static void stream_job_done(Net * const me, KqpWorkerDoneEvt const * const j)
         }
     }
     stream_pump(me);
+    net_fast_job_end(me);
 }
 
 /**
@@ -6266,7 +6700,7 @@ static void stream_job_guard(Net * const me)
         case NETS_OPEN: {
             if ( NULL != me->swho )
             {
-                stream_reply_open(me->swho, KODE_TIMEOUT, 0U);
+                stream_reply_open(me->swho, KODE_TIMEOUT, 0U, 0U, stream_job_from(me));
             }
             me->sreplied = true;
             break;
@@ -6300,7 +6734,7 @@ static QState Net_initial(Net * const me, void const * const par)
      * the driver enforces, not a resource anybody has to own. */
     QActive_subscribe(&me->super, WIFI_STATE_SIG);
 #if CONFIG_KODE_LOWPOWER
-    me->lp_who = lowpower_join_radio(&me->super, "net");
+    me->lp_who = lowpower_join_dark(&me->super, "net");
     if ( KODE_LOWPOWER_WHO_NONE != me->lp_who )
     {
         QActive_subscribe(&me->super, LOWPOWER_ROUND_SIG);
@@ -6308,9 +6742,10 @@ static QState Net_initial(Net * const me, void const * const par)
         radio_lp_expect_net(true);   /* an OFF round waits for this AO's leave */
     }
     /* The scheduler's check wakes the radio, and has nothing to wake while the
-     * C5 link is down: ask where it stands rather than wait for an edge. */
+     * C5 link is down: ask where it stands rather than wait for an edge. A
+     * refusal is AO_Radio's line in the log; the next edge still comes. */
     QActive_subscribe(&me->super, RADIO_STATE_SIG);
-    radio_state_request();
+    (void)radio_state_request();
 #endif
 #if CONFIG_KODEOS_CHANNEL
     /* The setting this AO owns, `chan`: on unless the store says off. */
@@ -6363,11 +6798,63 @@ static QState Net_initial(Net * const me, void const * const par)
 
     /* Ask rather than wait for an edge that may have passed. Safe because
      * kode_init() starts AO_Radio before this AO: posting to an AO with no
-     * queue asserts. */
-    wifi_state_request();
+     * queue asserts. A refusal is AO_Radio's line in the log; the next edge
+     * still comes. */
+    (void)wifi_state_request();
 
     KLOG_I(TAG, "network services up (offline until there is an address)");
     return Q_TRAN(&Net_offline);
+}
+
+/**
+ * @brief Publish CHANNEL_STATE_SIG: the channel's state, or CHAN_OFF in a
+ *        firmware built without the channel.
+ *
+ * @param me The AO.
+ */
+static void chan_state_answer(const Net * const me)
+{
+#if CONFIG_KODEOS_CHANNEL
+    chan_publish(me);
+#else
+    ChannelStateEvt * const cs = Q_NEW_X(ChannelStateEvt, 0U, CHANNEL_STATE_SIG);
+    if ( NULL != cs )
+    {
+        (void)memset(&cs->why, 0, sizeof(cs->why));
+        (void)memset(&cs->broker, 0, sizeof(cs->broker));
+        cs->state   = (uint8_t)CHAN_OFF;
+        cs->since_s = 0U;
+        cs->next_s  = 0U;
+        cs->lost    = 0U;
+        cs->fast    = false;
+        cs->shot         = (uint8_t)KSHOT_IDLE;
+        cs->shot_sent    = 0U;
+        cs->shot_fps_x10 = 0U;
+        cs->shot_left_s  = 0U;
+        cs->keep_s       = 0U;
+        cs->session      = (uint8_t)CHAN_SESSION_NONE;
+        QACTIVE_PUBLISH(&cs->super, &me->super);
+    }
+#endif
+}
+
+/**
+ * @brief Answer a channel state ask the queue refused, before the event in hand.
+ *
+ * Called at the head of each state that can be the current one; asks owed
+ * together are answered once.
+ *
+ * @param me The AO.
+ * @param e  The event about to be handled; the entry, exit and init signals
+ *           of a transition are not events and pay nothing.
+ */
+static void chan_ask_pay(const Net * const me, QEvt const * const e)
+{
+    if ( ((enum_t)Q_USER_SIG <= (enum_t)e->sig)
+        && atomic_exchange_explicit(&s_chan_ask_owed, false, memory_order_acq_rel) )
+    {
+        chan_state_answer(me);
+    }
 }
 
 /**
@@ -6405,6 +6892,16 @@ static QState Net_root(Net * const me, QEvt const * const e)
         }
         case NET_JOB_GUARD_SIG: {
             net_job_guard(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_JOB_FAST_SIG: {
+            net_fast_job_tail(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_FAST_RETRY_SIG: {
+            net_fast_eval(me);
             status = Q_HANDLED();
             break;
         }
@@ -6471,6 +6968,20 @@ static QState Net_root(Net * const me, QEvt const * const e)
                 case KDRV_NET_MQTT_ERROR:
                     me->err = (uint8_t)KDRV_MQTT_ERR_REFUSED;
                     break;
+                case KDRV_NET_MQTT_ACKED: {
+                    /* A confirmed reply line reached the broker (its
+                     * PUBACK); the session's state is unchanged. */
+#if CONFIG_KODEOS_CHANNEL
+                    static const ConsoleSentEvt s_chan_sent = {
+                        .super = QEVT_INITIALIZER(CONSOLE_SENT_SIG),
+                        .src   = (uint8_t)KODE_CONSOLE_SRC_NET,
+                        .ok    = true,
+                    };
+
+                    QACTIVE_PUBLISH(&s_chan_sent.super, &me->super);
+#endif
+                    break;
+                }
                 default:
                     /* A disconnect: a bench client reconnects by itself, so
                      * the phase stands and the report carries the driver's
@@ -6480,7 +6991,10 @@ static QState Net_root(Net * const me, QEvt const * const e)
 #endif
                     break;
             }
-            mqtt_publish_state(me);
+            if ( (uint8_t)KDRV_NET_MQTT_ACKED != l->evt )
+            {
+                mqtt_publish_state(me);
+            }
             status = Q_HANDLED();
             break;
         }
@@ -6529,7 +7043,14 @@ static QState Net_root(Net * const me, QEvt const * const e)
             break;
         }
         case NET_CHAN_OUT_SIG: {
-            chan_out_step(me);
+            if ( 0U < me->leave_left )
+            {
+                net_leave_drain(me);   /* the leave's own steps */
+            }
+            else
+            {
+                chan_out_step(me);
+            }
             status = Q_HANDLED();
             break;
         }
@@ -6618,28 +7139,7 @@ static QState Net_root(Net * const me, QEvt const * const e)
         }
 #endif
         case CHANNEL_STATE_REQ_SIG: {
-#if CONFIG_KODEOS_CHANNEL
-            chan_publish(me);
-#else
-            ChannelStateEvt * const cs = Q_NEW_X(ChannelStateEvt, 0U, CHANNEL_STATE_SIG);
-            if ( NULL != cs )
-            {
-                (void)memset(&cs->why, 0, sizeof(cs->why));
-                (void)memset(&cs->broker, 0, sizeof(cs->broker));
-                cs->state   = (uint8_t)CHAN_OFF;
-                cs->since_s = 0U;
-                cs->next_s  = 0U;
-                cs->lost    = 0U;
-                cs->fast    = false;
-                cs->shot         = (uint8_t)KSHOT_IDLE;
-                cs->shot_sent    = 0U;
-                cs->shot_fps_x10 = 0U;
-                cs->shot_left_s  = 0U;
-                cs->keep_s       = 0U;
-                cs->session      = (uint8_t)CHAN_SESSION_NONE;
-                QACTIVE_PUBLISH(&cs->super, &me->super);
-            }
-#endif
+            chan_state_answer(me);
             status = Q_HANDLED();
             break;
         }
@@ -6657,23 +7157,14 @@ static void net_say_offline(const char *what)
     KLOG_W(TAG, "no network; %s needs an address - `wifi_join` first", what);
 }
 
-/** @brief Answer a transfer's open with a refusal: nothing was opened. */
-static void stream_open_refuse(NetStreamOpenEvt const * const req)
+/**
+ * @brief Answer a transfer's open with a refusal: nothing was opened.
+ * @param who  Who asked.
+ * @param from Whether it was asked with an offset.
+ */
+static void stream_open_refuse(QActive * const who, bool from)
 {
-    StorageOpenRspEvt *rsp = Q_NEW_X(StorageOpenRspEvt, 0U,
-                                     NET_STREAM_OPEN_RSP_SIG);
-
-    if ( NULL != rsp )
-    {
-        rsp->medium = (uint8_t)KDRV_MEDIUM_COUNT;
-        rsp->size   = 0U;
-        rsp->status = (uint8_t)KODE_DENIED;
-        QACTIVE_POST(req->who, &rsp->super, AO_Net);
-    }
-    else
-    {
-        KLOG_E(TAG, "out of events; open request dropped");
-    }
+    stream_reply_open(who, KODE_DENIED, 0U, 0U, from);
 }
 
 /**
@@ -6684,6 +7175,8 @@ static void stream_open_refuse(NetStreamOpenEvt const * const req)
 static QState Net_offline(Net * const me, QEvt const * const e)
 {
     QState status;
+
+    chan_ask_pay(me, e);
     switch ( e->sig )
     {
         case Q_ENTRY_SIG: {
@@ -6707,7 +7200,13 @@ static QState Net_offline(Net * const me, QEvt const * const e)
             /* Refused with its own outcome event: the callers wait on it with
              * no deadline of their own. */
             net_say_offline("a transfer over HTTP");
-            stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt));
+            stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt)->who, false);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_STREAM_OPEN_FROM_SIG: {
+            net_say_offline("a transfer over HTTP");
+            stream_open_refuse(Q_EVT_CAST(NetStreamFromEvt)->who, true);
             status = Q_HANDLED();
             break;
         }
@@ -6846,7 +7345,10 @@ static bool net_lp_refuses(Net * const me, QEvt const * const e)
                 mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
                 break;
             case NET_STREAM_OPEN_REQ_SIG:
-                stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt));
+                stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt)->who, false);
+                break;
+            case NET_STREAM_OPEN_FROM_SIG:
+                stream_open_refuse(Q_EVT_CAST(NetStreamFromEvt)->who, true);
                 break;
 #if CONFIG_KODEOS_CHANNEL && CONFIG_KODEOS_SHOT_HTTP
             case NET_SHOT_REQ_SIG:
@@ -6878,6 +7380,7 @@ static QState Net_online(Net * const me, QEvt const * const e)
 {
     QState status;
 
+    chan_ask_pay(me, e);
     if ( net_lp_refuses(me, e) )
     {
         status = Q_HANDLED();
@@ -6902,10 +7405,23 @@ static QState Net_online(Net * const me, QEvt const * const e)
 #endif
 {
     QState status;
+
+#if !CONFIG_KODE_LOWPOWER
+    chan_ask_pay(me, e);    /* with the board's rest, Net_online() paid */
+#endif
     switch ( e->sig )
     {
         case NET_STREAM_OPEN_REQ_SIG: {
-            stream_open_request(me, Q_EVT_CAST(NetStreamOpenEvt));
+            NetStreamOpenEvt const * const q = Q_EVT_CAST(NetStreamOpenEvt);
+
+            stream_open_request(me, q->who, q->url, 0U, false);
+            status = Q_HANDLED();
+            break;
+        }
+        case NET_STREAM_OPEN_FROM_SIG: {
+            NetStreamFromEvt const * const q = Q_EVT_CAST(NetStreamFromEvt);
+
+            stream_open_request(me, q->who, q->url, q->offset, true);
             status = Q_HANDLED();
             break;
         }
@@ -6997,6 +7513,10 @@ static QState Net_online(Net * const me, QEvt const * const e)
 #if CONFIG_KODEOS_CHANNEL
             chan_leave(me, "");
 #endif
+            /* Before the client's stop below, which is a job like any other
+             * and must not hold the fast mode: Net_offline says it again. */
+            me->online = false;
+            net_fast_gone(me);
             if ( ((uint8_t)MQTT_IDLE != me->phase)
                 && ((uint8_t)MQTT_STOPPING != me->phase) )
             {
@@ -7140,10 +7660,11 @@ static QState Net_online(Net * const me, QEvt const * const e)
 #endif
             if ( me->busy )
             {
-                /* Another network job holds the worker: refused. */
+                /* Another network job holds the worker: refused, and answered
+                 * busy as the channel's refusal is. The client's own reason
+                 * is left alone: it did not start, and did not fail. */
                 net_say_busy("mqtt_up");
-                me->err = (uint8_t)KDRV_MQTT_ERR_REFUSED;
-                mqtt_publish_state(me);
+                mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
             }
             else if ( (uint8_t)MQTT_IDLE != me->phase )
             {
@@ -7191,8 +7712,11 @@ static QState Net_online(Net * const me, QEvt const * const e)
             }
             else if ( me->busy )
             {
+                /* Answered busy, as the channel's refusal is: the console
+                 * closes `mqtt_down` on the answer, and the client's own
+                 * state would read as a stop that worked. */
                 net_say_busy("mqtt_down");
-                mqtt_publish_state(me);
+                mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
             }
             else
             {
@@ -7223,12 +7747,17 @@ static QState Net_online(Net * const me, QEvt const * const e)
                 break;
             }
 #endif
+            /* Either answer closes the verb. */
             if ( kdrv_net_mqtt_publish(p->topic, p->data, p->len, false)
                     != KODE_OK )
             {
                 KLOG_W(TAG, "publish to '%s' refused: no broker", p->topic);
+                mqtt_publish_refused();
             }
-            mqtt_publish_taken();   /* closes the verb: busy or ok */
+            else
+            {
+                mqtt_publish_taken();
+            }
             status = Q_HANDLED();
             break;
         }
@@ -7245,12 +7774,13 @@ static QState Net_online(Net * const me, QEvt const * const e)
             if ( kdrv_net_mqtt_subscribe(t->topic) != KODE_OK )
             {
                 KLOG_W(TAG, "subscribe to '%s' refused: no broker", t->topic);
+                mqtt_publish_refused();
             }
             else
             {
                 KLOG_N(TAG, "subscribed to '%s'", t->topic);
+                mqtt_publish_taken();
             }
-            mqtt_publish_taken();
             status = Q_HANDLED();
             break;
         }
@@ -7270,8 +7800,12 @@ static QState Net_online(Net * const me, QEvt const * const e)
             {
                 KLOG_W(TAG, "unsubscribe from '%s' refused: no broker",
                        t->topic);
+                mqtt_publish_refused();
             }
-            mqtt_publish_taken();
+            else
+            {
+                mqtt_publish_taken();
+            }
             status = Q_HANDLED();
             break;
         }

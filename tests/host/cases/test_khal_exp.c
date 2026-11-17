@@ -320,6 +320,42 @@ TEST_CASE("an interrupt needs an input first, and re-arms by position",
     exp_done();
 }
 
+/* What a wake line needs to know before it takes an input, and to put it back. */
+TEST_CASE("the info says an input's pull and whether an interrupt is attached, until it changes",
+          "[khal_exp]")
+{
+    khal_exp_info_t info;
+
+    exp_fresh();
+    khal_gpio_input_ExpectAndReturn(9U, KHAL_GPIO_PULL_DOWN, KODE_OK);   /* EXP2 */
+    TEST_ASSERT_EQUAL(KODE_OK, khal_exp_input(2U, KHAL_GPIO_PULL_DOWN));
+    khal_exp_info(2U, &info);
+    TEST_ASSERT_EQUAL(KHAL_GPIO_PULL_DOWN, info.pulled);
+    TEST_ASSERT_FALSE(info.irq);
+
+    khal_gpio_irq_attach_ExpectAndReturn(9U, KHAL_GPIO_IRQ_ANY_EDGE, NULL, NULL, KODE_ERROR);
+    khal_gpio_irq_attach_IgnoreArg_cb();
+    TEST_ASSERT_EQUAL(KODE_ERROR, khal_exp_irq_attach(2U, KHAL_GPIO_IRQ_ANY_EDGE,
+                                                      (khal_gpio_cb_t)0x1, NULL));
+    khal_exp_info(2U, &info);
+    TEST_ASSERT_FALSE_MESSAGE(info.irq, "an interrupt that did not attach is not one");
+
+    khal_gpio_irq_attach_ExpectAndReturn(9U, KHAL_GPIO_IRQ_ANY_EDGE, NULL, NULL, KODE_OK);
+    khal_gpio_irq_attach_IgnoreArg_cb();
+    TEST_ASSERT_EQUAL(KODE_OK, khal_exp_irq_attach(2U, KHAL_GPIO_IRQ_ANY_EDGE,
+                                                   (khal_gpio_cb_t)0x1, NULL));
+    khal_exp_info(2U, &info);
+    TEST_ASSERT_TRUE(info.irq);
+    TEST_ASSERT_EQUAL(KHAL_GPIO_PULL_DOWN, info.pulled);
+
+    khal_gpio_release_Expect(9U);
+    TEST_ASSERT_EQUAL(KODE_OK, khal_exp_release(2U));
+    khal_exp_info(2U, &info);
+    TEST_ASSERT_FALSE(info.irq);
+    TEST_ASSERT_EQUAL(KHAL_GPIO_PULL_NONE, info.pulled);
+    exp_done();
+}
+
 TEST_CASE("an uncalibrated port still fills the raw count", "[khal_exp]")
 {
     uint16_t raw = 0U;

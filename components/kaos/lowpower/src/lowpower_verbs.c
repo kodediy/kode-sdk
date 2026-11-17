@@ -10,6 +10,7 @@
 
 #include "kaos.h"
 #include "kdrv_radio.h"
+#include "khal_exp.h"
 #include "khal_power.h"
 #include "khal_system.h"
 #include "kode_log.h"
@@ -31,6 +32,9 @@ KAOS_WEAK bool radio_sleep_last_note(RadioSleepNoteEvt *out);
 #define LP_V_TIMEOUT_MS  (KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS \
                           + KODE_LOWPOWER_ROUND_MS + (uint32_t)CONSOLE_CMD_TIMEOUT_MS_N)
 
+/** @brief The longest wake time `rest` takes: a day, in ms. */
+#define LP_V_AFTER_MAX_MS  86400000U
+
 /** @brief Records of the summary one slice emits: the console's own slice. */
 #define LP_V_SLICE  KAOS_WIRE_SLICE
 
@@ -42,7 +46,9 @@ typedef enum {
     LP_V_NONE = 0,   /**< None of them.                                       */
     LP_V_STATE,      /**< sleep and power_off: closed by LOWPOWER_STATE_SIG, or by
                       *   LOWPOWER_REFUSED_SIG carrying this command's source. */
-    LP_V_LAST        /**< lowpower_info last=on: the last rest, in paced slices. */
+    LP_V_LAST,       /**< lowpower_info last=on: the last rest, in paced slices. */
+    LP_V_PART        /**< rest and rest_end: closed by LOWPOWER_PART_SIG, the
+                      *   answer carrying this command's source.              */
 } lp_verb_kind_t;
 
 static lp_verb_kind_t s_lp_kind;   /**< The verb in flight, LP_V_NONE between. */
@@ -78,6 +84,84 @@ static void h_power_off(const kverb_t *c, const karg_val_t *v)
 {
     (void)v;
     lowpower_ask(c, KODE_LP_OFF);
+}
+
+/** @brief The deadline of `rest` and `rest_end`: the bound kode_rest() waits,
+ *         and the default deadline as the margin on top. */
+#define LP_V_PART_TIMEOUT_MS  (KODE_LOWPOWER_PART_BOUND_MS + (uint32_t)CONSOLE_CMD_TIMEOUT_MS_N)
+_Static_assert(LP_V_PART_TIMEOUT_MS < KODE_CHAN_LINE_BOUND_MS,
+               "the Kode channel passes a line at its bound: rest must end before it");
+
+/* Where `rest`'s keys land in the parsed values. */
+#define LP_REST_ARG_PARTS  0U   /**< `parts`: the mask of KODE_LP_PART_*.            */
+#define LP_REST_ARG_TOUCH  1U   /**< `touch`: a touch ends the CPU part.             */
+#define LP_REST_ARG_PIN    2U   /**< `pin`: the header's position that ends it.      */
+#define LP_REST_ARG_LEVEL  3U   /**< `level`: the level of that position that does.  */
+#define LP_REST_ARG_AFTER  4U   /**< `after_ms`: the time that ends it.              */
+
+/**
+ * @brief Post AO_LowPower a request for parts and wait for its answer.
+ *
+ * @param c   The verb.
+ * @param req What is asked.
+ */
+static void lowpower_part_ask(const kverb_t *c, const lowpower_part_req_t *req)
+{
+    QEvt const * const e = lowpower_part_req_evt(req, console_src());
+
+    /* A queue with no room recycles the request: the line is refused, not asserted at. */
+    if ( (NULL == e) || (!QACTIVE_POST_X(AO_LowPower, e, KQP_LOWPOWER_CMD_MARGIN, NULL)) )
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
+    else
+    {
+        console_begin(c->verb);
+        console_extend(LP_V_PART_TIMEOUT_MS);
+        s_lp_kind = LP_V_PART;
+    }
+}
+
+/**
+ * @brief rest: put parts away while the board stays AWAKE, as an app does with kode_sys_rest().
+ *
+ * `parts` is the mask of KODE_LP_PART_* (1 screen, 2 panel, 4 touch, 8 sound,
+ * 16 card, 32 radio, 64 CPU). `touch`, `pin` with `level`, and `after_ms` are
+ * what ends the CPU part besides the buttons. Answered `>|rest parts=<mask at
+ * rest>` and `>ok`, or the refusal, "part: why".
+ */
+static void h_rest(const kverb_t *c, const karg_val_t *v)
+{
+    lowpower_part_req_t req = { 0 };
+
+    req.parts = (uint8_t)v[LP_REST_ARG_PARTS].u;
+    if ( v[LP_REST_ARG_TOUCH].present )
+    {
+        req.wake_touch = v[LP_REST_ARG_TOUCH].b;
+    }
+    if ( v[LP_REST_ARG_PIN].present )
+    {
+        req.wake_pin = (uint8_t)v[LP_REST_ARG_PIN].u;
+    }
+    if ( v[LP_REST_ARG_LEVEL].present )
+    {
+        req.wake_level = v[LP_REST_ARG_LEVEL].b;
+    }
+    if ( v[LP_REST_ARG_AFTER].present )
+    {
+        req.wake_after_ms = v[LP_REST_ARG_AFTER].u;
+    }
+    lowpower_part_ask(c, &req);
+}
+
+/** @brief rest_end: bring back every part `rest` put away. */
+static void h_rest_end(const kverb_t *c, const karg_val_t *v)
+{
+    lowpower_part_req_t req = { 0 };
+
+    (void)v;
+    req.end = true;
+    lowpower_part_ask(c, &req);
 }
 
 /** @brief The share of the time since boot spent in light sleep, 0..100. */
@@ -269,10 +353,12 @@ static void lp_last_advance(void)
 }
 
 /**
- * @brief lowpower_info: the board's rest, two records.
+ * @brief lowpower_info: the board's rest, three records.
  *
  * `>|lowpower`: state, for_s, cause, the two stored times in seconds (0 is never),
  * the wakes, and last_busy last, as the one field that can run long.
+ * `>|lowpower_rest`: the parts an app's rest has put away (a mask of
+ * KODE_LP_PART_*) and why its last request was refused, `-` when it stood.
  * `>|lowpower_stats`: light-sleep share and count, the C5's wakes, frames queued
  * while it slept (`-` until a wake is noted), most knocks per wake, deaf wakes.
  * `last=on` prints the last rest instead: a `>|lowpower_last` header and one
@@ -336,15 +422,22 @@ static void h_lowpower_info(const kverb_t *c, const karg_val_t *v)
                   lp_count(tx_serial, sizeof(tx_serial), have, note.tx_serial),
                   lp_count(tx_hci, sizeof(tx_hci), have, note.tx_hci),
                   (unsigned)rs.knocks_max, (unsigned long)rs.deaf);
+    refusal   = lp.part_why;
+    last_busy = "-";
+    if ( (NULL != refusal) && ('\0' != refusal[0]) )
+    {
+        last_busy = console_kv_fit(busy, sizeof(busy), refusal, "last_busy");
+    }
+    console_reply(">|lowpower_rest parts=%u last_busy=%s", (unsigned)lp.parts, last_busy);
     console_reply(">ok");
 }
 
 /**
  * @brief The events of this AO's verbs while one holds the console.
  *
- * ASLEEP or OFF answers `sleep` and `power_off`; AWAKE and RADIO do not (a wake
+ * ASLEEP or OFF answers `sleep` and `power_off`; AWAKE and DARK do not (a wake
  * or a round given up, which the refusal explains). A refusal answers only the
- * port that asked. The pacer's tick carries `lowpower_info last=on` to its next
+ * port that asked, and so does the answer to `rest` and `rest_end`. The pacer's tick carries `lowpower_info last=on` to its next
  * slice, or waits out a congested port.
  *
  * @param e The event.
@@ -376,6 +469,30 @@ static bool lowpower_answer(QEvt const *e)
 
             console_reply(">err code=%u msg=%s", (unsigned)KCLI_ERR_BUSY,
                           console_kv_text(quoted, sizeof(quoted), r->why));
+            s_lp_kind = LP_V_NONE;
+            console_end();
+        }
+        handled = true;
+    }
+    else if ( (LP_V_PART == s_lp_kind) && ((QSignal)LOWPOWER_PART_SIG == e->sig) )
+    {
+        LowPowerPartEvt const * const p = Q_EVT_CAST(LowPowerPartEvt);
+
+        /* A wake and a rest the board took are news, not this verb's answer. */
+        if ( ((uint8_t)KODE_LP_PART_ANSWER == p->what) && (console_src() == p->src) )
+        {
+            if ( (uint8_t)KODE_OK == p->rc )
+            {
+                console_reply(">|rest parts=%u", (unsigned)p->parts);
+                console_reply(">ok");
+            }
+            else
+            {
+                char quoted[CONSOLE_QUOTED_MAX(KODE_LOWPOWER_REFUSAL_MAX)];
+
+                console_reply(">err code=%u msg=%s", (unsigned)KCLI_ERR_BUSY,
+                              console_kv_text(quoted, sizeof(quoted), p->why));
+            }
             s_lp_kind = LP_V_NONE;
             console_end();
         }
@@ -417,10 +534,24 @@ static const karg_spec_t A_LOWPOWER_INFO[] = {
     { .key = "last", .required = false, .type = KARG_BOOL },
 };
 
+/* `rest parts=<mask> [touch=on] [pin=<position> level=on|off] [after_ms=<ms>]`. */
+static const karg_spec_t A_REST[] = {
+    { .key = "parts", .required = true, .type = KARG_UINT,
+      .min = 1U, .max = KODE_LP_PART_ALL },
+    { .key = "touch", .required = false, .type = KARG_BOOL },
+    { .key = "pin", .required = false, .type = KARG_UINT,
+      .min = KHAL_EXP_POS_MIN, .max = KHAL_EXP_POS_MAX },
+    { .key = "level", .required = false, .type = KARG_BOOL },
+    { .key = "after_ms", .required = false, .type = KARG_UINT,
+      .min = 1U, .max = LP_V_AFTER_MAX_MS },
+};
+
 static const kverb_t LOWPOWER_VERBS[] = {
     { "sleep",         NULL,            0U,                          h_sleep         },
     { "power_off",     NULL,            0U,                          h_power_off     },
     { "lowpower_info", A_LOWPOWER_INFO, KVERB_KEYS(A_LOWPOWER_INFO), h_lowpower_info },
+    { "rest",          A_REST,          KVERB_KEYS(A_REST),          h_rest          },
+    { "rest_end",      NULL,            0U,                          h_rest_end      },
 };
 
 const kverbs_t lowpower_verbs = {

@@ -131,7 +131,18 @@
 /** @brief What a save or a stop with no recording fails with. */
 #define AUDIO_NOTHING_TEXT "nothing was recorded"
 
+/** @brief What a call that found the app's own stream in its way fails with. */
+#define AUDIO_STREAM_BUSY_TEXT "audio is busy: a stream is open"
+
+/** @brief What a write or a close with no stream fails with. */
+#define AUDIO_STREAM_NONE_TEXT "no stream is open"
+
+/** @brief The idle time in seconds, for its text. */
+#define AUDIO_STREAM_IDLE_S ((uint32_t)KODE_AUDIO_STREAM_IDLE_MS / AUDIO_MS_PER_S)
+
 _Static_assert(KODE_AUDIO_TONE_HZ_MIN == KTONE_HZ_MIN, "the lowest tone is the board's");
+_Static_assert(KODE_AUDIO_STREAM_IDLE_MS == KODE_SYS_AUDIO_STREAM_IDLE_MS, "the stream's idle time is AO_Audio's");
+_Static_assert(KODE_SYS_AUDIO_CHANNELS_STEREO == 2U, "a stereo stream is two channels, as kode.h says");
 _Static_assert(KODE_AUDIO_TONE_HZ_MAX == KTONE_HZ_MAX, "the highest tone is the board's");
 _Static_assert((KODE_SYS_FILE_READ_MAX % AUDIO_FRAME_BYTES) == 0U, "a read window holds whole frames");
 _Static_assert(KODE_SYS_AUDIO_RATE_HZ == KWAV_RATE_HZ, "the stream and the WAV reader speak one rate");
@@ -161,7 +172,8 @@ typedef struct {
 
 /** @brief What one try carries. */
 typedef struct {
-    kode_status_t rc;  /**< The last answer. */
+    kode_status_t rc;        /**< The last answer.           */
+    uint8_t       channels;  /**< A stream's channels to ask. */
 } try_t;
 
 /** @brief The lock every public audio call holds; made on the first call. */
@@ -181,6 +193,9 @@ static atomic_bool s_fg_running;
 
 /** @brief The sound, background or not, is to end; cleared as a sound arms. */
 static atomic_bool s_sound_stop;
+
+/** @brief The app's own stream is open: from kode_audio_stream_open() to its close, or to the call that finds AO_Audio closed it. */
+static atomic_bool s_stream_running;
 
 /** @brief The recording in memory: a WAV image, the header and then the frames as bytes. */
 typedef struct {
@@ -600,17 +615,18 @@ static bool open_attempt(void *ctx)
     /* cppcheck-suppress misra-c2012-11.5 ; the context is the try_t stream_begin() passed */
     try_t *const t = (try_t *)ctx;
 
-    t->rc = kode_block_audio_stream_open(KODE_SYS_AUDIO_RATE_HZ, 1U);
+    t->rc = kode_block_audio_stream_open(KODE_SYS_AUDIO_RATE_HZ, t->channels);
     return KODE_DENIED != t->rc;
 }
 
 /**
  * @brief Open the stream, waiting its turn.
+ * @param channels KODE_SYS_AUDIO_CHANNELS_MONO or KODE_SYS_AUDIO_CHANNELS_STEREO.
  * @return true when it is open; false with the error set.
  */
-static bool stream_begin(void)
+static bool stream_begin(uint8_t channels)
 {
-    try_t t = { KODE_ERROR };
+    try_t t = { KODE_ERROR, channels };
 
     (void)kode_retry(&open_attempt, &t, KODE_AUDIO_BUSY_MS);
     switch ( t.rc )
@@ -631,6 +647,26 @@ static bool stream_begin(void)
         break;
     }
     return KODE_OK == t.rc;
+}
+
+/**
+ * @brief Whether the app's own stream holds the speaker.
+ *
+ * A stream AO_Audio closed for silence holds nothing: its mark is dropped
+ * here, so the task that forgot it does not keep the speaker from the rest.
+ *
+ * @return true while kode_audio_stream_open()'s stream is open.
+ */
+static bool stream_held(void)
+{
+    bool held = atomic_load(&s_stream_running);
+
+    if ( held && !kode_block_audio_stream_is_open() )
+    {
+        atomic_store(&s_stream_running, false);
+        held = false;
+    }
+    return held;
 }
 
 /**
@@ -679,10 +715,14 @@ bool kode_audio_play(const char *path)
         {
             kode_err_set("%s", AUDIO_RECORDING_BUSY_TEXT);
         }
+        else if ( stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_BUSY_TEXT);
+        }
         else
         {
             p.buf = window_get(&s_fg_window);
-            if ( (NULL != p.buf) && play_load(&p, path) && stream_begin() )
+            if ( (NULL != p.buf) && play_load(&p, path) && stream_begin(KODE_SYS_AUDIO_CHANNELS_MONO) )
             {
                 sound_arm(&s_fg_running);
                 p.stop = &s_sound_stop;
@@ -718,6 +758,10 @@ bool kode_audio_play_start(const char *path)
         {
             kode_err_set("%s", AUDIO_RECORDING_BUSY_TEXT);
         }
+        else if ( stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_BUSY_TEXT);
+        }
         else if ( !sound_halt() )
         {
             kode_err_set("%s", AUDIO_BUSY_TEXT);
@@ -728,7 +772,7 @@ bool kode_audio_play_start(const char *path)
 
             (void)memset(&s_bg, 0, sizeof(s_bg));
             s_bg.buf = window_get(&window);
-            if ( (NULL != s_bg.buf) && play_load(&s_bg, path) && stream_begin() )
+            if ( (NULL != s_bg.buf) && play_load(&s_bg, path) && stream_begin(KODE_SYS_AUDIO_CHANNELS_MONO) )
             {
                 sound_arm(&s_bg_running);
                 s_bg.stop = &s_sound_stop;
@@ -826,7 +870,7 @@ static bool tone_play(uint16_t hz, uint32_t ms)
 
     (void)memset(&p, 0, sizeof(p));
     p.buf = window_get(&s_fg_window);
-    if ( (NULL != p.buf) && stream_begin() )
+    if ( (NULL != p.buf) && stream_begin(KODE_SYS_AUDIO_CHANNELS_MONO) )
     {
         sound_arm(&s_fg_running);
         p.stop = &s_sound_stop;
@@ -860,6 +904,10 @@ bool kode_audio_tone(uint16_t hz, uint32_t ms)
         {
             kode_err_set("%s", AUDIO_RECORDING_BUSY_TEXT);
         }
+        else if ( stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_BUSY_TEXT);
+        }
         else
         {
             heard = tone_play(hz, ms);
@@ -888,7 +936,11 @@ bool kode_audio_play_samples(const int16_t *samples, uint32_t count)
         {
             kode_err_set("%s", AUDIO_RECORDING_BUSY_TEXT);
         }
-        else if ( stream_begin() )
+        else if ( stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_BUSY_TEXT);
+        }
+        else if ( stream_begin(KODE_SYS_AUDIO_CHANNELS_MONO) )
         {
             sound_arm(&s_fg_running);
             heard = frames_write(samples, count, &s_sound_stop);
@@ -1203,6 +1255,10 @@ bool kode_audio_record_file(const char *path, uint32_t ms)
         {
             kode_err_set("%s", AUDIO_PLAYING_TEXT);
         }
+        else if ( stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_BUSY_TEXT);
+        }
         else if ( kode_file_path(path, vol, sizeof(vol)) )
         {
             rec_file_try_t t = { vol, ms, 0U, KODE_ERROR };
@@ -1278,6 +1334,10 @@ bool kode_audio_record_samples(int16_t *buf, uint32_t cap, uint32_t ms, uint32_t
         else if ( atomic_load(&s_bg_running) )
         {
             kode_err_set("%s", AUDIO_PLAYING_TEXT);
+        }
+        else if ( stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_BUSY_TEXT);
         }
         else
         {
@@ -1471,6 +1531,10 @@ bool kode_audio_record_start(uint32_t max_ms)
         {
             kode_err_set("%s", AUDIO_PLAYING_TEXT);
         }
+        else if ( stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_BUSY_TEXT);
+        }
         else if ( !rec_halt() )
         {
             kode_err_set("%s", AUDIO_BUSY_TEXT);
@@ -1557,4 +1621,129 @@ bool kode_audio_record_save(const char *path)
         audio_leave();
     }
     return saved;
+}
+
+/* ---- The stream a task writes itself ---------------------------------------- */
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_audio_stream_open(uint8_t channels)
+{
+    bool opened = false;
+
+    if ( audio_enter("kode_audio_stream_open") )
+    {
+        if ( (KODE_SYS_AUDIO_CHANNELS_MONO != channels) && (KODE_SYS_AUDIO_CHANNELS_STEREO != channels) )
+        {
+            kode_err_set("a stream has 1 or 2 channels");
+        }
+        else if ( atomic_load(&s_bg_running) )
+        {
+            kode_err_set("%s", AUDIO_PLAYING_TEXT);
+        }
+        else if ( atomic_load(&s_rec_running) )
+        {
+            kode_err_set("%s", AUDIO_RECORDING_BUSY_TEXT);
+        }
+        else if ( stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_BUSY_TEXT);
+        }
+        else if ( stream_begin(channels) )
+        {
+            atomic_store(&s_stream_running, true);
+            opened = true;
+        }
+        else
+        {
+            /* stream_begin() said why */
+        }
+        audio_leave();
+    }
+    return opened;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_audio_stream_write(const int16_t *frames, uint32_t count, uint32_t ms, uint32_t *taken)
+{
+    bool   written = false;
+    size_t got     = 0U;
+
+    if ( NULL != taken )
+    {
+        *taken = 0U;
+    }
+    /* No turn is taken: a writer may wait for room, and the calls that take
+     * a turn are refused by the open stream, not kept waiting behind it. */
+    if ( kode_enter("kode_audio_stream_write") )
+    {
+        if ( !atomic_load(&s_stream_running) )
+        {
+            kode_err_set("%s", AUDIO_STREAM_NONE_TEXT);
+        }
+        else if ( (NULL == frames) || (0U == count) )
+        {
+            kode_err_set("no frames to write");
+        }
+        else
+        {
+            const kode_status_t rc = kode_block_audio_stream_write(frames, (size_t)count, ms, &got);
+
+            if ( KODE_OK == rc )
+            {
+                written = true;
+            }
+            else if ( KODE_TIMEOUT == rc )
+            {
+                kode_err_set("the stream is full: %" PRIu32 " of %" PRIu32 " frames written",
+                             (uint32_t)got, count);
+            }
+            else
+            {
+                /* Closed while this write waited, by a close or for silence:
+                 * from here on there is no stream. */
+                atomic_store(&s_stream_running, false);
+                kode_err_set("the stream is no longer open: it was closed, or went %" PRIu32
+                             " s without a write", AUDIO_STREAM_IDLE_S);
+            }
+            if ( NULL != taken )
+            {
+                *taken = (uint32_t)got;
+            }
+        }
+    }
+    return written;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+bool kode_audio_stream_close(void)
+{
+    bool closed = false;
+
+    if ( audio_enter("kode_audio_stream_close") )
+    {
+        if ( !stream_held() )
+        {
+            kode_err_set("%s", AUDIO_STREAM_NONE_TEXT);
+        }
+        else
+        {
+            const kode_status_t rc = kode_block_audio_stream_close();
+
+            atomic_store(&s_stream_running, false);
+            if ( KODE_OK == rc )
+            {
+                closed = true;
+            }
+            else if ( KODE_DENIED == rc )
+            {
+                kode_err_set("%s", AUDIO_STREAM_NONE_TEXT);
+            }
+            else
+            {
+                kode_err_set("%s", AUDIO_DEAF_TEXT);
+            }
+        }
+        audio_leave();
+    }
+    return closed;
 }

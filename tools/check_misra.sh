@@ -6,7 +6,9 @@
 # cppcheck reads the build's own compile_commands.json, so every file is
 # analysed with the include paths and the defines it is compiled with. Without
 # them the ESP-IDF and QP/C headers are not found, and half the report is
-# functions cppcheck never saw declared.
+# functions cppcheck never saw declared. What it never reads is the
+# toolchain's own headers: tools/misra_libc.h, beside this script, defines
+# the little of them some ESP-IDF headers cannot be read without.
 #
 # What is judged: the `.c` files the build compiles under the directories
 # named on the command line, and the headers under those directories. What is
@@ -37,8 +39,9 @@
 #   usage: tools/check_misra.sh [--update] <compile_commands.json> <baseline> <dir>...
 #          --update rewrites the baseline from this run instead of judging it
 #   stdout: "MISRA: <n> findings in <k> files, none past the baseline"
-#   exit:   0 within the baseline, 1 past it, if a file could not be analysed
-#           or if an input cannot be read
+#   exit:   0 within the baseline, 1 past it, if a file could not be analysed,
+#           if cppcheck failed or reported nothing at all, or if an input
+#           cannot be read
 #
 # Needs cppcheck and python3 on the PATH. Run it from the directory the
 # baseline's paths are relative to.
@@ -60,6 +63,7 @@ if [ "$#" -eq 0 ]; then
 fi
 
 deviations="$(cd "$(dirname "$0")" && pwd)/misra_deviations.txt"
+libc="$(cd "$(dirname "$0")" && pwd)/misra_libc.h"
 
 # Paths that are never judged, as extended regular expressions on the path
 # from the working directory.
@@ -69,7 +73,7 @@ EXCLUDE='/managed_components/|/build/|/components/qpc/|/components/kdrv/rfal/|/k
 # nobody checked, so these are never baselined.
 BLIND='^(syntaxError|unknownMacro|preprocessorErrorDirective|internalAstError|internalError|cppcheckError)$'
 
-for input in "$db" "$deviations"; do
+for input in "$db" "$deviations" "$libc"; do
     if [ ! -f "$input" ]; then
         echo "error: missing required input: $input" >&2
         exit 1
@@ -115,7 +119,7 @@ dirs=()
 for dir in "$@"; do
     dirs+=("$(cd "$dir" && pwd -P)")
 done
-if ! python3 - "$db" "$work/db.json" "$root" "$EXCLUDE" "${dirs[@]}" <<'EOF'
+if ! python3 - "$db" "$work/db.json" "$root" "$EXCLUDE" "${dirs[@]}" > "$work/judged.txt" <<'EOF'
 import json
 import os
 import re
@@ -137,6 +141,7 @@ for entry in json.load(open(src)):
     kept.append(entry)
 
 json.dump(kept, open(dst, "w"))
+print(len(kept))
 sys.exit(0 if kept else 1)
 EOF
 then
@@ -146,40 +151,68 @@ fi
 
 # ---- 2. the analysis --------------------------------------------------------
 # The compile database carries the include paths and the project's defines,
-# but not what the compiler defines by itself; the two below are the ones the
-# ESP-IDF headers ask for. The platform is the P4's: 32-bit, int and pointers
-# of four bytes.
+# but not what the compiler defines by itself; the three below are the ones the
+# ESP-IDF headers ask for, `__has_attribute()` answering no. The platform is
+# the P4's: 32-bit, int and pointers of four bytes.
 cppcheck --project="$work/db.json" --addon=misra --platform=unix32 \
     --enable=warning,style,performance,portability \
-    --inline-suppr --suppressions-list="$deviations" \
+    --inline-suppr --suppressions-list="$deviations" --include="$libc" \
     --suppress=missingInclude --suppress=missingIncludeSystem \
     --suppress=unusedFunction --suppress=checkersReport \
-    -D__riscv -D__GNUC__=14 -j "$(getconf _NPROCESSORS_ONLN)" \
+    -D__riscv -D__GNUC__=14 '-D__has_attribute(x)=0' \
+    -j "$(getconf _NPROCESSORS_ONLN)" \
     --template='{file}:{line}:{id}' \
     > /dev/null 2> "$work/raw.txt"
+status=$?
 
-# One finding a line, `<file> <line> <id>`, paths from the working directory;
-# only what lies under the named directories and outside the excluded paths.
+# Every line it writes there is a finding in the template's shape. A failed
+# run, or a line of any other shape - an error of its own, an addon that did
+# not load - means the files were not all judged, whatever the findings say.
+odd="$(awk -F: 'NF != 3 || $2 !~ /^[0-9]+$/' "$work/raw.txt")"
+if [ "$status" -ne 0 ] || [ -n "$odd" ]; then
+    echo "error: cppcheck did not run cleanly (exit $status), so nothing it reports can be trusted" >&2
+    if [ -n "$odd" ]; then
+        printf '%s\n' "$odd" | sed 's/^/  /' >&2
+    fi
+    exit 1
+fi
+
+# One finding a line, `<file> <line> <id>`, paths from the working directory.
 # A header is reported once however many sources include it.
-keep="$(printf '%s\n' "${dirs[@]}" | sed "s|^$root/||" | paste -sd'|' -)"
 sed "s|^$root/||" "$work/raw.txt" \
     | awk -F: 'NF == 3 { print $1, $2, $3 }' \
-    | grep -E "^($keep)/" \
-    | awk -v skip="$EXCLUDE" '("/" $1) !~ skip' \
-    | sort -u -k1,1 -k2,2n -k3,3 > "$work/found.txt"
+    | sort -u -k1,1 -k2,2n -k3,3 > "$work/all.txt"
 
-blind="$(awk -v ids="$BLIND" '$3 ~ ids { printf "  %s:%s %s\n", $1, $2, $3 }' "$work/found.txt")"
+# Read before anything is filtered out. Only judged sources were analysed, and
+# a header's #error or syntax error is reported at the header, which is often
+# an ESP-IDF or a vendored one: wherever it lies, a judged source went unread.
+blind="$(awk -v ids="$BLIND" '$3 ~ ids { printf "  %s:%s %s\n", $1, $2, $3 }' "$work/all.txt")"
 if [ -n "$blind" ]; then
     echo "error: cppcheck could not analyse these, so nothing checked them:" >&2
     echo "$blind" >&2
     exit 1
 fi
 
+# What is judged: only what lies under the named directories and outside the
+# excluded paths.
+keep="$(printf '%s\n' "${dirs[@]}" | sed "s|^$root/||" | paste -sd'|' -)"
+grep -E "^($keep)/" "$work/all.txt" \
+    | awk -v skip="$EXCLUDE" '("/" $1) !~ skip' > "$work/found.txt"
+
 awk '{ n[$1 " " $3]++ } END { for (k in n) print k, n[k] }' "$work/found.txt" \
     | sort > "$work/counts.txt"
 
 total="$(wc -l < "$work/found.txt" | tr -d ' ')"
 files="$(awk '{ print $1 }' "$work/found.txt" | sort -u | wc -l | tr -d ' ')"
+
+# Every file of this code base carries findings the baseline allows, so a run
+# that reports none judged none: a cppcheck that analysed nothing and said so
+# nowhere.
+if [ "$total" -eq 0 ]; then
+    printf 'error: cppcheck reported no finding in the %s sources it was given; it analysed nothing\n' \
+        "$(cat "$work/judged.txt")" >&2
+    exit 1
+fi
 
 # ---- 3. the verdict ---------------------------------------------------------
 if [ "$update" -eq 1 ]; then

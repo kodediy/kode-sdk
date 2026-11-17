@@ -21,6 +21,8 @@
 #include "kui_test_dot.h"
 #endif
 
+#include "kscreen_priv.h"
+
 #define TAG "kscreen"
 
 #if LV_USE_OS != LV_OS_NONE
@@ -80,6 +82,20 @@ _Static_assert((KSCREEN_BUF_BYTES - KSCREEN_BUF_ROW_BYTES) < ((size_t)KBSP_LCD_H
  * and nothing logged.
  */
 #define KSCREEN_FLUSH_TIMEOUT_MS 500U
+
+/* The critical battery notice, worded as kodeOS's own critical card. Every
+ * line was measured against the kit's faces to fit its place on one line. */
+#define KSCREEN_CRIT_TITLE      "Battery"                 /**< The card's title.                  */
+#define KSCREEN_CRIT_SUB        "Critical"                /**< Under it, in the danger colour.    */
+#define KSCREEN_CRIT_LINE1      "Plug in the cable"       /**< What it asks for...                */
+#define KSCREEN_CRIT_LINE2      "before it switches off." /**< ...and why.                        */
+#define KSCREEN_CRIT_NOTE       "Tap to close."           /**< How it goes without a cable.       */
+#define KSCREEN_CRIT_SHIELD_PCT 100                       /**< The shield covers the whole notice. */
+
+#if defined(CONFIG_KODE_COMPOSE)
+/** @brief The renderer kscreen_open() bound to a display: one per image. */
+static kscreen_t *l_opened = NULL;
+#endif
 
 /**
  * @brief LVGL's clock.
@@ -376,12 +392,18 @@ void kscreen_ctor(kscreen_t *s, QActive *owner, enum_t tick_sig)
     s->part_buf[0] = NULL;
     s->part_buf[1] = NULL;
     s->rot_buf = NULL;
+    s->parked  = false;
+    s->frame_copied = 0U;
+    s->frame_drawn  = 0U;
+    s->critical     = NULL;
 }
 
 void kscreen_start(kscreen_t *s)
 {
     QActive_subscribe(s->owner, DISPLAY_STATE_SIG);
     QActive_subscribe(s->owner, DISPLAY_REPAINT_SIG);
+    QActive_subscribe(s->owner, DISPLAY_PARK_SIG);
+    QActive_subscribe(s->owner, POWER_CRITICAL_SIG);
     touch_subscribe(s->owner);
 #if CONFIG_KODE_TEST_DOT
     QActive_subscribe(s->owner, TEST_DOT_SCREEN_REQ_SIG);
@@ -469,6 +491,9 @@ kode_status_t kscreen_open(kscreen_t *s, DisplayStateEvt const *d)
     {
         s->disp  = disp;
         s->indev = indev;
+#if defined(CONFIG_KODE_COMPOSE)
+        l_opened = s;
+#endif
         kui_init(disp);
         if ( direct )
         {
@@ -497,9 +522,24 @@ kode_status_t kscreen_open(kscreen_t *s, DisplayStateEvt const *d)
     return rc;
 }
 
+#if defined(CONFIG_KODE_COMPOSE)
+kscreen_t *kscreen_of(lv_display_t const *disp)
+{
+    kscreen_t *s = NULL;
+
+    if ( (NULL != disp) && (NULL != l_opened) && (l_opened->disp == disp) )
+    {
+        s = l_opened;
+    }
+    return s;
+}
+#endif
+
 void kscreen_tick(kscreen_t *s)
 {
-    if ( NULL != s->disp )
+    /* Parked, a tick already queued is let go and not re-armed: the
+     * framebuffers may be gone. kscreen_repaint() starts the pass again. */
+    if ( (NULL != s->disp) && !s->parked )
     {
         /* A resting finger publishes nothing - AO_Touch only speaks on change
          * - so feed LVGL the unchanged position each pass while pressed:
@@ -532,6 +572,9 @@ void kscreen_tick(kscreen_t *s)
         {
             wait = KODE_GUI_TICK_MS;
         }
+        /* A repaint may have armed the timer while this tick sat in the
+         * queue; arming an armed QTimeEvt is a QP assert. */
+        (void)QTimeEvt_disarm(&s->tick);
         QTimeEvt_armX(&s->tick, KQP_TICKS_PER_MS(wait) + 1U, 0U);
     }
 }
@@ -542,6 +585,13 @@ void kscreen_touch(kscreen_t *s, TouchEvt const *t)
     {
         /* A contact that stopped counting lifts with no click: nothing was
          * tapped where it rested. */
+        lv_indev_wait_release(s->indev);
+    }
+    if ( s->parked && t->pressed && (NULL != s->indev) )
+    {
+        /* The glass is dark: a finger on it wakes the app, and presses
+         * nothing it cannot see. The contact lifts with no click, even when
+         * it outlasts the wake. */
         lv_indev_wait_release(s->indev);
     }
     s->x       = t->x;
@@ -561,11 +611,159 @@ void kscreen_repaint(kscreen_t *s)
         if ( s->direct )
         {
             /* The row flipped the panel on its own, so LVGL's idea of which
-             * framebuffer is free may be the one on the glass. */
+             * framebuffer is free may be the one on the glass; after a sleep
+             * the link brought both back new. */
             buffers_align(s->disp);
         }
         lv_obj_invalidate(lv_screen_active());
         lv_obj_invalidate(lv_layer_top());
+        if ( s->parked )
+        {
+            /* A tick that fell due before kscreen_park() may still be in the
+             * queue; kscreen_tick() disarms before it arms, so the two never
+             * meet on an armed timer. */
+            s->parked = false;
+            QTimeEvt_armX(&s->tick, KQP_TICKS_PER_MS(KODE_GUI_TICK_MS), 0U);
+        }
+    }
+}
+
+void kscreen_park(kscreen_t *s, uint32_t seq)
+{
+    if ( NULL != s->disp )
+    {
+        if ( !s->parked )
+        {
+            s->parked = true;
+            (void)QTimeEvt_disarm(&s->tick);
+        }
+        /* Answered again for a second ask: each sleep waits for its own. */
+        if ( kode_sys_screen_parked(seq) != KODE_OK )
+        {
+            /* AO_Display's wait runs out and the glass stays lit; its repaint
+             * starts the pass again. */
+            KLOG_E(TAG, "could not tell the display the screen stopped drawing");
+        }
+    }
+}
+
+/**
+ * @brief A tap on the critical notice: close it, and let the tap reach
+ *        nothing else.
+ *
+ * Deleted later rather than here, inside its own event.
+ *
+ * @param e The event; its user data is the renderer.
+ */
+static void critical_tap_cb(lv_event_t *e)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; the user data is the kscreen_t critical_show() passed */
+    kscreen_t * const s = (kscreen_t *)lv_event_get_user_data(e);
+
+    if ( NULL != s->critical )
+    {
+        lv_obj_delete_async(s->critical);
+        s->critical = NULL;
+        KLOG_I(TAG, "critical battery: notice closed by a tap");
+    }
+}
+
+/**
+ * @brief Show one named child of the notice's card with @p text.
+ * @param card The card.
+ * @param name The child's name, a label of kui_sheet_create().
+ * @param text What it says.
+ * @return The label, or NULL when the card has no such child.
+ */
+static lv_obj_t *critical_line(const lv_obj_t *card, const char *name, const char *text)
+{
+    lv_obj_t * const l = lv_obj_find_by_name(card, name);
+
+    if ( NULL != l )
+    {
+        lv_label_set_text_static(l, text);
+        lv_obj_set_hidden(l, false);
+    }
+    return l;
+}
+
+/**
+ * @brief Build the critical notice on the top layer: the kit's sheet, said
+ *        as kodeOS's own critical card says it, under a shield that takes
+ *        every touch.
+ * @param s The renderer; open, and no notice up.
+ */
+static void critical_show(kscreen_t *s)
+{
+    lv_obj_t * const root = kui_sheet_create(lv_layer_top());
+    const lv_obj_t * const card = lv_obj_find_by_name(root, "card");
+
+    if ( NULL != card )
+    {
+        lv_obj_t * const handle = lv_obj_find_by_name(card, "handle");
+        lv_obj_t * const img    = lv_obj_find_by_name(card, "hdr_img");
+        lv_obj_t * const sub    = critical_line(card, "hdr_sub", KSCREEN_CRIT_SUB);
+
+        /* Nothing on the card drags or answers: the shield over it does. */
+        if ( NULL != handle )
+        {
+            lv_obj_set_hidden(handle, true);
+        }
+        if ( NULL != img )
+        {
+            lv_image_set_src(img, &kui_glyph_power_40);
+            lv_obj_set_style_image_recolor(img, KUI_COLOR_DANGER, 0);
+            lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
+            lv_obj_set_hidden(img, false);
+        }
+        if ( NULL != sub )
+        {
+            lv_obj_set_style_text_color(sub, KUI_COLOR_DANGER, 0);
+        }
+        (void)critical_line(card, "hdr_title", KSCREEN_CRIT_TITLE);
+        (void)critical_line(card, "line1", KSCREEN_CRIT_LINE1);
+        (void)critical_line(card, "line2", KSCREEN_CRIT_LINE2);
+        (void)critical_line(card, "note", KSCREEN_CRIT_NOTE);
+    }
+
+    /* Last, so it lies over the card and every press lands on it: a tap
+     * closes the notice and presses nothing of the app's underneath. */
+    lv_obj_t * const shield = lv_obj_create(root);
+
+    lv_obj_remove_style_all(shield);
+    lv_obj_set_size(shield, lv_pct(KSCREEN_CRIT_SHIELD_PCT), lv_pct(KSCREEN_CRIT_SHIELD_PCT));
+    lv_obj_set_scrollable(shield, false);
+    (void)lv_obj_add_event_cb(shield, &critical_tap_cb, LV_EVENT_CLICKED, s);
+    s->critical = root;
+}
+
+void kscreen_critical(kscreen_t *s, PowerCriticalEvt const *e)
+{
+    if ( e->critical )
+    {
+        if ( NULL == s->disp )
+        {
+            KLOG_W(TAG, "critical battery said before the glass is open; no notice");
+        }
+        else if ( NULL == s->critical )
+        {
+            critical_show(s);
+            KLOG_N(TAG, "critical battery: notice up");
+        }
+        else
+        {
+            /* up already */
+        }
+    }
+    else if ( NULL != s->critical )
+    {
+        lv_obj_delete(s->critical);
+        s->critical = NULL;
+        KLOG_N(TAG, "critical battery over: notice down");
+    }
+    else
+    {
+        /* nothing up, nothing to take down */
     }
 }
 

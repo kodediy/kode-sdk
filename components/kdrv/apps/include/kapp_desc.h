@@ -43,6 +43,8 @@ extern "C" {
 #define KAPP_IDF_DATE_MAX   16U
 /** @brief Bytes of esp_app_desc_t.time, terminator included: "21:14:03". */
 #define KAPP_IDF_TIME_MAX   16U
+/** @brief Bytes of an image's build id: esp_app_desc_t.app_elf_sha256, the digest of its ELF. */
+#define KAPP_BUILD_LEN      32U
 
 /**
  * @brief What an app declares about itself.
@@ -119,6 +121,19 @@ kode_status_t kapp_idf_desc(const uint8_t *prefix, size_t len,
                             char *build_time, size_t build_time_max);
 
 /**
+ * @brief An image's build id, from its prefix: the ELF digest IDF stamps in it.
+ *
+ * Two builds of an app differ in it even at the same length, so it is what
+ * says a file is the image an app was installed from.
+ *
+ * @param prefix The first bytes of an image; at least KAPP_DESC_OFF of them.
+ * @param len    How many bytes @p prefix holds.
+ * @param out    KAPP_BUILD_LEN bytes; zeroed when there is no id.
+ * @return KODE_OK when IDF's descriptor was found at its fixed offset.
+ */
+kode_status_t kapp_build_id(const uint8_t *prefix, size_t len, uint8_t *out);
+
+/**
  * @brief The chip an ESP image was built for, from its header.
  *
  * A bare `.bin` says which silicon it runs on in its first sixteen bytes,
@@ -145,6 +160,8 @@ kode_status_t kapp_image_chip(const uint8_t *prefix, size_t len,
 #define KAPP_IMAGE_CHIP_OFF  12U
 /** @brief ESP_IMAGE_HEADER_MAGIC, the first byte of every ESP image. */
 #define KAPP_IMAGE_MAGIC     0xE9U
+/** @brief ESP_CHIP_ID_ESP32P4, the chip id an image for kodeOS or its apps carries. */
+#define KAPP_CHIP_ESP32P4    0x0012U
 
 /**
  * @brief Declare this firmware's manifest. Optional; omit it and the app is
@@ -173,7 +190,8 @@ kode_status_t kapp_image_chip(const uint8_t *prefix, size_t len,
  *
  * @param display_  String literal: what a user reads on the pill.
  * @param category_ String literal: a free-form group, e.g. "game", "audio" -
- *                   up to four, comma-separated, e.g. "game,demo".
+ *                   up to four, comma-separated, e.g. "game,demo". "" names
+ *                   none: the name still shows, in no group of its own.
  */
 #define KODE_APP_MANIFEST(display_, category_)                                \
     _Static_assert(sizeof(display_) <= KAPP_NAME_MAX,                         \

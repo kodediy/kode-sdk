@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #include "unity.h"
 
@@ -141,6 +142,43 @@ TEST_CASE("ps on a board that refused nothing says alloc_fail=0",
 
     TEST_ASSERT_TRUE(replied("int_low=98304 alloc_fail=0"));
     TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+/* A word the console knows is handed to AO_Autotest, which announces the run
+ * or that it has no such row; a word it does not know never leaves the
+ * console. The row is AO_Display's: when an earlier case has started that AO
+ * the row runs here, with nobody to serve its requests, and what it left in
+ * AO_Display's queue is taken out again. */
+TEST_CASE("test component=compose is a word the console knows and hands to AO_Autotest",
+          "[console_ps]")
+{
+    const QEvt *e;
+
+    console_up();
+    ao_spy_subscribe(AUTOTEST_BEGIN_SIG);
+    ao_spy_drain();
+
+    type_line("test component=compose");
+    e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "AO_Autotest was asked for the row");
+    TEST_ASSERT_EQUAL_UINT((unsigned)AUTOTEST_BEGIN_SIG, (unsigned)e->sig);
+    ao_spy_drain();
+    if ( NULL != AO_Display->eQueue )
+    {
+        const QEvt *left = NULL;
+
+        while ( xQueueReceive(AO_Display->eQueue, &left, 0U) == pdTRUE )
+        {
+            QF_gc(left);
+        }
+    }
+
+    (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
+    type_line("test component=nosuchrow");
+    TEST_ASSERT_TRUE(replied(">err code=3 msg=component"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+                                   "a word that is no row's never leaves the console");
+    ao_spy_drain();
 }
 
 TEST_CASE("test component=mem passes on a board that kept its floor and refused nothing",

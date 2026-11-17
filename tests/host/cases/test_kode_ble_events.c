@@ -19,6 +19,7 @@
 #include "kode.h"
 #include "kode_entry.h"
 #include "kode_standard_ao.h"
+#include "kode_sys.h"
 #include "kode_sys_priv.h"
 #include "kqp.h"
 #include "qf_support.h"
@@ -171,4 +172,40 @@ TEST_CASE("a value a central took from 'log' arrives as ble_taken, source log, v
     TEST_ASSERT_EQUAL_STRING("log", s_rec[0].source);
     TEST_ASSERT_EQUAL_INT32(3, s_rec[0].value);
     TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_BLE_TAKEN, &listener_rec));
+}
+
+TEST_CASE("a pairing's code arrives as ble_pair_code, the code as value and as six digits, "
+          "and its end as ble_pair_done", "[kode_ble_events]")
+{
+    ble_events_up();
+    TEST_ASSERT_TRUE(kode_event_add_listener(KODE_EVENT_BLE_PAIR_CODE, &listener_rec));
+    TEST_ASSERT_TRUE(kode_event_add_listener(KODE_EVENT_BLE_PAIR_DONE, &listener_rec));
+    TEST_ASSERT_TRUE(ble_subscribed(BLE_PAIR_SIG));
+
+    BlePairEvt *show = Q_NEW(BlePairEvt, BLE_PAIR_SIG);
+    show->phase   = (uint8_t)KODE_SYS_BLE_PAIR_SHOW;
+    show->passkey = 4217U;
+    show->outcome = 0U;
+    QACTIVE_PUBLISH(&show->super, NULL);
+    BlePairEvt *done = Q_NEW(BlePairEvt, BLE_PAIR_SIG);
+    done->phase   = (uint8_t)KODE_SYS_BLE_PAIR_DONE;
+    done->passkey = 0U;
+    done->outcome = (uint8_t)KODE_SYS_BLE_PAIR_OK;
+    QACTIVE_PUBLISH(&done->super, NULL);
+    BlePairEvt *lost = Q_NEW(BlePairEvt, BLE_PAIR_SIG);
+    lost->phase   = (uint8_t)KODE_SYS_BLE_PAIR_DONE;
+    lost->passkey = 0U;
+    lost->outcome = (uint8_t)(KODE_SYS_BLE_PAIR_OK + 1U);
+    QACTIVE_PUBLISH(&lost->super, NULL);
+
+    TEST_ASSERT_TRUE(ble_rec_wait(3U));
+    TEST_ASSERT_EQUAL_STRING("ble_pair_code", s_rec[0].name);
+    TEST_ASSERT_EQUAL_INT32(4217, s_rec[0].value);
+    TEST_ASSERT_EQUAL_STRING("004217", (const char *)s_rec[0].text);
+    TEST_ASSERT_EQUAL_STRING("ble_pair_done", s_rec[1].name);
+    TEST_ASSERT_EQUAL_INT32(1, s_rec[1].value);
+    TEST_ASSERT_EQUAL_STRING("ble_pair_done", s_rec[2].name);
+    TEST_ASSERT_EQUAL_INT32(0, s_rec[2].value);
+    TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_BLE_PAIR_CODE, &listener_rec));
+    TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_BLE_PAIR_DONE, &listener_rec));
 }

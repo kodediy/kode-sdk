@@ -19,6 +19,8 @@ typedef struct {
     khal_exp_mode_t mode;     /**< What the position is doing. */
     const char     *tag;      /**< LENT only: who holds it. */
     khal_pwm_t      pwm;      /**< PWM only: the channel khal_pwm handed out. */
+    khal_gpio_pull_t pulled;  /**< IN only: the pull it was made an input with. */
+    bool            irq;      /**< IN only: an interrupt is attached to it. */
 } slot_t;
 
 static slot_t s_pos[KBSP_EXP_COUNT];   /**< One per position, in kbsp's order. */
@@ -82,6 +84,8 @@ static kode_status_t leave_mode(size_t i)
     }
     s->mode = KHAL_EXP_FREE;
     s->tag  = NULL;
+    s->pulled = KHAL_GPIO_PULL_NONE;
+    s->irq    = false;
     return KODE_OK;
 }
 
@@ -122,7 +126,9 @@ kode_status_t khal_exp_input(uint8_t pos, khal_gpio_pull_t pull)
     {
         return KODE_ERROR;
     }
-    s_pos[i].mode = KHAL_EXP_IN;
+    s_pos[i].mode   = KHAL_EXP_IN;
+    /* cppcheck-suppress misra-c2012-7.3 ; `pull` is the parameter, not the suffix of a literal */
+    s_pos[i].pulled = pull;
     return KODE_OK;
 }
 
@@ -287,7 +293,9 @@ kode_status_t khal_exp_pwm(uint8_t pos, uint32_t hz, uint16_t duty_x10)
 kode_status_t khal_exp_irq_attach(uint8_t pos, khal_gpio_irq_t kind,
                                   khal_gpio_cb_t cb, void *arg)
 {
-    size_t const i = idx_of(pos);
+    size_t const  i = idx_of(pos);
+    kode_status_t rc;
+
     if ( KBSP_EXP_COUNT <= i )
     {
         deny_pos("irq_attach on", pos);
@@ -303,7 +311,12 @@ kode_status_t khal_exp_irq_attach(uint8_t pos, khal_gpio_irq_t kind,
         KLOG_D(TAG, "irq_attach on EXP%u: a callback is wanted", (unsigned)pos);
         return KODE_DENIED;
     }
-    return khal_gpio_irq_attach(KBSP_EXP[i].gpio, kind, cb, arg);
+    rc = khal_gpio_irq_attach(KBSP_EXP[i].gpio, kind, cb, arg);
+    if ( KODE_OK == rc )
+    {
+        s_pos[i].irq = true;
+    }
+    return rc;
 }
 
 void khal_exp_irq_enable(uint8_t pos)
@@ -444,4 +457,6 @@ void khal_exp_info(uint8_t pos, khal_exp_info_t *out)
     out->lp   = KBSP_EXP[i].lp;
     out->mode = s_pos[i].mode;
     out->tag  = s_pos[i].tag;
+    out->pulled = s_pos[i].pulled;
+    out->irq    = s_pos[i].irq;
 }

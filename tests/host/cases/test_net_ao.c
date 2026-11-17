@@ -894,6 +894,9 @@ static kode_status_t stub_publish(const char *topic, const void *data,
     return s_publish_rc;
 }
 
+/** @brief What the subscribe and unsubscribe stubs answer; KODE_OK unless a case says otherwise. */
+static kode_status_t s_topic_rc = KODE_OK;
+
 static kode_status_t stub_subscribe(const char *topic, int n)
 {
     (void)n;
@@ -902,7 +905,7 @@ static kode_status_t stub_subscribe(const char *topic, int n)
         (void)snprintf(s_subs[s_nsub], sizeof(s_subs[s_nsub]), "%s", topic);
     }
     s_nsub++;
-    return KODE_OK;
+    return s_topic_rc;
 }
 
 static kode_status_t stub_unsubscribe(const char *topic, int n)
@@ -910,7 +913,7 @@ static kode_status_t stub_unsubscribe(const char *topic, int n)
     (void)topic;
     (void)n;
     s_nunsub++;
-    return KODE_OK;
+    return s_topic_rc;
 }
 
 static void stub_http_result(kdrv_net_http_result_t *out, int n)
@@ -1198,6 +1201,7 @@ static void chan_fresh(void)
 
     s_nreq = 0U; s_nbody = 0U; s_nsess = 0U; s_npub = 0U; s_nsub = 0U;
     s_nunsub = 0U;
+    s_topic_rc = KODE_OK;
     s_nout = 0U;
     s_publish_rc = KODE_OK;
     s_http_status = 0U;
@@ -2106,6 +2110,37 @@ TEST_CASE("mqtt_pub, mqtt_sub and mqtt_unsub with no network are answered no_net
     net_done();
 }
 
+/* Online and with no client up, the driver takes none of the three. The
+ * answer says so, or the console would close a publish that went nowhere
+ * with `>ok`. */
+TEST_CASE("mqtt_pub, mqtt_sub and mqtt_unsub with no broker are answered refused",
+          "[net_ao]")
+{
+    IdReqEvt q;
+
+    chan_fresh();
+
+    go_online();
+    TEST_ASSERT_EQUAL_INT(ID_REQ_SIG, (int)radio_take(&q, sizeof(q)));
+    answer_end((uint8_t)KODE_ST_NOT_FOUND, 0U, 0U);   /* no identity: the client is free */
+    ao_spy_drain();
+    s_publish_rc = KODE_ERROR;
+    s_topic_rc   = KODE_ERROR;
+
+    mqtt_pub_request("some/topic", "x", 1U);
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_REFUSED, next_state_err());
+    mqtt_sub_request("some/topic");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_REFUSED, next_state_err());
+    mqtt_unsub_request("some/topic");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_REFUSED, next_state_err());
+
+    s_publish_rc = KODE_OK;
+    net_done();
+}
+
 /* The reason a client is down outlives the network that caused it. A request
  * that was served says nothing of it, or `mqtt_pub` would be refused for an
  * address the board lost an hour ago. */
@@ -2967,7 +3002,7 @@ static void push_rows(unsigned first, unsigned n)
     for ( unsigned i = 0U; i < n; i++ )
     {
         (void)snprintf(line, sizeof(line), ">|row=%03u", first + i);
-        (void)kchan_out_push(line, strlen(line));
+        (void)kchan_out_push(line, strlen(line), false);
     }
 }
 
@@ -3697,7 +3732,7 @@ TEST_CASE("test_chan_stale_bound: an expiry queued behind the console's end of t
 }
 
 /* The retry of a line the console did not take has the same two meanings and
- * the same hazard: its expiry, queued, must not read as the 30 s bound. */
+ * the same hazard: its expiry, queued, must not read as the line's bound. */
 TEST_CASE("test_chan_stale_retry: a retry expiry queued behind a new line does not "
           "drop the head that was handed back", "[net_ao]")
 {
@@ -4358,6 +4393,21 @@ static fast_posts_t radio_fast_posts(void)
     return f;
 }
 
+/** @brief AO_Net's NET_FAST_JOB_HOLD_MS: how long the fast mode outlives the last job. */
+#define JOB_FAST_HOLD_MS  5000U
+
+/**
+ * @brief Let the tail of the join's last job run out, and empty AO_Radio's mailbox.
+ *
+ * What a join's jobs ask for is not what the cases that follow are about: they
+ * look at the channel's own hold.
+ */
+static void fast_idle(void)
+{
+    secs((JOB_FAST_HOLD_MS / 1000U) + 1U);
+    radio_drain();
+}
+
 TEST_CASE("the first cmd/in line asks for the fast mode once, and later lines "
           "only hold it", "[net_ao][fast]")
 {
@@ -4368,7 +4418,7 @@ TEST_CASE("the first cmd/in line asks for the fast mode once, and later lines "
     unsigned        notices;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
     before = chan_now();
 
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
@@ -4401,7 +4451,7 @@ TEST_CASE("the fast mode ends 60 s after the last line, and every line moves "
     unsigned        notices;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
 
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     radio_drain();
@@ -4430,7 +4480,7 @@ TEST_CASE("a line after the fast mode ended turns it on again", "[net_ao][fast]"
     fast_posts_t again;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
 
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     secs(61U);
@@ -4448,7 +4498,7 @@ TEST_CASE("lines the channel refuses do not turn the fast mode on",
     fast_posts_t f;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
 
     rx_mqtt_flags(CHAN_T_IN, "ping", 4U, false, true);   /* retained */
     rx_mqtt(CHAN_T_IN, "", 0U, false);                   /* empty */
@@ -4460,12 +4510,39 @@ TEST_CASE("lines the channel refuses do not turn the fast mode on",
     TEST_ASSERT_EQUAL_UINT(0U, f.on);
 }
 
+/* AO_Radio's doors leave KQP_RADIO_POST_MARGIN free: a wish posted into less
+ * than that is refused, and AO_Net asks again by itself (#151). */
+TEST_CASE("a fast-mode wish AO_Radio had no room for is asked again with nothing "
+          "else changing", "[net_ao][fast]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+    fast_posts_t      refused;
+    fast_posts_t      later;
+
+    cmd_fresh();
+    fast_idle();
+    while ( uxQueueSpacesAvailable(AO_Radio->eQueue) > (UBaseType_t)KQP_RADIO_POST_MARGIN )
+    {
+        (void)QACTIVE_POST_X(AO_Radio, &filler, 0U, NULL);
+    }
+
+    rx_mqtt(CHAN_T_IN, "ping", 4U, false);
+    refused = radio_fast_posts();       /* AO_Radio's queue is free again */
+    secs(1U);                           /* the holds stay as they are */
+    later = radio_fast_posts();
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, refused.on, "the queue had room for the wish");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, later.on, "a wish refused for room was never asked again");
+    TEST_ASSERT_TRUE(later.last_on);
+}
+
 TEST_CASE("losing the address ends the fast mode at once", "[net_ao][fast]")
 {
     fast_posts_t f;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
 
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     radio_drain();
@@ -4477,14 +4554,16 @@ TEST_CASE("losing the address ends the fast mode at once", "[net_ao][fast]")
     TEST_ASSERT_EQUAL_UINT(1U, f.off);
 }
 
-TEST_CASE("a refusal by the api ends the fast mode at once", "[net_ao][fast]")
+TEST_CASE("a refusal by the api ends the channel's hold at once, and the fast "
+          "mode when the jobs' tail does", "[net_ao][fast]")
 {
     IdSignReqEvt    sq;
     fast_posts_t    f;
+    fast_posts_t    tail;
     ChannelStateEvt st;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
     secs(100U);
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     radio_drain();
@@ -4493,22 +4572,28 @@ TEST_CASE("a refusal by the api ends the fast mode at once", "[net_ao][fast]")
     TEST_ASSERT_EQUAL_INT(ID_SIGN_REQ_SIG, (int)radio_take(&sq, sizeof(sq)));
     answer_sign((uint8_t)KODE_ST_OK, 70U);
     http_reply(401U, "{\"error\":\"untrusted_cert\"}");
-    f  = radio_fast_posts();
+    f  = radio_fast_posts();              /* the client's stop is with the worker */
     st = last_chan();
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    secs(6U);                             /* the jobs' tail runs out */
+    tail = radio_fast_posts();
     net_done();
 
     TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_REFUSED, st.state);
-    TEST_ASSERT_EQUAL_UINT(1U, f.off);
     TEST_ASSERT_FALSE(st.fast);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+    TEST_ASSERT_EQUAL_UINT(1U, tail.off);
 }
 
-TEST_CASE("losing the certificate ends the fast mode at once", "[net_ao][fast]")
+TEST_CASE("losing the certificate ends the channel's hold at once, and the fast "
+          "mode when the jobs' tail does", "[net_ao][fast]")
 {
     IdSignReqEvt sq;
     fast_posts_t f;
+    fast_posts_t tail;
 
     cmd_fresh();
-    radio_drain();
+    fast_idle();
     secs(100U);
     rx_mqtt(CHAN_T_IN, "ping", 4U, false);
     radio_drain();
@@ -4516,10 +4601,14 @@ TEST_CASE("losing the certificate ends the fast mode at once", "[net_ao][fast]")
     http_reply(200U, "{\"nonce\":\"v1.connect.second\"}");
     TEST_ASSERT_EQUAL_INT(ID_SIGN_REQ_SIG, (int)radio_take(&sq, sizeof(sq)));
     answer_sign((uint8_t)KODE_ST_NOT_FOUND, 0U);
-    f = radio_fast_posts();
+    f = radio_fast_posts();               /* the client's stop is with the worker */
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    secs(6U);                             /* the jobs' tail runs out */
+    tail = radio_fast_posts();
     net_done();
 
-    TEST_ASSERT_EQUAL_UINT(1U, f.off);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+    TEST_ASSERT_EQUAL_UINT(1U, tail.off);
 }
 
 /* ---- M1: a lost DISCONNECTED must not leave the channel deaf ---------------- */
@@ -4788,6 +4877,71 @@ TEST_CASE("mqtt_up hands the driver no session", "[net_ao]")
     net_done();
 }
 
+/* The console closes `mqtt_down` on the answer: a refusal that is published
+ * as the client's state reads as a stop that worked. */
+TEST_CASE("mqtt_down while a network job runs is refused as busy, not answered with a state",
+          "[net_ao][answers]")
+{
+    uint8_t       err = 0U;
+    uint8_t const off = 0U;
+
+    fake_nvs_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_set_u8(KSET_NAMESPACE, KSET_KEY_CHAN, off));
+    chan_fresh();
+    go_online();
+
+    mqtt_up_request("mqtt://broker.example:1883", "", "");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(1U, s_nreq);                  /* the start is in flight */
+    uint32_t const before = mqtt_answers(NULL);
+    fake_klog_reset();
+
+    TEST_ASSERT_TRUE(mqtt_down_request());
+    (void)net_settle();
+
+    TEST_ASSERT_TRUE(logged("a network job is already running"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_nreq, "a stop went out over the running job");
+    TEST_ASSERT_EQUAL_UINT32(before + 1U, mqtt_answers(&err));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KDRV_MQTT_ERR_BUSY, err,
+        "the refusal was answered as the state of a client that is fine");
+
+    fake_nvs_reset();
+    net_done();
+}
+
+/* The same for `mqtt_up`: asked while another network job holds the worker, it
+ * is refused, and the console closes it on the answer. Answered with the
+ * client's state it read as a client that started. */
+TEST_CASE("mqtt_up while a network job runs is refused as busy, not answered with a state",
+          "[net_ao][answers]")
+{
+    uint8_t       err = 0U;
+    uint8_t const off = 0U;
+
+    fake_nvs_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_set_u8(KSET_NAMESPACE, KSET_KEY_CHAN, off));
+    chan_fresh();
+    go_online();
+
+    mqtt_up_request("mqtt://broker.example:1883", "", "");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(1U, s_nreq);                  /* the start is in flight */
+    uint32_t const before = mqtt_answers(NULL);
+    fake_klog_reset();
+
+    TEST_ASSERT_TRUE(mqtt_up_request("mqtt://other.example:1883", "", ""));
+    (void)net_settle();
+
+    TEST_ASSERT_TRUE(logged("a network job is already running"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_nreq, "a second start went out over the running job");
+    TEST_ASSERT_EQUAL_UINT32(before + 1U, mqtt_answers(&err));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KDRV_MQTT_ERR_BUSY, err,
+        "the refusal was answered as the state of a client that started");
+
+    fake_nvs_reset();
+    net_done();
+}
+
 /* The CONNACK's session_present is what tells a Kode that its commands were
  * kept: channel_info says it, and one NOTICE per connect writes it down. */
 TEST_CASE("a connect the broker resumed says session resumed", "[net_ao]")
@@ -5015,15 +5169,22 @@ static size_t   s_read_got;
 /** @brief The URL the last open was asked for. */
 static char     s_open_url[KODE_FLASH_SRC_MAX];
 
-static kode_status_t stub_stream_open(const char *url, uint32_t *total,
+/** @brief Where the last open asked the body from. */
+static uint32_t s_open_offset;
+/** @brief What the open stand-in answers, and the status it says the server sent. */
+static kode_status_t s_open_rc = KODE_OK;
+static uint16_t      s_open_code = 200U;
+
+static kode_status_t stub_stream_open(const char *url, uint32_t offset, uint32_t *total,
                                       uint16_t *status, int n)
 {
     (void)n;
     s_n_open++;
+    s_open_offset = offset;
     (void)snprintf(s_open_url, sizeof(s_open_url), "%s", url);
     *total  = s_open_total;
-    *status = 200U;
-    return KODE_OK;
+    *status = s_open_code;
+    return s_open_rc;
 }
 
 static kode_status_t stub_stream_read(void *buf, size_t max, size_t *got, int n)
@@ -5088,6 +5249,9 @@ static void worker_fresh(void)
 
     s_n_open = 0U; s_n_read = 0U; s_n_close = 0U;
     s_open_total = 4242U;
+    s_open_offset = 0U;
+    s_open_rc     = KODE_OK;
+    s_open_code   = 200U;
     s_read_got   = 100U;
     s_nreq       = 0U;
     s_echo_n     = 0U;
@@ -5461,6 +5625,126 @@ TEST_CASE("an open that waited for a close, and whose asker closed before it "
     TEST_ASSERT_NOT_NULL(rsp);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, rsp->status);
 
+    worker_done();
+}
+
+/* ---- A transfer taken up part of the way in --------------------------------- */
+
+/** @brief Where the resumed transfers of these cases start. */
+#define RESUME_AT  40000U
+
+/** @brief Ask for a transfer from @p offset on, as net_stream_open_from_request() posts it. */
+static void ask_stream_open_from(const char *url, uint32_t offset)
+{
+    NetStreamFromEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_OPEN_FROM_SIG);
+    (void)snprintf(e.url, sizeof(e.url), "%s", url);
+    e.offset = offset;
+    e.who    = ao_spy();
+
+    net_dispatch(&e.super);
+}
+
+/** @brief The next answer the spy holds, which must be a resumed open's. */
+static const NetStreamFromRspEvt *from_rsp_next(void)
+{
+    const QEvt * const e = spy_next();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the open was not answered");
+    TEST_ASSERT_EQUAL_INT((int)NET_STREAM_FROM_RSP_SIG, (int)e->sig);
+    return (const NetStreamFromRspEvt *)(const void *)e;
+}
+
+TEST_CASE("a transfer opened from an offset asks the driver for the rest and "
+          "says what the server answered", "[net_ao]")
+{
+    const NetStreamFromRspEvt *rsp;
+
+    worker_fresh();
+    s_open_code = 206U;
+
+    ask_stream_open_from("http://example.invalid/big.bin", RESUME_AT);
+    TEST_ASSERT_EQUAL_UINT(1U, s_n_open);
+    TEST_ASSERT_EQUAL_UINT32(RESUME_AT, s_open_offset);
+    deliver_stream(KODE_OK);
+    rsp = from_rsp_next();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, rsp->status);
+    TEST_ASSERT_EQUAL_UINT16(206U, rsp->http);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(4242U, rsp->size, "what is left of the body");
+
+    ask_close();
+    deliver_stream(KODE_OK);
+    worker_done();
+}
+
+/* The opener decides what a refusal means, so it is told what the server
+ * said: a 200 is a server that ignores ranges, a 416 a file already whole. */
+TEST_CASE("an open the server refuses tells its opener the server's status",
+          "[net_ao]")
+{
+    const NetStreamFromRspEvt *rsp;
+
+    worker_fresh();
+
+    s_open_code = 200U;
+    s_open_rc   = KODE_ERROR;
+    ask_stream_open_from("http://example.invalid/big.bin", RESUME_AT);
+    deliver_stream(KODE_ERROR);
+    rsp = from_rsp_next();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_ERROR, rsp->status);
+    TEST_ASSERT_EQUAL_UINT16(200U, rsp->http);
+    ao_spy_drain();
+
+    s_open_code = 416U;
+    ask_stream_open_from("http://example.invalid/big.bin", RESUME_AT);
+    deliver_stream(KODE_ERROR);
+    rsp = from_rsp_next();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_ERROR, rsp->status);
+    TEST_ASSERT_EQUAL_UINT16(416U, rsp->http);
+
+    worker_done();
+}
+
+/* An open that has to wait for a close keeps the offset it was asked with,
+ * and the open after it starts from the beginning again. */
+TEST_CASE("an open that waited for a close keeps its offset, and the next has none",
+          "[net_ao]")
+{
+    const NetStreamFromRspEvt *rsp;
+    const StorageOpenRspEvt   *plain;
+
+    worker_fresh();
+    open_transfer();
+
+    ask_close();                       /* the close job is inside the worker */
+    s_open_code = 206U;
+    ask_stream_open_from("http://example.invalid/waiting.bin", RESUME_AT);
+    TEST_ASSERT_EQUAL_UINT(1U, s_n_open);
+    deliver_stream(KODE_OK);           /* the close is done: the open runs */
+    TEST_ASSERT_EQUAL_UINT(2U, s_n_open);
+    TEST_ASSERT_EQUAL_UINT32(RESUME_AT, s_open_offset);
+    deliver_stream(KODE_OK);
+    rsp = from_rsp_next();
+    TEST_ASSERT_EQUAL_UINT16(206U, rsp->http);
+    ao_spy_drain();
+
+    ask_close();
+    deliver_stream(KODE_OK);
+    s_open_code = 200U;
+    ask_stream_open("http://example.invalid/whole.bin");
+    TEST_ASSERT_EQUAL_UINT(3U, s_n_open);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_open_offset, "a plain open is the whole body");
+    deliver_stream(KODE_OK);
+    plain = (const StorageOpenRspEvt *)spy_next();
+    TEST_ASSERT_NOT_NULL(plain);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)NET_STREAM_OPEN_RSP_SIG, (int)plain->super.sig,
+        "a plain open is answered as it always was");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, plain->status);
+
+    ask_close();
+    deliver_stream(KODE_OK);
     worker_done();
 }
 
@@ -7309,6 +7593,7 @@ TEST_CASE("the stream holds the fast mode and lets it go when it ends",
     fast_posts_t f;
 
     stream_fresh();
+    fast_idle();
     stream_ask(1U, 50U);
     (void)spied();
     f = radio_fast_posts();
@@ -7323,6 +7608,7 @@ TEST_CASE("the stream holds the fast mode and lets it go when it ends",
         ms(1000U);
     }
     TEST_ASSERT_EQUAL_UINT(1U, logged_count("shot: stream ended (time)"));
+    job_done_http(KODE_OK);   /* the stream's close */
     f = radio_fast_posts();
     TEST_ASSERT_EQUAL_UINT(0U, f.on);
     TEST_ASSERT_EQUAL_UINT(0U, f.off);
@@ -7414,6 +7700,7 @@ TEST_CASE("a display that cannot encode ends the stream with display, closes "
     unsigned     from;
 
     stream_fresh();
+    fast_idle();
     from = s_nreq;
     stream_ask(2U, 300U);
     (void)spied();
@@ -7428,6 +7715,7 @@ TEST_CASE("a display that cannot encode ends the stream with display, closes "
     TEST_ASSERT_EQUAL_UINT(0U, jobs_of(KDRV_NET_JOB_HTTP_PUT, from));
     ms(1000U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, display_asks(), "the ended stream asked again");
+    job_done_http(KODE_OK);   /* the stream's close */
 
     /* The fast mode is the hold's to end, 60 s after the frame that asked. */
     ms(57000U);
@@ -7826,6 +8114,7 @@ static void sys_stub_result(kdrv_net_http_result_t *out, uint8_t *buf, uint32_t 
     out->body_len       = SYS_BODY_LEN;
     out->kept           = keep;
     out->truncated      = SYS_BODY_LEN > keep;
+    out->range_total    = -1;
 }
 
 static kode_status_t sys_stub_get(const char *url, uint8_t *buf, uint32_t cap,
@@ -7835,6 +8124,33 @@ static kode_status_t sys_stub_get(const char *url, uint8_t *buf, uint32_t cap,
     s_sys_calls++;
     s_sys_seen_buf = buf;
     sys_stub_result(out, buf, cap);
+    return s_sys_rc;
+}
+
+/** @brief What the ranged GET stand-in was asked for, and what it says of the whole. */
+static uint64_t s_sys_seen_offset;
+static uint32_t s_sys_seen_cap;
+static uint32_t s_sys_range_calls;
+
+/** @brief The length of the whole resource the ranged stand-in reports. */
+#define SYS_RANGE_TOTAL   5000000000LL
+/** @brief The status of a served range. */
+#define SYS_RANGE_STATUS  206U
+/** @brief Where the ranged cases start: past what 32 bits hold. */
+#define SYS_RANGE_OFFSET  4294967296ULL
+
+static kode_status_t sys_stub_range(const char *url, uint64_t offset, uint8_t *buf, uint32_t cap,
+                                    kdrv_net_http_result_t *out, uint32_t timeout_ms, int n)
+{
+    (void)url; (void)timeout_ms; (void)n;
+    s_sys_calls++;
+    s_sys_range_calls++;
+    s_sys_seen_buf    = buf;
+    s_sys_seen_offset = offset;
+    s_sys_seen_cap    = cap;
+    sys_stub_result(out, buf, cap);
+    out->status      = SYS_RANGE_STATUS;
+    out->range_total = SYS_RANGE_TOTAL;
     return s_sys_rc;
 }
 
@@ -7877,7 +8193,11 @@ static void sys_fresh(void)
     kdrv_net_lookup_Stub(&sys_stub_lookup);
     kdrv_net_ping_Stub(&sys_stub_ping);
     kdrv_net_http_get_Stub(&sys_stub_get);
+    kdrv_net_http_get_range_Stub(&sys_stub_range);
     kdrv_net_http_post_Stub(&sys_stub_post);
+    s_sys_seen_offset = 0U;
+    s_sys_seen_cap    = 0U;
+    s_sys_range_calls = 0U;
     kdrv_net_udp_send_Stub(&sys_stub_udp);
 }
 
@@ -7992,6 +8312,114 @@ TEST_CASE("kode_sys_http_get fills the lent buffer on the worker and answers the
     TEST_ASSERT_FALSE(a->result.truncated);
     TEST_ASSERT_EQUAL_MEMORY(SYS_BODY, buf, SYS_BODY_LEN);
     TEST_ASSERT_EQUAL_UINT8(SYS_LENT_FILL, buf[SYS_BODY_LEN]);
+    worker_done();
+}
+
+/* A file too big for one buffer is fetched a range at a time: the offset goes
+ * to the driver whole, and the answer says how long the resource is. */
+TEST_CASE("kode_sys_http_get_range asks the worker for the range and answers the total",
+          "[net_ao][ask]")
+{
+    uint8_t              buf[SYS_BUF];
+    const NetHttpRspEvt *a;
+
+    sys_fresh();
+    (void)memset(buf, SYS_LENT_FILL, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", SYS_RANGE_OFFSET, buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", 0U, buf, SYS_BUF),
+        "a range shares the door of a GET: one at a time");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_sys_range_calls, "the range ran on the worker");
+    TEST_ASSERT_EQUAL_UINT64(SYS_RANGE_OFFSET, s_sys_seen_offset);
+    TEST_ASSERT_EQUAL_UINT32(SYS_BUF, s_sys_seen_cap);
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(buf, s_sys_seen_buf, "the worker wrote somewhere else");
+    deliver_held(KODE_OK);
+
+    a = (const NetHttpRspEvt *)(const void *)sys_take(NET_HTTP_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_FALSE(a->post);
+    TEST_ASSERT_EQUAL_UINT16(SYS_RANGE_STATUS, a->result.status);
+    TEST_ASSERT_EQUAL_UINT32(SYS_BODY_LEN, a->result.kept);
+    TEST_ASSERT_EQUAL_INT64(SYS_RANGE_TOTAL, a->result.range_total);
+    TEST_ASSERT_EQUAL_MEMORY(SYS_BODY, buf, SYS_BODY_LEN);
+    worker_done();
+}
+
+/* The request after a range is a plain one again: nothing of the range stays
+ * with the worker's job. */
+TEST_CASE("a plain GET after a range asks for no range and answers no total",
+          "[net_ao][ask]")
+{
+    uint8_t              buf[SYS_BUF];
+    const NetHttpRspEvt *a;
+
+    sys_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", SYS_RANGE_OFFSET, buf, SYS_BUF));
+    (void)net_settle();
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_sys_range_calls, "the plain GET went out as a range");
+    deliver_held(KODE_OK);
+    a = (const NetHttpRspEvt *)(const void *)sys_take(NET_HTTP_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT16(SYS_HTTP_STATUS, a->result.status);
+    TEST_ASSERT_EQUAL_INT64(-1, a->result.range_total);
+    worker_done();
+}
+
+TEST_CASE("with no network a range is answered KODE_IO_ERROR with no total, the driver untouched",
+          "[net_ao][ask]")
+{
+    uint8_t              buf[SYS_BUF];
+    const NetHttpRspEvt *a;
+
+    sys_fresh();
+    go_offline();
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        net_http_range_ask(ao_spy(), "http://example.com/big.bin", 0U, buf, SYS_BUF));
+    (void)net_settle();
+    a = (const NetHttpRspEvt *)(const void *)sys_take(NET_HTTP_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_IO_ERROR, a->rc);
+    TEST_ASSERT_EQUAL_INT64(-1, a->result.range_total);
+    TEST_ASSERT_EQUAL_UINT32(0U, s_sys_range_calls);
+    worker_done();
+}
+
+/* The door of the header: what it refuses, it refuses before anything is
+ * asked of AO_Net. */
+TEST_CASE("kode_sys_http_get_range refuses what cannot be a range and posts nothing",
+          "[net_ao][ask]")
+{
+    uint8_t buf[SYS_BUF];
+    char    longurl[KODE_SYS_NET_URL_MAX + 1U];
+
+    sys_fresh();
+    (void)memset(longurl, 'u', sizeof(longurl) - 1U);
+    longurl[sizeof(longurl) - 1U] = '\0';
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(NULL, "http://x/", 0U, buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), longurl, 0U, buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), "http://x/", 0U, NULL, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), "http://x/", 0U, buf, 0U));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+        kode_sys_http_get_range(ao_spy(), "http://x/", KODE_HTTP_OFF_MAX, buf, SYS_BUF),
+        "a range that runs past the last offset the type holds");
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_sys_calls);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get_range(ao_spy(), "http://x/", 100U, buf, SYS_BUF));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT64(100U, s_sys_seen_offset);
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
     worker_done();
 }
 
@@ -8491,6 +8919,304 @@ TEST_CASE("an AWAKE that comes while the client is still stopping rejoins when t
     net_done();
 }
 
+/* ---- The fast mode and the jobs ----------------------------------------------
+ * A job with either worker holds the fast mode, and for NET_FAST_JOB_HOLD_MS
+ * after the last one comes back. AO_Radio is asked once for each edge of the
+ * channel's hold and the jobs' together: on when the first begins, off when
+ * the last ends. Nothing of the jobs' hold outlives the address or the rest.
+ */
+
+/** @brief A download's address, any. */
+#define JOB_FAST_URL      "http://example.invalid/app.bin"
+
+TEST_CASE("a job handed to the worker asks AO_Radio for the fast mode once",
+          "[net_ao][fast]")
+{
+    fast_posts_t f;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    f = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, f.on);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+}
+
+TEST_CASE("a job handed to the download's worker asks for the fast mode too",
+          "[net_ao][fast]")
+{
+    fast_posts_t f;
+
+    worker_fresh();
+    ask_stream_open(JOB_FAST_URL);
+    f = radio_fast_posts();
+    deliver_stream(KODE_OK);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, f.on);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+}
+
+TEST_CASE("two jobs back to back ask for the fast mode once, not twice",
+          "[net_ao][fast]")
+{
+    fast_posts_t first;
+    fast_posts_t second;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    first = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    ask_ping("192.168.0.2", 1U);
+    second = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, first.on);
+    TEST_ASSERT_EQUAL_UINT(0U, second.on);
+    TEST_ASSERT_EQUAL_UINT(0U, second.off);
+}
+
+TEST_CASE("the fast mode is given back NET_FAST_JOB_HOLD_MS after the last "
+          "job ends, and not before", "[net_ao][fast]")
+{
+    fast_posts_t before;
+    fast_posts_t at;
+    fast_posts_t later;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    radio_drain();
+
+    ms(JOB_FAST_HOLD_MS - 100U);
+    before = radio_fast_posts();
+    ms(200U);
+    at = radio_fast_posts();
+    ms(2U * JOB_FAST_HOLD_MS);
+    later = radio_fast_posts();
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, before.off);
+    TEST_ASSERT_EQUAL_UINT(1U, at.off);
+    TEST_ASSERT_EQUAL_UINT(0U, at.on);
+    TEST_ASSERT_EQUAL_UINT(0U, later.off);
+    TEST_ASSERT_EQUAL_UINT(0U, later.on);
+}
+
+TEST_CASE("a job that starts during the tail keeps the fast mode and sends "
+          "no new request", "[net_ao][fast]")
+{
+    fast_posts_t restart;
+    fast_posts_t held;
+    fast_posts_t end;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    radio_drain();
+
+    ms(3000U);
+    ask_ping("192.168.0.2", 1U);
+    restart = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    ms(3000U);                /* 6 s after the first end: its tail is gone */
+    held = radio_fast_posts();
+    ms(2100U);                /* 5.1 s after the second */
+    end = radio_fast_posts();
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, restart.on);
+    TEST_ASSERT_EQUAL_UINT(0U, restart.off);
+    TEST_ASSERT_EQUAL_UINT(0U, held.off);
+    TEST_ASSERT_EQUAL_UINT(1U, end.off);
+}
+
+TEST_CASE("the tail starts only when neither worker holds a job",
+          "[net_ao][fast]")
+{
+    fast_posts_t first;
+    fast_posts_t second;
+    fast_posts_t inside;
+    fast_posts_t before;
+    fast_posts_t at;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    first = radio_fast_posts();
+    ask_stream_open(JOB_FAST_URL);
+    second = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    ms(2U * JOB_FAST_HOLD_MS);            /* the download's job is still inside */
+    inside = radio_fast_posts();
+
+    deliver_stream(KODE_OK);
+    ms(JOB_FAST_HOLD_MS - 100U);
+    before = radio_fast_posts();
+    ms(200U);
+    at = radio_fast_posts();
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, first.on);
+    TEST_ASSERT_EQUAL_UINT(0U, second.on);
+    TEST_ASSERT_EQUAL_UINT(0U, inside.off);
+    TEST_ASSERT_EQUAL_UINT(0U, before.off);
+    TEST_ASSERT_EQUAL_UINT(1U, at.off);
+}
+
+TEST_CASE("the channel's hold running when the jobs' tail ends keeps the "
+          "fast mode", "[net_ao][fast]")
+{
+    fast_posts_t    joined;
+    fast_posts_t    mid;
+    fast_posts_t    end;
+    ChannelStateEvt held;
+
+    cmd_fresh();                          /* the join's last job ended just now */
+    radio_drain();
+
+    rx_mqtt(CHAN_T_IN, "ping", 4U, false);
+    joined = radio_fast_posts();
+    ms(JOB_FAST_HOLD_MS + 500U);          /* the jobs' tail ends here */
+    mid  = radio_fast_posts();
+    held = chan_now();
+    secs(60U);                            /* the channel's own hold ends */
+    end = radio_fast_posts();
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, joined.on);
+    TEST_ASSERT_EQUAL_UINT(0U, joined.off);
+    TEST_ASSERT_EQUAL_UINT(0U, mid.off);
+    TEST_ASSERT_TRUE(held.fast);
+    TEST_ASSERT_EQUAL_UINT(1U, end.off);
+    TEST_ASSERT_EQUAL_UINT(0U, end.on);
+}
+
+TEST_CASE("losing the network ends the jobs' hold without a request, and a "
+          "job after it asks again", "[net_ao][fast]")
+{
+    fast_posts_t gone;
+    fast_posts_t late;
+    fast_posts_t again;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    radio_drain();
+
+    go_offline();                         /* the job is still with the worker */
+    gone = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK); /* it comes back with no address */
+    ms(2U * JOB_FAST_HOLD_MS);
+    late = radio_fast_posts();
+
+    go_online();
+    ask_ping("192.168.0.2", 1U);
+    again = radio_fast_posts();
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, gone.on);
+    TEST_ASSERT_EQUAL_UINT(0U, gone.off);
+    TEST_ASSERT_EQUAL_UINT(0U, late.on);
+    TEST_ASSERT_EQUAL_UINT(0U, late.off);
+    TEST_ASSERT_EQUAL_UINT(1U, again.on);
+}
+
+TEST_CASE("the stop of a lost network does not ask for the fast mode",
+          "[net_ao][fast]")
+{
+    fast_posts_t gone;
+    fast_posts_t late;
+
+    lp_channel_up();
+    ms(2U * JOB_FAST_HOLD_MS);            /* the join's tail is over */
+    radio_drain();
+
+    go_offline();                         /* the client is stopped: a job */
+    TEST_ASSERT_EQUAL_INT((int)KDRV_NET_JOB_MQTT_STOP, s_ran_job);
+    gone = radio_fast_posts();
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    ms(2U * JOB_FAST_HOLD_MS);
+    late = radio_fast_posts();
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, gone.on);
+    TEST_ASSERT_EQUAL_UINT(0U, gone.off);
+    TEST_ASSERT_EQUAL_UINT(0U, late.on);
+    TEST_ASSERT_EQUAL_UINT(0U, late.off);
+}
+
+TEST_CASE("an ASLEEP round drops the jobs' tail at once", "[net_ao][fast]")
+{
+    fast_posts_t rest;
+    fast_posts_t late;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    radio_drain();
+
+    lp_round(AO_Net, KODE_LP_ASLEEP);
+    rest = radio_fast_posts();
+    lp_expect_answer(false, NULL);
+    ms(2U * JOB_FAST_HOLD_MS);            /* nothing is left to fire */
+    late = radio_fast_posts();
+    lp_awake(AO_Net);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, rest.off);
+    TEST_ASSERT_EQUAL_UINT(0U, rest.on);
+    TEST_ASSERT_EQUAL_UINT(0U, late.off);
+    TEST_ASSERT_EQUAL_UINT(0U, late.on);
+}
+
+TEST_CASE("an OFF round drops the jobs' tail at once", "[net_ao][fast]")
+{
+    fast_posts_t rest;
+    fast_posts_t late;
+
+    worker_fresh();
+    ask_ping("192.168.0.1", 1U);
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    radio_drain();
+
+    lp_round(AO_Net, KODE_LP_OFF);
+    rest = radio_fast_posts();
+    lp_expect_answer(false, NULL);
+    ms(2U * JOB_FAST_HOLD_MS);
+    late = radio_fast_posts();
+    lp_awake(AO_Net);
+    worker_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, rest.off);
+    TEST_ASSERT_EQUAL_UINT(0U, rest.on);
+    TEST_ASSERT_EQUAL_UINT(0U, late.off);
+    TEST_ASSERT_EQUAL_UINT(0U, late.on);
+}
+
+TEST_CASE("the stop of an OFF round does not ask for the fast mode",
+          "[net_ao][fast]")
+{
+    fast_posts_t f;
+
+    lp_channel_up();
+    ms(2U * JOB_FAST_HOLD_MS);            /* the join's tail is over */
+    radio_drain();
+
+    lp_round(AO_Net, KODE_LP_OFF);        /* the client is stopped: a job */
+    pull_jobs();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_NET_JOB_MQTT_STOP, s_ran_job);
+    f = radio_fast_posts();
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    lp_awake(AO_Net);
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT(0U, f.on);
+    TEST_ASSERT_EQUAL_UINT(0U, f.off);
+}
+
 /* ---- Real time across the rest ----------------------------------------------
  * A QTimeEvt does not count while the tick is stopped, so the channel's renewal
  * and back-off carry a deadline in khal_time_us(). The cases below play the
@@ -8766,9 +9492,9 @@ TEST_CASE("a join between steps refuses the round to ASLEEP and says so", "[net_
     net_done();
 }
 
-/* ---- A radio wake: the channel's work with the glass asleep -------------------- */
+/* ---- A dark wake: the channel's work with the glass asleep --------------------- */
 
-TEST_CASE("a radio wake with nothing due is done at once, and the next round is the ordinary one",
+TEST_CASE("a dark wake with nothing due is done at once, and the next round is the ordinary one",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -8780,11 +9506,11 @@ TEST_CASE("a radio wake with nothing due is done at once, and the next round is 
     pull_jobs();
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(),
                                    "the renewal is a long way off: the work is done");
     TEST_ASSERT_EQUAL_UINT(jobs, s_nreq);
 
@@ -8792,12 +9518,12 @@ TEST_CASE("a radio wake with nothing due is done at once, and the next round is 
     pull_jobs();
     lp_expect_answer(false, NULL);
     TEST_ASSERT_TRUE_MESSAGE(fake_lowpower_wake_take(&w), "the deadline goes back to AO_LowPower");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "and nothing is said twice");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "and nothing is said twice");
     lp_awake(AO_Net);
     net_done();
 }
 
-TEST_CASE("a radio wake whose renewal is due works through it and is done at its end",
+TEST_CASE("a dark wake whose renewal is due works through it and is done at its end",
           "[net_ao][lowpower]")
 {
     IdSignReqEvt      sq;
@@ -8813,15 +9539,15 @@ TEST_CASE("a radio wake whose renewal is due works through it and is done at its
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
     fake_time_advance_ms(NIGHT_MS);           /* the renewal fell due asleep */
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     pull_jobs();
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(),
                                    "the renewal is due: not done");
     secs(3U);                                 /* the settle, then the challenge */
     TEST_ASSERT_EQUAL_UINT_MESSAGE(jobs + 1U, s_nreq, "the renewal asks the api again");
-    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_dark_done_count());
 
     http_reply(200U, "{\"nonce\":\"v1.connect.second\"}");
     TEST_ASSERT_EQUAL_INT(ID_SIGN_REQ_SIG, (int)radio_take(&sq, sizeof(sq)));
@@ -8829,21 +9555,21 @@ TEST_CASE("a radio wake whose renewal is due works through it and is done at its
     s_drv_state = KDRV_MQTT_UP;
     connect_answer(answer, sizeof(answer));
     http_reply(200U, answer);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(),
                                    "the new session is still being swapped in");
     job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
     job_done(KDRV_NET_JOB_MQTT_START, KODE_OK);
     mqtt_link(KDRV_NET_MQTT_CONNECTED);
 
     TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_UP, chan_now().state);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(),
                                    "the session is up for another renewal: done");
     (void)q;
     lp_awake(AO_Net);
     net_done();
 }
 
-TEST_CASE("a radio wake whose renewal fails is done once it waits out a back-off",
+TEST_CASE("a dark wake whose renewal fails is done once it waits out a back-off",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -8856,16 +9582,16 @@ TEST_CASE("a radio wake whose renewal fails is done once it waits out a back-off
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
     fake_time_advance_ms(NIGHT_MS);
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     secs(3U);
     TEST_ASSERT_EQUAL_UINT(jobs + 1U, s_nreq);
-    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_dark_done_count());
 
     http_reply(503U, "{\"error\":\"channel_unavailable\"}");   /* the api is unreachable */
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(),
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(),
                                    "the back-off is longer than the settle: done");
     lp_round(AO_Net, KODE_LP_ASLEEP);
     pull_jobs();
@@ -8875,7 +9601,7 @@ TEST_CASE("a radio wake whose renewal fails is done once it waits out a back-off
     net_done();
 }
 
-TEST_CASE("a round that arrives in a radio wake ends its work: no done is said afterwards",
+TEST_CASE("a round that arrives in a dark wake ends its work: no done is said afterwards",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -8886,22 +9612,22 @@ TEST_CASE("a round that arrives in a radio wake ends its work: no done is said a
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
     fake_time_advance_ms(NIGHT_MS);
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     lp_round(AO_Net, KODE_LP_ASLEEP);          /* the renewal is still due */
     pull_jobs();
     lp_expect_answer(false, NULL);
     (void)fake_lowpower_wake_take(&w);
     secs(3U);
-    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_lowpower_dark_done_count());
     lp_awake(AO_Net);
     net_done();
 }
 
 /* ---- The scheduler's mqtt check ------------------------------------------------
  * The scheduler hands AO_Net the time of its check (net_check_at()). A round
- * for ASLEEP gives it to AO_LowPower, a radio wake that finds it due waits the
+ * for ASLEEP gives it to AO_LowPower, a dark wake that finds it due waits the
  * dwell, and a check made is told back (sched_check_done()). */
 
 /** @brief The wall clock the cases below start from: 18:37:12 on 2026-10-30, Unix seconds. */
@@ -8925,7 +9651,7 @@ static void chk_prepare(void)
     }
     fake_time_wall_set((uint64_t)CHK_T0 * CHK_US_PER_S);
     (void)fake_lowpower_wake_take(&(LowPowerWakeAtEvt){ 0 });
-    (void)fake_lowpower_radio_done_count();
+    (void)fake_lowpower_dark_done_count();
 }
 
 /** @brief A fresh AO_Net, offline: no Wi-Fi address, so nothing to listen to. */
@@ -9104,10 +9830,10 @@ TEST_CASE("a client of the user's is something to listen to, with the channel of
     TEST_ASSERT_EQUAL_UINT64(khal_time_us() + (60U * CHK_US_PER_S), w.due_us);
 
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "the dwell is on");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "the dwell is on");
     secs((KODE_NET_CHECK_DWELL_MS / 1000U) + 1U);
-    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_radio_done_count());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_dark_done_count());
     TEST_ASSERT_EQUAL_UINT(1U, chk_told(&passed));
     lp_awake(AO_Net);
     net_done();
@@ -9131,7 +9857,7 @@ TEST_CASE("a session left over without a Wi-Fi address is nothing to listen to",
     chk_give(CHK_T0 + 60);
 
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chk_told(&passed), "no address: no dwell, made at once");
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
     lp_awake(AO_Net);
@@ -9158,7 +9884,7 @@ TEST_CASE("a time given while the board sleeps is told to AO_LowPower at once", 
 }
 
 /* test_net_check_dwell */
-TEST_CASE("a radio wake with the check due is not done before the dwell, and is after it",
+TEST_CASE("a dark wake with the check due is not done before the dwell, and is after it",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -9173,18 +9899,18 @@ TEST_CASE("a radio wake with the check due is not done before the dwell, and is 
     (void)fake_lowpower_wake_take(&w);
 
     chk_clock_to(CHK_T0 + 60);                /* the board slept until it was due */
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "the dwell is on");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "the dwell is on");
     secs((KODE_NET_CHECK_DWELL_MS / 1000U) - 1U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "not before it has passed");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "not before it has passed");
     TEST_ASSERT_EQUAL_UINT(0U, chk_told(&passed));
 
     secs(2U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "once after it");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "once after it");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chk_told(&passed), "and the scheduler is told");
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
     secs(5U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "only once");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "only once");
 
     /* The round that ends the wake finds the time spent: it asks to wake for none of the check's. */
     lp_round(AO_Net, KODE_LP_ASLEEP);
@@ -9206,8 +9932,8 @@ TEST_CASE("a due check with nothing to listen to is made at once", "[net_ao][low
     chk_listening();
     chk_give(CHK_T0 + 60);
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "nothing to wake: done");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "nothing to wake: done");
     TEST_ASSERT_EQUAL_UINT(1U, chk_told(&passed));
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
     lp_awake(AO_Net);
@@ -9218,8 +9944,8 @@ TEST_CASE("a due check with nothing to listen to is made at once", "[net_ao][low
     chk_link(KRADIO_UP);
     chk_give(CHK_T0 + 60);
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "no Wi-Fi: done");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "no Wi-Fi: done");
     TEST_ASSERT_EQUAL_UINT(1U, chk_told(&passed));
     lp_awake(AO_Net);
     net_done();
@@ -9229,8 +9955,8 @@ TEST_CASE("a due check with nothing to listen to is made at once", "[net_ao][low
     chk_link(KRADIO_UP);
     chk_give(CHK_T0 + 60);
     chk_clock_to(CHK_T0 + 60);
-    lp_radio(AO_Net);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_radio_done_count(), "channel off, no client: done");
+    lp_dark(AO_Net);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_lowpower_dark_done_count(), "channel off, no client: done");
     TEST_ASSERT_EQUAL_UINT(1U, chk_told(&passed));
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
     lp_awake(AO_Net);
@@ -9238,7 +9964,7 @@ TEST_CASE("a due check with nothing to listen to is made at once", "[net_ao][low
     fake_nvs_reset();
 }
 
-TEST_CASE("a radio wake that finds the check not due is done at once and tells nothing",
+TEST_CASE("a dark wake that finds the check not due is done at once and tells nothing",
           "[net_ao][lowpower]")
 {
     int64_t passed = 0;
@@ -9246,8 +9972,8 @@ TEST_CASE("a radio wake that finds the check not due is done at once and tells n
     chk_listening();
     chk_link(KRADIO_UP);
     chk_give(CHK_T0 + CHK_QUARTER_S);
-    lp_radio(AO_Net);                         /* the channel's time, say, and not the check's */
-    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_radio_done_count());
+    lp_dark(AO_Net);                         /* the channel's time, say, and not the check's */
+    TEST_ASSERT_EQUAL_UINT(1U, fake_lowpower_dark_done_count());
     TEST_ASSERT_EQUAL_UINT(0U, chk_told(&passed));
     lp_awake(AO_Net);
     net_done();
@@ -9303,7 +10029,7 @@ TEST_CASE("a whole wake with the check due dwells, and a round is busy until the
     secs(2U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chk_told(&passed), "made at the end of the dwell");
     TEST_ASSERT_EQUAL_INT64(CHK_T0 + 60, passed);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_radio_done_count(), "a whole wake says no radio done");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_lowpower_dark_done_count(), "a whole wake says no dark done");
     lp_round(AO_Net, KODE_LP_ASLEEP);
     pull_jobs();
     lp_expect_answer(false, NULL);
@@ -9357,7 +10083,7 @@ TEST_CASE("a whole wake with nothing to listen to, or a round with the board awa
     net_done();
 }
 
-TEST_CASE("a round in a radio wake's dwell is busy, and the dwell still ends in one done",
+TEST_CASE("a round in a dark wake's dwell is busy, and the dwell still ends in one done",
           "[net_ao][lowpower]")
 {
     LowPowerWakeAtEvt w;
@@ -9372,12 +10098,12 @@ TEST_CASE("a round in a radio wake's dwell is busy, and the dwell still ends in 
     (void)fake_lowpower_wake_take(&w);
     chk_clock_to(CHK_T0 + 60);
 
-    lp_radio(AO_Net);
+    lp_dark(AO_Net);
     secs(1U);
     lp_round(AO_Net, KODE_LP_ASLEEP);         /* somebody asked early */
     lp_expect_answer(true, "check dwell");
     TEST_ASSERT_EQUAL_UINT(0U, chk_told(&passed));
-    lp_awake(AO_Net);                         /* the busy radio round made it a whole wake */
+    lp_awake(AO_Net);                         /* the busy dark-wake round made it a whole wake */
     secs(KODE_NET_CHECK_DWELL_MS / 1000U);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chk_told(&passed), "the dwell kept, and ended once");
     secs(5U);
@@ -9606,4 +10332,210 @@ TEST_CASE("an entry's whole wake in the check's minute dwells, and only then is 
 
     pair_down();
     net_done();
+}
+
+/* ---- Confirmed reply lines --------------------------------------------------
+ * An install's last record is a confirmed line: AO_Net publishes it at QoS 1,
+ * and the broker's PUBACK is published as CONSOLE_SENT_SIG for AO_AppMgr.
+ */
+
+static unsigned s_nacked;   /**< kdrv_net_mqtt_publish_acked() calls on cmd/out. */
+static kode_status_t s_acked_rc;
+
+static kode_status_t stub_publish_acked(const char *topic, const void *data,
+                                        uint16_t len, int n)
+{
+    (void)data;
+    (void)len;
+    (void)n;
+    if ( strcmp(topic, "kode/KODE0001F00MR1C/cmd/out") == 0 )
+    {
+        s_nacked++;
+    }
+    return s_acked_rc;
+}
+
+/** @brief The CONSOLE_SENT_SIG the spy holds, or one with src NONE. */
+static ConsoleSentEvt sent_taken(void)
+{
+    ConsoleSentEvt out;
+
+    (void)memset(&out, 0, sizeof(out));
+    out.src = (uint8_t)KODE_LOG_SRC_NONE;
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)CONSOLE_SENT_SIG == (enum_t)e->sig )
+        {
+            out = *(ConsoleSentEvt const *)e;
+        }
+    }
+    return out;
+}
+
+TEST_CASE("a confirmed reply goes at QoS 1, and its PUBACK is published",
+          "[net_ao]")
+{
+    cmd_fresh();
+    s_nacked   = 0U;
+    s_acked_rc = KODE_OK;
+    kdrv_net_mqtt_publish_acked_Stub(&stub_publish_acked);
+    ao_spy_subscribe(CONSOLE_SENT_SIG);
+
+    (void)kchan_out_push(">ok", 3U, false);
+    (void)kchan_out_push(">|install id=3", 14U, true);
+    (void)net_settle();
+    unsigned const plain = s_nout;
+    unsigned const acked = s_nacked;
+    ConsoleSentEvt const before = sent_taken();
+
+    mqtt_link(KDRV_NET_MQTT_ACKED);
+    ConsoleSentEvt const after = sent_taken();
+
+    s_acked_rc = KODE_NO_RESOURCES;
+    (void)kchan_out_push(">|install id=4", 14U, true);
+    (void)net_settle();
+    ConsoleSentEvt const refused = sent_taken();
+    QActive_unsubscribe(ao_spy(), CONSOLE_SENT_SIG);
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, plain, "the plain line went at QoS 0");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, acked, "the confirmed line was not published at QoS 1");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KODE_LOG_SRC_NONE, before.src,
+        "CONSOLE_SENT_SIG before the broker answered");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CONSOLE_SRC_NET, after.src);
+    TEST_ASSERT_TRUE(after.ok);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_CONSOLE_SRC_NET, refused.src);
+    TEST_ASSERT_FALSE_MESSAGE(refused.ok, "a line the client refused was not said lost");
+}
+
+/* AO_Boot's leave cannot overtake the replies already in the ring: they go out
+ * before the offline notice, an install's last record among them. */
+TEST_CASE("a leave publishes the waiting replies before it says offline",
+          "[net_ao]")
+{
+    static const QEvt leave = QEVT_INITIALIZER(NET_LEAVE_REQ_SIG);
+
+    chan_fresh();
+    qf_support_give_queue(AO_Boot);
+    (void)boot_left_taken();
+    drive_to_up();
+    s_drv_state = KDRV_MQTT_UP;
+    s_npub = 0U;
+    s_nout = 0U;
+
+    push_rows(0U, 3U);
+    net_dispatch(&leave);   /* ahead of the drain the push woke */
+    (void)net_settle();
+
+    bool const rows_first = outs_are_rows(0U, 3U);
+    bool const will_last  = (4U == s_npub)
+                            && (strcmp(s_pubs[3].topic, "kode/KODE0001F00MR1C/status") == 0);
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    net_done();
+    (void)boot_left_taken();
+
+    TEST_ASSERT_TRUE_MESSAGE(rows_first, "the replies did not go out before the leave");
+    TEST_ASSERT_TRUE_MESSAGE(will_last, "offline was not said after the replies");
+}
+
+/** @brief net_ao.c's CHAN_OUT_BURST, repeated: reply lines a step hands over. */
+#define LEAVE_BURST  8U
+
+/* The leave's drain is chunked like any other (rule 5): a step hands over a
+ * burst and posts the next, so the replies still all go out before offline
+ * without one long step. */
+TEST_CASE("a leave hands the waiting replies over a burst a step, then says offline",
+          "[net_ao]")
+{
+    static const QEvt leave = QEVT_INITIALIZER(NET_LEAVE_REQ_SIG);
+
+    chan_fresh();
+    qf_support_give_queue(AO_Boot);
+    (void)boot_left_taken();
+    drive_to_up();
+    s_drv_state = KDRV_MQTT_UP;
+    s_npub = 0U;
+    s_nout = 0U;
+
+    push_rows(0U, 20U);
+    net_dispatch(&leave);
+    unsigned const first_step = s_nout;
+    unsigned const pubs_first = s_npub;
+    (void)net_settle();
+
+    bool const rows_first = outs_are_rows(0U, 20U);
+    bool const will_last  = (21U == s_npub);   /* the rows, then offline */
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    net_done();
+    (void)boot_left_taken();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(LEAVE_BURST, first_step, "the first step was not one burst");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(LEAVE_BURST, pubs_first, "offline came before the rest");
+    TEST_ASSERT_TRUE_MESSAGE(rows_first, "the replies did not all go out, in order");
+    TEST_ASSERT_TRUE_MESSAGE(will_last, "offline was not said after the replies");
+}
+
+/* ---- A channel state ask a full queue refused ---------------------------------- */
+
+/** @brief Fill AO_Net's queue with an event it ignores, then ask for the channel's state.
+ *  @return What channel_state_request() answered. */
+static bool chan_ask_into_full_queue(void)
+{
+    static const QEvt filler = QEVT_INITIALIZER(GUI_STATE_SIG);
+
+    while ( QACTIVE_POST_X(AO_Net, &filler, 0U, NULL) )
+    {
+        /* until the queue refuses: no slot to spare */
+    }
+    return channel_state_request();
+}
+
+/** @brief How many CHANNEL_STATE_SIG the spy holds; drains it. */
+static unsigned chan_states_heard(void)
+{
+    unsigned    n = 0U;
+    const QEvt *e;
+
+    while ( (e = ao_spy_take()) != NULL )
+    {
+        if ( (QSignal)CHANNEL_STATE_SIG == e->sig )
+        {
+            ++n;
+        }
+    }
+    ao_spy_drain();
+    return n;
+}
+
+/* channel_info and AO_AppMgr wait for the answer and have no clock of their
+ * own: a refused ask is owed and answered once, before the next event AO_Net
+ * handles, with or without an address. */
+TEST_CASE("test_chan_state_owed: a channel state ask a full queue refused is answered "
+          "once, before AO_Net's next event", "[net_ao]")
+{
+    bool     posted_up;
+    bool     posted_down;
+    unsigned up;
+    unsigned up_again;
+    unsigned down;
+
+    cmd_fresh();
+    posted_up = chan_ask_into_full_queue();
+    (void)net_settle();
+    up = chan_states_heard();
+    (void)net_tick(1U);
+    up_again = chan_states_heard();
+    net_done();
+
+    chan_fresh();
+    posted_down = chan_ask_into_full_queue();
+    (void)net_settle();
+    down = chan_states_heard();
+    net_done();
+
+    TEST_ASSERT_FALSE_MESSAGE(posted_up, "the queue took the ask: the case proves nothing");
+    TEST_ASSERT_FALSE(posted_down);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, up, "online: the ask was not answered once");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, up_again, "the owed ask was answered twice");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, down, "offline: the ask was not answered once");
 }

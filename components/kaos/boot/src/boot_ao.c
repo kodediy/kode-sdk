@@ -33,10 +33,27 @@
 /** @brief The tag of a zone being set: the zone's own record, not a line of the boot. */
 #define ZONE_TAG "kaos.zone"
 
+/**
+ * @brief The hold of the bottom button that means home in this build.
+ *
+ * An app built with the home hold goes home on the long one, and the ordinary
+ * hold of the same press is the app's own. Everything else - kodeOS, and an
+ * app that switched the home hold off - goes home on the ordinary one. Both
+ * carry a ButtonHoldEvt.
+ */
+/* cppcheck-suppress misra-c2012-20.9 ; sdkconfig.h leaves an option that is off undefined, and #if reads it as 0 */
+#if CONFIG_KODEOS_HOME_HOLD
+#define BOOT_HOME_ON_SIG  BUTTON_HOME_HOLD_SIG
+#else
+#define BOOT_HOME_ON_SIG  BUTTON_HOLD_SIG
+#endif
+
 /** @brief The leave step that waits for AO_Net's answer. */
 #define BOOT_LEAVE_STEP_NET     0U
 /** @brief The leave step that waits for AO_Radio's answer. */
 #define BOOT_LEAVE_STEP_RADIO   1U
+/** @brief The leave step that waits for AO_Log's answer. */
+#define BOOT_LEAVE_STEP_LOG     2U
 
 _Static_assert(KSET_ZONE_MAX == KODE_CONFIG_VALUE_MAX,
                "a zone is one setting's value, the longest one");
@@ -47,7 +64,7 @@ typedef struct {
     QActive  super;
     QTimeEvt leave;         /**< The bound of the leave step that is running. */
     uint8_t  leave_kind;    /**< kdrv_radio_note_t: the role the jump goes to. */
-    uint8_t  leave_step;    /**< BOOT_LEAVE_STEP_NET or BOOT_LEAVE_STEP_RADIO. */
+    uint8_t  leave_step;    /**< BOOT_LEAVE_STEP_LOG, _NET or _RADIO.          */
 #if CONFIG_KODE_LOWPOWER
     uint8_t  lp_who;        /**< The id lowpower_join() gave.                 */
 #endif
@@ -58,6 +75,10 @@ typedef struct {
                              *   KODE_BOOT_STABLE_MS: one timer, one after the
                              *   other.                                        */
     bool     stable_next;   /**< The healthy timer is on its second count.      */
+    uint8_t  other;         /**< kboot_other_t: what became of the slot that is
+                             *   not running, read before otadata is cleared. */
+    bool     rescue_kept;   /**< `kset/rescued` is in NVS: erased at the stable
+                             *   minute that tells the rescue.              */
     QActive *reset_who;     /**< Where the reset's answer goes.                 */
     uint32_t welcome_off;   /**< The welcome app's extent in the apps region.   */
     uint32_t welcome_size;  /**< Its length.                                    */
@@ -247,6 +268,14 @@ void boot_net_left(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(BOOT_NET_LEFT_SIG);
     QACTIVE_POST(AO_Boot, &evt, NULL);
+}
+
+void boot_log_flushed(void)
+{
+    static const QEvt evt = QEVT_INITIALIZER(BOOT_LOG_FLUSHED_SIG);
+    /* A full queue drops the word: the leave's KODE_LEAVE_LOG_MS bound
+     * moves it on as if AO_Log had not answered. */
+    (void)QACTIVE_POST_X(AO_Boot, &evt, KQP_BOOT_CMD_MARGIN, NULL);
 }
 
 bool boot_home_pending(void)
@@ -540,6 +569,40 @@ static void boot_crashes_count(bool after_app)
         }
     }
 }
+
+/**
+ * @brief What became of the kodeOS slot that is not running, from otadata.
+ *
+ * @param st      What the bootloader recorded about that slot.
+ * @param newer   That slot was selected after the running one; when not, @p st
+ *                is an earlier update's and the last switch never took effect.
+ * @param rescued The rescue took over: an update was launched and never
+ *                confirmed. From factory, @p st is ota_0's, which need not be
+ *                the slot written, so it is not read.
+ * @return Its kboot_other_t.
+ */
+static kboot_other_t boot_other_of(kdrv_slot_state_t st, bool newer, bool rescued)
+{
+    kboot_other_t other = KBOOT_OTHER_GIVEN_UP;
+
+    if ( rescued )
+    {
+        other = KBOOT_OTHER_UNCONFIRMED;
+    }
+    else if ( (!newer) || (KDRV_SLOT_STATE_UNDEFINED == st) )
+    {
+        other = KBOOT_OTHER_NEVER_RAN;
+    }
+    else if ( KDRV_SLOT_STATE_ABORTED == st )
+    {
+        other = KBOOT_OTHER_UNCONFIRMED;
+    }
+    else
+    {
+        /* Launched, and the bootloader holds something else: given up on. */
+    }
+    return other;
+}
 #endif
 
 /**
@@ -565,10 +628,11 @@ static QState Boot_initial(Boot * const me, void const * const par)
     }
 #endif
 
-    /* The hold has ONE owner in both roles: this AO hears it and publishes
-     * HOME_SIG, and whoever draws the screen answers that. What differs is
-     * only what AO_Boot does afterwards - in an app, reset. */
-    QActive_subscribe(&me->super, BUTTON_HOLD_SIG);
+    /* The hold that means home has ONE owner in both roles: this AO hears
+     * it and publishes HOME_SIG, and whoever draws the screen answers that.
+     * What differs is which hold it is (BOOT_HOME_ON_SIG) and what AO_Boot
+     * does afterwards - in an app, reset. */
+    QActive_subscribe(&me->super, BOOT_HOME_ON_SIG);
 
 #if CONFIG_KODEOS_HOME_HOLD
     me->home_deferred = false;
@@ -649,10 +713,22 @@ static QState Boot_initial(Boot * const me, void const * const par)
     }
 
     /* 2. Running from factory with otadata non-blank means the rescue took
-     *    over: a kodeOS update died before confirming. Make it sticky. */
-    if ( kdrv_running_is_factory() && !kdrv_otadata_blank() )
+     *    over: a kodeOS update died before confirming. Make it sticky. What
+     *    became of the other slot is read first, while otadata still says,
+     *    and the rescue is kept in NVS before otadata is cleared: a boot
+     *    before the stable minute finds otadata blank and still owes it. */
+    bool const factory = kdrv_running_is_factory();
+    bool const rescued = factory && !kdrv_otadata_blank();
+    uint8_t    owed    = 0U;
+
+    me->rescue_kept = (khal_nvs_get_u8(KSET_NAMESPACE, KSET_KEY_RESCUED, &owed) == KODE_OK);
+    me->other = (uint8_t)boot_other_of(kdrv_slot_state(), kdrv_slot_newer(),
+                                       rescued || (factory && (0U != owed)));
+    if ( rescued )
     {
         s_reason = KBOOT_UNEXPECTED;
+        me->rescue_kept = (khal_nvs_set_u8(KSET_NAMESPACE, KSET_KEY_RESCUED, 1U) == KODE_OK)
+                          || me->rescue_kept;
         (void)kdrv_otadata_clear();
         KLOG_W(TAG, "a kodeOS update never confirmed; staying on factory");
     }
@@ -723,7 +799,37 @@ static void leave_drop(void)
 }
 
 /**
- * @brief Second step of the leave: AO_Radio hangs BLE up and parks the C5.
+ * @brief Write a pair to the app's store for an asker that waits for no answer.
+ *
+ * kode_sys_nvs_set() posted it and its caller went on, so a pair the store
+ * refuses, or one past the apps' share of it, is a warning here and nothing
+ * else. The value is the app's own and is not logged.
+ *
+ * @param e The pair, both strings NUL-terminated.
+ */
+static void store_set(BootNvsSetEvt const * const e)
+{
+    kode_status_t const rc = khal_nvs_set_str_within(KODE_NVS_NAMESPACE, e->key,
+                                                     e->value, KODE_NVS_SHARE_MAX);
+
+    if ( KODE_NO_RESOURCES == rc )
+    {
+        KLOG_W(TAG, "'%s' is not kept: the apps' share of the store (%u bytes) "
+                    "is full", e->key, KODE_NVS_SHARE_MAX);
+    }
+    else if ( KODE_OK != rc )
+    {
+        KLOG_W(TAG, "the store refused '%s' (status %d); it is not kept",
+               e->key, (int)rc);
+    }
+    else
+    {
+        KLOG_D(TAG, "stored '%s' for an app", e->key);
+    }
+}
+
+/**
+ * @brief Third step of the leave: AO_Radio hangs BLE up and parks the C5.
  *
  * An app without AO_Radio has nothing to wait for.
  *
@@ -744,18 +850,14 @@ static void leave_radio_step(Boot * const me)
 }
 
 /**
- * @brief Start the leave that ends in a reset.
+ * @brief Second step of the leave: AO_Net's clean stop of the Kode channel.
  *
- * The caller has done whatever must be on flash first. The first step is
- * AO_Net's clean stop of the Kode channel; an app without AO_Net goes on to
- * the second at once. The caller then transitions to Boot_leaving.
+ * An app without AO_Net goes on to the third at once.
  *
- * @param me   AO_Boot.
- * @param kind The role of the firmware the jump goes to.
+ * @param me AO_Boot.
  */
-static void leave_begin(Boot * const me, kdrv_radio_note_t kind)
+static void leave_net_step(Boot * const me)
 {
-    me->leave_kind = (uint8_t)kind;
     me->leave_step = BOOT_LEAVE_STEP_NET;
     if ( kaos_linked(&kaos_net_start) )
     {
@@ -765,6 +867,32 @@ static void leave_begin(Boot * const me, kdrv_radio_note_t kind)
     else
     {
         leave_radio_step(me);
+    }
+}
+
+/**
+ * @brief Start the leave that ends in a reset.
+ *
+ * The caller has done whatever must be on flash first. The first step is
+ * AO_Log's word that the lines posted before the leave are on their ports,
+ * so nothing said just before the jump (an install's last record) is behind
+ * the ports going down; a queue with no room goes on to the second at once.
+ * The caller then transitions to Boot_leaving.
+ *
+ * @param me   AO_Boot.
+ * @param kind The role of the firmware the jump goes to.
+ */
+static void leave_begin(Boot * const me, kdrv_radio_note_t kind)
+{
+    me->leave_kind = (uint8_t)kind;
+    me->leave_step = BOOT_LEAVE_STEP_LOG;
+    if ( log_flush_request() )
+    {
+        QTimeEvt_armX(&me->leave, KQP_TICKS_PER_MS(KODE_LEAVE_LOG_MS), 0U);
+    }
+    else
+    {
+        leave_net_step(me);
     }
 }
 
@@ -794,6 +922,9 @@ const char *boot_reset_step_name(uint8_t step)
         break;
     case (uint8_t)KBOOT_RESET_STEP_APPS:
         name = "apps";
+        break;
+    case (uint8_t)KBOOT_RESET_STEP_FILES:
+        name = "files";
         break;
     case (uint8_t)KBOOT_RESET_STEP_LINK:
         name = "link";
@@ -903,7 +1034,13 @@ static bool reset_refuses(QEvt const * const e)
         KLOG_N(TAG, "busy with a factory reset; this request is dropped");
         break;
     case BUTTON_HOLD_SIG:
+    case BUTTON_HOME_HOLD_SIG:
         KLOG_D(TAG, "busy with a factory reset; this button hold is dropped");
+        break;
+    case BOOT_NVS_SET_SIG:
+        /* The reset erases what the board remembers; a setting written in
+         * the middle would be the one thing it kept. */
+        KLOG_N(TAG, "busy with a factory reset; this setting is dropped");
         break;
     default:
         refused = false;
@@ -938,6 +1075,8 @@ static void reset_enter(Boot * const me, kboot_reset_step_t step, uint32_t ms)
 {
     me->reset_step = (uint8_t)step;
     reset_arm(me, ms);
+    /* A pause the step before armed never asks this step's question. */
+    (void)QTimeEvt_disarm(&me->again);
     KLOG_N(TAG, "factory reset: %s", boot_reset_step_name((uint8_t)step));
 }
 
@@ -1031,6 +1170,26 @@ static kode_status_t reset_start_nvs(Boot * const me)
     me->reset_passes = 0U;
     KLOG_N(TAG, "factory reset: %s", boot_reset_step_name(me->reset_step));
     return reset_nvs_pass(me);
+}
+
+/**
+ * @brief The files step starts: AO_Storage takes every other app's images and
+ *        data folders off both media.
+ *
+ * The welcome app's name is kept whether or not it is installed: its folder
+ * and its image on a card are its own, and its source for the next reset.
+ */
+static kode_status_t reset_start_files(Boot * const me)
+{
+    reset_enter(me, KBOOT_RESET_STEP_FILES, KODE_RESET_FILES_MS);
+    if ( storage_apps_clear_request(CONFIG_KODEOS_WELCOME_APP, &me->super)
+        != KODE_OK )
+    {
+        KLOG_W(TAG, "factory reset: AO_Storage was not asked for the apps' "
+                    "files");
+        return KODE_ERROR;
+    }
+    return KODE_OK;
 }
 
 /** @brief The apps step starts: AppMgr removes every app but the welcome app. */
@@ -1218,6 +1377,74 @@ static kode_status_t reset_on_find(Boot * const me, AppFindRspEvt const * const 
 }
 
 /**
+ * @brief The files step's answer: say what stayed, then erase the settings.
+ *
+ * A file or a folder that stayed, or a part of a medium never looked at, is
+ * said and does not stop the reset, as a folder the apps step could not
+ * delete. A clear refused for a transfer is asked again after
+ * KODE_RESET_FILES_AGAIN_MS, inside the step's budget; any other refusal stops
+ * the reset at this step with its status.
+ *
+ * @param me AO_Boot, in the files step.
+ * @param r  AO_Storage's answer.
+ * @return KODE_OK to go on, else the status that stops the reset.
+ */
+static kode_status_t reset_on_files(Boot * const me,
+                                    StorageAppWipeRspEvt const * const r)
+{
+    if ( (uint8_t)KODE_DENIED == r->status )
+    {
+        KLOG_I(TAG, "factory reset: AO_Storage is busy with a transfer; the "
+                    "apps' files are asked for again in %u ms",
+               (unsigned)KODE_RESET_FILES_AGAIN_MS);
+        (void)QTimeEvt_disarm(&me->again);
+        QTimeEvt_armX(&me->again, KQP_TICKS_PER_MS(KODE_RESET_FILES_AGAIN_MS),
+                      0U);
+        return KODE_OK;
+    }
+    if ( (uint8_t)KODE_OK != r->status )
+    {
+        KLOG_W(TAG, "factory reset: AO_Storage did not take the apps' files "
+                    "(status %u)", (unsigned)r->status);
+        return (kode_status_t)r->status;
+    }
+    if ( !r->fs.present )
+    {
+        KLOG_W(TAG, "factory reset: the internal partition would not mount or "
+                    "read; its apps' files were not looked at");
+    }
+    if ( !r->sd.present && r->sd.cut )
+    {
+        KLOG_N(TAG, "factory reset: %u app image(s) removed; the card would "
+                    "not read", (unsigned)r->fs.files);
+    }
+    else if ( !r->sd.present )
+    {
+        KLOG_N(TAG, "factory reset: %u app image(s) removed; no card",
+               (unsigned)r->fs.files);
+    }
+    else if ( r->sd.cut )
+    {
+        KLOG_N(TAG, "factory reset: %u app image(s) removed; the card was not "
+                    "looked at whole",
+               (unsigned)r->fs.files + (unsigned)r->sd.files);
+    }
+    else
+    {
+        KLOG_N(TAG, "factory reset: %u app image(s) removed, the card's "
+                    "included", (unsigned)r->fs.files + (unsigned)r->sd.files);
+    }
+    if ( (0U != r->fs.left) || (0U != r->sd.left) || r->fs.cut || r->sd.cut
+        || ((uint8_t)APP_WIPE_FOLDER_LEFT == r->fs.folder)
+        || ((uint8_t)APP_WIPE_FOLDER_LEFT == r->sd.folder) )
+    {
+        KLOG_W(TAG, "factory reset: some of the apps' files stay or were not "
+                    "looked at; the reset goes on");
+    }
+    return reset_start_nvs(me);
+}
+
+/**
  * @brief Stop the reset at the step that is running.
  *
  * The caller transitions out of Boot_resetting, whose exit disarms the timer.
@@ -1372,6 +1599,9 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case BOOT_OS_SWITCH_SIG: {
+            /* Published when the board stays on this slot, so the update
+             * that asked is not left waiting for a reset that never comes. */
+            static const QEvt failed = QEVT_INITIALIZER(BOOT_OS_SWITCH_FAIL_SIG);
 #if CONFIG_KODEOS_BOOT_ROLE_OS
             /* Before otadata moves: confirming marks the slot otadata names,
              * which from then on is the new one. */
@@ -1380,11 +1610,13 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             if ( !kdrv_slot_present() )
             {
                 KLOG_E(TAG, "no inactive kodeOS slot in the partition table");
+                QACTIVE_PUBLISH(&failed, &me->super);
             }
             else if ( !kdrv_slot_has_image() )
             {
                 KLOG_E(TAG, "the inactive kodeOS slot holds no valid image - "
                             "nothing to switch to");
+                QACTIVE_PUBLISH(&failed, &me->super);
             }
             /* kdrv_otadata_select_slot verifies the image before writing, so
              * a corrupt slot is refused here rather than at the next boot. */
@@ -1401,6 +1633,7 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             {
                 /* Said, or a failed write would look like an update in progress. */
                 KLOG_E(TAG, "could not write otadata - staying on this slot");
+                QACTIVE_PUBLISH(&failed, &me->super);
             }
             status = Q_HANDLED();
             break;
@@ -1476,7 +1709,29 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             }
             else
             {
+                BootStableEvt * const ev = Q_NEW_X(BootStableEvt, 0U, BOOT_STABLE_SIG);
+
                 kdrv_slot_crashes_set(0U);
+                /* The minute that settles a kodeOS update: where kodeOS runs
+                 * and what became of the other slot. AO_AppMgr compares the
+                 * first with the slot it wrote. */
+                if ( NULL != ev )
+                {
+                    kdrv_running_info(NULL, &ev->running, NULL);
+                    ev->other = me->other;
+                    QACTIVE_PUBLISH(&ev->super, &me->super);
+                    if ( me->rescue_kept )
+                    {
+                        (void)khal_nvs_erase(KSET_NAMESPACE, KSET_KEY_RESCUED);
+                        me->rescue_kept = false;   /* told: the minute has come */
+                    }
+                }
+                else
+                {
+                    KLOG_W(TAG, "no event for the stable minute; a kodeOS "
+                                "update waiting on it stays installed until "
+                                "the next boot's minute");
+                }
             }
             status = Q_HANDLED();
             break;
@@ -1497,7 +1752,14 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
             status = Q_TRAN(&Boot_leaving);
             break;
         }
-        case BUTTON_HOLD_SIG: {
+        case BOOT_NVS_SET_SIG: {
+            /* One write a step, in the order the requests were made: a
+             * restart asked after it finds it done. */
+            store_set(Q_EVT_CAST(BootNvsSetEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case BOOT_HOME_ON_SIG: {
             ButtonHoldEvt const * const h = Q_EVT_CAST(ButtonHoldEvt);
             if ( (uint8_t)KDRV_BTN_BOT == h->id )
             {
@@ -1598,7 +1860,7 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
 }
 
 /**
- * @brief The leave: AO_Net, then AO_Radio, then the reset.
+ * @brief The leave: AO_Log, AO_Net, then AO_Radio, then the reset.
  *
  * The substate of Boot_active that a restart request enters once its
  * pre-reset write is done. Every restart request and home gesture is dropped
@@ -1614,6 +1876,19 @@ static QState Boot_leaving(Boot * const me, QEvt const * const e)
     QState status;
     switch ( e->sig )
     {
+        case BOOT_LOG_FLUSHED_SIG: {
+            if ( BOOT_LEAVE_STEP_LOG == me->leave_step )
+            {
+                (void)QTimeEvt_disarm(&me->leave);
+                leave_net_step(me);
+            }
+            else
+            {
+                KLOG_D(TAG, "a late answer from AO_Log is ignored");
+            }
+            status = Q_HANDLED();
+            break;
+        }
         case BOOT_NET_LEFT_SIG: {
             if ( BOOT_LEAVE_STEP_NET == me->leave_step )
             {
@@ -1645,6 +1920,11 @@ static QState Boot_leaving(Boot * const me, QEvt const * const e)
                 /* The step before ran out as its answer arrived; the timer
                  * counting now is the next step's, not this one. */
                 KLOG_D(TAG, "a stale leave timeout is ignored");
+            }
+            else if ( BOOT_LEAVE_STEP_LOG == me->leave_step )
+            {
+                KLOG_W(TAG, "AO_Log did not answer in time; going on");
+                leave_net_step(me);
             }
             else if ( BOOT_LEAVE_STEP_NET == me->leave_step )
             {
@@ -1679,6 +1959,13 @@ static QState Boot_leaving(Boot * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case BOOT_NVS_SET_SIG: {
+            /* It reached the queue behind the request that began the leave:
+             * the board is on its way and writes nothing more. */
+            KLOG_N(TAG, "already leaving; this setting is dropped");
+            status = Q_HANDLED();
+            break;
+        }
 #if CONFIG_KODE_LOWPOWER
         case LOWPOWER_ROUND_SIG: {
             /* A board that rested between the boot request's write and the reset
@@ -1701,6 +1988,7 @@ static QState Boot_leaving(Boot * const me, QEvt const * const e)
         }
 #endif
         case BUTTON_HOLD_SIG:
+        case BUTTON_HOME_HOLD_SIG:
         case BOOT_HOME_DEFER_SIG:
         case BOOT_HOME_GRACE_SIG: {
             /* The board is already on its way: a second hold must not arm a
@@ -1795,7 +2083,7 @@ static QState Boot_resetting(Boot * const me, QEvt const * const e)
                 {
                     KLOG_N(TAG, "factory reset: %u other app(s) removed",
                            (unsigned)r->erased);
-                    st = reset_start_nvs(me);
+                    st = reset_start_files(me);
                 }
                 else
                 {
@@ -1808,6 +2096,24 @@ static QState Boot_resetting(Boot * const me, QEvt const * const e)
             {
                 KLOG_D(TAG, "factory reset: a late keep-only answer is "
                             "ignored");
+            }
+            status = reset_settle(me, st);
+            break;
+        }
+        case STORAGE_APP_WIPE_RSP_SIG: {
+            kode_status_t st = KODE_OK;
+
+            StorageAppWipeRspEvt const * const r =
+                Q_EVT_CAST(StorageAppWipeRspEvt);
+            if ( ((uint8_t)KBOOT_RESET_STEP_FILES == me->reset_step)
+                && (strcmp(r->project, CONFIG_KODEOS_WELCOME_APP) == 0) )
+            {
+                st = reset_on_files(me, r);
+            }
+            else
+            {
+                KLOG_D(TAG, "factory reset: a late answer about the apps' "
+                            "files is ignored");
             }
             status = reset_settle(me, st);
             break;
@@ -1904,6 +2210,16 @@ static QState Boot_resetting(Boot * const me, QEvt const * const e)
                 }
             }
 #endif
+            if ( (uint8_t)KBOOT_RESET_STEP_FILES == me->reset_step )
+            {
+                if ( storage_apps_clear_request(CONFIG_KODEOS_WELCOME_APP,
+                                                &me->super) != KODE_OK )
+                {
+                    KLOG_W(TAG, "factory reset: out of events; the apps' files "
+                                "were not asked for again");
+                    st = KODE_ERROR;
+                }
+            }
             status = reset_settle(me, st);
             break;
         }

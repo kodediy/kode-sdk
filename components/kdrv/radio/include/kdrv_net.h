@@ -137,6 +137,10 @@ typedef struct {
     uint32_t kept;            /**< Bytes written into the caller's buffer.  */
     bool     truncated;       /**< body_len > kept: the rest was counted,
                                *   not stored. Saying so is the point.      */
+    int64_t  range_total;     /**< A ranged GET: the length of the whole
+                               *   resource, from the server's Content-Range;
+                               *   -1 when it sent none, and for every other
+                               *   request.                                 */
 } kdrv_net_http_result_t;
 
 /**
@@ -156,6 +160,34 @@ typedef struct {
 kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
                                 kdrv_net_http_result_t *out,
                                 uint32_t timeout_ms);
+
+/**
+ * @brief GET the bytes of @p url from @p offset on, as many as @p buf holds.
+ *        Blocks, as kdrv_net_http_get().
+ *
+ * Sends `Range: bytes=offset-(offset+cap-1)`. A server that honours it answers
+ * 206, and @c range_total is the length of the whole resource from its
+ * Content-Range. One that ignores it answers 200 with the body from its first
+ * byte: the body is then read no further than @p cap, @c truncated says the
+ * rest was left unread, and the status is how the caller knows where its
+ * bytes start. Any other status leaves its body unread, with @c kept 0: an
+ * offset past the end is the server's 416, and its page or a 404's is not
+ * the resource.
+ *
+ * @param url        Target.
+ * @param offset     The first byte wanted.
+ * @param buf        Out: the bytes. Required.
+ * @param cap        Room in @p buf, above 0.
+ * @param out        Out: status, lengths, the total and whether more follows.
+ * @param timeout_ms Per-operation deadline handed to the client.
+ * @return KODE_OK, KODE_TIMEOUT, or KODE_ERROR (also for a NULL @p url,
+ *         @p buf or @p out, a zero @p cap, or a range that runs past the last
+ *         offset there is).
+ */
+kode_status_t kdrv_net_http_get_range(const char *url, uint64_t offset,
+                                      uint8_t *buf, uint32_t cap,
+                                      kdrv_net_http_result_t *out,
+                                      uint32_t timeout_ms);
 
 /**
  * @brief POST @p body to @p url and read the answer into @p buf. Blocks the
@@ -193,17 +225,25 @@ kode_status_t kdrv_net_http_post(const char *url, const char *body,
  * KDRV_NET_STREAM_OPEN_MAX_MS in total, each I/O given only the time left.
  * Never call from an Active Object: AO_Net runs it as a worker job.
  *
- * @param[out] total   Content-Length, or 0 when the server did not declare
- *                     one (a chunked response). A container carries its own
- *                     length, so 0 is only fatal for a raw .bin.
+ * @param      offset  Where the body is wanted from: 0 for all of it, or
+ *                     the bytes a cut download already has, sent as
+ *                     `Range: bytes=offset-`.
+ * @param[out] total   Content-Length - what is left from @p offset on - or 0
+ *                     when the server did not declare one (a chunked
+ *                     response) or it does not fit 32 bits. A container
+ *                     carries its own length, so 0 is only fatal for a raw
+ *                     .bin. For a 416, the resource's whole length from its
+ *                     Content-Range, or 0 when it gave none.
  * @param[out] status  The HTTP status code.
- * @return KODE_OK when the status is 200 and the body is ready to read;
- *         KODE_TIMEOUT when the total cap ran out before an I/O could
- *         start; KODE_DENIED when a transfer is already open; KODE_ERROR
- *         otherwise.
+ * @return KODE_OK when the body is ready to read from @p offset: a 200 for
+ *         offset 0, a 206 for any other. KODE_TIMEOUT when the total cap ran
+ *         out before an I/O could start; KODE_DENIED when a transfer is
+ *         already open; KODE_ERROR otherwise, a 200 to an offset above 0
+ *         included (the server ignores ranges: its body starts at byte 0)
+ *         and a 416 (nothing lies past @p offset), with nothing left open.
  */
-kode_status_t kdrv_net_stream_open(const char *url, uint32_t *total,
-                                   uint16_t *status);
+kode_status_t kdrv_net_stream_open(const char *url, uint32_t offset,
+                                   uint32_t *total, uint16_t *status);
 
 /**
  * @brief Read the next piece of the open body.
@@ -457,7 +497,9 @@ typedef enum {
 typedef enum {
     KDRV_MQTT_ERR_NONE = 0,
     KDRV_MQTT_ERR_NO_NET,   /**< This board has no address.                 */
-    KDRV_MQTT_ERR_REFUSED,  /**< The broker or the transport said no.       */
+    KDRV_MQTT_ERR_REFUSED,  /**< The broker or the transport said no; for a
+                             *   publish, subscribe or unsubscribe, no
+                             *   client was up to take it.               */
     KDRV_MQTT_ERR_TIMEOUT,  /**< Nothing answered in time.                  */
     KDRV_MQTT_ERR_BUSY,     /**< The request was refused because the Kode
                              *   channel holds the client. Reported once to
@@ -479,6 +521,8 @@ typedef enum {
                              *   refusal (bad or expired credentials). A
                              *   bench client is retried with the same
                              *   ones.                                     */
+    KDRV_NET_MQTT_ACKED,    /**< The broker's PUBACK for the last
+                             *   kdrv_net_mqtt_publish_acked().            */
 } kdrv_net_mqtt_evt_t;
 
 /**
@@ -653,6 +697,22 @@ void kdrv_net_mqtt_uri_copy(char *out, size_t cap);
  */
 kode_status_t kdrv_net_mqtt_publish(const char *topic, const void *data,
                                     uint16_t len, bool retain);
+
+/**
+ * @brief Publish at QoS 1, written to the socket before it returns, and report
+ *        KDRV_NET_MQTT_ACKED when the broker's PUBACK arrives.
+ *
+ * Only the last one is waited for: a second before the first's PUBACK takes
+ * its place, and the first's is not reported. A client that stops first never
+ * reports it.
+ *
+ * @param topic Where to.
+ * @param data  Payload bytes; may be NULL when @p len is 0.
+ * @param len   Payload length.
+ * @return As kdrv_net_mqtt_publish().
+ */
+kode_status_t kdrv_net_mqtt_publish_acked(const char *topic, const void *data,
+                                          uint16_t len);
 
 /**
  * @brief Subscribe at the QoS the client's session asked for (0 for the

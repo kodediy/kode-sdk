@@ -128,6 +128,14 @@ bool khal_sdmmc_hosted(void);
 kode_status_t khal_sdmmc_info(uint64_t *total, uint64_t *free_bytes);
 
 /**
+ * @brief The allocation unit of the mounted volume: what a file of one byte
+ *        takes on it.
+ * @return The cluster size in bytes; 0 with nothing mounted or when the
+ *         filesystem will not answer.
+ */
+uint32_t khal_sdmmc_cluster_bytes(void);
+
+/**
  * @brief Make a fresh, empty FAT volume on the mounted card.
  * @return KODE_OK with the card still mounted and empty; KODE_DENIED with
  *         nothing mounted; KODE_ERROR with NOTHING MOUNTED, and the caller

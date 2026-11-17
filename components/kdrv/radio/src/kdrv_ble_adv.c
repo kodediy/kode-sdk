@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kdrv_ble_adv.c
- * @brief What a scan response carries, packed as BLE lays it out, and the board's default name.
+ * @brief What a scan response carries, packed as BLE lays it out, the board's default name,
+ *        and what follows each pulse of a pulsed advert.
  */
 #include "kdrv_ble.h"
 
 #include <string.h>
 
+#include "kdrv_ble_hid_table.h"
 #include "khal_identity.h"
 
 /** @brief What one AD structure spends before its payload: a length, a type. */
@@ -17,6 +19,17 @@
 
 /** @brief AD type: manufacturer-specific data, its company id first. */
 #define BLE_AD_MFG    0xFFU
+
+/* What each field of an advert spends, its two bytes of header included. */
+#define BLE_AD_FLAGS_BYTES       3U   /**< The flags: one byte.               */
+#define BLE_AD_UUID128_BYTES     18U  /**< One 128-bit service UUID.          */
+#define BLE_AD_UUID16_BYTES      4U   /**< One 16-bit service UUID.           */
+#define BLE_AD_APPEARANCE_BYTES  4U   /**< The appearance: two bytes.         */
+#define BLE_AD_TX_POWER_BYTES    3U   /**< The transmit power: one byte.      */
+
+_Static_assert((BLE_AD_FLAGS_BYTES + BLE_AD_UUID128_BYTES + BLE_AD_UUID16_BYTES
+                + BLE_AD_APPEARANCE_BYTES) <= KDRV_BLE_ADV_MAX,
+               "an advert that serves HID keeps its 128-bit UUID");
 
 /* ---- Connection parameters ----
  * Intervals in 1.25 ms units, timeouts in 10 ms units, as BLE gives them. */
@@ -36,6 +49,10 @@
 #define CONN_Q_6S             24000U /**< 6 s.                               */
 #define CONN_LATENCY_MAX      30U    /**< The most events a board may skip.  */
 #define CONN_TIMEOUT_FACTOR   3U     /**< The timeout covers three misses.   */
+
+/* BLE counts an advertising interval in units of 0.625 ms: 5/8 of a ms. */
+#define BLE_ITVL_UNIT_NUM     5U     /**< The numerator of one interval unit, ms.   */
+#define BLE_ITVL_UNIT_DEN     8U     /**< The denominator of one interval unit, ms. */
 
 /** @brief The name of a board that does not know its serial. */
 #define BLE_NAME_UNKNOWN  "KODE-DOT"
@@ -75,6 +92,46 @@ static size_t adv_put(uint8_t *out, size_t at, uint8_t type, const void *src, si
     out[at + 1U] = type;
     (void)memcpy(&out[at + BLE_AD_HEAD], src, n);
     return at + BLE_AD_HEAD + n;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; called by kdrv_ble.c, which is a file this check does not join to this one */
+void kdrv_ble_adv_shape(const kdrv_ble_adv_ask_t *ask, kdrv_ble_adv_shape_t *out)
+{
+    if ( (NULL == ask) || (NULL == out) )
+    {
+        return;
+    }
+    (void)memset(out, 0, sizeof(*out));
+    out->uuid128      = (uint8_t)KDRV_BLE_ADV_UUID128_NONE;
+    out->discoverable = !ask->hidden;
+    out->tx_power     = true;
+    out->bytes        = (uint8_t)BLE_AD_FLAGS_BYTES;
+    if ( !ask->console )
+    {
+        /* No service to name: the name has room in the advert itself. */
+        out->name = !ask->hidden;
+    }
+    else
+    {
+        out->uuid128 = (uint8_t)KDRV_BLE_ADV_UUID128_CONSOLE;
+        if ( ask->app_uuid )
+        {
+            out->uuid128 = (uint8_t)KDRV_BLE_ADV_UUID128_APP;
+        }
+        out->bytes = (uint8_t)(out->bytes + BLE_AD_UUID128_BYTES);
+        if ( 0U != (ask->hid & KDRV_BLE_HID_KINDS) )
+        {
+            /* The two fields a host lists the board by take the power's place. */
+            out->uuid16     = (uint16_t)KDRV_BLE_HID_SVC_UUID;
+            out->appearance = kdrv_ble_hid_appearance(ask->hid);
+            out->tx_power   = false;
+            out->bytes      = (uint8_t)(out->bytes + BLE_AD_UUID16_BYTES + BLE_AD_APPEARANCE_BYTES);
+        }
+    }
+    if ( out->tx_power )
+    {
+        out->bytes = (uint8_t)(out->bytes + BLE_AD_TX_POWER_BYTES);
+    }
 }
 
 kode_status_t kdrv_ble_adv_pack(const char *name, const uint8_t *data, size_t len,
@@ -184,4 +241,55 @@ bool kdrv_ble_conn_params_ok(const kdrv_ble_conn_params_t *p)
              && ((cycle_q * CONN_TIMEOUT_FACTOR) < tout_q);
     }
     return ok;
+}
+
+uint32_t kdrv_ble_pulse_period_ms(uint16_t itvl)
+{
+    return ((uint32_t)itvl * BLE_ITVL_UNIT_NUM) / BLE_ITVL_UNIT_DEN;
+}
+
+uint32_t kdrv_ble_pulse_pause_ms(uint16_t itvl, uint32_t run_ms)
+{
+    uint32_t const period = kdrv_ble_pulse_period_ms(itvl);
+    uint32_t       pause  = KDRV_BLE_PULSE_WAIT_MIN_MS;
+
+    if ( (run_ms < period) && ((period - run_ms) > KDRV_BLE_PULSE_WAIT_MIN_MS) )
+    {
+        pause = period - run_ms;
+    }
+    return pause;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; called by kdrv_ble.c, which is a file this check does not join to this one */
+kdrv_ble_pulse_do_t kdrv_ble_pulse_next(const kdrv_ble_pulse_t *in, uint32_t *wait_ms)
+{
+    kdrv_ble_pulse_do_t act  = KDRV_BLE_PULSE_NEXT;
+    uint32_t            wait = 0U;
+
+    if ( NULL == in )
+    {
+        act = KDRV_BLE_PULSE_DONE;
+    }
+    else if ( !in->live )
+    {
+        act = KDRV_BLE_PULSE_DONE;
+    }
+    else if ( (!in->timed_out) || (KDRV_BLE_PULSE_REFUSALS_MAX <= in->refused)
+              || ((0U != in->leg_ms) && (in->leg_ms <= in->leg_run_ms)) )
+    {
+        act = KDRV_BLE_PULSE_IDLE;
+    }
+    else
+    {
+        wait = kdrv_ble_pulse_pause_ms(in->itvl, in->pulse_run_ms);
+        if ( (0U != in->leg_ms) && ((in->leg_ms - in->leg_run_ms) < wait) )
+        {
+            wait = in->leg_ms - in->leg_run_ms;   /* the leg ends first: IDLE comes then */
+        }
+    }
+    if ( NULL != wait_ms )
+    {
+        *wait_ms = wait;
+    }
+    return act;
 }

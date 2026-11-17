@@ -11,6 +11,7 @@
 #include "fakes.h"
 #include "kode_log.h"
 #include "khal_time.h"
+#include "kqp_config.h"   /* KQP_TICKS_PER_SEC */
 
 /** @brief Microseconds in a second, for the wall clock's whole seconds. */
 #define FAKE_US_PER_S  1000000ULL
@@ -19,11 +20,23 @@ static uint64_t s_now_us;
 static uint64_t s_wall_us;
 static void   (*s_delay_hook)(void);
 
-/* The periodic timer, as the case sees it. Not cleared by fake_time_reset():
- * the timer is started once per binary, the way it is once per boot, and a
- * case clears the counters it reads with fake_time_periodic_forget(). */
-static void  (*s_periodic_cb)(void *);
-static bool    s_periodic_running;
+/** @brief The QP tick's period: kqp_tick_start() starts its timer with it. */
+#define FAKE_TICK_US   (FAKE_US_PER_S / (uint64_t)KQP_TICKS_PER_SEC)
+
+/** @brief One periodic timer, as the case sees it: named by its callback, as on the board. */
+typedef struct {
+    void   (*cb)(void *);   /**< The callback; NULL for a free slot. */
+    void    *arg;           /**< Passed to @c cb when a case fires it. */
+    uint64_t period_us;     /**< What it was started with. */
+    bool     running;       /**< Started and not stopped. */
+    unsigned made;          /**< How many times khal_timer_periodic() made it. */
+} fake_periodic_t;
+
+/* The periodic timers. Not cleared by fake_time_reset(): each is started once
+ * per binary, the way it is once per boot, and a case clears the counters it
+ * reads with fake_time_periodic_forget(). The counters and
+ * fake_time_periodic_running() are the QP tick's: the timer with its period. */
+static fake_periodic_t s_periodic[KHAL_TIMER_PERIODIC_SLOTS];
 static unsigned s_run_stops;
 static unsigned s_run_starts;
 
@@ -45,6 +58,11 @@ void fake_time_delay_hook(void (*hook)(void))
 void fake_time_advance_ms(uint32_t ms)
 {
     s_now_us += (uint64_t)ms * 1000U;
+}
+
+void fake_time_advance_us(uint32_t us)
+{
+    s_now_us += (uint64_t)us;
 }
 
 uint64_t khal_time_us(void)
@@ -147,30 +165,91 @@ int gettimeofday(struct timeval *tv, void *tz)
     return 0;
 }
 
+/**
+ * @brief The periodic timer named by @p cb, or a free one when none is.
+ * @param cb The callback.
+ * @return The slot; NULL when @p cb has none and every slot is taken.
+ */
+static fake_periodic_t *periodic_slot_for(void (*cb)(void *))
+{
+    fake_periodic_t *slot = NULL;
+
+    for ( unsigned i = 0U; (KHAL_TIMER_PERIODIC_SLOTS > i) && (NULL == slot); i++ )
+    {
+        if ( s_periodic[i].cb == cb )
+        {
+            slot = &s_periodic[i];
+        }
+    }
+    for ( unsigned i = 0U; (KHAL_TIMER_PERIODIC_SLOTS > i) && (NULL == slot); i++ )
+    {
+        if ( NULL == s_periodic[i].cb )
+        {
+            slot = &s_periodic[i];
+        }
+    }
+    return slot;
+}
+
+/**
+ * @brief The periodic timer started with @p period_us.
+ * @param period_us The period.
+ * @return The slot; NULL when no timer has that period.
+ */
+static fake_periodic_t *periodic_slot_at(uint64_t period_us)
+{
+    fake_periodic_t *slot = NULL;
+
+    for ( unsigned i = 0U; (KHAL_TIMER_PERIODIC_SLOTS > i) && (NULL == slot); i++ )
+    {
+        if ( (NULL != s_periodic[i].cb) && (s_periodic[i].period_us == period_us) )
+        {
+            slot = &s_periodic[i];
+        }
+    }
+    return slot;
+}
+
 kode_status_t khal_timer_periodic(void (*cb)(void *), void *arg, uint64_t period_us)
 {
-    (void)arg;
-    (void)period_us;
-    s_periodic_cb      = cb;
-    s_periodic_running = true;
+    fake_periodic_t *const slot = periodic_slot_for(cb);
+
+    if ( NULL == slot )
+    {
+        return KODE_NO_RESOURCES;
+    }
+    slot->cb        = cb;
+    slot->arg       = arg;
+    slot->period_us = period_us;
+    slot->running   = true;
+    ++slot->made;
     return KODE_OK;
 }
 
 kode_status_t khal_timer_periodic_run(void (*cb)(void *), bool run)
 {
-    if ( cb != s_periodic_cb )
+    fake_periodic_t *slot = NULL;
+
+    if ( NULL != cb )
+    {
+        slot = periodic_slot_for(cb);
+    }
+    if ( (NULL == slot) || (slot->cb != cb) )
     {
         return KODE_DENIED;
     }
-    if ( run )
+    if ( FAKE_TICK_US == slot->period_us )
     {
-        ++s_run_starts;
+        if ( run )
+        {
+            ++s_run_starts;
+        }
+        else
+        {
+            ++s_run_stops;
+        }
     }
-    else
-    {
-        ++s_run_stops;
-    }
-    s_periodic_running = run;
+    slot->running = run;
     return KODE_OK;
 }
 
@@ -286,5 +365,36 @@ unsigned fake_time_periodic_starts(void)
 
 bool fake_time_periodic_running(void)
 {
-    return s_periodic_running;
+    return fake_time_periodic_running_at(FAKE_TICK_US);
+}
+
+bool fake_time_periodic_running_at(uint64_t period_us)
+{
+    fake_periodic_t const *const slot = periodic_slot_at(period_us);
+
+    return (NULL != slot) && slot->running;
+}
+
+unsigned fake_time_periodic_made_at(uint64_t period_us)
+{
+    fake_periodic_t const *const slot = periodic_slot_at(period_us);
+    unsigned made = 0U;
+
+    if ( NULL != slot )
+    {
+        made = slot->made;
+    }
+    return made;
+}
+
+bool fake_time_periodic_fire_at(uint64_t period_us)
+{
+    fake_periodic_t const *const slot = periodic_slot_at(period_us);
+    bool const fired = (NULL != slot) && slot->running;
+
+    if ( fired )
+    {
+        slot->cb(slot->arg);
+    }
+    return fired;
 }

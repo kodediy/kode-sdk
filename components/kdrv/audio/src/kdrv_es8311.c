@@ -354,7 +354,7 @@ static kode_status_t do_close(void);
  *
  * Every volume anybody sets passes through this curve - the field table, a
  * tone, an app - so it is the one place the cap can live and be obeyed by
- * all of them. Two points: the layer's own fifty-decibel span, moved down so
+ * all of them. Two points: the layer's own fifty-decibel span, placed so
  * that its top is KDRV_ES8311_OUT_DB_X10_MAX. Volume 100 is the cap, and
  * every volume under it sits as far under the cap as the same volume sits
  * under full scale on the layer's own curve. The layer interpolates in floats
@@ -724,6 +724,12 @@ static int16_t      *s_stream_buf;    /**< Its storage. NULL until first opened.
 static khal_sem_t    s_stream_room;   /**< Given each time the job takes frames. */
 static volatile bool s_stream_open;   /**< Writes are taken: reset to end.       */
 static volatile bool s_stream_end;    /**< No more frames are coming.            */
+/** @brief khal_time_ms() when a write last put frames in, or at the reset.
+ *         One word the writer stores and the owner loads. */
+static volatile uint32_t s_stream_fed_ms;
+/** @brief The number of the stream last opened; 0 before the first. The
+ *         owner stores it at the reset and any task loads it. */
+static volatile uint32_t s_stream_serial;
 
 kode_status_t kdrv_es8311_stream_reset(void)
 {
@@ -746,12 +752,18 @@ kode_status_t kdrv_es8311_stream_reset(void)
         }
     }
     kring_init(&s_stream, s_stream_buf, (uint32_t)KDRV_ES8311_STREAM_FRAMES);
-    s_stream_end  = false;
-    s_stream_open = true;
+    s_stream_fed_ms = khal_time_ms();
+    s_stream_serial += 1U;
+    if ( 0U == s_stream_serial )
+    {
+        s_stream_serial = 1U;   /* 0 is "no stream" */
+    }
+    s_stream_end    = false;
+    s_stream_open   = true;
     return KODE_OK;
 }
 
-kode_status_t kdrv_es8311_stream_write(const int16_t *frames, size_t n,
+kode_status_t kdrv_es8311_stream_write(uint32_t id, const int16_t *frames, size_t n,
                                        uint8_t channels, uint32_t ms,
                                        size_t *taken)
 {
@@ -768,23 +780,29 @@ kode_status_t kdrv_es8311_stream_write(const int16_t *frames, size_t n,
     {
         return KODE_DENIED;
     }
-    if ( !s_stream_open )
-    {
-        return KODE_DENIED;
-    }
     for ( ;; )
     {
         TickType_t spent;
+        size_t     put;
 
-        done += kring_put(&s_stream, &frames[done * (size_t)channels],
-                          n - done, channels);
-        if ( done >= n )
-        {
-            break;
-        }
-        if ( !s_stream_open )
+        /* Asked on every pass: the stream may end, and the next one open,
+         * while this writer waits for room. Number 0 is no stream at all. */
+        if ( (0U == id) || (kdrv_es8311_stream_id() != id) )
         {
             rc = KODE_DENIED;
+            break;
+        }
+        put = kring_put(&s_stream, &frames[done * (size_t)channels], n - done, channels);
+
+        if ( 0U < put )
+        {
+            /* Stamped as frames go in, so one long write that keeps moving
+             * never reads as a silence. */
+            s_stream_fed_ms = khal_time_ms();
+        }
+        done += put;
+        if ( done >= n )
+        {
             break;
         }
         spent = xTaskGetTickCount() - start;
@@ -814,6 +832,27 @@ void kdrv_es8311_stream_end(void)
     {
         khal_sem_signal(s_stream_room);
     }
+}
+
+uint32_t kdrv_es8311_stream_id(void)
+{
+    uint32_t id = 0U;
+
+    if ( s_stream_open )
+    {
+        id = s_stream_serial;
+    }
+    return id;
+}
+
+uint32_t kdrv_es8311_stream_idle_ms(void)
+{
+    /* The stamp before the clock: a writer that stamps in between leaves the
+     * clock ahead of it, never behind. Unsigned, so the difference holds
+     * across the clock's wrap. */
+    uint32_t const fed = s_stream_fed_ms;
+
+    return khal_time_ms() - fed;
 }
 
 /* ---- The jobs, all of which run on the owner's worker --------------------- */

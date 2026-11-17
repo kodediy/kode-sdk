@@ -165,7 +165,7 @@ static bool lowpower_queue_has(kode_lp_state_t target)
 /** @brief Fill AO_LowPower's queue until only its command margin is free. */
 static void lowpower_fill_to_margin(void)
 {
-    static const QEvt filler = QEVT_INITIALIZER(LOWPOWER_RADIO_DONE_SIG);
+    static const QEvt filler = QEVT_INITIALIZER(LOWPOWER_DARK_DONE_SIG);
 
     for ( uint32_t guard = 0U;
          (POWER_FILL_MAX > guard)

@@ -35,6 +35,7 @@
 #include "kapp_cat.h"
 #include "kapp_data.h"      /* the app.json status names `appdata_ls` prints */
 #include "kdrv_buttons.h"
+#include "kdrv_c5.h"        /* KDRV_C5_VERSION_MAX: the room `info`'s c5= needs, and nothing else */
 #include "kdrv_clocks.h"   /* the `clocks` verb and its test row */
 #if CONFIG_KODEOS_NET
 #include "kdrv_net.h"      /* time sync=: ask a server now */
@@ -70,10 +71,13 @@ KAOS_WEAK void kaos_appmgr_start(void);
 KAOS_WEAK void kaos_radio_start(void);
 KAOS_WEAK void kaos_display_start(void);
 KAOS_WEAK void kaos_net_start(void);
+KAOS_WEAK void kaos_touch_start(void);
 KAOS_WEAK void appdata_request(const char *project, QActive *who);
 KAOS_WEAK kode_status_t appdata_rm_request(const char *project, QActive *who);
 KAOS_WEAK kode_status_t appmgr_appdata_get_request(const char *project,
-                                                   const char *url, QActive *who);
+                                                   const char *url, bool install,
+                                                   QActive *who);
+KAOS_WEAK void touch_test_inject(int16_t x, int16_t y, bool pressed);
 KAOS_WEAK const uint8_t *storage_buf(uint8_t idx);
 KAOS_WEAK void storage_close_request(void);
 KAOS_WEAK void storage_desc_request(const char *name, QActive *who);
@@ -84,15 +88,18 @@ KAOS_WEAK void storage_open_request(const char *name, QActive *who);
 KAOS_WEAK void storage_path_request(QActive *who, uint8_t op, const char *path);
 KAOS_WEAK void storage_read_request(void);
 KAOS_WEAK void storage_write_all_request(const char *name, const void *data,
-                                         uint32_t len, QActive *who);
-KAOS_WEAK void appmgr_image_request(uint8_t src_kind, const char *src,
-                                    uint8_t dst_kind, bool launch);
+                                         uint32_t len, QActive *who,
+                                         uint32_t tag);
+KAOS_WEAK bool appmgr_image_ask_from(uint8_t src_kind, const char *src,
+                                     uint8_t dst_kind, bool launch,
+                                     QActive *who, uint8_t asker);
 KAOS_WEAK void appmgr_list_page(uint16_t skip, QActive *who);
 KAOS_WEAK void appmgr_list_request(QActive *who);
 KAOS_WEAK bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
                                    bool launch, uint8_t src, const char *name);
-KAOS_WEAK void c5_flash_request(uint8_t src_kind, const char *src);
+KAOS_WEAK bool c5_flash_request(uint8_t src_kind, const char *src);
 KAOS_WEAK bool c5_recv_request(uint32_t size, uint32_t crc32, uint8_t src);
+KAOS_WEAK kode_status_t radio_c5_release(char *out, size_t len);
 KAOS_WEAK const uint8_t *display_capture_buf(void);
 KAOS_WEAK void display_capture_release(void);
 KAOS_WEAK void display_capture_request(QActive *who);
@@ -125,6 +132,11 @@ KAOS_WEAK kode_status_t kdrv_net_sntp_sync_now(void);
  * was empty. Not KCLI_TAP_HOLD_MS: changing the hold must not change this. */
 #define KCLI_INJ_RETRY_MS   60U
 
+/* How long the console holds a stop AO_Radio took, for a BLE advertisement
+ * stream no run reads, before it asks again: one stop for a queue of records,
+ * not one a record. */
+#define KCLI_HEARD_STOP_MS  1000U
+
 /* The limits of an injected swipe. A swipe is replayed at the touch sensor's
  * own rate, one sample a KODE_TOUCH_POLL_MS, so the shortest one is a single
  * sample; the longest two are far past any gesture a hand makes, and bound
@@ -147,11 +159,21 @@ KAOS_WEAK kode_status_t kdrv_net_sntp_sync_now(void);
  * over it (Console_ctor() asserts that). */
 #define KCLI_MAX_KEYS      KARG_KEYS_MAX
 
-/* One `help` record's `args=` value: every key of a command spelled out with
- * its type, its enum members or source prefixes and its default. `install`'s
- * five keys, its six source prefixes among them, take 135 characters; a
- * longer value is cut at the tail rather than overrunning. */
+/* One `help` record's `args=` value: every key of a command with its type,
+ * whether it is required and its default. A key's members, or a source's
+ * prefixes, go in `>|member=` records of their own, so the value stays
+ * short: `install`'s six keys take 89 characters. One that does not fit is
+ * cut after its last whole key (`-` when not even the first fits), the
+ * record says `cut=on`, and the members of the keys cut out are not listed. */
 #define KCLI_ARGS_DESC_MAX    192U
+_Static_assert(((sizeof(">|cmd= args= cut=on") - 1U) + KVERB_NAME_MAX
+                + KCLI_ARGS_DESC_MAX) <= KODE_LOG_LINE_MAX,
+               "a help record, cut or whole, must fit one console line");
+/* And a member's record: kverbs_add() refuses an owner's key or member past
+ * its limit, console_specs_ok() the console's own. */
+_Static_assert(((sizeof(">|member= verb= key=") - 1U) + KARG_MEMBER_NAME_MAX
+                + KVERB_NAME_MAX + KARG_KEY_NAME_MAX) <= KODE_LOG_LINE_MAX,
+               "a help member record must fit one console line");
 
 /* The longest field name and field description the chip tables carry, as the
  * size of the buffers they are quoted into. A longer one is cut at the tail
@@ -207,11 +229,14 @@ typedef enum {
                      *   fifty records, more than the large pool holds.   */
     KCLI_I2C_SCAN,  /**< i2c_scan: a few addresses probed per step, closed by
                      *   this AO after the last one.                      */
-    KCLI_FS_LIST_STAT, /**< ls, phase one: STAT first, as the LIST
-                        *   terminator carries no status. Closed by
-                        *   STORAGE_PATH_RSP_SIG, which refuses or promotes
-                        *   to KCLI_FS_LIST.                             */
-    KCLI_FS_LIST,   /**< ls, phase two: sd_ls's burst plus `type=`.       */
+    KCLI_FS_LIST_STAT, /**< ls, phase one: STAT first, so a missing
+                        *   directory is refused as `cd` refuses it. Closed
+                        *   by STORAGE_PATH_RSP_SIG, which refuses or
+                        *   promotes to KCLI_FS_LIST.                    */
+    KCLI_FS_LIST,   /**< ls, phase two: sd_ls's record plus `type=`, one
+                     *   page at a time, each asked from where the last
+                     *   ended. Closed by the last page's
+                     *   FILE_LIST_END_SIG.                              */
     KCLI_FS_STAT,   /**< stat: closed by STORAGE_PATH_RSP_SIG, one record. */
     KCLI_FS_CD,     /**< cd: closed by the same signal and no record.    */
     KCLI_FS_CAT_STAT, /**< cat, phase one: STAT first; a directory is
@@ -286,6 +311,8 @@ typedef enum {
                        *   APPDATA_END_SIG.                               */
     KCLI_APPDATA_RM,  /**< appdata_rm: closed by APPDATA_RM_RSP_SIG.      */
     KCLI_APPDATA_GET, /**< appdata_get: closed by APPDATA_GET_RSP_SIG.    */
+    KCLI_INSTALL,   /**< install off a medium or the mailbox: closed by
+                     *   AO_AppMgr's verdict, APP_REQ_RSP_SIG.           */
     KCLI_OWNER,     /**< A registered verb: its owner's answer hook sees
                      *   the events, and console_end() closes it.        */
 } kcli_inflight_t;
@@ -426,6 +453,8 @@ typedef struct {
                              *   being written, set when a line is accepted
                              *   like @c cmd_src; net_line_done() returns it. */
     uint16_t help_idx;      /**< Next command `help` has still to print.    */
+    uint16_t help_line;     /**< `help`: that command's next line, 0 its
+                             *   record, then its keys' members.            */
     uint16_t scan_next;     /**< KCLI_I2C_SCAN: the next address to probe.  */
     uint16_t scan_found;    /**< KCLI_I2C_SCAN: the addresses that answered. */
 
@@ -451,7 +480,9 @@ typedef struct {
                               *   is also the skip of the next page.       */
     uint16_t list_from;     /**< The skip the last page was asked with: a
                               *   page that ends with `more` and leaves
-                              *   list_next here brought nothing.          */
+                              *   list_next here brought nothing. `ls`
+                              *   adds its page's count to it for the
+                              *   next skip.                               */
     uint8_t  ad_n;          /**< Slots in use.                             */
     uint8_t  ad_at;         /**< The slot being asked about right now.     */
     uint8_t  ad_kind[KCLI_AD_MAX];                  /**< kcli_ad_kind_t.   */
@@ -479,6 +510,11 @@ typedef struct {
     bool        inj_stalled;/**< A sample has retried at least once; gates
                              *   the KLOG_W to once per stall.             */
     kcli_swipe_t swipe;     /**< KCLI_INJ_SWIPE: the plan.                 */
+#ifdef CONFIG_KODEOS_BLE
+    bool        heard_stop; /**< AO_Radio took a stop for a BLE advertisement
+                             *   stream no run reads.                      */
+    uint32_t    heard_stop_ms; /**< khal_time_ms() when it took it.        */
+#endif
 
     /* config: the setting asked about, the request's number, and whether
      * the whole table is being listed. */
@@ -639,13 +675,13 @@ const char *console_status_word(uint32_t st)
 {
     static const char *const WORDS[] = {
         "ok", "error", "timeout", "denied", "noresources", "iofail",
-        "exists", "notdir", "isdir"
+        "exists", "notdir", "isdir", "cancelled"
     };
-    /* The table is tied to KODE_IS_DIR + 1, so a member inserted before
-     * KODE_IS_DIR stops the build; one appended after it prints error until
-     * it is named here. */
+    /* The table is tied to KODE_CANCELLED + 1, so a member inserted before
+     * KODE_CANCELLED stops the build; one appended after it prints error
+     * until it is named here. */
     _Static_assert((sizeof(WORDS) / sizeof(WORDS[0]))
-                   == ((size_t)KODE_IS_DIR + 1U),
+                   == ((size_t)KODE_CANCELLED + 1U),
                    "one status word per kode_status_t");
     const char *w = "error";
 
@@ -1153,8 +1189,8 @@ static void fs_refuse(void)
  * @brief ls [path=]: STATs the path first, then entries and `>ok`.
  *
  * KCLI_FS_LIST_STAT until path_answer() sees a directory, then KCLI_FS_LIST
- * for the burst STORAGE_LIST_END_SIG closes. A path `cd` refuses, `ls`
- * refuses the same way.
+ * for the pages ls_page() asks, until ls_end() reads the last one. A path
+ * `cd` refuses, `ls` refuses the same way.
  */
 static void h_ls(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
@@ -1166,6 +1202,75 @@ static void h_ls(Console *me, const kcmd_t *c, const karg_val_t *v)
     if ( console_fs_ls(&me->super, v[0].s) != KODE_OK )
     {
         fs_refuse();
+    }
+}
+
+/**
+ * @brief Close `ls` on a listing that stopped before the folder's end.
+ *
+ * The records already sent stand; `>err code=5 msg=cut` says the rest did
+ * not come, where an `>ok` would read as the whole folder.
+ *
+ * @param listed Entries the pages brought before it stopped.
+ */
+static void ls_cut(uint32_t listed)
+{
+    KLOG_W(TAG, "ls: the listing stopped after %lu entries",
+           (unsigned long)listed);
+    console_reply_err(KCLI_ERR_REJECT, "cut");
+    console_end();
+}
+
+/**
+ * @brief Ask for the page of `ls` that starts at entry @p skip.
+ *
+ * Each page has the deadline the first one had. A page AO_Storage could not
+ * be asked for ends the listing as cut.
+ *
+ * @param me   The console.
+ * @param skip Entries the earlier pages brought.
+ */
+static void ls_page(Console *me, uint16_t skip)
+{
+    me->list_from = skip;
+    console_extend(KCLI_CMD_TIMEOUT_MS);
+    if ( console_fs_list_page(&me->super, skip) != KODE_OK )
+    {
+        ls_cut((uint32_t)skip);
+    }
+}
+
+/**
+ * @brief Read the end of a page of `ls`: `>ok` after the last page, the next
+ *        page while more follow, cut when the listing cannot go on.
+ *
+ * It cannot go on after a page AO_Storage could not list, after a page that
+ * brought nothing (asking again would bring nothing again), or past the last
+ * entry a page's skip can name.
+ *
+ * @param me  The console.
+ * @param end The page's end.
+ */
+static void ls_end(Console *me, FileRspEvt const *end)
+{
+    uint32_t const next = (uint32_t)me->list_from + (uint32_t)end->count;
+
+    if ( (uint8_t)KODE_OK != end->rc )
+    {
+        ls_cut(next);
+    }
+    else if ( !end->more )
+    {
+        console_reply(">ok");
+        console_end();
+    }
+    else if ( (0U == end->count) || ((uint32_t)UINT16_MAX < next) )
+    {
+        ls_cut(next);
+    }
+    else
+    {
+        ls_page(me, (uint16_t)next);
     }
 }
 
@@ -1610,12 +1715,11 @@ static void path_answer(Console *me, const StoragePathRspEvt *r)
     }
     else if ( (uint8_t)KCLI_FS_LIST_STAT == me->inflight )
     {
-        /* The STAT that guards `ls` found a directory. The command stays in
-         * flight under the one watchdog cmd_begin() already armed - only
-         * what it is waiting for changes - so this returns instead of
-         * falling through to console_end(). */
+        /* The STAT that guards `ls` found a directory: on to the first page.
+         * The command stays in flight - only what it is waiting for changes
+         * - so this returns instead of falling through to console_end(). */
         me->inflight = (uint8_t)KCLI_FS_LIST;
-        console_fs_list_begin(&me->super);
+        ls_page(me, 0U);
         return;
     }
     else if ( (uint8_t)KCLI_FS_CAT_STAT == me->inflight )
@@ -1771,11 +1875,54 @@ static void install_from_wire(Console *me, const kcmd_t *c, uint8_t dst,
     }
     if ( !ok )
     {
-        /* The event pool was dry and nothing was posted: close here, or
-         * the watchdog would report a false timeout. */
+        /* Nothing was posted (the pool was dry, or the owner had no room):
+         * close here, or the watchdog would report a false timeout. */
         console_reply_err(KCLI_ERR_REJECT, c->verb);
         console_end();
     }
+}
+
+/** How long `install` waits for AO_AppMgr's verdict: the deadline AO_AppMgr gives a
+ *  medium to open a file, then the console's own. AO_AppMgr answers every
+ *  request it takes, so this only bounds a lost answer. */
+#define KCLI_INSTALL_MS  (KODE_APPMGR_OPEN_MS + KCLI_CMD_TIMEOUT_MS)
+
+/**
+ * @brief Close the command in flight with AO_AppMgr's verdict on its request.
+ *
+ * `>ok` for a request taken; code 4 `busy` when AO_AppMgr had work in hand;
+ * code 5 `missing` for a file that is not on the medium or an app that is not
+ * installed, `empty` for a mailbox with nothing in it, `refused` for anything
+ * else AO_AppMgr turned down.
+ *
+ * @param verdict app_req_verdict_t.
+ */
+void console_reply_app_verdict(uint8_t verdict)
+{
+    switch ( (app_req_verdict_t)verdict )
+    {
+        case APP_REQ_TAKEN: {
+            console_reply(">ok");
+            break;
+        }
+        case APP_REQ_BUSY: {
+            console_reply_err(KCLI_ERR_BUSY, "busy");
+            break;
+        }
+        case APP_REQ_MISSING: {
+            console_reply_err(KCLI_ERR_REJECT, "missing");
+            break;
+        }
+        case APP_REQ_EMPTY: {
+            console_reply_err(KCLI_ERR_REJECT, "empty");
+            break;
+        }
+        default: {
+            console_reply_err(KCLI_ERR_REJECT, "refused");
+            break;
+        }
+    }
+    console_end();
 }
 
 /**
@@ -1785,7 +1932,9 @@ static void install_from_wire(Console *me, const kcmd_t *c, uint8_t dst,
  * `dst=` is `os`, `c5`, `pending` (the mailbox) or `app`, which boots once
  * only on `run=on`; `run` is refused for any other `dst`. `src=` is
  * `fs:name`, `sd:name`, `http(s)://...`, `"pending"` or `"terminal"`. Only
- * `"terminal"` takes `size` and `crc32`, and only there is `>ok` a result.
+ * `"terminal"` takes `size` and `crc32`, and only there is `>ok` a result: off
+ * a medium or the mailbox it says AO_AppMgr took the install, and the
+ * verdict decides (console_reply_app_verdict()).
  */
 static void h_install(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
@@ -1900,12 +2049,25 @@ static void h_install(Console *me, const kcmd_t *c, const karg_val_t *v)
         {
             return;
         }
-        c5_flash_request(kind, spec);
-        console_reply(">ok");
+        if ( c5_flash_request(kind, spec) )
+        {
+            console_reply(">ok");
+        }
+        else
+        {
+            /* Nothing was posted: the pool was dry or AO_Radio had no room. */
+            console_reply_err(KCLI_ERR_BUSY, "busy");
+        }
         return;
     }
-    appmgr_image_request(kind, spec, dst, run);
-    console_reply(">ok");
+    cmd_begin(me, KCLI_INSTALL, c->verb);
+    console_extend(KCLI_INSTALL_MS);
+    if ( !appmgr_image_ask_from(kind, spec, dst, run, &me->super, me->src) )
+    {
+        /* Nothing was posted, so nobody will answer. */
+        console_reply_err(KCLI_ERR_REJECT, c->verb);
+        console_end();
+    }
 }
 
 /* ---- Handlers: the app data folder ---------------------------------------
@@ -2186,9 +2348,11 @@ static void h_appdata_rm(Console *me, const kcmd_t *c, const karg_val_t *v)
  *  answers every fetch, so this only bounds a lost answer. */
 #define KCLI_APPDATA_GET_MS  ((2U * KODE_APPMGR_OPEN_MS) + APPMGR_TIDY_MS + KCLI_CMD_TIMEOUT_MS)
 
-/** @brief appdata_get name=<project> url=<base>: fetch the app's data folder
- *        from `<base>app.json` and `<base>icon.k64`; closed by
- *        APPDATA_GET_RSP_SIG, or at once when the request is refused. */
+/** @brief appdata_get name=<project> url=<base> [install=on]: fetch the app's
+ *        data folder from `<base>app.json` and `<base>icon.k64`; closed by
+ *        APPDATA_GET_RSP_SIG, or at once when the request is refused.
+ *        `install=on` says an install of the app comes next, and the card the
+ *        fetch raises stays up for it (appmgr_appdata_get_request()). */
 static void h_appdata_get(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     if ( console_owner_absent(&kaos_storage_start) )
@@ -2205,7 +2369,9 @@ static void h_appdata_get(Console *me, const kcmd_t *c, const karg_val_t *v)
         return;
     }
     cmd_begin(me, KCLI_APPDATA_GET, c->verb);
-    kode_status_t const rc = appmgr_appdata_get_request(v[0].s, v[1].s, &me->super);
+    bool const install = v[2].present && v[2].b;
+    kode_status_t const rc = appmgr_appdata_get_request(v[0].s, v[1].s, install,
+                                                        &me->super);
     if ( KODE_OK != rc )
     {
         /* Nothing was posted, so nobody will answer. */
@@ -2226,7 +2392,7 @@ static const char *ad_get_word(uint8_t why)
 {
     /* In appdata_get_why_t's order. */
     static const char *const WORDS[] = { "ok", "busy", "name", "fetch",
-                                         "json", "icon", "full", "store" };
+                                         "json", "full", "store" };
     _Static_assert((sizeof(WORDS) / sizeof(WORDS[0]))
                        == ((size_t)APPDATA_GET_STORE + 1U),
                    "one word for each way a fetch ends");
@@ -2529,6 +2695,12 @@ static void h_touch(Console *me, const kcmd_t *c, const karg_val_t *v)
     /* down/up only: logging every "move" would flood the log. */
     if ( sent && (2U != v[2].u) )
     {
+        /* The panel's owner is an app's choice: the injected sample went out
+         * above either way, and only a linked AO_Touch has a test to tell. */
+        if ( kaos_linked(&kaos_touch_start) )
+        {
+            touch_test_inject((int16_t)v[0].u, (int16_t)v[1].u, (1U != v[2].u));
+        }
         KLOG_I(TAG, "console: injected touch x=%d y=%d state=%s",
                (int)v[0].u, (int)v[1].u, A_TOUCH_STATES[v[2].u]);
     }
@@ -2769,8 +2941,10 @@ static void h_swipe(Console *me, const kcmd_t *c, const karg_val_t *v)
  * A press or a release goes through buttons_inject(), so a polling app sees
  * it too. A hold or a double is published here: an injected press never
  * starts AO_Buttons' hold clock or double detector, and neither changes a
- * button's state. Only the top and bottom buttons hold and only the top one
- * doubles; any other id is refused (`>err code=3 msg=id`).
+ * button's state. The bottom button's hold publishes BUTTON_HOLD_SIG and then
+ * BUTTON_HOME_HOLD_SIG, as a thumb that holds it to go home does. Only the top
+ * and bottom buttons hold and only the top one doubles; any other id is
+ * refused (`>err code=3 msg=id`).
  */
 static void h_btn(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
@@ -2792,6 +2966,16 @@ static void h_btn(Console *me, const kcmd_t *c, const karg_val_t *v)
             ev->id = id;
             QACTIVE_PUBLISH(&ev->super, &me->super);
             ok = true;
+        }
+        if ( ok && ((uint8_t)KDRV_BTN_BOT == id) )
+        {
+            /* A thumb that holds the bottom button to go home passes both of
+             * AO_Buttons' thresholds, so the word publishes both holds. */
+            static const ButtonHoldEvt home = {
+                .super = QEVT_INITIALIZER(BUTTON_HOME_HOLD_SIG),
+                .id    = (uint8_t)KDRV_BTN_BOT };
+
+            QACTIVE_PUBLISH(&home.super, &me->super);
         }
     }
     else if ( A_BTN_DOUBLE == v[1].u )
@@ -3550,7 +3734,12 @@ static bool nvs_key_ok(const char *key)
     return true;
 }
 
-/** @brief nvs_set key=<k> value=<v>: remember one string under one name. */
+/**
+ * @brief nvs_set key=<k> value=<v>: remember one string under one name.
+ *
+ * Held to the apps' share of the store, as an app's own write is: one past it
+ * answers `>err code=5 msg=full` and writes nothing.
+ */
 static void h_nvs_set(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     (void)me;
@@ -3567,7 +3756,14 @@ static void h_nvs_set(Console *me, const kcmd_t *c, const karg_val_t *v)
         console_reply_err(KCLI_ERR_VALUE, "value");
         return;
     }
-    if ( khal_nvs_set_str(KODE_NVS_NAMESPACE, v[0].s, v[1].s) != KODE_OK )
+    kode_status_t const rc = khal_nvs_set_str_within(KODE_NVS_NAMESPACE, v[0].s,
+                                                     v[1].s, KODE_NVS_SHARE_MAX);
+    if ( KODE_NO_RESOURCES == rc )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "full");
+        return;
+    }
+    if ( KODE_OK != rc )
     {
         console_reply_err(KCLI_ERR_REJECT, c->verb);
         return;
@@ -3773,40 +3969,166 @@ static kode_status_t reply_temp(void)
     return KODE_OK;
 }
 
+/** @brief Bytes of a MAC as `info` prints it, "xx:xx:xx:xx:xx:xx" and its NUL. */
+#define INFO_MAC_TEXT  18U
+
+/**
+ * @brief Write a MAC as `info` prints it, or "-" for one that is all zero.
+ * @param mac KHAL_ID_MAC_LEN bytes, most significant first.
+ * @param out Where the text goes.
+ * @param cap Bytes of @p out, at least INFO_MAC_TEXT.
+ */
+static void info_mac_text(const uint8_t mac[KHAL_ID_MAC_LEN], char *out, size_t cap)
+{
+    bool any = false;
+
+    for ( size_t i = 0U; i < (size_t)KHAL_ID_MAC_LEN; i++ )
+    {
+        if ( 0U != mac[i] )
+        {
+            any = true;
+        }
+    }
+    if ( any )
+    {
+        (void)snprintf(out, cap, "%02x:%02x:%02x:%02x:%02x:%02x",
+                       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    else
+    {
+        (void)snprintf(out, cap, "-");
+    }
+}
+
+/** @brief Say in the log why a board has no revision, when it has none. */
+static void board_rev_say_none(void)
+{
+    if ( '\0' == khal_identity_board_rev()[0] )
+    {
+        KLOG_N(TAG, "no official hardware revision is loaded: production "
+                    "writes it with board_rev on the cable");
+    }
+}
+
+/**
+ * @brief board_rev [value="1.0"]: the hardware revision production wrote, or
+ *        writes it.
+ *
+ * Read from any source; written from the cable alone, as the identity it sits
+ * beside, and kept across a factory reset. With nothing written the record
+ * says `value=-` and the log says why.
+ */
+static void h_board_rev(Console *me, const kcmd_t *c, const karg_val_t *v)
+{
+    char q[CONSOLE_QUOTED_MAX(KHAL_ID_BOARD_REV_LEN)];
+
+    (void)me;
+    if ( v[0].present )
+    {
+        if ( !console_src_allows(CONSOLE_NEED_CABLE) )
+        {
+            return;
+        }
+        kode_status_t const st = khal_identity_set_board_rev(v[0].s);
+        if ( KODE_DENIED == st )
+        {
+            console_reply_err(KCLI_ERR_VALUE, "value");
+            return;
+        }
+        if ( KODE_OK != st )
+        {
+            console_reply_err(KCLI_ERR_REJECT, c->verb);
+            return;
+        }
+    }
+    board_rev_say_none();
+    console_reply(">|board_rev value=%s",
+                  console_kv_text(q, sizeof(q), khal_identity_board_rev()));
+    console_reply(">ok");
+}
+
+/**
+ * @brief `info`'s `>|fw` record: the kodeOS release and the kode_c5 release.
+ *
+ * `c5` is the release the C5's image descriptor gave when the link came up,
+ * `-` with no link up now, for a slave that is not kode_c5, for a kode_c5
+ * from before its own releases, or in an image without AO_Radio. Never the
+ * version the link negotiates: that one is esp-hosted's, and the `c5` verb
+ * gives it.
+ *
+ * @param kodeos The kodeOS release h_info() chose; empty prints `-`.
+ */
+static void info_fw(const char *kodeos)
+{
+    char c5[KDRV_C5_VERSION_MAX];
+    char qk[CONSOLE_QUOTED_MAX(KDRV_SLOT_VERSION_MAX)];
+    char qc[CONSOLE_QUOTED_MAX(sizeof(c5))];
+
+    c5[0] = '\0';
+    if ( kaos_linked(&kaos_radio_start) )
+    {
+        if ( radio_c5_release(c5, sizeof(c5)) != KODE_OK )
+        {
+            c5[0] = '\0';
+        }
+    }
+    console_reply(">|fw kodeos=%s c5=%s",
+                  console_kv_text(qk, sizeof(qk), kodeos),
+                  console_kv_text(qc, sizeof(qc), c5));
+}
+
 /**
  * @brief info: what this board is.
  *
- * Synchronous: the identity is decoded at startup, so no owner is asked. The
- * MAC is printed beside the serial it encodes. A board with no identity is
- * not a refusal: its record carries `-` placeholders and closes with `>ok`.
+ * Synchronous: the identity is decoded at startup, so no owner is asked.
+ * `mac_p4` is the P4's own MAC, the one its USB port gives as its serial
+ * number; `mac_c5` is the C5's, which the serial encodes. A board with no
+ * identity is not a refusal: its record carries `-` placeholders and closes
+ * with `>ok`. After the partitions, `>|fw` gives the two releases on the
+ * board, kodeOS's and kode_c5's (info_fw()). `>|nvs erased=yes` says this boot
+ * found the settings store unreadable and erased it whole.
  */
 static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     (void)me; (void)c; (void)v;
 
-    uint8_t mac[6];
+    uint8_t          mac[KHAL_ID_MAC_LEN];
+    khal_chip_info_t chip;
+    char             p4[INFO_MAC_TEXT];
+    char             c5[INFO_MAC_TEXT];
+
+    /* A board with no identity leaves the C5's MAC at zero, which prints as "-". */
+    (void)memset(mac, 0, sizeof(mac));
     bool const known = (khal_identity_mac(mac) == KODE_OK);
 
+    /* Only the flash size can fail; khal_chip_info() fills the MAC first. */
+    (void)memset(&chip, 0, sizeof(chip));
+    (void)khal_chip_info(&chip);
+    info_mac_text(chip.mac, p4, sizeof(p4));
+    info_mac_text(mac, c5, sizeof(c5));
+
     /* The product is a firmware fact, so it answers even when the silicon
-     * would not: a board that cannot read its own MAC still knows what it is. */
-    console_reply(">|serial=%s product=\"%s\" board=\"%s\"",
+     * would not: a board that cannot read its own MAC still knows what it is.
+     * The revision is what production wrote, or `-` and the reason. */
+    char rev[CONSOLE_QUOTED_MAX(KHAL_ID_BOARD_REV_LEN)];
+    board_rev_say_none();
+    console_reply(">|serial=%s product=\"%s\" board=%s",
           known ? khal_identity_serial() : "-", KBSP_ID_PRODUCT,
-          KBSP_BOARD_REV);
-    if ( known )
-    {
-        console_reply(">|mac_p4=%02x:%02x:%02x:%02x:%02x:%02x",
-              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    }
-    else
-    {
-        console_reply(">|mac_p4=-");
-    }
+          console_kv_text(rev, sizeof(rev), khal_identity_board_rev()));
+    console_reply(">|mac_p4=%s mac_c5=%s", p4, c5);
 
     /* Then what is programmed where: a descriptor is one 256-byte flash read,
      * so this answers in every state. An empty partition is an answer. */
     static const char *const SLOT_NAMES[KDRV_SLOT_ID_COUNT] = {
         "factory", "ota_0", "ota_1",
     };
+    /* The kodeOS release for `>|fw`: the one that runs, else the one otadata
+     * names - in an app's console no partition runs, and that is the kodeOS
+     * the next boot that is not the app's starts. */
+    char running[KDRV_SLOT_VERSION_MAX];
+    char booted[KDRV_SLOT_VERSION_MAX];
+    running[0] = '\0';
+    booted[0]  = '\0';
     for ( unsigned i = 0U; (unsigned)KDRV_SLOT_ID_COUNT > i; ++i )
     {
         kdrv_slot_info_t info;
@@ -3829,12 +4151,28 @@ static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
             project = console_kv_text(qp, sizeof(qp), info.desc.project);
             version = console_kv_text(qv, sizeof(qv), info.desc.version);
             idf     = console_kv_text(qi, sizeof(qi), info.desc.idf_ver);
+            if ( info.running )
+            {
+                (void)snprintf(running, sizeof(running), "%s", info.desc.version);
+            }
+            if ( info.boot )
+            {
+                (void)snprintf(booted, sizeof(booted), "%s", info.desc.version);
+            }
         }
         console_reply(">|slot=%s addr=0x%06lx size_kb=%lu state=%s project=%s "
               "version=%s idf=%s",
               info.label, (unsigned long)info.address,
               (unsigned long)(info.size / 1024U), state,
               project, version, idf);
+    }
+    if ( '\0' != running[0] )
+    {
+        info_fw(running);
+    }
+    else
+    {
+        info_fw(booted);
     }
 
     /* Whether a crash waits in the coredump partition, and whose. Omitted
@@ -3865,6 +4203,17 @@ static void h_info(Console *me, const kcmd_t *c, const karg_val_t *v)
         {
             console_reply(">|coredump=none");
         }
+    }
+
+    /* Whether this boot found the settings store unreadable and erased it:
+     * every setting is then back to its default. */
+    if ( khal_nvs_erased() )
+    {
+        console_reply(">|nvs erased=yes");
+    }
+    else
+    {
+        console_reply(">|nvs erased=no");
     }
 
     /* What the owners add, in registration order: the coprocessor's
@@ -4674,44 +5023,125 @@ _Static_assert((sizeof(TYPE_NAMES) / sizeof(TYPE_NAMES[0]))
 
 /**
  * @brief One command's key specs as a record value: no spaces, keys joined
- *        by commas, each `key:type:req|opt[=default]`, enums spelled out.
- *        `-` when the command takes no keys.
+ *        by commas, each `key:type:req|opt[=default]`. `-` when it holds no
+ *        key: the command takes none, or not even its first fits. The members
+ *        of a key are not here: help_line() gives each a record of its own.
+ *
+ * @param args   The command's key specs.
+ * @param n_args How many.
+ * @param dst    Where the value is written.
+ * @param cap    Its size.
+ * @return How many keys went in, whole and in order: fewer than @p n_args
+ *         when the rest did not fit, and then nothing of them is in @p dst.
  */
-static void args_desc(const karg_spec_t *args, uint8_t n_args, char *dst,
-                      size_t cap)
+static uint8_t args_desc(const karg_spec_t *args, uint8_t n_args, char *dst,
+                         size_t cap)
 {
-    size_t used = 0U;
-    if ( 0U == n_args )
-    {
-        (void)snprintf(dst, cap, "-");
-        return;
-    }
+    size_t  used = 0U;
+    uint8_t in   = 0U;
+    bool    fits = true;
+
     dst[0] = '\0';
-    for ( uint8_t a = 0U; a < n_args; ++a )
+    for ( uint8_t a = 0U; (a < n_args) && fits; ++a )
     {
         karg_spec_t const * const s = &args[a];
-        int n = snprintf(&dst[used], cap - used, "%s%s:%s",
-                         (0U < a) ? "," : "", s->key, TYPE_NAMES[s->type]);
-        used += ((0 < n) && ((size_t)n < (cap - used))) ? (size_t)n : 0U;
-        /* Not just for an enum: a string's members are the prefixes it
-         * understands (`src`), where an enum's are its values (`dst`). */
-        if ( NULL != s->enums )
+        const char *sep  = "";
+        const char *need = "opt";
+        const char *eq   = "";
+        const char *def  = "";
+        int         n;
+
+        if ( 0U < a )
         {
-            for ( uint8_t m = 0U; m < s->n_enums; ++m )
-            {
-                n = snprintf(&dst[used], cap - used, "%c%s",
-                             (0U == m) ? '(' : '|', s->enums[m]);
-                used += ((0 < n) && ((size_t)n < (cap - used))) ? (size_t)n : 0U;
-            }
-            n = snprintf(&dst[used], cap - used, ")");
-            used += ((0 < n) && ((size_t)n < (cap - used))) ? (size_t)n : 0U;
+            sep = ",";
         }
-        n = snprintf(&dst[used], cap - used, ":%s%s%s",
-                     s->required ? "req" : "opt",
-                     (NULL != s->def) ? "=" : "",
-                     (NULL != s->def) ? s->def : "");
-        used += ((0 < n) && ((size_t)n < (cap - used))) ? (size_t)n : 0U;
+        if ( s->required )
+        {
+            need = "req";
+        }
+        if ( NULL != s->def )
+        {
+            eq  = "=";
+            def = s->def;
+        }
+        /* A key goes in whole or not at all: one that does not fit is taken
+         * back out, and none after it is tried. */
+        n = snprintf(&dst[used], cap - used, "%s%s:%s:%s%s%s", sep, s->key,
+                     TYPE_NAMES[s->type], need, eq, def);
+        if ( (0 < n) && ((size_t)n < (cap - used)) )
+        {
+            used += (size_t)n;
+            in   += 1U;
+        }
+        else
+        {
+            dst[used] = '\0';
+            fits = false;
+        }
     }
+    if ( 0U == in )
+    {
+        (void)snprintf(dst, cap, "-");
+    }
+    return in;
+}
+
+/**
+ * @brief Print line @p line of one command's part of the `help` listing.
+ *
+ * Line 0 is the command's `>|cmd=` record; after it, one `>|member=` record
+ * for each member of each key that record holds, in the order of the keys.
+ * Not just for an enum: a string's members are the prefixes it understands
+ * (`src`), where an enum's are its values (`dst`).
+ *
+ * @param verb   The command.
+ * @param args   Its key specs.
+ * @param n_args How many.
+ * @param line   Which of its lines.
+ * @return false when the command has no such line: its part is over.
+ */
+static bool help_line(const char *verb, const karg_spec_t *args,
+                      uint8_t n_args, uint16_t line)
+{
+    bool          printed = false;
+    char          desc[KCLI_ARGS_DESC_MAX];
+    uint8_t const in      = args_desc(args, n_args, desc, sizeof(desc));
+
+    if ( 0U == line )
+    {
+        if ( in == n_args )
+        {
+            console_reply(">|cmd=%s args=%s", verb, desc);
+        }
+        else
+        {
+            console_reply(">|cmd=%s args=%s cut=on", verb, desc);
+        }
+        printed = true;
+    }
+    else
+    {
+        uint16_t left = (uint16_t)(line - 1U);
+
+        for ( uint8_t a = 0U; (a < in) && !printed; ++a )
+        {
+            if ( NULL == args[a].enums )
+            {
+                /* No members to list. */
+            }
+            else if ( left < (uint16_t)args[a].n_enums )
+            {
+                console_reply(">|member=%s verb=%s key=%s",
+                              args[a].enums[left], verb, args[a].key);
+                printed = true;
+            }
+            else
+            {
+                left -= (uint16_t)args[a].n_enums;
+            }
+        }
+    }
+    return printed;
 }
 
 /**
@@ -4753,44 +5183,54 @@ static void h_tasks(Console *me, const kcmd_t *c, const karg_val_t *v)
 /**
  * @brief Emit one slice of the listing, and say whether that was the last.
  *
- * @param me The console; @c me->help_idx is where the last slice stopped.
+ * A slice is KCLI_SLICE lines, records and members alike, wherever they fall.
+ *
+ * @param me The console; @c me->help_idx and @c me->help_line are where the
+ *           last slice stopped.
  * @return true when the table is exhausted.
  */
 static bool help_slice(Console *me)
 {
-    char desc[KCLI_ARGS_DESC_MAX];
     uint16_t const total = (uint16_t)(g_ncmds + kverbs_count());
-    uint16_t       end   = total;
+    uint16_t       shown = 0U;
 
-    if ( (uint16_t)(me->help_idx + KCLI_SLICE) < total )
-    {
-        end = (uint16_t)(me->help_idx + KCLI_SLICE);
-    }
     /* The console's own verbs, then the owners' in registration order. */
-    for ( uint16_t i = me->help_idx; i < end; ++i )
+    while ( (me->help_idx < total) && (KCLI_SLICE > shown) )
     {
-        if ( (size_t)i < g_ncmds )
+        bool printed = false;
+
+        if ( (size_t)me->help_idx < g_ncmds )
         {
-            args_desc(g_cmds[i].args, g_cmds[i].n_args, desc, sizeof(desc));
-            console_reply(">|cmd=%s args=%s", g_cmds[i].verb, desc);
+            const kcmd_t * const c = &g_cmds[me->help_idx];
+
+            printed = help_line(c->verb, c->args, c->n_args, me->help_line);
         }
         else
         {
-            const kverb_t * const r = kverbs_at((size_t)i - g_ncmds);
+            const kverb_t * const r = kverbs_at((size_t)me->help_idx - g_ncmds);
 
             if ( NULL != r )
             {
-                args_desc(r->args, r->n_args, desc, sizeof(desc));
-                console_reply(">|cmd=%s args=%s", r->verb, desc);
+                printed = help_line(r->verb, r->args, r->n_args, me->help_line);
             }
         }
+        if ( printed )
+        {
+            me->help_line += 1U;
+            shown += 1U;
+        }
+        else
+        {
+            me->help_idx += 1U;
+            me->help_line = 0U;
+        }
     }
-    me->help_idx = end;
-    return (end >= total);
+    return (me->help_idx >= total);
 }
 
 /**
- * @brief help: one record per command, straight from the table, in slices.
+ * @brief help: one record per command, then one per member of its keys,
+ *        straight from the table, in slices.
  *
  * Paced (KCLI_SLICE): in one step the listing would exhaust the large pool
  * before AO_Log writes a line, losing its tail and the `>ok`.
@@ -4798,7 +5238,8 @@ static bool help_slice(Console *me)
 static void h_help(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     (void)v;
-    me->help_idx = 0U;
+    me->help_idx  = 0U;
+    me->help_line = 0U;
     cmd_begin(me, KCLI_HELP, c->verb);
     if ( help_slice(me) )
     {
@@ -5267,6 +5708,11 @@ static void h_config(Console *me, const kcmd_t *c, const karg_val_t *v)
     }
     if ( v[1].present )
     {
+        /* A row may ask for whoever sets it to be at the board. */
+        if ( row->wire && !console_src_allows(CONSOLE_NEED_WIRE) )
+        {
+            return;
+        }
         /* A string value is quoted and every other kind is bare; only the
          * row knows which this one is. */
         bool const want_quoted = (KODE_TYPE_STRING == row->type);
@@ -5896,6 +6342,7 @@ static const char *const EN_COMPONENT[] = {
     "display",
     "buttons", "tp",
     "psram",
+    "compose",
     "mem",
     "boot",
     "apps", "kfw", "id",
@@ -6075,6 +6522,13 @@ static void h_test(Console *me, const kcmd_t *c, const karg_val_t *v)
     {
         group = AUTOTEST_G_USER;
     }
+#if !defined(CONFIG_KODE_COMPOSE)
+    else if ( strcmp(EN_COMPONENT[v[0].u], "compose") == 0 )
+    {
+        console_reply_err(KCLI_ERR_REJECT, "not_built");
+        return;
+    }
+#endif
     else
     {
         sel = EN_COMPONENT[v[0].u];
@@ -6170,9 +6624,12 @@ _Static_assert((sizeof(A_EXP) / sizeof(A_EXP[0])) <= (size_t)KCLI_MAX_KEYS,
 static const karg_spec_t A_NAME[] = {
     { .key = "name", .required = true, .type = KARG_STRING },
 };
+/* `install=on` when the host sends the app's install next: the fetch's card
+ * waits for it instead of closing between the two. */
 static const karg_spec_t A_APPDATA_GET[] = {
-    { .key = "name", .required = true, .type = KARG_STRING },
-    { .key = "url",  .required = true, .type = KARG_STRING },
+    { .key = "name",    .required = true,  .type = KARG_STRING },
+    { .key = "url",     .required = true,  .type = KARG_STRING },
+    { .key = "install", .required = false, .type = KARG_BOOL, .def = "off" },
 };
 /* `ls` may be typed bare (the cwd). `cd` and `stat` need a path, so a
  * mistyped key is not taken as the cwd. */
@@ -6269,6 +6726,11 @@ static const karg_spec_t A_NVS_SET[] = {
     { .key = "key",   .required = true, .type = KARG_STRING },
     { .key = "value", .required = true, .type = KARG_STRING },
 };
+/* `value="1.0"`: the one string a hardware revision is, quoted as every
+ * string is. */
+static const karg_spec_t A_BOARD_REV[] = {
+    { .key = "value", .required = false, .type = KARG_STRING },
+};
 static const karg_spec_t A_NVS_KEY[] = {
     { .key = "key", .required = true, .type = KARG_STRING },
 };
@@ -6301,6 +6763,18 @@ static const karg_spec_t A_CRON[] = {
     { .key = "name", .required = false, .type = KARG_STRING },
     { .key = "when", .required = false, .type = KARG_ROW    },
     { .key = "cmd",  .required = false, .type = KARG_STRING },
+};
+#endif
+
+#ifndef CONFIG_KODE_LOWPOWER
+/* `rest`'s keys, as lowpower_verbs.c declares them, with every value let
+ * through: the verb answers "not built" whatever it is asked. */
+static const karg_spec_t A_REST[] = {
+    { .key = "parts",    .required = false, .type = KARG_UINT, .min = 0U, .max = UINT32_MAX },
+    { .key = "touch",    .required = false, .type = KARG_BOOL },
+    { .key = "pin",      .required = false, .type = KARG_UINT, .min = 0U, .max = UINT32_MAX },
+    { .key = "level",    .required = false, .type = KARG_BOOL },
+    { .key = "after_ms", .required = false, .type = KARG_UINT, .min = 0U, .max = UINT32_MAX },
 };
 #endif
 
@@ -6362,7 +6836,7 @@ static const kcmd_t CMDS[] = {
     { "appdata_ls",   NULL,      0U, h_appdata_ls   },
     { "appdata_info", A_NAME,    1U, h_appdata_info },
     { "appdata_rm",   A_NAME,    1U, h_appdata_rm   },
-    { "appdata_get",  A_APPDATA_GET, 2U, h_appdata_get },
+    { "appdata_get",  A_APPDATA_GET, 3U, h_appdata_get },
     { "variable",      A_VARIABLE, 2U, h_variable      },
     { "variable_list", NULL,       0U, h_variable_list },
     { "function",        A_FUNCTION,   2U, h_function        },
@@ -6378,6 +6852,8 @@ static const kcmd_t CMDS[] = {
     /* AO_LowPower registers them when it is built (lowpower_verbs.c). */
     { "sleep",      NULL,        0U, h_not_built  },
     { "power_off",  NULL,        0U, h_not_built  },
+    { "rest",       A_REST,      (uint8_t)Q_DIM(A_REST), h_not_built  },
+    { "rest_end",   NULL,        0U, h_not_built  },
 #endif
 #if !CONFIG_KODE_SCHEDULER
     /* AO_Scheduler registers `cron` when it is built (scheduler_verbs.c). */
@@ -6405,6 +6881,7 @@ static const kcmd_t CMDS[] = {
     { "nvs_get",    A_NVS_KEY,   1U, h_nvs_get    },
     { "nvs_del",    A_NVS_KEY,   1U, h_nvs_del    },
     { "nvs_list",   NULL,        0U, h_nvs_list   },
+    { "board_rev",  A_BOARD_REV, 1U, h_board_rev  },
 #if CONFIG_KODEOS_BOOT_ROLE_OS
     { "factory_reset", console_confirm_args, CONSOLE_CONFIRM_ARGS_N, h_factory_reset },
 #endif
@@ -6428,18 +6905,43 @@ bool console_system_verb(const char *verb)
     return found;
 }
 
+/**
+ * @brief Whether @p s is a word of at most @p max characters.
+ * @param s   The word, or NULL.
+ * @param max The most characters a `help` record leaves it.
+ * @return true when there is one, and it fits.
+ */
+static bool spec_word_fits(const char *s, size_t max)
+{
+    return (NULL != s) && (strlen(s) <= max);
+}
+
 bool console_specs_ok(void)
 {
-    for ( size_t c = 0U; (sizeof(CMDS) / sizeof(CMDS[0])) > c; ++c )
+    bool ok = true;
+
+    for ( size_t c = 0U; ok && ((sizeof(CMDS) / sizeof(CMDS[0])) > c); ++c )
     {
+        kcmd_t const * const r = &CMDS[c];
+
         /* A row with more keys than KCLI_MAX_KEYS would make cmd_validate()
-         * write past console_exec()'s stack frame. This checks every row. */
-        if ( (size_t)CMDS[c].n_args > (size_t)KCLI_MAX_KEYS )
+         * write past console_exec()'s stack frame, and a verb, key or member
+         * past its limit would not fit its `help` record. This checks every
+         * row. The lengths alone: `src`'s members are prefixes, not names. */
+        ok = ((size_t)r->n_args <= (size_t)KCLI_MAX_KEYS)
+             && spec_word_fits(r->verb, KVERB_NAME_MAX);
+        for ( uint8_t a = 0U; ok && (a < r->n_args); ++a )
         {
-            return false;
+            karg_spec_t const * const k = &r->args[a];
+
+            ok = spec_word_fits(k->key, KARG_KEY_NAME_MAX);
+            for ( uint8_t m = 0U; ok && (NULL != k->enums) && (m < k->n_enums); ++m )
+            {
+                ok = spec_word_fits(k->enums[m], KARG_MEMBER_NAME_MAX);
+            }
         }
     }
-    return true;
+    return ok;
 }
 
 /**
@@ -6504,6 +7006,55 @@ static bool console_exec_nowait(const char *verb, char *rest)
 }
 
 /**
+ * @brief Whether a line that arrived with a command in flight would take its place.
+ *
+ * Only a line from the port that holds the console: a line from another one
+ * waits its turn or is answered busy, as any other. And only when the owner
+ * of its verb says the one replaces the other (kverbs_t.replaces). Nothing is
+ * closed here: console_exec() closes the command in flight once the line has
+ * been validated, so a line that is refused replaces nothing.
+ *
+ * @param me   The console.
+ * @param verb The line's first token.
+ * @return true when the line, if valid, takes the place of the command in flight.
+ */
+static bool console_line_replaces(Console const *me, const char *verb)
+{
+    const kverbs_t *owner    = NULL;
+    const kverb_t  *row      = NULL;
+    bool            replaces = false;
+
+    if ( me->src == me->cmd_src )
+    {
+        row = kverbs_find(verb, &owner);
+    }
+    if ( (NULL != row) && (NULL != owner->replaces) )
+    {
+        replaces = owner->replaces(row);
+    }
+    return replaces;
+}
+
+/**
+ * @brief Give the command in flight its sequence back, after a line that
+ *        would have replaced it was refused.
+ *
+ * The line's error went out under the line's own sequence; the command is
+ * still in flight and its end is still to carry its own.
+ *
+ * @param me       The console.
+ * @param replaces The line was one that replaces (console_line_replaces()).
+ * @param seq      The sequence of the command in flight.
+ */
+static void console_seq_back(Console *me, bool replaces, uint8_t seq)
+{
+    if ( replaces )
+    {
+        me->net_seq = seq;
+    }
+}
+
+/**
  * @brief Parse and run one line: split it, find the verb, validate against
  *        its specs, hand the values to the handler.
  *
@@ -6536,7 +7087,12 @@ static void console_exec(Console *me, char *line)
 #endif
         return;
     }
-    if ( ((uint8_t)KCLI_IDLE != me->inflight) && line_handed_back(me->src) )
+    /* A line that would take the place of the command in flight is read
+     * as one that found the console free; the command gives way further
+     * down, once the line is known to be valid. */
+    bool const replaces = ((uint8_t)KCLI_IDLE != me->inflight) && console_line_replaces(me, tok);
+
+    if ( ((uint8_t)KCLI_IDLE != me->inflight) && (!replaces) && line_handed_back(me->src) )
     {
         /* A NET or SCHED line is not refused: its sender holds it and offers
          * it again. Nothing was accepted, so it neither wakes the board nor
@@ -6547,7 +7103,7 @@ static void console_exec(Console *me, char *line)
      * before the busy check, because a refused line is a person at the other
      * end as much as an accepted one. */
     lowpower_input_note(me->src);
-    if ( (uint8_t)KCLI_IDLE != me->inflight )
+    if ( ((uint8_t)KCLI_IDLE != me->inflight) && !replaces )
     {
         /* Busy, whatever else is wrong with the line, unless it is a verb
          * that does not wait. Either answer goes to the NEW line's port; the
@@ -6563,7 +7119,12 @@ static void console_exec(Console *me, char *line)
         return;
     }
     /* Accepted: from here every reply, errors of the line included, goes to
-     * the port that sent it, until the command has closed. */
+     * the port that sent it, until the command has closed. A line that
+     * replaces came from the port the command in flight already answers,
+     * and until it has replaced it the command keeps its sequence: an error
+     * of the line is the line's, and puts the command's back. */
+    uint8_t const running_seq = me->net_seq;
+
     me->cmd_src = me->src;
     me->net_seq = me->line_seq;
     while ( (CONSOLE_TOK_WORD == rc) && (KCLI_MAX_ARGS > argc) )
@@ -6576,6 +7137,7 @@ static void console_exec(Console *me, char *line)
     {
         /* console_token() has already cut the token at its `=`. */
         console_reply_err(KCLI_ERR_VALUE, tok);
+        console_seq_back(me, replaces, running_seq);
         return;
     }
     if ( CONSOLE_TOK_WORD == rc )
@@ -6589,6 +7151,7 @@ static void console_exec(Console *me, char *line)
             *eq = '\0';
         }
         console_reply_err(KCLI_ERR_VALUE, tok);
+        console_seq_back(me, replaces, running_seq);
         return;
     }
 
@@ -6614,8 +7177,24 @@ static void console_exec(Console *me, char *line)
         karg_val_t vals[KCLI_MAX_KEYS];
         if ( cmd_validate(row->args, row->n_args, argc, argv, vals) )
         {
+            if ( replaces )
+            {
+                /* Valid, so it runs: now, and not before, the command in
+                 * flight gives way, told so on the port they share and
+                 * under its own sequence. The word is the one a scan
+                 * somebody else ended answers with: to whoever reads it,
+                 * the listing did not reach its end either way. */
+                me->net_seq = running_seq;
+                console_reply_err(KCLI_ERR_REJECT, "stopped");
+                console_end();
+                me->net_seq = me->line_seq;
+            }
             me->owner = owner;
             row->fn(row, vals);
+        }
+        else
+        {
+            console_seq_back(me, replaces, running_seq);
         }
         return;
     }
@@ -6681,6 +7260,7 @@ static QState Console_initial(Console * const me, void const * const par)
     }
     QActive_subscribe(&me->super, LOWPOWER_STATE_SIG);
     QActive_subscribe(&me->super, LOWPOWER_REFUSED_SIG);
+    QActive_subscribe(&me->super, LOWPOWER_PART_SIG);
 #endif
     QActive_subscribe(&me->super, STORAGE_ENTRY_SIG);
     QActive_subscribe(&me->super, STORAGE_LIST_END_SIG);
@@ -6691,6 +7271,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, RECV_DONE_SIG);
     QActive_subscribe(&me->super, APP_EVICTED_SIG);
     QActive_subscribe(&me->super, RECV_FAIL_SIG);
+    QActive_subscribe(&me->super, RECV_AGAIN_SIG);
     QActive_subscribe(&me->super, RECV_STALL_SIG);
     QActive_subscribe(&me->super, APP_CAT_RSP_SIG);
     QActive_subscribe(&me->super, APP_ERASE_DONE_SIG);
@@ -6732,6 +7313,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, WIFI_STATE_SIG);
     QActive_subscribe(&me->super, WIFI_SCAN_ENTRY_SIG);
     QActive_subscribe(&me->super, WIFI_SCAN_END_SIG);
+    QActive_subscribe(&me->super, WIFI_SCAN_AGAIN_SIG);
     QActive_subscribe(&me->super, WIFI_SAVED_ENTRY_SIG);
     QActive_subscribe(&me->super, WIFI_SAVED_END_SIG);
 #endif
@@ -6789,9 +7371,9 @@ static QState console_own(Console * const me, QEvt const * const e)
             break;
         }
 
-        /* `sd_ls`, `fs_ls` and `ls` entries are published, so they also
-         * arrive when someone else asked: each record is gated on this AO's
-         * own command being in flight. */
+        /* `sd_ls` and `fs_ls` entries are published, so they also arrive
+         * when someone else asked; `ls`'s pages are posted to this AO alone.
+         * Each record is gated on this AO's own command being in flight. */
         case STORAGE_ENTRY_SIG: {
             StorageEntryEvt const * const en = Q_EVT_CAST(StorageEntryEvt);
             const char *medium = "fs";
@@ -6825,14 +7407,19 @@ static QState console_own(Console * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case STORAGE_LIST_END_SIG: {
+        /* Posted to this AO alone: the end of a page of `ls`. One that
+         * arrives after its command ended is nobody's. */
+        case FILE_LIST_END_SIG: {
             if ( (uint8_t)KCLI_FS_LIST == me->inflight )
             {
-                console_reply(">ok");
-                console_end();
+                ls_end(me, Q_EVT_CAST(FileRspEvt));
             }
-            else if ( ((uint8_t)KCLI_APPDATA_LS == me->inflight)
-                     || ((uint8_t)KCLI_APPDATA_INFO == me->inflight) )
+            status = Q_HANDLED();
+            break;
+        }
+        case STORAGE_LIST_END_SIG: {
+            if ( ((uint8_t)KCLI_APPDATA_LS == me->inflight)
+                || ((uint8_t)KCLI_APPDATA_INFO == me->inflight) )
             {
                 bool const more = Q_EVT_CAST(ListEndEvt)->more;
                 if ( ((uint8_t)KCLI_AD_FILES == me->ad_phase) && more
@@ -7888,6 +8475,16 @@ static QState console_own(Console * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case APP_REQ_RSP_SIG: {
+            /* Only the install in flight hears it: a verdict that arrives
+             * after the watchdog closed the command belongs to nobody. */
+            if ( (uint8_t)KCLI_INSTALL == me->inflight )
+            {
+                console_reply_app_verdict(Q_EVT_CAST(AppReqRspEvt)->verdict);
+            }
+            status = Q_HANDLED();
+            break;
+        }
         case RECV_FAIL_SIG: {
             if ( (uint8_t)KCLI_RECV == me->inflight )
             {
@@ -7901,6 +8498,19 @@ static QState console_own(Console * const me, QEvt const * const e)
             if ( (uint8_t)KCLI_RECV == me->inflight )
             {
                 console_reply_err(KCLI_ERR_TIMEOUT, me->verb);
+                console_end();
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case RECV_AGAIN_SIG:
+        case RECV_BUSY_SIG: {
+            /* AO_Storage's transfer in flight outlasted the wait of this
+             * `file_put`, or AO_AppMgr refused this install for now:
+             * nothing was armed, the host sends no byte. */
+            if ( (uint8_t)KCLI_RECV == me->inflight )
+            {
+                console_reply_err(KCLI_ERR_BUSY, "busy");
                 console_end();
             }
             status = Q_HANDLED();
@@ -7948,7 +8558,8 @@ static QState console_own(Console * const me, QEvt const * const e)
                     if ( to_file )
                     {
                         storage_write_all_request(me->file_name, img, r->len,
-                                                  &me->super);
+                                                  &me->super,
+                                                  KODE_STORAGE_TAG_NONE);
                     }
                     else
                     {
@@ -8098,6 +8709,12 @@ static QState console_own(Console * const me, QEvt const * const e)
                     console_reply(">|appdata project=%s json=ok icon=%s",
                                   console_quote(q, sizeof(q), g->project), icon);
                     console_reply(">ok");
+                }
+                else if ( (uint8_t)APPDATA_GET_BUSY == g->why )
+                {
+                    /* The one refusal that asking again cures: the code every
+                     * other verb gives a busy answer. */
+                    console_reply_err(KCLI_ERR_BUSY, ad_get_word(g->why));
                 }
                 else
                 {
@@ -8359,6 +8976,26 @@ static QState console_own(Console * const me, QEvt const * const e)
              * asked again by the next tick. Its answer comes here and is
              * nobody's. */
             (void)wifi_frames_request(&me->super, false, 0U);
+            status = Q_HANDLED();
+            break;
+        }
+#endif
+#ifdef CONFIG_KODEOS_BLE
+        case BLE_HEARD_SIG: {
+            /* The same for the advertisements: records go to the asker alone,
+             * and no `ble_heard` run reads this one, so a run ended while
+             * AO_Radio still held the console as its asker leaves a stream
+             * with nobody. It is stopped once for the records already in
+             * this queue, not once a record: a stop AO_Radio took is held
+             * for KCLI_HEARD_STOP_MS, and a refused post is asked again by
+             * the next record. */
+            uint32_t const now = khal_time_ms();
+
+            if ( (!me->heard_stop) || (KCLI_HEARD_STOP_MS <= (now - me->heard_stop_ms)) )
+            {
+                me->heard_stop    = ble_heard_request(&me->super, false);
+                me->heard_stop_ms = now;
+            }
             status = Q_HANDLED();
             break;
         }

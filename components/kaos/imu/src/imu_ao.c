@@ -1894,14 +1894,43 @@ static void mag_row(Imu * const me)
         return;
     }
 
-    if ( kdrv_qmc5883p_self_test(st) == KODE_OK )
+    if ( kdrv_qmc5883p_self_test(st) != KODE_OK )
     {
-        KLOG_N(TAG, "test mag: self-test shift %d %d %d mG (a reading, not "
-                    "judged)", (int)st[0], (int)st[1], (int)st[2]);
+        KLOG_E(TAG, "test mag: FAIL - the self-test could not be run");
+        mag_row_publish(me, 2U, (uint8_t)MAG_TEST_ST, 0U, 0, 0, 0, 0);
+        mag_row_verdict(me, false, "the part identified itself and its "
+                                   "self-test would not run");
+        return;
     }
-    else
     {
-        KLOG_W(TAG, "test mag: the self-test could not be run");
+        /* The datasheet gives the procedure and no figure, so the floor is
+         * not a spec: it is far under what a board that works shows (about
+         * 1000 mG an axis) and over what an axis that does not move can. */
+        bool moved = true;
+
+        for ( size_t i = 0U; (size_t)KDRV_QMC5883P_AXES > i; ++i )
+        {
+            int32_t d = st[i];
+
+            if ( 0 > d )
+            {
+                d = -d;
+            }
+            if ( (int32_t)KDRV_QMC5883P_ST_MIN_MG > d )
+            {
+                moved = false;
+            }
+        }
+        KLOG_N(TAG, "test mag: self-test shift %d %d %d mG, at least %d an axis",
+               (int)st[0], (int)st[1], (int)st[2], (int)KDRV_QMC5883P_ST_MIN_MG);
+        if ( !moved )
+        {
+            KLOG_E(TAG, "test mag: FAIL - an axis did not move under the self-test");
+            mag_row_publish(me, 2U, (uint8_t)MAG_TEST_ST, 0U, st[0], st[1], st[2], 0);
+            mag_row_verdict(me, false, "an axis did not move under the self-test");
+            return;
+        }
+        mag_row_publish(me, 2U, (uint8_t)MAG_TEST_ST, (uint8_t)MAG_TF_PASS, st[0], st[1], st[2], 0);
     }
 
     if ( kdrv_qmc5883p_read(mg) != KODE_OK )

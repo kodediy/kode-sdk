@@ -83,7 +83,7 @@ const char *seam_event_wifi_lost(void);
 /** @brief Rows the scripted scan offers at most. */
 #define SEAM_SCAN_MAX 16U
 
-static kode_status_t seam_block_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms);
+static kode_status_t seam_block_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms, bool *rest);
 int seam_wifi_scan(kode_wifi_network_t *out, size_t cap);
 
 #define kode_block_wifi_scan     seam_block_scan
@@ -113,11 +113,16 @@ static uint32_t           s_seam_rows_n;               /**< How many rows it off
 static kode_status_t      s_seam_scan_rc;              /**< What it answers.                 */
 static uint32_t           s_seam_scans;                /**< Scans it was asked for.          */
 static uint32_t           s_seam_scan_ms;              /**< The bound it was handed.         */
+static bool               s_seam_scan_rest;            /**< Its answer says the radio rests. */
 
-static kode_status_t seam_block_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms)
+static kode_status_t seam_block_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms, bool *rest)
 {
     s_seam_scans++;
     s_seam_scan_ms = ms;
+    if ( NULL != rest )
+    {
+        *rest = s_seam_scan_rest;
+    }
     if ( KODE_OK == s_seam_scan_rc )
     {
         for ( uint32_t i = 0U; i < s_seam_rows_n; i++ )
@@ -147,10 +152,11 @@ static void seam_scan_script(const int8_t *rssi, uint32_t n, kode_status_t rc)
         s_seam_rows[i].channel = (uint8_t)(1U + i);
         s_seam_rows[i].open    = (i % 2U) == 0U;
     }
-    s_seam_rows_n  = n;
-    s_seam_scan_rc = rc;
-    s_seam_scans   = 0U;
-    s_seam_scan_ms = 0U;
+    s_seam_rows_n    = n;
+    s_seam_scan_rc   = rc;
+    s_seam_scans     = 0U;
+    s_seam_scan_ms   = 0U;
+    s_seam_scan_rest = false;
 }
 
 static kode_status_t seam_status(kode_sys_wifi_status_t *out)
@@ -302,7 +308,8 @@ static void world_up(void)
     esp_wifi_start_IgnoreAndReturn(ESP_OK);
     esp_wifi_disconnect_IgnoreAndReturn(ESP_OK);
     esp_wifi_sta_get_ap_info_IgnoreAndReturn(ESP_FAIL);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("net"));
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("net", KDRV_WIFI_CHANNEL_ANY));
     fake_time_reset();
 }
 
@@ -694,6 +701,24 @@ TEST_CASE("scan with room for more than were found returns them all, in order", 
     TEST_ASSERT_EQUAL_STRING("", kode_error());
 }
 
+/* AO_Radio's refusal and AO_LowPower's parts can differ for a while (a board
+ * round over the app's rest): the text follows the answer, never the parts. */
+TEST_CASE("scan denied says the rest when its answer does, and only then", "[kode_wifi]")
+{
+    static const int8_t rssi[1] = { -50 };
+    kode_wifi_network_t out[1];
+
+    fresh();
+    seam_scan_script(rssi, 1U, KODE_DENIED);
+    s_seam_scan_rest = true;
+    TEST_ASSERT_EQUAL_INT(-1, seam_wifi_scan(out, 1U));
+    TEST_ASSERT_EQUAL_STRING("kode_wifi_scan: the radio is at rest; kode_rest_end() first", kode_error());
+
+    s_seam_scan_rest = false;
+    TEST_ASSERT_EQUAL_INT(-1, seam_wifi_scan(out, 1U));
+    TEST_ASSERT_EQUAL_STRING("this firmware has no Wi-Fi", kode_error());
+}
+
 TEST_CASE("scan refuses no room before it asks for anything", "[kode_wifi]")
 {
     static const int8_t rssi[1] = { -50 };
@@ -720,7 +745,12 @@ TEST_CASE("scan that fails says why and returns -1", "[kode_wifi]")
 
     seam_scan_script(rssi, 2U, KODE_NO_RESOURCES);
     TEST_ASSERT_EQUAL_INT(-1, seam_wifi_scan(out, 4U));
-    TEST_ASSERT_EQUAL_STRING("the radio is busy with a scan, a self-test or an install; try again",
+    TEST_ASSERT_EQUAL_STRING("the radio is busy with another scan, a network search, "
+                             "a self-test, an install or the board's rest; try again", kode_error());
+
+    seam_scan_script(rssi, 2U, KODE_CANCELLED);
+    TEST_ASSERT_EQUAL_INT(-1, seam_wifi_scan(out, 4U));
+    TEST_ASSERT_EQUAL_STRING("a newer Wi-Fi request ended the scan early; do not scan again at once",
                              kode_error());
 
     seam_scan_script(rssi, 2U, KODE_TIMEOUT);

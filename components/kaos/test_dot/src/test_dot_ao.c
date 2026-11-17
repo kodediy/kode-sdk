@@ -13,6 +13,7 @@
 #include "kaos.h"
 #include "kaos_claim.h"
 #include "kaos_start.h"
+#include "kbsp.h"
 #include "kdrv_buttons.h"
 #include "kdrv_wifi.h"
 #include "khal_nvs.h"
@@ -36,6 +37,8 @@ _Static_assert(KODE_TEST_DOT_SWEEP_MS >= (KDRV_WIFI_SCAN_TIMEOUT_MS + KDRV_WIFI_
                "the discovery's bound holds a whole sweep at the driver's own bound");
 _Static_assert(KODE_TEST_DOT_LINE_MS > KODE_TEST_DOT_END_MS, "the console's line outlasts the end");
 _Static_assert(KODE_TEST_DOT_LINE_MS > KODE_TEST_DOT_LOOP_MS, "the console's line outlasts the pads loop");
+_Static_assert(KODE_TEST_DOT_ANSWER_MS > (KODE_POWER_POLL_MS + KODE_TEST_DOT_BOOST_SETTLE_MS),
+               "the boost's answer, a poll past the settle, arrives inside its bound");
 
 /* The option has no "depends on" (kdrv's manifest reads it, see its Kconfig
  * help), so what it needs is checked here. */
@@ -945,6 +948,20 @@ static bool verb_needs_cam(uint8_t v)
            || ((uint8_t)TEST_DOT_VERB_CAMERA == v);
 }
 
+/**
+ * @brief Ask AO_Radio for J3's rail off.
+ *
+ * Nothing here waits for its end, so a refusal is only said: the rail stays
+ * on until the next ask.
+ */
+static void rail_off_ask(void)
+{
+    if ( !exp_power_request(false) )
+    {
+        KLOG_E(TAG, "J3's rail stays on: AO_Radio had no room to switch it off");
+    }
+}
+
 /** @brief Start the wake for @p e: J3's rail first. */
 static void wake_begin(TestDot *me, TestDotReqEvt const *e)
 {
@@ -961,9 +978,15 @@ static void wake_begin(TestDot *me, TestDotReqEvt const *e)
     me->mode = (uint8_t)MODE_WAKING;
     subscribe(me, true);
     me->rail_on = true;
-    exp_power_request(true);
+    if ( exp_power_request(true) )
+    {
+        KLOG_N(TAG, "wake: J3's rail asked");
+    }
+    else
+    {
+        KLOG_W(TAG, "wake: AO_Radio had no room for J3's rail; the rail's time ends the wake");
+    }
     tmo_arm(me, (uint8_t)TMO_RAIL, KODE_TEST_DOT_RAIL_MS);
-    KLOG_N(TAG, "wake: J3's rail asked");
 }
 
 /** @brief The wake failed on @p why: the relays at rest and the camera closed, then the rail off. */
@@ -984,7 +1007,7 @@ static void wake_closed(TestDot *me)
 {
     if ( me->rail_on )
     {
-        exp_power_request(false);
+        rail_off_ask();
     }
     me->rail_on      = false;
     me->probed       = false;
@@ -1898,15 +1921,20 @@ _Static_assert(sizeof(TD_RADIO_TIME_WORST) <= KODE_FUNCTION_REC_MAX, "the longes
 
 /**
  * @brief Whether the C5's card passes: an ESP32-C5 running Kode's slave at this image's
- *        esp-hosted version, with its data lines up.
+ *        esp-hosted version, on the bus the board is made for.
+ *
+ * A link that fell back to one data line or to a slower clock (a data line that does not
+ * reach the C5) fails, as it does in the production `c5` row.
  *
  * @param e AO_Radio's answer to the radio check.
- * @return true when the card, the chip, the slave, the version and the SDIO width all pass.
+ * @return true when the card, the chip, the slave, the version and the SDIO width and clock
+ *         all pass.
  */
 static bool radio_card_ok(RadioProbeEvt const *e)
 {
     return e->card && (RADIO_PROBE_CHIP_C5 == e->chip) && e->kode && (e->fw[0] == e->host[0])
-           && (e->fw[1] == e->host[1]) && (e->fw[2] == e->host[2]) && (0U < e->sdio_width);
+           && (e->fw[1] == e->host[1]) && (e->fw[2] == e->host[2])
+           && ((uint8_t)KBSP_C5_SDIO_WIDTH == e->sdio_width) && ((uint32_t)KBSP_C5_SDIO_KHZ == e->sdio_khz);
 }
 
 /**
@@ -2223,7 +2251,7 @@ static void end_next(TestDot *me)
                 tmo_stop(me);
                 if ( me->rail_on )
                 {
-                    exp_power_request(false);
+                    rail_off_ask();
                 }
                 me->rail_on      = false;
                 me->probed       = false;

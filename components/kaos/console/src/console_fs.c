@@ -19,6 +19,7 @@
  * refused by the console before it reaches them when the app did not link
  * AO_Storage, and naming them strongly would link it into every console. */
 KAOS_WEAK void storage_path_request(QActive *who, uint8_t op, const char *path);
+KAOS_WEAK kode_status_t storage_list_ask(QActive *who, const char *path, uint16_t skip);
 KAOS_WEAK void storage_cat_request(QActive *who, const char *path, uint32_t max);
 KAOS_WEAK void storage_pair_request(QActive *who, uint8_t op, const char *src,
                                     const char *dst);
@@ -223,15 +224,14 @@ void console_fs_enter(void)
 
 kode_status_t console_fs_ls(QActive *who, const char *in)
 {
-    /* The LIST terminator carries no status, so an empty directory and a
-     * missing one would look the same: STAT first, and
-     * console_fs_list_begin() lists once the answer says directory. */
+    /* STAT first, so a missing directory is refused the way `cd` refuses it;
+     * console_fs_list_page() lists once the answer says directory. */
     return ask_stat(who, in);
 }
 
-void console_fs_list_begin(QActive *who)
+kode_status_t console_fs_list_page(QActive *who, uint16_t skip)
 {
-    storage_path_request(who, (uint8_t)STORAGE_PATH_LIST, s_target);
+    return storage_list_ask(who, s_target, skip);
 }
 
 kode_status_t console_fs_stat(QActive *who, const char *in)

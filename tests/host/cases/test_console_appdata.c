@@ -630,11 +630,10 @@ TEST_CASE("appdata_get says why no folder was made", "[console_appdata]")
         appdata_get_why_t why;
         const char       *line;
     } CASES[] = {
-        { APPDATA_GET_BUSY,  ">err code=5 msg=busy"  },
+        { APPDATA_GET_BUSY,  ">err code=4 msg=busy"  },   /* busy is code 4 on every verb */
         { APPDATA_GET_NAME,  ">err code=5 msg=name"  },
         { APPDATA_GET_FETCH, ">err code=5 msg=fetch" },
         { APPDATA_GET_JSON,  ">err code=5 msg=json"  },
-        { APPDATA_GET_ICON,  ">err code=5 msg=icon"  },
         { APPDATA_GET_FULL,  ">err code=5 msg=full"  },
         { APPDATA_GET_STORE, ">err code=5 msg=store" },
     };
@@ -683,6 +682,50 @@ TEST_CASE("appdata_get needs both its keys", "[console_appdata]")
     type_line("appdata_get name=\"snake\"");
     TEST_ASSERT_TRUE(replied(">err code=2 msg=url"));
     TEST_ASSERT_FALSE(get_asked(&req));
+}
+
+TEST_CASE("appdata_get says an install follows only when it is told so",
+          "[console_appdata]")
+{
+    static const struct {
+        const char *tail;
+        bool        install;
+    } CASES[] = {
+        { "",             false },
+        { " install=off", false },
+        { " install=on",  true  },
+    };
+    static char      line[KODE_CONSOLE_LINE_MAX];
+    AppDataGetReqEvt req;
+
+    for ( size_t i = 0U; (sizeof(CASES) / sizeof(CASES[0])) > i; ++i )
+    {
+        console_up_once();
+        (void)get_asked(&req);
+        (void)snprintf(line, sizeof(line),
+                       "appdata_get name=\"snake\" url=\"http://example.invalid/s/\"%s",
+                       CASES[i].tail);
+
+        type_line(line);
+
+        TEST_ASSERT_TRUE_MESSAGE(get_asked(&req), line);
+        TEST_ASSERT_EQUAL_MESSAGE(CASES[i].install, req.install, line);
+        get_answered("snake", APPDATA_GET_OK, false);
+        TEST_ASSERT_TRUE(replied(">ok"));
+    }
+}
+
+TEST_CASE("appdata_get refuses an install that is neither on nor off",
+          "[console_appdata]")
+{
+    AppDataGetReqEvt req;
+
+    console_up_once();
+    (void)get_asked(&req);
+
+    type_line("appdata_get name=\"snake\" url=\"http://example.invalid/s/\" install=yes");
+    TEST_ASSERT_TRUE(replied(">err code=3 msg=install"));
+    TEST_ASSERT_FALSE_MESSAGE(get_asked(&req), "a fetch was asked for on a word it cannot read");
 }
 
 TEST_CASE("an answer to a fetch nobody typed says nothing", "[console_appdata]")

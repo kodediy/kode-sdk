@@ -242,7 +242,8 @@ kode_status_t kode_block_file_space(const char *path, kode_sys_file_space_t *out
     return rc;
 }
 
-kode_status_t kode_block_file_list_each(const char *path, kode_sys_file_entry_cb cb, void *ctx)
+kode_status_t kode_block_file_list_each(const char *path, uint32_t skip, kode_sys_file_entry_cb cb,
+                                        void *ctx)
 {
     kode_sys_file_status_t st;
 
@@ -274,8 +275,7 @@ kode_status_t kode_block_file_list_each(const char *path, kode_sys_file_entry_cb
     s_fs_wait.cut = false;
 
     uint32_t const gen = fs_next_gen();
-    storage_path_request_wait(&s_fs_wait, gen, (uint8_t)STORAGE_PATH_LIST,
-                              path);
+    storage_list_request_wait(&s_fs_wait, gen, path, skip);
 
     rc = fs_await(gen);
     if ( KODE_OK != rc )

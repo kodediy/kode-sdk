@@ -40,7 +40,6 @@
                                   * value and it plays at 24 kHz, an octave up. */
 #define AW_STANDBY_BIT   0x40U   /* SYSCTRL2 bit 6: the driver stage parked.  */
 #define AW_GLB_STATE_MASK 0x0FU
-#define AW_GLB_RTP       0x08U   /* GLB_STATE: playing from the RTP FIFO.     */
 #define AW_FAMILY        0x23U   /* CHIPID_H on every AW8623X.                */
 
 #define AW_PROBE_MS      50U
@@ -54,6 +53,10 @@
 #define AW_TWO_PI_F      6.2831853f /* One turn. Single precision: the P4 has
                                      * no double unit and this is a waveform. */
 #define AW_DUMP_LINE     96U
+
+/* A burst written while FF_AFS is still clear lands under the FIFO's top. */
+_Static_assert((KDRV_AW_FIFO_AF + KDRV_AW_BURST) <= KDRV_AW_FIFO_DEPTH,
+               "a burst over the almost-full mark must fit in the FIFO");
 
 /* ---- The table ----------------------------------------------------------- */
 
@@ -275,7 +278,7 @@ static bool go_took(void)
         {
             return false;
         }
-        if ( (st & AW_GLB_STATE_MASK) == AW_GLB_RTP )
+        if ( (st & AW_GLB_STATE_MASK) == (uint8_t)KDRV_AW_GLB_RTP )
         {
             return true;
         }
@@ -308,8 +311,9 @@ kode_status_t kdrv_aw86233_rtp_begin(uint8_t gain_pct, uint8_t *reg_written)
     {
         return KODE_IO_ERROR;
     }
-    /* GO before a single sample exists: the chip plays what arrives and
-     * waits on an empty FIFO, so this is the mode's contract and not a race. */
+    /* GO before a single sample exists: the chip waits for its first sample,
+     * so this is the mode's contract and not a race. Once it has played, an
+     * empty FIFO sends it back to standby. */
     if ( !reg_write(AW_REG_PLAYCFG4, AW_GO) )
     {
         return KODE_IO_ERROR;

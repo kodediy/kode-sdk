@@ -9,6 +9,7 @@
 
 #include "kbsp_identity.h"
 #include "khal_identity.h"
+#include "khal_nvs.h"
 #include "fakes.h"
 
 /** @brief The bench board: e8:f6:0a:e7:6c:1d. */
@@ -330,4 +331,88 @@ TEST_CASE("a cache that cannot be written still names the board this boot",
     TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, khal_identity_set_mac(C5_MAC));
     TEST_ASSERT_EQUAL_INT(KODE_OK, khal_identity_encode(C5_MAC, expect, sizeof(expect)));
     TEST_ASSERT_EQUAL_STRING(expect, khal_identity_serial());
+}
+
+/* ---- The hardware revision production writes ------------------------------ */
+
+/* The revision is no build constant: production's station writes it over the
+ * cable into the identity's namespace, which the factory reset keeps. A board
+ * nobody wrote one for has none, and says so instead of guessing. */
+
+TEST_CASE("a board production wrote no revision for has none", "[khal_identity]")
+{
+    fake_nvs_reset();
+    (void)khal_identity_init();
+    TEST_ASSERT_EQUAL_STRING("", khal_identity_board_rev());
+}
+
+TEST_CASE("the revision production writes is read back after a reboot",
+          "[khal_identity]")
+{
+    char ns[16];
+
+    fake_nvs_reset();
+    (void)khal_identity_init();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_identity_set_board_rev("1.0"));
+    TEST_ASSERT_EQUAL_STRING("1.0", khal_identity_board_rev());
+
+    (void)khal_identity_init();   /* the next boot */
+    TEST_ASSERT_EQUAL_STRING("1.0", khal_identity_board_rev());
+
+    /* Where the factory reset leaves it alone. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_namespace(0U, ns, sizeof(ns)));
+    TEST_ASSERT_EQUAL_STRING(KHAL_IDENTITY_NVS_NS, ns);
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, khal_nvs_namespace(1U, ns, sizeof(ns)));
+}
+
+TEST_CASE("a revision that is not digits, a dot and digits is refused and "
+          "changes nothing", "[khal_identity]")
+{
+    static const char *const bad[] = {
+        "", "1", "1.", ".0", "v1.0", "1.0.0", "1,0", "1 .0", "1234.567", "-1.0",
+    };
+
+    fake_nvs_reset();
+    (void)khal_identity_init();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_identity_set_board_rev("2.10"));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, khal_identity_set_board_rev(NULL));
+    for ( size_t i = 0U; (sizeof(bad) / sizeof(bad[0])) > i; ++i )
+    {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, khal_identity_set_board_rev(bad[i]),
+                                      bad[i]);
+    }
+    TEST_ASSERT_EQUAL_STRING("2.10", khal_identity_board_rev());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_identity_set_board_rev("123.456"));
+}
+
+TEST_CASE("a revision the store refuses is not taken", "[khal_identity]")
+{
+    fake_nvs_reset();
+    (void)khal_identity_init();
+    fake_nvs_fail_next_set();
+    TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, khal_identity_set_board_rev("1.0"));
+    TEST_ASSERT_EQUAL_STRING("", khal_identity_board_rev());
+}
+
+/* A store written by hand, or by something else, is read with the same rule
+ * the write keeps: what is no revision is none. */
+TEST_CASE("a stored value that is no revision reads as none", "[khal_identity]")
+{
+    fake_nvs_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_set_str(KHAL_IDENTITY_NVS_NS,
+                                                     KHAL_ID_BOARD_REV_KEY, "DVT"));
+    (void)khal_identity_init();
+    TEST_ASSERT_EQUAL_STRING("", khal_identity_board_rev());
+}
+
+/* A value longer than any revision does not fit the read, and is none: the
+ * read never hands back the front of it. */
+TEST_CASE("a stored value longer than a revision reads as none", "[khal_identity]")
+{
+    fake_nvs_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_set_str(KHAL_IDENTITY_NVS_NS,
+                                                     KHAL_ID_BOARD_REV_KEY,
+                                                     "12345.67890"));
+    (void)khal_identity_init();
+    TEST_ASSERT_EQUAL_STRING("", khal_identity_board_rev());
 }

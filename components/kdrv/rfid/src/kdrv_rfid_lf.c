@@ -109,7 +109,7 @@ static adc_continuous_handle_t s_adc;
 /** @brief The VO4 channel handle, held only while a boosted field is up. */
 static esp_ldo_channel_handle_t s_ldo;
 
-/** @brief The carrier's channel while the field is up, else KHAL_PWM_NONE. */
+/** @brief The carrier's channel from the first field to the next rest, else KHAL_PWM_NONE. */
 static khal_pwm_t s_carrier = KHAL_PWM_NONE;
 
 /** @brief Whether the carrier is currently driving RFID_OUT. */
@@ -212,6 +212,23 @@ static void pins_read_state(void)
 /* ===== Carrier ============================================================ */
 
 /**
+ * @brief Take RFID_OUT out of the GPIO driver's reservation, still driven low.
+ *
+ * gpio_config() reserves an output pin, and LEDC warns when it is handed a
+ * pin that is reserved. gpio_reset_pin() gives the reservation up and leaves
+ * the pad undriven with its pull-up on; the pad is made an output again at
+ * once by its direction alone, which reserves nothing. It is undriven for the
+ * few instructions in between, and low from there until LEDC takes it.
+ */
+static void out_unreserve(void)
+{
+    (void)gpio_set_level((gpio_num_t)KBSP_PIN_RFID_OUT, OUT_IDLE);
+    (void)gpio_reset_pin((gpio_num_t)KBSP_PIN_RFID_OUT);
+    (void)gpio_set_direction((gpio_num_t)KBSP_PIN_RFID_OUT, GPIO_MODE_OUTPUT);
+    (void)gpio_set_pull_mode((gpio_num_t)KBSP_PIN_RFID_OUT, GPIO_FLOATING);
+}
+
+/**
  * @brief Bring the 125 kHz carrier up on RFID_OUT, on a timer of its own.
  *
  * The drive strength is capped high so the half-bridge gets a clean edge.
@@ -232,8 +249,12 @@ static kode_status_t carrier_start(void)
 
     if ( KHAL_PWM_NONE != s_carrier )
     {
-        return KODE_OK;
+        /* The channel stays with LEDC, silent, between the fields of a read:
+         * only its duty comes back. */
+        return khal_pwm_set(s_carrier, RFID_CARRIER_HZ, RFID_CARRIER_DUTY_X10);
     }
+    /* At rest the pin is a GPIO output, reserved: LEDC takes it unreserved. */
+    out_unreserve();
     rc = khal_pwm_open(&cfg, &s_carrier);
     if ( KODE_NO_RESOURCES == rc )
     {
@@ -251,14 +272,29 @@ static kode_status_t carrier_start(void)
 }
 
 /**
- * @brief Take the carrier down, leaving RFID_OUT idle low and its timer free.
+ * @brief Give the carrier's channel and its timer back, the pin to the GPIO driver.
  */
-static void carrier_stop(void)
+static void carrier_release(void)
 {
     if ( KHAL_PWM_NONE != s_carrier )
     {
         khal_pwm_close(s_carrier);
         s_carrier = KHAL_PWM_NONE;
+    }
+}
+
+/**
+ * @brief Silence the carrier: RFID_OUT held idle low by its channel, which stays open.
+ *
+ * A channel that will not go quiet is let go instead; the pin is then idle low
+ * as a GPIO.
+ */
+static void carrier_stop(void)
+{
+    if ( (KHAL_PWM_NONE != s_carrier)
+        && (khal_pwm_set(s_carrier, RFID_CARRIER_HZ, 0U) != KODE_OK) )
+    {
+        carrier_release();
     }
 }
 
@@ -726,6 +762,7 @@ kode_status_t kdrv_rfid_lf_cert_carrier(bool modulated)
 
 kode_status_t kdrv_rfid_lf_init(void)
 {
+    carrier_release();   /* the pin is about to be a GPIO output again */
     pins_read_state();
     s_field = false;
     return KODE_OK;
@@ -895,13 +932,17 @@ static kode_status_t job_read(uint32_t ms, uint8_t id[5], uint8_t *rf_div)
     return rc;
 }
 
+/** @brief The most windows a clone reads back before calling the copy bad. */
+#define RFID_CLONE_VERIFY_WINDOWS 4U
+
 /**
- * @brief Run one CLONE job: boost, write, read one window back to verify, drop.
+ * @brief Run one CLONE job: boost, write, read back to verify, drop.
  *
  * @param src    The 5-byte ID to program.
  * @param id     Out: what the verify read decoded, for the AO to compare.
  * @param rf_div Out: the bit rate the read-back came at, 0 when none.
- * @return KODE_OK when the read-back decoded; the carrier's error when the
+ * @return KODE_OK when one of the first RFID_CLONE_VERIFY_WINDOWS read-back
+ *         windows decoded; the carrier's error when the
  *         field would not come up; the clone's error otherwise.
  */
 static kode_status_t job_clone(const uint8_t src[5], uint8_t id[5],
@@ -918,8 +959,17 @@ static kode_status_t job_clone(const uint8_t src[5], uint8_t id[5],
     rc = kdrv_rfid_lf_clone(src);
     if ( KODE_OK == rc )
     {
-        (void)memset(&d, 0, sizeof(d));
-        rc = kdrv_rfid_lf_read_window(id, &d);
+        /* The first window after a write is flat while the front end settles,
+         * so a read-back gets a few windows before the copy is called bad. */
+        for ( uint8_t w = 0U; (uint8_t)RFID_CLONE_VERIFY_WINDOWS > w; ++w )
+        {
+            (void)memset(&d, 0, sizeof(d));
+            rc = kdrv_rfid_lf_read_window(id, &d);
+            if ( KODE_TIMEOUT != rc )
+            {
+                break;
+            }
+        }
         if ( KODE_OK == rc )
         {
             *rf_div = (uint8_t)d.bitrate_div;
@@ -1362,6 +1412,7 @@ kode_status_t kdrv_rfid_lf_rest(void)
     {
         return KODE_DENIED;
     }
+    carrier_release();   /* the timer goes back to the header while nothing reads */
     pull_set(PULL_REST);
     return KODE_OK;
 }

@@ -69,6 +69,16 @@ menu "kodeOS active objects"
 
                 On in kodeOS, off in an app.
 
+        config KODE_COMPOSE
+            bool "Compose pictures with the pixel accelerator"
+            default n
+            help
+                The passes a renderer composes with (kscreen_pic_*), run by
+                AO_Display, and the `compose` self-test row. Off, a pass is
+                refused as not built.
+
+                If unsure, say N.
+
     endmenu
 
     menu "Radio (ESP32-C5)"
@@ -146,6 +156,19 @@ menu "kodeOS active objects"
                 wins. It does not turn WiFi on.
 
                 If unsure, say Y.
+
+        config KODE_WIFI_HINT_YIELD_DB
+            int "dB another access point must be stronger by to take the join"
+            depends on KODEOS_WIFI
+            range 0 40
+            default 6
+            help
+                A join starts on the channel the network was last joined on.
+                When the same network was also heard on another channel, the
+                board listens on both and joins the other access point when it
+                is this many dB stronger than the remembered one. A lower
+                value moves to the stronger access point sooner; a higher one
+                stays where the last join worked.
 
         config KODEOS_NET
             bool "AO_Net (ping, HTTP(S), UDP - the host's own lwIP)"
@@ -251,15 +274,17 @@ menu "kodeOS active objects"
                 If unsure, say Y.
 
         config KODEOS_BLE_PAIRING_PASSKEY
-            bool "Pair with a code: shown on the glass in kodeOS, never in an app"
+            bool "Pair with a code, shown on the glass"
             depends on KODEOS_BLE_CONSOLE_PAIRING
             default y
             help
                 Pairing with a six-digit code shown on the glass, so the bond is
-                authenticated. An app refuses every new pairing; a phone bonded
-                in kodeOS reconnects in the app. The code never reaches a log or
-                the console. Off, pairing is Just Works: encrypted, not
-                authenticated.
+                authenticated. An app refuses every new pairing, and a phone
+                bonded in kodeOS reconnects in it; only an app that serves the
+                HID service pairs a device, in the time it opens, and shows the
+                code itself. The SDK writes the code to no log and to no console:
+                where an app shows it is the app's. Off, pairing is Just Works:
+                encrypted, not authenticated.
 
                 If unsure, say Y.
 

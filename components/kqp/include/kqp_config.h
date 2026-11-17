@@ -111,6 +111,12 @@
 /* 3 is the renderer's - a consumer level, defined with its family below as
  * KODE_PRIO_USER_GUI. */
 #define KODE_PRIO_READER        4U    /**< Console reader task (blocking).  */
+/* The boot task is FreeRTOS's main task, at priority 1, and it runs every
+ * owner's initial transition. The renderer starts in the early row and draws
+ * without a pause; where the port puts it on the boot task's core, a walk at
+ * priority 1 gets only the gaps between its passes, and the rows below the
+ * early one come up seconds late. One level above the renderer is enough. */
+#define KODE_PRIO_BOOT_WALK     (KODE_PRIO_USER_GUI + 1U) /**< The boot task while kode_init() starts and parks the rows. */
 #define KODE_PRIO_RADIO         4U    /**< AO_Radio + its worker task.      */
 #define KODE_PRIO_STORAGE       5U    /**< AO_Storage + its storage_sd worker task. */
 #define KODE_PRIO_LOG           6U    /**< AO_Log (the console device).     */
@@ -255,7 +261,7 @@
 #define KODE_TEST_DOT_SCREEN_MS     2000U   /**< The longest a screen or a pattern waits for its host; past it the step goes on. */
 #define KODE_TEST_DOT_JOB_MS        20000U  /**< The longest one worker job may take before the step gives it up. */
 #define KODE_TEST_DOT_JPEG_MS       2000U   /**< The longest one photo's encode waits for AO_Display: an encode takes milliseconds. */
-#define KODE_TEST_DOT_ANSWER_MS     5000U   /**< The longest an owner's answer may take (the boost, the dock's pins): AO_Power answers at its next 2 s poll. */
+#define KODE_TEST_DOT_ANSWER_MS     5000U   /**< The longest an owner's answer may take (the boost, the dock's pins): AO_Power answers at the first 2 s poll past the boost's settle. */
 #define KODE_TEST_DOT_RESET_MS      KODE_RESET_CONSOLE_MS /**< The longest the SHIP reset may take to answer: every step at its budget. */
 #define KODE_TEST_DOT_RADIO_QUEUE_MS 25000U /**< What a radio check may wait behind AO_Radio's running job: a join takes 20 s. */
 /** @brief The longest `test_dot_radio` waits for RADIO_PROBE_SIG before it answers a timeout. */
@@ -292,6 +298,7 @@
  */
 #define KODE_TEST_DOT_LINE_MS       (KODE_TEST_DOT_RESET_MS + KODE_TEST_DOT_LINE_MARGIN_MS)
 #define KODE_TEST_DOT_BOOST_LIM_CODE 2U     /**< BQ25896 BOOST_LIM for the pads delivery test: 1.2 A. */
+#define KODE_TEST_DOT_BOOST_SETTLE_MS 500U  /**< The least time between the delivery test's boost write and the reading that answers it. */
 #define KODE_TEST_DOT_LOCK_KEY      "locked" /**< The lock's key in KODE_STATION_NVS_NS. */
 #define KODE_TEST_DOT_LOCK_ON       1U      /**< The value the lock's key holds. */
 #define KODE_TEST_DOT_GRID_LEN      17U     /**< Characters of the automatic phase's grid: identification, twelve rows, four radio. */
@@ -327,18 +334,24 @@
 #define KODE_LOWPOWER_ROUND_MS         2000U   /**< Longest wait for a round's answers. */
 #define KODE_LOWPOWER_OFF_GRACE_MS     100U    /**< Between STATE(OFF) and deep sleep, for the log to drain. */
 #define KODE_LOWPOWER_REQUEST_RETRY_MS 1000U   /**< A requested round that met a busy or silent owner begins again this long
-                                                *   after it was abandoned. */
+                                                *   after it was abandoned; in an app's rest, a busy owner is asked
+                                                *   again this long after its answer. */
 #define KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS 10000U /**< The longest a request is begun again, counted from the request;
-                                                *   the requester is answered once, when it runs out. */
+                                                *   the requester is answered once, when it runs out. An app's rest
+                                                *   asks a busy owner again only inside it. */
 #define KODE_LOWPOWER_ORDER_MS         10000U  /**< The longest a request for OFF waits for a busy or silent owner;
                                                 *   the board goes OFF when it runs out, done or not. */
 #define KODE_LOWPOWER_QUEUE_LEN        48U     /**< AO_LowPower's queue: every participant's answer, a request and the inputs. */
-#define KODE_LOWPOWER_RADIO_MAX_MS     60000U  /**< Longest a radio wake lasts before the radio owners are asked to rest, done or not. */
+#define KODE_LOWPOWER_DARK_MAX_MS      60000U  /**< Longest a dark wake lasts before the dark-wake owners are asked to rest, done or not. */
 #define KODE_LOWPOWER_SLEEP_AFTER_DEF_S 120U   /**< Idle time before ASLEEP: 2 min. */
-#define KODE_LOWPOWER_OFF_AFTER_DEF_S  3600U   /**< Asleep time before OFF: 1 h. */
+#define KODE_LOWPOWER_OFF_AFTER_DEF_S  1200U   /**< Asleep time before OFF: 20 min. */
 #define KODE_LOWPOWER_DIM_PCT          20U     /**< The glass in ASLEEP when no glyphs were handed;
                                                 *   the interface sets its own through rest_pct. */
 #define KODE_LOWPOWER_MINUTE_S         60U     /**< The minute the glass is lit for. */
+#define KODE_LOWPOWER_CABLE_LOOK_MS    KODE_POWER_POLL_MS  /**< How often ASLEEP and the CPU part's rest look
+                                                *   for a cable, which no line of the board wakes the P4 for: as
+                                                *   often as AO_Power's poll does awake, so a cable is seen as soon
+                                                *   asleep as awake. */
 #define KODE_LOWPOWER_GLYPHS_WAIT_MS   1500U   /**< Longest AO_Display waits for the renderer's glyphs
                                                 *   after a round opens: under KODE_LOWPOWER_ROUND_MS, so
                                                 *   it can still answer busy and name the reason. */
@@ -353,8 +366,38 @@
 #define KODE_LOWPOWER_LAST_VERSION     1U      /**< The layout of the summary in the store; another reads as none. */
 #define KODE_LOWPOWER_LAST_OPEN        0xFFU   /**< The summary's end cause when the rest left none: the board
                                                 *   was asleep at the last write, and a reset ended it. */
+#define KODE_LOWPOWER_PART_STEP_MS     3000U   /**< Longest AO_LowPower waits for one owner to put its part away
+                                                *   or bring it back in an app's rest: over the glass's own
+                                                *   KODE_DISPLAY_SLEEP_WAIT_MS and a card's unmount. */
+#define KODE_LOWPOWER_PART_ASKS        8U      /**< Owners the longest rest asks, one after the other: one a part,
+                                                *   and the CPU part asks a second for its wake time. */
+#define KODE_LOWPOWER_PART_WAIT_MS     ((KODE_LOWPOWER_PART_ASKS * KODE_LOWPOWER_PART_STEP_MS) \
+                                        + KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS) /**< Longest a rest's answer
+                                                *   takes: busy owners asked again for the whole window, then
+                                                *   every owner of the longest rest silent to the end of its step. */
+#define KODE_LOWPOWER_PART_BOUND_MS    (KODE_LOWPOWER_PART_WAIT_MS + KODE_LOWPOWER_PART_STEP_MS) /**< Longest
+                                                *   kode_rest(), kode_rest_end() and the verbs `rest` and
+                                                *   `rest_end` wait for that answer: one step over the worst case,
+                                                *   for the steps' timers rounded to ticks. */
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
+#define KODE_LOWPOWER_PART_TIMERS      2U      /**< One-shots a rest's wake time may have out at once; a time
+                                                *   that would need another is refused. */
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
+#define KODE_LOWPOWER_PART_HOP_MS      60000U  /**< The longest one of those one-shots runs: a longer wake time is
+                                                *   reached in hops, so a one-shot that outlives its rest (none can
+                                                *   be taken back) is gone within this. */
+/* cppcheck-suppress misra-c2012-2.5 ; used where CONFIG_KODE_LOWPOWER is set, in a region cppcheck does not read without it */
+#define KODE_DISPLAY_SUPPLY_SETTLE_MS  20U     /**< AO_Display's wait between the expander's owner saying the
+                                                *   panel's supply is back and the panel's cold reset: the rail's
+                                                *   rise, the one wait there is for it. */
 #define KODE_DISPLAY_RESTORE_RETRY_MS  200U    /**< AO_Display's wait before it puts the glass back again
                                                 *   after the link or the panel refused to wake. */
+#define KODE_DISPLAY_SLEEP_WAIT_MS     2000U   /**< Longest kode_display_sleep() waits for AO_Display to
+                                                *   sleep the glass or wake it: the renderer's
+                                                *   KODE_LOWPOWER_GLYPHS_WAIT_MS, then the panel's sleep-in
+                                                *   and the link, about 210 ms. */
+_Static_assert(KODE_DISPLAY_SLEEP_WAIT_MS > KODE_LOWPOWER_GLYPHS_WAIT_MS,
+               "a task's wait for the glass outlasts the renderer's time to stop drawing");
 
 /* ---- AO_Scheduler: the table, the clock and the lines it runs -------------- */
 #define KODE_SCHED_MAX           16U     /**< Entries, the built-in `mqtt` included (its slot is always taken). */
@@ -549,6 +592,20 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  * of them; a console line (KODE_CONSOLE_LINE_MAX) carries fewer. A file name
  * is still bounded by KODE_APP_FILE_MAX. */
 #define KODE_FLASH_SRC_MAX       257U
+/* A URL a download into a file names, terminator included: 255 characters.
+ * One less than a source string so that the offset a resumed download starts
+ * from fits beside it in the large event block (NetStreamFromEvt). */
+#define KODE_NET_FETCH_URL_MAX   256U
+/* A chunk of a download into a file that finds another transfer holding the
+ * one file handle is tried again this often, for KODE_STORAGE_TURN_MS in
+ * all: the bound every request that waits its turn at AO_Storage has. */
+#define KODE_HTTP_FILE_RETRY_MS  50U
+/* How long a download into a file waits for AO_Net's next chunk before it
+ * gives up. AO_Net answers a read within its own guard (the driver's 20 s and
+ * KODE_NET_STREAM_SLACK_MS), but forgets a transfer whose network went and
+ * tells its reader nothing: this is what ends that wait. Above the guard, so a
+ * read that is only slow is answered by AO_Net first. */
+#define KODE_HTTP_FILE_STALL_MS  30000U
 /* `dst=` values 0..2 are kfw_target_t. This one is not a container target -
  * nothing declares itself "for the mailbox" - it is an instruction to park
  * whatever arrives without decoding it. */
@@ -557,6 +614,16 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  * over a slow link must not time out, but a host that dies mid-image must not
  * leave the console waiting forever. AO_AppMgr rearms it on every chunk. */
 #define KODE_RECV_IDLE_MS       5000U
+/* The same watchdog for a transfer that rides BLE. A link that stalls for a
+ * few seconds under interference is slow, not dead, and the phone app waits
+ * 10 s for each ack before it sends the chunk again: the bound has to outlast
+ * that wait, or the board gives up on a transfer the host is still retrying. */
+#define KODE_RECV_IDLE_BLE_MS  15000U
+/* How long a launch after a terminal install waits for the BLE console's
+ * outbound bytes to leave - the `>ok` the host is waiting for - before it
+ * resets the board anyway. A notification still queued when the board resets
+ * is lost, and the phone retries against a running app. */
+#define KODE_RECV_DRAIN_BLE_MS  2000U
 
 /* How long a BLE scan listens. Long enough to catch a phone's slow
  * advertising interval (up to ~1.3 s) several times over, short enough that
@@ -571,6 +638,11 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  *         Wi-Fi sweep of about 38 s, so a scan never holds the link longer
  *         than one already does. */
 #define KODE_BLE_SCAN_MAX_MS    30000U
+
+/** @brief After AO_Radio tells of a pairing refused with no code, how long it
+ *         tells of no other, ms: a phone retries a refused pairing several
+ *         times, and one attempt is one notice. */
+#define KODE_BLE_PAIR_REFUSED_QUIET_MS  10000U
 
 /* There is no advertising window. A board with BLE on advertises until
  * somebody connects, and advertises again when they leave - see AO_Radio's
@@ -624,9 +696,9 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
 /** @brief The guard of the download's close: shutting a TLS connection waits
  *         at most one I/O. */
 #define KODE_NET_CLOSE_GUARD_MS       30000U
-/** @brief The least a radio wake for the scheduler's `mqtt` check lasts, counted from the wake's
+/** @brief The least a dark wake for the scheduler's `mqtt` check lasts, counted from the wake's
  *         beginning: what the C5 or the broker holds for the P4 needs this long to flow in once the
- *         sentinel stops (a TCP retransmit, a retained message, the C5's own queue) before the radio owners
+ *         sentinel stops (a TCP retransmit, a retained message, the C5's own queue) before the dark-wake owners
  *         rest again. A first figure from reading the paths, to be measured on the bench. */
 #define KODE_NET_CHECK_DWELL_MS        3000U
 _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
@@ -645,11 +717,14 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  * console is busy wait here, and go to it one at a time, in order. */
 #define KODE_CHAN_QUEUE_MAX     32U   /**< Lines the channel holds for the console, the one it is running
                                        *   included; a line past it is answered `>err code=4 msg=busy`.  */
-#define KODE_CHAN_LINE_BOUND_MS 30000U /**< The longest AO_Net waits for the console to answer a line before
+#define KODE_CHAN_LINE_BOUND_MS 45000U /**< The longest AO_Net waits for the console to answer a line before
                                        *   it gives the next one: one that never answers (a reset, `sleep`)
-                                       *   cannot hold the queue for ever. A verb that runs longer (`cp`, a
-                                       *   dual-band scan, `install`) is passed at the bound, and its late
-                                       *   end is ignored: it carries the sequence of a line no longer out. */
+                                       *   cannot hold the queue for ever. It holds `rest` and `rest_end`,
+                                       *   whose console deadline is KODE_LOWPOWER_PART_BOUND_MS and the
+                                       *   console's default on top (lowpower_verbs.c checks it). A verb that
+                                       *   runs longer (`cp`, a dual-band scan, `install`) is passed at the
+                                       *   bound, and its late end is ignored: it carries the sequence of a
+                                       *   line no longer out. */
 /* The screen upload's two event bounds: the token an order carries and the
  * id a 201 answers with. kaos.h holds the rest of the upload's limits. */
 #define KSHOT_TOKEN_MAX        128U   /**< Characters of an upload token.    */
@@ -687,6 +762,10 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  * so a longer verb never has to move this number. */
 #define KODE_SYS_NVS_KEY_MAX        16U
 #define KODE_SYS_NVS_VALUE_MAX     192U
+/* The most bytes of the store every app's keys may take together: a quarter
+ * of the 64 KB nvs partition, so kodeOS's own keys and the bonds keep their
+ * room. Every write into KODE_NVS_NAMESPACE is held to it. */
+#define KODE_NVS_SHARE_MAX     (16U * 1024U)
 /* How many keys one `nvs_list` may answer with. The whole burst is in flight
  * at once - AO_Log's queue is what absorbs it - and unlike `ps`, whose record
  * count is fixed by the AO table, this one is whatever an operator has
@@ -760,14 +839,16 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 #define KODE_APP_PROJECT_MAX    32U   /**< == KDRV_SLOT_PROJECT_MAX: a
                                        *   project name, terminator
                                        *   included.                        */
+#define KODE_APP_BUILD_LEN      32U   /**< == KAPP_BUILD_LEN: an image's build id. */
 /* An app's data folder (app.json and icon.k64) may reach the internal
  * partition before its app does, so nothing bounds how many there are but the
- * partition itself. A new one is refused when it would leave less than the
+ * partition itself. A put is charged what it weighs on the volume: its json
+ * and its icon, each in whole clusters, and the folder's own cluster when the
+ * folder is new; a replacement writes its pair beside the old one and is
+ * charged the pair. A new folder is refused when it would leave less than the
  * floor free: Kody's pack is staged beside the one in use when it updates. */
-#define KODE_APPDATA_FOLDER_BYTES   (20U * 1024U)  /**< What one data folder
-                                       *   takes: five 4 KB clusters, one for
-                                       *   the directory, one for app.json,
-                                       *   three for the icon.              */
+#define KODE_APPDATA_CLUSTER_BYTES  4096U          /**< The internal FAT's allocation unit the charge assumes when the
+                                       *   driver cannot say: what the volume is formatted with. */
 #define KODE_APPDATA_FREE_MIN_BYTES (128U * 1024U) /**< What a new data folder
                                        *   must leave free on the internal
                                        *   partition.                       */
@@ -808,8 +889,9 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  * and every asker's queue must hold that: AO_Gui and AO_Console are both
  * 64. It must also stay below the medium pool count. How many entries a
  * reader keeps in all is its own ceiling (KODE_APP_LIST_MAX for the launcher).
- * The one-medium listings (`sd_ls`, `fs_ls`, `ls`) are one page and stop at
- * this number, and say so.
+ * The one-medium listings (`sd_ls`, `fs_ls`) are one page and stop at this
+ * number, and say so. `ls` reads a folder page after page
+ * (storage_list_ask()) until its end.
  *
  * The WiFi scan's own cap (KDRV_WIFI_SCAN_MAX) is this number for the same
  * reason and must move with it - though that one really is per burst, since
@@ -891,6 +973,20 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  */
 #define KODE_BUTTON_HOLD_MS     600U
 /**
+ * @brief How long the bottom button must stay pressed to be the home hold.
+ *
+ * Counted from the press, on the clock that counted KODE_BUTTON_HOLD_MS:
+ * AO_Buttons publishes BUTTON_HOME_HOLD_SIG when it fires, and in an app
+ * built with CONFIG_KODEOS_HOME_HOLD that is the gesture that goes home to
+ * kodeOS. Three seconds is long enough that an app can spend the ordinary
+ * hold of the same button on something of its own, and well short of the 16 s
+ * at which the PMIC cuts the board's supply on this button (its QON pin). An
+ * app that defers adds KODE_SYS_HOME_DEFER_MAX_MS at most to it.
+ */
+#define KODE_HOME_HOLD_MS       3000U
+_Static_assert(KODE_HOME_HOLD_MS > KODE_BUTTON_HOLD_MS,
+               "the home hold is the hold, held on");
+/**
  * @brief How soon after the first press's release the top button's second
  * press must be confirmed to make a double.
  *
@@ -904,16 +1000,21 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 /**
  * @brief How long AO_Boot waits after announcing home before it resets.
  *
- * A held bottom button always comes home (CONFIG_KODEOS_HOME_HOLD), and the
- * hold goes out as HOME_SIG before the reset so an app can hear it. This is
- * what that hearing is worth: 200 ms (200 QP ticks), long enough for an AO one
- * step below AO_Boot to run its handler and write a file, short enough that
- * the gesture still feels like the button did it. An app that needs more says
- * so with kode_sys_home_defer().
+ * A bottom button held KODE_HOME_HOLD_MS always comes home
+ * (CONFIG_KODEOS_HOME_HOLD), and the hold goes out as HOME_SIG before the
+ * reset so an app can hear it. This is what that hearing is worth: 200 ms
+ * (200 QP ticks), long enough for an AO one step below AO_Boot to run its
+ * handler and write a file, short enough that the gesture still feels like
+ * the button did it. An app that needs more says so with
+ * kode_sys_home_defer().
  */
 #define KODE_SYS_HOME_GRACE_MS      200U
 /**
- * @brief The longest a deferral can hold the board, from the hold itself.
+ * @brief The longest a deferral can hold the board, from HOME_SIG.
+ *
+ * Counted from the home hold, so a board whose app defers resets
+ * KODE_HOME_HOLD_MS + KODE_SYS_HOME_DEFER_MAX_MS after the press at the
+ * latest, plus the leave.
  *
  * The grace is for saving state, not for thinking. An app that asks for a
  * moment and never calls kode_sys_home_now() is reset anyway when this expires,
@@ -935,14 +1036,19 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 _Static_assert(KODE_BOOT_STABLE_MS > KODE_BOOT_CONFIRM_MS, "the crashes outlast the confirmation");
 #define KODE_BOOT_CRASHES_MAX   3U      /**< Crashes in a row, none of them after KODE_BOOT_STABLE_MS up, that make kodeOS give its slot up. */
 #define KODE_RESTART_DRAIN_MS   45U
+#define KODE_LEAVE_LOG_MS       40U   /**< AO_Log's answer that the lines
+                                       *   posted before a jump are on their
+                                       *   ports: a bound for an AO_Log that
+                                       *   does not run, not a pause.       */
 #define KODE_LEAVE_NET_MS       200U  /**< The channel's clean stop before a
                                        *   jump.                            */
 #define KODE_LEAVE_RADIO_MS     250U  /**< BLE hung up and the C5 parked
                                        *   before a jump.                   */
-/** @brief Half a second: the most the two steps of a leave may cost together. */
+/** @brief Half a second: the most the three steps of a leave may cost together. */
 #define KODE_LEAVE_BUDGET_MS    500U
-_Static_assert((KODE_LEAVE_NET_MS + KODE_LEAVE_RADIO_MS) < KODE_LEAVE_BUDGET_MS,
-               "the two steps of a leave must stay under half a second");
+_Static_assert((KODE_LEAVE_LOG_MS + KODE_LEAVE_NET_MS + KODE_LEAVE_RADIO_MS)
+               < KODE_LEAVE_BUDGET_MS,
+               "the three steps of a leave must stay under half a second");
 #define KODE_IOEXP_RETRY_MS     500U  /**< The expander's INT fired and the
                                        *   input register did not read: look
                                        *   again this much later rather than
@@ -1118,6 +1224,21 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         request over this many is refused the way it is when the AO has no
  *         room to run it. */
 #define KODE_STORAGE_DEFER_DEPTH      8U
+/** @brief The longest a request that writes or deletes waits for the transfer
+ *         AO_Storage has in flight to end. It is served when the transfer
+ *         does; past this it is refused as busy. */
+#define KODE_STORAGE_TURN_MS         2000U
+/** @brief Reads of an app's data folder, and of a manifest, AO_Storage holds in
+ *         arrival order while a transfer is in flight; each is answered when
+ *         it ends, or after KODE_STORAGE_TURN_MS from the first one held. One
+ *         over this many is answered at once, as a read is during a
+ *         transfer. */
+#define KODE_STORAGE_READ_WAIT_DEPTH  8U
+/** @brief The pause before a folder read whose icon found the icon pool short
+ *         tries again, within the same bound: the pool holds one icon's pieces,
+ *         and the reader of the last icon hands them back with no event of
+ *         its own to say so. */
+#define KODE_STORAGE_ICON_RETRY_MS    20U
 
 /* ---- The NFC row ----------------------------------------------------------
  * ASYNC, and it does what no other row does: it WRITES. The board's own
@@ -1343,6 +1464,17 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  *         the guard turns that into a named failure instead of a row that
  *         goes silent until the console's budget expires. */
 #define KODE_AUDIO_GUARD_MS       45000U
+/**
+ * @brief How long an open stream may go without a write before AO_Audio
+ *        closes it.
+ *
+ * The stream's frames skip AO_Audio, so a writer that stops and never closes
+ * would hold the codec for good. Ten seconds is longer than any pause a voice
+ * or a game leaves between two sounds, and short enough that a forgotten
+ * stream does not read as a speaker that stopped working. Counted from the
+ * last write that put frames in, or from the open when there was none.
+ */
+#define KODE_SYS_AUDIO_STREAM_IDLE_MS  10000U
 /** @brief Volume at boot. 100 is exactly zero decibels on this board; the
  *         user's volume is attenuation from here and never gain. */
 #define KODE_AUDIO_VOL_DEFAULT      100U
@@ -1417,17 +1549,33 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief Segments in one vibration pattern: on, off, on... */
 #define KODE_HAPTIC_RETRY_MS       2000U /**< After a boot that found no AW86233, when it is looked for again: a NAK on a busy bus is not a board with no Antenna PCB. */
 #define KODE_HAPTIC_SEGMENTS_MAX    16U
-/* The RTP feed runs every 10 ms and offers up to two bursts each time - 128
- * bytes, 10.7 ms of playback - so the chip is never given less than it is
- * about to consume. The first feed after GO lands in time because AO_Haptic
- * pushes those two bursts in the same step that starts RTP playback, so the
- * chip holds ~10 ms before it. A 4 ms feed of one burst is what the
- * arithmetic asks for and the 1 ms tick could now keep; it stays at 10 ms
- * until it is measured on the chip. */
+/* The AW86233 goes back to standby the moment its RTP FIFO is empty, so
+ * the feed keeps it from running dry, paced by the chip's own almost-full
+ * flag: the chip's oscillator, not the board's clock, sets how fast the FIFO
+ * drains, and nothing on the board measures it.
+ *
+ * The step that issues GO wakes the chip (a 1 ms busy-wait), starts RTP and
+ * reads GLB_STATE until it shows it (about 1 ms of bus, 1.6 at worst), then
+ * pushes four bursts - 256 samples, 21.3 ms of playback - in about 6.3 ms of
+ * bus: some 9 ms in one step, 10 at worst. The feed then runs every 4 ms, so
+ * the first one lands about 10 ms after GO with some 11 ms still to play.
+ * Each feed reads GLB_STATE once (about 0.1 ms, 2-3 % of the bus at this
+ * period) and offers up to two bursts, each after a read of FF_AFS: 3.3 ms of
+ * the 4 ms period at worst. A tick that comes due while a feed is still on
+ * the bus waits in the queue and costs a status read. Two bursts are 2.7
+ * times what the chip plays in a period, so the level climbs to the chip's
+ * almost-full mark within about 75 ms of GO and stays there: at its reset
+ * value (KDRV_AW_FIFO_AF), about 124 ms of playback in hand just before a
+ * feed and 133 ms at most just after one. After the last sample the tick
+ * goes on reading GLB_STATE, and the buzz ends the period after the chip has
+ * left RTP. haptic_ao.c holds these numbers to each other and to the
+ * driver's. */
 /** @brief The RTP feed period, in milliseconds. */
-#define KODE_HAPTIC_TICK_MS          10U
-/** @brief Bursts offered per feed. Two, because a feed is 10 ms. */
+#define KODE_HAPTIC_TICK_MS          4U
+/** @brief Bursts offered per feed, at most. */
 #define KODE_HAPTIC_BURSTS_PER_TICK  2U
+/** @brief Bursts pushed by the step that issues GO, before the first feed. */
+#define KODE_HAPTIC_BURSTS_AT_GO     4U
 /** @brief On/off ratio at 235 Hz a moving motor must clear, x10. MEASURED
  *         2026-09-11 on board e8:f6:0a:e7:6c:1d, one third of what that board
  *         delivered at gain 0x40: sqrt(246.1)/3. The row itself then read a
@@ -1549,8 +1697,22 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
  * registers mean anything - ask sooner and every scale reads at its floor,
  * which looks exactly like a flat cell.
  */
-#define KODE_POWER_POLL_MS      2000U
+#define KODE_POWER_POLL_MS      2000U   /**< How often AO_Power reads both chips and publishes the reading
+                                         *   while the board is awake; KODE_LOWPOWER_CABLE_LOOK_MS keeps the
+                                         *   same pace asleep. */
 #define KODE_POWER_FIRST_MS     1500U
+
+/**
+ * @brief The critical mark: at this level or under, on battery, AO_Power says
+ *        POWER_CRITICAL_SIG.
+ *
+ * kodeOS's own critical card uses the same figure. On the cell's curve 10 % is
+ * about 3.59 V, well above the 3.3 V cut (KBSP_CELL_CUT_MV), so a person has
+ * time to read the notice and plug a cable in.
+ */
+#define KODE_POWER_CRITICAL_PCT       10U
+/** @brief How far above the critical mark the level climbs before it is over. */
+#define KODE_POWER_CRITICAL_REARM_PCT 3U
 
 /* ---- The gauge row (`test component=gauge`) ---------------------------------
  * A CW2217 in shutdown (the cell just connected) takes about 1.5 s from
@@ -1590,10 +1752,25 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 #define KODE_CARD_APP_PREFIX    "/sdcard/"
 /** @brief The end of the path of an app's copy on the card, after its name. */
 #define KODE_CARD_APP_SUFFIX    ".bin"
+/** @brief What the path of an app's copy carries after that while it is written. */
+#define KODE_CARD_APP_TMP       ".tmp"
 
 /** @brief The longest AO_AppMgr waits for AO_Storage or AO_Net to answer an
  *         open or a STAT of the card; then it gives that wait up. */
-#define KODE_APPMGR_OPEN_MS     30000U
+#define KODE_APPMGR_OPEN_MS     32000U
+#define KODE_APP_BACKUP_IDLE_MS 5000U   /**< How long AO_AppMgr is idle before it copies apps to the card. */
+#define KODE_APP_BACKUP_GAP_MS  1000U   /**< The pause between one app's copy and the next, for AO_Storage's other askers. */
+/** @brief How many times AO_AppMgr asks again for a fetched data folder's put
+ *         that AO_Storage refused as busy, before the fetch fails busy. */
+#define KODE_APPMGR_PUT_TRIES   3U
+/** @brief The pause before each of those tries, in ms. */
+#define KODE_APPMGR_PUT_RETRY_MS 500U
+/** @brief How long the card of a fetch that announced an install
+ *         (`appdata_get install=on`) waits for that install to begin, in ms:
+ *         a whole number of seconds, counted on the beat that says the card.
+ *         The host sends it the moment the fetch is answered; this only bounds
+ *         a host that never does, so the card does not stand for ever. */
+#define KODE_APPMGR_HOLD_MS     15000U
 
 /* ---- The factory reset's budgets ----------------------------------------
  * AO_Boot walks the reset one step at a time and arms one timer per step; a
@@ -1619,6 +1796,37 @@ _Static_assert(KODE_RESET_FIND_MS > KODE_APPMGR_OPEN_MS,
                                          *   directory commit, then each
                                          *   image header and each data
                                          *   folder in turn.                  */
+#define KODE_RESET_FILES_WALKS  3U      /**< Walks AO_Storage makes of each
+                                         *   root, and of the two data
+                                         *   trees, in the files step: one,
+                                         *   and another while the walk
+                                         *   before kept all it holds and
+                                         *   its pass took something.         */
+#define KODE_RESET_FILES_STEPS  (KODE_RESET_FILES_WALKS * 4U \
+                                 * KODE_APP_LIST_MAX) /**< The files step's
+                                         *   steps at most: a walk keeps
+                                         *   KODE_APP_LIST_MAX images of each
+                                         *   root and twice as many folders
+                                         *   of the two trees, one a step.    */
+#define KODE_RESET_FILES_STEP_MS 100U   /**< What one image or one folder is
+                                         *   allowed on average: the 10 ms
+                                         *   pace and the deletes. A slower
+                                         *   card runs out the budget and
+                                         *   the reset stops at files.        */
+#define KODE_RESET_FILES_MS     90000U  /**< Every other app's files on both
+                                         *   media: KODE_RESET_FILES_STEPS at
+                                         *   KODE_RESET_FILES_STEP_MS each,
+                                         *   after up to KODE_STORAGE_TURN_MS
+                                         *   of a transfer AO_Storage waits
+                                         *   for.                             */
+_Static_assert(KODE_RESET_FILES_MS
+               >= (KODE_STORAGE_TURN_MS
+                   + (KODE_RESET_FILES_STEPS * KODE_RESET_FILES_STEP_MS)),
+               "the files step must hold every step a clear may take");
+#define KODE_RESET_FILES_AGAIN_MS 500U  /**< The pause before the files step
+                                         *   asks again for a clear AO_Storage
+                                         *   refused for a transfer, inside
+                                         *   the step's budget.               */
 #define KODE_RESET_LINK_MS      20000U  /**< The C5 link brought up, if it was
                                          *   not: the bring-up of a board that
                                          *   booted without the radio.        */
@@ -1644,6 +1852,7 @@ _Static_assert(KODE_RESET_FIND_MS > KODE_APPMGR_OPEN_MS,
                                          *   write.                           */
 #define KODE_RESET_CONSOLE_MS   (KODE_RESET_FIND_MS + KODE_RESET_INSTALL_MS \
                                  + KODE_RESET_FIND_MS + KODE_RESET_APPS_MS \
+                                 + KODE_RESET_FILES_MS \
                                  + KODE_RESET_LINK_MS + KODE_RESET_WIPE_MS \
                                  + KODE_RESET_NVS_MS + KODE_RESTART_DRAIN_MS)
                                         /**< How long the console waits for
@@ -1702,17 +1911,25 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
  * Eight: a central's writes waiting for the app, and the app's own values on
  * their way to AO_Radio, which takes each in one step. */
 #define KQP_WIDE_POOL_COUNT     8U
-/* The jumbo tier holds two things: a piece of an image arriving on the
- * console (a terminal install), and a third of an app icon leaving a medium
- * (`app_data`). Four blocks cover everything one 4 KB protocol chunk can
- * fragment into, and one icon is three of them taken in one step or not at
- * all, section E of the app data spec. For an install, that is
- * everything a chunk can fragment into on its way off the wire (the reader
- * drains the RX ring in whatever pieces it finds) with room to spare; the
- * transfer's actual flow control is the `>|ack` protocol, not this pool -
- * the wire itself has none (the USB-Serial/JTAG ISR drops silently once its
- * RX ring is full). */
+/* The jumbo tier holds one thing: a piece of an image arriving on the console
+ * (a terminal install). Four blocks cover everything one 4 KB protocol chunk
+ * can fragment into on its way off the wire (the reader drains the RX ring in
+ * whatever pieces it finds) with room to spare; the transfer's actual flow
+ * control is the `>|ack` protocol, not this pool - the wire itself has none
+ * (the USB-Serial/JTAG ISR drops silently once its RX ring is full). */
 #define KQP_JUMBO_POOL_COUNT    4U
+/* The icon tier holds one thing: a piece of an app's icon leaving a medium
+ * (`app_data`). An icon is KODE_APP_ICON_BYTES, 48 KB, and travels as
+ * KODE_APP_ICON_PIECES events taken in one step or not at all, section E of
+ * the app data spec; one icon is in flight at a time, so the tier is one
+ * icon's pieces. Its blocks come from PSRAM when kqp_init() runs: the same
+ * pieces in the internal pool would be 48 KB of the 640 KB, taken for the
+ * life of every firmware whether or not it ever shows an icon. */
+#define KODE_APP_ICON_BYTES     49152U  /**< == KAPP_ICON_BYTES: the 128x128 RGB565 + A8 block. */
+#define KODE_APP_ICON_PIECES    3U      /**< The events one icon travels in.                    */
+#define KODE_APP_ICON_PIECE     (KODE_APP_ICON_BYTES / KODE_APP_ICON_PIECES)
+                                        /**< What each carries: 16 KB.                          */
+#define KQP_ICON_POOL_COUNT     KODE_APP_ICON_PIECES  /**< One icon's pieces.                   */
 
 /* ---- System AO housekeeping --------------------------------------------- */
 #define KQP_AO_QUEUE_LEN        16U   /**< Events buffered per system AO.     */
@@ -1727,17 +1944,29 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
 /* ---- Request doors: queue depths, and the post margin each leaves free (half a queue) ---- */
 /* AO_Radio's queue: a scan knock and a KODE answer, posted from other tasks,
  * leave KQP_RADIO_DROP_MARGIN slots free and are refused past it. The BLE
- * state, the pairing note, the lost link and the AO's own time events post
- * with no margin: a full queue is still an assertion for them. */
+ * state and its ask, the pairing note, the lost link, the knock of the BLE
+ * advertisement stream and the HID wake-up leave KQP_RADIO_KNOCK_MARGIN and
+ * are owed past it: posted again once there is room, never lost. Neither
+ * margin reserves the slots it leaves. Every request door leaves
+ * KQP_RADIO_POST_MARGIN and tells its caller when it could not post, and the
+ * caller answers its own asker. What posts with no margin is what AO_Radio
+ * cannot refuse: its posts to itself, its time events, the answers to its own
+ * asks (AO_Net's to a round of rest among them) and the publishes it
+ * subscribes to (LOWPOWER_ROUND_SIG, LOWPOWER_STATE_SIG, C5_RUN_REQ_SIG,
+ * C5_AMP_OFF_SIG, POWER_EVT_SIG), since a publish leaves no margin; a full
+ * queue is still an assertion for them. */
 #define KQP_RADIO_QUEUE_LEN     16U   /**< Events AO_Radio buffers.           */
 #define KQP_POWER_QUEUE_LEN     8U    /**< Events AO_Power buffers.           */
-#define KQP_RADIO_POST_MARGIN   8U    /**< Slots a Wi-Fi door or a link ask leaves free. */
+#define KQP_RADIO_POST_MARGIN   8U    /**< Slots a request door leaves free.  */
 #define KQP_RADIO_DROP_MARGIN   2U    /**< Slots a post that may be refused, a scan knock or a KODE answer, leaves free. */
+#define KQP_RADIO_KNOCK_MARGIN  2U    /**< Slots a post that is owed when refused leaves free: the BLE state and its ask, the pairing note, the lost link, the advertisements heard, the HID wake-up. */
 #define KQP_POWER_POST_MARGIN   4U    /**< Slots a power door leaves free.    */
 _Static_assert((KQP_RADIO_POST_MARGIN * 2U) == KQP_RADIO_QUEUE_LEN,
                "the radio door margin is half of AO_Radio's queue");
 _Static_assert((KQP_RADIO_DROP_MARGIN > 0U) && (KQP_RADIO_DROP_MARGIN < KQP_RADIO_POST_MARGIN),
                "a post that may be refused goes deeper into AO_Radio's queue than a door does, and leaves slots");
+_Static_assert((KQP_RADIO_KNOCK_MARGIN > 0U) && (KQP_RADIO_KNOCK_MARGIN < KQP_RADIO_POST_MARGIN),
+               "a post that is owed goes deeper into AO_Radio's queue than a door does, and leaves slots");
 _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
                "the power door margin is half of AO_Power's queue");
 #define KQP_BOOT_QUEUE_LEN      8U    /**< Events AO_Boot buffers: an AO with few events. */
@@ -1749,11 +1978,19 @@ _Static_assert((KQP_POWER_POST_MARGIN * 2U) == KQP_POWER_QUEUE_LEN,
 #define KQP_ID_ANSWER_MARGIN    0U    /**< Slots an identity, signature or wipe answer leaves free: 0 only asks that there be one. */
 #define KQP_FRAMES_MARGIN       4U    /**< Slots a Wi-Fi frames tick or frame leaves free in its asker's queue: room for its own traffic and the answer to a stop. */
 #define KQP_FRAMES_ANSWER_MARGIN 0U   /**< Slots a Wi-Fi frames answer leaves free: 0 only asks that there be one. */
+#define KQP_FETCH_POOL_MARGIN   16U   /**< Small blocks a download's progress event leaves free (half the tier), for every other AO's small events; a chunk with no block for it goes unannounced. */
 #define KQP_FRAMES_POOL_MARGIN  16U   /**< Blocks a Wi-Fi frames tick (the small tier) or frame (the medium tier) leaves free in its tier, for every other AO's events; kqp.c pins each event to its tier. */
 _Static_assert((KQP_FRAMES_POOL_MARGIN > 0U) && (KQP_FRAMES_POOL_MARGIN < KQP_SMALL_POOL_COUNT),
                "a tick leaves some of the small tier free, and the tier has more than that");
 _Static_assert(KQP_FRAMES_POOL_MARGIN < KQP_MEDIUM_POOL_COUNT,
                "a frame leaves some of the medium tier free, and the tier has more than that");
+#define KQP_HEARD_MARGIN        4U    /**< The fewest slots a BLE advertisement leaves free in its asker's queue, which is half of it when that is more: room for its own traffic and the answer to a stop. */
+#define KQP_HEARD_ANSWER_MARGIN 0U    /**< Slots a BLE advertisement stream's answer leaves free: 0 only asks that there be one. */
+#define KQP_HEARD_POOL_MARGIN   16U   /**< Blocks a BLE advertisement (the medium tier) leaves free in its tier, for every other AO's events; kqp.c pins the event to its tier. */
+_Static_assert(KQP_HEARD_MARGIN > 0U,
+               "an advertisement leaves some of its asker's queue free for the answer to a stop");
+_Static_assert((KQP_HEARD_POOL_MARGIN > 0U) && (KQP_HEARD_POOL_MARGIN < KQP_MEDIUM_POOL_COUNT),
+               "an advertisement leaves some of the medium tier free, and the tier has more than that");
 #define KQP_NET_MQTT_MARGIN     12U   /**< Slots inbound MQTT leaves free in AO_Net's queue: an identity answer's room, KODE_ID_PARTS_MAX parts and the end. */
 #define KQP_NET_LINK_MARGIN     0U    /**< Slots an MQTT link event leaves free in AO_Net's queue: it yields last of all. */
 #define KQP_NET_WAKE_MARGIN     1U    /**< Slots the channel's ring wake leaves free in AO_Net's queue. */

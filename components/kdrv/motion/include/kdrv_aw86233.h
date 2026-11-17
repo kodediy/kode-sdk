@@ -22,8 +22,46 @@ extern "C" {
 /** @brief The LRA's resonance, in Hz. Off it, the motor barely moves. */
 #define KDRV_AW_F0_HZ        235U
 
+/** @brief GLB_STATE (KDRV_AW_GLB_STATE) while the chip plays its RTP FIFO.
+ *         It leaves this state by itself once the FIFO is played empty. */
+#define KDRV_AW_GLB_RTP      8
+
+/**
+ * @brief How far the chip's own oscillator may stray from KDRV_AW_RATE_HZ,
+ *        per cent.
+ *
+ * DS_AW8623X V1.4 gives no accuracy for the oscillator. Its trim, TRIM_LRA
+ * (0x5A), reaches 31 steps of 0.24 % - 7.4 % - which is the spread the part
+ * is built to correct; this is that reach, rounded up.
+ */
+#define KDRV_AW_RATE_TOL_PCT 8U
+
 /** @brief The longest burst one kdrv_aw86233_rtp_feed() writes, in bytes. */
 #define KDRV_AW_BURST        64U
+
+/**
+ * @brief The RTP FIFO's depth, in samples (DS_AW8623X V1.4, RTPCFG1-2).
+ *
+ * The FIFO is the 3 KB SRAM below BASE_ADDR: BASE_ADDR_H in RTPCFG1 (0x2C)
+ * resets to 0x8 and BASE_ADDR_L in RTPCFG2 (0x2D) to 0, so BASE_ADDR is
+ * 0x800. The driver writes neither, and the soft reset in
+ * kdrv_aw86233_create() returns every configuration register to its reset
+ * value, so this holds on every bring-up; standby keeps it.
+ */
+#define KDRV_AW_FIFO_DEPTH   2048U
+
+/**
+ * @brief Where FF_AFS (SYSST bit 3) rises, in samples (DS_AW8623X V1.4,
+ *        RTPCFG3 and RTPCFG5).
+ *
+ * FIFO_AFH in RTPCFG3 (0x2E) resets to 0x6 and FIFO_AFL in RTPCFG5 (0x30) to
+ * 0, so FIFO_AF is 0x600, and the driver leaves both there.
+ * kdrv_aw86233_rtp_feed() reads FF_AFS before each burst and writes the burst
+ * only while it is clear, so the level tops out a burst over this. That is
+ * the pacing the datasheet asks of the host, and it runs on the chip's clock,
+ * not the board's.
+ */
+#define KDRV_AW_FIFO_AF      1536U
 
 /** @brief The amplitude ceiling, per cent of full scale: the LRA's 1.8 Vrms rating. */
 #define KDRV_AW_GAIN_MAX_PCT 80U
@@ -111,7 +149,9 @@ kode_status_t kdrv_aw86233_standby(bool on);
  * @brief Put the chip in RTP mode at @p gain_pct and start it playing.
  *
  * GO is issued before a single sample exists, which is the mode's contract:
- * the chip plays what arrives and waits on an empty FIFO. The datasheet's
+ * the chip waits for its first sample and plays what arrives. Once it has
+ * played, an empty FIFO ends RTP and the chip goes back to standby, so the
+ * caller keeps the FIFO from running dry until the buzz ends. The datasheet's
  * playback sequence then has the host confirm the chip actually entered RTP
  * - GLB_STATE reads 8 - before the first sample, and so does this: a GO that
  * is acknowledged and not acted on is how a parked driver stage fails, and

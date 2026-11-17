@@ -32,12 +32,20 @@
  * long enough that a streaming host never pays for the round trip. */
 #define KHAL_RAW_READ_MS   200U
 
+/* Where a bounce of the cable port is (log_bounce_request()). */
+#define LOG_BOUNCE_IDLE  0U   /**< None runs.                                            */
+#define LOG_BOUNCE_WAIT  1U   /**< Waiting KHAL_CONSOLE_FRAME_WAIT_MS for a frame.       */
+#define LOG_BOUNCE_OFF   2U   /**< The pad is off the bus for KHAL_CONSOLE_OFF_BUS_MS.   */
+
 typedef struct {
-    QActive super;
-    char    line[KODE_CONSOLE_LINE_MAX];
-    size_t  len;
-    bool    prompt_drawn;   /**< No prompt to erase until the first draw. */
-    bool    overflow;       /**< This line ran past the buffer: refuse it. */
+    QActive  super;
+    char     line[KODE_CONSOLE_LINE_MAX];
+    size_t   len;
+    bool     prompt_drawn;   /**< No prompt to erase until the first draw. */
+    bool     overflow;       /**< This line ran past the buffer: refuse it. */
+    QTimeEvt bounce;         /**< The bounce's one-shot: the wait for a frame, then the time off the bus. */
+    uint32_t bounce_frame;   /**< The host's frame count when the bounce began. */
+    uint8_t  bounce_step;    /**< LOG_BOUNCE_*: where the bounce is. */
 } Log;
 
 static Log l_log;
@@ -129,17 +137,48 @@ bool console_congested(void)
 }
 
 /**
+ * @brief The port a line's tag names, without kode_log_reply_confirm()'s bit.
+ * @param src The tag klog handed over.
+ * @return A KODE_CONSOLE_SRC_*, or KODE_LOG_SRC_NONE.
+ */
+static uint8_t line_port(uint8_t src)
+{
+    uint8_t port = src;
+
+    if ( (uint8_t)KODE_LOG_SRC_NONE != src )
+    {
+        port = (uint8_t)(src & (uint8_t)(~(uint8_t)KODE_LOG_SRC_CONFIRM));
+    }
+    return port;
+}
+
+/**
+ * @brief Whether a line's tag asks for word of its leaving the board.
+ * @param src The tag klog handed over.
+ * @return true for a line sent with kode_log_reply_confirm().
+ */
+static bool line_confirms(uint8_t src)
+{
+    return ((uint8_t)KODE_LOG_SRC_NONE != src)
+           && (0U != (src & (uint8_t)KODE_LOG_SRC_CONFIRM));
+}
+
+static void log_line_unsent(uint8_t src);
+
+/**
  * @brief Count a line the front end could not carry.
  *
- * Dropped rather than asserted, but never invisibly: `ps` reports the count.
+ * Dropped rather than asserted, but never invisibly: `ps` reports the count,
+ * and a confirmed line's asker hears it was not sent.
  *
  * @param src The line's source (a KodeConsoleSrc).
  */
 static void log_line_lost(uint8_t src)
 {
     ++s_dropped;
+    log_line_unsent(src);
 #if CONFIG_KODEOS_CHANNEL
-    if ( (uint8_t)KODE_CONSOLE_SRC_NET == src )
+    if ( (uint8_t)KODE_CONSOLE_SRC_NET == line_port(src) )
     {
         /* A reply the owner is waiting for on the channel: `channel_info`
          * must say a line went missing, not only `ps`. */
@@ -261,7 +300,79 @@ static void log_on_ble_line(const char *line)
         QACTIVE_PUBLISH(&e->super, &l_log.super);
     }
 }
+
+/**
+ * @brief Told by the driver whether the confirmed lines reached the central.
+ *
+ * Runs on NimBLE's host task, or in AO_Log's step for a line the ring
+ * refused: publishes a static event and returns, as log_on_ble_line() does.
+ *
+ * @param ok true when the central has them.
+ */
+static void log_on_ble_sent(bool ok)
+{
+    /* The BLE console's confirmed lines reached the central, or did not. */
+    static const ConsoleSentEvt s_ble_sent = {
+        .super = QEVT_INITIALIZER(CONSOLE_SENT_SIG),
+        .src   = (uint8_t)KODE_CONSOLE_SRC_BLE,
+        .ok    = true,
+    };
+    static const ConsoleSentEvt s_ble_unsent = {
+        .super = QEVT_INITIALIZER(CONSOLE_SENT_SIG),
+        .src   = (uint8_t)KODE_CONSOLE_SRC_BLE,
+        .ok    = false,
+    };
+
+    if ( ok )
+    {
+        QACTIVE_PUBLISH(&s_ble_sent.super, &l_log.super);
+    }
+    else
+    {
+        QACTIVE_PUBLISH(&s_ble_unsent.super, &l_log.super);
+    }
+}
 #endif
+
+/**
+ * @brief A confirmed line was lost before its port took it: its asker hears
+ *        CONSOLE_SENT_SIG not sent, as when the port itself loses one.
+ *
+ * Without it the asker would wait for an answer that never comes. Runs on the
+ * thread that logged (a full pool or queue) or in AO_Log's step (a full
+ * `cmd/out` ring). Any other line is nobody's business here.
+ *
+ * @param src The line's tag.
+ */
+static void log_line_unsent(uint8_t src)
+{
+#if CONFIG_KODEOS_CHANNEL
+    /* A confirmed reply line for the Kode channel never reached its ring. */
+    static const ConsoleSentEvt s_chan_unsent = {
+        .super = QEVT_INITIALIZER(CONSOLE_SENT_SIG),
+        .src   = (uint8_t)KODE_CONSOLE_SRC_NET,
+        .ok    = false,
+    };
+#endif
+    uint8_t const port = line_port(src);
+
+    if ( line_confirms(src) )
+    {
+#if CONFIG_KODEOS_BLE_CONSOLE
+        if ( (uint8_t)KODE_CONSOLE_SRC_BLE == port )
+        {
+            log_on_ble_sent(false);
+        }
+#endif
+#if CONFIG_KODEOS_CHANNEL
+        if ( (uint8_t)KODE_CONSOLE_SRC_NET == port )
+        {
+            QACTIVE_PUBLISH(&s_chan_unsent.super, &l_log.super);
+        }
+#endif
+    }
+    (void)port;   /* read only with a remote port in the build */
+}
 
 /* ---- Raw mode: the input stream, handed to somebody else ------------------
  * For one transfer the reader task runs raw_pump() instead of the line path,
@@ -450,6 +561,13 @@ void log_level_request(const char *tag, kode_log_lvl_t level)
     }
 }
 
+bool log_flush_request(void)
+{
+    static const QEvt evt = QEVT_INITIALIZER(LOG_FLUSH_REQ_SIG);
+
+    return QACTIVE_POST_X(AO_Log, &evt, KQP_LOG_CMD_MARGIN, NULL);
+}
+
 bool log_dock_lend_request(QActive *who, bool lend)
 {
     LogDockReqEvt *ev;
@@ -515,6 +633,92 @@ static void dock_lend(LogDockReqEvt const * const r)
         ev->lent   = lent;
         ev->status = (uint8_t)rc;
         QACTIVE_POST(r->who, &ev->super, AO_Log);
+    }
+}
+
+/* ---- The cable port shown to a host again (log_bounce_request()) ---------- */
+
+/* cppcheck-suppress misra-c2012-8.7 ; a door kaos.h declares for another AO: AO_LowPower asks it, and a build without CONFIG_KODE_LOWPOWER has no asker */
+bool log_bounce_request(void)
+{
+    static const QEvt evt = QEVT_INITIALIZER(LOG_BOUNCE_REQ_SIG);
+
+    return QACTIVE_POST_X(AO_Log, &evt, KQP_LOG_CMD_MARGIN, NULL);
+}
+
+/**
+ * @brief Begin a bounce: note the host's frame count and wait for the next frame.
+ *
+ * A bounce that runs already covers this request, and finishes on its own. A
+ * console with no cable port has nothing to show.
+ *
+ * @param me The AO.
+ */
+static void bounce_begin(Log * const me)
+{
+    if ( LOG_BOUNCE_IDLE != me->bounce_step )
+    {
+        /* The bounce under way shows the port again, or finds it in use. */
+    }
+    else if ( khal_console_frame(&me->bounce_frame) != KODE_OK )
+    {
+        KLOG_N(TAG, "cable port: this console has none to show the host");
+    }
+    else
+    {
+        me->bounce_step = LOG_BOUNCE_WAIT;
+        QTimeEvt_armX(&me->bounce, KQP_TICKS_PER_MS(KHAL_CONSOLE_FRAME_WAIT_MS), 0U);
+    }
+}
+
+/**
+ * @brief The bounce's one-shot ran out: judge the frames, or put the pad back.
+ *
+ * After the wait, a count that moved is a host that keeps the port in use: the
+ * port stays on the bus. A count that did not is a host that gave the port up,
+ * or none at all: the pad leaves the bus, and comes back when the one-shot runs
+ * out again, which the host takes for a new device.
+ *
+ * @param me The AO.
+ */
+static void bounce_next(Log * const me)
+{
+    uint32_t frame = 0U;
+
+    if ( LOG_BOUNCE_WAIT == me->bounce_step )
+    {
+        me->bounce_step = LOG_BOUNCE_IDLE;
+        if ( (khal_console_frame(&frame) == KODE_OK) && (frame != me->bounce_frame) )
+        {
+            KLOG_N(TAG, "cable port: the host sends frames; it stays on the bus");
+        }
+        else if ( khal_console_pad(false) == KODE_OK )
+        {
+            me->bounce_step = LOG_BOUNCE_OFF;
+            QTimeEvt_armX(&me->bounce, KQP_TICKS_PER_MS(KHAL_CONSOLE_OFF_BUS_MS), 0U);
+        }
+        else
+        {
+            KLOG_W(TAG, "cable port: no frame from the host, and the pad would not leave the bus");
+        }
+    }
+    else if ( LOG_BOUNCE_OFF == me->bounce_step )
+    {
+        me->bounce_step = LOG_BOUNCE_IDLE;
+        if ( khal_console_pad(true) == KODE_OK )
+        {
+            KLOG_N(TAG, "cable port: no frame from the host in %u ms; off the bus for %u ms "
+                        "and back, for the host to find it again",
+                   (unsigned)KHAL_CONSOLE_FRAME_WAIT_MS, (unsigned)KHAL_CONSOLE_OFF_BUS_MS);
+        }
+        else
+        {
+            KLOG_E(TAG, "cable port: the pad would not come back on the bus");
+        }
+    }
+    else
+    {
+        /* No bounce runs: nothing to judge. */
     }
 }
 
@@ -614,9 +818,12 @@ void Log_ctor(void)
 {
     Log * const me = &l_log;
     QActive_ctor(&me->super, Q_STATE_CAST(&Log_initial));
+    QTimeEvt_ctorX(&me->bounce, &me->super, LOG_BOUNCE_TMO_SIG, 0U);
     me->len          = 0U;
     me->prompt_drawn = false;
     me->overflow     = false;
+    me->bounce_frame = 0U;
+    me->bounce_step  = LOG_BOUNCE_IDLE;
 }
 
 #define KODE_QUEUE_LOG_LEN  64U  /**< AO_Log's queue; lines, bytes and requests leave margins. */
@@ -677,6 +884,7 @@ static QState Log_initial(Log * const me, void const * const par)
      * nobody listening. */
     (void)kdrv_ble_console_set_rx_cb(&log_on_ble_line);
     (void)kdrv_ble_console_set_raw_cb(&log_on_ble_raw);
+    (void)kdrv_ble_console_set_sent_cb(&log_on_ble_sent);
 #endif
 
     KLOG_I(TAG, "console owned by AO_Log; logging is an event from here on");
@@ -764,7 +972,8 @@ static void handle_byte(Log * const me, uint8_t c)
 }
 
 /**
- * @brief Lines out and bytes in: log lines, console input, raw transfers, the dock and the level.
+ * @brief Lines out and bytes in: log lines, console input, raw transfers, the
+ *        dock, the cable port's bounce and the level.
  *
  * @param me The AO.
  * @param e  The event.
@@ -777,6 +986,10 @@ static QState Log_active(Log * const me, QEvt const * const e)
     {
         case LOG_LINE_SIG: {
             LogEvt const * const l = Q_EVT_CAST(LogEvt);
+            uint8_t const port    = line_port(l->src);
+            bool const    confirm = line_confirms(l->src);
+            (void)port;      /* read only with a second port in the build */
+            (void)confirm;
             /* Wipe the prompt and print on a clean line; it comes back only to
              * restore a half-typed command, so the next record starts with '>' or
              * '!'. No lock: this AO is the only writer. */
@@ -786,14 +999,25 @@ static QState Log_active(Log * const me, QEvt const * const e)
             /* The console's second port gets every complete line, if anyone is
              * listening. The prompt, echo and erase are for a terminal and are
              * not mirrored. */
-            (void)kdrv_ble_console_write(l->line, l->len);
+            if ( confirm && ((uint8_t)KODE_CONSOLE_SRC_BLE == port) )
+            {
+                /* Its asker waits to hear the central has it. */
+                if ( kdrv_ble_console_write_confirmed(l->line, l->len) != KODE_OK )
+                {
+                    log_on_ble_sent(false);
+                }
+            }
+            else
+            {
+                (void)kdrv_ble_console_write(l->line, l->len);
+            }
 #endif
 #if CONFIG_KODEOS_CHANNEL
             /* A reply to a command that came in on the Kode channel also goes
              * to the ring AO_Net drains onto cmd/out, one line per message,
              * without its newline. Nothing else does: not the replies to the
              * cable or BLE, and not a '!' line. */
-            if ( (uint8_t)KODE_CONSOLE_SRC_NET == l->src )
+            if ( (uint8_t)KODE_CONSOLE_SRC_NET == port )
             {
                 size_t n = l->len;
                 while ( (0U < n) && (('\n' == l->line[n - 1U])
@@ -801,7 +1025,12 @@ static QState Log_active(Log * const me, QEvt const * const e)
                 {
                     --n;
                 }
-                (void)kchan_out_push(l->line, n);
+                /* A confirmed one is published at QoS 1: the broker's
+                 * PUBACK is AO_Net's word that it left. */
+                if ( !kchan_out_push(l->line, n, confirm) )
+                {
+                    log_line_unsent(l->src);   /* the ring was full */
+                }
             }
 #endif
             if ( 0U < me->len )
@@ -906,8 +1135,25 @@ static QState Log_active(Log * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case LOG_FLUSH_REQ_SIG: {
+            /* Every line ahead of it in the queue is written: the leave may
+             * take the ports down. */
+            boot_log_flushed();
+            status = Q_HANDLED();
+            break;
+        }
         case LOG_DOCK_REQ_SIG: {
             dock_lend(Q_EVT_CAST(LogDockReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case LOG_BOUNCE_REQ_SIG: {
+            bounce_begin(me);
+            status = Q_HANDLED();
+            break;
+        }
+        case LOG_BOUNCE_TMO_SIG: {
+            bounce_next(me);
             status = Q_HANDLED();
             break;
         }

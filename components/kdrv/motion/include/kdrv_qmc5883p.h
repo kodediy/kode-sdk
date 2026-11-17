@@ -22,6 +22,10 @@ extern "C" {
 /** @brief What the chip-id register reads on a QMC5883P. */
 #define KDRV_QMC5883P_CHIP_ID 0x80U
 
+/** @brief The least an axis must move under the self-test, mG. Not a datasheet
+ *         figure (it gives none): boards that work show about 1000 an axis. */
+#define KDRV_QMC5883P_ST_MIN_MG          150
+
 /* ---- The calibration ----------------------------------------------------
  * The part's own field and the board's are in every reading, so a raw one is
  * no compass. The correction is a diagonal one: an offset per axis (hard

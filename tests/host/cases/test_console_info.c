@@ -20,6 +20,7 @@
 #include "kcli_proto.h"
 #include "kdrv_c5.h"
 #include "kdrv_c5svc.h"
+#include "khal_identity.h"
 #include "kode_wire.h"
 #include "kqp.h"
 #include "qf_support.h"
@@ -84,16 +85,19 @@ static int reply_index(const char *needle)
     return -1;
 }
 
-/** @brief What kdrv_slot answers for one partition on the next ask. */
+/** @brief What kdrv_slot answers for one partition on the next ask: whether
+ *         the board runs from it, and whether otadata names it. */
 static void expect_slot(kdrv_slot_info_t *info, const char *label,
-                        uint32_t address, bool running, const char *project,
-                        const char *version, const char *idf)
+                        uint32_t address, bool running, bool boot,
+                        const char *project, const char *version,
+                        const char *idf)
 {
     (void)memset(info, 0, sizeof(*info));
     info->label   = label;
     info->address = address;
     info->size    = 0x400000U;
     info->running = running;
+    info->boot    = boot;
     if ( NULL != project )
     {
         info->has_image = true;
@@ -122,6 +126,79 @@ static void expect_coredump(kdrv_coredump_t *cd, bool present, bool mine,
     kdrv_slot_coredump_ReturnThruPtr_out(cd);
 }
 
+/* ---- The two MACs: the P4's own, and the C5's that the serial encodes ----- */
+
+/** @brief A C5's MAC, as AO_Radio hands it over when the link comes up. */
+static const uint8_t INFO_C5_MAC[6] = { 0x38U, 0x44U, 0xBEU, 0x07U, 0xE6U, 0x54U };
+
+TEST_CASE("info names the P4's own MAC as mac_p4 and the C5's beside it", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    fake_nvs_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_identity_set_mac(INFO_C5_MAC));
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE_MESSAGE(replied(">|mac_p4=e8:f6:0a:00:00:01 mac_c5=38:44:be:07:e6:54"),
+        "mac_p4 is the chip's own MAC, not the C5's");
+    Mockkdrv_slot_Destroy();
+}
+
+/* ---- The board's revision: what production wrote, or none -------------- */
+
+TEST_CASE("info says board=- and why on a board production wrote no revision for",
+          "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    fake_nvs_reset();
+    (void)khal_identity_init();
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied("product=\"KODE-DOT\" board=-"));
+    TEST_ASSERT_TRUE_MESSAGE(replied("no official hardware revision is loaded"),
+                             "the log does not say why");
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("info says the revision production wrote", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    fake_nvs_reset();
+    (void)khal_identity_init();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_identity_set_board_rev("1.0"));
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied("product=\"KODE-DOT\" board=\"1.0\""));
+    TEST_ASSERT_FALSE(replied("no official hardware revision"));
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("info names the P4's MAC on a board that has never seen its C5", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    fake_nvs_reset();
+    (void)khal_identity_init();
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|mac_p4=e8:f6:0a:00:00:01 mac_c5=-"));
+    Mockkdrv_slot_Destroy();
+}
+
 TEST_CASE("info prints one record per kodeOS partition after the identity, "
           "and says which one is running", "[console_info]")
 {
@@ -129,9 +206,9 @@ TEST_CASE("info prints one record per kodeOS partition after the identity, "
 
     console_up();
     Mockkdrv_slot_Init();
-    expect_slot(&slots[0], "factory", 0x20000U, false, "kodeos", "00.00.17", "v6.1");
-    expect_slot(&slots[1], "ota_0", 0x420000U, true, "kodeos", "00.00.18", "v6.1");
-    expect_slot(&slots[2], "ota_1", 0x820000U, false, NULL, NULL, NULL);
+    expect_slot(&slots[0], "factory", 0x20000U, false, false, "kodeos", "00.00.17", "v6.1");
+    expect_slot(&slots[1], "ota_0", 0x420000U, true, true, "kodeos", "00.00.18", "v6.1");
+    expect_slot(&slots[2], "ota_1", 0x820000U, false, false, NULL, NULL, NULL);
     /* Not this case's concern - see the coredump-specific cases below. */
     kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
     kdrv_c5_forget();
@@ -254,6 +331,31 @@ TEST_CASE("info reports an undecodable dump as present but unclaimed, with "
     TEST_ASSERT_TRUE(replied(">|coredump=present owner=other task=- pc=-"));
 
     Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+/* A store this boot found unreadable was erased whole, and every setting went
+ * back to its default: info says so for the rest of that boot. */
+TEST_CASE("info says whether this boot erased the settings store", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    kdrv_c5_forget();
+    fake_nvs_reset();
+
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|nvs erased=no"));
+    TEST_ASSERT_TRUE(reply_index(">|nvs") < reply_index(">ok"));
+
+    fake_klog_reset();
+    fake_nvs_erased_set(true);
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|nvs erased=yes"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    fake_nvs_reset();
     Mockkdrv_slot_Destroy();
 }
 
@@ -392,6 +494,228 @@ TEST_CASE("info ends with the die temperature, and a dash when the sensor "
         "a sensor that does not answer is a dash, not a failed info");
     TEST_ASSERT_TRUE(replied(">ok"));
 
+    Mockkdrv_slot_Destroy();
+}
+
+/* ---- The two releases: which firmware is on this board ------------------- */
+
+/** @brief A kode_c5 image of release @p version, as the last link-up saw it. */
+static void c5_release(const char *version)
+{
+    fake_hosted_reset();
+    fake_hosted_set_app_strings(version, "v6.1", "Nov 17 2026", "10:00:00");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+}
+
+TEST_CASE("info gives the kodeOS and the kode_c5 releases in one fw record, "
+          "after the partitions", "[console_info]")
+{
+    static kdrv_slot_info_t slots[3];
+
+    console_up();
+    Mockkdrv_slot_Init();
+    expect_slot(&slots[0], "factory", 0x20000U, false, false, "kodeos", "0.1.0", "v6.1");
+    expect_slot(&slots[1], "ota_0", 0x420000U, true, true, "kodeos", "0.1.2", "v6.1");
+    expect_slot(&slots[2], "ota_1", 0x820000U, false, false, "kodeos", "0.1.1", "v6.1");
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    c5_release("0.1.3");
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=\"0.1.2\" c5=\"0.1.3\""));
+    TEST_ASSERT_TRUE(reply_index(">|slot=ota_1") < reply_index(">|fw "));
+    TEST_ASSERT_TRUE(reply_index(">|fw ") < reply_index(">ok"));
+
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+/* An app's console answers `info` too. The app runs from the apps region, so
+ * no partition is running, and the kodeOS on the board is the one the next
+ * boot that is not an app's starts: the one otadata names. */
+TEST_CASE("in an app, info's kodeos is the kodeOS otadata boots", "[console_info]")
+{
+    static kdrv_slot_info_t slots[3];
+
+    console_up();
+    Mockkdrv_slot_Init();
+    expect_slot(&slots[0], "factory", 0x20000U, false, false, "kodeos", "0.1.0", "v6.1");
+    expect_slot(&slots[1], "ota_0", 0x420000U, false, false, "kodeos", "0.1.1", "v6.1");
+    expect_slot(&slots[2], "ota_1", 0x820000U, false, true, "kodeos", "0.1.2", "v6.1");
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    c5_release("0.1.3");
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=\"0.1.2\" c5=\"0.1.3\""));
+
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+/* Between an update's selection and its boot, otadata names the new slot
+ * while the old kodeOS runs: the record says what runs. So does a rescue
+ * boot into factory with otadata still naming a slot. */
+TEST_CASE("info's kodeos is the kodeOS that runs, whatever otadata names",
+          "[console_info]")
+{
+    static kdrv_slot_info_t slots[3];
+
+    console_up();
+    Mockkdrv_slot_Init();
+    expect_slot(&slots[0], "factory", 0x20000U, true, false, "kodeos", "0.1.0", "v6.1");
+    expect_slot(&slots[1], "ota_0", 0x420000U, false, true, "kodeos", "0.1.2", "v6.1");
+    expect_slot(&slots[2], "ota_1", 0x820000U, false, false, NULL, NULL, NULL);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    c5_release("0.1.3");
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=\"0.1.0\" c5=\"0.1.3\""));
+
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("info's fw record says kodeos=- when no partition names one",
+          "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    c5_release("0.1.3");
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=\"0.1.3\""));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    Mockkdrv_slot_Destroy();
+}
+
+/* The C5's release is what its image descriptor said at the last link-up.
+ * Before one there is nothing to say; a slave that is not kode_c5, or one
+ * with no descriptor RPC, carries no kode_c5 release. */
+TEST_CASE("info's fw record says c5=- while the link has never been up, and "
+          "for a slave that is not kode_c5", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+
+    kdrv_c5_forget();
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=-"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    /* A version that is not esp-hosted's, so the project name alone decides. */
+    fake_klog_reset();
+    fake_hosted_reset();
+    fake_hosted_set_project("network_adapter");
+    fake_hosted_set_app_strings("1.0.0", "v6.1", "Nov 17 2026", "10:00:00");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+    type_line("info");
+    TEST_ASSERT_TRUE_MESSAGE(replied(">|fw kodeos=- c5=-"),
+        "a stock slave's version is not a kode_c5 release");
+
+    fake_klog_reset();
+    fake_hosted_reset();
+    fake_hosted_app_desc_unsupported(true);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=-"));
+
+    fake_hosted_reset();
+    kdrv_c5_forget();
+    Mockkdrv_slot_Destroy();
+}
+
+/* Before kode_c5 had releases of its own, its image stamped esp-hosted's
+ * version, the one the link negotiates. That is no release of kode_c5, and
+ * it compares newer than every real one. */
+TEST_CASE("info's fw record says c5=- for a kode_c5 whose version is "
+          "esp-hosted's", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    /* The fake's own slave: kode_c5, descriptor and link both at 2.12.9. */
+    fake_hosted_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE_MESSAGE(replied(">|fw kodeos=- c5=-"),
+        "esp-hosted's version is not a kode_c5 release");
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    kdrv_c5_forget();
+    Mockkdrv_slot_Destroy();
+}
+
+/* The record sits where it was put: after the partitions, before the
+ * records the owners add (the C5's own among them), before `>ok`. */
+TEST_CASE("info's fw record comes after the partitions and before the "
+          "owners' records", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    c5_release("0.1.3");
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=\"0.1.3\""));
+    TEST_ASSERT_TRUE(replied(">|c5=running project=\"kode_c5\" version=\"0.1.3\""));
+    TEST_ASSERT_TRUE(reply_index(">|slot=ota_1") < reply_index(">|fw "));
+    TEST_ASSERT_TRUE(reply_index(">|fw ") < reply_index(">|c5=running"));
+    TEST_ASSERT_TRUE(reply_index(">|c5=running") < reply_index(">ok"));
+
+    kdrv_c5_forget();
+    Mockkdrv_slot_Destroy();
+}
+
+/* The door gives the whole release or nothing: a cut one would read as
+ * another release. */
+TEST_CASE("radio_c5_release refuses a buffer the whole release does not fit",
+          "[console_info]")
+{
+    char out[sizeof("0.1.3")];
+
+    c5_release("0.1.3");
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, radio_c5_release(out, sizeof(out) - 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, radio_c5_release(out, 0U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, radio_c5_release(NULL, sizeof(out)));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, radio_c5_release(out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("0.1.3", out);
+
+    kdrv_c5_forget();
+}
+
+TEST_CASE("info's fw record says c5=- in an image without AO_Radio",
+          "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    c5_release("0.1.3");
+    fake_kaos_linked_reset();
+    fake_kaos_absent(&kaos_radio_start);
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=-"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    fake_kaos_linked_reset();
+    kdrv_c5_forget();
     Mockkdrv_slot_Destroy();
 }
 

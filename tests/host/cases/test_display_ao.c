@@ -18,11 +18,14 @@
 #include "kdrv_tca6408a.h"
 #include "Mockkdrv_jpeg.h"
 #include "Mockkdrv_ppa.h"
+#include "Mockkdrv_compose.h"
 
 #include "ao_spy.h"
 #include "config_support.h"
+#include "display_sleep.h"
 #include "fakes.h"
 #include "kaos.h"
+#include "kbsp_board.h"
 #include "kbsp_owners.h"
 #include "khal_nvs.h"
 #include "khal_time.h"
@@ -44,7 +47,8 @@ typedef enum {
     T_SLEEP_IN,     /**< kdrv_display_panel_sleep(true).                       */
     T_SLEEP_OUT,    /**< kdrv_display_panel_sleep(false).                      */
     T_GRAM,         /**< kdrv_display_gram_write().                            */
-    T_RESET_LOW     /**< kdrv_display_reset_low().                             */
+    T_RESET_LOW,    /**< kdrv_display_reset_low().                             */
+    T_COLD          /**< kdrv_display_panel_cold().                            */
 } trace_t;
 
 /** @brief Longest sequence a case traces. */
@@ -88,6 +92,46 @@ static void supply_answered(kdrv_tca6408a_field_t f, int32_t value)
     a.rc    = (uint8_t)KODE_OK;
     a.value = value;
     QASM_DISPATCH(AO_Display, &a.super, 0U);
+}
+
+/**
+ * @brief Ask for a compose pass while the panel's supply is still being asked for.
+ *
+ * Dispatched as the request arrives, with the answer's four places on this
+ * frame: the pass is run and answered in the same step.
+ */
+static void compose_asked_while_powering(void)
+{
+    static uint8_t       px[64];
+    DisplayComposeReqEvt q;
+    uint32_t             rc  = UINT32_MAX;
+    uint32_t             us  = UINT32_MAX;
+    uint32_t             cur = 1U;
+    uint32_t             ack = 0U;
+    unsigned const       woken = fake_sem_signals();
+
+    (void)memset(&q, 0, sizeof(q));
+    q.super         = (QEvt)QEVT_INITIALIZER(DISPLAY_COMPOSE_REQ_SIG);
+    q.job.op        = DISPLAY_COMPOSE_FILL;
+    q.job.dst.px    = px;
+    q.job.dst.bytes = (uint32_t)sizeof(px);
+    q.job.dst.w     = 8U;
+    q.job.dst.h     = 4U;
+    q.job.w         = 8U;
+    q.job.h         = 4U;
+    q.rc            = &rc;
+    q.us            = &us;
+    q.done          = khal_sem_create();
+    q.gen           = 1U;
+    q.cur           = &cur;
+    q.ack           = &ack;
+
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    QASM_DISPATCH(AO_Display, &q.super, 0U);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)KODE_OK, rc,
+                                     "a pass asked before the panel is up is run");
+    TEST_ASSERT_EQUAL_UINT32(1U, ack);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(woken + 1U, fake_sem_signals(), "and its asker is woken");
 }
 
 /**
@@ -158,6 +202,11 @@ static void display_up_once(uint8_t stored)
         TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
                                        "a state asked for too early is deferred, not refused");
 
+        /* A renderer that composes this early is answered too: the
+         * accelerator does not wait for the panel, and a request left to
+         * drop would cost its asker the whole wait. */
+        compose_asked_while_powering();
+
         supply_answered(KDRV_TCA_O7, 1);
         TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 2U, fake_neighbour_ioexp_posts(),
                                        "then the direction is asked for");
@@ -213,6 +262,44 @@ static const DisplayStateEvt *announced(void)
         return NULL;
     }
     return (DisplayStateEvt const *)e;
+}
+
+/**
+ * @brief Boot AO_Display again, with nobody drawing on it yet.
+ *
+ * AO_Display counts a renderer from the first state request or flush and
+ * never forgets it, and the bring-up above asks for the state as AO_Gui does.
+ * A case about a firmware with no renderer starts from a second boot: the
+ * AO's timers out of QF's list and its queue emptied, then the constructor,
+ * the initial transition and the supply's two answers.
+ *
+ * @return The brightness the second boot announced.
+ */
+static uint8_t display_headless(void)
+{
+    display_up_once(0U);
+    qf_support_disarm_timers(AO_Display);
+    qf_support_reap_timers();
+    (void)qf_support_waiting_of(AO_Display, 0U);
+    kdrv_jpeg_init_IgnoreAndReturn(KODE_OK);
+    kdrv_ppa_init_IgnoreAndReturn(KODE_OK);
+    ao_spy_drain();
+
+    Display_ctor();
+    QASM_INIT(AO_Display, (void *)0, 0U);
+    supply_answered(KDRV_TCA_O7, 1);
+    kdrv_display_init_ExpectAndReturn(KODE_OK);
+    supply_answered(KDRV_TCA_C7, 0);
+
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the second boot announced no panel");
+    TEST_ASSERT_EQUAL_INT((int)DISPLAY_STATE_SIG, (int)e->sig);
+    uint8_t const bright = ((const DisplayStateEvt *)(const void *)e)->bright;
+
+    ao_spy_drain();
+    fake_klog_reset();
+    return bright;
 }
 
 /* ---- The rest: stand-ins for the driver's three new calls ------------------ */
@@ -905,10 +992,10 @@ TEST_CASE("another owner's key is not AO_Display's to answer", "[display_ao]")
 
 /* ---- The rest: a board nobody has drawn on ---------------------------------- */
 
-/* These come before every flush in this file on purpose: AO_Display counts a
- * renderer from its first flush and never forgets it, so the cases below see
- * the glass as a headless firmware does. The cases after the flushing section
- * see it as kodeOS does. */
+/* AO_Display counts a renderer from the first state request or flush and never
+ * forgets it. The cases below boot it again first, with display_headless(), so
+ * they see the glass as a firmware with nobody drawing does; the cases after
+ * the flushing section see it as kodeOS does. */
 
 /* A round for ASLEEP: the glass is dimmed to the level the interface gave, or
  * to the default when it gave none, and only then does the link go; the
@@ -917,7 +1004,7 @@ TEST_CASE("a round for ASLEEP with no renderer dims the glass, drops the link, "
           "then answers", "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     round_for(KODE_LP_ASLEEP);
@@ -943,9 +1030,8 @@ TEST_CASE("AWAKE restores the glass once, however often it is said",
     uint8_t user;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    user = display_headless();
     rest_mocks();
-    user = announced()->bright;
     ao_spy_drain();
 
     round_for(KODE_LP_ASLEEP);
@@ -973,7 +1059,7 @@ TEST_CASE("a restore the link refused is tried again until it answers",
           "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     ao_spy_drain();
 
@@ -1012,7 +1098,7 @@ TEST_CASE("a restore the link refused is tried again until it answers",
 TEST_CASE("a new round ends the restore retry", "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     round_for(KODE_LP_ASLEEP);
@@ -1037,9 +1123,8 @@ TEST_CASE("a round for OFF sleeps the panel and drops the link",
     uint8_t user;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    user = display_headless();
     rest_mocks();
-    user = announced()->bright;
     ao_spy_drain();
 
     round_for(KODE_LP_OFF);
@@ -1079,7 +1164,7 @@ TEST_CASE("STATE(OFF) after the sleep-in drives the reset line low, then asks fo
     unsigned asked;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     round_for(KODE_LP_OFF);
@@ -1109,7 +1194,7 @@ TEST_CASE("STATE(OFF) asks for the supply off even when the reset line is refuse
     uint32_t asked;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     s_reset_low_rc = KODE_DENIED;
 
@@ -1136,7 +1221,7 @@ TEST_CASE("the panel keeps its supply when it did not sleep, and for ASLEEP",
     unsigned asked;
 
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     /* ASLEEP, the glass at rest: no reset line, no supply. */
@@ -1187,7 +1272,7 @@ TEST_CASE("OFF from the ASLEEP rest brings the link up for the sleep-in",
           "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
 
     round_for(KODE_LP_ASLEEP);
@@ -1213,7 +1298,7 @@ TEST_CASE("OFF from the ASLEEP rest brings the link up for the sleep-in",
 TEST_CASE("a link that will not go down refuses the round", "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     s_link_down_rc = KODE_ERROR;
 
@@ -1236,7 +1321,7 @@ TEST_CASE("a link error on the way to OFF still wakes the link and the panel",
           "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     s_link_down_rc = KODE_ERROR;
 
@@ -1258,12 +1343,272 @@ TEST_CASE("a link error on the way to OFF still wakes the link and the panel",
     Mockkdrv_display_Destroy();
 }
 
+/* ---- The glass asleep for an app: kode_sys_screen_sleep() ------------------ */
+
+/** @brief The rest's stand-ins, and the spy listening for the request's answers. */
+static void sleep_mocks(void)
+{
+    rest_mocks();
+    ao_spy_subscribe(DISPLAY_PARK_SIG);
+    ao_spy_subscribe(DISPLAY_SLEEP_SIG);
+    ao_spy_drain();
+}
+
+/** @brief An app asks for the glass asleep (true) or awake (false). */
+static void sleep_asked(bool sleep)
+{
+    DisplaySleepReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(DISPLAY_SLEEP_REQ_SIG);
+    e.sleep = sleep;
+    QASM_DISPATCH(AO_Display, &e.super, 0U);
+}
+
+/** @brief The next thing on the bus is @p sig. */
+static void expect_published(enum_t sig)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "nothing was published");
+    TEST_ASSERT_EQUAL_INT((int)sig, (int)e->sig);
+}
+
+/** @brief The next thing on the bus is a request's answer, as given. */
+static void expect_sleep_event(bool asleep, kode_status_t rc, display_sleep_why_t why)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the request was not answered");
+    TEST_ASSERT_EQUAL_INT((int)DISPLAY_SLEEP_SIG, (int)e->sig);
+    TEST_ASSERT_EQUAL_INT(asleep, ((const DisplaySleepEvt *)(const void *)e)->asleep);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)rc, ((const DisplaySleepEvt *)(const void *)e)->rc);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)why, ((const DisplaySleepEvt *)(const void *)e)->why);
+}
+
+/** @brief The next thing on the bus is the last request's answer, as given,
+ *         and the words a task reads say the same. */
+static void expect_sleep_answer(bool asleep, kode_status_t rc, display_sleep_why_t why)
+{
+    display_sleep_last_t last;
+
+    expect_sleep_event(asleep, rc, why);
+    display_sleep_last(&last);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)rc, last.rc);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)why, last.why);
+    TEST_ASSERT_EQUAL_INT(asleep, display_asleep());
+}
+
+/** @brief How many requests AO_Display has answered since the boot. */
+static uint16_t sleep_answers(void)
+{
+    display_sleep_last_t last;
+
+    display_sleep_last(&last);
+    return last.answers;
+}
+
+/* With nobody drawing there is nothing to wait for: the panel sleeps, then its
+ * link goes, and the wake undoes both in the order the panel needs - the link
+ * first, since the sleep-out rides it. */
+TEST_CASE("an app's sleep with no renderer sleeps the panel, drops the link and says so; "
+          "its wake brings both back", "[display_ao][sleep]")
+{
+    uint8_t  user;
+    uint16_t answered;
+
+    Mockkdrv_display_Init();
+    user = display_headless();
+    sleep_mocks();
+    ao_spy_drain();
+    answered = sleep_answers();
+
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "one request, one answer");
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)(answered + 1U), sleep_answers());
+
+    s_trace_n = 0U;
+    sleep_asked(false);
+    EXPECT_TRACE(T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(user, s_driven, "the brightness the glass had is back");
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)(answered + 2U), sleep_answers());
+
+    Mockkdrv_display_Destroy();
+}
+
+/* Asking for what is already true moves nothing and is still answered. */
+TEST_CASE("a glass already as asked is answered at once and not touched", "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+
+    sleep_asked(false);
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    s_trace_n = 0U;
+    sleep_asked(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a sleeping panel was put to sleep again");
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A panel that refuses the sleep-in is left as it was: lit, its link up. */
+TEST_CASE("a panel that will not sleep leaves the glass awake, and the asker is told",
+          "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+    s_sleep_in_rc = KODE_ERROR;
+
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_UP, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_IO_ERROR, DISPLAY_SLEEP_WHY_PANEL);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    /* And nothing is left half done: the next request starts from awake. */
+    s_sleep_in_rc = KODE_OK;
+    s_trace_n = 0U;
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A link that answers an error has gone down all the same, with the panel
+ * already asleep: both are brought back before the asker hears no. */
+TEST_CASE("a link that will not go down wakes the panel again, and the asker is told",
+          "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+    s_link_down_rc = KODE_ERROR;
+
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_IO_ERROR, DISPLAY_SLEEP_WHY_PANEL);
+
+    Mockkdrv_display_Destroy();
+}
+
+/* The wake is not answered until the glass is back: a link that refuses is
+ * asked again on the restore timer, and a second wake meanwhile is told the
+ * first is still under way. */
+TEST_CASE("a wake the link refuses is tried again and answered when the glass is back",
+          "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    s_link_up_rc = KODE_ERROR;
+    s_trace_n = 0U;
+    sleep_asked(false);
+    EXPECT_TRACE(T_LINK_UP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a wake that failed was answered");
+    TEST_ASSERT_TRUE_MESSAGE(display_asleep(), "the glass is still dark");
+
+    sleep_asked(false);
+    expect_sleep_answer(true, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+
+    s_link_up_rc = KODE_OK;
+    s_trace_n = 0U;
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_RESTORE_RETRY_MS) + 1U);
+    EXPECT_TRACE(T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    Mockkdrv_display_Destroy();
+}
+
+/* The board's rest has the glass first. A round that finds it asleep for the
+ * app keeps it as it is and answers ready; the AWAKE that ends the rest wakes
+ * it, and the app's next request starts from an awake glass. */
+TEST_CASE("the board's rest takes over a glass the app slept, and its AWAKE wakes it",
+          "[display_ao][sleep][lowpower]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    s_trace_n = 0U;
+    round_for(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a glass at rest was moved for the round");
+    expect_answer(false, NULL);
+    expect_no_more_answers();
+
+    state_awake(KODE_LP_ASLEEP);
+    EXPECT_TRACE(T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    TEST_ASSERT_FALSE(display_asleep());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the board's wake answers no request");
+
+    s_trace_n = 0U;
+    sleep_asked(true);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* While the board rests the glass is not the app's to wake; asking for it
+ * asleep is asking for what it is. */
+TEST_CASE("a wake asked while the board rests is refused, and a sleep finds it asleep",
+          "[display_ao][sleep][lowpower]")
+{
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+    s_trace_n = 0U;
+
+    sleep_asked(false);
+    expect_sleep_answer(true, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
+    sleep_asked(true);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the resting glass was touched");
+
+    state_awake(KODE_LP_ASLEEP);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
 /* The minute is written only into a glass that is resting, and only from
  * glyphs: without them the panel's memory is left as it is. */
 TEST_CASE("the minute without glyphs writes nothing", "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
-    display_up_once(0U);
+    (void)display_headless();
     rest_mocks();
     fake_time_wall_set(EPOCH_0941 * US_PER_S);
 
@@ -1899,22 +2244,22 @@ TEST_CASE("a link that will not come up is tried again at the next AWAKE",
     Mockkdrv_display_Destroy();
 }
 
-/** @brief AO_LowPower says the radio alone is awake: the glass is not. */
+/** @brief AO_LowPower says a dark wake runs: the glass stays asleep. */
 static void state_radio(void)
 {
     LowPowerStateEvt e;
 
     (void)memset(&e, 0, sizeof(e));
     e.super = (QEvt)QEVT_INITIALIZER(LOWPOWER_STATE_SIG);
-    e.state = (uint8_t)KODE_LP_RADIO;
+    e.state = (uint8_t)KODE_LP_DARK;
     e.cause = (uint8_t)KODE_LP_CAUSE_TIMER;
     e.prev  = (uint8_t)KODE_LP_ASLEEP;
     QASM_DISPATCH(AO_Display, &e.super, 0U);
 }
 
-/* A radio wake keeps the glass asleep: no link, no brightness, no repaint
+/* A dark wake keeps the glass asleep: no link, no brightness, no repaint
  * asked, and the AWAKE that follows still restores it. */
-TEST_CASE("STATE(RADIO) leaves the rested glass alone; AWAKE still restores it",
+TEST_CASE("STATE(DARK) leaves the rested glass alone; AWAKE still restores it",
           "[display_ao][lowpower]")
 {
     Mockkdrv_display_Init();
@@ -1931,8 +2276,8 @@ TEST_CASE("STATE(RADIO) leaves the rested glass alone; AWAKE still restores it",
 
     state_radio();
     (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_RESTORE_RETRY_MS) * 3U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the radio wake drove the glass");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the radio wake asked for a repaint");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the dark wake drove the glass");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the dark wake asked for a repaint");
 
     state_awake(KODE_LP_ASLEEP);
     EXPECT_TRACE(T_LINK_UP, T_BRIGHT);
@@ -2044,5 +2389,1197 @@ TEST_CASE("pixel-path errors on most frames are a lost glass", "[display_ao]")
     look_seconds(5U, 66U, 60U);
     TEST_ASSERT_EQUAL_UINT(before, fake_system_restarts());
     TEST_ASSERT_TRUE(fake_klog_saw("the glass stays lost"));
+    Mockkdrv_display_Destroy();
+}
+
+/* ---- The glass asleep for an app, with a renderer -------------------------- */
+
+/**
+ * @brief The next thing on the bus is a park; its number.
+ * @return The number the renderer answers with.
+ */
+static uint32_t expect_park(void)
+{
+    const QEvt * const e = ao_spy_take();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "no park was published");
+    TEST_ASSERT_EQUAL_INT((int)DISPLAY_PARK_SIG, (int)e->sig);
+    uint32_t const seq = ((const DisplayParkEvt *)(const void *)e)->seq;
+
+    TEST_ASSERT_NOT_EQUAL_UINT32_MESSAGE(0U, seq, "a park numbered 0, a round's number");
+    return seq;
+}
+
+/**
+ * @brief The renderer says it has stopped drawing for one park, with no
+ *        glyphs to give, as kode_sys_screen_parked() does.
+ * @param seq The number of the park it answers.
+ */
+static void renderer_parks(uint32_t seq)
+{
+    DisplayGlyphsEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(DISPLAY_GLYPHS_SIG);
+    e.park  = seq;
+    QASM_DISPATCH(AO_Display, &e.super, 0U);
+}
+
+/* The link takes the framebuffers with it, so whoever draws is asked to stop
+ * first and the glass does not move until it has said so. */
+TEST_CASE("an app's sleep asks the renderer to park and keeps the link up until it has",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT(1U, s_flush_sent);
+
+    sleep_asked(true);
+    seq = expect_park();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "answered before the renderer stopped");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the glass moved before the renderer stopped");
+
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_flush_sent, "the renderer's last page was dropped");
+
+    renderer_parks(seq);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_flush_sent, "a flush reached the sleeping glass");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_flush_aborted, "a flush into the sleeping glass was not completed");
+
+    /* The wait ended with the answer: no timer is left to refuse anything. */
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 2U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    sleep_asked(false);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(3U, s_flush_sent, "flushes flow again once awake");
+
+    Mockkdrv_display_Destroy();
+}
+
+/* A renderer that never answers keeps the glass: the link is never taken from
+ * under somebody who may still be drawing. It is told it may draw again, in
+ * case it stopped late. */
+TEST_CASE("a renderer that does not park in time keeps the glass lit, and the asker is told",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    seq = expect_park();
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "refused before the wait was over");
+    (void)qf_support_tick(AO_Display, 2U);
+
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_TIMEOUT, DISPLAY_SLEEP_WHY_RENDERER);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the glass moved under a renderer that never stopped");
+
+    /* A late answer belongs to a request that is over. */
+    renderer_parks(seq);
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_flush_sent, "the lit glass refused a flush");
+
+    Mockkdrv_display_Destroy();
+}
+
+/* A wake that comes while the renderer is still being parked ends the sleep
+ * before it happened: the first asker hears no, the second yes, and the
+ * renderer is told it may draw. */
+TEST_CASE("a wake before the renderer parked ends the sleep, and both requests are answered",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    uint16_t answered;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    answered = sleep_answers();
+    sleep_asked(true);
+    seq = expect_park();
+    sleep_asked(false);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_event(false, KODE_DENIED, DISPLAY_SLEEP_WHY_WOKEN);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE((uint16_t)(answered + 2U), sleep_answers(),
+                                     "two requests, two answers counted");
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 2U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the wait outlived the request it timed");
+    renderer_parks(seq);
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+
+    Mockkdrv_display_Destroy();
+}
+
+/* The renderer answers each park in its turn, after whatever AO_Display
+ * published before it. Sleep, wake and sleep again in a row publish PARK,
+ * REPAINT and PARK: the first answer is for the first sleep, and the renderer
+ * draws again at the REPAINT behind it. Only the second answer says it stopped
+ * for the sleep that is open; taking the link down at the first would free the
+ * framebuffers under a renderer about to draw. */
+TEST_CASE("a hand-over for an earlier park does not settle the sleep that is open",
+          "[display_ao][sleep]")
+{
+    uint32_t first;
+    uint32_t second;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    first = expect_park();
+    sleep_asked(false);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_event(false, KODE_DENIED, DISPLAY_SLEEP_WHY_WOKEN);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    sleep_asked(true);
+    second = expect_park();
+
+    renderer_parks(first);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n,
+        "the first park's answer took the link from the second sleep");
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    renderer_parks(second);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A park that timed out may still be answered, late, before the next sleep's
+ * own answer: that late one is the old park's. */
+TEST_CASE("a late hand-over for a park that timed out is not the next sleep's",
+          "[display_ao][sleep]")
+{
+    uint32_t first;
+    uint32_t second;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    first = expect_park();
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 2U);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_TIMEOUT, DISPLAY_SLEEP_WHY_RENDERER);
+
+    sleep_asked(true);
+    second = expect_park();
+    renderer_parks(first);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n,
+        "the late answer to the old park took the link from the new sleep");
+
+    renderer_parks(second);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A park that ran out with no hand-over at all leaves nothing owed: the next
+ * sleep's one hand-over carries its own number, and the glass sleeps. */
+TEST_CASE("a park that ran out unanswered does not take the next sleep's hand-over",
+          "[display_ao][sleep]")
+{
+    uint32_t first;
+    uint32_t second;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    first = expect_park();
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 2U);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_TIMEOUT, DISPLAY_SLEEP_WHY_RENDERER);
+
+    sleep_asked(true);
+    second = expect_park();
+    TEST_ASSERT_NOT_EQUAL_UINT32_MESSAGE(first, second, "two parks carry one number");
+    renderer_parks(second);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* Whoever asks for the panel's state draws on it, flush or not: kscreen asks
+ * as it opens, before its first frame. Its glass is parked like any
+ * renderer's, and the link stays up until it has answered. */
+TEST_CASE("a renderer that asked for the state and never flushed is parked before the link goes",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+
+    Mockkdrv_display_Init();
+    (void)display_headless();
+    sleep_mocks();
+    TEST_ASSERT_NOT_NULL(announced());
+    ao_spy_drain();
+
+    sleep_asked(true);
+    seq = expect_park();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n,
+        "the link went under a renderer that asked for the state");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "answered before the renderer stopped");
+
+    renderer_parks(seq);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* One request at a time: a second sleep while the first is parking the
+ * renderer is told so, and the first still ends as it would have. */
+TEST_CASE("a second sleep while the renderer parks is told one is under way",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+
+    sleep_asked(true);
+    seq = expect_park();
+    sleep_asked(true);
+    expect_sleep_answer(false, KODE_DENIED, DISPLAY_SLEEP_WHY_UNDERWAY);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the renderer was asked to park twice");
+
+    renderer_parks(seq);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A glass that is lent refuses at once, before anybody is asked to park. */
+TEST_CASE("a lent glass refuses the app's sleep before anything moves", "[display_ao][sleep]")
+{
+    DisplayCaptureReqEvt req;
+    static const QEvt end = QEVT_INITIALIZER(DISPLAY_CAPTURE_END_SIG);
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    renderer_flushes();
+    kdrv_display_capture_begin_StubWithCallback(&on_capture_begin);
+    kdrv_display_capture_painted_IgnoreAndReturn(true);
+    kdrv_display_capture_end_Ignore();
+    (void)memset(&req, 0, sizeof(req));
+    req.super = (QEvt)QEVT_INITIALIZER(DISPLAY_CAPTURE_REQ_SIG);
+    req.who   = AO_Display;   /* the answer lands on this AO and is not its business */
+    QASM_DISPATCH(AO_Display, &req.super, 0U);
+
+    sleep_asked(true);
+    expect_sleep_answer(false, KODE_DENIED, DISPLAY_SLEEP_WHY_LENT);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a renderer was parked for a refused sleep");
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+
+    QASM_DISPATCH(AO_Display, &end, 0U);
+    Mockkdrv_display_Destroy();
+}
+
+/* A round that opens while the renderer is parking for the app has the glass:
+ * the app's request ends refused, and the round goes on from there as any
+ * round with a renderer does. */
+TEST_CASE("a round that opens while the renderer parks for the app takes the glass",
+          "[display_ao][sleep][lowpower]")
+{
+    uint32_t seq;
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    strip_fill();
+    renderer_flushes();
+
+    sleep_asked(true);
+    seq = expect_park();
+
+    round_for(KODE_LP_ASLEEP);
+    expect_sleep_answer(false, KODE_DENIED, DISPLAY_SLEEP_WHY_BOARD);
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+    TEST_ASSERT_FALSE_MESSAGE(lp_queued() > 0U, "the round was answered before the renderer stopped");
+
+    /* The renderer answers the park first, then the round's own ask. */
+    renderer_parks(seq);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the park's answer was taken as the round's");
+    TEST_ASSERT_FALSE(lp_queued() > 0U);
+
+    hand(s_strip, (uint16_t)GLYPH_X);
+    EXPECT_TRACE(T_BRIGHT, T_LINK_DOWN);
+    expect_answer(false, NULL);
+    expect_no_more_answers();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the round's rest answered the app again");
+
+    state_awake(KODE_LP_ASLEEP);
+    expect_published(DISPLAY_REPAINT_SIG);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* The display row paints the glass and, as it ends, has the renderer paint it
+ * whole again. With the glass asleep the link is down and the framebuffers
+ * are gone with it: the row is refused at once, saying why, and the renderer
+ * is not woken over memory the link let go. */
+TEST_CASE("the display row is refused while the glass is asleep, and the renderer stays parked",
+          "[display_ao][sleep]")
+{
+    uint32_t seq;
+    static const QEvt req = QEVT_INITIALIZER(DISPLAY_TEST_REQ_SIG);
+    const QEvt *e;
+    unsigned    verdicts = 0U;
+    bool        failed   = false;
+    bool        repaint  = false;
+    bool        said     = false;
+    unsigned    moves;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    sleep_mocks();
+    ao_spy_subscribe(TEST_RESULT_SIG);
+    renderer_flushes();
+
+    sleep_asked(true);
+    seq = expect_park();
+    renderer_parks(seq);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN);
+    expect_sleep_answer(true, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+
+    moves = s_trace_n;
+    fake_klog_reset();
+    QASM_DISPATCH(AO_Display, &req, 0U);
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS));
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const line = fake_klog_line(i);
+
+        if ( (NULL != line) && (NULL != strstr(line, "the glass is asleep")) )
+        {
+            said = true;
+        }
+    }
+    for ( e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (int)e->sig == TEST_RESULT_SIG )
+        {
+            verdicts += 1U;
+            failed = !((const TestResultEvt *)(const void *)e)->ok;
+        }
+        if ( (int)e->sig == DISPLAY_REPAINT_SIG )
+        {
+            repaint = true;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, verdicts, "the row was not answered at once");
+    TEST_ASSERT_TRUE_MESSAGE(failed, "a row on a sleeping glass passed");
+    TEST_ASSERT_FALSE_MESSAGE(repaint, "the renderer was woken over a downed link");
+    TEST_ASSERT_TRUE_MESSAGE(said, "the refusal did not say why");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(moves, s_trace_n, "the row moved the sleeping glass");
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* The look at the glass once a second counts frames, and a sleeping glass
+ * sends none: that is not a lost glass. */
+TEST_CASE("a glass the app slept is not a lost glass", "[display_ao][sleep]")
+{
+    unsigned const before = fake_system_restarts();
+
+    look_setup();
+    ao_spy_subscribe(DISPLAY_PARK_SIG);
+    ao_spy_subscribe(DISPLAY_SLEEP_SIG);
+    sleep_asked(true);
+    renderer_parks(expect_park());
+    TEST_ASSERT_TRUE(display_asleep());
+
+    look_seconds(6U, 0U, 0U);
+    TEST_ASSERT_EQUAL_UINT(before, fake_system_restarts());
+    TEST_ASSERT_FALSE(fake_klog_saw("the glass is lost"));
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* ---- Composing: the accelerator behind its owner -----------------------------
+ * A renderer never calls the accelerator: it asks AO_Display, which runs the
+ * pass in its own step and wakes the asker. The asker sleeps on a semaphore
+ * meanwhile, so each case runs AO_Display's step from inside that wait. */
+
+#define CP_W      32U   /* pictures of 32 by 8: 512 bytes, whole cache lines */
+#define CP_H      8U
+#define CP_BYTES  (CP_W * CP_H * 2U)
+#define CP_WAIT   500U  /* a renderer's bound, ms */
+
+static uint8_t s_cp_dst[CP_BYTES];
+static uint8_t s_cp_src[CP_BYTES];
+static display_compose_ask_t s_cp_ask;
+
+/** @brief AO_Display takes what is in its queue, while the asker sleeps. */
+static void cp_owner_runs(void)
+{
+    (void)qf_support_pump(AO_Display, 1U);
+}
+
+/** @brief Nothing happens during this wait; AO_Display runs during the next. */
+static void cp_owner_runs_next_wait(void)
+{
+    fake_sem_wait_hook(&cp_owner_runs);
+}
+
+/** @brief AO_Display takes two requests from its queue, while the asker sleeps. */
+static void cp_owner_runs_two(void)
+{
+    (void)qf_support_pump(AO_Display, 2U);
+}
+
+/** @brief A pass over the two small pictures, the whole of each. */
+static display_compose_t cp_job(uint8_t op)
+{
+    display_compose_t job;
+
+    (void)memset(&job, 0, sizeof(job));
+    job.op        = op;
+    job.dst.px    = s_cp_dst;
+    job.dst.bytes = CP_BYTES;
+    job.dst.w     = (uint16_t)CP_W;
+    job.dst.h     = (uint16_t)CP_H;
+    job.src.px    = s_cp_src;
+    job.src.bytes = CP_BYTES;
+    job.src.w     = (uint16_t)CP_W;
+    job.src.h     = (uint16_t)CP_H;
+    job.w         = (uint16_t)CP_W;
+    job.h         = (uint16_t)CP_H;
+    return job;
+}
+
+/** @brief The mocks a compose case needs, and a fresh asker. */
+static void cp_setup(void)
+{
+    Mockkdrv_display_Init();
+    Mockkdrv_compose_Init();
+    display_up_once(0U);
+    /* A request is posted with a margin, which QP reads from the static kind
+     * of queue. */
+    qf_support_margin_queue(AO_Display);
+    fake_sem_reset();
+    (void)memset(&s_cp_ask, 0, sizeof(s_cp_ask));
+}
+
+/** @brief Every expected pass was made, and no other. */
+static void cp_done(void)
+{
+    /* A wait that never came leaves its hook armed for somebody else's. */
+    fake_sem_wait_hook(NULL);
+    Mockkdrv_compose_Verify();
+    Mockkdrv_compose_Destroy();
+    Mockkdrv_display_Destroy();
+}
+
+TEST_CASE("a compose pass is run by the accelerator's owner, and its answer wakes the asker",
+          "[display_ao][compose]")
+{
+    kdrv_compose_pic_t const  dst  = { s_cp_dst, CP_BYTES, (uint16_t)CP_W, (uint16_t)CP_H };
+    kdrv_compose_pic_t const  src  = { s_cp_src, CP_BYTES, (uint16_t)CP_W, (uint16_t)CP_H };
+    kdrv_compose_rect_t const half = { 4U, 2U, 16U, 4U };
+    kdrv_compose_rect_t const all  = { 0U, 0U, (uint16_t)CP_W, (uint16_t)CP_H };
+    display_compose_t         job;
+    uint32_t                  us   = UINT32_MAX;
+
+    cp_setup();
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("AO_Display", kbsp_owner_name(KBSP_RES_PPA),
+                                     "the accelerator is AO_Display's");
+
+    /* A scale: a block of the source, to a point of the destination. */
+    job         = cp_job(DISPLAY_COMPOSE_SCALE);
+    job.x       = half.x;
+    job.y       = half.y;
+    job.w       = half.w;
+    job.h       = half.h;
+    job.dst_x   = 8U;
+    job.dst_y   = 6U;
+    job.scale_x = 8U;
+    job.scale_y = 4U;
+    kdrv_compose_scale_ExpectAndReturn(&dst, 8U, 6U, &src, &half, 8U, 4U, 0U, KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, &us));
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(UINT32_MAX, us, "the pass's time is answered");
+    TEST_ASSERT_EQUAL_UINT32(CP_WAIT, fake_sem_last_wait_ms());
+
+    /* A fill: the block is the destination's. */
+    job        = cp_job(DISPLAY_COMPOSE_FILL);
+    job.colour = 0xFFFF0000U;
+    kdrv_compose_fill_ExpectAndReturn(&dst, &all, 0xFFFF0000U, KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* A blend, and the accelerator's refusal reaches the asker as it is. */
+    job     = cp_job(DISPLAY_COMPOSE_BLEND);
+    job.opa = 128U;
+    kdrv_compose_blend_ExpectAndReturn(&dst, 0U, 0U, &src, &all, 128U, KODE_ERROR);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_ERROR, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+TEST_CASE("the frame on the glass is a source only its owner can name", "[display_ao][compose]")
+{
+    static uint8_t            front[64];
+    kdrv_compose_pic_t const  dst   = { s_cp_dst, CP_BYTES, (uint16_t)CP_W, (uint16_t)CP_H };
+    kdrv_compose_pic_t const  glass = { front, (uint32_t)KDRV_DISPLAY_FB_BYTES,
+                                        (uint16_t)KBSP_LCD_H_RES, (uint16_t)KBSP_LCD_V_RES };
+    kdrv_compose_rect_t const from  = { 0U, 0U, 16U, 8U };
+    display_compose_t         job;
+
+    cp_setup();
+
+    job         = cp_job(DISPLAY_COMPOSE_SCALE);
+    job.glass   = true;
+    job.src.px  = NULL;
+    job.w       = from.w;
+    job.h       = from.h;
+    job.scale_x = 16U;
+    job.scale_y = 16U;
+    /* Turned on its way, for a glass that is: the turn reaches the pass. */
+    job.turns   = 3U;
+    kdrv_display_front_buffer_ExpectAndReturn(front);
+    kdrv_compose_scale_ExpectAndReturn(&dst, 0U, 0U, &glass, &from, 16U, 16U, 3U, KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* A panel with one framebuffer, or a link that is down: nothing to read. */
+    kdrv_display_front_buffer_ExpectAndReturn(NULL);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_NO_RESOURCES, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* The glass is read, never blended from or filled. */
+    job.op = DISPLAY_COMPOSE_BLEND;
+    kdrv_display_front_buffer_ExpectAndReturn(front);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+TEST_CASE("a pass nobody can run is refused, not waited out", "[display_ao][compose]")
+{
+    display_compose_t job;
+
+    cp_setup();
+
+    /* No accelerator for this kind of pass: its answer reaches the asker. */
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_NO_RESOURCES);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_NO_RESOURCES, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* A pass that is none of the three. */
+    job = cp_job(0x7FU);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(NULL, &job, CP_WAIT, NULL));
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, NULL, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+/* The owner did not answer in time: the asker goes on, and the request it
+ * left behind must not run later into pictures it may have freed. No
+ * expectation is the assertion: CMock fails a pass nobody asked for. */
+TEST_CASE("a compose pass its asker stopped waiting for is never run", "[display_ao][compose]")
+{
+    display_compose_t job;
+
+    cp_setup();
+
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    TEST_ASSERT_EQUAL(KODE_TIMEOUT, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_TRUE(fake_klog_saw("did not answer within"));
+
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_pump(AO_Display, 1U));
+    TEST_ASSERT_TRUE(fake_klog_saw("stopped waiting"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_sem_signals(), "nobody is woken for a stale tag");
+
+    /* The next request is answered as if nothing had happened. */
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    /* An abandoned request still in the queue when the next one joins it:
+     * AO_Display drops the first unread and runs the second, once. */
+    TEST_ASSERT_EQUAL(KODE_TIMEOUT, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs_two);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, (unsigned)uxQueueMessagesWaiting(AO_Display->eQueue),
+                                   "both were taken from the queue");
+
+    cp_done();
+}
+
+/* A glass that sleeps has its link down, and its framebuffers may be gone.
+ * The renderer was parked before that and has nothing to compose for; a pass
+ * asked all the same is refused at once, with its reason, and never reaches
+ * the accelerator. No expectation is the assertion: CMock fails a pass nobody
+ * asked for. */
+TEST_CASE("a compose pass asked with the glass asleep is refused, and served again once it wakes",
+          "[display_ao][compose][sleep]")
+{
+    display_compose_t job;
+
+    Mockkdrv_display_Init();
+    Mockkdrv_compose_Init();
+    (void)display_headless();
+    sleep_mocks();
+    qf_support_margin_queue(AO_Display);
+    fake_sem_reset();
+    (void)memset(&s_cp_ask, 0, sizeof(s_cp_ask));
+
+    sleep_asked(true);
+    ao_spy_drain();
+    TEST_ASSERT_TRUE_MESSAGE(display_asleep(), "the glass sleeps for the app");
+    fake_klog_reset();
+
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_TRUE_MESSAGE(fake_klog_saw("the glass is asleep"), "the refusal says why");
+
+    /* The frame on the glass is not read either: nobody is asked for it. */
+    job         = cp_job(DISPLAY_COMPOSE_SCALE);
+    job.glass   = true;
+    job.scale_x = 16U;
+    job.scale_y = 16U;
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_DENIED, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    sleep_asked(false);
+    ao_spy_drain();
+    TEST_ASSERT_FALSE(display_asleep());
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+/* ---- A deadline that falls inside a pass -------------------------------------
+ * The asker's time can run out while AO_Display is already inside the pass:
+ * the accelerator is then writing the destination by DMA. Giving up there
+ * would let the asker free pictures a pass still writes. So the request is
+ * claimed: once AO_Display has taken it, the asker can no longer abandon it
+ * and waits a second, longer time for the answer. */
+
+#define CP_PASS_MAX  2000U  /* the second wait, ms; repeated, not imported */
+
+/** @brief The answer comes at last, while the asker waits a second time. */
+static void cp_answer_arrives(void)
+{
+    khal_sem_signal(s_cp_ask.done);
+}
+
+/** @brief AO_Display runs the pass, but its signal has not reached the asker
+ *         when the first wait runs out; it comes during the second. */
+static void cp_owner_runs_late(void)
+{
+    (void)qf_support_pump(AO_Display, 1U);
+    fake_sem_reset();
+    fake_sem_wait_hook(&cp_answer_arrives);
+}
+
+/** @brief AO_Display takes the pass and its answer never reaches the asker. */
+static void cp_owner_runs_never_heard(void)
+{
+    (void)qf_support_pump(AO_Display, 1U);
+    fake_sem_reset();
+}
+
+TEST_CASE("a deadline that falls inside a pass waits for the pass, and answers what it did",
+          "[display_ao][compose]")
+{
+    display_compose_t job;
+
+    cp_setup();
+
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs_late);
+    TEST_ASSERT_EQUAL_MESSAGE(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL),
+                              "the pass ran: its answer, not a timeout");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(CP_PASS_MAX, fake_sem_last_wait_ms(),
+                                     "the second wait is the pass's own bound");
+
+    /* The accelerator never finishes: said as a fault of the device, so
+     * nobody takes it for a pass that was never started. */
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs_never_heard);
+    TEST_ASSERT_EQUAL(KODE_IO_ERROR, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_TRUE(fake_klog_saw("may still be writing"));
+
+    /* The stuck pass ends at last, long after its asker left, and its signal
+     * is still owed when the next request waits. That wait wakes on it at
+     * once, finds an answer that is not its own, and goes on waiting: what it
+     * returns is its own pass's word (an error here), not the old pass's. */
+    khal_sem_signal(s_cp_ask.done);
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_ERROR);
+    fake_sem_wait_hook(&cp_owner_runs_next_wait);
+    TEST_ASSERT_EQUAL_MESSAGE(KODE_ERROR, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL),
+                              "a late signal is not this request's answer");
+
+    /* And the request after it is served as ever. */
+    kdrv_compose_fill_ExpectAnyArgsAndReturn(KODE_OK);
+    fake_sem_wait_hook(&cp_owner_runs);
+    TEST_ASSERT_EQUAL(KODE_OK, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+
+    cp_done();
+}
+
+/* A renderer's request must never fill AO_Display's queue to the brim: the
+ * queue keeps room for its own traffic, and a request that does not fit is
+ * refused at once, not asserted on and not waited out. */
+TEST_CASE("a compose request leaves AO_Display's queue its margin, and is refused when it cannot",
+          "[display_ao][compose]")
+{
+    display_compose_t job;
+    const QEvt       *left = NULL;
+
+    cp_setup();
+    while ( uxQueueSpacesAvailable(AO_Display->eQueue) > (UBaseType_t)KQP_DISPLAY_CMD_MARGIN )
+    {
+        display_state_request();
+    }
+
+    job = cp_job(DISPLAY_COMPOSE_FILL);
+    TEST_ASSERT_EQUAL(KODE_NO_RESOURCES, display_compose_run(&s_cp_ask, &job, CP_WAIT, NULL));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)KQP_DISPLAY_CMD_MARGIN,
+                                   (unsigned)uxQueueSpacesAvailable(AO_Display->eQueue),
+                                   "nothing was queued");
+    /* A request that was never made has no answer: nothing is written for
+     * it, nobody is woken and nobody waits. */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_sem_signals(), "a refused post signals nobody");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, fake_sem_last_wait_ms(), "nor is it waited for");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, s_cp_ask.ack, "no answer is written for it");
+    TEST_ASSERT_EQUAL_UINT32(0U, s_cp_ask.rc);
+
+    while ( xQueueReceive(AO_Display->eQueue, &left, 0U) == pdTRUE )
+    {
+        QF_gc(left);
+    }
+    ao_spy_drain();
+    cp_done();
+}
+
+/* ---- The panel's supply, for an app's rest --------------------------------- */
+
+static kode_status_t s_cold_rc;   /**< What kdrv_display_panel_cold() answers. */
+
+static kode_status_t on_cold(int calls)
+{
+    (void)calls;
+    trace(T_COLD);
+    return s_cold_rc;
+}
+
+/** @brief The app sleep's stand-ins, and the cold start's. */
+static void supply_mocks(void)
+{
+    sleep_mocks();
+    s_cold_rc = KODE_OK;
+    kdrv_display_panel_cold_StubWithCallback(&on_cold);
+}
+
+/** @brief AO_LowPower asks for the supply of the panel, in a round of its own. */
+static void supply_asked(void)
+{
+    DisplaySupplyReqEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(DISPLAY_SUPPLY_REQ_SIG);
+    e.round = ++s_round_no;
+    QASM_DISPATCH(AO_Display, &e.super, 0U);
+}
+
+/**
+ * @brief Put the glass to sleep for an app.
+ *
+ * An earlier case may have left a renderer seen, and then the glass waits for
+ * it to stop drawing: the park is answered. With none the glass sleeps at once.
+ */
+static void glass_sleeps(void)
+{
+    ao_spy_drain();
+    sleep_asked(true);
+    if ( !display_asleep() )
+    {
+        renderer_parks(expect_park());
+    }
+    TEST_ASSERT_TRUE(display_asleep());
+    ao_spy_drain();
+}
+
+/** @brief The expander's owner answers the last thing it was asked about P7. */
+static void p7_answered(kode_status_t rc)
+{
+    IoexpFieldEvt a;
+
+    (void)memset(&a, 0, sizeof(a));
+    a.super = (QEvt)QEVT_INITIALIZER(IOEXP_FIELD_RSP_SIG);
+    a.op    = (uint8_t)FIELD_OP_SET;
+    a.field = (uint16_t)KDRV_TCA_O7;
+    a.rc    = (uint8_t)rc;
+    QASM_DISPATCH(AO_Display, &a.super, 0U);
+}
+
+/** @brief Put the glass to sleep for an app and take its supply. */
+static void supply_gone(void)
+{
+    glass_sleeps();
+    supply_asked();
+    p7_answered(KODE_OK);
+    expect_answer(false, NULL);
+    ao_spy_drain();
+    s_trace_n = 0U;
+}
+
+/** @brief Let the rail rise, once the expander's owner has said P7 is high. */
+static void rail_rises(void)
+{
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_SUPPLY_SETTLE_MS) + 1U);
+}
+
+/* The panel's power-off order, as at OFF: the line the panel shares with the
+ * touch goes low before the supply is asked off. */
+TEST_CASE("the supply of a glass asleep for an app goes: the reset line low, then P7",
+          "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+    asked = fake_neighbour_ioexp_posts();
+
+    supply_asked();
+
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN, T_RESET_LOW);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 is asked low");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked, s_posts_at_reset,
+                                   "the reset line goes low before P7 is asked");
+    /* Ready is what the expander did, not what it was asked. */
+    expect_no_more_answers();
+    p7_answered(KODE_OK);
+    expect_answer(false, NULL);
+    expect_no_more_answers();
+
+    /* Asked again, it is as asked already and nothing moves. */
+    supply_asked();
+    expect_answer(false, NULL);
+    EXPECT_TRACE(T_SLEEP_IN, T_LINK_DOWN, T_RESET_LOW);
+
+    sleep_asked(false);
+    p7_answered(KODE_OK);
+    rail_rises();
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* The panel sat in reset whether or not its supply went: the rest is told
+ * the supply did not go, and the way back still starts the panel cold. */
+TEST_CASE("an expander that will not take the supply away says so, and the wake still starts the panel cold",
+          "[display_ao][sleep]")
+{
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+
+    supply_asked();
+    p7_answered(KODE_ERROR);
+    expect_answer(true, "panel supply");
+
+    s_trace_n = 0U;
+    sleep_asked(false);
+    p7_answered(KODE_OK);
+    rail_rises();
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A lit panel that lost its supply would flash: only a glass an app put to
+ * sleep gives it up. */
+TEST_CASE("the supply of a glass that is awake is refused and nothing moves", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    asked = fake_neighbour_ioexp_posts();
+
+    supply_asked();
+
+    expect_answer(true, "glass not asleep");
+    TEST_ASSERT_EQUAL_UINT(0U, s_trace_n);
+    TEST_ASSERT_EQUAL_UINT(asked, fake_neighbour_ioexp_posts());
+    Mockkdrv_display_Destroy();
+}
+
+TEST_CASE("a reset line that will not go low keeps the supply and says so", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+    s_reset_low_rc = KODE_ERROR;
+    asked = fake_neighbour_ioexp_posts();
+
+    supply_asked();
+
+    expect_answer(true, "reset line");
+    TEST_ASSERT_EQUAL_UINT(asked, fake_neighbour_ioexp_posts());
+
+    sleep_asked(false);
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* The way back: the supply first, the rail's rise, the cold start, and only
+ * then what wakes a panel that merely slept. */
+TEST_CASE("the wake brings the supply back, starts the panel cold, then the link and the sleep-out",
+          "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+    asked = fake_neighbour_ioexp_posts();
+
+    sleep_asked(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 is asked high");
+    rail_rises();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the panel was touched before the expander answered");
+
+    p7_answered(KODE_OK);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the panel is not touched while the rail rises");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "not answered until the glass is back");
+    rail_rises();
+
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 is asked once");
+    Mockkdrv_display_Destroy();
+}
+
+/* A write the expander did not keep leaves the panel without its supply:
+ * nothing is sent to it, and the supply is asked for again. */
+TEST_CASE("an expander that will not give the supply back is asked again, the panel untouched",
+          "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+
+    sleep_asked(false);
+    asked = fake_neighbour_ioexp_posts();
+    p7_answered(KODE_ERROR);
+    rail_rises();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a panel with no supply was started");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a glass that is not back was answered");
+
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_RESTORE_RETRY_MS) + 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 was not asked again");
+    p7_answered(KODE_OK);
+    rail_rises();
+
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    Mockkdrv_display_Destroy();
+}
+
+/* An answer of the expander's owner that never came must not hold the supply
+ * for ever: whoever asked has given the step up, and asks again. */
+TEST_CASE("a supply whose answer never came is asked for again by the next request", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+    supply_asked();                              /* and the expander's owner says nothing */
+    asked = fake_neighbour_ioexp_posts();
+    ao_spy_drain();
+
+    supply_asked();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(),
+                                   "P7 was not asked low again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "answered before the expander's owner did");
+    p7_answered(KODE_OK);
+    expect_answer(false, NULL);
+    Mockkdrv_display_Destroy();
+}
+
+/* The reset line is low and the supply was asked away: a wake that comes
+ * before the answer finds a panel that must start cold, not one that slept. */
+TEST_CASE("a wake before the supply's answer came still starts the panel cold", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    glass_sleeps();
+    supply_asked();                              /* and the expander's owner says nothing */
+    asked = fake_neighbour_ioexp_posts();
+    ao_spy_drain();
+    s_trace_n = 0U;
+
+    sleep_asked(false);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 is asked high");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a panel in reset was woken as if it slept");
+    p7_answered(KODE_OK);
+    rail_rises();
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    Mockkdrv_display_Destroy();
+}
+
+TEST_CASE("a cold start that fails is tried again, the supply left on", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+    s_cold_rc = KODE_ERROR;
+
+    sleep_asked(false);
+    asked = fake_neighbour_ioexp_posts();
+    p7_answered(KODE_OK);
+    rail_rises();
+    EXPECT_TRACE(T_COLD);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a glass that is not back is not answered");
+
+    s_cold_rc = KODE_OK;
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_DISPLAY_RESTORE_RETRY_MS) + 1U);
+
+    EXPECT_TRACE(T_COLD, T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked, fake_neighbour_ioexp_posts(), "P7 is not asked again");
+    expect_published(DISPLAY_REPAINT_SIG);
+    expect_sleep_answer(false, KODE_OK, DISPLAY_SLEEP_WHY_NONE);
+    Mockkdrv_display_Destroy();
+}
+
+/* The board took the rest over: its AWAKE restores the glass, supply and all. */
+TEST_CASE("the board's AWAKE brings the supply back before the glass", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+    asked = fake_neighbour_ioexp_posts();
+
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "a glass at rest is ready as it is");
+
+    state_awake(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT(asked + 1U, fake_neighbour_ioexp_posts());
+    p7_answered(KODE_OK);
+    rail_rises();
+
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    TEST_ASSERT_FALSE(display_asleep());
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
+/* A round that comes while the rail rises finds a panel in reset with its
+ * supply on: the board rests without it, and its AWAKE asks for it again. */
+TEST_CASE("a round of the board during the supply's way back takes it away again", "[display_ao][sleep]")
+{
+    unsigned asked;
+
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    supply_mocks();
+    supply_gone();
+
+    sleep_asked(false);
+    p7_answered(KODE_OK);                    /* P7 is high, the rail rising */
+    asked = fake_neighbour_ioexp_posts();
+    round_for(KODE_LP_ASLEEP);
+    ao_spy_drain();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 1U, fake_neighbour_ioexp_posts(), "P7 was left high for the rest");
+    rail_rises();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_trace_n, "the panel was started under a board at rest");
+
+    state_awake(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(asked + 2U, fake_neighbour_ioexp_posts(), "P7 was not asked back");
+    p7_answered(KODE_OK);
+    rail_rises();
+    EXPECT_TRACE(T_COLD, T_LINK_UP, T_SLEEP_OUT, T_BRIGHT);
+    ao_spy_drain();
     Mockkdrv_display_Destroy();
 }

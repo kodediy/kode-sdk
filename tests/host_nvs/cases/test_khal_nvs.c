@@ -3,6 +3,7 @@
  * @file test_khal_nvs.c
  * @brief The persistence seam, over the real NVS.
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
@@ -520,4 +521,149 @@ TEST_CASE("a namespace name that does not fit is refused, not shortened",
 
     TEST_ASSERT_EQUAL_INT(KODE_ERROR,
         khal_nvs_namespace(0U, small, sizeof(small)));
+}
+
+/* ---- A store this NVS cannot read ----------------------------------------
+ *
+ * The runner leaves the partition as a newer NVS would, so whichever case
+ * brings NVS up first finds it unreadable and erases it whole.
+ */
+
+TEST_CASE("a store a newer NVS wrote is erased at init, and the boot says so",
+          "[khal_nvs]")
+{
+    char out[16];
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_init());
+    TEST_ASSERT_TRUE(khal_nvs_erased());
+
+    /* Done once and said for the whole boot: a later init erases nothing. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_set_str(NS, "str", "survives"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_init());
+    TEST_ASSERT_TRUE(khal_nvs_erased());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_get_str(NS, "str", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("survives", out);
+}
+
+/* ---- A namespace's share of the store ------------------------------------
+ *
+ * Counted as the store counts its space: a key's header is one 32-byte entry
+ * and its string, NUL included, whole entries more. So a value of 31
+ * characters takes two entries, 64 bytes, and a share of five such keys is
+ * 320 bytes.
+ */
+
+#define NSQ             "quota"     /**< The namespace held to a share.            */
+#define NSQ_OTHER       "quota2"    /**< A namespace beside it.                    */
+#define QUOTA_KEY_BYTES 64U         /**< What one key below takes: two entries.    */
+#define QUOTA_KEYS      5U          /**< Keys of that size the share holds.        */
+#define QUOTA_SHARE     (QUOTA_KEYS * QUOTA_KEY_BYTES) /**< The share, in bytes.   */
+#define QUOTA_KEY_CAP   8U          /**< Room for a key name the cases build.      */
+#define QUOTA_VALUE     "0123456789012345678901234567890"  /**< 31 characters. */
+#define QUOTA_OTHER     "abcdefghijabcdefghijabcdefghija"  /**< 31 others.     */
+#define QUOTA_LONGER    "0123456789012345678901234567890+" /**< 32: three entries. */
+
+/** @brief Empty both quota namespaces, so a case starts from nothing. */
+static void quota_fresh(void)
+{
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_init());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_erase_namespace(NSQ));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_erase_namespace(NSQ_OTHER));
+}
+
+/** @brief Fill NSQ to its share: keys k0 to k4, each holding QUOTA_VALUE. */
+static void quota_fill(void)
+{
+    char key[QUOTA_KEY_CAP];
+
+    for ( unsigned i = 0U; QUOTA_KEYS > i; ++i )
+    {
+        (void)snprintf(key, sizeof(key), "k%u", i);
+        TEST_ASSERT_EQUAL_INT(KODE_OK,
+            khal_nvs_set_str_within(NSQ, key, QUOTA_VALUE, QUOTA_SHARE));
+    }
+}
+
+TEST_CASE("a write past a namespace's share is refused, and nothing is written",
+          "[khal_nvs]")
+{
+    char key[QUOTA_KEY_CAP];
+    char out[QUOTA_KEY_BYTES];
+
+    quota_fresh();
+    quota_fill();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES,
+        khal_nvs_set_str_within(NSQ, "over", QUOTA_VALUE, QUOTA_SHARE));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+        khal_nvs_get_str(NSQ, "over", out, sizeof(out)));
+
+    /* What was there before the refusal is all still there. */
+    for ( unsigned i = 0U; QUOTA_KEYS > i; ++i )
+    {
+        (void)snprintf(key, sizeof(key), "k%u", i);
+        TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_get_str(NSQ, key, out, sizeof(out)));
+        TEST_ASSERT_EQUAL_STRING(QUOTA_VALUE, out);
+    }
+}
+
+/* The share is the most a namespace may take, that much included. */
+TEST_CASE("a write that fills the share exactly is taken", "[khal_nvs]")
+{
+    quota_fresh();
+
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES,
+        khal_nvs_set_str_within(NSQ, "k", QUOTA_VALUE, QUOTA_KEY_BYTES - 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        khal_nvs_set_str_within(NSQ, "k", QUOTA_VALUE, QUOTA_KEY_BYTES));
+}
+
+/* A full share must not lock a value in: replacing it frees what it held. */
+TEST_CASE("replacing a value counts the room the old one frees", "[khal_nvs]")
+{
+    char out[QUOTA_KEY_BYTES];
+
+    quota_fresh();
+    quota_fill();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        khal_nvs_set_str_within(NSQ, "k0", QUOTA_OTHER, QUOTA_SHARE));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_get_str(NSQ, "k0", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING(QUOTA_OTHER, out);
+
+    /* One entry more than it frees is past the share. */
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES,
+        khal_nvs_set_str_within(NSQ, "k0", QUOTA_LONGER, QUOTA_SHARE));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_get_str(NSQ, "k0", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING(QUOTA_OTHER, out);
+}
+
+TEST_CASE("erasing a key gives its room back to the share", "[khal_nvs]")
+{
+    quota_fresh();
+    quota_fill();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_erase(NSQ, "k0"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        khal_nvs_set_str_within(NSQ, "fresh", QUOTA_VALUE, QUOTA_SHARE));
+}
+
+/* The share holds one namespace back, and nobody else: kodeOS's own keys
+ * still go in beside a full one. */
+TEST_CASE("a namespace's share counts its own keys alone", "[khal_nvs]")
+{
+    quota_fresh();
+    quota_fill();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, khal_nvs_set_str(NSQ_OTHER, "plain", QUOTA_VALUE));
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        khal_nvs_set_str_within(NSQ_OTHER, "held", QUOTA_VALUE, QUOTA_SHARE));
+}
+
+TEST_CASE("a null value is refused by the write within a share", "[khal_nvs]")
+{
+    quota_fresh();
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        khal_nvs_set_str_within(NSQ, "k", NULL, QUOTA_SHARE));
 }

@@ -39,6 +39,15 @@
 /** @brief KODE_AUDIO_GUARD_MS in whole QP ticks. */
 #define GUARD_TICKS  ((KODE_AUDIO_GUARD_MS * 100U) / 1000U)
 
+/** @brief KODE_SYS_AUDIO_STREAM_IDLE_MS in whole QP ticks. */
+#define IDLE_TICKS   ((KODE_SYS_AUDIO_STREAM_IDLE_MS * 100U) / 1000U)
+
+/** @brief What is left of the idle time when a case's writer last wrote, ms. */
+#define IDLE_LEFT_MS 1000U
+
+/** @brief IDLE_LEFT_MS in whole QP ticks. */
+#define IDLE_LEFT_TICKS  ((IDLE_LEFT_MS * 100U) / 1000U)
+
 /** @brief The name AO_Audio gives its worker. */
 #define WORKER_NAME  "audio_worker"
 
@@ -78,6 +87,15 @@ static kdrv_es8311_result_t s_res;
 /** @brief How many times the stream's ring was emptied, and shut. */
 static unsigned s_stream_resets;
 static unsigned s_stream_ends;
+
+/** @brief What the driver says about the stream's silence: the case sets it. */
+static uint32_t s_stream_idle_ms;
+
+static uint32_t say_stream_idle(int ncalls)
+{
+    (void)ncalls;
+    return s_stream_idle_ms;
+}
 
 static kode_status_t count_stream_reset(int ncalls)
 {
@@ -202,6 +220,7 @@ static void audio_up_raw(void)
     kdrv_es8311_hush_StubWithCallback(&count_hush);
     kdrv_es8311_stream_reset_StubWithCallback(&count_stream_reset);
     kdrv_es8311_stream_end_StubWithCallback(&count_stream_end);
+    kdrv_es8311_stream_idle_ms_StubWithCallback(&say_stream_idle);
     kdrv_es8311_record_end_StubWithCallback(&count_record_end);
     kdrv_es8311_record_reset_StubWithCallback(&count_record_reset);
 
@@ -211,6 +230,7 @@ static void audio_up_raw(void)
     s_end_at_sub    = 0U;
     s_stream_resets = 0U;
     s_stream_ends   = 0U;
+    s_stream_idle_ms = 0U;
     s_hush      = 0U;
     s_nsub      = 0U;
     s_run_rc    = KODE_OK;
@@ -1355,7 +1375,7 @@ TEST_CASE("a field is read, written and dumped, mid-row included", "[audio_ao]")
      * ordinary register read - and the row in flight for the whole of this
      * case is the point: a question about the codec is answered whatever the
      * codec is doing. */
-    static uint8_t reg32 = 169U;
+    static uint8_t reg32 = 190U;
 
     audio_up();
     row_to_step2();
@@ -1378,8 +1398,8 @@ TEST_CASE("a field is read, written and dumped, mid-row included", "[audio_ao]")
         {
             AudioFieldEvt const * const a = (AudioFieldEvt const *)e;
             TEST_ASSERT_EQUAL_UINT(KDRV_ES_REG32, a->field);
-            TEST_ASSERT_EQUAL_INT_MESSAGE(169, a->value,
-                "0xA9 is what volume 100 writes under the speaker's cap");
+            TEST_ASSERT_EQUAL_INT_MESSAGE(190, a->value,
+                "0xBE is what volume 100 writes: one step under full scale");
             TEST_ASSERT_EQUAL_UINT(KODE_OK, a->rc);
             break;
         }
@@ -1605,12 +1625,13 @@ TEST_CASE("a stream opens the codec, starts its job and answers once it plays",
     TEST_ASSERT_EQUAL_HEX32(5U, ack);
     TEST_ASSERT_TRUE(khal_sem_wait_timeout(sem, 0U));
 
-    /* A stream plays for as long as its writer likes: no guard runs out on
-     * it while it is open. */
+    /* A stream plays for as long as its writer writes: no guard runs out on
+     * it while it is open, and a writer that has just written is not silent. */
+    s_stream_idle_ms = 0U;
     (void)qf_support_tick(AO_Audio, GUARD_TICKS + 10U);
     TEST_ASSERT_EQUAL_UINT(2U, s_nsub);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_stream_ends,
-                                   "an open stream is not ended by time");
+                                   "a stream that is written is not ended by time");
 
     audio_stream_close_request(NULL, NULL, 0U, NULL);
     (void)run();
@@ -1696,6 +1717,154 @@ TEST_CASE("closing when no stream is open is refused", "[audio_ao]")
     TEST_ASSERT_EQUAL_HEX32(3U, ack);
     TEST_ASSERT_TRUE(khal_sem_wait_timeout(sem, 0U));
     TEST_ASSERT_EQUAL_UINT(0U, s_stream_ends);
+}
+
+/* ---- A stream nobody writes to ---------------------------------------------
+ * The frames skip AO_Audio, so a writer that stops writing and never closes
+ * would hold the codec for good. AO_Audio asks the driver how long the ring
+ * has gone without a write and closes the stream at
+ * KODE_SYS_AUDIO_STREAM_IDLE_MS.
+ */
+
+/** @brief Steps the idle count has left right after stream_open_plain(): the
+ *         open's finish() has already run one. */
+#define IDLE_AFTER_OPEN  (IDLE_TICKS - 1U)
+
+/** @brief Steps a case stops short of the idle time to close by hand. */
+#define IDLE_SHORT       10U
+
+/** @brief Open the waiting path's stream with nobody waiting, up to its job. */
+static void stream_open_plain(void)
+{
+    stream_ready();
+    audio_stream_open_request(NULL, NULL, 0U, NULL);
+    (void)run();
+    finish(KDRV_ES8311_JOB_OPEN, KODE_OK);
+    TEST_ASSERT_EQUAL_INT(KDRV_ES8311_JOB_STREAM, sub_type(1U));
+}
+
+TEST_CASE("a stream nobody writes to is closed after the idle time", "[audio_ao]")
+{
+    stream_open_plain();
+
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS;
+    (void)qf_support_tick(AO_Audio, IDLE_AFTER_OPEN - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_stream_ends, "not a tick before");
+    (void)qf_support_tick(AO_Audio, 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_stream_ends,
+                                   "the ring is shut as a close would shut it");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, said("without a write"),
+                                   "and the log says why, once");
+
+    /* The job plays what was left and ends: the codec is free again. */
+    finish(KDRV_ES8311_JOB_STREAM, KODE_OK);
+    audio_tone_request(1020U, 10U, 25U);
+    (void)run();
+    TEST_ASSERT_EQUAL_INT(KDRV_ES8311_JOB_TONE, sub_type(s_nsub - 1U));
+    finish(KDRV_ES8311_JOB_TONE, KODE_OK);
+}
+
+/* The silence is counted from the last write, not from the open: a writer
+ * that wrote a second before the count ran out has the whole time again. */
+TEST_CASE("a write puts the idle close off by the time the writer has left",
+          "[audio_ao]")
+{
+    stream_open_plain();
+
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS - IDLE_LEFT_MS;
+    (void)qf_support_tick(AO_Audio, IDLE_AFTER_OPEN);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_stream_ends, "the writer wrote meanwhile");
+
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS;
+    (void)qf_support_tick(AO_Audio, IDLE_LEFT_TICKS - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_stream_ends, "it has what was left");
+    (void)qf_support_tick(AO_Audio, 1U);
+    TEST_ASSERT_EQUAL_UINT(1U, s_stream_ends);
+
+    finish(KDRV_ES8311_JOB_STREAM, KODE_OK);
+}
+
+/* The close and the idle close end the stream the same way, so a close that
+ * arrives while the ring drains is answered by the same end of the job. */
+TEST_CASE("a close asked while an idle close drains is answered when the job ends",
+          "[audio_ao]")
+{
+    khal_sem_t sem = khal_sem_create();
+    uint32_t   rc  = 0xA5A5A5A5U;
+    uint32_t   ack = 0U;
+
+    stream_open_plain();
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS;
+    (void)qf_support_tick(AO_Audio, IDLE_TICKS);
+    TEST_ASSERT_EQUAL_UINT(1U, s_stream_ends);
+
+    fake_sem_reset();
+    audio_stream_close_request(&rc, sem, 9U, &ack);
+    (void)run();
+    TEST_ASSERT_FALSE_MESSAGE(khal_sem_wait_timeout(sem, 0U),
+                              "not answered while the ring is still playing");
+    finish(KDRV_ES8311_JOB_STREAM, KODE_OK);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)KODE_OK, rc);
+    TEST_ASSERT_EQUAL_HEX32(9U, ack);
+    TEST_ASSERT_TRUE(khal_sem_wait_timeout(sem, 0U));
+}
+
+/* The count belongs to one stream. A stream closed a moment short of its idle
+ * time leaves nothing behind for the stream opened right after it. */
+TEST_CASE("a closed stream's idle count does not close the next stream",
+          "[audio_ao]")
+{
+    stream_open_plain();
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS;
+    (void)qf_support_tick(AO_Audio, IDLE_AFTER_OPEN - IDLE_SHORT);
+    audio_stream_close_request(NULL, NULL, 0U, NULL);
+    (void)run();
+    finish(KDRV_ES8311_JOB_STREAM, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT(1U, s_stream_ends);
+
+    s_stream_idle_ms = 0U;
+    audio_stream_open_request(NULL, NULL, 0U, NULL);
+    (void)run();
+    TEST_ASSERT_EQUAL_INT(KDRV_ES8311_JOB_STREAM, sub_type(s_nsub - 1U));
+    (void)qf_support_tick(AO_Audio, 2U * IDLE_SHORT);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_stream_ends,
+                                   "the new stream has its whole idle time");
+
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS;
+    (void)qf_support_tick(AO_Audio, IDLE_TICKS - (2U * IDLE_SHORT) - 1U);
+    TEST_ASSERT_EQUAL_UINT(1U, s_stream_ends);
+    (void)qf_support_tick(AO_Audio, 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_stream_ends, "counted from its own start");
+    finish(KDRV_ES8311_JOB_STREAM, KODE_OK);
+}
+
+/* The count's expiry can wait in the queue while its stream ends and another
+ * opens. It asks only for a reading, and the reading is the open stream's. */
+TEST_CASE("an idle reading left over from an ended stream closes nothing",
+          "[audio_ao]")
+{
+    static const QEvt due = QEVT_INITIALIZER(AUDIO_STREAM_IDLE_SIG);
+
+    stream_ready();
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS;
+    QASM_DISPATCH(AO_Audio, &due, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_stream_ends, "no stream is open");
+
+    audio_stream_open_request(NULL, NULL, 0U, NULL);
+    (void)run();
+    finish(KDRV_ES8311_JOB_OPEN, KODE_OK);
+    s_stream_idle_ms = 0U;
+    QASM_DISPATCH(AO_Audio, &due, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_stream_ends,
+                                   "the stream open now has just been written");
+
+    /* And its count runs whole from that reading. */
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS;
+    (void)qf_support_tick(AO_Audio, IDLE_TICKS - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, s_stream_ends);
+    (void)qf_support_tick(AO_Audio, 1U);
+    TEST_ASSERT_EQUAL_UINT(1U, s_stream_ends);
+    finish(KDRV_ES8311_JOB_STREAM, KODE_OK);
 }
 
 /* ---- Ending a recording early ---------------------------------------------- */
@@ -2007,6 +2176,8 @@ TEST_CASE("another owner's key is not AO_Audio's to answer", "[audio_ao]")
 
 /** @brief Frames of a lent buffer in these cases. */
 #define SYS_FRAMES   8U
+/** @brief The number the driver gives the open stream in these cases. */
+#define SYS_STREAM_ID 7U
 /** @brief A recording's length, ms. */
 #define SYS_REC_MS   10U
 /** @brief What a lent buffer holds before the owner touches it. */
@@ -2222,7 +2393,8 @@ TEST_CASE("kode_sys's stream opens and closes with an answer each; its write nev
     TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
     ao_spy_release();
 
-    kdrv_es8311_stream_write_ExpectAndReturn(frames, SYS_FRAMES, KODE_SYS_AUDIO_CHANNELS_MONO,
+    kdrv_es8311_stream_id_ExpectAndReturn(SYS_STREAM_ID);
+    kdrv_es8311_stream_write_ExpectAndReturn(SYS_STREAM_ID, frames, SYS_FRAMES, KODE_SYS_AUDIO_CHANNELS_MONO,
                                              0U, &taken, KODE_OK);
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_audio_stream_write(ao_spy(), frames, SYS_FRAMES,
                                                                KODE_SYS_AUDIO_CHANNELS_MONO,
@@ -2419,6 +2591,43 @@ TEST_CASE("only the AO that opened the stream writes and closes it", "[audio_ao]
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kode_sys_audio_stream_write(ao_spy(), frames, SYS_FRAMES,
                                                                            KODE_SYS_AUDIO_CHANNELS_MONO, NULL),
                                   "a closed stream has no writer");
+    ao_spy_drain();
+}
+
+/* An Active Object's stream follows the same rule: left open and silent it
+ * is closed, and from that moment its opener is no longer its writer. */
+TEST_CASE("an Active Object's stream closed for silence is no longer its opener's",
+          "[audio_ao]")
+{
+    static int16_t                 frames[SYS_FRAMES];
+    size_t                         taken = 1U;
+    const kode_sys_audio_answer_t *a;
+
+    sys_ready();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_audio_stream_open(ao_spy()));
+    (void)run();
+    finish(KDRV_ES8311_JOB_OPEN, KODE_OK);
+    a = (const kode_sys_audio_answer_t *)sys_take(AUDIO_STREAM_OPEN_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    ao_spy_release();
+
+    s_stream_idle_ms = KODE_SYS_AUDIO_STREAM_IDLE_MS;
+    (void)qf_support_tick(AO_Audio, IDLE_TICKS);
+    TEST_ASSERT_EQUAL_UINT(1U, s_stream_ends);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+        kode_sys_audio_stream_write(ao_spy(), frames, SYS_FRAMES,
+                                    KODE_SYS_AUDIO_CHANNELS_MONO, &taken),
+        "the opener's write is refused as soon as the ring is shut");
+    TEST_ASSERT_EQUAL_UINT(0U, taken);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+        "nobody asked for the close, so nobody is answered");
+
+    finish(KDRV_ES8311_JOB_STREAM, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_audio_stream_close(ao_spy()));
+    (void)run();
+    a = (const kode_sys_audio_answer_t *)sys_take(AUDIO_STREAM_CLOSE_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((uint32_t)KODE_DENIED, a->rc, "no stream to close");
     ao_spy_drain();
 }
 

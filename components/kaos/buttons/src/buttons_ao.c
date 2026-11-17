@@ -22,9 +22,12 @@ typedef struct {
     QTimeEvt settle;       /**< One-shot: the confirming sample is due.      */
     QTimeEvt test_tmo;     /**< One-shot: the guided test's step deadline.   */
     QTimeEvt hold;         /**< One-shot: the top or the bottom button has
-                            *   been down for KODE_BUTTON_HOLD_MS.          */
+                            *   been down for KODE_BUTTON_HOLD_MS, or the
+                            *   bottom one for KODE_HOME_HOLD_MS.           */
     uint8_t  hold_id;      /**< kdrv_button_t the hold timer is running for;
                             *   KDRV_BTN_COUNT when it is not running.      */
+    bool     hold_home;    /**< The hold timer is on its second count: the
+                            *   bottom button's, up to KODE_HOME_HOLD_MS.   */
     uint8_t  stable;       /**< What the world currently believes.            */
     uint8_t  candidate;    /**< The sample before last, waiting to be confirmed. */
     uint8_t  exp_levels;   /**< The expander's byte as last published.        */
@@ -50,6 +53,8 @@ typedef struct {
 
     /* The guided test, while one is running. */
     bool     test_on;      /**< A run is in progress.                         */
+    uint8_t  test_inject;  /**< What the console's injections hold down, by
+                            *   the board's own button, for the run's judge. */
     uint8_t  test_origin;  /**< Who asked for it: TEST_ORIGIN_AUTOTEST or a client. */
     bool     test_judged;  /**< This step's press has been judged; waiting
                             *   for everything to be released.               */
@@ -335,6 +340,24 @@ bool buttons_inject(uint8_t id, bool pressed)
     {
         return false;
     }
+    /* The test asks for the board's buttons, not for a thumb's: its judge
+     * hears an injection as it hears the pins, so a station with nobody at it
+     * (the bench's operator) can run the row. Only a running row has a judge
+     * to tell. A read of one byte the AO writes: a row that starts or ends
+     * under it costs one event at most. */
+    if ( l_buttons.test_on )
+    {
+        ButtonEvt *j = Q_NEW_X(ButtonEvt, 0U, BUTTONS_INJECT_SIG);
+        if ( NULL != j )
+        {
+            j->id      = id;         /* the board's own button, before the pad's turn */
+            j->pressed = pressed;
+            j->t_ms    = khal_time_ms();
+            /* A refused post gives the event back to its pool: the row then
+             * hears nothing of this press, as of one nobody made. */
+            (void)QACTIVE_POST_X(AO_Buttons, &j->super, 1U, NULL);
+        }
+    }
     ButtonEvt *e = Q_NEW_X(ButtonEvt, 0U, BUTTON_EVT_SIG);
     if ( NULL == e )
     {
@@ -373,6 +396,7 @@ void Buttons_ctor(void)
     QTimeEvt_ctorX(&me->test_tmo, &me->super, BUTTONS_TEST_TMO_SIG, 0U);
     QTimeEvt_ctorX(&me->hold, &me->super, BUTTONS_HOLD_TMO_SIG, 0U);
     me->hold_id      = (uint8_t)KDRV_BTN_COUNT;
+    me->hold_home    = false;
     me->stable       = 0U;
     me->candidate    = 0U;
     me->exp_levels   = 0xFFU;   /* every pin at rest until the owner says otherwise */
@@ -388,6 +412,7 @@ void Buttons_ctor(void)
     me->rot_pending  = 0U;
     s_rot = 0U;   /* the pad as wired */
     me->test_on      = false;
+    me->test_inject  = 0U;
     me->test_origin  = TEST_ORIGIN_AUTOTEST;
     me->test_judged  = false;
     me->test_failed  = false;
@@ -706,6 +731,7 @@ static void test_start(Buttons * const me, uint8_t origin)
         return;
     }
     me->test_on      = true;
+    me->test_inject  = 0U;
     me->test_failed  = false;
     me->test_gaveup  = false;
     me->test_wrong   = 0U;
@@ -760,6 +786,107 @@ static bool holdable(kdrv_button_t b)
 }
 
 /**
+ * @brief Stop the hold clock, on whichever of its two counts it is.
+ *
+ * @param me The AO.
+ */
+static void hold_stop(Buttons * const me)
+{
+    (void)QTimeEvt_disarm(&me->hold);
+    me->hold_id   = (uint8_t)KDRV_BTN_COUNT;
+    me->hold_home = false;
+}
+
+/**
+ * @brief Publish BUTTON_HOLD_SIG for @p id.
+ *
+ * @param me The AO.
+ * @param id The button held: KDRV_BTN_TOP or KDRV_BTN_BOT.
+ */
+static void hold_publish(Buttons * const me, uint8_t id)
+{
+    ButtonHoldEvt *ev = Q_NEW_X(ButtonHoldEvt, 0U, BUTTON_HOLD_SIG);
+
+    if ( (uint8_t)KDRV_BTN_TOP == id )
+    {
+        me->top_held = true;   /* this press will not start a double */
+    }
+    if ( NULL != ev )
+    {
+        ev->id = id;
+        QACTIVE_PUBLISH(&ev->super, &me->super);
+        KLOG_I(TAG, "%s held %u ms", kdrv_button_name((kdrv_button_t)id),
+               (unsigned)KODE_BUTTON_HOLD_MS);
+    }
+}
+
+/**
+ * @brief Publish BUTTON_HOME_HOLD_SIG: the bottom button's, and nobody else's.
+ *
+ * The event is static, so it never waits on the pool: a board with no event
+ * block left still goes home.
+ *
+ * @param me The AO.
+ */
+/* cppcheck-suppress misra-c2012-2.7 ; @p me is the publish's sender, which only a QS build reads */
+static void hold_publish_home(Buttons * const me)
+{
+    static const ButtonHoldEvt home = { .super = QEVT_INITIALIZER(BUTTON_HOME_HOLD_SIG),
+                                        .id    = (uint8_t)KDRV_BTN_BOT };
+
+    QACTIVE_PUBLISH(&home.super, &me->super);
+    KLOG_I(TAG, "%s held %u ms", kdrv_button_name(KDRV_BTN_BOT),
+           (unsigned)KODE_HOME_HOLD_MS);
+}
+
+/**
+ * @brief The hold clock ran out: publish the hold it counted, if the button is
+ *        still down.
+ *
+ * The first count ends in BUTTON_HOLD_SIG, and for the bottom button the same
+ * clock counts on to KODE_HOME_HOLD_MS from the press and ends in
+ * BUTTON_HOME_HOLD_SIG. An expiry that arrives while the clock is counting is
+ * left over from an earlier press, read after that press's release and a new
+ * press: it is ignored, so the new press is timed whole. One that arrives
+ * after a release finds no button timed, or the button up.
+ *
+ * @param me The AO.
+ */
+static void hold_expired(Buttons * const me)
+{
+    uint8_t const id     = me->hold_id;
+    bool    const second = me->hold_home;
+
+    if ( QTimeEvt_getCtr(&me->hold) != 0U )
+    {
+        return;
+    }
+    me->hold_id   = (uint8_t)KDRV_BTN_COUNT;
+    me->hold_home = false;
+    if ( ((uint8_t)KDRV_BTN_COUNT <= id) || ((me->stable & (uint8_t)(1U << id)) == 0U) )
+    {
+        return;
+    }
+    if ( second )
+    {
+        hold_publish_home(me);
+    }
+    else
+    {
+        hold_publish(me, id);
+        if ( (uint8_t)KDRV_BTN_BOT == id )
+        {
+            /* Counted on whether or not the pool had a block for the hold
+             * above: home does not depend on it. */
+            me->hold_id   = id;
+            me->hold_home = true;
+            QTimeEvt_armX(&me->hold,
+                          KQP_TICKS_PER_MS(KODE_HOME_HOLD_MS - KODE_BUTTON_HOLD_MS), 0U);
+        }
+    }
+}
+
+/**
  * @brief Start or stop the hold clock for a confirmed edge.
  *
  * One clock: a press of the top or bottom button (re)arms it, and the release
@@ -778,14 +905,13 @@ static void hold_track(Buttons * const me, kdrv_button_t b, bool pressed)
     }
     if ( pressed && !me->test_on )
     {
-        (void)QTimeEvt_disarm(&me->hold);
+        hold_stop(me);
         me->hold_id = (uint8_t)b;
         QTimeEvt_armX(&me->hold, KQP_TICKS_PER_MS(KODE_BUTTON_HOLD_MS), 0U);
     }
     else if ( !pressed && ((uint8_t)b == me->hold_id) )
     {
-        (void)QTimeEvt_disarm(&me->hold);
-        me->hold_id = (uint8_t)KDRV_BTN_COUNT;
+        hold_stop(me);
     }
     else
     {
@@ -1063,6 +1189,22 @@ static QState Buttons_watching(Buttons * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case BUTTONS_INJECT_SIG: {
+            ButtonEvt const * const j = Q_EVT_CAST(ButtonEvt);
+            uint8_t const bit = (uint8_t)(1U << j->id);
+
+            if ( j->pressed )
+            {
+                me->test_inject |= bit;
+            }
+            else
+            {
+                me->test_inject &= (uint8_t)~bit;
+            }
+            test_judge(me, (uint8_t)(me->stable | me->test_inject));
+            status = Q_HANDLED();
+            break;
+        }
         case BUTTONS_PAD_IDLE_SIG: {
             rot_settle(me);
             status = Q_HANDLED();
@@ -1083,9 +1225,8 @@ static QState Buttons_watching(Buttons * const me, QEvt const * const e)
                 origin = Q_EVT_CAST(TestReqEvt)->origin;
             }
             /* A hold armed a tick before the run started must not fire into
-             * it: the prompts ask for presses, not holds. */
-            (void)QTimeEvt_disarm(&me->hold);
-            me->hold_id = (uint8_t)KDRV_BTN_COUNT;
+             * it, on either count: the prompts ask for presses, not holds. */
+            hold_stop(me);
             test_start(me, origin);
             status = Q_HANDLED();
             break;
@@ -1142,27 +1283,7 @@ static QState Buttons_watching(Buttons * const me, QEvt const * const e)
             break;
         }
         case BUTTONS_HOLD_TMO_SIG: {
-            /* Publish only if the timed button is still down after debounce:
-             * a stray expiry after a release must not become a hold. */
-            uint8_t const id  = me->hold_id;
-            uint8_t const bit = (uint8_t)(1U << id);
-            me->hold_id = (uint8_t)KDRV_BTN_COUNT;
-            if ( ((uint8_t)KDRV_BTN_COUNT > id) && ((me->stable & bit) != 0U) )
-            {
-                if ( (uint8_t)KDRV_BTN_TOP == id )
-                {
-                    me->top_held = true;   /* this press will not start a double */
-                }
-                ButtonHoldEvt *ev = Q_NEW_X(ButtonHoldEvt, 0U, BUTTON_HOLD_SIG);
-                if ( NULL != ev )
-                {
-                    ev->id = id;
-                    QACTIVE_PUBLISH(&ev->super, &me->super);
-                    KLOG_I(TAG, "%s held %u ms",
-                           kdrv_button_name((kdrv_button_t)id),
-                           (unsigned)KODE_BUTTON_HOLD_MS);
-                }
-            }
+            hold_expired(me);
             status = Q_HANDLED();
             break;
         }

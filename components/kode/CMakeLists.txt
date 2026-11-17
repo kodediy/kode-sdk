@@ -14,7 +14,7 @@
 # those two; and kode_pin_lock.h, the lock J3's pin and bus calls share, under
 # the same guard.
 set(srcs "src/kode_audio.c" "src/kode_battery.c" "src/kode_bus.c" "src/kode_button.c" "src/kode_entry.c" "src/kode_event.c" "src/kode_file.c" "src/kode_haptic.c" "src/kode_http.c"
-         "src/kode_ir.c" "src/kode_ir_capture.c" "src/kode_ir_file.c" "src/kode_led.c" "src/kode_motion.c" "src/kode_mqtt.c" "src/kode_net.c" "src/kode_pin.c" "src/kode_pin_power.c" "src/kode_rfid.c" "src/kode_screen_bright.c" "src/kode_setting.c"
+         "src/kode_ir.c" "src/kode_ir_capture.c" "src/kode_ir_file.c" "src/kode_led.c" "src/kode_motion.c" "src/kode_mqtt.c" "src/kode_net.c" "src/kode_pin.c" "src/kode_pin_power.c" "src/kode_rest.c" "src/kode_rfid.c" "src/kode_screen_bright.c" "src/kode_screen_sleep.c" "src/kode_setting.c"
          "src/kode_standard_ao.c" "src/kode_system.c" "src/kode_tag.c" "src/kode_touch.c" "src/kode_wifi.c" "src/kode_ble.c")
 if(CONFIG_KODEOS_NFC)
     # Off, the reader is the app's, and a call to kode_nfc_*() fails to link.

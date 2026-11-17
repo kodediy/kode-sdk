@@ -46,6 +46,12 @@
 /** @brief The event for a read that took a queued value: kode.h's KODE_EVENT_BLE_TAKEN. */
 #define KODE_EVENT_BLE_TAKEN_NAME "ble_taken"
 
+/** @brief The event for a pairing's code to show: kode.h's KODE_EVENT_BLE_PAIR_CODE. */
+#define KODE_EVENT_BLE_PAIR_CODE_NAME "ble_pair_code"
+
+/** @brief The event for a pairing that ended: kode.h's KODE_EVENT_BLE_PAIR_DONE. */
+#define KODE_EVENT_BLE_PAIR_DONE_NAME "ble_pair_done"
+
 /* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
 /** @brief How long asking for the finger keeps trying while the Active Object's queue is full, in ms. */
 #define KODE_TOUCH_LISTEN_BOUND_MS 100U
@@ -60,7 +66,7 @@
 /** @brief How long arming a pin keeps trying while the Active Object's queue is full, in ms. */
 #define KODE_PIN_LISTEN_BOUND_MS 100U
 
-/** @brief What subscribes an Active Object to an owner's signals: AO_Touch's touch_subscribe(), ble_app_subscribe(). */
+/** @brief What subscribes an Active Object to an owner's signals: AO_Touch's touch_subscribe(), ble_app_subscribe(), ble_pair_subscribe(). */
 typedef void (*kode_owner_subscribe_t)(QActive const *who);
 
 /** @brief Bytes of the dispatch task's stack (taken from PSRAM). */
@@ -184,9 +190,10 @@ kode_status_t kode_standard_ao_power_await(uint32_t ms);
  * ble_app_subscribe() is what links AO_Radio, so @p subscribe is passed in
  * rather than named here. Call it once kode_standard_ao_ensure() has answered
  * true. The Active Object turns BLE_APP_LINK_SIG into ble_connected and
- * ble_disconnected, BLE_APP_TAKEN_SIG into ble_taken, and BLE_APP_WRITE_SIG
+ * ble_disconnected, BLE_APP_TAKEN_SIG into ble_taken, BLE_APP_WRITE_SIG
  * into ble_written
- * (kode_event_push_bytes()).
+ * (kode_event_push_bytes()), and BLE_PAIR_SIG into ble_pair_code and
+ * ble_pair_done.
  *
  * @param subscribe The owner's subscribe; never NULL.
  * @return true; in the kodeOS image false, with kode_standard_ao_ensure()'s error.

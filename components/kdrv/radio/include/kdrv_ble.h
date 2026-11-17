@@ -75,10 +75,11 @@ typedef enum {
 } kdrv_ble_state_t;
 
 /**
- * @brief Told when a connection comes or goes.
+ * @brief Told when a connection comes or goes, or the count of bonds moves.
  *
- * Called from NimBLE's host task. Post an event and return - the same
- * contract the console reader's byte callback has.
+ * Called from the task that changed the BLE state or the bond store:
+ * NimBLE's host task, or the radio worker. Post an event and return - the
+ * same contract the console reader's byte callback has.
  */
 typedef void (*kdrv_ble_cb_t)(kdrv_ble_state_t state);
 
@@ -90,26 +91,31 @@ kode_status_t kdrv_ble_set_cb(kdrv_ble_cb_t cb);
 typedef enum {
     KDRV_BLE_PAIR_NONE = 0,  /**< Nothing pending.                          */
     KDRV_BLE_PAIR_SHOW,      /**< A code is on offer; passkey is valid.     */
-    KDRV_BLE_PAIR_DONE       /**< It ended; outcome says how.               */
+    KDRV_BLE_PAIR_DONE,      /**< It ended; outcome says how.               */
+    KDRV_BLE_PAIR_REFUSED    /**< A device asked and was hung up on with no
+                              *   code; outcome says why. One per refusal.  */
 } kdrv_ble_pair_phase_t;
 
-/** @brief How a pairing ended. */
+/** @brief How a pairing ended, or why it was refused. */
 typedef enum {
     KDRV_BLE_PAIR_OK = 0,    /**< Bonded.                                   */
     KDRV_BLE_PAIR_GONE,      /**< The peer left with the pairing in flight. */
     KDRV_BLE_PAIR_FAILED,    /**< Encryption failed, or the SM gave up.     */
-    KDRV_BLE_PAIR_REJECTED   /**< This board hung up on it.                 */
+    KDRV_BLE_PAIR_REJECTED,  /**< This board hung up on it.                 */
+    KDRV_BLE_PAIR_HIDDEN,    /**< Refused: kodeOS hides the board from new
+                              *   devices until Pair new device.            */
+    KDRV_BLE_PAIR_APP_CLOSED /**< Refused: an app runs and is not pairing.  */
 } kdrv_ble_pair_outcome_t;
 
 /** @brief One moment in a pairing's life, as kdrv_ble_pair_take() reports it. */
 typedef struct {
     kdrv_ble_pair_phase_t   phase;
     uint32_t                passkey;  /**< 0..999999. Valid in SHOW.        */
-    kdrv_ble_pair_outcome_t outcome;  /**< Valid in DONE.                   */
+    kdrv_ble_pair_outcome_t outcome;  /**< Valid in DONE and REFUSED.       */
 } kdrv_ble_pair_t;
 
 /**
- * @brief Told that a pairing wants a code shown, or has ended.
+ * @brief Told that a pairing wants a code shown, has ended, or was refused.
  *
  * Carries nothing on purpose: it runs on NimBLE's host task, so it posts and
  * returns, and the reader collects the record with kdrv_ble_pair_take() on
@@ -129,14 +135,28 @@ kode_status_t kdrv_ble_set_pair_cb(kdrv_ble_pair_cb_t cb);
 bool kdrv_ble_pair_take(kdrv_ble_pair_t *out);
 
 /**
- * @brief Refuse the pairing in flight: hang up on the peer that asked.
+ * @brief Refuse the pairing in flight, at once.
  *
- * Records KDRV_BLE_PAIR_REJECTED and terminates the connection, which is
- * what kdrv_ble_quiet() already does from a thread that is not NimBLE's.
+ * Records KDRV_BLE_PAIR_REJECTED and marks the link refused. It takes no lock
+ * of NimBLE's, so the AO that decides calls it. A peer that finishes typing
+ * the code afterwards has its bond forgotten and its link closed by the host
+ * task. The hang-up itself is kdrv_ble_pair_hang_up().
  *
  * @return KODE_OK when a pairing was there to refuse, KODE_DENIED otherwise.
  */
 kode_status_t kdrv_ble_pair_reject(void);
+
+/**
+ * @brief Hang up on the peer whose pairing kdrv_ble_pair_reject() refused.
+ *
+ * Takes NimBLE's host lock, which the radio's worker may hold for seconds
+ * while it writes a key: a job of that worker (KDRV_RADIO_JOB_BLE_PAIR_REJECT).
+ *
+ * @return KODE_OK when it hung up; KODE_DENIED when there is nobody to hang
+ *         up on: the link ended, a new code replaced the refused one, or the
+ *         host task undid the pairing.
+ */
+kode_status_t kdrv_ble_pair_hang_up(void);
 #endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
 
 /**
@@ -181,6 +201,16 @@ kode_status_t kdrv_ble_stop(void);
  *         for minutes costs little at. */
 #define KDRV_BLE_ITVL_SLOW  1636U
 
+/** @brief One pulse's time enabled, ms: the first event leaves in a few ms; the station is deaf while enabled. */
+/* cppcheck-suppress misra-c2012-2.5 ; used by kdrv_ble.c, which is a file this check does not join to this one, and by the host cases */
+#define KDRV_BLE_PULSE_ON_MS         100U
+
+/** @brief Restarts of a pulsed advert NimBLE may refuse in a row before the state goes to IDLE. */
+#define KDRV_BLE_PULSE_REFUSALS_MAX  3U
+
+/** @brief The shortest wait for the next pulse, ms: a pulse that ended late is followed at once. */
+#define KDRV_BLE_PULSE_WAIT_MIN_MS   1U
+
 /**
  * @brief Say how the next kdrv_ble_advertise(true) goes on the air.
  *
@@ -190,8 +220,65 @@ kode_status_t kdrv_ble_stop(void);
  * @param hidden Hide the board: the advert stays connectable for the devices
  *               bonded to it, with no discoverable flag and no name, and no
  *               new device may pair until an advert is planned visible.
+ * @param pulsed Send the advert in pulses: enabled for KDRV_BLE_PULSE_ON_MS
+ *               at the start of each interval and disabled until the interval
+ *               is over, so the air still sees one advertising event per
+ *               interval. With the advert enabled, the C5's station on a 5 GHz
+ *               channel does not fetch the frames its access point holds for
+ *               it; with the advert enabled only for the event, it does.
+ *               Meant for the slow interval. @p ms counts across the pulses.
  */
-void kdrv_ble_adv_plan(uint16_t itvl, uint32_t ms, bool hidden);
+void kdrv_ble_adv_plan(uint16_t itvl, uint32_t ms, bool hidden, bool pulsed);
+
+/** @brief What the driver does at the end of a pulse, or when a pause is over. */
+typedef enum {
+    KDRV_BLE_PULSE_DONE = 0,  /**< Nothing: a stop or a connection ended the train, and whoever did said so. */
+    KDRV_BLE_PULSE_NEXT,      /**< Another pulse is owed, after the wait kdrv_ble_pulse_next() gives. */
+    KDRV_BLE_PULSE_IDLE       /**< The train is over: the state goes to IDLE, once. */
+} kdrv_ble_pulse_do_t;
+
+/** @brief What kdrv_ble_pulse_next() judges, as the driver knows it. */
+typedef struct {
+    bool     live;          /**< No stop and no connection has ended the train.   */
+    bool     timed_out;     /**< The pulse ended on its own time; false when NimBLE
+                             *   or the controller ended it.                      */
+    uint16_t itvl;          /**< The advert's interval, 0.625 ms units.           */
+    uint32_t leg_ms;        /**< The plan's time on the air, ms; 0 for no end.    */
+    uint32_t leg_run_ms;    /**< Since the first pulse began, ms.                 */
+    uint32_t pulse_run_ms;  /**< Since the last pulse (or its try) began, ms.     */
+    uint8_t  refused;       /**< Restarts NimBLE refused in a row.                */
+} kdrv_ble_pulse_t;
+
+/**
+ * @brief The period of an advert of interval @p itvl, in ms: the time between
+ *        the starts of two pulses of a pulsed one.
+ * @param itvl The interval, 0.625 ms units.
+ * @return The period, ms, rounded down.
+ */
+uint32_t kdrv_ble_pulse_period_ms(uint16_t itvl);
+
+/**
+ * @brief How long to wait for the next pulse after one that has run @p run_ms.
+ * @param itvl   The interval, 0.625 ms units.
+ * @param run_ms Since the pulse began, ms.
+ * @return The period less @p run_ms, and at least KDRV_BLE_PULSE_WAIT_MIN_MS.
+ */
+uint32_t kdrv_ble_pulse_pause_ms(uint16_t itvl, uint32_t run_ms);
+
+/**
+ * @brief Judge what follows a pulse's end, or the end of its pause.
+ *
+ * A train that a stop or a connection ended is DONE. One that NimBLE or the
+ * controller ended, that ran out its leg, or whose restarts were refused
+ * KDRV_BLE_PULSE_REFUSALS_MAX times in a row is IDLE. Any other has a next
+ * pulse after the wait: the rest of the period, or of the leg when that ends
+ * sooner.
+ *
+ * @param in      What the driver knows.
+ * @param wait_ms Receives the wait, ms, for KDRV_BLE_PULSE_NEXT; 0 otherwise.
+ * @return What follows.
+ */
+kdrv_ble_pulse_do_t kdrv_ble_pulse_next(const kdrv_ble_pulse_t *in, uint32_t *wait_ms);
 
 /**
  * @brief Whether the last link got encrypted: somebody this board knows, or who
@@ -209,6 +296,14 @@ bool kdrv_ble_link_secure(void);
  * the interval and for the time that plan said: the advert stays on the air
  * until a central takes it, somebody stops it or its time runs out.
  *
+ * A pulsed plan goes on the air as a train of pulses: the driver enables the
+ * advert for KDRV_BLE_PULSE_ON_MS, disables it for the rest of the interval
+ * and starts the next pulse by itself, from NimBLE's host task. The state is
+ * ADVERTISING from the first pulse to the end of the train, and the plan's time
+ * counts across the pulses. A stop, a connection, a lost link or a host reset
+ * ends the train and nothing restarts it; a leg that runs out, or restarts
+ * NimBLE keeps refusing, take the state to IDLE once.
+ *
  * When the console service is built in, the advert carries its UUID so a
  * client can filter for Kode Dots and nothing else, and the device name
  * travels in the scan response - the two together do not fit in one 31-byte
@@ -224,8 +319,10 @@ bool kdrv_ble_link_secure(void);
 kode_status_t kdrv_ble_advertise(bool on);
 
 /**
- * @brief A fast advert on the air goes on at the slow interval; anything else
- *        is left as it is. A board that goes to rest must not pay for a fast one.
+ * @brief A fast or a pulsed advert on the air goes on at the slow interval,
+ *        continuous; anything else is left as it is. A board that goes to rest
+ *        must not pay for a fast advert, nor for pulses: their commands wake
+ *        the link several times a second.
  *
  * @param ms The time the slow one stays on the air, in ms; 0 for no end.
  * @return KODE_OK, or what kdrv_ble_advertise() answered.
@@ -278,6 +375,46 @@ bool kdrv_ble_conn_params_ok(const kdrv_ble_conn_params_t *p);
  *         NimBLE refused to send the request.
  */
 kode_status_t kdrv_ble_conn_calm(bool rest);
+
+#define KDRV_BLE_ADV_UUID128_NONE     0U  /**< kdrv_ble_adv_shape_t.uuid128: no 128-bit UUID.            */
+#define KDRV_BLE_ADV_UUID128_CONSOLE  1U  /**< The console's service, which its clients filter on.       */
+#define KDRV_BLE_ADV_UUID128_APP      2U  /**< The app's service, in the console's place.                */
+
+/** @brief What decides the fields an advert carries. */
+typedef struct {
+    bool    console;   /**< The build serves the console's service.                          */
+    bool    hidden;    /**< The board hides from every device it is not bonded with.         */
+    bool    app_uuid;  /**< The app's service is served and its UUID takes the console's place
+                        *   (CONFIG_KODE_BLE_ADVERTISE_APP_SERVICE).                         */
+    uint8_t hid;       /**< The kinds of HID device served; 0 for none.                      */
+} kdrv_ble_adv_ask_t;
+
+/** @brief The fields an advert carries. */
+typedef struct {
+    bool     discoverable;  /**< The flags say a new device may find the board.        */
+    bool     tx_power;      /**< The transmit power rides the advert.                  */
+    bool     name;          /**< The name rides the advert, not the scan response.     */
+    uint8_t  uuid128;       /**< KDRV_BLE_ADV_UUID128_NONE, _CONSOLE or _APP.          */
+    uint16_t uuid16;        /**< A 16-bit service UUID; 0 for none.                    */
+    uint16_t appearance;    /**< What the board looks like to a host; 0 for none.      */
+    uint8_t  bytes;         /**< The advert's length without a name, of KDRV_BLE_ADV_MAX. */
+} kdrv_ble_adv_shape_t;
+
+/**
+ * @brief Choose the fields of an advert.
+ *
+ * Without HID: the flags, the console's 128-bit UUID (or the app's) and the
+ * transmit power, 24 of the 31 bytes, or the flags, the name and the power in
+ * a build without the console's service. A board that serves HID adds 0x1812
+ * and its appearance, which a host lists it by, and gives up the transmit
+ * power for them: the 128-bit UUID stays, so the console's clients still find
+ * the board, in 29 bytes. Hidden, the advert is not discoverable and carries
+ * no name. Pure: no stack, no lock, any thread.
+ *
+ * @param ask What decides them.
+ * @param out Receives the fields.
+ */
+void kdrv_ble_adv_shape(const kdrv_ble_adv_ask_t *ask, kdrv_ble_adv_shape_t *out);
 
 /**
  * @brief Pack a name and manufacturer data the way a scan response carries them.
@@ -351,8 +488,27 @@ const char *kdrv_ble_name(void);
  * Fills this driver's result table; read it with kdrv_ble_scan_count() and
  * kdrv_ble_scan_get() afterwards. A device that advertises repeatedly is
  * reported once, with the strongest signal seen.
+ *
+ * @param ms How long to listen.
+ * @return KODE_OK when the listen ran its time; KODE_DENIED when
+ *         kdrv_ble_scan_abort() cut it short, the table holding what it had
+ *         heard; the stack's own status when it would not start.
  */
 kode_status_t kdrv_ble_scan(uint32_t ms);
+
+/**
+ * @brief Ask the listen that is running (if any) to end now, or take the
+ *        request back.
+ *
+ * For a newer request that needs the radio. It sets a flag and wakes the
+ * listen's wait: the worker cancels the discovery and kdrv_ble_scan() returns
+ * KODE_DENIED. While the flag is set every listen that starts ends before it
+ * listens, so whoever set it clears it (@p on false) once the listen it was
+ * for has ended. kdrv_ble_scan_find() is not cut. AO_Radio only.
+ *
+ * @param on true to ask for the stop, false to take the request back.
+ */
+void kdrv_ble_scan_abort(bool on);
 
 /**
  * @brief Listen for ONE advertiser by its local name and stop as soon as it
@@ -376,6 +532,45 @@ kode_status_t kdrv_ble_scan(uint32_t ms);
  */
 kode_status_t kdrv_ble_scan_find(const char *name, uint32_t max_ms,
                                  kdrv_ble_dev_t *dev, bool *found);
+
+/** @brief What the hear hook is told. */
+typedef enum {
+    KDRV_BLE_HEAR_RECORD = 0,  /**< A record was offered to the ring: kdrv_ble_heard_feed() took it or counted it. */
+    KDRV_BLE_HEAR_ENDED        /**< The stack ended the scan by itself (DISC_COMPLETE while hearing).              */
+} kdrv_ble_hear_note_t;
+
+/**
+ * @brief Told when kdrv_ble_hear()'s scan hears an advertisement or ends.
+ *
+ * Called from NimBLE's host task. Post a static event and return - the same
+ * contract kdrv_ble_cb_t has.
+ */
+typedef void (*kdrv_ble_hear_cb_t)(kdrv_ble_hear_note_t note);
+
+/**
+ * @brief Install the hear hook. Before the first start.
+ * @param cb The hook; NULL is refused.
+ * @return KODE_OK; KODE_DENIED for NULL.
+ */
+kode_status_t kdrv_ble_set_hear_cb(kdrv_ble_hear_cb_t cb);
+
+/**
+ * @brief Start or stop a passive scan with no end. Worker only; does not block.
+ *
+ * Every advertisement heard goes into the ring of kdrv_ble_heard.h, which
+ * kdrv_ble_heard_init() must have made first, and the hook is told. Interval
+ * and window are equal, so the controller listens all the time. Never brings
+ * the stack up. A stop with none running is KODE_OK, and a start with this
+ * scan still running starts it again. kdrv_ble_scan() and
+ * kdrv_ble_scan_find() take the host's one scan from it as they start, and
+ * kdrv_ble_quiet() and kdrv_ble_stop() end it too; none of them tells the
+ * hook: AO_Radio ends its stream before it asks for them.
+ *
+ * @param on true to start, false to stop.
+ * @return KODE_OK; KODE_DENIED (the stack is down, or a scan or a find
+ *         runs); KODE_ERROR when NimBLE refuses the scan.
+ */
+kode_status_t kdrv_ble_hear(bool on);
 
 /** @brief How many devices the last scan kept. */
 uint8_t kdrv_ble_scan_count(void);
@@ -741,7 +936,15 @@ uint16_t kdrv_ble_console_retry(void);
 /** @brief Lines the ring has refused since the central attached. */
 uint16_t kdrv_ble_console_tx_drop(void);
 
-/** @brief How many peers the bond store holds. */
+/**
+ * @brief How many peers the bond store holds.
+ *
+ * The count the last change of the store left: it takes no lock and never
+ * waits for a store write. When the count moves, the state callback
+ * (kdrv_ble_set_cb()) is called.
+ *
+ * @return The bonded peers; 0 while the stack is down.
+ */
 uint8_t kdrv_ble_bonds(void);
 
 /**
@@ -772,6 +975,43 @@ kode_status_t kdrv_ble_unpair(void);
  *         KODE_NO_RESOURCES the ring is full and the line was dropped whole.
  */
 kode_status_t kdrv_ble_console_write(const char *buf, size_t len);
+
+/**
+ * @brief Told whether the lines written with
+ *        kdrv_ble_console_write_confirmed() reached the central.
+ *
+ * Called from NimBLE's host task, or from the writer's thread when a line is
+ * refused at once. Post an event and return.
+ *
+ * @param ok true: the central answered a request sent after the last such
+ *           line, so it has that line and every one before it. false: the
+ *           link went, a line was dropped, or the central did not answer.
+ */
+typedef void (*kdrv_ble_console_sent_t)(bool ok);
+
+/**
+ * @brief Install the confirmation callback.
+ *
+ * @param cb The callback; NULL uninstalls it.
+ * @return KODE_OK.
+ */
+kode_status_t kdrv_ble_console_set_sent_cb(kdrv_ble_console_sent_t cb);
+
+/**
+ * @brief kdrv_ble_console_write(), and the callback says once the central has
+ *        the line.
+ *
+ * Once NimBLE has taken every byte the ring held, the driver sends the
+ * central one GATT request (a discovery of the GAP service) and waits for its
+ * answer: the link layer keeps order, so an answer means the notifications
+ * before it arrived. Only the last mark is kept, and one answer confirms
+ * every line before it.
+ *
+ * @param buf As for kdrv_ble_console_write().
+ * @param len As for kdrv_ble_console_write().
+ * @return As kdrv_ble_console_write(); nothing is confirmed unless KODE_OK.
+ */
+kode_status_t kdrv_ble_console_write_confirmed(const char *buf, size_t len);
 
 /**
  * @brief The console ring, checked against itself: `test component=ble_console`.

@@ -75,27 +75,19 @@ extern "C" {
 /**
  * @brief The loudest the DAC is ever set, in tenth-decibels of full scale.
  *
- * Volume 100 is this and nothing reaches past it: register 0x32 reads 0xA9,
- * not 0xBF. It is the speaker's limit rather than the codec's, and it is
- * derived rather than chosen, from the validation bench's model - the one
- * that predicts every value it measured. Full scale is 1.9 Vrms at the codec;
- * the NS4150B multiplies that by its internal feedback resistor (measured
- * 220 to 250 kOhm, datasheet 240) over R2/R10; and the YN1811 may dissipate
- * 0.5 W, its maker's 96-hour test, at the 5.85 Ohm valley of its impedance,
- * which is 1.71 Vrms. The 270 kOhm rework meets that at full scale (1.69 Vrms,
- * 0.49 W measured); the board as drawn carries 120 kOhm, which puts full
- * scale at 3.96 Vrms and needs a cap of -7.3 dB.
- *
- * So -11.0 dB: the drawn value's cap with a whole register step of margin
- * over it, because fitted resistors have measured well under their drawn
- * value on earlier builds and a cap that trusts the drawing is a speaker
- * that overheats. It also keeps the build out of the clipping it shows at
- * full scale, because the thermal limit is the tighter one. What would move
- * it is R2/R10 measured on the build that ships, and a 3 kHz tone at volume
- * 100 measured at the speaker terminals against 1.71 Vrms; on the 270 kOhm
- * rework it goes to zero.
+ * Volume 100 is this and nothing reaches past it: -0.5 dB, register 0x32 at
+ * 0xBE, one register step under the DAC's full scale. The speaker sets it,
+ * by the validation bench's model. Full scale is 1.9 Vrms at the codec; the
+ * NS4150B multiplies that by its internal feedback resistor (measured 220 to
+ * 250 kOhm, datasheet 240) over R2/R10, which is 270 kOhm on every board
+ * that ships, V1 (the DVT) and V2; and the YN1811 may dissipate 0.5 W, its
+ * maker's 96-hour test, at the 5.85 Ohm valley of its impedance, which is
+ * 1.71 Vrms. Full scale gives 1.69 Vrms (0.49 W) at the datasheet's resistor
+ * and 1.76 Vrms (0.53 W) at the highest one measured; one step under it
+ * gives 1.66 Vrms (0.47 W) there. A board with smaller resistors at R2/R10
+ * needs a lower value here.
  */
-#define KDRV_ES8311_OUT_DB_X10_MAX  (-110)
+#define KDRV_ES8311_OUT_DB_X10_MAX  (-5)
 
 /* ---- Bring-up ------------------------------------------------------------ */
 
@@ -319,8 +311,14 @@ kode_status_t kdrv_es8311_stream_reset(void);
  * @brief Put frames into the open stream. The writer's call, from its own task.
  *
  * Blocks only while the ring is full, for at most @p ms in all, and never
- * from an Active Object. One writer at a time.
+ * from an Active Object. One writer at a time. The frames go only into stream
+ * @p id: one that ends while the writer waits for room, or gives way to the
+ * next, takes nothing more, and the write answers KODE_DENIED. A write in the
+ * instant the owner ends the stream may still answer KODE_OK: its frames go
+ * with the ring the owner empties, unheard.
  *
+ * @param id       The stream the frames are for, as kdrv_es8311_stream_id()
+ *                 said.
  * @param frames   @p n mono samples, or @p n left-right pairs when
  *                 @p channels is 2; a pair is played as its mean.
  * @param n        How many frames.
@@ -328,10 +326,11 @@ kode_status_t kdrv_es8311_stream_reset(void);
  * @param ms       The longest to wait for room.
  * @param taken    Out: how many frames went in. May be NULL.
  * @return KODE_OK when all @p n went in, KODE_TIMEOUT when @p ms ran out
- *         first (@p taken says how far it got), KODE_DENIED when no stream is
- *         open or an argument is bad.
+ *         first (@p taken says how far it got), KODE_DENIED when stream @p id
+ *         is not the one open (@p taken says how much it took before) or an
+ *         argument is bad.
  */
-kode_status_t kdrv_es8311_stream_write(const int16_t *frames, size_t n,
+kode_status_t kdrv_es8311_stream_write(uint32_t id, const int16_t *frames, size_t n,
                                        uint8_t channels, uint32_t ms,
                                        size_t *taken);
 
@@ -342,6 +341,34 @@ kode_status_t kdrv_es8311_stream_write(const int16_t *frames, size_t n,
  * drains and returns; writes are refused from this call on.
  */
 void kdrv_es8311_stream_end(void);
+
+/**
+ * @brief Which stream takes writes now.
+ *
+ * Every kdrv_es8311_stream_reset() opens a stream with a number of its own,
+ * never 0 and never the one before, and the stream keeps it until
+ * kdrv_es8311_stream_end() or the end of its job. A writer that noted the
+ * number of its stream tells from it whether that stream is still the one
+ * open, or has ended and perhaps given way to another. Two reads, from any
+ * task.
+ *
+ * @return The open stream's number, or 0 while kdrv_es8311_stream_write()
+ *         takes nothing.
+ */
+uint32_t kdrv_es8311_stream_id(void);
+
+/**
+ * @brief How long since a write last put frames into the stream.
+ *
+ * Counted from kdrv_es8311_stream_reset() while nothing has been written, and
+ * from the last kdrv_es8311_stream_write() that put at least one frame in
+ * after that: a write the full ring took nothing of does not count. A read of
+ * one word, from any task; it is the owner's to decide what a long silence
+ * means.
+ *
+ * @return The milliseconds, by khal_time_ms().
+ */
+uint32_t kdrv_es8311_stream_idle_ms(void);
 
 /**
  * @brief Clear a recording's early end, before its job is submitted.

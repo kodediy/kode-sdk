@@ -1396,7 +1396,10 @@ kode_status_t ir_last_ask(QActive *who);
  * Two exceptions to events: flush completion is kdrv_display's semaphore, given
  * from the DMA ISR (cache disabled, so no callback) because LVGL waits inside its
  * render call (kdrv_display_flush_wait()); and kdrv_display's shutdown handler
- * resets the panel inside esp_restart(), in the restarting task.
+ * resets the panel inside esp_restart(), in the restarting task. The first
+ * covers a compose pass too (display_compose_run()): the renderer hands the
+ * pass over by event and waits for it on a semaphore, inside its own render
+ * work, bounded, and AO_Display never waits for the renderer.
  */
 extern QActive * const AO_Display;  /**< The panel owner AO. */
 void Display_ctor(void);            /**< Construct it; kaos_display_start() calls it. */
@@ -1437,6 +1440,67 @@ void display_minute_request(void);
  *                transient (a slider mid-drag), nothing written.
  */
 void display_brightness_request(uint8_t pct, bool persist);
+
+/* ---- The glass asleep ------------------------------------------------------
+ * kode_sys_screen_sleep() posts DISPLAY_SLEEP_REQ_SIG. To sleep, AO_Display
+ * parks whoever draws (DISPLAY_PARK_SIG, answered with kode_sys_screen_parked()),
+ * puts the panel in sleep-in and takes its link down; to wake, it brings both
+ * back, gives the brightness and publishes DISPLAY_REPAINT_SIG. Each request
+ * ends in one DISPLAY_SLEEP_SIG. A task hears no event, so the same is kept in
+ * two words any thread may read: display_asleep() and display_sleep_last().
+ * With AO_LowPower the board's rest outranks the request: a round takes the
+ * glass over as it finds it, and the AWAKE that ends the rest wakes it.
+ */
+
+/** @brief How the last request to sleep or wake the glass ended. */
+typedef struct {
+    uint16_t answers;   /**< Requests answered since the boot; it wraps.     */
+    uint8_t  rc;        /**< The last answer's kode_status_t.                */
+    uint8_t  why;       /**< The last answer's display_sleep_why_t.          */
+} display_sleep_last_t;
+
+/**
+ * @brief Whether the glass is at rest: its link down, the panel asleep or, in
+ *        the board's ASLEEP, dimmed and showing its memory.
+ *
+ * A plain read of one word, from any thread. True from the moment AO_Display
+ * has taken the link down until it has brought the glass back.
+ *
+ * @return true while the glass is at rest.
+ */
+bool display_asleep(void);
+
+/**
+ * @brief How the last request to sleep or wake the glass ended.
+ *
+ * A plain read of one word, from any thread. AO_Display writes it just before
+ * it publishes DISPLAY_SLEEP_SIG, so a change of @c answers is one more
+ * request answered.
+ *
+ * @param out Filled; all zero before the first answer.
+ */
+void display_sleep_last(display_sleep_last_t *out);
+
+/**
+ * @brief A reason of DisplaySleepEvt in words, for a log line or an error text.
+ * @param why A display_sleep_why_t.
+ * @return The words; "" for DISPLAY_SLEEP_WHY_NONE and for a value that is no reason.
+ */
+const char *display_sleep_why_text(uint8_t why);
+
+/**
+ * @brief Tell AO_Display the renderer has stopped drawing, and hand it the
+ *        glyphs the minute is drawn from.
+ *
+ * What a renderer answers a round of AO_LowPower with; an app's sleep
+ * (DISPLAY_PARK_SIG) is answered with kode_sys_screen_parked(). The hand-over
+ * carries no park number, whatever @c park @p e holds. The strip is not
+ * copied: it stays the caller's, in PSRAM, until the next AWAKE (see
+ * DisplayGlyphsEvt). The event is copied; @p e need not outlive the call.
+ *
+ * @param e The glyphs and where they go; NULL when the renderer has none to give.
+ */
+void display_glyphs_hand(const DisplayGlyphsEvt *e);
 
 /* ---- Capture: a picture of the panel ------------------------------------
  * AO_Display owns the panel, so a capture is asked for. The answer is a loan:
@@ -1524,6 +1588,53 @@ void display_shot_release(void);
  */
 void display_jpeg_request(display_jpeg_t const *job, uint32_t *len, uint32_t *rc, khal_sem_t done,
                           uint32_t gen, uint32_t const *cur, uint32_t *ack);
+
+/**
+ * @brief An asker's own state for display_compose_run(): one per asking thread.
+ *
+ * Static storage, zeroed, for the life of the image: AO_Display may still
+ * read and write it for a request the asker stopped waiting for, and the
+ * semaphore made on the first request is kept.
+ */
+typedef struct {
+    khal_sem_t done;  /**< AO_Display's signal, made on the first request and kept. */
+    uint32_t   gen;   /**< The tag of the request waited on now.                    */
+    uint32_t   ack;   /**< The tag AO_Display answered last.                        */
+    uint32_t   rc;    /**< The answer's kode_status_t.                              */
+    uint32_t   us;    /**< The microseconds the pass took.                          */
+} display_compose_ask_t;
+
+/**
+ * @brief Run one pass of the pixel accelerator on the caller's pictures, and wait for it.
+ *
+ * AO_Display owns the accelerator and runs the pass in its step. A blocking
+ * request, asked by the renderer's AO inside its own pass (kscreen), by
+ * AO_Autotest's bench row or by a worker task; the call holds that AO's step
+ * for up to @p timeout_ms plus two seconds.
+ * Built with CONFIG_KODE_COMPOSE; without it every pass is refused, logged.
+ * The pictures stay the caller's and must outlive the call. A request is
+ * either given up before AO_Display takes it (KODE_TIMEOUT: no pass runs for
+ * it, then or later) or waited for until its pass is over, two seconds more
+ * at most. Only KODE_IO_ERROR leaves a pass that may still be writing its
+ * destination: the pictures of that request are not freed.
+ *
+ * @param ask        The caller's state, in static storage; never shared
+ *                   between threads.
+ * @param job        The pass; copied into the request.
+ * @param timeout_ms How long to wait for the answer.
+ * @param us         Receives the microseconds the pass took; may be NULL.
+ * @return KODE_OK; KODE_DENIED for a NULL argument, a malformed or oversized
+ *         picture, a block that does not fit, a glass that is asleep
+ *         (display_asleep()) or a build without CONFIG_KODE_COMPOSE;
+ *         KODE_NO_RESOURCES with no accelerator, no
+ *         event to carry the request, no room in AO_Display's queue or no
+ *         frame on the glass to read;
+ *         KODE_TIMEOUT when AO_Display did not take the request in time;
+ *         KODE_ERROR when the accelerator refused the pass; KODE_IO_ERROR
+ *         when a pass it started never ended.
+ */
+kode_status_t display_compose_run(display_compose_ask_t *ask, display_compose_t const *job,
+                                  uint32_t timeout_ms, uint32_t *us);
 
 /* ---- Mirror: the panel, live -------------------------------------------
  * A live stream of small JPEG frames from the panel's framebuffer, paced by a
@@ -1617,6 +1728,18 @@ void touch_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value
 void touch_test_request(void);
 
 /**
+ * @brief Tell the guided touch test about a finger the console injected.
+ *
+ * The test judges what the panel read, and an injected finger is not read
+ * from the panel: without this a station with nobody at it cannot run the row.
+ *
+ * @param x       Where, in the panel's pixels.
+ * @param y       Where.
+ * @param pressed true while the finger is down; false is its lift.
+ */
+void touch_test_inject(int16_t x, int16_t y, bool pressed);
+
+/**
  * @brief Subscribe @p who to TOUCH_EVT_SIG, AO_Touch's report of the finger.
  *
  * A bare subscription names nobody: this call is what links AO_Touch into an
@@ -1705,7 +1828,8 @@ void ioexp_test_request(void);
 /* ---- AO_Buttons: owner of the six push-buttons --------------------------
  * Five are bits of AO_IoExp's publish, the sixth is GPIO35. Two equal samples
  * KODE_SYS_BUTTON_SETTLE_MS apart move a button; BUTTON_EVT_SIG goes out on change.
- * Top and bottom publish BUTTON_HOLD_SIG after KODE_BUTTON_HOLD_MS; top publishes
+ * Top and bottom publish BUTTON_HOLD_SIG after KODE_BUTTON_HOLD_MS, and bottom,
+ * held on, BUTTON_HOME_HOLD_SIG after KODE_HOME_HOLD_MS; top publishes
  * BUTTON_DOUBLE_SIG for a second press within KODE_BUTTON_DOUBLE_MS of the first's
  * release (not after a hold).
  */
@@ -1849,6 +1973,20 @@ void power_dump_request(void);
  * in the reading, and the poll that keeps the clock does not run asleep.
  */
 void power_peek_request(void);
+
+/**
+ * @brief Ask AO_Power whether a cable is in: one register of the BQ25896.
+ *
+ * A whole reading, published as POWER_EVT_SIG, follows only when the answer
+ * differs from the last reading published, or when none was. Logs nothing,
+ * reads no gauge and keeps no clock: what AO_LowPower asks every
+ * KODE_LOWPOWER_CABLE_LOOK_MS while the P4 sleeps, ASLEEP or in the CPU part
+ * of an app's rest, where nothing else reads the charger for a cable.
+ *
+ * @return true when the request was queued; false when the queue is within
+ *         KQP_POWER_POST_MARGIN, and nothing was queued.
+ */
+bool power_cable_request(void);
 
 /**
  * @brief Ask AO_Power to read, write or dump one field of one chip.
@@ -1997,24 +2135,34 @@ typedef enum {
  */
 void radio_up_request(void);
 
-/** @brief Ask AO_Radio to tear the link down. The C5 keeps running. */
-void radio_down_request(void);
+/**
+ * @brief Ask AO_Radio to tear the link down. The C5 keeps running.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
+ */
+bool radio_down_request(void);
 
 /**
  * @brief Ask AO_Radio to publish RADIO_STATE_SIG again.
  *
  * Same contract as display_state_request(): only once kode_init() has
  * returned - posting to an unstarted AO is a FreeRTOS assert, not a no-op.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void radio_state_request(void);
+bool radio_state_request(void);
 
 /**
  * @brief Ask AO_Radio to leave the C5 parked for a jump that restarts the board.
  *
  * AO_Boot's request, once before it restarts. With the link up AO_Radio hangs up
  * BLE, asks the C5 to park and, only on its yes, leaves the note for @p target.
- * Always answered with one BOOT_RADIO_PARKED_SIG to AO_Boot; with no link, at once.
- * Compiled under CONFIG_KODEOS_RADIO; guard the call the same way.
+ * Always answered with one BOOT_RADIO_PARKED_SIG to AO_Boot; with no link, at once,
+ * and so are a dry pool and a queue within KQP_RADIO_POST_MARGIN of full, as a
+ * park the C5 refused. Compiled under CONFIG_KODEOS_RADIO; guard the call the
+ * same way.
  *
  * @param target The role of the firmware the restart goes to.
  */
@@ -2042,8 +2190,25 @@ void radio_boot_release(void);
  *
  * Answered on the bus: one WIFI_SCAN_ENTRY_SIG per network, then WIFI_SCAN_END_SIG,
  * even with no link (ok=false), so silence never stands for "no networks".
+ * The newest Wi-Fi request wins: this one ends a Wi-Fi scan somebody asked for
+ * that is in flight, and starts when the worker is back. Behind a listing it
+ * publishes WIFI_SCAN_AGAIN_SIG, and the one end closes both; a newer Wi-Fi
+ * request (a scan, a join, Wi-Fi switched) ends it in turn, and its end says
+ * @c cut. It waits for a join; behind a Bluetooth listen, the board's own
+ * round, a row or an install it is answered @c busy. While an app rests the
+ * radio (KODE_LP_PART_RADIO) it is answered @c rest at once and ends nothing.
+ *
+ * Every entry and end of the listing carries the generation of the newest
+ * request it answers. A listener that waits for its own request skips the
+ * ones older than its generation: they are a listing before it, still in its
+ * queue.
+ *
+ * @param gen Out: this request's generation; NULL when the caller reads none.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full, and then
+ *         nothing was asked and nothing answers.
  */
-void wifi_scan_request(void);
+bool wifi_scan_request(uint8_t *gen);
 
 /**
  * @brief Ask AO_Radio to end the listing in flight before its last channel.
@@ -2065,8 +2230,13 @@ bool wifi_scan_stop_request(void);
  * Brings the link up if needed. Entries are POSTED to @p who as WIFI_SCAN_ENTRY_SIG
  * while its queue keeps KODE_STORAGE_LIST_FREE_SLOTS free, then one
  * WIFI_SCAN_RSP_SIG (no margin, refusals included): the count, rc (KODE_OK;
- * KODE_ERROR failed or link lost; KODE_NO_RESOURCES radio busy with another scan,
- * a BLE listen, the row or an install: ask again) and whether entries were dropped.
+ * KODE_ERROR failed or link lost; KODE_NO_RESOURCES radio busy with a Bluetooth
+ * listen, the board's own round, the row or an install: ask again;
+ * KODE_CANCELLED a newer Wi-Fi request took its place) and whether entries were
+ * dropped. It ends the Wi-Fi scan somebody asked for before it, running or
+ * waiting, whose asker is told then. An asker that scans again at every answer
+ * waits for its own end first: asked again at once after KODE_CANCELLED, it
+ * ends the scan that replaced it, and neither ever finishes.
  *
  * @param who The asking AO.
  * @return KODE_OK when posted; KODE_DENIED for a NULL or unstarted @p who,
@@ -2079,7 +2249,7 @@ kode_status_t wifi_scan_ask(QActive *who);
  * @brief Scan for a blocked task; kode_block_wifi_scan()'s request.
  *
  * As wifi_scan_ask(), answered in @p wait instead: the rows the sweep kept
- * copied into @c wait->rows, @c rc and @c got set, @p gen stamped into
+ * copied into @c wait->rows, @c rc, @c got and @c rest set, @p gen stamped into
  * @c wait->ack, then @c wait->done signalled. With the pool dry or AO_Radio's
  * queue within KQP_RADIO_CMD_MARGIN it is answered the same way at once,
  * KODE_NO_RESOURCES. @p wait must outlive the answer.
@@ -2111,6 +2281,42 @@ void wifi_scan_request_wait(ScanWaiter *wait, uint32_t gen);
  *         nothing answers.
  */
 bool wifi_frames_request(QActive *who, bool on, uint8_t channel);
+
+/**
+ * @brief Ask AO_Radio to start or stop telling @p who about BLE advertisements.
+ *
+ * Posts and returns. Always answered to @p who with BLE_HEARD_STATE_SIG, in
+ * every state of the link: with it down the answer is KBLE_HEARD_NO_LINK. A
+ * stop asked again while the first is still being served shares its answer.
+ * While on, @p who gets one BLE_HEARD_SIG per advertisement handed over, the
+ * first of them after the answer that says on. All of them are posted to
+ * @p who, never published, and leave half of its queue free (KQP_HEARD_MARGIN
+ * slots at least): what its queue or the pool has no room for is counted in
+ * the next one's @c dropped. Passive: nothing is sent. Never brings Bluetooth
+ * up: with it off in Settings, or its stack down, the answer is
+ * KBLE_HEARD_BLE_OFF.
+ *
+ * The newest Bluetooth request wins, as ble_scan_request() says of a listen.
+ * A start ends the Bluetooth listen somebody asked for, running or waiting,
+ * whose asker is told then, and goes when the worker is back; another
+ * asker's start takes the stream. A newer listen ends the stream in turn,
+ * and so do the radio check's name find and the production row's scan as
+ * they start: @p who is told KBLE_HEARD_CANCELLED at once. A Wi-Fi request
+ * ends nothing of it. Behind what is not cut (a Wi-Fi scan somebody asked
+ * for, the board's own round, the radio check, the production row, an
+ * install, an update) a start is answered KBLE_HEARD_BUSY. Bluetooth
+ * switched off, the board's rest, a C5 update and the link going end the
+ * stream too, each with its reason. A stream that was ended does not come
+ * back by itself: @p who asks again. Exists only in a build with
+ * CONFIG_KODEOS_BLE, as the other ble_* doors do.
+ *
+ * @param who Where the answers go. Never NULL.
+ * @param on  true to listen, false to stop.
+ * @return true when the request was posted; false when the event pool was dry
+ *         or AO_Radio's queue is within KQP_RADIO_CMD_MARGIN of full, and then
+ *         nothing answers.
+ */
+bool ble_heard_request(QActive *who, bool on);
 
 /**
  * @brief Ask AO_Radio to join @p ssid.
@@ -2160,8 +2366,11 @@ QEvt const *wifi_leave_evt(void);
  * The flag is the wish, not the outcome: a call refused while the C5 is busy is
  * still delivered by the next reconcile or boot. WIFI_STATE_SIG answers every call
  * (`enabled` is the flag). wifi_stop_request() is the opposite.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void wifi_start_request(void);
+bool wifi_start_request(void);
 
 /**
  * @brief Switch the WiFi service off, and remember that it is off.
@@ -2169,30 +2378,45 @@ void wifi_start_request(void);
  * Takes the station all the way down and clears the stored flag. The link stays
  * up: esp-hosted cannot rebuild its transport within a boot (an idle link costs
  * ~27 mA). Answered with WIFI_STATE_SIG, even when it waits for a job in flight.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void wifi_stop_request(void);
+bool wifi_stop_request(void);
 
-/** @brief Ask AO_Radio to publish WIFI_STATE_SIG now. Always answered. */
-void wifi_state_request(void);
+/**
+ * @brief Ask AO_Radio to publish WIFI_STATE_SIG now. Answered whenever it is posted.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
+ */
+bool wifi_state_request(void);
 
 /**
  * @brief Ask AO_Radio to refresh the current association's signal strength.
  *
  * `wifi_info` reports the last known value without waiting. Answered with
  * WIFI_STATE_SIG once measured, or at once with no link or no association.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void wifi_rssi_request(void);
+bool wifi_rssi_request(void);
 
 /**
  * @brief Ask AO_Radio for the station's fast mode, or for the default back.
  *
  * On: no power save, every frame answered at once, about 27 mA more. Off (default)
  * is modem save. Applied while connected; a (re)connect or stop resets it. No
- * answer: a missed fast mode is only a slow reply. AO_Net is the one caller.
+ * answer: a missed fast mode is only a slow reply. AO_Net is the one caller: it
+ * asks while the Kode channel receives command lines and while a job is with one
+ * of its workers, and gives the default back when the last of them ends.
  *
  * @param on true for fast, false for the default.
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
  */
-void wifi_fast_request(bool on);
+bool wifi_fast_request(bool on);
 
 /**
  * @brief Ask AO_Radio to get onto a remembered network by itself.
@@ -2218,11 +2442,20 @@ QEvt const *wifi_auto_evt(void);
  * Answered on the bus: one WIFI_SAVED_ENTRY_SIG per network, most recently
  * used first, then WIFI_SAVED_END_SIG. Names only - a stored password is
  * never handed back.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void wifi_list_request(void);
+bool wifi_list_request(void);
 
-/** @brief Ask AO_Radio to forget @p ssid. Does not disconnect. */
-void wifi_forget_request(const char *ssid);
+/**
+ * @brief Ask AO_Radio to forget @p ssid. Does not disconnect.
+ * @param ssid The network.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
+ */
+bool wifi_forget_request(const char *ssid);
 
 /* ---- BLE: a host here, the controller on the C5 -------------------------
  * The radio is the coprocessor's and the stack above HCI is the P4's, so a
@@ -2236,20 +2469,31 @@ void wifi_forget_request(const char *ssid);
  * On means advertising whenever the flag is set and nobody is connected. The
  * pairing gate on the console service bounds exposure. As wifi_start_request():
  * persisted, link brought up, restored after reboot. Answered with BLE_STATE_SIG.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void ble_start_request(void);
+bool ble_start_request(void);
 
 /**
  * @brief Ask for a BLE scan that listens for @p ms.
  *
  * Answered on the bus: one BLE_SCAN_ENTRY_SIG per device (once, at its strongest),
  * then BLE_SCAN_END_SIG. A length out of range gets `ok = false` and no scan.
+ * The newest Bluetooth request wins, as wifi_scan_request() says of Wi-Fi: a
+ * listen cut for a newer listen publishes nothing and the one end closes both;
+ * cut for Bluetooth switched or an asked listen, its end says @c cut and lists
+ * no device. Behind a Wi-Fi sweep it is answered @c busy; while an app rests
+ * the radio, @c rest. Entries and ends carry the request's generation, as the
+ * Wi-Fi listing's do.
  *
- * @param ms How long to listen; 0 for KODE_BLE_SCAN_MS.
- * @return true when the request was posted, false when the pool was dry (logged,
- *         nothing answers).
+ * @param ms  How long to listen; 0 for KODE_BLE_SCAN_MS.
+ * @param gen Out: this request's generation; NULL when the caller reads none.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full, and then
+ *         nothing was asked and nothing answers.
  */
-bool ble_scan_request(uint32_t ms);
+bool ble_scan_request(uint32_t ms, uint8_t *gen);
 
 /**
  * @brief Ask for the listen ble_scan_request() runs, for an AO; the door
@@ -2257,8 +2501,10 @@ bool ble_scan_request(uint32_t ms);
  *
  * Posts and answers as wifi_scan_ask() (BLE_SCAN_ENTRY_SIG, then BLE_SCAN_RSP_SIG),
  * sharing its one slot. rc: KODE_OK; KODE_ERROR failed or link lost; KODE_DENIED
- * Bluetooth off; KODE_NO_RESOURCES radio busy, ask again. The autojoin round on a
- * cold link with Wi-Fi on makes the first listen nearly always busy.
+ * Bluetooth off; KODE_NO_RESOURCES radio busy (a Wi-Fi scan, the round, the row,
+ * an install), ask again; KODE_CANCELLED a newer Bluetooth request took its
+ * place. The autojoin round on a cold link with Wi-Fi on makes the first listen
+ * nearly always busy.
  *
  * @param who The asking AO.
  * @param ms  How long to listen, KODE_BLE_SCAN_MIN_MS..KODE_BLE_SCAN_MAX_MS.
@@ -2273,7 +2519,7 @@ kode_status_t ble_scan_ask(QActive *who, uint32_t ms);
  * @brief Listen for a blocked task; kode_block_ble_scan()'s request.
  *
  * As ble_scan_ask(), answered in @p wait: devices (kdrv_ble_dev_t) in @c wait->rows,
- * @c rc and @c got set, @p gen in @c wait->ack, then @c wait->done. A dry pool or
+ * @c rc, @c got and @c rest set, @p gen in @c wait->ack, then @c wait->done. A dry pool or
  * full queue answers at once KODE_NO_RESOURCES; @p ms out of range, KODE_DENIED.
  * @p wait must outlive the answer.
  *
@@ -2334,8 +2580,11 @@ bool ble_enabled(void);
  * Takes the host down and disables the C5's controller and clears the
  * stored flag. The link itself stays up for the rest of the boot, for the
  * reason wifi_stop_request() gives. Answered with BLE_STATE_SIG.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void ble_stop_request(void);
+bool ble_stop_request(void);
 
 /**
  * @brief How many console lines the event pool could not carry.
@@ -2366,7 +2615,13 @@ uint32_t console_rx_dropped(void);
  */
 bool console_congested(void);
 
-/** @brief Ask AO_Radio to publish BLE_STATE_SIG now. Always answered. */
+/**
+ * @brief Ask AO_Radio to publish BLE_STATE_SIG now. Always answered.
+ *
+ * A knock, as the BLE state change is: asks that pile up fold into one
+ * BLE_STATE_SIG, and a queue too full for it owes the ask and posts it again
+ * before the next event AO_Radio handles.
+ */
 void ble_state_request(void);
 
 /**
@@ -2374,8 +2629,11 @@ void ble_state_request(void);
  *
  * Refused while a central is attached: its link would outlive its key. Use
  * ble_stop_request() to disconnect.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void ble_unpair_request(void);
+bool ble_unpair_request(void);
 
 /**
  * @brief Ask AO_Radio to show the board for five minutes, so a new device can
@@ -2384,18 +2642,32 @@ void ble_unpair_request(void);
  * With bonds, the board is nameless, not discoverable and refuses new pairings;
  * this lifts that until the time runs out or a device pairs. Answered by
  * BLE_STATE_SIG (`pair_open`); refused, with a log line, while Bluetooth is off.
+ * In an app a device pairs in that time only when the app serves the HID
+ * service (kdrv_ble_hid_select()). Any task: the post leaves
+ * KQP_RADIO_POST_MARGIN of AO_Radio's queue free.
+ *
+ * @return false when AO_Radio's queue had no room; nothing was asked.
  */
-void ble_pair_open_request(void);
+bool ble_pair_open_request(void);
 
 /**
  * @brief Refuse the pairing whose code is currently on the glass.
  *
  * The peer is hung up on rather than left for the security manager's 30 s.
  * Answered by BLE_PAIR_SIG (DONE, REJECTED); nothing in flight, nothing published.
- * Compiled under CONFIG_KODEOS_BLE_PAIRING_PASSKEY (default on). Only kodeOS shows
- * a code; an app refuses new pairings first.
+ * The refusal is said at once, so a peer that finishes typing the code
+ * afterwards is not bonded. The hang-up is the radio worker's, after the job in
+ * flight; with the link down it waits for the link, and it hangs up on nobody
+ * once that link or its code is gone.
+ * Compiled under CONFIG_KODEOS_BLE_PAIRING_PASSKEY (default on). kodeOS shows a
+ * code, and so does an app that serves the HID service; any other app refuses
+ * new pairings first.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full: the code stays up until the
+ *         security manager gives up on the peer.
  */
-void ble_pair_reject_request(void);
+bool ble_pair_reject_request(void);
 
 /**
  * @brief Send an image to the coprocessor from @p src.
@@ -2406,8 +2678,11 @@ void ble_pair_reject_request(void);
  * @param src_kind  KFW_SRC_FS, KFW_SRC_SD or KFW_SRC_HTTP. The image is decoded
  *                  whole into PSRAM and verified before the C5's session opens.
  * @param src       File name, or URL.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
-void c5_flash_request(uint8_t src_kind, const char *src);
+bool c5_flash_request(uint8_t src_kind, const char *src);
 
 /**
  * @brief Ask AO_Radio to install a coprocessor image arriving on the console.
@@ -2422,8 +2697,9 @@ void c5_flash_request(uint8_t src_kind, const char *src);
  * @param size  Payload length in bytes.
  * @param crc32 What khal_crc32() over the whole payload must equal.
  * @param src   KODE_CONSOLE_SRC_*: the port the payload follows on.
- * @return false if the request event could not be allocated - nothing is
- *         coming, and the caller must not wait.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
 bool c5_recv_request(uint32_t size, uint32_t crc32, uint8_t src);
 
@@ -2439,8 +2715,9 @@ bool c5_recv_request(uint32_t size, uint32_t crc32, uint8_t src);
  *
  * @param who   Where the answer goes.
  * @param nonce 1..KODE_ID_NONCE_MAX characters of [A-Za-z0-9._-].
- * @return false if the request event could not be allocated - nothing is
- *         coming, and the caller must not wait.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
 bool id_sign_request(QActive *who, const char *nonce);
 
@@ -2459,8 +2736,9 @@ bool id_sign_request(QActive *who, const char *nonce);
  * @param of  ID_OP_CERT_PUT: parts in all, 1..KODE_ID_PARTS_MAX; 0 otherwise.
  * @param der ID_OP_CERT_PUT: the part's DER; NULL otherwise.
  * @param len Bytes of der, 1..KODE_ID_PART_BYTES; 0 otherwise.
- * @return false if the request event could not be allocated - nothing is
- *         coming, and the caller must not wait.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
 bool id_request(QActive *who, uint8_t op, uint8_t n, uint8_t of,
                 const uint8_t *der, size_t len);
@@ -2475,8 +2753,9 @@ bool id_request(QActive *who, uint8_t op, uint8_t n, uint8_t of,
  * or no answer within 3 s). A failed step stops the wipe there.
  *
  * @param who Where the answer goes.
- * @return false if the request event could not be allocated - nothing is
- *         coming, and the caller must not wait.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
 bool c5_wipe_request(QActive *who);
 
@@ -2488,8 +2767,11 @@ bool c5_wipe_request(QActive *who);
  * slave build, SDIO at four lines and board clock, card supply on, strongest
  * network above KODE_C5_TEST_RSSI_MIN_DBM. Readings are logged; `wifi` and `ble`
  * flags untouched. Waits for a job; fails at once during an update or after `radio_down`.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void c5_test_request(void);
+bool c5_test_request(void);
 
 /**
  * @brief The same row as the owner of a unit runs it.
@@ -2497,8 +2779,11 @@ void c5_test_request(void);
  * The link, the snapshot, a WiFi sweep that completes and the BLE
  * controller, with no floor on what either scan hears: what is in range
  * depends on where the unit is. Answers TEST_RESULT_SIG named "c5".
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void c5_test_request_user(void);
+bool c5_test_request_user(void);
 
 /**
  * @brief Read, write or dump one field of the coprocessor - the console's `c5`.
@@ -2506,8 +2791,16 @@ void c5_test_request_user(void);
  * @p field is a resolved kdrv_c5_field_t. Answered to @p who as RADIO_FIELD_RSP_SIG
  * (RadioFieldEvt) from the last bring-up's snapshot: no link crossed, answered in
  * every state, refusals included. A NULL @p who is not answered.
+ *
+ * @param who   Where the answer goes.
+ * @param op    FIELD_OP_GET, _SET or _DUMP.
+ * @param field The field.
+ * @param value What a set writes.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
-void c5_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value);
+bool c5_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value);
 
 /**
  * @brief Ask AO_Radio for the expansion header's +3.3V_EXT on or off.
@@ -2519,8 +2812,10 @@ void c5_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value);
  * as EXP_POWER_SIG (ExpPowerDoneEvt); `c5` reads back `pwr_ext`.
  *
  * @param on true for the rail on, false for off.
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
  */
-void exp_power_request(bool on);
+bool exp_power_request(bool on);
 
 /**
  * @brief The event exp_power_request() posts, for a caller that posts it itself.
@@ -2559,6 +2854,57 @@ bool radio_probe_request(QActive *who, const radio_probe_t *req);
  * @param on true for the amplifier on.
  */
 void radio_amp_request(bool on);
+
+/**
+ * @brief Subscribe @p who to the pairings: BLE_PAIR_SIG, a code to show, how
+ *        each pairing ended, and a pairing refused with no code.
+ *
+ * Beside AO_Radio's start, so the call links AO_Radio (tools/check_starts.sh).
+ *
+ * @param who The listening Active Object.
+ */
+void ble_pair_subscribe(QActive const *who);
+
+/**
+ * @brief The kode_c5 release the C5 runs ("0.1.3"), as its image descriptor
+ *        said when the link came up.
+ *
+ * Reads the snapshot kdrv_c5 keeps: no link is crossed and nothing blocks.
+ * `info`'s `>|fw` record asks it. The version the link negotiates is
+ * esp-hosted's, the `c5` verb's fw_* rows; this is the image's own, and a
+ * descriptor that carries that same version is a kode_c5 from before its
+ * own releases, so it gives none. Beside AO_Radio's start, so the call links
+ * AO_Radio (tools/check_starts.sh).
+ *
+ * @param out Where the release goes, NUL-terminated.
+ * @param len Room there; KDRV_C5_VERSION_MAX holds any release.
+ * @return KODE_OK; KODE_DENIED with no link up now (the snapshot goes when
+ *         the link drops or is taken down), for a slave that is not kode_c5
+ *         or has no descriptor, for a version that is esp-hosted's, or when
+ *         @p len cannot hold the whole release.
+ */
+kode_status_t radio_c5_release(char *out, size_t len);
+
+/**
+ * @brief Send AO_Radio one input report of the HID service, for its host.
+ *
+ * Claims the driver's ring and posts the report; never blocks. The HID
+ * service is served only when asked (kdrv_ble_hid_select()). A report of
+ * zeroes, which lets every key or button go, is never refused for want of
+ * room: with none, the driver owes it to the host and sends it once the
+ * reports of its kind ahead of it have gone.
+ *
+ * @param kind KDRV_BLE_HID_MOUSE or KDRV_BLE_HID_KEYBOARD.
+ * @param data The report, as kdrv_ble_hid_mouse_pack() or kdrv_ble_hid_keys_pack() wrote it.
+ * @param len  Its bytes.
+ * @param tap  true to follow it with a report of zeroes: a key or a button
+ *             pressed and let go, both queued or neither.
+ * @return KODE_OK when queued for the link; KODE_DENIED when that kind is not
+ *         served, no host is subscribed to it or the report is malformed;
+ *         KODE_NO_RESOURCES when the ring, the pool or AO_Radio's queue is
+ *         full: send it again.
+ */
+kode_status_t ble_hid_report_post(uint8_t kind, const uint8_t *data, size_t len, bool tap);
 
 /**
  * @brief Subscribe @p who to the app's own Bluetooth service: BLE_APP_WRITE_SIG,
@@ -2663,6 +3009,25 @@ kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void 
                            uint32_t len, const char *ctype, void *buf, uint32_t cap);
 
 /**
+ * @brief GET the @p cap bytes of @p url from @p offset on; answered with
+ *        NET_HTTP_RSP_SIG, as a GET, and through the same door: one at a time.
+ *
+ * The answer's status is 206 for a range the server served and 200 when it
+ * ignored the range and sent the body from its first byte, of which only
+ * @p cap bytes are read; @c range_total is the length of the whole resource
+ * when the server says it.
+ *
+ * @param who    The asking AO.
+ * @param url    Shorter than KODE_NET_URL_MAX; copied.
+ * @param offset The first byte wanted.
+ * @param buf    Where the bytes go, lent.
+ * @param cap    Its room, above 0.
+ * @return As the asks above.
+ */
+kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset, void *buf,
+                                 uint32_t cap);
+
+/**
  * @brief Send one datagram; answered with NET_UDP_RSP_SIG.
  * @param who  The asking AO.
  * @param host As net_lookup_ask().
@@ -2693,7 +3058,7 @@ void net_leave_request(void);
 /**
  * @brief Tell AO_Net when the scheduler's `mqtt` entry next falls due.
  *
- * The radio wake that lets held messages in while the board sleeps. AO_Net keeps
+ * The dark wake that lets held messages in while the board sleeps. AO_Net keeps
  * one time, gives AO_LowPower the earlier of it and the channel's deadline, and
  * holds the wake KODE_NET_CHECK_DWELL_MS (an ASLEEP round meanwhile is "check
  * dwell"). Nothing to listen to: passed at once. Each check is told to AO_Scheduler
@@ -2746,7 +3111,11 @@ QEvt const *mqtt_down_evt(void);
  *
  * Fire-and-forget, like appmgr_flash_request(): queued in the client's
  * outbox and reported in '!' lines. A payload longer than
- * KODE_MQTT_PAYLOAD_MAX is cut to it.
+ * KODE_MQTT_PAYLOAD_MAX is cut to it. AO_Net answers with MQTT_STATE_SIG:
+ * no error when the client took it, KDRV_MQTT_ERR_REFUSED when no client is
+ * up, KDRV_MQTT_ERR_NO_NET with no address, KDRV_MQTT_ERR_BUSY while the Kode
+ * channel holds the client. mqtt_sub_request() and mqtt_unsub_request() are
+ * answered the same way.
  *
  * @param topic The topic.
  * @param data  The payload.
@@ -2838,12 +3207,14 @@ typedef enum {
 } chan_session_t;
 
 /**
- * @brief Ask AO_Net to publish CHANNEL_STATE_SIG now. Always answered, with
- *        CHAN_OFF in a firmware built without the channel.
+ * @brief Ask AO_Net to publish CHANNEL_STATE_SIG now, with CHAN_OFF in a
+ *        firmware built without the channel. Always answered.
  *
- * A post like the other requests here: a full queue is a reset, not a false.
+ * Posted with KQP_NET_CMD_MARGIN, as AO_Net's other doors are. A queue too
+ * full for it owes the ask, and AO_Net answers it before the next event it
+ * handles; asks owed together are answered once.
  *
- * @return true; the form is the facade's, where a request can be refused.
+ * @return true when the ask was posted; false when it is owed.
  */
 bool channel_state_request(void);
 
@@ -3036,12 +3407,28 @@ typedef enum {
                              *   32 KB chunk per step paced by a QTimeEvt, so
                              *   lower AOs keep running. Answered once at the
                              *   end; a failed copy leaves no destination.   */
+    STORAGE_PAIR_REPLACE,   /**< Put @p src on @p dst, which may be taken: the
+                             *   file there goes to `<dst>.bak` first, is put
+                             *   back if a step fails and is unlinked when the
+                             *   copy is in place, all in one step with one
+                             *   answer. Same volume only. @p src stays where it
+                             *   was when the replacement fails. A `<dst>.bak`
+                             *   already there is removed. A reset between the
+                             *   steps leaves the file that was there as
+                             *   `<dst>.bak` and @p src where it was, never a
+                             *   cut file on @p dst. On the card it is warned
+                             *   about only while the card has not proved it
+                             *   takes a write, whoever asks.                   */
 } storage_pair_op_t;
 
 /**
  * @brief Ask AO_Storage about one path: STAT, LIST, MKDIR, UNLINK or RMDIR it.
  *
  * Every request is answered, refusals included: the console closes on it.
+ * UNLINK and RMDIR, and the delete that tries either, wait for the transfer
+ * AO_Storage has in flight to end, KODE_STORAGE_TURN_MS at most, and are refused
+ * with KODE_DENIED after it; one request waits at a time, and a second is refused
+ * at once.
  *
  * @param who  Where the response is posted. NULL is served and not answered.
  * @param op   storage_path_op_t, any but STORAGE_PATH_CAT (storage_cat_request()).
@@ -3050,17 +3437,22 @@ typedef enum {
 void storage_path_request(QActive *who, uint8_t op, const char *path);
 
 /**
- * @brief Ask AO_Storage to move or copy @p src to @p dst.
+ * @brief Ask AO_Storage to move or copy @p src to @p dst, or to replace @p dst by it.
  *
  * Answered once with StoragePathRspEvt; `rc` says how it went. On KODE_ERROR,
  * `exists` true means the source was checked afterwards and is missing.
- * MOVE: KODE_DENIED malformed, no volume, or two volumes; KODE_ERROR no mount or
- * rename failed. COPY: KODE_DENIED malformed, no volume, same file, or a transfer in
+ * MOVE waits for a transfer in flight like storage_path_request()'s deletes.
+ * MOVE: KODE_DENIED malformed, no volume, two volumes, or a transfer that outlasted
+ * the wait; KODE_ERROR no mount or rename failed. REPLACE waits for a transfer in
+ * flight as MOVE does and is refused as it is, and with KODE_DENIED when a folder
+ * is on @p dst; KODE_ERROR when a step failed, the file on @p dst then as it was
+ * unless it would not go back, which the log says with both names. COPY: KODE_DENIED malformed, no volume, same file, or a transfer in
  * flight; KODE_ERROR otherwise. COPY answers at its end: size deadlines for it.
  *
  * @param who Where the response is posted. NULL is served and not answered for
- *            MOVE; refused for COPY, whose only sign of life is @p who.
- * @param op  storage_pair_op_t: STORAGE_PAIR_MOVE or STORAGE_PAIR_COPY.
+ *            MOVE and REPLACE; refused for COPY, whose only sign of life is @p who.
+ * @param op  storage_pair_op_t: STORAGE_PAIR_MOVE, _COPY or _REPLACE. The answer's
+ *            `op` is the same.
  * @param src Absolute, normalised, virtual. Copied into the event.
  * @param dst Absolute, normalised, virtual. Copied into the event.
  */
@@ -3075,7 +3467,8 @@ void storage_pair_request(QActive *who, uint8_t op, const char *src,
  * StoragePathRspEvt tagged STORAGE_PATH_WRITE. @p line n: replaces line n (1-based)
  * via a temporary renamed over the original, so a failure leaves it untouched; the
  * file must fit a 32 KB buffer (else KODE_NO_RESOURCES); tagged
- * STORAGE_PATH_WRITE_LINE so path_answer() can tell the failures apart.
+ * STORAGE_PATH_WRITE_LINE so path_answer() can tell the failures apart. Either waits
+ * for a transfer in flight like storage_path_request()'s deletes.
  *
  * @param who    Where the response is posted. NULL is served and not
  *               answered.
@@ -3124,6 +3517,21 @@ void storage_cat_request(QActive *who, const char *path, uint32_t max);
  */
 void storage_path_request_wait(StorageWaiter *wait, uint32_t gen, uint8_t op,
                                const char *path);
+
+/**
+ * @brief A STORAGE_PATH_LIST answered into @p wait, from the @p skip-th entry on.
+ *
+ * storage_path_request_wait() with STORAGE_PATH_LIST is this with a @p skip
+ * of 0. The entries left out are counted as the walk finds them, after the
+ * names it never lists, so a page starts where the one before it ended.
+ *
+ * @param wait See storage_path_request_wait().
+ * @param gen  See storage_path_request_wait().
+ * @param path Absolute, normalised, virtual. Copied into the event.
+ * @param skip Entries to leave out: the ones earlier pages gave.
+ */
+void storage_list_request_wait(StorageWaiter *wait, uint32_t gen, const char *path,
+                               uint32_t skip);
 
 /**
  * @brief storage_cat_request(), answered into @p wait.
@@ -3197,6 +3605,8 @@ kode_status_t storage_stat_ask(QActive *who, const char *path);
  *
  * Each entry leaves KODE_STORAGE_LIST_FREE_SLOTS free in @p who's queue; no room
  * ends the page early with @c more set, or KODE_NO_RESOURCES if nothing fit.
+ * The console's `ls` reads a folder through it too, page after page, with a
+ * path it has resolved itself.
  * @param who  The asking AO.
  * @param path A directory, absolute and virtual.
  * @param skip Entries earlier pages sent.
@@ -3272,8 +3682,11 @@ kode_status_t storage_space_ask(QActive *who, const char *path);
  * `file_put`: AO_Log hands over exactly @p size raw bytes, written to @p path
  * (truncating). Answered by RECV_READY_SIG, RECV_ACK_SIG per KODE_RECV_CHUNK, then
  * one of RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG, POSTED to @p who; no
- * APP_FLASH_* reporting. Any failure removes the file, so `app_run` never boots a
- * stub. Designed and verified on the cable; over BLE it is untried, not refused.
+ * APP_FLASH_* reporting. A transfer already in flight is waited for,
+ * KODE_STORAGE_TURN_MS at most; past it, and for a second request while one
+ * waits, the answer is RECV_BUSY_SIG and nothing was armed. Any failure removes
+ * the file, so `app_run` never boots a stub. Designed and verified on the cable;
+ * over BLE it is untried, not refused.
  *
  * @param who   Where the RECV_* conversation is posted. NULL is refused: it is
  *              AO_Storage's only sign the transfer is alive.
@@ -3344,6 +3757,10 @@ void storage_open_request(const char *name, QActive *who);
  * Open, read the first KAPP_PREFIX_LEN bytes, parse and close within one step.
  * It does not take the reader slot, so it can never strand the one open file.
  *
+ * A read that meets a transfer in flight waits for it, in the same line as the
+ * reads of appdata_request() and by the same rules, and is answered with a
+ * failed status only when that wait is full or has run out.
+ *
  * @param name The file, as a listing named it.
  * @param who  Where STORAGE_DESC_RSP_SIG is posted. Never NULL.
  */
@@ -3352,9 +3769,21 @@ void storage_desc_request(const char *name, QActive *who);
 /**
  * @brief Ask AO_Storage what the app data folder says about @p project.
  *
- * Posted to @p who: APPDATA_FIELDS_SIG once, APPDATA_ICON_SIG zero or three times,
- * APPDATA_END_SIG once. No reader slot taken. Refused during a transfer (medium=none,
- * json_status=none); unallocatable gives icon_status=busy and an empty project.
+ * Posted to @p who: APPDATA_FIELDS_SIG once, APPDATA_ICON_SIG zero or
+ * KODE_APP_ICON_PIECES times (the icon, always the 128x128 block, whichever
+ * size the file has), APPDATA_END_SIG once. No reader slot taken. The folder
+ * is on the first medium, the internal one before the card, that holds its
+ * app.json: a folder with no app.json is no data, and does not hide a folder
+ * on the other medium that has one.
+ * A read that meets a transfer in flight waits for it, with up to
+ * KODE_STORAGE_READ_WAIT_DEPTH others and in arrival order, behind a write or
+ * delete that waits; it is answered when the transfer ends. One that waits
+ * KODE_STORAGE_TURN_MS from the first, or finds the wait full, is refused
+ * (medium=none, json_status=none). An icon whose pieces the icon pool cannot
+ * all take, because the last icon is still with its reader, is tried again every
+ * KODE_STORAGE_ICON_RETRY_MS within the same bound, and then answered
+ * icon_status=busy with the medium and the json it found; no event at all gives
+ * icon_status=busy and an empty project.
  * Fields and end always arrive. See https://docs.kode.diy/sdk/kdrv/apps.
  *
  * @param project The app's project name, as the binary declares it.
@@ -3363,12 +3792,15 @@ void storage_desc_request(const char *name, QActive *who);
 void appdata_request(const char *project, QActive *who);
 
 /**
- * @brief Delete @p project's data folder on the internal partition.
+ * @brief Delete @p project's data folder, from the medium that holds it.
  *
- * The one recursive delete, bounded to `/storage/.kode/appsdata/<project>` and one
- * subfolder level (https://docs.kode.diy/sdk/kdrv/apps). The card is never touched;
- * a card folder of that name is logged. Always answered once posted, refusals
- * included, with an AppDataRmRspEvt naming @p project.
+ * The one recursive delete, bounded to `<root>/.kode/appsdata/<project>` and one
+ * subfolder level (https://docs.kode.diy/sdk/kdrv/apps). The internal partition's
+ * folder is the one removed; a card folder of that name is then left where it is
+ * and logged. A folder only on the card is removed from the card. Always answered once posted, refusals
+ * included, with an AppDataRmRspEvt naming @p project. It waits for a transfer in
+ * flight like storage_path_request()'s deletes; a transfer that outlasts the wait
+ * is KODE_DENIED.
  *
  * @param project The app's project name, as the binary declares it.
  * @param who     Where APPDATA_RM_RSP_SIG is posted. Never NULL.
@@ -3384,9 +3816,11 @@ kode_status_t appdata_rm_request(const char *project, QActive *who);
  * The images at the root of the internal partition and of the card whose
  * descriptor names @p project, whatever the files are called, and the app's
  * data folder on each. `kodeos.bin` and `c5_slave.bin` are never opened. One
- * file a step, so the walk never holds AO_Storage. Always answered once
- * posted, with a StorageAppWipeRspEvt naming @p project; an absent card is
- * said there, and is no failure.
+ * file a step, so the walk never holds AO_Storage. One asked while a transfer
+ * is in flight waits for it, KODE_STORAGE_TURN_MS at most, and is refused with
+ * KODE_DENIED after it. Always answered once posted, with a
+ * StorageAppWipeRspEvt naming @p project; an absent card is said there, and is
+ * no failure.
  *
  * @param project The app's project name, as the binary declares it.
  * @param who     Where STORAGE_APP_WIPE_RSP_SIG is posted. Never NULL.
@@ -3396,6 +3830,58 @@ kode_status_t appdata_rm_request(const char *project, QActive *who);
  */
 kode_status_t storage_app_wipe_request(const char *project, QActive *who);
 
+/**
+ * @brief Take every app's files off both media but @p keep's: the factory
+ *        reset's share of this AO.
+ *
+ * An app's image, to a clear, is a file at the root of the internal partition
+ * or of the card, called `*.bin`, whose ESP image header names the ESP32-P4
+ * and whose descriptor names a project other than @p keep, the running
+ * system's own (kodeOS's, whatever the file is called) and the C5's
+ * (KDRV_C5_PROJECT_NAME). Every such image goes, and every data folder under
+ * `<root>/.kode/appsdata/` but @p keep's (compared as FAT does, without case),
+ * whether an app is installed behind it or not. When the running image's
+ * descriptor names no project, no image can be told from it: none is taken,
+ * and every P4 image that would have gone is said left.
+ *
+ * What stays: `kodeos.bin` and `c5_slave.bin`, never opened; an image that
+ * names no project or another chip; every file that is no `.bin` image, which
+ * takes in an install's `.bin.tmp`, a replace's `.bin.bak` and a `.kfw`
+ * container; every other file, at a root or deeper, outside the data trees.
+ * A folder out of the data
+ * folder's format (more files than it holds, a second sub-folder, a deeper
+ * level) loses what the delete reaches and is said left.
+ *
+ * Paced as a wipe, one image or one folder a step, and refused or kept waiting
+ * as a wipe is. A root or a tree that holds more than one walk keeps is walked
+ * again once its names are spent, while that walk's pass took something, up to
+ * KODE_RESET_FILES_WALKS walks. Answered once posted with a
+ * StorageAppWipeRspEvt naming @p keep, per medium:
+ * - `files` the images removed; `left` the images that would not go, and
+ *   those listed that would not open or read;
+ * - `folder` APP_WIPE_FOLDER_LEFT when a folder would not go, when one listed
+ *   is no longer found, or when a tree that is there would not read; else
+ *   APP_WIPE_FOLDER_REMOVED when one went;
+ * - `cut` when some of the medium was never looked at: a root or a tree that
+ *   would not read (a tree a walk listed and the next could not included), a
+ *   root or a tree with more than the walks keep, or an image whose name is
+ *   too long to look at;
+ * - `present` true once the medium mounted and its root read: false for an
+ *   absent card, which is no failure, and for a root that would not read,
+ *   said `cut` too.
+ *
+ * A request is not withdrawn once posted: an asker that stopped waiting still
+ * has it run to its end and its answer arrive, and a clear or a wipe asked
+ * meanwhile waits for the turn or is refused with KODE_DENIED.
+ *
+ * @param keep The one app whose files stay, "" for none.
+ * @param who  Where STORAGE_APP_WIPE_RSP_SIG is posted. Never NULL.
+ * @return KODE_OK when the request is posted and an answer is owed;
+ *         KODE_NO_RESOURCES when the event pool is dry: nothing was posted and
+ *         no answer will come.
+ */
+kode_status_t storage_apps_clear_request(const char *keep, QActive *who);
+
 /** @brief Write one app's data folder (APPDATA_PUT_REQ_SIG). */
 typedef struct {
     QEvt            super;
@@ -3404,7 +3890,8 @@ typedef struct {
                                 *   icon.k64. AO_Storage owns it from the post
                                 *   and khal_free()s it on every path.          */
     uint16_t        json_len;  /**< Bytes of app.json, 1..KAPP_DATA_JSON_MAX.     */
-    uint16_t        icon_len;  /**< Bytes of icon.k64 after it: 0 or KAPP_ICON_BYTES. */
+    uint16_t        icon_len;  /**< Bytes of icon.k64 after it: 0, KAPP_ICON_BYTES or
+                                *   KAPP_ICON_HALF_BYTES.                           */
     QActive        *who;       /**< Where APPDATA_PUT_RSP_SIG is posted.          */
 } AppDataPutEvt;
 
@@ -3413,26 +3900,57 @@ typedef struct {
     QEvt          super;
     char          project[KDRV_SLOT_PROJECT_MAX]; /**< Echoed: answers can cross. */
     kode_status_t rc;      /**< KODE_OK, KODE_DENIED, KODE_ERROR, KODE_IO_ERROR,
-                            *   or KODE_NO_RESOURCES: no room for a new folder. */
+                            *   or KODE_NO_RESOURCES: no room for the put.     */
+    bool          busy;    /**< With KODE_DENIED: the put was good but AO_Storage
+                            *   had no turn for it within KODE_STORAGE_TURN_MS,
+                            *   so nothing was written and the same put may be
+                            *   asked again. False for every other answer.   */
 } AppDataPutRspEvt;
 
 /**
- * @brief Write @p project's data folder on the internal partition, replacing
- *        whatever folder was there.
+ * @brief Write @p project's data folder, replacing whatever folder was there
+ *        whole, or not at all.
  *
- * Clears the folder (as appdata_rm_request()), makes missing parents, then writes
- * `app.json` and, if @p icon_len, `icon.k64` in two steps. Never the card. Once
- * posted, AO_Storage owns @p buf and frees it on every path. Always answered with an
- * AppDataPutRspEvt: KODE_OK; KODE_DENIED bad name, length, NULL buffer or busy;
- * KODE_ERROR not mounted; KODE_IO_ERROR; KODE_NO_RESOURCES when a new folder
- * would leave the partition under KODE_APPDATA_FREE_MIN_BYTES (a folder that is
- * there is always replaced). A failed put leaves no folder.
+ * A card put in since the last listing is mounted first (a mount is posted
+ * ahead of the put). A folder that is there is replaced on the medium that
+ * holds its app.json, the internal partition before the card as the reader
+ * chooses. One inside whose replacement has no room there goes to a card that
+ * took the write check (kdrv_sd_took_write()) and has room, and the folder
+ * inside is removed once the new one reads back as written; a folder on the
+ * card is never moved inside. A new folder goes to a card that took the write
+ * check and has room for it, and stays there; a card that then will not take
+ * the write is not chosen again while it is in (kdrv_sd_write_failed()) and is
+ * mounted again, leaves none of the folder behind, and the folder goes
+ * inside. With no such card, or a full one,
+ * it goes inside and the log says why; when the internal partition has no room
+ * either and a card is mounted that has, it goes to the card. A folder that
+ * fits on neither is answered KODE_NO_RESOURCES.
+ *
+ * Makes missing parents, writes `app.json` and, if @p icon_len, `icon.k64` in two
+ * steps under temporary names beside the old files, and only when both are down
+ * puts them in the old files' place and removes whatever else the folder held. A
+ * put that fails, or never finishes, leaves the folder that was there as it was;
+ * one it made is removed. Once posted, AO_Storage owns @p buf and
+ * frees it on every path. A put that meets a transfer in flight waits for it
+ * (KODE_STORAGE_TURN_MS). Always answered with an AppDataPutRspEvt: KODE_OK;
+ * KODE_DENIED bad name, length, NULL buffer or busy (AppDataPutRspEvt.busy tells
+ * the last apart; a put that meets a call to the card waits for it, and is busy
+ * when the line of those waiting is full); KODE_ERROR not mounted; KODE_IO_ERROR,
+ * also when the card would not write it and the internal partition, with room,
+ * would not either; KODE_NO_RESOURCES when the put does not fit. It is charged what it weighs on the volume: its app.json
+ * and its icon, each rounded up to the volume's cluster (kdrv_storage_cluster_bytes()).
+ * A new folder is charged one cluster more, its own, and on the internal partition
+ * must leave KODE_APPDATA_FREE_MIN_BYTES free besides; a folder that is there is
+ * charged only that pair, the room of the temporaries it is written under beside
+ * the old files. The card keeps no floor: it refuses only when it says it has less
+ * free than the charge. The refusal is told in the log with the numbers.
  *
  * @param project  The app's project name, as the binary declares it.
  * @param buf      app.json then icon.k64, one allocation from khal_alloc_psram()
  *                 or khal_realloc_psram() (what kfw_appdata_take() gives).
  * @param json_len Bytes of app.json, 1 to KAPP_DATA_JSON_MAX.
- * @param icon_len Bytes of icon.k64 after it: 0 for none, else KAPP_ICON_BYTES.
+ * @param icon_len Bytes of icon.k64 after it: 0 for none, else KAPP_ICON_BYTES or
+ *                 KAPP_ICON_HALF_BYTES; the file is written as it is.
  * @param who      Where APPDATA_PUT_RSP_SIG is posted. Never NULL.
  * @return KODE_OK when the request is posted: @p buf is AO_Storage's and an
  *         answer is owed. KODE_NO_RESOURCES when the event pool is dry:
@@ -3447,6 +3965,45 @@ kode_status_t appdata_put_request(const char *project, uint8_t *buf,
  *         request of an install, in ms: a put of 13 KB onto the FAT, or one
  *         recursive delete. */
 #define APPMGR_TIDY_MS      (5000U)
+
+/** @brief How much longer an install that ends in a boot waits, in ms, for the
+ *         answer to the last data-folder request that went unanswered for
+ *         APPMGR_TIDY_MS: the board resets right after, and a write AO_Storage
+ *         is still making would be cut. */
+#define APPMGR_TIDY_LATE_MS (5000U)
+
+/* ---- What an install evicted, kept in NVS until the install ends --------------
+ * An install takes its victims out of the directory before the first byte
+ * arrives. AO_AppMgr records them first, in its own namespace, so a reset in
+ * the middle of the install does not cost them: the next boot puts back the
+ * ones whose bytes are as they were, which each record says by a CRC-32 of the
+ * image's extent taken when the victim was evicted. One blob, a header and one
+ * record per victim; absent when no install is evicting. A boot takes the table
+ * out of NVS before it checks anything.
+ */
+#define APPMGR_UNDO_NS       "kappmgr"  /**< The namespace AO_AppMgr keeps its records in.      */
+#define APPMGR_UNDO_KEY      "undo"     /**< The table of the victims of the install in hand.   */
+#define APPMGR_UNDO_VERSION  2U         /**< The layout below; any other is ignored and erased. */
+#define APPMGR_UNDO_MAX      64U        /**< Records in a table: every slot of the directory.   */
+#define APPMGR_UNDO_HDR_LEN  4U         /**< Bytes of appmgr_undo_hdr_t.                         */
+#define APPMGR_UNDO_REC_LEN  52U        /**< Bytes of appmgr_undo_rec_t.                         */
+
+/** @brief The head of the blob. */
+typedef struct {
+    uint8_t version;       /**< APPMGR_UNDO_VERSION.                          */
+    uint8_t count;         /**< Records that follow: 1..APPMGR_UNDO_MAX.       */
+    uint8_t reserved[2];   /**< Zero.                                         */
+} appmgr_undo_hdr_t;
+
+/** @brief One victim: its directory entry as it stood, field for field, its name and the CRC of its extent. */
+typedef struct {
+    uint32_t offset;       /**< Region-relative, a multiple of 64 KB.          */
+    uint32_t size;         /**< The image's exact length in bytes.             */
+    uint32_t seq;          /**< Its install number.                            */
+    uint32_t flags;        /**< The entry's flags.                             */
+    char     project[KODE_APP_PROJECT_MAX]; /**< Its name, read before the install could overwrite it. */
+    uint32_t crc;          /**< khal_crc32() over [offset, offset + size), taken before the eviction. */
+} appmgr_undo_rec_t;
 
 /**
  * @brief The folder's path on @p m, or false when the name cannot be a folder.
@@ -3469,18 +4026,100 @@ void storage_next_request(uint8_t idx);
 /** @brief Close the open file and release any buffers still on loan. */
 void storage_close_request(void);
 
+/** @brief The tag of a write whose answer needs no number of its own. */
+#define KODE_STORAGE_TAG_NONE  0U
+
 /**
  * @brief Write @p len bytes of @p data to a file called @p name.
  *
  * One call, since the caller already holds the whole buffer: @p data must stay
  * valid and unchanged until the answer. AO_Storage chunks the write with self-posts.
- * A bare name goes internal first, then the card; a name starting with '/' goes
- * to the volume it names only.
+ * A bare name is written over where a read finds it, unless that is a card that
+ * has not taken the write check (kdrv_sd_took_write()); a new one goes to a card
+ * that took it and has room, and inside otherwise, the log saying where and why.
+ * A card put in since the last listing is mounted first. A bare name whose write
+ * or close fails on one medium is removed there and tried once on the other: on
+ * the card only when it took the write check, and not at all when what landed
+ * on the card would not go, which a read of the name would find first. A card
+ * it failed on is not chosen again while it is in (kdrv_sd_write_failed()) and is
+ * mounted again once the write is over. A name starting with '/' goes to the
+ * volume it names only, and is refused with KODE_NO_RESOURCES, nothing
+ * written, when that volume says it has less room than @p len.
  *
- * @param who Receives STORAGE_WRITE_RSP_SIG when it is over, either way.
+ * @param name Where the bytes go.
+ * @param data The bytes.
+ * @param len  How many.
+ * @param who  Receives STORAGE_WRITE_RSP_SIG when it is over, either way.
+ * @param tag  Given back in that answer, so a writer that abandons a write
+ *             tells its late answer from the next write's;
+ *             KODE_STORAGE_TAG_NONE otherwise.
  */
 void storage_write_all_request(const char *name, const void *data,
-                               uint32_t len, QActive *who);
+                               uint32_t len, QActive *who, uint32_t tag);
+
+/**
+ * @brief Write as storage_write_all_request() does, giving way to a download.
+ *
+ * For a write that can be made again later, such as a copy kept on the card.
+ * While a download into a file runs (storage_fetch_ask()) the write is refused
+ * with KODE_DENIED and nothing opened. A download asked for while the write is
+ * in flight cuts it between two chunks: the half-written file is removed and
+ * the answer is KODE_DENIED with the bytes put down so far. A path on a card
+ * that has not proved it takes a write, the way a bare name's card must, is
+ * refused with KODE_ERROR and nothing written; one that fails on the card
+ * takes the card's word back, as a bare name's failure does.
+ *
+ * @param name Where the bytes go.
+ * @param data The bytes; valid and unchanged until the answer.
+ * @param len  How many.
+ * @param who  Receives STORAGE_WRITE_RSP_SIG when it is over, either way.
+ * @param tag  Given back in that answer, as for storage_write_all_request().
+ */
+void storage_write_yield_request(const char *name, const void *data,
+                                 uint32_t len, QActive *who, uint32_t tag);
+
+/**
+ * @brief End the write @p who asked for, between two of its chunks.
+ *
+ * AO_Storage stops, removes the half-written file and answers
+ * STORAGE_WRITE_RSP_SIG with a status other than KODE_OK and the bytes put down
+ * so far; the writer's buffer is its own again from that answer. A request
+ * from an AO that has no write in flight is ignored, so a late one is harmless.
+ *
+ * @param who The AO that called storage_write_all_request().
+ */
+void storage_write_abandon_request(QActive *who);
+
+/**
+ * @brief Download @p url into the file at @p path; answered to @p who with one
+ *        HTTP_FILE_PROGRESS_SIG per chunk in the file and one HTTP_FILE_RSP_SIG.
+ *
+ * AO_Storage leads: it asks AO_Net for the body from the length the file has
+ * (0 for a new one), so asking again after a cut takes the download up where
+ * it stopped. One download at a time on the board, and one ask per AO.
+ *
+ * A bare name goes where storage_write_all_request() puts one: on the card
+ * when the card took the write check, inside otherwise, and written over where
+ * it is. The card is not mounted for it first: a download asked while the
+ * card is out on a call is refused. A chunk the card fails ends the download
+ * with that error and takes the card's word back, as a write's does.
+ *
+ * @param who  The asking AO.
+ * @param url  Shorter than KODE_NET_FETCH_URL_MAX; copied.
+ * @param path Absolute and virtual, or a bare name; shorter than KODE_PATH_MAX
+ *             once a volume's root is put in front of a bare name; copied.
+ * @return As the asks above; KODE_NO_RESOURCES also when PSRAM has no room
+ *         for the download's record.
+ */
+kode_status_t storage_fetch_ask(QActive *who, const char *url, const char *path);
+
+/**
+ * @brief End the download @p who asked for; its HTTP_FILE_RSP_SIG follows,
+ *        @c stopped true. With no download of @p who's running nothing happens.
+ * @param who The AO that asked for the download.
+ * @return KODE_OK when AO_Storage's queue took it; KODE_NO_RESOURCES otherwise.
+ */
+kode_status_t storage_fetch_stop(QActive *who);
 
 /**
  * @brief The buffer a STORAGE_DATA_SIG is talking about.
@@ -3498,6 +4137,24 @@ const uint8_t *storage_buf(uint8_t idx);
 /** @brief Open @p url for reading; the answer goes to @p who. */
 void net_stream_open_request(const char *url, QActive *who);
 
+/**
+ * @brief Open @p url for reading from @p offset on: the rest of a download
+ *        that was cut. The answer goes to @p who, as net_stream_open_request()'s.
+ *
+ * The answer is NET_STREAM_FROM_RSP_SIG (NetStreamFromRspEvt), KODE_OK only
+ * when the body starts at @p offset. It carries the server's status either
+ * way: 206 for the rest, 200 with KODE_ERROR for a server that ignores ranges
+ * and would send the body from its first byte, 416 with KODE_ERROR when
+ * nothing lies past @p offset.
+ *
+ * @param url    Shorter than KODE_NET_FETCH_URL_MAX; copied.
+ * @param offset The bytes already had; 0 asks for the whole body.
+ * @param who    Where the response and the data go.
+ * @return false when there is no event for it or @p url is too long: nothing
+ *         was posted and no answer follows.
+ */
+bool net_stream_open_from_request(const char *url, uint32_t offset, QActive *who);
+
 /** @brief Ask for the next chunk (NET_STREAM_DATA_SIG). */
 void net_stream_read_request(void);
 
@@ -3512,8 +4169,10 @@ const uint8_t *net_stream_buf(uint8_t idx);
 
 /* ---- AO_AppMgr: owner of the apps region --------------------------------
  * Copies a .bin from a medium into the apps region (evicting the oldest install
- * when short of room), lists, launches and removes apps by name. Which firmware
- * boots is AO_Boot's; the two write different flash regions.
+ * when short of room), lists, launches and removes apps by name. An install that
+ * fails gives back every app it evicted whose flash its write never reached, and
+ * so does the next boot after a reset in the middle of one (the table below).
+ * Which firmware boots is AO_Boot's; the two write different flash regions.
  */
 extern QActive * const AO_AppMgr;   /**< The apps-region AO. */
 void AppMgr_ctor(void);             /**< Construct it; kaos_appmgr_start() calls it. */
@@ -3551,8 +4210,8 @@ void appmgr_run_request(const char *name);
  * @brief Leave the install in hand: nothing is committed, and it ends as
  *        APP_FLASH_FAIL_SIG.
  *
- * While victims are being kept on the card it ends when that copy does. With no
- * install, nothing happens.
+ * While the CRC of its victims is being taken it ends when the one in hand is
+ * done. With no install, nothing happens.
  */
 void appmgr_cancel_request(void);
 
@@ -3619,6 +4278,73 @@ bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
  */
 void appmgr_image_request(uint8_t src_kind, const char *src,
                           uint8_t dst_kind, bool launch);
+
+/**
+ * @brief appmgr_image_request(), asking AO_AppMgr for its verdict.
+ *
+ * AO_AppMgr posts @p who one APP_REQ_RSP_SIG (AppReqRspEvt) once it has
+ * decided: taken (an `https` source as soon as it starts opening, a file on a
+ * medium once the medium has opened it, the mailbox at once), busy, missing (no
+ * such file on the medium), empty (nothing in the mailbox) or refused. What
+ * goes wrong after that, a download that fails, is published as
+ * APP_FLASH_FAIL_SIG and says nothing here.
+ *
+ * @param src_kind kfw_src_t as a plain integer.
+ * @param src      File name for fs/sd, URL for http, ignored otherwise.
+ * @param dst_kind kfw_target_t as a plain integer.
+ * @param launch   Boot the image once it is written and verified.
+ * @param who      Where the verdict is posted.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
+                      bool launch, QActive *who);
+
+/**
+ * @brief appmgr_image_ask() for a console command: the install's record names
+ *        the port it came on.
+ *
+ * @param src_kind kfw_src_t as a plain integer.
+ * @param src      File name for fs/sd, URL for http, ignored otherwise.
+ * @param dst_kind kfw_target_t as a plain integer.
+ * @param launch   Boot the image once it is written and verified.
+ * @param who      Where the verdict is posted.
+ * @param asker    KODE_CONSOLE_SRC_* of the command that asked: once the
+ *                 install is taken, its record (`>|install`) goes there, before
+ *                 the verdict and again when the install ends.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_image_ask_from(uint8_t src_kind, const char *src, uint8_t dst_kind,
+                           bool launch, QActive *who, uint8_t asker);
+
+/**
+ * @brief Ask AO_AppMgr for the records of the last app install and the last
+ *        kodeOS update (`install_info`).
+ *
+ * AO_AppMgr writes the two `>|install` records to @p asker, then posts @p who
+ * one APP_REQ_RSP_SIG, always APP_REQ_TAKEN.
+ *
+ * @param who   Where the end is posted.
+ * @param asker KODE_CONSOLE_SRC_* of the command that asked.
+ * @return false when the pool was dry or AO_AppMgr's queue had no room past
+ *         KQP_APPMGR_CMD_MARGIN, and nothing was posted: no answer will come.
+ */
+bool appmgr_install_info_ask(QActive *who, uint8_t asker);
+
+/**
+ * @brief appmgr_run_request(), asking AO_AppMgr for its verdict.
+ *
+ * AO_AppMgr posts @p who one APP_REQ_RSP_SIG: taken when an installed app has
+ * that name (the boot request is on its way to AO_Boot), missing when none
+ * does, busy when it has work in hand.
+ *
+ * @param name The installed app's project name.
+ * @param who  Where the verdict is posted.
+ * @return false when the pool was dry and nothing was posted: no verdict
+ *         will come.
+ */
+bool appmgr_run_ask(const char *name, QActive *who);
 
 /**
  * @brief The event appmgr_image_request() posts, built for a caller that posts it itself.
@@ -3707,13 +4433,12 @@ typedef enum {
     APPDATA_GET_OK = 0,   /**< The folder is written.                           */
     APPDATA_GET_BUSY,     /**< AO_AppMgr or AO_Storage was busy with a write.   */
     APPDATA_GET_NAME,     /**< The project cannot name a folder.                */
-    APPDATA_GET_FETCH,    /**< A file did not come: no network, no 200, no
+    APPDATA_GET_FETCH,    /**< app.json did not come: no network, no 200, no
                            *   Content-Length, fewer bytes than it said, or
                            *   silence.                                         */
     APPDATA_GET_JSON,     /**< app.json is longer than KAPP_DATA_JSON_MAX, is
                            *   not what the board reads, or names an icon
                            *   other than icon.k64.                             */
-    APPDATA_GET_ICON,     /**< icon.k64 is not KAPP_ICON_BYTES long.            */
     APPDATA_GET_FULL,     /**< The internal partition has no room for it.       */
     APPDATA_GET_STORE     /**< The folder could not be written.                 */
 } appdata_get_why_t;
@@ -3726,6 +4451,8 @@ typedef struct {
                                               *   names are added to it.        */
     QActive *who;                            /**< Where APPDATA_GET_RSP_SIG is
                                               *   posted.                       */
+    bool     install;                        /**< An install of the app follows:
+                                              *   the card stays up for it.     */
 } AppDataGetReqEvt;
 
 /** @brief How a fetch of one app's data folder ended (APPDATA_GET_RSP_SIG). */
@@ -3743,20 +4470,38 @@ typedef struct {
  * app is. Two files are read, `<url>app.json` and, when that names an icon,
  * `<url>icon.k64`; both must come with a Content-Length, and they are checked
  * as the folder's own reader checks them before AO_Storage writes the folder
- * (appdata_put_request()), replacing one that was there. One APPDATA_GET_RSP_SIG
+ * (appdata_put_request()), replacing one that was there. An icon that does not
+ * come whole, or is neither of the two sizes, costs the icon alone: app.json is
+ * written without it, and the answer says the folder holds none. One APPDATA_GET_RSP_SIG
  * to @p who, refusals included: AO_AppMgr does one thing at a time and answers
  * APPDATA_GET_BUSY while it writes an image. Any task or AO.
+ *
+ * A fetch that began shows like a write: APP_FLASH_PROGRESS_SIG at 0 % at once
+ * and again every second while it waits on the network, ended by an unnamed
+ * APP_FLASH_DONE_SIG or by APP_FLASH_FAIL_SIG with KFAIL_DATA.
+ *
+ * A fetch asked with @p install is the first step of an install, and its card
+ * is the install's: whatever the fetch's end, neither event goes out. The card
+ * stays at 0 %, said again every second, until the next install from a medium
+ * or a URL takes it over - its own reports carry it from there, so the glass
+ * never empties between the two - or until AO_AppMgr turns to anything else,
+ * a refused install and a terminal install included, or KODE_APPMGR_HOLD_MS
+ * goes by; then the unnamed APP_FLASH_DONE_SIG ends it. A terminal install
+ * raises its own card at its ready. The reports of the install that took the
+ * card name no project until its image is read. The answer to the fetch is
+ * the same either way.
  *
  * @param project The app's project name, as its image declares it.
  * @param url     The base URL, ending where the file names begin; shorter than
  *                KODE_APPDATA_URL_MAX.
+ * @param install true when an install of the app follows the fetch.
  * @param who     The Active Object the answer is posted to. Not NULL.
  * @return KODE_OK when the request is posted and an answer is owed; KODE_ERROR
  *         for a NULL argument or a URL that does not fit; KODE_NO_RESOURCES when
  *         the pool is dry or the queue full. Nothing was posted for the last two.
  */
 kode_status_t appmgr_appdata_get_request(const char *project, const char *url,
-                                         QActive *who);
+                                         bool install, QActive *who);
 
 /* ---- AO_Boot: owner of otadata AND the apps boot request ----------------
  * kodeOS lives in `factory` or its OTA slot; apps live in the `apps` region.
@@ -3783,6 +4528,22 @@ typedef enum {
 
 /** @brief Why we booted, as AO_Boot worked it out on the way up. */
 kboot_reason_t boot_reason(void);
+
+/**
+ * @brief What became of the kodeOS slot that is not running, as AO_Boot read
+ *        otadata on the way up, before the rescue clears it
+ *        (BootStableEvt.other).
+ *
+ * Running from factory after the rescue took over, the other slot was
+ * launched whatever otadata says of it, so it never reads as never launched.
+ */
+typedef enum {
+    KBOOT_OTHER_NEVER_RAN,     /**< Never launched: no switch to it took effect. */
+    KBOOT_OTHER_UNCONFIRMED,   /**< Launched and never confirmed itself; the
+                                *   bootloader brought the board back.          */
+    KBOOT_OTHER_GIVEN_UP       /**< Launched, then given up on after it kept
+                                *   crashing.                                   */
+} kboot_other_t;
 
 /**
  * @brief How the app before this boot ended.
@@ -3919,8 +4680,9 @@ typedef enum {
                                *   KODE_SHIP_UNPLUG_MS, then switches off.      */
 } kboot_reset_end_t;
 
-/* What can fail comes before what cannot be undone, so a failed step leaves the apps and the
- * settings where they were. */
+/* What is most likely to fail comes before what cannot be undone. From the
+ * wipe on, a step that fails leaves the steps before it done and the settings
+ * where they were. */
 /** @brief The steps of a factory reset, in order (FactoryResetRspEvt.step). */
 typedef enum {
     KBOOT_RESET_STEP_FIND = 0,  /**< Where the welcome app is.                  */
@@ -3929,6 +4691,8 @@ typedef enum {
     KBOOT_RESET_STEP_WIPE,      /**< The C5's networks and BLE keys, and this
                                  *   chip's bond store.                         */
     KBOOT_RESET_STEP_APPS,      /**< Every other app removed.                   */
+    KBOOT_RESET_STEP_FILES,     /**< Every other app's images and data folders,
+                                 *   orphans included, on both media.           */
     KBOOT_RESET_STEP_NVS,       /**< Every other NVS namespace.                 */
     KBOOT_RESET_STEP_REQUEST,   /**< The closing request: the welcome app's boot
                                  *   request or AO_Power's cable arm. Only ever
@@ -3940,8 +4704,9 @@ typedef enum {
  * @brief The word for a step of the factory reset, as the console prints it.
  *
  * @param step A kboot_reset_step_t.
- * @return "find", "install", "apps", "link", "wipe", "nvs", "request" or
- *         "done"; "?" for a value that is none of them. Never NULL.
+ * @return "find", "install", "apps", "files", "link", "wipe", "nvs",
+ *         "request" or "done"; "?" for a value that is none of them. Never
+ *         NULL.
  */
 const char *boot_reset_step_name(uint8_t step);
 
@@ -3950,8 +4715,12 @@ const char *boot_reset_step_name(uint8_t step);
  *
  * Keeps the identity cache, the station lock and the welcome app. Steps, each with
  * a KODE_RESET_*_MS budget: find, link, install the welcome app, wipe the C5 and
- * bonds, remove apps, erase NVS. What can fail comes first: a C5 that will not
- * answer stops it with nothing erased. Then RESTART writes the welcome app's boot
+ * bonds, remove apps, take every other app's images and data folders off both
+ * media (storage_apps_clear_request()), erase NVS. A C5 that will not answer
+ * stops the reset before anything is erased. From the wipe on each step
+ * erases, and one that fails stops the reset with the steps before it done and
+ * the settings kept; the files step asks again for a clear refused for a
+ * transfer, inside its budget. Then RESTART writes the welcome app's boot
  * request and restarts at once (no radio park, no clean channel leave); SHIP waits
  * for the cable out KODE_SHIP_UNPLUG_MS, erases NVS again and ships. kodeOS role only.
  *
@@ -3984,6 +4753,15 @@ void boot_radio_parked(void);
  * none. The jump may go on.
  */
 void boot_net_left(void);
+
+/**
+ * @brief Tell AO_Boot that AO_Log has written what was posted to it before
+ *        the leave. AO_Log's answer to log_flush_request(), exactly once.
+ *
+ * Posted with KQP_BOOT_CMD_MARGIN. A queue too full for it drops the answer,
+ * and the leave goes on at its KODE_LEAVE_LOG_MS bound.
+ */
+void boot_log_flushed(void);
 
 /**
  * @brief Whether a held bottom button is still waiting to reset the board,
@@ -4056,6 +4834,37 @@ void log_level_request(const char *tag, kode_log_lvl_t level);
  */
 bool log_dock_lend_request(QActive *who, bool lend);
 
+/**
+ * @brief Ask AO_Log to answer AO_Boot once the lines already posted to it are
+ *        written to their ports (LOG_FLUSH_REQ_SIG, boot_log_flushed()).
+ *
+ * The first step of a leave: a line handed to AO_Log before the jump (an
+ * install's last record) reaches the Kode channel's and the BLE console's
+ * rings before AO_Net and AO_Radio take those ports down. AO_Log writes, it
+ * waits for nothing.
+ *
+ * @return false when nothing was posted: AO_Log's queue was within
+ *         KQP_LOG_CMD_MARGIN.
+ */
+bool log_flush_request(void);
+
+/**
+ * @brief Ask AO_Log to show a host the cable port again (LOG_BOUNCE_REQ_SIG).
+ *
+ * For a cable that came while the P4 slept: each light sleep takes the cable
+ * port's pad off the bus, and a host that failed to enumerate it then may have
+ * given the port up for good. AO_Log waits KHAL_CONSOLE_FRAME_WAIT_MS for a
+ * frame from the host. With none, the pad leaves the bus for
+ * KHAL_CONSOLE_OFF_BUS_MS and comes back, which the host takes for a new
+ * device; a port that gets frames is left on the bus. Either way AO_Log says
+ * so at NOTICE. A request while one runs does nothing. The waits run on the
+ * QP tick, so the asker holds the P4 awake.
+ *
+ * @return false when nothing was posted: AO_Log's queue was within
+ *         KQP_LOG_CMD_MARGIN.
+ */
+bool log_bounce_request(void);
+
 /* ---- AO_Console: the command line ---------------------------------------
  * Owns no hardware. It receives whole lines from AO_Log, parses them
  * run-to-completion, and drives everything else by posting the events those
@@ -4073,7 +4882,9 @@ void kaos_console_start(void);
  * @brief Whether every row of the command table declares its keys legally.
  *
  * A row with more than KCLI_MAX_KEYS keys writes past console_exec()'s value
- * array. Console_ctor() asserts this before the console takes a line.
+ * array, and a verb, key or member past KVERB_NAME_MAX, KARG_KEY_NAME_MAX or
+ * KARG_MEMBER_NAME_MAX outruns its `help` record. Console_ctor() asserts this
+ * before the console takes a line.
  *
  * @return true when every row fits.
  */
@@ -4114,6 +4925,11 @@ QEvt const *lowpower_req_evt(kode_lp_state_t target, uint8_t src);
  * The request is judged by a round of readiness; a participant that is busy
  * refuses it, and lowpower_last_refusal() says who and why. With the option
  * off it logs a refusal and does nothing.
+ *
+ * A request for AWAKE gives up a round under way and ends an app's rest
+ * (KODE_LP_PART_TAKEN); with the board AWAKE already, STATE(AWAKE) goes out
+ * over AWAKE so the owners of that rest restore. AO_Radio asks for it when
+ * its sleep sentinel stands down with the bus up.
  *
  * @param target The state wanted.
  * @param src    Who asked, for the log: KODE_CONSOLE_SRC_* for a command.
@@ -4172,6 +4988,101 @@ void lowpower_input_note(uint8_t src);
  */
 const char *lowpower_last_refusal(void);
 
+/* ---- An app's rest, part by part ------------------------------------------
+ * An app names the parts it does not use (KODE_LP_PART_*) and AO_LowPower puts
+ * them away one at a time, asking each owner alone, while the board stays
+ * AWAKE for everything else. The order is fixed: sound, card, touch, screen,
+ * panel, radio, CPU; back, the CPU first. A request that asks for what cannot
+ * be is refused whole: the radio without the sound in the same request (the
+ * amplifier's enable is a line of the C5), the CPU with the glass up or on a
+ * cable, a touch as a wake source with the touch at rest, a line of the
+ * header that is in use or has an interrupt attached. The panel brings the
+ * screen and the touch with it.
+ * The sound and the card are put away once and come back at their next use:
+ * they are never among the parts held, and asking again asks their owners
+ * again. An owner that answers busy is asked again
+ * KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round is begun again,
+ * while that ask falls inside KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS of the
+ * request; busy past it, or silent for KODE_LOWPOWER_PART_STEP_MS, it ends
+ * the request there. An owner with no room for the AWAKE that brings its
+ * part back is busy the same way, and its part stays held until it has it.
+ *
+ * With KODE_LP_PART_CPU the QP tick stops and the awake lock goes, as in
+ * ASLEEP: no Active Object counts time until a wake. AO_LowPower keeps the
+ * minute it keeps asleep: it reads the charger, counts off_after and serves
+ * the owners' times. Any button, a console line, an MQTT message, a request
+ * to AO_LowPower, a cable, the cell at its cut, an owner's time and what the
+ * request names (a touch, a line of the expansion header, a time) end the CPU
+ * part alone; the other parts stay away until the request to end.
+ *
+ * Each request is answered once, with LOWPOWER_PART_SIG (ANSWER). The same
+ * signal says, unasked, that a wake ended the CPU part (WOKE) and that the
+ * board has every part for a state of its own (TAKEN). A task hears no event
+ * and reads the same in lowpower_part_last().
+ *
+ * A round of the board that an owner may refuse asks the owners of the
+ * devices held at rest last, each with its own copy of the round, and takes
+ * the rest (TAKEN) only when every other owner is ready. Given up before
+ * that, it tells AWAKE to the owners it did ask and to nobody else, and the
+ * rest is as it was, less the CPU part, which the round's clock ended. An
+ * order for OFF, and a round begun while a rest is being arranged, take the
+ * rest at once and are published as any round. A request for AWAKE takes it
+ * whenever it comes (lowpower_request()).
+ */
+
+/** @brief What lowpower_part_req_evt() asks for. */
+typedef struct {
+    uint8_t  parts;          /**< The KODE_LP_PART_* to put away; unused when @c end. */
+    bool     end;            /**< true: bring every part back.                  */
+    bool     wake_touch;     /**< A touch ends the CPU part.                    */
+    bool     wake_level;     /**< The level of @c wake_pin that ends it.        */
+    uint8_t  wake_pin;       /**< A position of the expansion header; 0 for none. */
+    uint32_t wake_after_ms;  /**< A time that ends the CPU part; 0 for none.    */
+} lowpower_part_req_t;
+
+/** @brief How the facade's last request for parts ended, and what is at rest now. */
+typedef struct {
+    uint16_t answers;   /**< The facade's requests answered since the boot; it wraps. */
+    uint8_t  rc;        /**< The last of those answers' kode_status_t.       */
+    uint8_t  parts;     /**< The KODE_LP_PART_* held at rest now.            */
+    bool     open;      /**< A request, anybody's, is being arranged: another
+                         *   is refused until it is answered.                */
+} lowpower_part_last_t;
+
+#ifdef CONFIG_KODE_LOWPOWER
+/**
+ * @brief The event that asks AO_LowPower for parts, for a door that posts it
+ *        with its own margin (LOWPOWER_PART_REQ_SIG).
+ *
+ * @param req What is asked; NULL makes no event.
+ * @param src Who asks, for the log and the answer.
+ * @return The event, to post to AO_LowPower; NULL when the pool had none.
+ */
+QEvt const *lowpower_part_req_evt(const lowpower_part_req_t *req, uint8_t src);
+#endif
+
+/**
+ * @brief How the facade's last request for parts ended, and the parts at rest now.
+ *
+ * A plain read of one word, from any thread. AO_LowPower writes it just
+ * before it publishes LOWPOWER_PART_SIG. Only the answers to requests with
+ * the source KODE_LOWPOWER_SRC_APP are counted, so a task waiting for its own
+ * never takes the console's for it; a request refused because another is
+ * being arranged is answered on the bus and counted nowhere. Without
+ * CONFIG_KODE_LOWPOWER it is all zero.
+ *
+ * @param out Filled; all zero before the first answer.
+ */
+void lowpower_part_last(lowpower_part_last_t *out);
+
+/**
+ * @brief Why the last request for parts was refused, "part: why".
+ *
+ * @return The text; "" when the last one stood. Read from another task, so a
+ *         request answered at that instant can tear it.
+ */
+const char *lowpower_part_why(void);
+
 #if CONFIG_KODE_LOWPOWER
 /** @brief What `lowpower_info` prints of AO_LowPower itself. */
 typedef struct {
@@ -4183,8 +5094,11 @@ typedef struct {
     uint32_t wakes_bot;      /**< Wakes from ASLEEP by BOT.                         */
     uint32_t wakes_ble;      /**< Wakes from ASLEEP by a line on BLE.               */
     uint32_t wakes_mqtt;     /**< Wakes from ASLEEP by the Kode channel.            */
-    uint32_t wakes_timer;    /**< Wakes from ASLEEP for an owner's time, radio
+    uint32_t wakes_timer;    /**< Wakes from ASLEEP for an owner's time, dark
                               *   wakes included.                             */
+    uint8_t  parts;          /**< The KODE_LP_PART_* an app's rest has put away.    */
+    const char *part_why;    /**< Why the last request for parts was refused,
+                              *   whoever asked; "" when it stood.            */
 } lowpower_info_t;
 
 /**
@@ -4268,7 +5182,7 @@ const lowpower_sample_t *lowpower_last_sample(const lowpower_last_t *l, uint8_t 
  * Once, from the owner's initial transition; it then subscribes to
  * LOWPOWER_ROUND_SIG and LOWPOWER_STATE_SIG. It rests its device on a round and
  * answers exactly once; restores on STATE(AWAKE), idempotently (it may repeat);
- * ignores KODE_LP_RADIO; arms no QTimeEvt on ASLEEP (the tick is stopped): work
+ * ignores KODE_LP_DARK; arms no QTimeEvt on ASLEEP (the tick is stopped): work
  * due asleep is timed with khal_time_us() and given with lowpower_wake_at().
  *
  * @param ao   The participant's Active Object.
@@ -4279,11 +5193,11 @@ const lowpower_sample_t *lowpower_last_sample(const lowpower_last_t *l, uint8_t 
 uint8_t lowpower_join(QActive *ao, const char *name);
 
 /**
- * @brief Join the rounds like lowpower_join(), and take part in radio wakes.
+ * @brief Join the rounds like lowpower_join(), and take part in dark wakes.
  *
- * A radio wake (from one of these owners' lowpower_wake_at() times) runs the tick
- * for them alone. On STATE(KODE_LP_RADIO) restore as for AWAKE, work, then call
- * lowpower_radio_done() once; when all are done, or after KODE_LOWPOWER_RADIO_MAX_MS,
+ * A dark wake (from one of these owners' lowpower_wake_at() times) runs the tick
+ * for them alone. On STATE(KODE_LP_DARK) restore as for AWAKE, work, then call
+ * lowpower_dark_done() once; when all are done, or after KODE_LOWPOWER_DARK_MAX_MS,
  * a round for ASLEEP goes to them alone. A busy or silent owner, BOT, a console
  * line, a broker message or a cable turns it into a full AWAKE.
  *
@@ -4291,27 +5205,27 @@ uint8_t lowpower_join(QActive *ao, const char *name);
  * @param name Short name for the log and for `lowpower_info`.
  * @return The participant's id; KODE_LOWPOWER_WHO_NONE when the table is full.
  */
-uint8_t lowpower_join_radio(QActive *ao, const char *name);
+uint8_t lowpower_join_dark(QActive *ao, const char *name);
 
 /**
- * @brief Say that the owner's work in a radio wake is finished (posts
- *        LOWPOWER_RADIO_DONE_SIG).
+ * @brief Say that the owner's work in a dark wake is finished (posts
+ *        LOWPOWER_DARK_DONE_SIG).
  *
- * Once for each LOWPOWER_STATE_SIG with state KODE_LP_RADIO. Outside a radio
+ * Once for each LOWPOWER_STATE_SIG with state KODE_LP_DARK. Outside a dark
  * wake it is dropped. Safe from any task.
  *
- * @param who The id lowpower_join_radio() gave.
+ * @param who The id lowpower_join_dark() gave.
  */
-void lowpower_radio_done(uint8_t who);
+void lowpower_dark_done(uint8_t who);
 
 /**
  * @brief Say when the owner's work next needs the board awake (posts
  *        LOWPOWER_WAKE_AT_SIG).
  *
  * Before answering a round for ASLEEP (also taken while asleep). AO_LowPower wakes
- * at the earliest time given (KODE_LP_CAUSE_TIMER), a radio wake for a radio owner;
+ * at the earliest time given (KODE_LP_CAUSE_TIMER), a dark wake for a dark-wake owner;
  * a past time wakes at once. Times are forgotten at each round and wake, so say it
- * every round; a radio wake forgets only radio owners' times.
+ * every round; a dark wake forgets only dark-wake owners' times.
  *
  * @param who    The id lowpower_join() gave.
  * @param due_us khal_time_us() when the work is due; 0 asks for nothing.
@@ -4333,17 +5247,6 @@ bool lowpower_wake_at(uint8_t who, uint64_t due_us);
  * @param why   Why, at most KODE_LOWPOWER_WHY_MAX - 1 characters; NULL for none.
  */
 void lowpower_ready(uint8_t who, uint32_t round, bool busy, const char *why);
-
-/**
- * @brief Hand AO_Display the glyphs the minute is drawn from.
- *
- * The strip is not copied: it stays the caller's, in PSRAM, until the next
- * AWAKE (see DisplayGlyphsEvt). The event is copied; @p e need not outlive
- * the call.
- *
- * @param e The glyphs and where they go.
- */
-void display_glyphs_hand(const DisplayGlyphsEvt *e);
 
 /**
  * @brief Tell AO_Radio that AO_Net has closed its sessions for an OFF round.
@@ -4392,7 +5295,7 @@ bool radio_sleep_last_note(RadioSleepNoteEvt *out);
  * With CONFIG_KODE_LOWPOWER it joins the rounds: it gives the earliest entry
  * minute as a wake time, and after a timer wake's work asks lowpower_request_rest().
  * An entry still running at its minute is skipped. Nothing is posted before
- * sched_system_up(). `mqtt` minutes go to AO_Net (net_check_at()), a radio-only wake.
+ * sched_system_up(). `mqtt` minutes go to AO_Net (net_check_at()), a dark wake.
  */
 
 #define KODE_SCHED_MQTT_NAME     "mqtt"           /**< The built-in entry's name, reserved. */
@@ -4512,7 +5415,7 @@ void sched_line_busy(void);
  * @brief AO_Net made the check it was given the time of: AO_Scheduler gives it
  *        the next. Posts SCHED_CHECK_DONE_SIG.
  *
- * AO_Net's call, after the dwell of a radio wake, or at once when it had
+ * AO_Net's call, after the dwell of a dark wake, or at once when it had
  * nothing to wake or the board was awake. Safe from any task. Without
  * CONFIG_KODE_SCHEDULER it does nothing.
  *

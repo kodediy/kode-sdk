@@ -46,11 +46,25 @@ uint32_t kradio_note_pack(uint32_t target);
 kradio_note_t kradio_note_unpack(uint32_t word);
 
 /**
+ * @brief Whether the note says the C5 runs an update it has not confirmed.
+ *
+ * True when the note's magic is there, its target is KDRV_RADIO_NOTE_UPDATE
+ * and the reset was a software one; after any other reset the register's word
+ * says nothing.
+ *
+ * @param note         The note as read at boot.
+ * @param reset_was_sw The reset reason is a software reset.
+ * @return true for an update's note.
+ */
+bool kradio_note_is_update(const kradio_note_t *note, bool reset_was_sw);
+
+/**
  * @brief Whether the C5 stays running at this boot's first link.
  *
- * True only when every condition holds: the note's magic is there, its target
- * is a known role and this firmware's own, the reset was a software one, and
- * this boot wants Wi-Fi. Any other case resets the C5.
+ * True for an update's note (kradio_note_is_update()), whatever the role and
+ * the wish. Otherwise true only when every condition holds: the note's magic
+ * is there, its target is a known role and this firmware's own, the reset was
+ * a software one, and this boot wants Wi-Fi. Any other case resets the C5.
  *
  * @param note         The note as read at boot (before it was erased).
  * @param reset_was_sw The reset reason is a software reset.

@@ -48,6 +48,13 @@ extern bool g_fail_codec_new;  /**< The codec object cannot be made.            
 extern bool g_fail_dev_new;    /**< The codec device cannot be made.                */
 extern bool g_fail_vol_curve;  /**< The codec layer refuses the volume curve.       */
 
+extern bool     g_psram;       /**< khal_alloc_psram() and khal_sem_create() hand something
+                                *   out: off, as the pad's cases were written, until a case
+                                *   that needs the stream's ring turns it on.            */
+extern uint32_t g_time_ms;     /**< What khal_time_ms() answers.                     */
+/** @brief Called by khal_sem_wait_timeout(), when set: what happens while a writer waits. */
+extern void (*g_sem_wait_hook)(void);
+
 /** @brief Calls that let go of the clock pad, or set it as an input, while a channel was enabled. */
 extern uint32_t g_viol_pad;
 /** @brief Control interface accesses while a channel was enabled and the clock pad was not routed. */

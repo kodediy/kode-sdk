@@ -3,6 +3,7 @@
  * @file test_kode_setting.c
  * @brief kode_setting_set() and kode_setting_get() over the real facade and the NVS fake.
  */
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -175,6 +176,32 @@ TEST_CASE("a failed write is a failed set that says so", "[kode_setting]")
     TEST_ASSERT_EQUAL_STRING("setting 'flaky' could not be kept", kode_error());
     TEST_ASSERT_TRUE(kode_setting_set("flaky", "x"));
     TEST_ASSERT_EQUAL_STRING("", kode_error());
+}
+
+TEST_CASE("a setting is held to the apps' share of the store", "[kode_setting]")
+{
+    settings_fresh();
+    TEST_ASSERT_TRUE(kode_setting_set("share", "x"));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_NVS_SHARE_MAX, (uint32_t)fake_nvs_last_share());
+}
+
+TEST_CASE("a set past the apps' share is refused, says why and keeps the rest", "[kode_setting]")
+{
+    char want[SET_BUF];
+
+    settings_fresh();
+    TEST_ASSERT_TRUE(kode_setting_set("kept", "before"));
+    fake_nvs_full(true);
+    (void)snprintf(want, sizeof(want),
+                   "setting 'more' could not be kept: the apps' share of the store "
+                   "(%" PRIu32 " bytes) is full", (uint32_t)KODE_NVS_SHARE_MAX);
+
+    TEST_ASSERT_FALSE(kode_setting_set("more", "x"));
+    TEST_ASSERT_EQUAL_STRING(want, kode_error());
+
+    fake_nvs_full(false);
+    TEST_ASSERT_EQUAL_STRING("", kode_setting_get("more"));
+    TEST_ASSERT_EQUAL_STRING("before", kode_setting_get("kept"));
 }
 
 TEST_CASE("a task whose stack is in PSRAM cannot set or get and is told", "[kode_setting]")

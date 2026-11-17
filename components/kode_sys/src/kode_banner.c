@@ -12,9 +12,9 @@
 
 #include "sdkconfig.h"
 
-#include "kbsp_board.h"
 #include "kdrv_apps.h"
 #include "kdrv_slot.h"
+#include "khal_identity.h"
 #include "khal_system.h"
 #include "kode_log.h"
 #include "kode_sdk_version.h"   /* KODE_SDK_VERSION, written by the build */
@@ -23,6 +23,7 @@
 
 #define BANNER_DUMP_MAX   96U             /**< Room for the dump's panic reason.      */
 #define BANNER_LINE_MAX   160U            /**< Room for the reset line.               */
+#define BANNER_BOARD_MAX  64U             /**< Room for the board's words.            */
 #define BANNER_UNKNOWN    "?"             /**< Said when a fact cannot be read.       */
 #define BANNER_MB_BYTES   (1024U * 1024U) /**< Bytes in the megabyte the sizes use.   */
 
@@ -125,11 +126,15 @@ void kode_banner_print(void)
     /* Line 2: the SDK, as the build recorded it. */
     kode_log_always(KODE_LOG_NOTICE, TAG, "sdk %s", KODE_SDK_VERSION);
 
-    /* Line 3: the board and the chip under it. */
+    /* Line 3: the board, its revision as production wrote it, and the chip
+     * under it. */
+    char board[BANNER_BOARD_MAX];
     kode_log_always(KODE_LOG_NOTICE, TAG,
-                    "hardware %s %s, %s v%" PRIu32 ".%" PRIu32 ", %" PRIu32
+                    "hardware %s, %s v%" PRIu32 ".%" PRIu32 ", %" PRIu32
                     " MB flash, %" PRIu32 " MB PSRAM",
-                    KBSP_PRODUCT_NAME, KBSP_BOARD_REV, chip.model,
+                    kode_banner_board(board, sizeof(board),
+                                      khal_identity_board_rev()),
+                    chip.model,
                     (uint32_t)chip.rev_major, (uint32_t)chip.rev_minor,
                     chip.flash_bytes / BANNER_MB_BYTES,
                     chip.psram_bytes / BANNER_MB_BYTES);

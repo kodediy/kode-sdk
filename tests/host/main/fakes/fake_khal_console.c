@@ -34,6 +34,12 @@ static void (*s_on_byte)(uint8_t byte);
 /* What khal_console_rest() was told last. */
 static bool     s_resting;
 
+/* The cable port: the frame count khal_console_frame() reads, and the pad. */
+static uint32_t s_frame;
+static bool     s_pad_on = true;
+static unsigned s_pad_offs;
+static unsigned s_pad_ons;
+
 /* The dock's pins: lent or held, how many calls, and what the next take answers. */
 static bool          s_dock_lent;
 static unsigned      s_dock_releases;
@@ -56,6 +62,10 @@ void fake_console_reset(void)
     s_dock_releases = 0U;
     s_dock_takes    = 0U;
     s_dock_take_rc  = KODE_OK;
+    s_frame         = 0U;
+    s_pad_on        = true;
+    s_pad_offs      = 0U;
+    s_pad_ons       = 0U;
 }
 
 void fake_console_clear_out(void)
@@ -137,6 +147,50 @@ void khal_console_write(const char *buf, size_t len)
 void khal_console_rest(bool rest)
 {
     s_resting = rest;
+}
+
+kode_status_t khal_console_frame(uint32_t *frame)
+{
+    if ( NULL == frame )
+    {
+        return KODE_DENIED;
+    }
+    *frame = s_frame;
+    return KODE_OK;
+}
+
+kode_status_t khal_console_pad(bool on)
+{
+    if ( on )
+    {
+        ++s_pad_ons;
+    }
+    else
+    {
+        ++s_pad_offs;
+    }
+    s_pad_on = on;
+    return KODE_OK;
+}
+
+void fake_console_set_frame(uint32_t frame)
+{
+    s_frame = frame;
+}
+
+bool fake_console_pad_on(void)
+{
+    return s_pad_on;
+}
+
+unsigned fake_console_pad_offs(void)
+{
+    return s_pad_offs;
+}
+
+unsigned fake_console_pad_ons(void)
+{
+    return s_pad_ons;
 }
 
 bool fake_console_resting(void)

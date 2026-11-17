@@ -21,9 +21,24 @@ extern "C" {
 #define KAPP_DATA_VERSION_MAX  16U     /**< version, terminator included (AppEntryEvt). */
 #define KAPP_DATA_DESC_MAX     56U     /**< description: 52 chars + terminator, rounded. */
 #define KAPP_DATA_ICON_MAX     41U     /**< icon path, relative, terminator included. */
-#define KAPP_ICON_W             64U
-#define KAPP_ICON_H             64U
-#define KAPP_ICON_BYTES      12288U    /**< 64*64*2 RGB565 + 64*64 A8. */
+#define KAPP_ICON_W            128U    /**< The icon the board holds, in pixels across. */
+#define KAPP_ICON_H            128U    /**< The icon the board holds, in pixels down.   */
+#define KAPP_ICON_BYTES      49152U    /**< 128*128*2 RGB565 + 128*128 A8: the block
+                                        *   every reader and drawer of an icon uses.   */
+#define KAPP_ICON_HALF_W        64U    /**< The smaller form a file may have, across.   */
+#define KAPP_ICON_HALF_H        64U    /**< The smaller form a file may have, down.     */
+#define KAPP_ICON_HALF_BYTES 12288U    /**< 64*64*2 RGB565 + 64*64 A8: the smaller form a
+                                        *   file may have. It is brought up to
+                                        *   KAPP_ICON_BYTES when it is read.            */
+_Static_assert(KAPP_ICON_BYTES == ((KAPP_ICON_W * KAPP_ICON_H * 2U) + (KAPP_ICON_W * KAPP_ICON_H)),
+               "KAPP_ICON_BYTES is a 128x128 RGB565 plane and an A8 plane");
+_Static_assert(KAPP_ICON_HALF_BYTES == ((KAPP_ICON_HALF_W * KAPP_ICON_HALF_H * 2U)
+                                        + (KAPP_ICON_HALF_W * KAPP_ICON_HALF_H)),
+               "KAPP_ICON_HALF_BYTES is a 64x64 RGB565 plane and an A8 plane");
+_Static_assert(KAPP_ICON_W == (2U * KAPP_ICON_HALF_W),
+               "the smaller icon doubles to the one the board holds");
+_Static_assert(KAPP_ICON_H == (2U * KAPP_ICON_HALF_H),
+               "the smaller icon doubles to the one the board holds");
 #define KAPP_DATA_JSON_NAME  "app.json"  /**< A data folder's first file.          */
 #define KAPP_DATA_ICON_NAME  "icon.k64"  /**< Its icon, when a writer of the folder
                                           *   stores one.                          */
@@ -59,6 +74,29 @@ kapp_json_status_t kapp_data_parse(const char *text, size_t len, kapp_data_t *ou
 
 /** @brief The one-word name of a status, for the console and the log. */
 const char *kapp_json_status_name(kapp_json_status_t st);
+
+/**
+ * @brief Whether @p len is the length of an icon.k64 the board reads.
+ * @param len A file's length.
+ * @return true for KAPP_ICON_BYTES and KAPP_ICON_HALF_BYTES, false for any other.
+ */
+bool kapp_icon_len_ok(size_t len);
+
+/**
+ * @brief Bring an icon read into @p block up to the 128x128 form, in place.
+ *
+ * A file of KAPP_ICON_BYTES is left as it is. One of KAPP_ICON_HALF_BYTES is
+ * doubled in both directions, each pixel of the RGB565 plane and of the A8
+ * plane becoming a square of four, so the block reads as a 128x128 icon
+ * whichever the file was. The caller is the one place that reads icon.k64;
+ * nothing above it learns that the file had two sizes.
+ *
+ * @param block KAPP_ICON_BYTES of writable memory, the file's bytes at its head.
+ * @param len   The file's length, as the read reported it.
+ * @return true when @p block holds a 128x128 icon; false, with @p block
+ *         untouched, when @p len is neither size.
+ */
+bool kapp_icon_widen(uint8_t *block, size_t len);
 
 /** @brief What an app.json that arrived alone, ahead of its folder, asks for. */
 typedef enum {

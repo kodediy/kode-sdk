@@ -33,8 +33,14 @@ typedef struct {
     uint8_t  fc[KDRV_FRAME_FC_LEN];      /**< Frame control, as on the air.                  */
     uint8_t  addr1[KDRV_FRAME_ADDR_LEN]; /**< Address 1, as on the air.                      */
     uint8_t  addr2[KDRV_FRAME_ADDR_LEN]; /**< Address 2; zeros when the frame has none.      */
+    uint8_t  addr3[KDRV_FRAME_ADDR_LEN]; /**< Address 3; zeros when the frame has none, and
+                                          *   from a C5 that sends the record as it was.      */
     uint16_t len;                        /**< The frame's length on the air.                 */
-    uint8_t  head[KODE_SNIFF_HEAD_LEN];  /**< After the MAC header; zeros past the end.      */
+    uint8_t  head_len;                   /**< Bytes of @c head kept: KODE_SNIFF_HEAD_LEN, 8 from
+                                          *   a C5 that sends the record as it was, 0 in a
+                                          *   data frame.                                     */
+    uint8_t  head[KODE_SNIFF_HEAD_LEN];  /**< After the MAC header; zeros past the frame's end,
+                                          *   past @c head_len and in a data frame.           */
 } kdrv_frame_t;
 
 /** @brief What one batch said about its period. */
@@ -67,13 +73,24 @@ kode_status_t kdrv_frames_init(void);
  *
  * Runs on esp-hosted's thread: one lock, held for the copy and nothing else.
  * Records that do not fit the ring are counted in kdrv_frames_dropped(), never
- * overwritten. Only the newest tick is kept.
+ * overwritten, and so are those of a batch whose records are not whole (one
+ * at least): its records are refused and its header is still the tick, so
+ * the count reaches a listener when every batch is refused. Only the newest
+ * tick is kept. A data frame keeps no head, from any C5: what follows its
+ * header is a third party's traffic.
+ *
+ * The size of a batch's records is its length after the header shared out
+ * among its count. Records of kode_sniff_rec_t's size are read as they are;
+ * kode_sniff_rec_short_t's, which a C5 from before KODE_SNIFF_WIDE sends, as
+ * that (@c head_len 8, @c addr3 zeros), so such a C5 is heard.
  *
  * @param payload kode_sniff_batch_t, then its records; valid only during the call.
  * @param len     Payload bytes.
- * @return true when the batch was taken; false before kdrv_frames_init(), for
- *         a payload shorter than its header plus its records, or for a count
- *         over KODE_SNIFF_BATCH_MAX (nothing is queued then).
+ * @return true when the batch's header was read: a new tick waits, with its
+ *         records queued, or counted dropped when they are not a whole number
+ *         of one of the two sizes or are more than KODE_SNIFF_BATCH_MAX;
+ *         false before kdrv_frames_init() or for a payload shorter than a
+ *         header (nothing changes then).
  */
 bool kdrv_frames_feed(const uint8_t *payload, size_t len);
 
@@ -107,7 +124,8 @@ bool kdrv_frames_tick_take(kdrv_frames_tick_t *out);
 bool kdrv_frames_next(kdrv_frame_t *out);
 
 /**
- * @brief Records the ring refused since the last kdrv_frames_forget().
+ * @brief Records the ring refused, and those of batches that were not whole,
+ *        since the last kdrv_frames_forget().
  * @return The count; 0 before the ring exists.
  */
 uint32_t kdrv_frames_dropped(void);

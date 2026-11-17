@@ -47,6 +47,9 @@ static kode_sys_ble_device_t s_kept[KODE_SYS_BLE_SCAN_MAX];
 /** @brief How many devices the callback was offered. */
 static unsigned s_kept_n;
 
+/** @brief The next answer says the radio rests (ScanWaiter.rest); cleared once written. */
+static bool s_answer_rest;
+
 /** @brief Empty AO_Radio's queue, recycling what it holds. */
 static void radio_flush(void)
 {
@@ -72,8 +75,9 @@ static void ble_fresh(void)
     radio_flush();
     fake_sem_reset();
     fake_time_reset();
-    s_hook_fault = NULL;
-    s_kept_n     = 0U;
+    s_hook_fault  = NULL;
+    s_kept_n      = 0U;
+    s_answer_rest = false;
     (void)memset(s_kept, 0, sizeof(s_kept));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ble_set_data(NULL, 0U));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ble_set_name(NULL));
@@ -146,8 +150,10 @@ static void answer_head(unsigned n, const char *prefix, kode_status_t rc)
         rows[i].rssi    = (int8_t)(-40 - (int)i);
         ++got;
     }
-    w->rc  = (uint8_t)rc;
-    w->got = (uint8_t)got;
+    w->rc   = (uint8_t)rc;
+    w->got  = (uint8_t)got;
+    w->rest = s_answer_rest;
+    s_answer_rest = false;
     __atomic_store_n(&w->ack, a->gen, __ATOMIC_RELEASE);
     khal_sem_signal(w->done);
     QF_gc(e);
@@ -162,6 +168,13 @@ static void radio_answers_two(void)
 /** @brief AO_Radio, inside the wait: Bluetooth is off in Settings. */
 static void radio_answers_off(void)
 {
+    answer_head(0U, "dev", KODE_DENIED);
+}
+
+/** @brief AO_Radio, inside the wait: an app rests the radio. */
+static void radio_answers_rest(void)
+{
+    s_answer_rest = true;
     answer_head(0U, "dev", KODE_DENIED);
 }
 
@@ -284,9 +297,9 @@ TEST_CASE("a listen asked by no AO, or for 499 or 30001 ms, is refused and posts
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_scan(NULL, BLE_TEST_MS));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_scan(AO_Radio, 499U));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ble_scan(AO_Radio, 30001U));
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ble_scan(&keep_dev, NULL, 499U, BLE_TEST_WAIT_MS));
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ble_scan(&keep_dev, NULL, 30001U, BLE_TEST_WAIT_MS));
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_ble_scan(NULL, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ble_scan(&keep_dev, NULL, 499U, BLE_TEST_WAIT_MS, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ble_scan(&keep_dev, NULL, 30001U, BLE_TEST_WAIT_MS, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_ble_scan(NULL, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS, NULL));
     TEST_ASSERT_EQUAL_UINT(0U, radio_pending());
 }
 
@@ -296,7 +309,7 @@ TEST_CASE("a blocking listen offers each device AO_Radio wrote, its address as t
     ble_fresh();
     fake_sem_wait_hook(&radio_answers_two);
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS, NULL));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
     TEST_ASSERT_EQUAL_UINT(2U, s_kept_n);
     TEST_ASSERT_EQUAL_STRING("dev-0", s_kept[0].name);
@@ -307,8 +320,25 @@ TEST_CASE("a blocking listen offers each device AO_Radio wrote, its address as t
     TEST_ASSERT_EQUAL_UINT(0U, radio_pending());
 
     fake_sem_wait_hook(&radio_answers_off);
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS, NULL));
     TEST_ASSERT_EQUAL_UINT(2U, s_kept_n);
+}
+
+TEST_CASE("a blocking listen tells its caller an app's rest from Bluetooth off", "[kode_sys_ble]")
+{
+    bool rest = false;
+
+    ble_fresh();
+    fake_sem_wait_hook(&radio_answers_rest);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+                          kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS, &rest));
+    TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
+    TEST_ASSERT_TRUE_MESSAGE(rest, "the answer's rest did not reach the caller");
+
+    fake_sem_wait_hook(&radio_answers_off);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+                          kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS, &rest));
+    TEST_ASSERT_FALSE_MESSAGE(rest, "Bluetooth off was told as a rest");
 }
 
 TEST_CASE("test_ble_scan_late_answer_is_dropped", "[kode_sys_ble]")
@@ -317,19 +347,19 @@ TEST_CASE("test_ble_scan_late_answer_is_dropped", "[kode_sys_ble]")
     s_late_step = 0U;
 
     /* Nobody answers in time: the wait runs out, and the request stays owed. */
-    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS, NULL));
     TEST_ASSERT_EQUAL_UINT(1U, radio_pending());
 
     /* The owed answer never lands: the storage is not lent again, nothing is posted. */
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES,
-                          kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS));
+                          kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS, NULL));
     TEST_ASSERT_EQUAL_UINT(1U, radio_pending());
     TEST_ASSERT_EQUAL_UINT(0U, s_kept_n);
 
     /* It lands at last, tagged with the old generation, inside the next call's wait:
      * that call waits it out, asks again, and offers its own devices alone. */
     fake_sem_wait_hook(&radio_answers_late);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ble_scan(&keep_dev, NULL, BLE_TEST_MS, BLE_TEST_WAIT_MS, NULL));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
     TEST_ASSERT_EQUAL_UINT(2U, s_late_step);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_kept_n, "the abandoned answer's devices were offered");

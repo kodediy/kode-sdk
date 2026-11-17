@@ -296,6 +296,56 @@ TEST_CASE("fs_info closes on the internal FAT's answer, not on the card's",
     TEST_ASSERT_TRUE(replied(">ok"));
 }
 
+/** @brief Deliver the card's STORAGE_INFO_SIG with nothing mounted, for @p why. */
+static void card_not_mounted_arrives(kdrv_sd_why_t why)
+{
+    StorageInfoEvt i;
+
+    (void)memset(&i, 0, sizeof(i));
+    i.super  = (QEvt)QEVT_INITIALIZER(STORAGE_INFO_SIG);
+    i.medium = (uint8_t)KDRV_MEDIUM_SD;
+    i.why    = (uint8_t)why;
+    QASM_DISPATCH(AO_Console, &i.super, 0U);
+}
+
+/* An empty slot, a card with no FAT volume and a card that would not come up
+ * are three answers, not one `mounted=off`. */
+TEST_CASE("sd_info says why the card is not mounted", "[console_sd]")
+{
+    static const struct {
+        kdrv_sd_why_t why;
+        const char   *record;
+    } CASES[] = {
+        { KDRV_SD_WHY_NONE,    ">|medium=sd mounted=off why=none"    },
+        { KDRV_SD_WHY_NO_CARD, ">|medium=sd mounted=off why=no_card" },
+        { KDRV_SD_WHY_NO_FAT,  ">|medium=sd mounted=off why=no_fat"  },
+        { KDRV_SD_WHY_FAILED,  ">|medium=sd mounted=off why=failed"  },
+    };
+
+    for ( size_t c = 0U; (sizeof(CASES) / sizeof(CASES[0])) > c; ++c )
+    {
+        console_up();
+        type_line("sd_info");
+        card_not_mounted_arrives(CASES[c].why);
+        TEST_ASSERT_TRUE_MESSAGE(replied(CASES[c].record), CASES[c].record);
+        TEST_ASSERT_TRUE(replied(">ok"));
+    }
+
+    /* A mounted card has nothing to say, and says so. */
+    console_up();
+    type_line("sd_info");
+    info_arrives(KDRV_MEDIUM_SD, 30000U);
+    TEST_ASSERT_TRUE(replied(">|medium=sd mounted=on total_kb=30000 free_kb=1 "
+                             "why=none"));
+
+    /* The internal partition has no card to be missing. */
+    console_up();
+    type_line("fs_info");
+    info_arrives(KDRV_MEDIUM_FS, 1988U);
+    TEST_ASSERT_TRUE(replied(">|medium=fs mounted=on total_kb=1988 free_kb=1"));
+    TEST_ASSERT_FALSE(replied("why="));
+}
+
 /* ---- sd_help --------------------------------------------------------------- */
 
 TEST_CASE("sd_help lists every field, paced, and closes with ok", "[console_sd]")
@@ -331,7 +381,7 @@ TEST_CASE("sd_help lists every field, paced, and closes with ok", "[console_sd]"
     fake_klog_reset();
     (void)qf_support_tick(AO_Console, 1U);
     TEST_ASSERT_TRUE(
-        replied(">|field=\"freq_req_khz\" unit=kHz min=400 max=50000 rw=rw"));
+        replied(">|field=\"check_req\" unit=bool min=0 max=1 rw=rw"));
     TEST_ASSERT_TRUE(replied(">ok"));
 }
 

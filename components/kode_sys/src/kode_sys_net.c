@@ -58,6 +58,7 @@ kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t ca
     kdrv_net_http_result_t r;
     (void)memset(&r, 0, sizeof(r));
     r.content_length = -1;
+    r.range_total    = -1;
 
     kode_status_t const rc = kdrv_net_http_get(url, (uint8_t *)buf, cap, &r,
                                                KODE_HTTP_TIMEOUT_MS);
@@ -67,6 +68,34 @@ kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t ca
     out->body_len       = r.body_len;
     out->kept           = r.kept;
     out->truncated      = r.truncated;
+    out->range_total    = r.range_total;
+    return rc;
+}
+
+kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *buf,
+                                        uint32_t cap, kode_sys_http_result_t *out)
+{
+    if ( NULL == out )
+    {
+        return KODE_ERROR;
+    }
+
+    /* Cleared first, as in kode_block_net_ping(). */
+    kdrv_net_http_result_t r;
+    (void)memset(&r, 0, sizeof(r));
+    r.content_length = -1;
+    r.range_total    = -1;
+
+    /* cppcheck-suppress misra-c2012-11.5 ; the facade's buffer is void *, and the driver fills it with bytes */
+    kode_status_t const rc = kdrv_net_http_get_range(url, offset, (uint8_t *)buf, cap, &r,
+                                                     KODE_HTTP_TIMEOUT_MS);
+
+    out->status         = r.status;
+    out->content_length = r.content_length;
+    out->body_len       = r.body_len;
+    out->kept           = r.kept;
+    out->truncated      = r.truncated;
+    out->range_total    = r.range_total;
     return rc;
 }
 
@@ -82,6 +111,7 @@ kode_status_t kode_block_http_post_buffer(const char *url, const void *body,
     kdrv_net_http_result_t r;
     (void)memset(&r, 0, sizeof(r));
     r.content_length = -1;
+    r.range_total    = -1;
 
     const char *const send_body = body;
     uint8_t *const    recv_buf  = buf;
@@ -98,6 +128,7 @@ kode_status_t kode_block_http_post_buffer(const char *url, const void *body,
     out->body_len       = r.body_len;
     out->kept           = r.kept;
     out->truncated      = r.truncated;
+    out->range_total    = r.range_total;
     return rc;
 }
 
@@ -155,6 +186,18 @@ kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_http_get_range(QActive *me, const char *url, kode_http_off_t offset,
+                                      void *buf, uint32_t cap)
+{
+    if ( !kode_sys_text_fits(url, KODE_SYS_NET_URL_MAX) || (NULL == buf) || (0U == cap)
+        || (offset > (KODE_HTTP_OFF_MAX - ((kode_http_off_t)cap - 1U))) )
+    {
+        return KODE_DENIED;
+    }
+    return net_http_range_ask(me, url, (uint64_t)offset, buf, cap);
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 kode_status_t kode_sys_http_post(QActive *me, const char *url, const void *body, uint32_t len,
                                  const char *ctype, void *buf, uint32_t cap)
 {
@@ -202,6 +245,13 @@ kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t ca
     return KODE_DENIED;
 }
 
+kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *buf,
+                                        uint32_t cap, kode_sys_http_result_t *out)
+{
+    (void)url; (void)offset; (void)buf; (void)cap; (void)out;
+    return KODE_DENIED;
+}
+
 kode_status_t kode_block_http_post_buffer(const char *url, const void *body,
                             uint32_t len, const char *ctype, void *buf,
                             uint32_t cap, kode_sys_http_result_t *out)
@@ -236,6 +286,14 @@ kode_status_t kode_sys_net_ping(QActive *me, const char *host, uint8_t count)
 kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap)
 {
     (void)me; (void)url; (void)buf; (void)cap;
+    return KODE_DENIED;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
+kode_status_t kode_sys_http_get_range(QActive *me, const char *url, kode_http_off_t offset,
+                                      void *buf, uint32_t cap)
+{
+    (void)me; (void)url; (void)offset; (void)buf; (void)cap;
     return KODE_DENIED;
 }
 

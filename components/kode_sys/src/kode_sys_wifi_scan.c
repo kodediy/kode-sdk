@@ -75,8 +75,12 @@ static void wifi_scan_offer(kode_sys_wifi_ap_cb cb, void *ctx)
     }
 }
 
-kode_status_t kode_block_wifi_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms)
+kode_status_t kode_block_wifi_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms, bool *rest)
 {
+    if ( NULL != rest )
+    {
+        *rest = false;
+    }
     if ( NULL == cb )
     {
         return KODE_ERROR;
@@ -95,6 +99,14 @@ kode_status_t kode_block_wifi_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t m
     {
         wifi_scan_offer(cb, ctx);
     }
+    else if ( (KODE_DENIED == rc) && (NULL != rest) )
+    {
+        *rest = s_wifi_scan.wait.rest;
+    }
+    else
+    {
+        /* Nothing more to hand over. */
+    }
     kode_sys_scan_release(&s_wifi_scan);
     return rc;
 }
@@ -107,9 +119,13 @@ kode_status_t kode_sys_wifi_scan(QActive *me)
     return KODE_DENIED;
 }
 
-kode_status_t kode_block_wifi_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms)
+kode_status_t kode_block_wifi_scan(kode_sys_wifi_ap_cb cb, void *ctx, uint32_t ms, bool *rest)
 {
     (void)cb; (void)ctx; (void)ms;
+    if ( NULL != rest )
+    {
+        *rest = false;
+    }
     return KODE_DENIED;
 }
 

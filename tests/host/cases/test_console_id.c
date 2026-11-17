@@ -18,6 +18,7 @@
 #include "fakes.h"
 #include "kaos.h"
 #include "kcli_proto.h"
+#include "khal_identity.h"
 #include "kode_wire.h"
 #include "kqp.h"
 #include "qf_support.h"
@@ -377,4 +378,83 @@ TEST_CASE("c5_wipe closes with ok when every step did", "[console_id]")
     a.step   = (uint8_t)C5_WIPE_DONE;
     QASM_DISPATCH(AO_Console, &a.super, 0U);
     TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+/* ---- board_rev: the hardware revision production writes ------------------ */
+
+/* The revision is the identity's, kept across a factory reset. Anyone may read
+ * it; only the cable writes it, as the other identity verbs. */
+
+/** @brief A store with no revision, read as the boot would. */
+static void no_revision(void)
+{
+    fake_nvs_reset();
+    (void)khal_identity_init();
+}
+
+TEST_CASE("board_rev with nothing written says none, and why", "[console_id]")
+{
+    console_up();
+    no_revision();
+    type_line("board_rev");
+    TEST_ASSERT_TRUE(replied(">|board_rev value=-"));
+    TEST_ASSERT_TRUE_MESSAGE(replied("no official hardware revision is loaded"),
+                             "the log does not say why");
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+TEST_CASE("board_rev value= on the cable stores the revision", "[console_id]")
+{
+    console_up();
+    no_revision();
+    type_line("board_rev value=\"1.0\"");
+    TEST_ASSERT_TRUE(replied(">|board_rev value=\"1.0\""));
+    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_EQUAL_STRING("1.0", khal_identity_board_rev());
+
+    fake_klog_reset();
+    type_line("board_rev");
+    TEST_ASSERT_TRUE(replied(">|board_rev value=\"1.0\""));
+}
+
+TEST_CASE("board_rev value= is refused over BLE, from the channel and from cron",
+          "[console_id]")
+{
+    console_up();
+    no_revision();
+    type_from("board_rev value=\"1.0\"", (uint8_t)KODE_CONSOLE_SRC_BLE);
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=cable"));
+    type_from("board_rev value=\"1.0\"", (uint8_t)KODE_CONSOLE_SRC_NET);
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=net"));
+    type_from("board_rev value=\"1.0\"", (uint8_t)KODE_CONSOLE_SRC_SCHED);
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=sched"));
+    TEST_ASSERT_EQUAL_STRING("", khal_identity_board_rev());
+
+    /* Reading asks nothing of the port. */
+    fake_klog_reset();
+    type_from("board_rev", (uint8_t)KODE_CONSOLE_SRC_BLE);
+    TEST_ASSERT_TRUE(replied(">|board_rev value=-"));
+}
+
+TEST_CASE("board_rev refuses a value that is no revision, and a bare one",
+          "[console_id]")
+{
+    console_up();
+    no_revision();
+    type_line("board_rev value=\"DVT\"");
+    TEST_ASSERT_TRUE(replied(">err code=3 msg=value"));
+    fake_klog_reset();
+    type_line("board_rev value=1.0");
+    TEST_ASSERT_TRUE(replied(">err code=3 msg=value"));
+    TEST_ASSERT_EQUAL_STRING("", khal_identity_board_rev());
+}
+
+TEST_CASE("board_rev says a store that refused the write", "[console_id]")
+{
+    console_up();
+    no_revision();
+    fake_nvs_fail_next_set();
+    type_line("board_rev value=\"1.0\"");
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=board_rev"));
+    TEST_ASSERT_EQUAL_STRING("", khal_identity_board_rev());
 }

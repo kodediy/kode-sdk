@@ -222,20 +222,23 @@ void kchan_out_set_wake(kchan_out_wake_t wake);
  * not tell the consumer). A line that does not fit, is longer than
  * `KODE_LOG_LINE_MAX`, or arrives before the ring exists is counted as lost.
  *
- * @param line The line; not NUL-terminated necessarily.
- * @param len  Its length, 1 to `KODE_LOG_LINE_MAX`.
+ * @param line  The line; not NUL-terminated necessarily.
+ * @param len   Its length, 1 to `KODE_LOG_LINE_MAX`.
+ * @param acked Publish it at QoS 1 and publish CONSOLE_SENT_SIG on its PUBACK
+ *              (kode_log_reply_confirm()).
  * @return true when the line is in the ring.
  */
-bool kchan_out_push(const char *line, size_t len);
+bool kchan_out_push(const char *line, size_t len, bool acked);
 
 /**
  * @brief Take the oldest line out of the ring.
  *
- * @param line Receives the line and a terminator.
- * @param cap  Bytes @p line holds; a longer line is cut to cap - 1.
+ * @param line  Receives the line and a terminator.
+ * @param cap   Bytes @p line holds; a longer line is cut to cap - 1.
+ * @param acked Receives whether it was pushed acked; may be NULL.
  * @return The line's length, 0 when the ring is empty.
  */
-size_t kchan_out_pop(char *line, size_t cap);
+size_t kchan_out_pop(char *line, size_t cap, bool *acked);
 
 /** @brief Whether a line is waiting. */
 bool kchan_out_pending(void);

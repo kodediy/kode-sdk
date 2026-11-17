@@ -44,6 +44,9 @@ static unsigned s_kept_n;
 /** @brief Rows after which the callback asks to stop; 0 = never. */
 static unsigned s_stop_after;
 
+/** @brief The next answer says the radio rests (ScanWaiter.rest); cleared once written. */
+static bool s_answer_rest;
+
 /** @brief Empty AO_Radio's queue, recycling what it holds. */
 static void radio_flush(void)
 {
@@ -63,9 +66,10 @@ static void scan_fresh(void)
     radio_flush();
     fake_sem_reset();
     fake_time_reset();
-    s_hook_fault = NULL;
-    s_kept_n     = 0U;
-    s_stop_after = 0U;
+    s_hook_fault  = NULL;
+    s_kept_n      = 0U;
+    s_stop_after  = 0U;
+    s_answer_rest = false;
     (void)memset(s_kept, 0, sizeof(s_kept));
 }
 
@@ -124,8 +128,10 @@ static void answer_head(unsigned n, const char *prefix, kode_status_t rc)
         rows[i].authmode = (uint8_t)(i % 2U);
         ++got;
     }
-    w->rc  = (uint8_t)rc;
-    w->got = (uint8_t)got;
+    w->rc   = (uint8_t)rc;
+    w->got  = (uint8_t)got;
+    w->rest = s_answer_rest;
+    s_answer_rest = false;
     __atomic_store_n(&w->ack, a->gen, __ATOMIC_RELEASE);
     khal_sem_signal(w->done);
     QF_gc(e);
@@ -147,6 +153,13 @@ static void radio_answers_failure(void)
 static void radio_answers_busy(void)
 {
     answer_head(0U, "net", KODE_NO_RESOURCES);
+}
+
+/** @brief AO_Radio, inside the wait: an app rests the radio. */
+static void radio_answers_rest(void)
+{
+    s_answer_rest = true;
+    answer_head(0U, "net", KODE_DENIED);
 }
 
 /** @brief Answers given by radio_answers_late(), in order. */
@@ -197,7 +210,7 @@ TEST_CASE("a blocking scan offers every row AO_Radio wrote, in its order", "[kod
     scan_fresh();
     fake_sem_wait_hook(&radio_answers_three);
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
     TEST_ASSERT_EQUAL_UINT(3U, s_kept_n);
     TEST_ASSERT_EQUAL_STRING("net-0", s_kept[0].ssid);
@@ -216,7 +229,7 @@ TEST_CASE("a blocking scan stops offering rows when the callback says so", "[kod
     s_stop_after = 2U;
     fake_sem_wait_hook(&radio_answers_three);
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
     TEST_ASSERT_EQUAL_UINT(2U, s_kept_n);
 }
@@ -224,7 +237,7 @@ TEST_CASE("a blocking scan stops offering rows when the callback says so", "[kod
 TEST_CASE("a blocking scan with no callback is refused and posts nothing", "[kode_sys_wifi_scan]")
 {
     scan_fresh();
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_wifi_scan(NULL, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_wifi_scan(NULL, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_EQUAL_UINT(0U, radio_pending());
 }
 
@@ -233,14 +246,30 @@ TEST_CASE("a blocking scan says what AO_Radio answered, and offers nothing on a 
 {
     scan_fresh();
     fake_sem_wait_hook(&radio_answers_failure);
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
     TEST_ASSERT_EQUAL_UINT(0U, s_kept_n);
 
     fake_sem_wait_hook(&radio_answers_busy);
-    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
     TEST_ASSERT_EQUAL_UINT(0U, s_kept_n);
+}
+
+TEST_CASE("a blocking scan hands its caller the rest the answer says, and no other answer's",
+          "[kode_sys_wifi_scan]")
+{
+    bool rest = false;
+
+    scan_fresh();
+    fake_sem_wait_hook(&radio_answers_rest);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, &rest));
+    TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
+    TEST_ASSERT_TRUE_MESSAGE(rest, "the answer's rest did not reach the caller");
+
+    fake_sem_wait_hook(&radio_answers_busy);
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, &rest));
+    TEST_ASSERT_FALSE_MESSAGE(rest, "a busy radio was told as a rest");
 }
 
 TEST_CASE("a blocking scan AO_Radio has no room for is refused at once", "[kode_sys_wifi_scan]")
@@ -255,7 +284,7 @@ TEST_CASE("a blocking scan AO_Radio has no room for is refused at once", "[kode_
     {
         QACTIVE_POST(AO_Radio, &filler, NULL);
     }
-    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_EQUAL_UINT(0U, s_kept_n);
     radio_flush();
 }
@@ -266,18 +295,18 @@ TEST_CASE("test_wifi_scan_late_answer_is_dropped", "[kode_sys_wifi_scan]")
     s_late_step = 0U;
 
     /* Nobody answers in time: the wait runs out, and the request stays owed. */
-    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_EQUAL_UINT(1U, radio_pending());
 
     /* The owed answer never lands: the storage is not lent again, nothing is posted. */
-    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_EQUAL_UINT(1U, radio_pending());
     TEST_ASSERT_EQUAL_UINT(0U, s_kept_n);
 
     /* It lands at last, tagged with the old generation, inside the next call's wait:
      * that call waits it out, asks again, and offers its own rows alone. */
     fake_sem_wait_hook(&radio_answers_late);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_wifi_scan(&keep_row, NULL, SCAN_TEST_MS, NULL));
     TEST_ASSERT_NULL_MESSAGE(s_hook_fault, s_hook_fault);
     TEST_ASSERT_EQUAL_UINT(2U, s_late_step);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_kept_n, "the abandoned answer's rows were offered");

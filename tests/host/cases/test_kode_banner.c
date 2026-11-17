@@ -146,3 +146,29 @@ TEST_CASE("an always line refuses a level that is not one", "[banner]")
     kode_log_always(KODE_LOG_OFF, "t.ban", "no");
     TEST_ASSERT_EQUAL_UINT(0U, fake_klog_count());
 }
+
+/* ---- The board's words: the revision production wrote, or that none was ---- */
+
+TEST_CASE("the banner names the revision production wrote", "[banner]")
+{
+    char out[64];
+
+    TEST_ASSERT_EQUAL_STRING("Kode Dot 1.0", kode_banner_board(out, sizeof(out), "1.0"));
+}
+
+TEST_CASE("the banner says no official revision is loaded when none was written",
+          "[banner]")
+{
+    char out[64];
+
+    TEST_ASSERT_EQUAL_STRING("Kode Dot (no official hardware revision loaded)",
+                             kode_banner_board(out, sizeof(out), ""));
+}
+
+TEST_CASE("the banner's board words in a small buffer are cut and terminated",
+          "[banner]")
+{
+    char out[5];
+
+    TEST_ASSERT_EQUAL_STRING("Kode", kode_banner_board(out, sizeof(out), "1.0"));
+}

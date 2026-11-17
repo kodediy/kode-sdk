@@ -338,9 +338,10 @@ TEST_CASE("wifi_status follows the driver into an address and back out",
     esp_wifi_start_IgnoreAndReturn(ESP_OK);
     esp_wifi_disconnect_IgnoreAndReturn(ESP_OK);
     esp_wifi_sta_get_ap_info_IgnoreAndReturn(ESP_FAIL);
+    esp_wifi_set_band_mode_IgnoreAndReturn(ESP_OK);
 
     /* Readied and not joined: nothing to report. */
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("net"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_prepare("net", KDRV_WIFI_CHANNEL_ANY));
     (void)memset(&st, POISON, sizeof(st));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_wifi_status(&st));
     TEST_ASSERT_EQUAL_UINT8(KODE_SYS_WIFI_STATE_IDLE, st.state);

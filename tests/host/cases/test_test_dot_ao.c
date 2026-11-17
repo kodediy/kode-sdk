@@ -586,6 +586,9 @@ TEST_CASE("test_photos_count_from_one_and_a_retry_says_no_total", "[test_dot_ao]
     td_down();
 }
 
+/** @brief The data lines the next radio answer says the link came up on. */
+static uint8_t s_sdio_lines = TD_C5_SDIO_LINES;
+
 /** @brief Fill @p rsp with every number at its widest and a timeout: the longest records the check can make. */
 static void radio_widest(RadioProbeEvt *rsp)
 {
@@ -629,7 +632,7 @@ static void radio_answer(uint8_t fw_patch, bool widest)
     rsp->host[1]    = TD_C5_FW_MINOR;
     rsp->host[2]    = TD_C5_FW_PATCH;
     rsp->kode       = true;
-    rsp->sdio_width = TD_C5_SDIO_LINES;
+    rsp->sdio_width = s_sdio_lines;
     rsp->sdio_khz   = TD_C5_SDIO_KHZ;
     rsp->seen24     = true;
     rsp->rssi24     = TD_RSSI_24;
@@ -680,6 +683,16 @@ TEST_CASE("test_radio_records_carry_the_card_and_the_times", "[test_dot_ao]")
     radio_answer((uint8_t)(TD_C5_FW_PATCH + 1U), false);
     td_take();
     TEST_ASSERT_TRUE(td_said("rec radio_card ok=0 chip=esp32c5 id=23 kode=1 fw=2.12.10 host=2.12.9"));
+
+    /* A link that came up on one data line is a bad card: a line does not reach the C5. */
+    td_clear();
+    td_verb(&r);
+    s_sdio_lines = 1U;
+    radio_answer(TD_C5_FW_PATCH, false);
+    s_sdio_lines = TD_C5_SDIO_LINES;
+    td_take();
+    TEST_ASSERT_TRUE(td_said("rec radio_card ok=0 chip=esp32c5 id=23 kode=1 fw=2.12.9 host=2.12.9"));
+    TEST_ASSERT_TRUE(td_said(" sdio=1x40000kHz"));
 
     /* Every number at its widest: each record still ends whole, nothing cut. */
     td_clear();

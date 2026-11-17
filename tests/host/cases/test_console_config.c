@@ -397,3 +397,55 @@ TEST_CASE("a burst of sets to an owner that does not drain answers busy at its "
     answer(&r, KODE_OK, true, "5");
     TEST_ASSERT_TRUE(replied(">ok"));
 }
+
+/* ---- A setting only somebody at the board may change ------------------------- */
+
+/** @brief Hand the console one line, as the port @p src delivers it. */
+static void ask_from(uint8_t src, const char *text)
+{
+    ConsoleLineEvt e;
+
+    fake_klog_reset();
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CONSOLE_LINE_SIG);
+    e.src   = src;
+    (void)snprintf(e.line, sizeof(e.line), "%s", text);
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+    notes_drop();
+}
+
+TEST_CASE("a setting that asks for the wire is set from the cable or BLE, and only read "
+          "from the network and the scheduler", "[console_config]")
+{
+    static const kode_config_t HELD[] = {
+        { .name = "held", .type = KODE_TYPE_BOOL, .wire = true },
+    };
+
+    console_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, KODE_CONFIG_ADD(ao_spy(), KODE_CONFIG_MARGIN, HELD));
+
+    ask_from((uint8_t)KODE_CONSOLE_SRC_NET, "config key=\"held\" value=on");
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=net"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the owner was asked to set it");
+    ask_from((uint8_t)KODE_CONSOLE_SRC_SCHED, "config key=\"held\" value=on");
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=sched"));
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    /* Reading it is nobody's secret. */
+    ask_from((uint8_t)KODE_CONSOLE_SRC_NET, "config key=\"held\"");
+    KodeConfigReqEvt r = requested();
+    TEST_ASSERT_FALSE(r.set);
+    answer(&r, KODE_OK, false, "off");
+
+    ask_from((uint8_t)KODE_CONSOLE_SRC_BLE, "config key=\"held\" value=on");
+    r = requested();
+    TEST_ASSERT_TRUE(r.set);
+    TEST_ASSERT_TRUE(r.b);
+    answer(&r, KODE_OK, true, "on");
+
+    /* A setting that does not ask for it is set from anywhere, as before. */
+    ask_from((uint8_t)KODE_CONSOLE_SRC_NET, "config key=\"level\" value=4");
+    r = requested();
+    TEST_ASSERT_TRUE(r.set);
+    answer(&r, KODE_OK, true, "4");
+}

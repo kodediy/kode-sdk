@@ -13,6 +13,8 @@
 #define KSET_KEY_BRIGHT  "bright"   /**< u8, 5..100. Owner: AO_Display.   */
 #define KSET_KEY_WIFI    "wifi"     /**< u8 as bool. Owner: AO_Radio.     */
 #define KSET_KEY_BLE     "ble"      /**< u8 as bool. Owner: AO_Radio.     */
+#define KSET_KEY_BLE_HID "ble_hid"  /**< u8: the kinds of HID device kodeOS
+                                     *   is, 0 for none. Owner: AO_Radio.  */
 #define KSET_KEY_LOG     "log"      /**< u8, a kode_log_lvl_t: the console's
                                   *   global log level. Absent = the
                                   *   build's own (CONFIG_KLOG_DEFAULT_LEVEL).
@@ -53,6 +55,11 @@
                                   *   ASLEEP. Owner: AO_LowPower.      */
 #define KSET_KEY_OFF_AFTER "off_after" /**< u32, seconds: the time asleep before
                                   *   OFF. Owner: AO_LowPower.         */
+#define KSET_KEY_RESCUED "rescued"  /**< u8, 1: the rescue took over from a kodeOS
+                                  *   update and the stable minute that tells
+                                  *   it has not come; it outlives the otadata
+                                  *   the rescue clears. Absent = no rescue
+                                  *   owed. Owner: AO_Boot.            */
 #define KSET_KEY_LP_LAST "lp_last"  /**< blob, a lowpower_last_t: the summary of the
                                   *   last rest, written at most once a
                                   *   minute asleep and once when it ends.
@@ -73,10 +80,10 @@
 #define KSET_SLEEP_AFTER_SECS  { 30U, KSET_S_MIN, 2U * KSET_S_MIN, \
                                  5U * KSET_S_MIN, 10U * KSET_S_MIN, KSET_S_NEVER }
 /** The times asleep `off_after` offers. */
-#define KSET_OFF_AFTER_WORDS   { "1h", "6h", "24h", "3d", "7d", "never" }
-/** The seconds of each, 1 h being KODE_LOWPOWER_OFF_AFTER_DEF_S. */
-#define KSET_OFF_AFTER_SECS    { KSET_S_HOUR, 6U * KSET_S_HOUR, KSET_S_DAY, \
-                                 3U * KSET_S_DAY, 7U * KSET_S_DAY, KSET_S_NEVER }
+#define KSET_OFF_AFTER_WORDS   { "20m", "1h", "6h", "24h", "7d", "never" }
+/** The seconds of each, 20 min being KODE_LOWPOWER_OFF_AFTER_DEF_S. */
+#define KSET_OFF_AFTER_SECS    { 20U * KSET_S_MIN, KSET_S_HOUR, 6U * KSET_S_HOUR, \
+                                 KSET_S_DAY, 7U * KSET_S_DAY, KSET_S_NEVER }
 
 /** The ages `chan_keep` offers. */
 #define KSET_CHAN_KEEP_WORDS   { "1h", "6h", "1d", "3d", "7d", "never" }

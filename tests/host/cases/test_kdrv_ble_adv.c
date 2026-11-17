@@ -1,13 +1,16 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file test_kdrv_ble_adv.c
- * @brief The BLE scan response's packing: name and manufacturer data, refused whole if too big.
+ * @brief The BLE scan response's packing: name and manufacturer data, refused whole if too big;
+ *        and what follows each pulse of a pulsed advert.
  */
 #include <string.h>
 
 #include "unity.h"
 
 #include "kdrv_ble.h"
+#include "kdrv_ble_hid.h"
+#include "kdrv_ble_hid_table.h"
 #include "khal_identity.h"
 
 /** @brief A byte the packing never writes, to see what it left alone. */
@@ -201,4 +204,221 @@ TEST_CASE("asking for the connection set into NULL writes nothing", "[kdrv_ble_a
     kdrv_ble_conn_params(true, NULL);
     kdrv_ble_conn_params(false, NULL);
     TEST_ASSERT_FALSE(kdrv_ble_conn_params_ok(NULL));
+}
+
+/* ---- The pulses of a pulsed advert ------------------------------------------ */
+
+/** @brief The slow interval's period, ms: 1636 units of 0.625 ms, rounded down. */
+#define PULSE_SLOW_PERIOD_MS  1022U
+
+/** @brief The pause after a pulse of KDRV_BLE_PULSE_ON_MS at the slow interval, ms. */
+#define PULSE_SLOW_PAUSE_MS   (PULSE_SLOW_PERIOD_MS - KDRV_BLE_PULSE_ON_MS)
+
+/** @brief A leg with time left to run, ms: what Pair new device leaves after the fast one. */
+#define PULSE_LEG_MS          270000U
+
+/** @brief A leg that ends before the next pulse is due, ms. */
+#define PULSE_SHORT_LEG_MS    1000U
+
+/** @brief A train at the end of its first pulse of the slow advert, with no end to the leg. */
+static kdrv_ble_pulse_t pulse_first_end(void)
+{
+    kdrv_ble_pulse_t p;
+
+    (void)memset(&p, 0, sizeof(p));
+    p.live         = true;
+    p.timed_out    = true;
+    p.itvl         = (uint16_t)KDRV_BLE_ITVL_SLOW;
+    p.leg_run_ms   = KDRV_BLE_PULSE_ON_MS;
+    p.pulse_run_ms = KDRV_BLE_PULSE_ON_MS;
+    return p;
+}
+
+TEST_CASE("the slow interval's period is 1022 ms and a 100 ms pulse leaves 922 of it", "[kdrv_ble_adv][pulse]")
+{
+    TEST_ASSERT_EQUAL_UINT32(PULSE_SLOW_PERIOD_MS, kdrv_ble_pulse_period_ms((uint16_t)KDRV_BLE_ITVL_SLOW));
+    TEST_ASSERT_EQUAL_UINT32(PULSE_SLOW_PAUSE_MS,
+                             kdrv_ble_pulse_pause_ms((uint16_t)KDRV_BLE_ITVL_SLOW, KDRV_BLE_PULSE_ON_MS));
+}
+
+TEST_CASE("a pulse that ended late is followed at once, never after a wait of 0", "[kdrv_ble_adv][pulse]")
+{
+    TEST_ASSERT_EQUAL_UINT32(KDRV_BLE_PULSE_WAIT_MIN_MS,
+                             kdrv_ble_pulse_pause_ms((uint16_t)KDRV_BLE_ITVL_SLOW, PULSE_SLOW_PERIOD_MS));
+    TEST_ASSERT_EQUAL_UINT32(KDRV_BLE_PULSE_WAIT_MIN_MS,
+                             kdrv_ble_pulse_pause_ms((uint16_t)KDRV_BLE_ITVL_SLOW, UINT32_MAX));
+}
+
+TEST_CASE("a pulse's end with no end to the leg leads to the next pulse after the pause", "[kdrv_ble_adv][pulse]")
+{
+    kdrv_ble_pulse_t const p    = pulse_first_end();
+    uint32_t               wait = 0U;
+
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_NEXT, (int)kdrv_ble_pulse_next(&p, &wait));
+    TEST_ASSERT_EQUAL_UINT32(PULSE_SLOW_PAUSE_MS, wait);
+}
+
+TEST_CASE("a pulse's end with time left in the leg leads to the next pulse after the pause", "[kdrv_ble_adv][pulse]")
+{
+    kdrv_ble_pulse_t p    = pulse_first_end();
+    uint32_t         wait = 0U;
+
+    p.leg_ms = PULSE_LEG_MS;
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_NEXT, (int)kdrv_ble_pulse_next(&p, &wait));
+    TEST_ASSERT_EQUAL_UINT32(PULSE_SLOW_PAUSE_MS, wait);
+}
+
+TEST_CASE("a leg that ends before the next pulse waits for its own end, and is IDLE then", "[kdrv_ble_adv][pulse]")
+{
+    kdrv_ble_pulse_t p    = pulse_first_end();
+    uint32_t         wait = 0U;
+
+    p.leg_ms = PULSE_SHORT_LEG_MS;
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_NEXT, (int)kdrv_ble_pulse_next(&p, &wait));
+    TEST_ASSERT_EQUAL_UINT32(PULSE_SHORT_LEG_MS - KDRV_BLE_PULSE_ON_MS, wait);
+
+    p.leg_run_ms = PULSE_SHORT_LEG_MS;
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_IDLE, (int)kdrv_ble_pulse_next(&p, &wait));
+    TEST_ASSERT_EQUAL_UINT32(0U, wait);
+}
+
+TEST_CASE("a pulse's end with the leg over is IDLE, a leg of no end never is", "[kdrv_ble_adv][pulse]")
+{
+    kdrv_ble_pulse_t p    = pulse_first_end();
+    uint32_t         wait = 0U;
+
+    p.leg_ms     = PULSE_LEG_MS;
+    p.leg_run_ms = PULSE_LEG_MS + KDRV_BLE_PULSE_ON_MS;
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_IDLE, (int)kdrv_ble_pulse_next(&p, &wait));
+
+    p.leg_ms     = 0U;
+    p.leg_run_ms = UINT32_MAX;
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_NEXT, (int)kdrv_ble_pulse_next(&p, &wait));
+}
+
+TEST_CASE("after a stop or a connection nothing follows, whatever else holds", "[kdrv_ble_adv][pulse]")
+{
+    kdrv_ble_pulse_t p    = pulse_first_end();
+    uint32_t         wait = 1U;
+
+    p.live       = false;
+    p.leg_ms     = PULSE_SHORT_LEG_MS;
+    p.leg_run_ms = PULSE_LEG_MS;
+    p.refused    = (uint8_t)KDRV_BLE_PULSE_REFUSALS_MAX;
+    p.timed_out  = false;
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_DONE, (int)kdrv_ble_pulse_next(&p, &wait));
+    TEST_ASSERT_EQUAL_UINT32(0U, wait);
+}
+
+TEST_CASE("a pulse that NimBLE or the controller ended is IDLE: AO_Radio plans again", "[kdrv_ble_adv][pulse]")
+{
+    kdrv_ble_pulse_t p    = pulse_first_end();
+    uint32_t         wait = 0U;
+
+    p.timed_out = false;
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_IDLE, (int)kdrv_ble_pulse_next(&p, &wait));
+}
+
+TEST_CASE("the third refusal in a row is IDLE, the first two wait for a whole period", "[kdrv_ble_adv][pulse]")
+{
+    kdrv_ble_pulse_t p    = pulse_first_end();
+    uint32_t         wait = 0U;
+
+    p.pulse_run_ms = 0U;
+    for ( uint8_t n = 1U; n < (uint8_t)KDRV_BLE_PULSE_REFUSALS_MAX; ++n )
+    {
+        p.refused = n;
+        TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_NEXT, (int)kdrv_ble_pulse_next(&p, &wait));
+        TEST_ASSERT_EQUAL_UINT32(PULSE_SLOW_PERIOD_MS, wait);
+    }
+    p.refused = (uint8_t)KDRV_BLE_PULSE_REFUSALS_MAX;
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_IDLE, (int)kdrv_ble_pulse_next(&p, &wait));
+}
+
+TEST_CASE("judging nothing follows with nothing, and a verdict needs no place for its wait", "[kdrv_ble_adv][pulse]")
+{
+    kdrv_ble_pulse_t const p    = pulse_first_end();
+    uint32_t               wait = 1U;
+
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_DONE, (int)kdrv_ble_pulse_next(NULL, &wait));
+    TEST_ASSERT_EQUAL_UINT32(0U, wait);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_BLE_PULSE_NEXT, (int)kdrv_ble_pulse_next(&p, NULL));
+}
+
+/* ---- The fields an advert carries ---------------------------------------------- */
+
+/** @brief The fields of the advert @p ask asks for. */
+static kdrv_ble_adv_shape_t shape_of(bool console, bool hidden, bool app_uuid, uint8_t hid)
+{
+    kdrv_ble_adv_ask_t const ask = { .console = console, .hidden = hidden,
+                                     .app_uuid = app_uuid, .hid = hid };
+    kdrv_ble_adv_shape_t     out;
+
+    (void)memset(&out, 0xA5, sizeof(out));
+    kdrv_ble_adv_shape(&ask, &out);
+    return out;
+}
+
+TEST_CASE("a board that serves no HID advertises its flags, the console's UUID and its power",
+          "[kdrv_ble_adv]")
+{
+    kdrv_ble_adv_shape_t const s = shape_of(true, false, false, 0U);
+
+    TEST_ASSERT_TRUE(s.discoverable);
+    TEST_ASSERT_TRUE(s.tx_power);
+    TEST_ASSERT_FALSE(s.name);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_CONSOLE, s.uuid128);
+    TEST_ASSERT_EQUAL_HEX16_MESSAGE(0U, s.uuid16, "0x1812 on a board that never asked for HID");
+    TEST_ASSERT_EQUAL_HEX16_MESSAGE(0U, s.appearance, "an appearance on a board that never asked");
+    TEST_ASSERT_EQUAL_UINT8(24U, s.bytes);
+}
+
+TEST_CASE("a hidden advert is not discoverable and keeps the UUID its bonded clients filter on",
+          "[kdrv_ble_adv]")
+{
+    kdrv_ble_adv_shape_t const s = shape_of(true, true, false, 0U);
+
+    TEST_ASSERT_FALSE(s.discoverable);
+    TEST_ASSERT_FALSE(s.name);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_CONSOLE, s.uuid128);
+    TEST_ASSERT_EQUAL_UINT8(24U, s.bytes);
+}
+
+TEST_CASE("a board that serves HID adds 0x1812 and its appearance, gives up the power and "
+          "keeps the console's UUID", "[kdrv_ble_adv]")
+{
+    kdrv_ble_adv_shape_t const s = shape_of(true, false, false, KDRV_BLE_HID_KINDS);
+
+    TEST_ASSERT_EQUAL_HEX16(0x1812U, s.uuid16);
+    TEST_ASSERT_EQUAL_HEX16(KDRV_BLE_HID_APPEAR_HID, s.appearance);
+    TEST_ASSERT_FALSE(s.tx_power);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KDRV_BLE_ADV_UUID128_CONSOLE, s.uuid128,
+                                    "the console's clients would not find the board");
+    TEST_ASSERT_EQUAL_UINT8(29U, s.bytes);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(KDRV_BLE_ADV_MAX, s.bytes);
+    TEST_ASSERT_EQUAL_HEX16(KDRV_BLE_HID_APPEAR_MOUSE,
+                            shape_of(true, false, false, KDRV_BLE_HID_MOUSE).appearance);
+    TEST_ASSERT_EQUAL_HEX16(KDRV_BLE_HID_APPEAR_KEYS,
+                            shape_of(true, true, false, KDRV_BLE_HID_KEYBOARD).appearance);
+}
+
+TEST_CASE("the app's UUID takes the console's place with HID and without it", "[kdrv_ble_adv]")
+{
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_APP, shape_of(true, false, true, 0U).uuid128);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_APP,
+                            shape_of(true, false, true, KDRV_BLE_HID_MOUSE).uuid128);
+    TEST_ASSERT_EQUAL_UINT8(29U, shape_of(true, false, true, KDRV_BLE_HID_MOUSE).bytes);
+}
+
+TEST_CASE("a build without the console's service advertises its name, and none when hidden",
+          "[kdrv_ble_adv]")
+{
+    kdrv_ble_adv_shape_t const s = shape_of(false, false, false, 0U);
+
+    TEST_ASSERT_TRUE(s.name);
+    TEST_ASSERT_TRUE(s.tx_power);
+    TEST_ASSERT_EQUAL_UINT8(KDRV_BLE_ADV_UUID128_NONE, s.uuid128);
+    TEST_ASSERT_EQUAL_HEX16(0U, s.uuid16);
+    TEST_ASSERT_EQUAL_UINT8(6U, s.bytes);
+    TEST_ASSERT_FALSE(shape_of(false, true, false, 0U).name);
 }

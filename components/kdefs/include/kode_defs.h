@@ -24,6 +24,7 @@ typedef enum {
     KODE_EXISTS,          /**< The name is already taken.                    */
     KODE_NOT_DIR,         /**< A component of the path is not a directory.   */
     KODE_IS_DIR,          /**< The path is a directory; a file was wanted.   */
+    KODE_CANCELLED,       /**< Ended early: a newer request took its place.  */
 } kode_status_t;
 
 #ifdef __cplusplus

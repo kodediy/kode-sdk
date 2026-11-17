@@ -48,6 +48,7 @@ KAOS_WEAK void kaos_radio_start(void);
 KAOS_WEAK void kaos_touch_start(void);
 KAOS_WEAK void touch_subscribe(QActive const *who);
 KAOS_WEAK void ble_app_subscribe(QActive const *who);
+KAOS_WEAK void ble_pair_subscribe(QActive const *who);
 KAOS_WEAK void ir_capture_request(IrSymbol *out, size_t cap, size_t *n, khal_sem_t done,
                                   uint32_t ms, uint32_t gen, uint32_t *ack);
 
@@ -96,6 +97,21 @@ static bool ble_listen(void)
 }
 
 /**
+ * @brief Have the standard layer's Active Object subscribe to the pairings:
+ *        a code to show and how each one ended.
+ *
+ * Reached only for a pairing event that can arrive, so AO_Radio is linked and
+ * ble_pair_subscribe(), which lives beside its start, with it.
+ *
+ * @return true once subscribed, by this call or an earlier one; false in the
+ *         kodeOS image.
+ */
+static bool ble_pair_listen(void)
+{
+    return kode_standard_ao_subscribe(&ble_pair_subscribe);
+}
+
+/**
  * @brief What a listener or a waiter of an event asks of its owner.
  *
  * The contract every row's hook keeps: it runs in the caller's task, once the
@@ -137,6 +153,8 @@ static const kode_known_t s_known[] = {
     { KODE_EVENT_BLE_DISCONNECTED_NAME, &kaos_radio_start, "KODE_EVENT_BLE_DISCONNECTED", &ble_listen },
     { KODE_EVENT_BLE_WRITTEN_NAME,      &kaos_radio_start, "KODE_EVENT_BLE_WRITTEN",      &ble_listen },
     { KODE_EVENT_BLE_TAKEN_NAME,        &kaos_radio_start, "KODE_EVENT_BLE_TAKEN",        &ble_listen },
+    { KODE_EVENT_BLE_PAIR_CODE_NAME,    &kaos_radio_start, "KODE_EVENT_BLE_PAIR_CODE",    &ble_pair_listen },
+    { KODE_EVENT_BLE_PAIR_DONE_NAME,    &kaos_radio_start, "KODE_EVENT_BLE_PAIR_DONE",    &ble_pair_listen },
     { NULL,                      NULL,              NULL,                        NULL             }
 };
 

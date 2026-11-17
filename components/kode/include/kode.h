@@ -15,6 +15,7 @@
 #include "kode_colors.h"
 #include "kode_defs.h"
 #include "kode_init.h"
+#include "kode_http_off.h"   /* kode_http_off_t, KODE_HTTP_OFF_MAX */
 #include "kapp_desc.h"
 
 #ifdef __cplusplus
@@ -224,11 +225,16 @@ kode_buttons_t kode_button_read_all(void);
  * are still queued. A listener or a waiter for any of the four has the radio
  * send them.
  *
+ * ble_pair_code and ble_pair_done: a device is pairing with the board. The
+ * first carries the code to show, as the value and, with its leading zeroes,
+ * as six digits of text; the second says the pairing ended, value 1 when the
+ * device is bonded and 0 when it is not. See kode_ble_pair_open().
+ *
  * An event comes only from an owner the app links, and an app links an owner
- * by naming one of its calls. Ten events have an owner no other call need
+ * by naming one of its calls. Twelve events have an owner no other call need
  * link: ir_received (the infrared), wifi_connected and wifi_lost (the radio,
  * which joins a remembered network by itself), the three touch events (the
- * touch panel) and the four Bluetooth events (the radio). Name those with
+ * touch panel) and the six Bluetooth events (the radio). Name those with
  * KODE_EVENT_IR_RECEIVED, KODE_EVENT_WIFI_CONNECTED, KODE_EVENT_WIFI_LOST, the
  * KODE_EVENT_TOUCH_ constants and the KODE_EVENT_BLE_ constants, which link
  * it. Typed as a string in an app that links no such owner, the event is
@@ -257,6 +263,25 @@ kode_buttons_t kode_button_read_all(void);
 /* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
 /** @brief "ble_taken", naming the radio so the app links it. */
 #define KODE_EVENT_BLE_TAKEN        kode_event_ble_taken()
+
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
+/** @brief "ble_pair_code", naming the radio so the app links it. */
+#define KODE_EVENT_BLE_PAIR_CODE    kode_event_ble_pair_code()
+/* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
+/** @brief "ble_pair_done", naming the radio so the app links it. */
+#define KODE_EVENT_BLE_PAIR_DONE    kode_event_ble_pair_done()
+
+/**
+ * @brief The radio's event name for a pairing's code; what KODE_EVENT_BLE_PAIR_CODE calls.
+ * @return "ble_pair_code".
+ */
+const char *kode_event_ble_pair_code(void);
+
+/**
+ * @brief The radio's event name for a pairing that ended; what KODE_EVENT_BLE_PAIR_DONE calls.
+ * @return "ble_pair_done".
+ */
+const char *kode_event_ble_pair_done(void);
 
 /**
  * @brief The radio's event name for a phone that connected; what KODE_EVENT_BLE_CONNECTED calls.
@@ -588,10 +613,31 @@ bool kode_file_exists(const char *path);
  * Blocks. KODE_FILE_LIST_MAX entries at most; `more` says there were others.
  *
  * @param folder "sd", "flash" or "sd/...", "flash/..." naming a folder.
- * @return The listing, valid until this task's next kode_file_list(); never
- *         NULL: empty on failure, with kode_error() saying why.
+ * @return The listing, valid until this task's next kode_file_list() or
+ *         kode_file_list_from(); never NULL: empty on failure, with
+ *         kode_error() saying why.
  */
 const kode_file_list_t *kode_file_list(const char *folder);
+
+/**
+ * @brief List one folder from its @p skip-th entry on.
+ *
+ * Blocks. kode_file_list(folder) is kode_file_list_from(folder, 0). A folder
+ * of more than KODE_FILE_LIST_MAX entries is read a page at a time: while
+ * `more` is set, ask again with the entries read so far. A @p skip at or past
+ * the last entry lists nothing and is not an error. Every page walks the
+ * folder from its first entry, so a page deep into a large folder takes
+ * longer than the first. An entry created or deleted between two pages moves
+ * the ones after it, so a page can then repeat an entry or miss one. An
+ * Active Object lists with kode_sys_file_list().
+ *
+ * @param folder As kode_file_list().
+ * @param skip   The entries to leave out: the ones earlier pages gave.
+ * @return The listing, valid until this task's next kode_file_list() or
+ *         kode_file_list_from(); never NULL: empty on failure, with
+ *         kode_error() saying why.
+ */
+const kode_file_list_t *kode_file_list_from(const char *folder, uint32_t skip);
 
 /**
  * @brief Delete a file, or a folder with nothing in it.
@@ -788,20 +834,24 @@ bool kode_haptic_add_profile(const char *name, const uint16_t *pattern_ms, uint3
 
 /* ---- Audio ---- */
 
-/* 48 kHz, 16-bit, mono WAV or samples only. Audio calls take turns, and a play or a
+/* 48 kHz, 16-bit, mono WAV or samples only; a stream may also be written as
+ * left-right pairs. Audio calls take turns, and a play or a
  * recording to a file or a buffer keeps its turn to the end. A call that finds the speaker
  * or microphone held waits up to KODE_AUDIO_BUSY_MS, then fails with "audio is
  * busy"; a background recording waits the same, then ends with no frames.
- * kode_audio_set(), kode_audio_get(), kode_audio_play_stop(), kode_audio_is_playing()
- * and kode_audio_record_status() take no turn. A setting lasts this boot. A
- * sound is refused while a recording runs, and a recording while a sound
- * plays in the background. */
+ * kode_audio_set(), kode_audio_get(), kode_audio_play_stop(), kode_audio_is_playing(),
+ * kode_audio_record_status() and kode_audio_stream_write() take no turn. A
+ * setting lasts this boot. A sound is refused while a recording runs, and a
+ * recording while a sound plays in the background. The stream
+ * (kode_audio_stream_open()) is opened and closed apart from its writes, and
+ * while it is open every other sound and recording is refused at once. */
 
 #define KODE_AUDIO_BUSY_MS       5000U   /**< How long a call waits for the audio path.  */
 #define KODE_AUDIO_TONE_MAX_MS   65535U  /**< The longest tone, ms.                      */
 #define KODE_AUDIO_TONE_HZ_MIN   400U    /**< The lowest tone, Hz.                       */
 #define KODE_AUDIO_TONE_HZ_MAX   3400U   /**< The highest tone, Hz.                      */
 #define KODE_AUDIO_RECORD_MAX_MS 30000U  /**< The longest recording, ms.                 */
+#define KODE_AUDIO_STREAM_IDLE_MS 10000U /**< A stream left this long without a write is closed. */
 
 /** @brief What a recording in the background has done. */
 typedef struct {
@@ -860,6 +910,54 @@ bool kode_audio_play_stop(void);
  * @return true when they were heard or kode_audio_play_stop() ended them; false with kode_error() saying why.
  */
 bool kode_audio_play_samples(const int16_t *samples, uint32_t count);
+
+/**
+ * @brief Open the speaker for sound written a piece at a time.
+ *
+ * Blocks until the speaker plays. Waits its turn for it like
+ * kode_audio_play(); refused at once while a sound plays in the background, a
+ * recording runs or the stream is open already. The app has one stream. While
+ * it is open the speaker is its alone: every other sound and recording is
+ * refused at once with "audio is busy: a stream is open". Left
+ * KODE_AUDIO_STREAM_IDLE_MS without a write that put frames in, counted from
+ * the open while there has been none, the stream is closed for the app: the
+ * next write says so, and the other calls have the speaker again.
+ *
+ * @param channels 1 for mono samples, 2 for left-right pairs, played as their mean.
+ * @return true when the stream is open; false with kode_error() saying why.
+ */
+bool kode_audio_stream_open(uint8_t channels);
+
+/**
+ * @brief Write frames to the stream kode_audio_stream_open() opened.
+ *
+ * Blocks only while the stream is full, @p ms at most; it holds
+ * 200 ms of sound. Takes no turn, so the settings and the other calls are not
+ * kept waiting behind a writer. One task writes at a time. Like every call of
+ * this layer it is for tasks, never for an Active Object.
+ *
+ * @param frames 48 kHz 16-bit frames of the kind the stream was opened with; read in place until the call returns.
+ * @param count  How many frames, above 0: samples for mono, pairs for two channels.
+ * @param ms     The longest to wait for room in all; 0 takes what fits and returns.
+ * @param taken  Out, may be NULL: the frames that went in, also on failure.
+ * @return true when all @p count went in. false with kode_error() saying why:
+ *         the stream is full (@p taken says how far it got, and the stream
+ *         stays open), no stream is open, or it was closed for silence. A
+ *         write in the instant the stream closes for silence may still be
+ *         true, its frames unheard; the next write says so.
+ */
+bool kode_audio_stream_write(const int16_t *frames, uint32_t count, uint32_t ms, uint32_t *taken);
+
+/**
+ * @brief Close the stream and wait until what it held has been heard.
+ *
+ * Blocks. A task that never calls it loses the stream after
+ * KODE_AUDIO_STREAM_IDLE_MS without a write.
+ *
+ * @return true when the speaker is free again; false with kode_error() saying
+ *         why, "no stream is open" when it was closed for silence included.
+ */
+bool kode_audio_stream_close(void);
 
 /**
  * @brief Play a tone and wait until it has been heard.
@@ -1009,12 +1107,19 @@ typedef struct {
  * @brief Scan the air for networks, both bands, and wait for the sweep (about 38 s).
  *
  * Brings the radio's link up first when it is down, and switches Wi-Fi on for
- * nobody; the call can wait for that bring-up plus one sweep. It does not wait
- * for anything longer: while the radio is already sweeping - the boot's own
- * search for a known network, another scan - or listens for Bluetooth
- * devices (kode_ble_scan(), or the console's `ble_scan`), or runs a self-test
- * or an install, it fails at once and kode_error() says the radio is busy;
- * ask again later. Joins and leaves take turns with it.
+ * nobody; the call can wait for that bring-up plus one sweep. The newest Wi-Fi
+ * request wins: this scan ends the Wi-Fi scan that is in flight (another
+ * app's, the console's `wifi_scan`) and runs in its place, and a newer one -
+ * another Wi-Fi scan, kode_wifi_connect(), Wi-Fi switched - ends this one: it
+ * fails and kode_error() says a newer request ended it early. Do not scan
+ * again at once then: whoever ended it has the radio, and two callers that
+ * each scan again the moment they are ended never let a sweep finish. Scan
+ * again after a pause, or when the app next needs the list. While the radio
+ * listens for Bluetooth devices, runs the boot's own search for a known
+ * network, a self-test or an install, or sleeps between wakes for the board's
+ * rest, it fails at once and kode_error() says the radio is busy; ask again
+ * later. A join in flight is waited for. One
+ * task at a time.
  *
  * @param out Where the networks go, the strongest first.
  * @param cap How many @p out holds; the strongest @p cap are kept.
@@ -1076,13 +1181,16 @@ typedef struct {
 /**
  * @brief Listen for Bluetooth devices for @p ms and wait for the end.
  *
- * Brings the radio's link up first when it is down. Like kode_wifi_scan() it
- * waits for nothing longer: while the radio is already scanning - a Wi-Fi
- * scan, another listen, or its own search for a known network - or runs a
- * self-test or an install, it fails at once and kode_error() says the radio
- * is busy. That search runs each time the link comes up with Wi-Fi on, so
- * the first listen on a link that was down nearly always fails busy; ask
- * again once the search is over. One task at a time.
+ * Brings the radio's link up first when it is down. As kode_wifi_scan() does
+ * for Wi-Fi, it ends the Bluetooth listen that is in flight and runs in its
+ * place, and a newer Bluetooth request ends it the same way: it fails, and
+ * the caller does not listen again at once. While the radio sweeps for Wi-Fi
+ * networks, runs its own search for a known network, a self-test or an
+ * install, or sleeps between wakes for the board's rest, it fails at once and
+ * kode_error() says the radio is busy. That
+ * search runs each time the link comes up with Wi-Fi on, so the first listen
+ * on a link that was down nearly always fails busy; ask again once the search
+ * is over. One task at a time.
  *
  * @param out Where the devices go, the strongest first.
  * @param cap How many @p out holds; the strongest @p cap are kept.
@@ -1305,6 +1413,124 @@ size_t kode_ble_queue_room(const char *chr);
  */
 bool kode_ble_queue_clear(const char *chr);
 
+/* The board as a Bluetooth mouse and keyboard, which a computer or a phone
+ * pairs with from its own Bluetooth settings, with nothing to install:
+ *
+ *     kode_ble_hid_select(KODE_BLE_HID_MOUSE);       // at the app's start
+ *     ...
+ *     if ( kode_ble_hid_ready() )
+ *     {
+ *         kode_ble_hid_mouse(0, dx, dy, 0);
+ *     }
+ *
+ * Nothing of it exists until the app asks: kode_ble_hid_select() adds the
+ * HID service, with the SDK's own report map, the battery and the device's
+ * information to what the radio serves, and from then on the board
+ * advertises as a mouse or a keyboard. The board takes one link: while a
+ * computer uses it, neither the console nor a phone gets in, and a computer
+ * bonded as a host comes back by itself whenever it sees the board. An app
+ * or a kodeOS that does not ask hangs up on that computer, so the link stays
+ * free for everything else.
+ *
+ * The reports reach only a device that paired with the board while it was a
+ * mouse or a keyboard. The phone paired for the console is never typed at,
+ * and a computer paired as a host never reaches the console: a device has
+ * one use or the other, and changes it by pairing again.
+ *
+ * A computer pairs with a code. The app opens the time to pair with
+ * kode_ble_pair_open() and shows the code ble_pair_code brings; ble_pair_done
+ * says how it ended. The bond is kept, so the computer pairs once.
+ *
+ * A report never waits: it is queued for the link, KODE_BLE_HID_RING_SLOTS
+ * at most, and a full queue fails the call. A keyboard report says which
+ * keys are down now, so the one that lets them go follows it; that one, with
+ * nothing down, never fails for a full queue. kode_ble_hid_tap() and
+ * kode_ble_hid_click() press and let go in one call, which is how a key is
+ * typed. Needs CONFIG_KODEOS_BLE_CONSOLE_PAIRING=y, the default. */
+
+#define KODE_BLE_HID_MOUSE       0x01U  /**< A mouse: three buttons, x, y and a wheel.  */
+#define KODE_BLE_HID_KEYBOARD    0x02U  /**< A keyboard: eight modifiers and six keys.  */
+#define KODE_BLE_HID_KEYS_MAX    6U     /**< Keys one keyboard report holds down.       */
+#define KODE_BLE_HID_KEY_MAX     101U   /**< The last key the board can press, a usage ID. */
+#define KODE_BLE_HID_RING_SLOTS  16U    /**< Reports that wait for the link.            */
+#define KODE_BLE_HID_BUTTONS     0x07U  /**< The mouse's buttons: bit 0 left, 1 right, 2 middle. */
+
+/**
+ * @brief Make the board a Bluetooth mouse, a keyboard, both, or neither.
+ *
+ * The radio reads the choice once, when it registers its table at
+ * Bluetooth's first start in the boot, so make this the app's first call to
+ * the SDK: the choice is then kept before anything starts. Not stored: the
+ * app makes this call at each start. Bluetooth off in Settings is not an
+ * error: the choice is kept for when it comes on.
+ *
+ * @param kinds KODE_BLE_HID_MOUSE, KODE_BLE_HID_KEYBOARD, both, or 0 for neither.
+ * @return true when the choice is kept; false with kode_error() saying why:
+ *         a kind that does not exist, or the table registered already, and
+ *         nothing changes until the next boot. A firmware without the
+ *         pairing HID needs refuses every kind.
+ */
+bool kode_ble_hid_select(uint8_t kinds);
+
+/**
+ * @brief Whether a computer is connected and takes the reports of every kind chosen.
+ * @return true when a report sent now reaches it. Does not wait and sets no error.
+ */
+bool kode_ble_hid_ready(void);
+
+/**
+ * @brief Send one mouse report. Movement and wheel are relative.
+ * @param buttons Bit 0 left, bit 1 right, bit 2 middle; 0 lets them go.
+ * @param dx      Right, -127 to 127.
+ * @param dy      Down, -127 to 127.
+ * @param wheel   Up, -127 to 127.
+ * @return true when it is queued for the link; false with kode_error() saying
+ *         why: Bluetooth off in Settings, the mouse not chosen, no computer
+ *         taking its reports, or the queue full (send it again, or the sum).
+ *         A report of no button and no movement never fails for a full queue.
+ */
+bool kode_ble_hid_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel);
+
+/**
+ * @brief Click: press the mouse's buttons and let them go, both or neither.
+ * @param buttons Bit 0 left, bit 1 right, bit 2 middle; at least one.
+ * @return As kode_ble_hid_mouse(); false for no button too.
+ */
+bool kode_ble_hid_click(uint8_t buttons);
+
+/**
+ * @brief Send one keyboard report: the keys held down now.
+ * @param modifiers The eight modifier bits, left Control first.
+ * @param keys      KODE_BLE_HID_KEYS_MAX usage IDs up to KODE_BLE_HID_KEY_MAX,
+ *                  0 for none; copied. NULL lets every key go.
+ * @return As kode_ble_hid_mouse(), for the keyboard. Letting every key go
+ *         never fails for a full queue.
+ */
+bool kode_ble_hid_keys(uint8_t modifiers, const uint8_t *keys);
+
+/**
+ * @brief Type one key: press it with its modifiers and let it go, both or neither.
+ * @param modifiers The eight modifier bits, left Control first.
+ * @param key       A usage ID, 1 to KODE_BLE_HID_KEY_MAX: 4 is `a`.
+ * @return As kode_ble_hid_mouse(), for the keyboard; false for a key out of
+ *         range too.
+ */
+bool kode_ble_hid_tap(uint8_t modifiers, uint8_t key);
+
+/**
+ * @brief Open the time to pair a new computer or phone: five minutes.
+ *
+ * Only an app that chose a kind with kode_ble_hid_select() pairs a device;
+ * any other app serves the phones bonded in kodeOS. The board shows itself
+ * while the time runs, and the code to show arrives as ble_pair_code. With a
+ * device connected, the time starts when it leaves.
+ *
+ * @return true when the time is asked for; false with kode_error() saying
+ *         why: Bluetooth off in Settings, no kind chosen, or the radio too
+ *         busy to take the request now.
+ */
+bool kode_ble_pair_open(void);
+
 /* ---- HTTP ---- */
 
 /* The calls block, one task at a time. A redirect is not followed: it comes back
@@ -1337,6 +1563,37 @@ const char *kode_http_get(const char *url);
  * @return As for kode_http_get().
  */
 const char *kode_http_post(const char *url, const char *body);
+
+/**
+ * @brief Fetch the @p cap bytes of @p url from @p offset on, into a buffer of
+ *        the caller's own: a resource too big for kode_http_get(), a range at
+ *        a time.
+ *
+ * Blocks. Each call is a connection of its own, and a redirect is not
+ * followed. The call is true whenever the server answered, and
+ * kode_http_status() says what @p buf holds: 206, the bytes from @p offset;
+ * 200, the resource from byte 0 - the server ignores ranges - of which only
+ * @p cap bytes were read, and only when @p offset is 0: to a later @p offset
+ * a 200 leaves @p got 0, since its bytes are not the ones asked for; 416,
+ * nothing - @p offset is past the end. Any other status (a 404, a 403, a 302)
+ * is the server's page about the request, not the resource, and @p got is 0
+ * for it too. A file is put together by appending each range with
+ * kode_file_append_bytes() and asking the next from the size the file has,
+ * for as long as the answer is a 206 (or a 200 to the first range, which has
+ * the whole resource when @p got is under @p cap).
+ *
+ * @param url    As for kode_http_get().
+ * @param offset The first byte wanted.
+ * @param buf    Where the bytes go; what it holds after a failure is unspecified.
+ * @param cap    Its room, above 0.
+ * @param got    Out, may be NULL: the bytes written; 0 on failure.
+ * @param total  Out, may be NULL: the length of the whole resource when the
+ *               server says it (a 206 and a 416 do), else 0; one longer than
+ *               the type holds reads as KODE_HTTP_OFF_MAX.
+ * @return true when the server answered; false with kode_error() saying why.
+ */
+bool kode_http_get_range(const char *url, kode_http_off_t offset, void *buf, uint32_t cap,
+                         uint32_t *got, kode_http_off_t *total);
 
 /**
  * @brief The status this task's last request was answered with.
@@ -1505,6 +1762,105 @@ bool kode_power_is_usb_connected(void);
  */
 bool kode_power_off(void);
 
+/* ---- Rest: the parts the app does not use ---- */
+
+/*
+ * The app names the parts it does not use and the board puts them away, one
+ * at a time, while everything else keeps running. They stay away until
+ * kode_rest_end(). The board keeps the last word: when it goes to sleep or
+ * switches off by itself, when the radio chip cannot sleep through its rest,
+ * or the user holds the bottom button to go home, the rest is over and every
+ * part comes back. A sleep the board begins by itself and gives up, because
+ * something is busy, leaves the rest as it was. One task asks at a time: two
+ * that ask at once can each take the other's answer.
+ */
+
+/** @brief The parts kode_rest() can put away. */
+/* cppcheck-suppress misra-c2012-2.4 ; the tag of a public enum: the apps outside this tree name its constants */
+typedef enum {
+    KODE_REST_SCREEN = 1U << 0, /**< The display asleep, as kode_display_sleep(true).                       */
+    KODE_REST_PANEL  = 1U << 1, /**< And the display's supply off. Takes the screen and the touch with it.  */
+    KODE_REST_TOUCH  = 1U << 2, /**< The touch asleep: it reports nothing.                                  */
+    KODE_REST_SOUND  = 1U << 3, /**< The speaker's amplifier and the audio chip off, once: the next sound
+                                 *   brings them back, and kode_rest() asked again puts them away again.   */
+    KODE_REST_CARD   = 1U << 4, /**< The card unmounted and unpowered, once: the next file on it brings it
+                                 *   back, and kode_rest() asked again puts it away again. In kodeOS, an
+                                 *   install that would evict an app brings the card back to check or
+                                 *   make that app's copy first, and the card then stays awake.            */
+    KODE_REST_RADIO  = 1U << 5, /**< The radio chip asleep; Wi-Fi and Bluetooth keep their connections.
+                                 *   A scan, Wi-Fi or Bluetooth, is refused while it rests: the radio
+                                 *   sleeps between wakes too long for one. Needs KODE_REST_SOUND with it. */
+    KODE_REST_CPU    = 1U << 6  /**< The processor sleeps whenever the app is waiting. Needs the screen at
+                                 *   rest, and no USB cable.                                               */
+/* cppcheck-suppress misra-c2012-2.3 ; a public enum: an app names the type, and nothing in this tree does */
+} kode_rest_part_t;
+
+/** @brief What wakes the processor from KODE_REST_CPU, besides the buttons. */
+typedef struct {
+    bool     touch;     /**< A touch. Not with KODE_REST_TOUCH or KODE_REST_PANEL.            */
+    uint8_t  pin;       /**< A pin, KODE_PIN_FIRST to KODE_PIN_LAST; 0 for none. It must be free,
+                         *   or an input nothing listens to: a pin with a listener is refused.
+                         *   For the rest it is an input pulled to the other level; afterwards
+                         *   it is what it was, free or an input with the pull it had.            */
+    bool     pin_level; /**< The level of that pin that wakes.                                */
+    uint32_t after_ms;  /**< A time, in ms from the moment kode_rest() returns; 0 for none.   */
+} kode_rest_wake_t;
+
+/** @brief How long kode_rest() and kode_rest_end() wait for the board, in ms: three
+ *         seconds a part, the ten seconds a busy part is asked again for, and three
+ *         seconds of margin. */
+#define KODE_REST_BOUND_MS 37000U
+
+/**
+ * @brief Put the named parts away and keep them away until kode_rest_end().
+ *
+ * Returns once every part named is at rest, which takes up to three seconds a
+ * part. A part that is busy is asked again every second, for up to ten
+ * seconds from the call, as a sleep the board is asked for is; still busy
+ * then, it stops the call there: it returns false, the parts that had rested
+ * stay at rest, and kode_error() names the one that did not. A part that does
+ * not answer in its three seconds stops the call the same way, and is not
+ * asked again.
+ * Called again, it adds parts and takes the new wake sources; it also wakes
+ * a processor asleep for KODE_REST_CPU, which sleeps again only when the call
+ * names that part. While another request is being arranged, the console's
+ * included, it returns false at once and says so.
+ *
+ * kode_display_sleep(false) wakes a display the rest put to sleep. From then
+ * the screen is not at rest, and KODE_REST_CPU is refused until it is again.
+ * With the radio at rest Wi-Fi still joins its network again by itself, but
+ * kode_wifi_scan() and kode_ble_scan() fail at once and say the radio is at
+ * rest: kode_rest_end() first.
+ *
+ * With KODE_REST_CPU the board's own clock stops as well, so the system does
+ * nothing that takes time until a wake: finish file and network work first,
+ * and wait for the wake with kode_event_wait() or a button, not by asking the
+ * board for things. Whatever @p wake says, these always wake it: every
+ * button, a USB cable (seen within a minute), a console line, an MQTT
+ * message, and the battery at the level where the board protects it. And a
+ * processor left asleep for the user's `off_after` time switches the board
+ * off, as a board asleep does. A wake ends only the CPU part: the other parts
+ * stay away, and calling kode_rest() again lets the processor sleep again.
+ * What the rest saves is not a measured figure.
+ *
+ * Needs CONFIG_KODE_LOWPOWER: without it the call is refused and says so.
+ *
+ * @param parts A mask of kode_rest_part_t.
+ * @param wake  What wakes the processor besides the buttons; NULL for nothing more.
+ * @return true when every named part is at rest; false with kode_error() naming the one that is not.
+ */
+bool kode_rest(uint32_t parts, const kode_rest_wake_t *wake);
+
+/**
+ * @brief Bring back what kode_rest() put away.
+ *
+ * The display comes back as kode_display_sleep(false) leaves it. The sound
+ * and the card come back by themselves at their next use.
+ *
+ * @return true when all of it is back; false with kode_error() saying why.
+ */
+bool kode_rest_end(void);
+
 /**
  * @brief Allow or forbid charging the cell. Not stored: the next boot
  *        goes back to the stored `charge` setting (on unless it was set off).
@@ -1535,7 +1891,9 @@ bool kode_power_set_charge_current(uint16_t ma);
 /* A few strings the board keeps by name across resets and visits to kodeOS.
  * Names are exact: "Name" and "name" are two settings. The calls block, one
  * task at a time, and fail on a task whose stack is in PSRAM: use app_main or
- * a task of your own. Anyone who can read this board can read them: keep no
+ * a task of your own. Every app's settings share one part of the store, so
+ * kodeOS keeps room for its own: a set past it fails, and kode_error() says
+ * how big it is. Anyone who can read this board can read them: keep no
  * secrets here. */
 
 #define KODE_SETTING_KEY_MAX   16U   /**< Bytes of a name, NUL included.  */
@@ -2141,6 +2499,29 @@ bool kode_rfid_emulate_stop(void);
  */
 bool kode_display_set_brightness(uint8_t pct);
 
+/** @brief How long kode_display_sleep() waits for the display, in ms. */
+#define KODE_DISPLAY_SLEEP_BOUND_MS 2000U
+
+/**
+ * @brief Put the display to sleep, or wake it.
+ *
+ * Asleep, the panel and its link to the processor are off: the glass is dark
+ * and the board draws less than at a brightness of 0, which leaves both
+ * running. The touch keeps reading, so a touch event can be what wakes it.
+ * On waking, the screen comes back as the app last left it, at the brightness
+ * it had; what the app draws while it sleeps shows then.
+ *
+ * Waits until the display is as asked, up to KODE_DISPLAY_SLEEP_BOUND_MS: a
+ * sleep waits for the screen to finish the frame it draws, up to 1.5 s, then
+ * puts the panel to sleep and takes its link down. Already asleep, or already
+ * awake, is true at once. One task at a time.
+ *
+ * @param sleep true to sleep, false to wake.
+ * @return true when the display is as asked; false with kode_error() saying
+ *         why: a screenshot is being read, the display did not answer in time.
+ */
+bool kode_display_sleep(bool sleep);
+
 /* ---- Touch ---- */
 
 /*
@@ -2209,7 +2590,9 @@ bool kode_touch_read(int16_t *x, int16_t *y);
  * screen is behind it waits up to KODE_SCREEN_BUSY_MS, after any screen calls
  * of other tasks ahead of it, so a wait can be longer. The calls live in the
  * kode_screen component: an app that draws adds it to its REQUIRES, and one
- * that does not links no LVGL. Not available in the kodeOS image. */
+ * that does not links no LVGL. Not available in the kodeOS image.
+ * When the cell is critical on battery, before the board switches itself off,
+ * a notice covers the screen until a tap closes it or a cable comes. */
 
 #define KODE_WIDGETS_MAX      32U    /**< Widgets on one screen.                              */
 #define KODE_WIDGET_TEXT_MAX  128U   /**< Bytes of a title or a widget's text, NUL included.  */

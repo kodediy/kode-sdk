@@ -134,9 +134,9 @@ static QState ButtonsLed_running(ButtonsLed * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             show_colour(me);
-            QTimeEvt_armX(&me->tick,
-                          KQP_TICKS_PER_MS(BL_TICK_MS),
-                          KQP_TICKS_PER_MS(BL_TICK_MS));
+            /* A one-shot each tick arms again: a periodic one keeps posting
+             * while this AO does not run, and a full queue is a reset. */
+            QTimeEvt_armX(&me->tick, KQP_TICKS_PER_MS(BL_TICK_MS), 0U);
             status = Q_HANDLED();
             break;
         }
@@ -173,6 +173,7 @@ static QState ButtonsLed_running(ButtonsLed * const me, QEvt const * const e)
             break;
         }
         case BL_TICK_SIG: {
+            (void)QTimeEvt_rearm(&me->tick, KQP_TICKS_PER_MS(BL_TICK_MS));
             KLOG_D(TAG, "still here, %ums in", (unsigned)kode_sys_time_ms());
             status = Q_HANDLED();
             break;

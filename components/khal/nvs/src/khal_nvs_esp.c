@@ -17,7 +17,11 @@
 
 #define TAG "khal.nvs"
 
+/** @brief Bytes of one entry of the store: a key's header, or that much of its string. */
+#define NVS_ENTRY_BYTES  32U
+
 static bool s_ready;
+static bool s_erased;   /* khal_nvs_init() erased the partition in this boot */
 
 /**
  * @brief Whether the caller runs on a stack in PSRAM, which NVS must not see.
@@ -58,10 +62,11 @@ kode_status_t khal_nvs_init(void)
         || (ESP_ERR_NVS_NEW_VERSION_FOUND == err) )
     {
         /* Erased whole: settings and app data go back to their defaults. */
-        KLOG_W(TAG, "the nvs partition needs erasing (%s); doing it",
+        KLOG_W(TAG, "the settings store cannot be read as it is (%s): erasing "
+                    "it, every setting goes back to its default",
                esp_err_to_name(err));
-        (void)nvs_flash_erase();
-        err = nvs_flash_init();
+        s_erased = (nvs_flash_erase() == ESP_OK);
+        err      = nvs_flash_init();
     }
     if ( ESP_OK != err )
     {
@@ -140,6 +145,88 @@ kode_status_t khal_nvs_set_str(const char *ns, const char *key,
         return KODE_ERROR;
     }
     return KODE_OK;
+}
+
+bool khal_nvs_erased(void)
+{
+    return s_erased;
+}
+
+/**
+ * @brief Entries a string takes in the store: its header, then its bytes in
+ *        whole entries.
+ *
+ * @param size The string's length, NUL included.
+ * @return How many entries.
+ */
+static size_t str_entries(size_t size)
+{
+    return 1U + ((size + NVS_ENTRY_BYTES - 1U) / NVS_ENTRY_BYTES);
+}
+
+/**
+ * @brief How many bytes @p ns would take once @p value is under @p key.
+ *
+ * @param ns    Namespace.
+ * @param key   Key.
+ * @param value The string to be written.
+ * @param after Where the bytes go on KODE_OK.
+ * @return KODE_OK; KODE_ERROR when the store could not count @p ns.
+ */
+static kode_status_t str_bytes_after(const char *ns, const char *key,
+                                     const char *value, size_t *after)
+{
+    nvs_handle_t h;
+    size_t       used = 0U;   /* entries @p ns takes now */
+    esp_err_t    err  = ESP_OK;
+
+    /* No namespace yet: it takes nothing. */
+    if ( nvs_open(ns, NVS_READONLY, &h) == ESP_OK )
+    {
+        size_t held = 0U;     /* the string @p key holds now, NUL included */
+
+        err = nvs_get_used_entry_count(h, &used);
+        if ( (ESP_OK == err) && (nvs_get_str(h, key, NULL, &held) == ESP_OK)
+            && (str_entries(held) <= used) )
+        {
+            /* The write frees what the key held. */
+            used -= str_entries(held);
+        }
+        nvs_close(h);
+    }
+    if ( ESP_OK != err )
+    {
+        KLOG_W(TAG, "count %s: %s", ns, esp_err_to_name(err));
+        return KODE_ERROR;
+    }
+    *after = (used + str_entries(strlen(value) + 1U)) * NVS_ENTRY_BYTES;
+    return KODE_OK;
+}
+
+kode_status_t khal_nvs_set_str_within(const char *ns, const char *key,
+                                      const char *value, size_t share)
+{
+    size_t after = 0U;
+
+    if ( stack_refused("khal_nvs_set_str_within") )
+    {
+        return KODE_DENIED;
+    }
+
+    if ( (khal_nvs_init() != KODE_OK) || (NULL == value) )
+    {
+        return KODE_ERROR;
+    }
+
+    if ( str_bytes_after(ns, key, value, &after) != KODE_OK )
+    {
+        return KODE_ERROR;
+    }
+    if ( after > share )
+    {
+        return KODE_NO_RESOURCES;
+    }
+    return khal_nvs_set_str(ns, key, value);
 }
 
 kode_status_t khal_nvs_get_u8(const char *ns, const char *key, uint8_t *out)

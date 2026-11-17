@@ -100,7 +100,7 @@ typedef enum {
 } kdrv_wifi_state_t;
 
 /**
- * @brief Why the station last left a network or was refused one, in the three
+ * @brief Why the station last left a network or was refused one, in the four
  *        answers a person can act on. The stack's own codes stay in this
  *        driver: every other layer reads this.
  */
@@ -109,6 +109,8 @@ typedef enum {
     KDRV_WIFI_FAIL_PASSWORD,    /**< The network turned the password down.          */
     KDRV_WIFI_FAIL_NOT_FOUND,   /**< Not heard: out of range, or no such name.      */
     KDRV_WIFI_FAIL_OTHER,       /**< Anything else: full, incompatible, a fault.    */
+    KDRV_WIFI_FAIL_HANDSHAKE,   /**< The handshake timed out: a wrong password, or
+                                 *   a signal that went during it.                  */
 } kdrv_wifi_fail_t;
 
 /**
@@ -299,6 +301,14 @@ uint16_t kdrv_wifi_scan_dropped(void);
 kode_status_t kdrv_wifi_connect(const char *ssid, const char *pass,
                                 uint32_t timeout_ms);
 
+/** @brief The last channel of the lower band: 1 to 14 are 2.4 GHz and every
+ *         channel above is 5 GHz. */
+#define KDRV_WIFI_LAST_24_CHANNEL  14U
+
+/** @brief The channel of a join whose access point is not known: the radio
+ *         may use both bands. */
+#define KDRV_WIFI_CHANNEL_ANY      0U
+
 /**
  * @brief Ready this side for a join somebody else makes: the C5, from its
  *        vault. Blocks briefly; the worker's.
@@ -308,10 +318,21 @@ kode_status_t kdrv_wifi_connect(const char *ssid, const char *pass,
  * left. The state stays IDLE: the join may still be refused, and then
  * nothing has to be undone. kdrv_wifi_await() then waits for the outcome.
  *
- * @param ssid The network the join is for.
+ * The C5 joins the first access point of the name its own scan finds, which
+ * is the 2.4 GHz one when the network is on both bands. So the radio is held
+ * to the band of the access point that was chosen: the lower band for a
+ * channel up to KDRV_WIFI_LAST_24_CHANNEL, the upper band above it, both
+ * bands for KDRV_WIFI_CHANNEL_ANY. kdrv_wifi_await() gives both back, and so
+ * does every scan. A C5 that refuses the band does not fail the join: it
+ * goes on as it would without the aim, and the first refusal of a boot is
+ * logged.
+ *
+ * @param ssid    The network the join is for.
+ * @param channel The channel of the access point the join is aimed at, or
+ *                KDRV_WIFI_CHANNEL_ANY when it is not known.
  * @return KODE_OK; KODE_ERROR for no name or a stack that would not start.
  */
-kode_status_t kdrv_wifi_prepare(const char *ssid);
+kode_status_t kdrv_wifi_prepare(const char *ssid, uint8_t channel);
 
 /**
  * @brief Wait for the join kdrv_wifi_prepare() readied. Blocks up to
@@ -319,6 +340,8 @@ kode_status_t kdrv_wifi_prepare(const char *ssid);
  *
  * The state is CONNECTING with @p ssid named from here, GOT_IP on success,
  * and back to IDLE (or DISCONNECTED, as the network said) on a failure.
+ * Whatever the outcome, the radio is given both bands back before this
+ * returns.
  *
  * @param ssid       The network, named in the state and in the log.
  * @param timeout_ms How long the lease may take.
@@ -393,9 +416,11 @@ void kdrv_wifi_on_lost(kdrv_wifi_lost_cb_t cb);
 /**
  * @brief Sort a disconnect's reason into what a person can act on.
  *
- * A timed-out handshake counts as the password because that is what a wrong
- * WPA2 password looks like from here: the access point simply never finishes
- * it. A weak signal can do the same, and nothing on this side tells them apart.
+ * A timed-out handshake has an answer of its own, KDRV_WIFI_FAIL_HANDSHAKE.
+ * That is what a wrong WPA2 password looks like from here, the access point
+ * simply never finishes it, and a weak signal can do the same: nothing on this
+ * side tells them apart. KDRV_WIFI_FAIL_PASSWORD is kept for a refusal that is
+ * no timeout.
  *
  * @param reason The stack's wifi_err_reason_t, as the event carried it.
  * @return The answer it belongs to; never KDRV_WIFI_FAIL_NONE.
@@ -425,7 +450,7 @@ int8_t kdrv_wifi_rssi_last(void);
 /**
  * @brief The primary channel of the network the station is on, as of the last
  *        kdrv_wifi_rssi(): a join's own success takes that sample. No RPC.
- * @return The channel, or 0 before any sample.
+ * @return The channel, or 0 before any sample and once the association is gone.
  */
 uint8_t kdrv_wifi_channel_last(void);
 

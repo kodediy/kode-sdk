@@ -9,7 +9,9 @@
 
 #include <string.h>
 
+#include "diskio_wl.h"
 #include "esp_vfs_fat.h"
+#include "ff.h"
 #include "wear_levelling.h"
 
 #include "kode_log.h"
@@ -123,6 +125,33 @@ void kdrv_fs_unmount(void)
     (void)esp_vfs_fat_spiflash_unmount_rw_wl(KDRV_FS_MOUNT, s_wl);
     s_wl = WL_INVALID_HANDLE;
     KLOG_I(TAG, "storage unmounted");
+}
+
+uint32_t kdrv_fs_cluster_bytes(void)
+{
+    uint32_t bytes = 0U;
+
+    if ( WL_INVALID_HANDLE != s_wl )
+    {
+        char  drive[3];
+        FATFS *fs = NULL;
+        DWORD free_clusters = 0U;
+
+        drive[0] = (char)('0' + ff_diskio_get_pdrv_wl(s_wl));
+        drive[1] = ':';
+        drive[2] = '\0';
+        /* The FATFS esp_vfs_fat_info() reads its sizes from comes with the
+         * free count. */
+        if ( (f_getfree(drive, &free_clusters, &fs) == FR_OK) && (NULL != fs) )
+        {
+            WORD sector = FF_MIN_SS;
+#if FF_MAX_SS != FF_MIN_SS
+            sector = fs->ssize;
+#endif
+            bytes = (uint32_t)fs->csize * (uint32_t)sector;
+        }
+    }
+    return bytes;
 }
 
 kode_status_t kdrv_fs_usage(uint64_t *total, uint64_t *free_bytes)
