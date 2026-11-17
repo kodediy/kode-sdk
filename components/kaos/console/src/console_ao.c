@@ -35,6 +35,7 @@
 #include "kapp_cat.h"
 #include "kapp_data.h"      /* the app.json status names `appdata_ls` prints */
 #include "kdrv_buttons.h"
+#include "kdrv_c5.h"        /* KDRV_C5_VERSION_MAX: the room `info`'s c5= needs, and nothing else */
 #include "kdrv_clocks.h"   /* the `clocks` verb and its test row */
 #if CONFIG_KODEOS_NET
 #include "kdrv_net.h"      /* time sync=: ask a server now */
@@ -3945,16 +3946,17 @@ static void h_board_rev(Console *me, const kcmd_t *c, const karg_val_t *v)
 /**
  * @brief `info`'s `>|fw` record: the kodeOS release and the kode_c5 release.
  *
- * `c5` is the release the C5's image descriptor gave at the last link-up,
- * `-` with no link up this boot, for a slave that is not kode_c5, or in an
- * image without AO_Radio. Never the version the link negotiates: that one is
- * esp-hosted's, and the `c5` verb gives it.
+ * `c5` is the release the C5's image descriptor gave when the link came up,
+ * `-` with no link up now, for a slave that is not kode_c5, for a kode_c5
+ * from before its own releases, or in an image without AO_Radio. Never the
+ * version the link negotiates: that one is esp-hosted's, and the `c5` verb
+ * gives it.
  *
  * @param kodeos The kodeOS release h_info() chose; empty prints `-`.
  */
 static void info_fw(const char *kodeos)
 {
-    char c5[KDRV_SLOT_VERSION_MAX];
+    char c5[KDRV_C5_VERSION_MAX];
     char qk[CONSOLE_QUOTED_MAX(KDRV_SLOT_VERSION_MAX)];
     char qc[CONSOLE_QUOTED_MAX(sizeof(c5))];
 

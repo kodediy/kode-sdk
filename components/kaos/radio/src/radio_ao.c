@@ -9754,16 +9754,36 @@ void ble_pair_subscribe(QActive const *who)
 
 kode_status_t radio_c5_release(char *out, size_t len)
 {
+    char release[KDRV_C5_VERSION_MAX];
+    char hosted[KDRV_C5_VERSION_MAX];
+
+    if ( (NULL == out) || (0U == len) )
+    {
+        return KODE_DENIED;
+    }
     /* A stock slave's descriptor carries esp-hosted's version, not a
      * release of kode_c5: only the project name tells the two apart. */
-    int32_t       kode = 0;
-    kode_status_t st   = KODE_DENIED;
-
-    if ( (kdrv_c5_get(KDRV_C5_PROJECT_KODE, &kode) == KODE_OK) && (0 != kode) )
+    if ( (1L != c5_num(KDRV_C5_PROJECT_KODE))
+        || (kdrv_c5_app_version(release, sizeof(release)) != KODE_OK) )
     {
-        st = kdrv_c5_app_version(out, len);
+        return KODE_DENIED;
     }
-    return st;
+    /* A kode_c5 from before its own releases stamped the version the link
+     * negotiates, esp-hosted's: no release either. */
+    (void)snprintf(hosted, sizeof(hosted), "%ld.%ld.%ld",
+                   c5_num(KDRV_C5_FW_MAJOR), c5_num(KDRV_C5_FW_MINOR),
+                   c5_num(KDRV_C5_FW_PATCH));
+    if ( strcmp(release, hosted) == 0 )
+    {
+        return KODE_DENIED;
+    }
+    /* The whole release or nothing: a cut one would read as another. */
+    if ( strlen(release) >= len )
+    {
+        return KODE_DENIED;
+    }
+    (void)snprintf(out, len, "%s", release);
+    return KODE_OK;
 }
 
 void ble_app_subscribe(QActive const *who)

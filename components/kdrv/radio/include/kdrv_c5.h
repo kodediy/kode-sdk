@@ -21,6 +21,9 @@ extern "C" {
  *         slave was renamed the two were indistinguishable over the link. */
 #define KDRV_C5_PROJECT_NAME  "kode_c5"
 
+#define KDRV_C5_VERSION_MAX   32U /**< Bytes of the image's version, with its
+                                    *   NUL, as the descriptor holds it.     */
+
 /** @brief esp_chip_model_t's value for an ESP32-C5. Spelled here so the
  *         table's contract does not depend on an ESP-IDF header; the .c
  *         asserts it against the real enum. */
@@ -139,7 +142,8 @@ kode_status_t kdrv_c5_target(char *out, size_t len);
 /** @brief The image's project name. KODE_DENIED without a descriptor. */
 kode_status_t kdrv_c5_project_name(char *out, size_t len);
 
-/** @brief The image's own version string. KODE_DENIED without a descriptor. */
+/** @brief The image's own version string, at most KDRV_C5_VERSION_MAX bytes
+ *         with its NUL. KODE_DENIED without a descriptor. */
 kode_status_t kdrv_c5_app_version(char *out, size_t len);
 
 /** @brief The IDF the image was built with. KODE_DENIED without a descriptor. */

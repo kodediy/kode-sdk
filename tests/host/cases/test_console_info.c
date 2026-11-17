@@ -585,9 +585,11 @@ TEST_CASE("info's fw record says c5=- while the link has never been up, and "
     TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=-"));
     TEST_ASSERT_TRUE(replied(">ok"));
 
+    /* A version that is not esp-hosted's, so the project name alone decides. */
     fake_klog_reset();
     fake_hosted_reset();
     fake_hosted_set_project("network_adapter");
+    fake_hosted_set_app_strings("1.0.0", "v6.1", "Nov 17 2026", "10:00:00");
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
     type_line("info");
     TEST_ASSERT_TRUE_MESSAGE(replied(">|fw kodeos=- c5=-"),
@@ -603,6 +605,72 @@ TEST_CASE("info's fw record says c5=- while the link has never been up, and "
     fake_hosted_reset();
     kdrv_c5_forget();
     Mockkdrv_slot_Destroy();
+}
+
+/* Before kode_c5 had releases of its own, its image stamped esp-hosted's
+ * version, the one the link negotiates. That is no release of kode_c5, and
+ * it compares newer than every real one. */
+TEST_CASE("info's fw record says c5=- for a kode_c5 whose version is "
+          "esp-hosted's", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    /* The fake's own slave: kode_c5, descriptor and link both at 2.12.9. */
+    fake_hosted_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE_MESSAGE(replied(">|fw kodeos=- c5=-"),
+        "esp-hosted's version is not a kode_c5 release");
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    kdrv_c5_forget();
+    Mockkdrv_slot_Destroy();
+}
+
+/* The record sits where it was put: after the partitions, before the
+ * records the owners add (the C5's own among them), before `>ok`. */
+TEST_CASE("info's fw record comes after the partitions and before the "
+          "owners' records", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    c5_release("0.1.3");
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=\"0.1.3\""));
+    TEST_ASSERT_TRUE(replied(">|c5=running project=\"kode_c5\" version=\"0.1.3\""));
+    TEST_ASSERT_TRUE(reply_index(">|slot=ota_1") < reply_index(">|fw "));
+    TEST_ASSERT_TRUE(reply_index(">|fw ") < reply_index(">|c5=running"));
+    TEST_ASSERT_TRUE(reply_index(">|c5=running") < reply_index(">ok"));
+
+    kdrv_c5_forget();
+    Mockkdrv_slot_Destroy();
+}
+
+/* The door gives the whole release or nothing: a cut one would read as
+ * another release. */
+TEST_CASE("radio_c5_release refuses a buffer the whole release does not fit",
+          "[console_info]")
+{
+    char out[sizeof("0.1.3")];
+
+    c5_release("0.1.3");
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, radio_c5_release(out, sizeof(out) - 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, radio_c5_release(out, 0U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, radio_c5_release(NULL, sizeof(out)));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, radio_c5_release(out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("0.1.3", out);
+
+    kdrv_c5_forget();
 }
 
 TEST_CASE("info's fw record says c5=- in an image without AO_Radio",

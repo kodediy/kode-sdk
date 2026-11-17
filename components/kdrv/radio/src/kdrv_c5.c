@@ -53,7 +53,7 @@ static struct {
     bool     app_desc;       /**< The descriptor group is filled.           */
     bool     project_kode;
     char     project[32];
-    char     version[32];
+    char     version[KDRV_C5_VERSION_MAX];
     char     idf_ver[32];
     char     date[16];
     char     time[16];
