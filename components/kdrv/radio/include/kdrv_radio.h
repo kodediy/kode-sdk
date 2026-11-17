@@ -176,12 +176,13 @@ typedef struct {
                               *   running instead of reset.                  */
 } kdrv_radio_req_t;
 
-/** @brief The C5 slave firmware version, read over RPC at link-up.
+/** @brief The esp-hosted version the C5's slave runs, read over RPC at link-up.
  *
- * The slave answers with esp-hosted's own version (2.12.9 today) and
- * hardcodes everything finer to -1, so this RPC alone cannot tell a Kode
- * build of the slave from stock. What can is the image descriptor's project
- * name, KDRV_C5_PROJECT_NAME, which kdrv_c5 reads in the same bring-up. */
+ * It is esp-hosted's (2.12.9 today), never a release of kode_c5, and the
+ * slave hardcodes everything finer to -1, so this RPC alone cannot tell a
+ * Kode build of the slave from stock. What can is the image descriptor's
+ * project name, KDRV_C5_PROJECT_NAME, which kdrv_c5 reads in the same
+ * bring-up, with the image's own version beside it. */
 typedef struct {
     uint32_t major;
     uint32_t minor;
