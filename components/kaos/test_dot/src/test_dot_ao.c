@@ -948,6 +948,20 @@ static bool verb_needs_cam(uint8_t v)
            || ((uint8_t)TEST_DOT_VERB_CAMERA == v);
 }
 
+/**
+ * @brief Ask AO_Radio for J3's rail off.
+ *
+ * Nothing here waits for its end, so a refusal is only said: the rail stays
+ * on until the next ask.
+ */
+static void rail_off_ask(void)
+{
+    if ( !exp_power_request(false) )
+    {
+        KLOG_E(TAG, "J3's rail stays on: AO_Radio had no room to switch it off");
+    }
+}
+
 /** @brief Start the wake for @p e: J3's rail first. */
 static void wake_begin(TestDot *me, TestDotReqEvt const *e)
 {
@@ -964,9 +978,15 @@ static void wake_begin(TestDot *me, TestDotReqEvt const *e)
     me->mode = (uint8_t)MODE_WAKING;
     subscribe(me, true);
     me->rail_on = true;
-    exp_power_request(true);
+    if ( exp_power_request(true) )
+    {
+        KLOG_N(TAG, "wake: J3's rail asked");
+    }
+    else
+    {
+        KLOG_W(TAG, "wake: AO_Radio had no room for J3's rail; the rail's time ends the wake");
+    }
     tmo_arm(me, (uint8_t)TMO_RAIL, KODE_TEST_DOT_RAIL_MS);
-    KLOG_N(TAG, "wake: J3's rail asked");
 }
 
 /** @brief The wake failed on @p why: the relays at rest and the camera closed, then the rail off. */
@@ -987,7 +1007,7 @@ static void wake_closed(TestDot *me)
 {
     if ( me->rail_on )
     {
-        exp_power_request(false);
+        rail_off_ask();
     }
     me->rail_on      = false;
     me->probed       = false;
@@ -2231,7 +2251,7 @@ static void end_next(TestDot *me)
                 tmo_stop(me);
                 if ( me->rail_on )
                 {
-                    exp_power_request(false);
+                    rail_off_ask();
                 }
                 me->rail_on      = false;
                 me->probed       = false;

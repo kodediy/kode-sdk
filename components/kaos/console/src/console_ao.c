@@ -96,7 +96,7 @@ KAOS_WEAK void appmgr_list_page(uint16_t skip, QActive *who);
 KAOS_WEAK void appmgr_list_request(QActive *who);
 KAOS_WEAK bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
                                    bool launch, uint8_t src, const char *name);
-KAOS_WEAK void c5_flash_request(uint8_t src_kind, const char *src);
+KAOS_WEAK bool c5_flash_request(uint8_t src_kind, const char *src);
 KAOS_WEAK bool c5_recv_request(uint32_t size, uint32_t crc32, uint8_t src);
 KAOS_WEAK const uint8_t *display_capture_buf(void);
 KAOS_WEAK void display_capture_release(void);
@@ -1788,8 +1788,8 @@ static void install_from_wire(Console *me, const kcmd_t *c, uint8_t dst,
     }
     if ( !ok )
     {
-        /* The event pool was dry and nothing was posted: close here, or
-         * the watchdog would report a false timeout. */
+        /* Nothing was posted (the pool was dry, or the owner had no room):
+         * close here, or the watchdog would report a false timeout. */
         console_reply_err(KCLI_ERR_REJECT, c->verb);
         console_end();
     }
@@ -1962,8 +1962,15 @@ static void h_install(Console *me, const kcmd_t *c, const karg_val_t *v)
         {
             return;
         }
-        c5_flash_request(kind, spec);
-        console_reply(">ok");
+        if ( c5_flash_request(kind, spec) )
+        {
+            console_reply(">ok");
+        }
+        else
+        {
+            /* Nothing was posted: the pool was dry or AO_Radio had no room. */
+            console_reply_err(KCLI_ERR_BUSY, "busy");
+        }
         return;
     }
     cmd_begin(me, KCLI_INSTALL, c->verb);

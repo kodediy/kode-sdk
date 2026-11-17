@@ -1529,7 +1529,9 @@ static kode_status_t net_stream_run(void *arg, uint32_t *value)
  *
  * The fast mode is wanted while the channel holds it (@c cfast) or the jobs
  * do (@c jfast). Asking for what was asked already does nothing, so the first
- * hold to begin is one request and the last to end is one.
+ * hold to begin is one request and the last to end is one. A request
+ * AO_Radio had no room for is not counted as asked: the next change of the
+ * holds asks again.
  *
  * @param me The AO.
  */
@@ -1540,10 +1542,9 @@ static void net_fast_eval(Net * const me)
 #if CONFIG_KODEOS_CHANNEL
     want = want || me->cfast;
 #endif
-    if ( want != me->fast_asked )
+    if ( (want != me->fast_asked) && wifi_fast_request(want) )
     {
         me->fast_asked = want;
-        wifi_fast_request(want);
     }
 }
 
@@ -6725,9 +6726,10 @@ static QState Net_initial(Net * const me, void const * const par)
         radio_lp_expect_net(true);   /* an OFF round waits for this AO's leave */
     }
     /* The scheduler's check wakes the radio, and has nothing to wake while the
-     * C5 link is down: ask where it stands rather than wait for an edge. */
+     * C5 link is down: ask where it stands rather than wait for an edge. A
+     * refusal is AO_Radio's line in the log; the next edge still comes. */
     QActive_subscribe(&me->super, RADIO_STATE_SIG);
-    radio_state_request();
+    (void)radio_state_request();
 #endif
 #if CONFIG_KODEOS_CHANNEL
     /* The setting this AO owns, `chan`: on unless the store says off. */
@@ -6780,8 +6782,9 @@ static QState Net_initial(Net * const me, void const * const par)
 
     /* Ask rather than wait for an edge that may have passed. Safe because
      * kode_init() starts AO_Radio before this AO: posting to an AO with no
-     * queue asserts. */
-    wifi_state_request();
+     * queue asserts. A refusal is AO_Radio's line in the log; the next edge
+     * still comes. */
+    (void)wifi_state_request();
 
     KLOG_I(TAG, "network services up (offline until there is an address)");
     return Q_TRAN(&Net_offline);

@@ -2121,24 +2121,34 @@ typedef enum {
  */
 void radio_up_request(void);
 
-/** @brief Ask AO_Radio to tear the link down. The C5 keeps running. */
-void radio_down_request(void);
+/**
+ * @brief Ask AO_Radio to tear the link down. The C5 keeps running.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
+ */
+bool radio_down_request(void);
 
 /**
  * @brief Ask AO_Radio to publish RADIO_STATE_SIG again.
  *
  * Same contract as display_state_request(): only once kode_init() has
  * returned - posting to an unstarted AO is a FreeRTOS assert, not a no-op.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void radio_state_request(void);
+bool radio_state_request(void);
 
 /**
  * @brief Ask AO_Radio to leave the C5 parked for a jump that restarts the board.
  *
  * AO_Boot's request, once before it restarts. With the link up AO_Radio hangs up
  * BLE, asks the C5 to park and, only on its yes, leaves the note for @p target.
- * Always answered with one BOOT_RADIO_PARKED_SIG to AO_Boot; with no link, at once.
- * Compiled under CONFIG_KODEOS_RADIO; guard the call the same way.
+ * Always answered with one BOOT_RADIO_PARKED_SIG to AO_Boot; with no link, at once,
+ * and so are a dry pool and a queue within KQP_RADIO_POST_MARGIN of full, as a
+ * park the C5 refused. Compiled under CONFIG_KODEOS_RADIO; guard the call the
+ * same way.
  *
  * @param target The role of the firmware the restart goes to.
  */
@@ -2342,8 +2352,11 @@ QEvt const *wifi_leave_evt(void);
  * The flag is the wish, not the outcome: a call refused while the C5 is busy is
  * still delivered by the next reconcile or boot. WIFI_STATE_SIG answers every call
  * (`enabled` is the flag). wifi_stop_request() is the opposite.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void wifi_start_request(void);
+bool wifi_start_request(void);
 
 /**
  * @brief Switch the WiFi service off, and remember that it is off.
@@ -2351,19 +2364,30 @@ void wifi_start_request(void);
  * Takes the station all the way down and clears the stored flag. The link stays
  * up: esp-hosted cannot rebuild its transport within a boot (an idle link costs
  * ~27 mA). Answered with WIFI_STATE_SIG, even when it waits for a job in flight.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void wifi_stop_request(void);
+bool wifi_stop_request(void);
 
-/** @brief Ask AO_Radio to publish WIFI_STATE_SIG now. Always answered. */
-void wifi_state_request(void);
+/**
+ * @brief Ask AO_Radio to publish WIFI_STATE_SIG now. Answered whenever it is posted.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
+ */
+bool wifi_state_request(void);
 
 /**
  * @brief Ask AO_Radio to refresh the current association's signal strength.
  *
  * `wifi_info` reports the last known value without waiting. Answered with
  * WIFI_STATE_SIG once measured, or at once with no link or no association.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void wifi_rssi_request(void);
+bool wifi_rssi_request(void);
 
 /**
  * @brief Ask AO_Radio for the station's fast mode, or for the default back.
@@ -2375,8 +2399,10 @@ void wifi_rssi_request(void);
  * of its workers, and gives the default back when the last of them ends.
  *
  * @param on true for fast, false for the default.
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
  */
-void wifi_fast_request(bool on);
+bool wifi_fast_request(bool on);
 
 /**
  * @brief Ask AO_Radio to get onto a remembered network by itself.
@@ -2402,11 +2428,20 @@ QEvt const *wifi_auto_evt(void);
  * Answered on the bus: one WIFI_SAVED_ENTRY_SIG per network, most recently
  * used first, then WIFI_SAVED_END_SIG. Names only - a stored password is
  * never handed back.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void wifi_list_request(void);
+bool wifi_list_request(void);
 
-/** @brief Ask AO_Radio to forget @p ssid. Does not disconnect. */
-void wifi_forget_request(const char *ssid);
+/**
+ * @brief Ask AO_Radio to forget @p ssid. Does not disconnect.
+ * @param ssid The network.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
+ */
+bool wifi_forget_request(const char *ssid);
 
 /* ---- BLE: a host here, the controller on the C5 -------------------------
  * The radio is the coprocessor's and the stack above HCI is the P4's, so a
@@ -2420,8 +2455,11 @@ void wifi_forget_request(const char *ssid);
  * On means advertising whenever the flag is set and nobody is connected. The
  * pairing gate on the console service bounds exposure. As wifi_start_request():
  * persisted, link brought up, restored after reboot. Answered with BLE_STATE_SIG.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void ble_start_request(void);
+bool ble_start_request(void);
 
 /**
  * @brief Ask for a BLE scan that listens for @p ms.
@@ -2528,8 +2566,11 @@ bool ble_enabled(void);
  * Takes the host down and disables the C5's controller and clears the
  * stored flag. The link itself stays up for the rest of the boot, for the
  * reason wifi_stop_request() gives. Answered with BLE_STATE_SIG.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void ble_stop_request(void);
+bool ble_stop_request(void);
 
 /**
  * @brief How many console lines the event pool could not carry.
@@ -2574,8 +2615,11 @@ void ble_state_request(void);
  *
  * Refused while a central is attached: its link would outlive its key. Use
  * ble_stop_request() to disconnect.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void ble_unpair_request(void);
+bool ble_unpair_request(void);
 
 /**
  * @brief Ask AO_Radio to show the board for five minutes, so a new device can
@@ -2600,8 +2644,12 @@ bool ble_pair_open_request(void);
  * Compiled under CONFIG_KODEOS_BLE_PAIRING_PASSKEY (default on). kodeOS shows a
  * code, and so does an app that serves the HID service; any other app refuses
  * new pairings first.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full: the code stays up until the
+ *         security manager gives up on the peer.
  */
-void ble_pair_reject_request(void);
+bool ble_pair_reject_request(void);
 
 /**
  * @brief Send an image to the coprocessor from @p src.
@@ -2612,8 +2660,11 @@ void ble_pair_reject_request(void);
  * @param src_kind  KFW_SRC_FS, KFW_SRC_SD or KFW_SRC_HTTP. The image is decoded
  *                  whole into PSRAM and verified before the C5's session opens.
  * @param src       File name, or URL.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
-void c5_flash_request(uint8_t src_kind, const char *src);
+bool c5_flash_request(uint8_t src_kind, const char *src);
 
 /**
  * @brief Ask AO_Radio to install a coprocessor image arriving on the console.
@@ -2628,8 +2679,9 @@ void c5_flash_request(uint8_t src_kind, const char *src);
  * @param size  Payload length in bytes.
  * @param crc32 What khal_crc32() over the whole payload must equal.
  * @param src   KODE_CONSOLE_SRC_*: the port the payload follows on.
- * @return false if the request event could not be allocated - nothing is
- *         coming, and the caller must not wait.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
 bool c5_recv_request(uint32_t size, uint32_t crc32, uint8_t src);
 
@@ -2645,8 +2697,9 @@ bool c5_recv_request(uint32_t size, uint32_t crc32, uint8_t src);
  *
  * @param who   Where the answer goes.
  * @param nonce 1..KODE_ID_NONCE_MAX characters of [A-Za-z0-9._-].
- * @return false if the request event could not be allocated - nothing is
- *         coming, and the caller must not wait.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
 bool id_sign_request(QActive *who, const char *nonce);
 
@@ -2665,8 +2718,9 @@ bool id_sign_request(QActive *who, const char *nonce);
  * @param of  ID_OP_CERT_PUT: parts in all, 1..KODE_ID_PARTS_MAX; 0 otherwise.
  * @param der ID_OP_CERT_PUT: the part's DER; NULL otherwise.
  * @param len Bytes of der, 1..KODE_ID_PART_BYTES; 0 otherwise.
- * @return false if the request event could not be allocated - nothing is
- *         coming, and the caller must not wait.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
 bool id_request(QActive *who, uint8_t op, uint8_t n, uint8_t of,
                 const uint8_t *der, size_t len);
@@ -2681,8 +2735,9 @@ bool id_request(QActive *who, uint8_t op, uint8_t n, uint8_t of,
  * or no answer within 3 s). A failed step stops the wipe there.
  *
  * @param who Where the answer goes.
- * @return false if the request event could not be allocated - nothing is
- *         coming, and the caller must not wait.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
 bool c5_wipe_request(QActive *who);
 
@@ -2694,8 +2749,11 @@ bool c5_wipe_request(QActive *who);
  * slave build, SDIO at four lines and board clock, card supply on, strongest
  * network above KODE_C5_TEST_RSSI_MIN_DBM. Readings are logged; `wifi` and `ble`
  * flags untouched. Waits for a job; fails at once during an update or after `radio_down`.
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void c5_test_request(void);
+bool c5_test_request(void);
 
 /**
  * @brief The same row as the owner of a unit runs it.
@@ -2703,8 +2761,11 @@ void c5_test_request(void);
  * The link, the snapshot, a WiFi sweep that completes and the BLE
  * controller, with no floor on what either scan hears: what is in range
  * depends on where the unit is. Answers TEST_RESULT_SIG named "c5".
+ *
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
-void c5_test_request_user(void);
+bool c5_test_request_user(void);
 
 /**
  * @brief Read, write or dump one field of the coprocessor - the console's `c5`.
@@ -2712,8 +2773,16 @@ void c5_test_request_user(void);
  * @p field is a resolved kdrv_c5_field_t. Answered to @p who as RADIO_FIELD_RSP_SIG
  * (RadioFieldEvt) from the last bring-up's snapshot: no link crossed, answered in
  * every state, refusals included. A NULL @p who is not answered.
+ *
+ * @param who   Where the answer goes.
+ * @param op    FIELD_OP_GET, _SET or _DUMP.
+ * @param field The field.
+ * @param value What a set writes.
+ * @return true when the request was posted; false when the pool is dry or
+ *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
+ *         is coming, and the caller must not wait.
  */
-void c5_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value);
+bool c5_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value);
 
 /**
  * @brief Ask AO_Radio for the expansion header's +3.3V_EXT on or off.
@@ -2725,8 +2794,10 @@ void c5_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value);
  * as EXP_POWER_SIG (ExpPowerDoneEvt); `c5` reads back `pwr_ext`.
  *
  * @param on true for the rail on, false for off.
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
  */
-void exp_power_request(bool on);
+bool exp_power_request(bool on);
 
 /**
  * @brief The event exp_power_request() posts, for a caller that posts it itself.

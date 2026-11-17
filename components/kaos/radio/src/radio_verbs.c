@@ -343,10 +343,25 @@ static bool c5_field_row(uint16_t field, console_field_t *out)
     return ok;
 }
 
+/**
+ * @brief Close a command AO_Radio had no room for: `>err code=4 msg=busy`.
+ *
+ * For a verb that began its command; the answer would never come, and the
+ * ones that disarm the watchdog would hold the console for ever.
+ */
+static void radio_v_busy_end(void)
+{
+    console_reply_err(KCLI_ERR_BUSY, "busy");
+    console_end();
+}
+
 /** @brief Ask the owner about a coprocessor field. */
 static void c5_field_ask(uint8_t op, uint16_t field, int32_t value)
 {
-    c5_field_request(AO_Console, op, field, value);
+    if ( !c5_field_request(AO_Console, op, field, value) )
+    {
+        radio_v_busy_end();
+    }
 }
 
 static const console_chip_t C5_CHIP = {
@@ -387,8 +402,14 @@ static void h_radio_up(const kverb_t *c, const karg_val_t *v)
 static void h_radio_down(const kverb_t *c, const karg_val_t *v)
 {
     (void)c; (void)v;
-    radio_down_request();
-    console_reply(">ok");
+    if ( radio_down_request() )
+    {
+        console_reply(">ok");
+    }
+    else
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
 }
 
 /** @brief exp_power state=on|off: switch J3's +3.3V_EXT. The pin is the
@@ -397,8 +418,14 @@ static void h_radio_down(const kverb_t *c, const karg_val_t *v)
 static void h_exp_power(const kverb_t *c, const karg_val_t *v)
 {
     (void)c;
-    exp_power_request(v[0].b);
-    console_reply(">ok");
+    if ( exp_power_request(v[0].b) )
+    {
+        console_reply(">ok");
+    }
+    else
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
 }
 
 /** @brief radio_info: closed by RADIO_STATE_SIG - always answerable, every
@@ -408,7 +435,10 @@ static void h_radio_info(const kverb_t *c, const karg_val_t *v)
     (void)v;
     console_begin(c->verb);
     s_radio_kind = RADIO_V_LINK;
-    radio_state_request();
+    if ( !radio_state_request() )
+    {
+        radio_v_busy_end();
+    }
 }
 
 #if defined(CONFIG_KODEOS_WIFI) || defined(CONFIG_KODEOS_BLE)
@@ -808,7 +838,10 @@ static void h_wifi_up(const kverb_t *c, const karg_val_t *v)
     console_begin(c->verb);
     s_radio_kind = RADIO_V_WIFI;
     console_unwatched();   /* rides autojoin's scan, like wifi_auto */
-    wifi_start_request();
+    if ( !wifi_start_request() )
+    {
+        radio_v_busy_end();
+    }
 }
 
 /** @brief wifi_down: disable the WiFi service; stops the station outright.
@@ -819,7 +852,10 @@ static void h_wifi_down(const kverb_t *c, const karg_val_t *v)
     console_begin(c->verb);
     s_radio_kind = RADIO_V_WIFI;
     console_unwatched();   /* the disconnect/stop/deinit chain */
-    wifi_stop_request();
+    if ( !wifi_stop_request() )
+    {
+        radio_v_busy_end();
+    }
 }
 
 /**
@@ -847,15 +883,24 @@ static void h_wifi_list(const kverb_t *c, const karg_val_t *v)
     (void)v;
     console_begin(c->verb);
     s_radio_kind = RADIO_V_WIFI_SAVED;
-    wifi_list_request();
+    if ( !wifi_list_request() )
+    {
+        radio_v_busy_end();
+    }
 }
 
 /** @brief wifi_forget ssid="<s>": drop one from the store. Does not disconnect. */
 static void h_wifi_forget(const kverb_t *c, const karg_val_t *v)
 {
     (void)c;
-    wifi_forget_request(v[0].s);
-    console_reply(">ok");
+    if ( wifi_forget_request(v[0].s) )
+    {
+        console_reply(">ok");
+    }
+    else
+    {
+        console_reply_err(KCLI_ERR_BUSY, "busy");
+    }
 }
 
 /** @brief wifi_info: closed by WIFI_STATE_SIG. */
@@ -864,7 +909,10 @@ static void h_wifi_info(const kverb_t *c, const karg_val_t *v)
     (void)v;
     console_begin(c->verb);
     s_radio_kind = RADIO_V_WIFI;
-    wifi_state_request();
+    if ( !wifi_state_request() )
+    {
+        radio_v_busy_end();
+    }
 }
 
 /** @brief What `wifi_frames` has counted in its window. */
@@ -1005,7 +1053,10 @@ static void h_ble_up(const kverb_t *c, const karg_val_t *v)
     console_begin(c->verb);
     s_radio_kind = RADIO_V_BLE;
     console_unwatched();
-    ble_start_request();
+    if ( !ble_start_request() )
+    {
+        radio_v_busy_end();
+    }
 }
 
 /** @brief Two hex digits a maker byte. */
@@ -1106,7 +1157,10 @@ static void h_ble_down(const kverb_t *c, const karg_val_t *v)
     console_begin(c->verb);
     s_radio_kind = RADIO_V_BLE;
     console_unwatched();
-    ble_stop_request();
+    if ( !ble_stop_request() )
+    {
+        radio_v_busy_end();
+    }
 }
 
 /**
@@ -1190,7 +1244,10 @@ static void h_ble_unpair(const kverb_t *c, const karg_val_t *v)
     /* A worker job that crosses the link, like ble_down: this AO's five
      * seconds are not the right deadline for it. */
     console_unwatched();
-    ble_unpair_request();
+    if ( !ble_unpair_request() )
+    {
+        radio_v_busy_end();
+    }
 }
 
 /** @brief ble_pair: show the board for five minutes, so a new device can pair. */
