@@ -540,6 +540,9 @@ static void finish_whatever_runs(void)
         case KDRV_RADIO_JOB_BLE_UNPAIR: finish(KDRV_RADIO_JOB_BLE_UNPAIR, KODE_OK); break;
         case KDRV_RADIO_JOB_BLE_RSP:    finish(KDRV_RADIO_JOB_BLE_RSP, KODE_OK); break;
         case KDRV_RADIO_JOB_BLE_HEAR:   finish(KDRV_RADIO_JOB_BLE_HEAR, KODE_OK); break;
+        case KDRV_RADIO_JOB_BLE_PAIR_REJECT:
+            finish(KDRV_RADIO_JOB_BLE_PAIR_REJECT, KODE_OK);
+            break;
         case KDRV_RADIO_JOB_EXP_POWER:  finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK); break;
         case KDRV_RADIO_JOB_AMP:        finish(KDRV_RADIO_JOB_AMP, KODE_OK); break;
         case KDRV_RADIO_JOB_SLEEP:      finish(KDRV_RADIO_JOB_SLEEP, KODE_OK); break;

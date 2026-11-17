@@ -320,6 +320,13 @@ kode_status_t kdrv_radio_run(const kdrv_radio_req_t *req)
         kdrv_ble_adv_plan(req->itvl, req->len, req->hidden, req->pulsed);
     }
 #endif
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    if ( KDRV_RADIO_JOB_BLE_PAIR_REJECT == req->type )
+    {
+        /* The refusal is the job: it runs where the worker runs it. */
+        (void)kdrv_ble_pair_reject();
+    }
+#endif
     if ( KDRV_RADIO_JOB_CONNECT == req->type )
     {
         /* What the real driver does first: esp-hosted takes the reset line

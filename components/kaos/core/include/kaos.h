@@ -2641,6 +2641,8 @@ bool ble_pair_open_request(void);
  *
  * The peer is hung up on rather than left for the security manager's 30 s.
  * Answered by BLE_PAIR_SIG (DONE, REJECTED); nothing in flight, nothing published.
+ * The radio worker runs it, after the job in flight; with the link down it waits
+ * for the link, and a pairing that moves first takes it back.
  * Compiled under CONFIG_KODEOS_BLE_PAIRING_PASSKEY (default on). kodeOS shows a
  * code, and so does an app that serves the HID service; any other app refuses
  * new pairings first.

@@ -1076,6 +1076,13 @@ static bool radio_run_ble(const kdrv_radio_req_t *req, kode_status_t *rc)
         case KDRV_RADIO_JOB_BLE_RSP:
             *rc = radio_ble_rsp_set(req);
             break;
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+        case KDRV_RADIO_JOB_BLE_PAIR_REJECT:
+            /* The hang-up takes NimBLE's host lock: here it waits on the
+             * worker, never on the AO that asked. */
+            *rc = kdrv_ble_pair_reject();
+            break;
+#endif
         default:
             mine = false;
             break;

@@ -2682,6 +2682,115 @@ TEST_CASE("a rejection with no pairing in flight is refused and publishes "
     TEST_ASSERT_NULL(take_pair());
 }
 
+/* The driver's refusal hangs up through NimBLE's host lock, which the worker
+ * may hold for seconds while it writes a key: AO_Radio only decides, and the
+ * worker calls the driver (#152). */
+
+/**
+ * @brief Give the radio worker a short job: J3's rail, whichever way it is
+ *        not. AO_Radio keeps the rail from one case to the next, so one of
+ *        the two asks is a job and the other is nothing or owed after it.
+ */
+static void worker_take(void)
+{
+    (void)exp_power_request(true);
+    (void)exp_power_request(false);
+    pump();
+}
+TEST_CASE("a refusal of a pairing runs on the radio worker, never on AO_Radio's "
+          "thread", "[radio_ao]")
+{
+    const QEvt reject = QEVT_INITIALIZER(BLE_PAIR_REJECT_REQ_SIG);
+
+    radio_fresh();
+    go_up();
+    fake_ble_pair_show(555555U);
+    pump();
+    ao_spy_drain();
+
+    QASM_DISPATCH(AO_Radio, &reject, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_ble_pair_rejects(),
+                                   "AO_Radio called the driver on its own thread");
+    (void)pull_jobs();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_PAIR_REJECT, running_job());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_ble_pair_rejects());
+    finish(KDRV_RADIO_JOB_BLE_PAIR_REJECT, KODE_OK);
+
+    const BlePairEvt * const p = take_pair();
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BLE_PAIR_DONE, p->phase);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BLE_PAIR_REJECTED, p->outcome);
+}
+
+TEST_CASE("a refusal of a pairing waits for the job in flight, then goes to "
+          "the worker", "[radio_ao]")
+{
+    radio_fresh();
+    go_up();
+    fake_ble_pair_show(666666U);
+    pump();
+    ao_spy_drain();
+    worker_take();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
+
+    dispatch(BLE_PAIR_REJECT_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_UINT(0U, fake_ble_pair_rejects());
+
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_PAIR_REJECT, running_job());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_ble_pair_rejects());
+    finish(KDRV_RADIO_JOB_BLE_PAIR_REJECT, KODE_OK);
+}
+
+TEST_CASE("a refusal owed for a pairing that ended never refuses the next one",
+          "[radio_ao]")
+{
+    radio_fresh();
+    go_up();
+    fake_ble_pair_show(777777U);
+    pump();
+    worker_take();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
+    dispatch(BLE_PAIR_REJECT_REQ_SIG);
+    pump();
+
+    /* The peer walks away, and another device brings a code of its own. */
+    fake_ble_pair_end(KDRV_BLE_PAIR_GONE);
+    pump();
+    fake_ble_pair_show(888888U);
+    pump();
+    ao_spy_drain();
+
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_NOT_EQUAL((int)KDRV_RADIO_JOB_BLE_PAIR_REJECT, running_job());
+    TEST_ASSERT_EQUAL_UINT(0U, fake_ble_pair_rejects());
+    TEST_ASSERT_NULL(take_pair());
+}
+
+TEST_CASE("a refusal asked with the link down waits for the link", "[radio_ao]")
+{
+    radio_fresh();
+    fake_ble_pair_show(999999U);
+    pump();
+    ao_spy_drain();
+
+    dispatch(BLE_PAIR_REJECT_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_ble_pair_rejects(),
+                                   "AO_Radio called the driver on its own thread");
+
+    go_up();
+    worker_take();                            /* a job, whatever else the link starts */
+    while ( job_held() && (KDRV_RADIO_JOB_BLE_PAIR_REJECT != held_req()->type) )
+    {
+        finish_whatever_runs();
+    }
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_PAIR_REJECT, running_job());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_ble_pair_rejects());
+    finish(KDRV_RADIO_JOB_BLE_PAIR_REJECT, KODE_OK);
+}
+
 TEST_CASE("a second take of one record publishes nothing", "[radio_ao]")
 {
     radio_fresh();

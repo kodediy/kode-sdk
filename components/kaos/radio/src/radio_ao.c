@@ -115,6 +115,7 @@ typedef enum {
     RADIO_OUT_WIFI_PROBE_DONE,  /**< One channel of the radio check was heard. */
     RADIO_OUT_BLE_FIND_DONE,    /**< The radio check's BLE listen ended.      */
     RADIO_OUT_BLE_HEAR_DONE,    /**< The advertisement stream's scan started or stopped. */
+    RADIO_OUT_BLE_PAIR_REJECT_DONE, /**< A pairing's refusal ran: KODE_DENIED is none to refuse. */
 #if CONFIG_KODE_LOWPOWER
     RADIO_OUT_SLEEP_DONE,       /**< The sentinel was started or stopped.    */
 #endif
@@ -406,6 +407,11 @@ typedef struct {
     bool    ble_stop_pending;
     bool    wifi_start_pending;
     bool    ble_start_pending;
+    /* A refusal of the pairing on the glass that waits for the worker: the
+     * driver hangs up through NimBLE's host lock, which only the worker may
+     * wait on. Kept across the link's loss, paid by the settle, and dropped
+     * by the next pairing record, which is newer than the code refused. */
+    bool    ble_reject_owed;
 
     /* The production row. `test_pending` is its debt, paid by the same
      * settle that pays the services' - after them, because the operator
@@ -4905,6 +4911,9 @@ static void ble_publish_pair(Radio * const me)
     {
         return;
     }
+    /* The pairing moved since a refusal was asked: the code that was
+     * refused is gone, and an owed refusal would hit the next one. */
+    me->ble_reject_owed = false;
 
     BlePairEvt *ev = Q_NEW_X(BlePairEvt, 0U, BLE_PAIR_SIG);
     if ( NULL == ev )
@@ -5704,6 +5713,7 @@ static radio_out_t radio_out_of(kdrv_radio_job_t type)
         case KDRV_RADIO_JOB_WIFI_PROBE:   out = RADIO_OUT_WIFI_PROBE_DONE;   break;
         case KDRV_RADIO_JOB_BLE_FIND:     out = RADIO_OUT_BLE_FIND_DONE;     break;
         case KDRV_RADIO_JOB_BLE_HEAR:     out = RADIO_OUT_BLE_HEAR_DONE;     break;
+        case KDRV_RADIO_JOB_BLE_PAIR_REJECT: out = RADIO_OUT_BLE_PAIR_REJECT_DONE; break;
 #if CONFIG_KODE_LOWPOWER
         case KDRV_RADIO_JOB_SLEEP:        out = RADIO_OUT_SLEEP_DONE;        break;
 #endif
@@ -8071,6 +8081,18 @@ static void radio_settle(Radio * const me)
     {
         return;   /* a job is in flight; its completion calls us back */
     }
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    if ( me->ble_reject_owed )
+    {
+        /* First of all: somebody is looking at the code, and the job is
+         * short. */
+        if ( radio_submit(me, KDRV_RADIO_JOB_BLE_PAIR_REJECT) )
+        {
+            me->ble_reject_owed = false;
+        }
+        return;   /* sent, or refused: the next completion tries again */
+    }
+#endif
 #if CONFIG_KODEOS_WIFI
     if ( me->wifi_stop_pending )
     {
@@ -9581,6 +9603,7 @@ void Radio_ctor(void)
     me->ble_stop_pending   = false;
     me->wifi_start_pending = false;
     me->ble_start_pending  = false;
+    me->ble_reject_owed    = false;
     me->pb_phase     = (uint8_t)PB_IDLE;
     me->pb_job       = false;
     me->pb_rsp       = NULL;
@@ -11336,7 +11359,10 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             break;
         }
         case BLE_PAIR_REJECT_REQ_SIG: {
-            (void)kdrv_ble_pair_reject();
+            /* Owed to the link: the driver hangs up on the worker, and the
+             * worker takes jobs while the link is up. */
+            me->ble_reject_owed = true;
+            KLOG_N(TAG, "pairing: the refusal waits for the link");
             status = Q_HANDLED();
             break;
         }
@@ -12619,6 +12645,17 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             status = Q_HANDLED();
             break;
         }
+        case RADIO_OUT_BLE_PAIR_REJECT_DONE: {
+            /* The driver's own note says REJECTED; KODE_DENIED is a pairing
+             * that ended before the job ran, which nobody needs told. */
+            me->busy = false;
+            if ( ((uint8_t)KODE_OK != job->status) && ((uint8_t)KODE_DENIED != job->status) )
+            {
+                KLOG_W(TAG, "pairing: the refusal failed (%u)", (unsigned)job->status);
+            }
+            status = Q_HANDLED();
+            break;
+        }
         case RADIO_OUT_BLE_UNPAIR_DONE: {
             me->busy = false;
             if ( me->wiping && ((uint8_t)C5_WIPE_BLE == me->wipe_step) )
@@ -13695,9 +13732,12 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             break;
         }
         case BLE_PAIR_REJECT_REQ_SIG: {
-            /* No advert sweep here. A refusal ends in a disconnect, and the
-             * disconnect is already what restores the invariant. */
-            (void)kdrv_ble_pair_reject();
+            /* A job, as every call that takes NimBLE's host lock: the worker
+             * may hold that lock for seconds while it writes a key, and
+             * AO_Radio waits on nothing. Sent now, or when the job in flight
+             * ends. */
+            me->ble_reject_owed = true;
+            radio_settle(me);
             status = Q_HANDLED();
             break;
         }
