@@ -465,8 +465,9 @@ TEST_CASE("a listen that fails says why and returns -1", "[kode_ble]")
 
     seam_scan_script(rssi, 2U, KODE_NO_RESOURCES);
     TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 4U, SEAM_LISTEN_MS));
-    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: the radio is busy with another scan, its search for "
-                             "a network, a self-test or an install; try again", kode_error());
+    TEST_ASSERT_EQUAL_STRING("kode_ble_scan: the radio is busy with another scan, a network "
+                             "search, a self-test, an install or the board's rest; try again",
+                             kode_error());
 
     seam_scan_script(rssi, 2U, KODE_CANCELLED);
     TEST_ASSERT_EQUAL_INT(-1, seam_ble_scan(out, 4U, SEAM_LISTEN_MS));

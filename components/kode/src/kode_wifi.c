@@ -473,8 +473,8 @@ static void wifi_scan_fail(kode_status_t rc, bool rest)
         }
         break;
     case KODE_NO_RESOURCES:
-        kode_err_set("the radio is busy with another scan, its search for a network, "
-                     "a self-test or an install; try again");
+        kode_err_set("the radio is busy with another scan, a network search, "
+                     "a self-test, an install or the board's rest; try again");
         break;
     case KODE_CANCELLED:
         kode_err_set("a newer Wi-Fi request ended the scan early; do not scan again at once");

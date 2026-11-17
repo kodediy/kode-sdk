@@ -10021,12 +10021,16 @@ TEST_CASE("an asked scan refused for an app's rest says so in its answer; refuse
 }
 
 /* sleep, the order to go OFF or an app's idle time: AO_LowPower takes the app's
- * rest for the board's, and the radio answers that round with no parts. */
-TEST_CASE("a board round over an app's rest of the radio ends the refusal of scans",
-          "[radio_ao][lowpower][ask]")
+ * rest for the board's, and the radio answers that round with no parts. No app
+ * holds the radio from then, yet the sentinel keeps the bus down until the
+ * state changes: a scan is refused as busy, to ask again, not for a rest. */
+TEST_CASE("a board round over an app's rest of the radio refuses scans as busy, not "
+          "for the rest", "[radio_ao][lowpower][ask]")
 {
     kdrv_wifi_ap_t rows[KDRV_WIFI_SCAN_MAX];
     ScanWaiter     w;
+    WifiScanEndEvt end;
+    uint8_t        gen = 0U;
 
     radio_fresh();
     go_up();
@@ -10036,18 +10040,28 @@ TEST_CASE("a board round over an app's rest of the radio ends the refusal of sca
     lp_expect_answer(false, NULL);
     lp_expect_no_more();
     ao_spy_drain();
+    unsigned const submits = job_submits();
 
     (void)memset(&w, 0, sizeof(w));
     w.done = khal_sem_create();
     w.rows = rows;
     w.cap  = (uint8_t)KDRV_WIFI_SCAN_MAX;
+    w.rest = true;
     wifi_scan_request_wait(&w, 8U);
     pump();
-    TEST_ASSERT_FALSE_MESSAGE((8U == w.ack) && ((uint32_t)KODE_DENIED == w.rc),
-                              "refused for an app's rest the board has taken");
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
-    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
-    TEST_ASSERT_EQUAL_UINT32(8U, w.ack);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(8U, w.ack, "the scan was not refused at once");
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_NO_RESOURCES, w.rc);
+    TEST_ASSERT_FALSE_MESSAGE(w.rest, "refused for an app's rest the board has taken");
+
+    /* The console's listing: busy, with the request's generation. */
+    TEST_ASSERT_TRUE(wifi_scan_request(&gen));
+    pump();
+    end = rest_end_take((QSignal)WIFI_SCAN_END_SIG);
+    TEST_ASSERT_TRUE_MESSAGE(end.busy, "the console was not told busy");
+    TEST_ASSERT_FALSE(end.rest);
+    TEST_ASSERT_EQUAL_UINT8(gen, end.gen);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(submits, job_submits(),
+                                   "a scan went to a C5 asleep between wakes");
     khal_sem_delete(w.done);
     lp_radio_awake();
     ao_spy_drain();

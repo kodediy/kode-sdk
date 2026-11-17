@@ -3014,6 +3014,30 @@ static bool radio_part_rests(Radio const * const me)
 #endif
 }
 
+/**
+ * @brief Whether the sentinel keeps the bus down between wakes, for an app's
+ *        rest or for the board's.
+ *
+ * A scan fails on a C5 that sleeps between wakes, so it is refused at once:
+ * for an app's rest by radio_part_rests(), and otherwise as busy, to ask
+ * again once the board is awake - after a board round has taken the app's
+ * rest for its own, no app holds the radio, yet the sentinel holds the bus
+ * until the state changes.
+ *
+ * @param me The AO.
+ * @return true while the sentinel is armed.
+ */
+static bool radio_bus_sleeps(Radio const * const me)
+{
+/* cppcheck-suppress misra-c2012-20.9 ; sdkconfig.h leaves an option that is off undefined, and #if reads it as 0 */
+#if CONFIG_KODE_LOWPOWER
+    return me->lp_asleep;
+#else
+    (void)me;
+    return false;
+#endif
+}
+
 /* ---- The asked scan ------------------------------------------------------
  * One slot for both kinds, the Wi-Fi sweep and the BLE listen: the channel
  * carries one job, so two asked scans could never run together anyway, and
@@ -3243,7 +3267,8 @@ static uint8_t scan_other(uint8_t kind)
  * listing or an asked one, running or waiting, ends here and its asker is
  * told. Behind a scan of the other radio it is refused, as it is behind the
  * board's own round, owed or running. While an app rests the radio it is
- * refused KODE_DENIED and ends nothing.
+ * refused KODE_DENIED and ends nothing; while the sentinel keeps the bus down
+ * for the board, KODE_NO_RESOURCES, to ask again.
  *
  * @param me The AO.
  * @param e  The RADIO_SCAN_ASK_SIG.
@@ -3260,6 +3285,14 @@ static bool scan_ask_take(Radio * const me, QEvt const * const e)
          * again before that is refused once more. */
         KLOG_N(TAG, "an app rests the radio; a %s is refused", scan_ask_name(a->kind));
         scan_ask_refuse(e, KODE_DENIED, true);
+        return false;
+    }
+    /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the board can rest */
+    if ( radio_bus_sleeps(me) )
+    {
+        KLOG_N(TAG, "the C5 sleeps between wakes; a %s is refused, to ask again",
+               scan_ask_name(a->kind));
+        scan_ask_refuse(e, KODE_NO_RESOURCES, false);
         return false;
     }
     if ( scan_ask_refuse_off(me, e) )
@@ -10629,7 +10662,9 @@ static void radio_lp_round(Radio * const me, const LowPowerRoundEvt * const r)
     {
         me->lp_rest  = true;     /* AWAKE says when it was abandoned */
         /* The board has taken the app's rest for its own (part_take()): no app
-         * holds the radio from here, so no scan is refused in its name. */
+         * holds the radio from here, so no scan is refused in its name. The
+         * sentinel still holds the bus until the state changes, and a scan
+         * meanwhile is refused as busy (radio_bus_sleeps()). */
         me->lp_part  = false;
     }
     else
@@ -13297,6 +13332,13 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 KLOG_I(TAG, "an app rests the radio; wifi_scan is refused");
                 wifi_publish_scan_rest(me, gen);
             }
+            /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the board can rest */
+            else if ( radio_bus_sleeps(me) )
+            {
+                /* The board's rest, not an app's: busy, to ask again. */
+                KLOG_I(TAG, "the C5 sleeps between wakes; wifi_scan is refused");
+                wifi_publish_scan_busy(me, gen);
+            }
             else if ( !scan_can_take(me, (uint8_t)KQP_SCAN_WIFI) )
             {
                 /* A job that is neither cut nor waited for holds the channel.
@@ -13641,6 +13683,12 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 /* As a Wi-Fi scan: a listen fails on a C5 asleep between wakes. */
                 KLOG_I(TAG, "an app rests the radio; ble_scan is refused");
                 ble_publish_scan_rest(me, gen);
+            }
+            /* cppcheck-suppress knownConditionTrueFalse ; constant in each build: whether the board can rest */
+            else if ( radio_bus_sleeps(me) )
+            {
+                KLOG_I(TAG, "the C5 sleeps between wakes; ble_scan is refused");
+                ble_publish_scan_busy(me, gen);
             }
             else if ( !scan_can_take(me, (uint8_t)KQP_SCAN_BLE) )
             {

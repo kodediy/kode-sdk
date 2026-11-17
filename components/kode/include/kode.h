@@ -1116,8 +1116,9 @@ typedef struct {
  * each scan again the moment they are ended never let a sweep finish. Scan
  * again after a pause, or when the app next needs the list. While the radio
  * listens for Bluetooth devices, runs the boot's own search for a known
- * network, a self-test or an install, it fails at once and kode_error() says
- * the radio is busy; ask again later. A join in flight is waited for. One
+ * network, a self-test or an install, or sleeps between wakes for the board's
+ * rest, it fails at once and kode_error() says the radio is busy; ask again
+ * later. A join in flight is waited for. One
  * task at a time.
  *
  * @param out Where the networks go, the strongest first.
@@ -1185,7 +1186,8 @@ typedef struct {
  * place, and a newer Bluetooth request ends it the same way: it fails, and
  * the caller does not listen again at once. While the radio sweeps for Wi-Fi
  * networks, runs its own search for a known network, a self-test or an
- * install, it fails at once and kode_error() says the radio is busy. That
+ * install, or sleeps between wakes for the board's rest, it fails at once and
+ * kode_error() says the radio is busy. That
  * search runs each time the link comes up with Wi-Fi on, so the first listen
  * on a link that was down nearly always fails busy; ask again once the search
  * is over. One task at a time.
