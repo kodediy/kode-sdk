@@ -51,7 +51,9 @@ typedef struct {
 /**
  * @brief Register an owner's table. The same table twice is one registration.
  * @param table The table; it must outlive the console.
- * @return KODE_OK; KODE_DENIED for a malformed row, or a @c nowait that is
+ * @return KODE_OK; KODE_DENIED for a malformed row (a key that is not 1 to
+ *         KARG_KEY_NAME_MAX of [a-z0-9_], or a member not 1 to
+ *         KARG_MEMBER_NAME_MAX, included), or a @c nowait that is
  *         not a row of the table with no keys; KODE_EXISTS for a verb already
  *         taken; KODE_NO_RESOURCES past KVERBS_TABLES_MAX. A refusal logs why
  *         and registers nothing.

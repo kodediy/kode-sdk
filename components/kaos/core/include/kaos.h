@@ -4851,7 +4851,9 @@ void kaos_console_start(void);
  * @brief Whether every row of the command table declares its keys legally.
  *
  * A row with more than KCLI_MAX_KEYS keys writes past console_exec()'s value
- * array. Console_ctor() asserts this before the console takes a line.
+ * array, and a verb, key or member past KVERB_NAME_MAX, KARG_KEY_NAME_MAX or
+ * KARG_MEMBER_NAME_MAX outruns its `help` record. Console_ctor() asserts this
+ * before the console takes a line.
  *
  * @return true when every row fits.
  */

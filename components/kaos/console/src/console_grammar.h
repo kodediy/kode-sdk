@@ -48,6 +48,13 @@ typedef struct {
 /** @brief Keys any one command may declare: the length of a line's value array. */
 #define KARG_KEYS_MAX  6U
 
+/** @brief The longest key a command declares, in characters. */
+#define KARG_KEY_NAME_MAX     16U
+
+/** @brief The longest member of a key, in characters: what `help` puts in a
+ *         `>|member=` record of its own. */
+#define KARG_MEMBER_NAME_MAX  24U
+
 /** @brief One key's parsed value, indexed like the command's spec array. */
 typedef struct {
     bool        present;  /**< The key appeared on the line.               */

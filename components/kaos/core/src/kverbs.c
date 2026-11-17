@@ -27,15 +27,78 @@ static size_t verb_tables_in(void)
     return __atomic_load_n(&s_verb_ntables, __ATOMIC_ACQUIRE);
 }
 
-/** @brief Every rule one row satisfies on its own. */
-static bool verb_row_ok(const kverb_t *r)
+/**
+ * @brief Every rule one row satisfies on its own, its keys apart.
+ *
+ * @param r   The row.
+ * @param why Out: the rule it breaks, for the log, when it breaks one.
+ * @return true when it breaks none.
+ */
+static bool verb_row_ok(const kverb_t *r, const char **why)
 {
-    bool ok = kregistry_name_ok(r->verb, KVERB_NAME_MAX) && (NULL != r->fn)
-              && (KARG_KEYS_MAX >= r->n_args);
+    bool ok = false;
 
-    if ( ok && (0U < r->n_args) )
+    if ( !kregistry_name_ok(r->verb, KVERB_NAME_MAX) )
     {
-        ok = (NULL != r->args);
+        *why = "the verb is not a name";
+    }
+    else if ( NULL == r->fn )
+    {
+        *why = "no handler";
+    }
+    else if ( KARG_KEYS_MAX < r->n_args )
+    {
+        *why = "more keys than a line holds";
+    }
+    else if ( (0U < r->n_args) && (NULL == r->args) )
+    {
+        *why = "keys, and no specs for them";
+    }
+    else
+    {
+        ok = true;
+    }
+    return ok;
+}
+
+/**
+ * @brief Whether every key of row @p i, and every member of its keys, is a
+ *        name `help` can print in a record of its own. Logs the first that
+ *        is not.
+ *
+ * A key is 1..KARG_KEY_NAME_MAX of [a-z0-9_], a member 1..KARG_MEMBER_NAME_MAX:
+ * with a verb of KVERB_NAME_MAX, a `>|member=` record then fits one line.
+ *
+ * @param r The row, already found well formed by verb_row_ok().
+ * @param i Its place in its table, for the log.
+ * @return true when they all are.
+ */
+static bool verb_keys_ok(const kverb_t *r, size_t i)
+{
+    bool ok = true;
+
+    for ( uint8_t a = 0U; ok && (a < r->n_args); ++a )
+    {
+        karg_spec_t const * const k = &r->args[a];
+
+        if ( !kregistry_name_ok(k->key, KARG_KEY_NAME_MAX) )
+        {
+            KLOG_E(TAG, "verb %" PRIu32 " '%s', key %" PRIu32 ": not a name of 1 to "
+                        "%" PRIu32 " of a-z, 0-9 and _",
+                   (uint32_t)i, r->verb, (uint32_t)a, (uint32_t)KARG_KEY_NAME_MAX);
+            ok = false;
+        }
+        for ( uint8_t m = 0U; ok && (NULL != k->enums) && (m < k->n_enums); ++m )
+        {
+            if ( !kregistry_name_ok(k->enums[m], KARG_MEMBER_NAME_MAX) )
+            {
+                KLOG_E(TAG, "verb %" PRIu32 " '%s', key '%s', member %" PRIu32 ": not a "
+                            "name of 1 to %" PRIu32 " of a-z, 0-9 and _",
+                       (uint32_t)i, r->verb, k->key, (uint32_t)m,
+                       (uint32_t)KARG_MEMBER_NAME_MAX);
+                ok = false;
+            }
+        }
     }
     return ok;
 }
@@ -63,11 +126,16 @@ static kode_status_t verb_rows_check(const kverbs_t *table)
 
     for ( size_t i = 0U; (i < table->n) && (KODE_OK == st); ++i )
     {
-        const kverb_t * const r = &table->verbs[i];
+        const kverb_t * const r   = &table->verbs[i];
+        const char           *why = "";
 
-        if ( !verb_row_ok(r) )
+        if ( !verb_row_ok(r, &why) )
         {
-            KLOG_E(TAG, "verb %" PRIu32 ": malformed", (uint32_t)i);
+            KLOG_E(TAG, "verb %" PRIu32 ": %s", (uint32_t)i, why);
+            st = KODE_DENIED;
+        }
+        else if ( !verb_keys_ok(r, i) )
+        {
             st = KODE_DENIED;
         }
         else if ( console_system_verb(r->verb)

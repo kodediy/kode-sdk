@@ -159,11 +159,21 @@ KAOS_WEAK kode_status_t kdrv_net_sntp_sync_now(void);
  * over it (Console_ctor() asserts that). */
 #define KCLI_MAX_KEYS      KARG_KEYS_MAX
 
-/* One `help` record's `args=` value: every key of a command spelled out with
- * its type, its enum members or source prefixes and its default. `install`'s
- * five keys, its six source prefixes among them, take 135 characters; a
- * longer value is cut at the tail rather than overrunning. */
+/* One `help` record's `args=` value: every key of a command with its type,
+ * whether it is required and its default. A key's members, or a source's
+ * prefixes, go in `>|member=` records of their own, so the value stays
+ * short: `install`'s six keys take 89 characters. One that does not fit is
+ * cut after its last whole key (`-` when not even the first fits), the
+ * record says `cut=on`, and the members of the keys cut out are not listed. */
 #define KCLI_ARGS_DESC_MAX    192U
+_Static_assert(((sizeof(">|cmd= args= cut=on") - 1U) + KVERB_NAME_MAX
+                + KCLI_ARGS_DESC_MAX) <= KODE_LOG_LINE_MAX,
+               "a help record, cut or whole, must fit one console line");
+/* And a member's record: kverbs_add() refuses an owner's key or member past
+ * its limit, console_specs_ok() the console's own. */
+_Static_assert(((sizeof(">|member= verb= key=") - 1U) + KARG_MEMBER_NAME_MAX
+                + KVERB_NAME_MAX + KARG_KEY_NAME_MAX) <= KODE_LOG_LINE_MAX,
+               "a help member record must fit one console line");
 
 /* The longest field name and field description the chip tables carry, as the
  * size of the buffers they are quoted into. A longer one is cut at the tail
@@ -443,6 +453,8 @@ typedef struct {
                              *   being written, set when a line is accepted
                              *   like @c cmd_src; net_line_done() returns it. */
     uint16_t help_idx;      /**< Next command `help` has still to print.    */
+    uint16_t help_line;     /**< `help`: that command's next line, 0 its
+                             *   record, then its keys' members.            */
     uint16_t scan_next;     /**< KCLI_I2C_SCAN: the next address to probe.  */
     uint16_t scan_found;    /**< KCLI_I2C_SCAN: the addresses that answered. */
 
@@ -4987,44 +4999,125 @@ _Static_assert((sizeof(TYPE_NAMES) / sizeof(TYPE_NAMES[0]))
 
 /**
  * @brief One command's key specs as a record value: no spaces, keys joined
- *        by commas, each `key:type:req|opt[=default]`, enums spelled out.
- *        `-` when the command takes no keys.
+ *        by commas, each `key:type:req|opt[=default]`. `-` when it holds no
+ *        key: the command takes none, or not even its first fits. The members
+ *        of a key are not here: help_line() gives each a record of its own.
+ *
+ * @param args   The command's key specs.
+ * @param n_args How many.
+ * @param dst    Where the value is written.
+ * @param cap    Its size.
+ * @return How many keys went in, whole and in order: fewer than @p n_args
+ *         when the rest did not fit, and then nothing of them is in @p dst.
  */
-static void args_desc(const karg_spec_t *args, uint8_t n_args, char *dst,
-                      size_t cap)
+static uint8_t args_desc(const karg_spec_t *args, uint8_t n_args, char *dst,
+                         size_t cap)
 {
-    size_t used = 0U;
-    if ( 0U == n_args )
-    {
-        (void)snprintf(dst, cap, "-");
-        return;
-    }
+    size_t  used = 0U;
+    uint8_t in   = 0U;
+    bool    fits = true;
+
     dst[0] = '\0';
-    for ( uint8_t a = 0U; a < n_args; ++a )
+    for ( uint8_t a = 0U; (a < n_args) && fits; ++a )
     {
         karg_spec_t const * const s = &args[a];
-        int n = snprintf(&dst[used], cap - used, "%s%s:%s",
-                         (0U < a) ? "," : "", s->key, TYPE_NAMES[s->type]);
-        used += ((0 < n) && ((size_t)n < (cap - used))) ? (size_t)n : 0U;
-        /* Not just for an enum: a string's members are the prefixes it
-         * understands (`src`), where an enum's are its values (`dst`). */
-        if ( NULL != s->enums )
+        const char *sep  = "";
+        const char *need = "opt";
+        const char *eq   = "";
+        const char *def  = "";
+        int         n;
+
+        if ( 0U < a )
         {
-            for ( uint8_t m = 0U; m < s->n_enums; ++m )
-            {
-                n = snprintf(&dst[used], cap - used, "%c%s",
-                             (0U == m) ? '(' : '|', s->enums[m]);
-                used += ((0 < n) && ((size_t)n < (cap - used))) ? (size_t)n : 0U;
-            }
-            n = snprintf(&dst[used], cap - used, ")");
-            used += ((0 < n) && ((size_t)n < (cap - used))) ? (size_t)n : 0U;
+            sep = ",";
         }
-        n = snprintf(&dst[used], cap - used, ":%s%s%s",
-                     s->required ? "req" : "opt",
-                     (NULL != s->def) ? "=" : "",
-                     (NULL != s->def) ? s->def : "");
-        used += ((0 < n) && ((size_t)n < (cap - used))) ? (size_t)n : 0U;
+        if ( s->required )
+        {
+            need = "req";
+        }
+        if ( NULL != s->def )
+        {
+            eq  = "=";
+            def = s->def;
+        }
+        /* A key goes in whole or not at all: one that does not fit is taken
+         * back out, and none after it is tried. */
+        n = snprintf(&dst[used], cap - used, "%s%s:%s:%s%s%s", sep, s->key,
+                     TYPE_NAMES[s->type], need, eq, def);
+        if ( (0 < n) && ((size_t)n < (cap - used)) )
+        {
+            used += (size_t)n;
+            in   += 1U;
+        }
+        else
+        {
+            dst[used] = '\0';
+            fits = false;
+        }
     }
+    if ( 0U == in )
+    {
+        (void)snprintf(dst, cap, "-");
+    }
+    return in;
+}
+
+/**
+ * @brief Print line @p line of one command's part of the `help` listing.
+ *
+ * Line 0 is the command's `>|cmd=` record; after it, one `>|member=` record
+ * for each member of each key that record holds, in the order of the keys.
+ * Not just for an enum: a string's members are the prefixes it understands
+ * (`src`), where an enum's are its values (`dst`).
+ *
+ * @param verb   The command.
+ * @param args   Its key specs.
+ * @param n_args How many.
+ * @param line   Which of its lines.
+ * @return false when the command has no such line: its part is over.
+ */
+static bool help_line(const char *verb, const karg_spec_t *args,
+                      uint8_t n_args, uint16_t line)
+{
+    bool          printed = false;
+    char          desc[KCLI_ARGS_DESC_MAX];
+    uint8_t const in      = args_desc(args, n_args, desc, sizeof(desc));
+
+    if ( 0U == line )
+    {
+        if ( in == n_args )
+        {
+            console_reply(">|cmd=%s args=%s", verb, desc);
+        }
+        else
+        {
+            console_reply(">|cmd=%s args=%s cut=on", verb, desc);
+        }
+        printed = true;
+    }
+    else
+    {
+        uint16_t left = (uint16_t)(line - 1U);
+
+        for ( uint8_t a = 0U; (a < in) && !printed; ++a )
+        {
+            if ( NULL == args[a].enums )
+            {
+                /* No members to list. */
+            }
+            else if ( left < (uint16_t)args[a].n_enums )
+            {
+                console_reply(">|member=%s verb=%s key=%s",
+                              args[a].enums[left], verb, args[a].key);
+                printed = true;
+            }
+            else
+            {
+                left -= (uint16_t)args[a].n_enums;
+            }
+        }
+    }
+    return printed;
 }
 
 /**
@@ -5066,44 +5159,54 @@ static void h_tasks(Console *me, const kcmd_t *c, const karg_val_t *v)
 /**
  * @brief Emit one slice of the listing, and say whether that was the last.
  *
- * @param me The console; @c me->help_idx is where the last slice stopped.
+ * A slice is KCLI_SLICE lines, records and members alike, wherever they fall.
+ *
+ * @param me The console; @c me->help_idx and @c me->help_line are where the
+ *           last slice stopped.
  * @return true when the table is exhausted.
  */
 static bool help_slice(Console *me)
 {
-    char desc[KCLI_ARGS_DESC_MAX];
     uint16_t const total = (uint16_t)(g_ncmds + kverbs_count());
-    uint16_t       end   = total;
+    uint16_t       shown = 0U;
 
-    if ( (uint16_t)(me->help_idx + KCLI_SLICE) < total )
-    {
-        end = (uint16_t)(me->help_idx + KCLI_SLICE);
-    }
     /* The console's own verbs, then the owners' in registration order. */
-    for ( uint16_t i = me->help_idx; i < end; ++i )
+    while ( (me->help_idx < total) && (KCLI_SLICE > shown) )
     {
-        if ( (size_t)i < g_ncmds )
+        bool printed = false;
+
+        if ( (size_t)me->help_idx < g_ncmds )
         {
-            args_desc(g_cmds[i].args, g_cmds[i].n_args, desc, sizeof(desc));
-            console_reply(">|cmd=%s args=%s", g_cmds[i].verb, desc);
+            const kcmd_t * const c = &g_cmds[me->help_idx];
+
+            printed = help_line(c->verb, c->args, c->n_args, me->help_line);
         }
         else
         {
-            const kverb_t * const r = kverbs_at((size_t)i - g_ncmds);
+            const kverb_t * const r = kverbs_at((size_t)me->help_idx - g_ncmds);
 
             if ( NULL != r )
             {
-                args_desc(r->args, r->n_args, desc, sizeof(desc));
-                console_reply(">|cmd=%s args=%s", r->verb, desc);
+                printed = help_line(r->verb, r->args, r->n_args, me->help_line);
             }
         }
+        if ( printed )
+        {
+            me->help_line += 1U;
+            shown += 1U;
+        }
+        else
+        {
+            me->help_idx += 1U;
+            me->help_line = 0U;
+        }
     }
-    me->help_idx = end;
-    return (end >= total);
+    return (me->help_idx >= total);
 }
 
 /**
- * @brief help: one record per command, straight from the table, in slices.
+ * @brief help: one record per command, then one per member of its keys,
+ *        straight from the table, in slices.
  *
  * Paced (KCLI_SLICE): in one step the listing would exhaust the large pool
  * before AO_Log writes a line, losing its tail and the `>ok`.
@@ -5111,7 +5214,8 @@ static bool help_slice(Console *me)
 static void h_help(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     (void)v;
-    me->help_idx = 0U;
+    me->help_idx  = 0U;
+    me->help_line = 0U;
     cmd_begin(me, KCLI_HELP, c->verb);
     if ( help_slice(me) )
     {
@@ -6777,18 +6881,43 @@ bool console_system_verb(const char *verb)
     return found;
 }
 
+/**
+ * @brief Whether @p s is a word of at most @p max characters.
+ * @param s   The word, or NULL.
+ * @param max The most characters a `help` record leaves it.
+ * @return true when there is one, and it fits.
+ */
+static bool spec_word_fits(const char *s, size_t max)
+{
+    return (NULL != s) && (strlen(s) <= max);
+}
+
 bool console_specs_ok(void)
 {
-    for ( size_t c = 0U; (sizeof(CMDS) / sizeof(CMDS[0])) > c; ++c )
+    bool ok = true;
+
+    for ( size_t c = 0U; ok && ((sizeof(CMDS) / sizeof(CMDS[0])) > c); ++c )
     {
+        kcmd_t const * const r = &CMDS[c];
+
         /* A row with more keys than KCLI_MAX_KEYS would make cmd_validate()
-         * write past console_exec()'s stack frame. This checks every row. */
-        if ( (size_t)CMDS[c].n_args > (size_t)KCLI_MAX_KEYS )
+         * write past console_exec()'s stack frame, and a verb, key or member
+         * past its limit would not fit its `help` record. This checks every
+         * row. The lengths alone: `src`'s members are prefixes, not names. */
+        ok = ((size_t)r->n_args <= (size_t)KCLI_MAX_KEYS)
+             && spec_word_fits(r->verb, KVERB_NAME_MAX);
+        for ( uint8_t a = 0U; ok && (a < r->n_args); ++a )
         {
-            return false;
+            karg_spec_t const * const k = &r->args[a];
+
+            ok = spec_word_fits(k->key, KARG_KEY_NAME_MAX);
+            for ( uint8_t m = 0U; ok && (NULL != k->enums) && (m < k->n_enums); ++m )
+            {
+                ok = spec_word_fits(k->enums[m], KARG_MEMBER_NAME_MAX);
+            }
         }
     }
-    return true;
+    return ok;
 }
 
 /**

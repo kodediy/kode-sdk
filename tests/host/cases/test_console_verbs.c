@@ -296,6 +296,257 @@ TEST_CASE("help lists the console's verbs, then the owners'", "[console_verbs]")
     owners_back();
 }
 
+/* ---- The listing whole ------------------------------------------------------ */
+
+#define LISTING_MAX  1024U  /**< Lines one `help` listing may run to here.      */
+#define LISTING_LEN  288U   /**< Room for a line, past the console's own cap.    */
+#define LONG_DEF     "0123456789012345678901234567890123456789"  /**< A long default. */
+
+static char     s_listing[LISTING_MAX][LISTING_LEN];  /**< `help`, line by line. */
+static uint32_t s_listed;                             /**< Lines in it.          */
+
+/** @brief Run `help` to its `>ok`, keeping every line without its line end. */
+static bool help_listing(void)
+{
+    bool done = false;
+
+    s_listed = 0U;
+    type_line("help");
+    for ( uint32_t step = 0U; (HELP_STEPS_MAX > step) && !done; ++step )
+    {
+        for ( uint32_t i = 0U; ((uint32_t)fake_klog_count() > i) && !done; ++i )
+        {
+            const char * const l = fake_klog_line(i);
+
+            if ( (NULL != l) && (LISTING_MAX > s_listed) )
+            {
+                (void)snprintf(s_listing[s_listed], LISTING_LEN, "%s", l);
+                s_listing[s_listed][strcspn(s_listing[s_listed], "\r\n")] = '\0';
+                s_listed += 1U;
+            }
+            done = (NULL != l) && (strstr(l, ">ok") != NULL);
+        }
+        fake_klog_reset();
+        (void)qf_support_tick(AO_Console, 1U);
+    }
+    return done;
+}
+
+/** @brief The line of the listing that is exactly @p want, or -1. */
+static int32_t listed_at(const char *want)
+{
+    int32_t at = -1;
+
+    for ( uint32_t i = 0U; (s_listed > i) && (0 > at); ++i )
+    {
+        if ( strcmp(s_listing[i], want) == 0 )
+        {
+            at = (int32_t)i;
+        }
+    }
+    return at;
+}
+
+/* `test` takes one key, and its members run past what one record holds: on
+ * the board they cut the record mid-member. A key's members are records of
+ * their own, under their verb's, and every record is whole. */
+TEST_CASE("help gives every member of a key a record of its own, after its verb's",
+          "[console_verbs]")
+{
+    char verb[LISTING_LEN] = "";
+
+    console_up();
+    TEST_ASSERT_TRUE(help_listing());
+
+    TEST_ASSERT_TRUE(0 <= listed_at(">|cmd=test args=component:enum:opt=all"));
+    TEST_ASSERT_TRUE(listed_at(">|cmd=test args=component:enum:opt=all")
+                     < listed_at(">|member=led verb=test key=component"));
+    TEST_ASSERT_TRUE(listed_at(">|member=led verb=test key=component")
+                     < listed_at(">|member=all verb=test key=component"));
+    TEST_ASSERT_TRUE(0 <= listed_at(">|cmd=install args=src:string:req,dst:enum:req,"
+                                    "run:bool:opt=off,size:uint:opt,crc32:uint:opt,"
+                                    "name:string:opt"));
+    TEST_ASSERT_TRUE(0 <= listed_at(">|member=https:// verb=install key=src"));
+    TEST_ASSERT_TRUE(0 <= listed_at(">|member=pending verb=install key=dst"));
+
+    for ( uint32_t i = 0U; s_listed > i; ++i )
+    {
+        const char * const l = s_listing[i];
+
+        TEST_ASSERT_TRUE_MESSAGE(strlen(l) < (size_t)(KODE_LOG_LINE_MAX - 1U), l);
+        TEST_ASSERT_NULL_MESSAGE(strstr(l, "cut=on"), l);
+        TEST_ASSERT_NULL_MESSAGE(strchr(l, '('), l);
+        if ( strncmp(l, ">|cmd=", sizeof(">|cmd=") - 1U) == 0 )
+        {
+            (void)snprintf(verb, sizeof(verb), "%s", &l[sizeof(">|cmd=") - 1U]);
+            verb[strcspn(verb, " ")] = '\0';
+        }
+        else if ( strncmp(l, ">|member=", sizeof(">|member=") - 1U) == 0 )
+        {
+            char under[LISTING_LEN + sizeof(" verb= key=")];
+
+            (void)snprintf(under, sizeof(under), " verb=%s key=", verb);
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(l, under), l);
+        }
+        else
+        {
+            /* The `>ok` that ends it. */
+        }
+    }
+    owners_back();
+}
+
+static const char *const LONG_K1_MEMBERS[] = { "m1" };  /**< In the record.   */
+static const char *const LONG_K4_MEMBERS[] = { "m4" };  /**< Cut out of it.   */
+static const karg_spec_t LONG_KEYS[] = {
+    { .key = "k1", .type = KARG_STRING, .def = LONG_DEF, .enums = LONG_K1_MEMBERS, .n_enums = 1U },
+    { .key = "k2", .type = KARG_STRING, .def = LONG_DEF },
+    { .key = "k3", .type = KARG_STRING, .def = LONG_DEF },
+    { .key = "k4", .type = KARG_STRING, .def = LONG_DEF, .enums = LONG_K4_MEMBERS, .n_enums = 1U },
+    { .key = "k5", .type = KARG_STRING, .def = LONG_DEF },
+    { .key = "k6", .type = KARG_STRING, .def = LONG_DEF },
+};
+static const kverb_t LONG_VERBS[] = {
+    { "zz_long", LONG_KEYS, (uint8_t)(sizeof(LONG_KEYS) / sizeof(LONG_KEYS[0])), h_made_up },
+};
+static const kverbs_t LONG_TABLE = { .verbs = LONG_VERBS, .n = 1U };
+
+/* An owner's keys can outrun the record; it is cut after a whole key and
+ * says so, never mid-key with the rest written over it. */
+TEST_CASE("a verb whose keys outrun the record is cut at a whole key, and says so",
+          "[console_verbs]")
+{
+    const char *l = NULL;
+    size_t      n;
+
+    console_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kverbs_add(&LONG_TABLE));
+    TEST_ASSERT_TRUE(help_listing());
+
+    for ( uint32_t i = 0U; s_listed > i; ++i )
+    {
+        if ( strncmp(s_listing[i], ">|cmd=zz_long ", sizeof(">|cmd=zz_long ") - 1U) == 0 )
+        {
+            l = s_listing[i];
+        }
+    }
+    TEST_ASSERT_NOT_NULL(l);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(l, " args=k1:string:opt=" LONG_DEF ",k2:"), l);
+    TEST_ASSERT_NULL_MESSAGE(strstr(l, "k6:"), l);
+    n = strlen(l);
+    TEST_ASSERT_TRUE_MESSAGE(n > (sizeof(LONG_DEF " cut=on") - 1U), l);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(LONG_DEF " cut=on",
+                                     &l[n - (sizeof(LONG_DEF " cut=on") - 1U)], l);
+
+    /* A member belongs to a key the record holds, or it is not listed. */
+    TEST_ASSERT_TRUE(0 <= listed_at(">|member=m1 verb=zz_long key=k1"));
+    TEST_ASSERT_TRUE_MESSAGE(0 > listed_at(">|member=m4 verb=zz_long key=k4"),
+                             "a member of a key the record left out");
+    owners_back();
+}
+
+/** @brief A default longer than a whole record. */
+#define HUGE_DEF  LONG_DEF LONG_DEF LONG_DEF LONG_DEF LONG_DEF
+
+static const char *const HUGE_MEMBERS[] = { "mh" };
+static const karg_spec_t HUGE_KEYS[] = {
+    { .key = "kh", .type = KARG_STRING, .def = HUGE_DEF, .enums = HUGE_MEMBERS, .n_enums = 1U },
+};
+static const kverb_t HUGE_VERBS[] = { { "zz_huge", HUGE_KEYS, 1U, h_made_up } };
+static const kverbs_t HUGE_TABLE = { .verbs = HUGE_VERBS, .n = 1U };
+
+/* Not even the first key fits: the record holds no key, which the grammar
+ * writes `-`, and says it was cut; and no member of the key is listed. */
+TEST_CASE("a verb whose first key alone outruns the record lists none, cut",
+          "[console_verbs]")
+{
+    console_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kverbs_add(&HUGE_TABLE));
+    TEST_ASSERT_TRUE(help_listing());
+
+    TEST_ASSERT_TRUE(0 <= listed_at(">|cmd=zz_huge args=- cut=on"));
+    TEST_ASSERT_TRUE(0 > listed_at(">|member=mh verb=zz_huge key=kh"));
+    owners_back();
+}
+
+/* ---- What a table's keys may be called -------------------------------------- */
+
+#define KEY_AT_MAX         "k234567890123456"           /**< KARG_KEY_NAME_MAX long.    */
+#define KEY_PAST_MAX       KEY_AT_MAX "x"               /**< One past it.               */
+#define MEMBER_AT_MAX      "m23456789012345678901234"   /**< KARG_MEMBER_NAME_MAX long. */
+#define MEMBER_PAST_MAX    MEMBER_AT_MAX "x"            /**< One past it.               */
+_Static_assert((sizeof(KEY_AT_MAX) - 1U) == KARG_KEY_NAME_MAX, "a key at the limit");
+_Static_assert((sizeof(MEMBER_AT_MAX) - 1U) == KARG_MEMBER_NAME_MAX, "a member at the limit");
+
+static const char *const FINE_MEMBERS[]  = { "fine" };
+static const char *const BAD_MEMBERS[]   = { "fine", "not-a-name" };
+static const char *const LONG_MEMBERS[]  = { MEMBER_PAST_MAX };
+static const char *const EDGE_MEMBERS[]  = { MEMBER_AT_MAX };
+
+static const karg_spec_t KEY_NOT_NAME[] = { { .key = "Key", .type = KARG_UINT, .max = 9U } };
+static const karg_spec_t KEY_TOO_LONG[] = { { .key = KEY_PAST_MAX, .type = KARG_UINT, .max = 9U } };
+static const karg_spec_t MEMBER_NOT_NAME[] = {
+    { .key = "a", .type = KARG_ENUM, .enums = FINE_MEMBERS, .n_enums = 1U },
+    { .key = "b", .type = KARG_ENUM, .enums = BAD_MEMBERS,  .n_enums = 2U },
+};
+static const karg_spec_t MEMBER_TOO_LONG[] = {
+    { .key = "c", .type = KARG_ENUM, .enums = LONG_MEMBERS, .n_enums = 1U },
+};
+static const karg_spec_t NAMES_AT_MAX[] = {
+    { .key = KEY_AT_MAX, .type = KARG_ENUM, .enums = EDGE_MEMBERS, .n_enums = 1U },
+};
+
+/** @brief Its second row's key is not a name. */
+static const kverb_t L_VERBS[] = {
+    { "zz_l0", NULL, 0U, h_made_up },
+    { "zz_l1", KEY_NOT_NAME, 1U, h_made_up },
+};
+static const kverbs_t L_TABLE = { .verbs = L_VERBS, .n = 2U };
+static const kverb_t M_VERBS[] = { { "zz_m0", KEY_TOO_LONG, 1U, h_made_up } };
+static const kverbs_t M_TABLE = { .verbs = M_VERBS, .n = 1U };
+static const kverb_t N_VERBS[] = { { "zz_n0", MEMBER_NOT_NAME, 2U, h_made_up } };
+static const kverbs_t N_TABLE = { .verbs = N_VERBS, .n = 1U };
+static const kverb_t O_VERBS[] = { { "zz_o0", MEMBER_TOO_LONG, 1U, h_made_up } };
+static const kverbs_t O_TABLE = { .verbs = O_VERBS, .n = 1U };
+static const kverb_t P_VERBS[] = { { "zz_p0", NAMES_AT_MAX, 1U, h_made_up } };
+static const kverbs_t P_TABLE = { .verbs = P_VERBS, .n = 1U };
+
+/* A key or a member the console could not print in a record of its own is
+ * refused with its table, and the log says which row and what is wrong. */
+TEST_CASE("an owner's key or member that is no name, or too long, refuses its table",
+          "[console_verbs]")
+{
+    struct {
+        const kverbs_t *table;
+        const char     *verb;
+        const char     *why;
+    } const bad[] = {
+        { &L_TABLE, "zz_l1", "verb 1 'zz_l1', key 0: not a name" },
+        { &M_TABLE, "zz_m0", "verb 0 'zz_m0', key 0: not a name" },
+        { &N_TABLE, "zz_n0", "verb 0 'zz_n0', key 'b', member 1: not a name" },
+        { &O_TABLE, "zz_o0", "verb 0 'zz_o0', key 'c', member 0: not a name" },
+    };
+
+    console_up();
+    size_t const before = kverbs_count();
+
+    for ( size_t i = 0U; (sizeof(bad) / sizeof(bad[0])) > i; ++i )
+    {
+        fake_klog_reset();
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kverbs_add(bad[i].table), bad[i].verb);
+        TEST_ASSERT_TRUE_MESSAGE(replied(bad[i].why), bad[i].why);
+        TEST_ASSERT_NULL_MESSAGE(kverbs_find(bad[i].verb, NULL), bad[i].verb);
+    }
+    TEST_ASSERT_NULL_MESSAGE(kverbs_find("zz_l0", NULL), "a refused table registers no row");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)before, (uint32_t)kverbs_count());
+
+    /* At the limits, it goes in, and its member's record is one line. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kverbs_add(&P_TABLE));
+    TEST_ASSERT_TRUE(help_listing());
+    TEST_ASSERT_TRUE(0 <= listed_at(">|member=" MEMBER_AT_MAX " verb=zz_p0 key=" KEY_AT_MAX));
+    owners_back();
+}
+
 /* ---- The hooks an owner's table carries ------------------------------------ */
 
 static uint32_t s_hook_a;   /**< Events table E's answer hook was shown. */
