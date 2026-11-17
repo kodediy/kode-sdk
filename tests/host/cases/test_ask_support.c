@@ -27,8 +27,12 @@ static void body_aborts(void *arg)
  *         whose output is dropped so the run's log shows no FAIL line. */
 static void body_fails(void *arg)
 {
+    /* Kept, not cast away: glibc marks freopen() warn_unused_result, and GCC
+     * warns about a (void) cast of it all the same. */
+    FILE *dropped = freopen("/dev/null", "w", stdout);
+
     (void)arg;
-    (void)freopen("/dev/null", "w", stdout);
+    (void)dropped;
     TEST_FAIL_MESSAGE("a failure inside the forked body, on purpose");
 }
 
