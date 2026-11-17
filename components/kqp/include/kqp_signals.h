@@ -364,8 +364,9 @@ enum KodeSignals {
     STORAGE_INFO_SIG,           /**< AO_Storage: one medium's mount state and
                                  *   usage, in answer to STORAGE_OP_INFO
                                  *   (StorageInfoEvt).                        */
-    STORAGE_CARD_SIG,           /**< AO_Storage: the card was mounted, or is
-                                 *   mounted no more (StorageCardEvt).        */
+    STORAGE_CARD_SIG,           /**< AO_Storage: the card was mounted, is
+                                 *   mounted no more, or was put away by an
+                                 *   app's rest (StorageCardEvt).             */
     STORAGE_TEST_SIG,           /**< AO_Storage: one phase of the card test
                                  *   (StorageTestEvt) - what it did and what
                                  *   it measured. The console prints it.      */

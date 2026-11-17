@@ -10593,6 +10593,68 @@ TEST_CASE("an image for another chip is kept as failed for wrong_board",
     TEST_ASSERT_TRUE_MESSAGE(said, "the record says why=wrong_board");
 }
 
+/** @brief A sink that takes everything: it only holds the one decoder. */
+static kode_status_t held_begin(void *ctx, uint32_t img_len)
+{
+    (void)ctx;
+    (void)img_len;
+    return KODE_OK;
+}
+
+/** @brief Takes the chunk and keeps nothing. */
+static kode_status_t held_write(void *ctx, const void *data, size_t len)
+{
+    (void)ctx;
+    (void)data;
+    (void)len;
+    return KODE_OK;
+}
+
+/** @brief Ends with nothing to judge. */
+static kode_status_t held_end(void *ctx)
+{
+    (void)ctx;
+    return KODE_OK;
+}
+
+/** @brief Nothing to abandon. */
+static void held_abort(void *ctx)
+{
+    (void)ctx;
+}
+
+static const kfw_sink_t HELD_SINK = { held_begin, held_write, held_end, held_abort };
+
+/* Another owner holding the one decoder when the file is opened again is not
+ * the file's fault: nothing is given up, and the record says other, not
+ * corrupt. */
+TEST_CASE("a read-through that finds the decoder held is kept as failed for other",
+          "[appmgr_ao][verify][install_rec]")
+{
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    region_full_of_old();
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+    uint32_t const len = container_named("fresh", true, false);
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    answer_data_bytes(s_cont, len);
+    TEST_ASSERT_TRUE_MESSAGE(read_through_asked(), "the install was not stopped at its plan");
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the file was not opened again to be read through");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kfw_begin(&HELD_SINK, NULL, KFW_TARGET_C5, len, NULL, NULL));
+    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    appmgr_inst_rec_t const got = inst_read(APPMGR_INST_KEY_APP);
+    kfw_abort();
+
+    dry_pass_refused("the decoder is busy");
+    TEST_ASSERT_EQUAL_UINT8(APPMGR_INST_FAILED, got.state);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(APPMGR_WHY_OTHER, got.why,
+        "a decoder another owner holds was taken for a corrupt file");
+}
+
 /* ---- Told means delivered ---------------------------------------------------
  * On the Kode channel and the BLE console the final record is a confirmed
  * line: `told` waits for the port's CONSOLE_SENT_SIG. A launch or a kodeOS

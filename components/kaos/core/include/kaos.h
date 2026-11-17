@@ -3309,8 +3309,7 @@ typedef enum {
                              *   `<dst>.bak` and @p src where it was, never a
                              *   cut file on @p dst. On the card it is warned
                              *   about only while the card has not proved it
-                             *   takes a write: its asker is kodeOS's own copy
-                             *   of an app, as a data folder is its own.       */
+                             *   takes a write, whoever asks.                   */
 } storage_pair_op_t;
 
 /**

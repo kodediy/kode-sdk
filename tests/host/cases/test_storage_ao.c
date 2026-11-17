@@ -7432,9 +7432,16 @@ TEST_CASE("a rest with no card in the slot publishes nothing", "[storage_ao][low
     lp_part_round(AO_Storage, KODE_LP_PART_CARD);
     TEST_ASSERT_TRUE(run_sd_job());
     fake_media_set_sd_present(true);
-    bool const told = card_last_said(false, true);
+    unsigned said = 0U;
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( STORAGE_CARD_SIG == (enum_t)e->sig )
+        {
+            said++;
+        }
+    }
     QActive_unsubscribe(ao_spy(), STORAGE_CARD_SIG);
-    TEST_ASSERT_FALSE_MESSAGE(told, "a rest with no card was told as a card at rest");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, said, "a rest with no card told some news of the card");
 }
 
 /* A slot that held no card was not forgotten as tried: nothing is probed

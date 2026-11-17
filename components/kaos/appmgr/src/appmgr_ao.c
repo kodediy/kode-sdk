@@ -5338,7 +5338,8 @@ static bool backup_tick(AppMgr * const me)
  * @brief Whether there is a copy to see to and a card to ask.
  *
  * A card at rest for an app is asked only for the copy an install waits for:
- * the idle copies and the dark wake leave it at rest.
+ * the idle copies and the dark wake begin nothing on it. A step already out
+ * when the rest lands may still bring it back.
  *
  * @param me The AO.
  * @return true when an installed app is unseen, and a card may answer.
@@ -8081,11 +8082,17 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
         case STORAGE_OPEN_RSP_SIG: {
             StorageOpenRspEvt const * const rsp = Q_EVT_CAST(StorageOpenRspEvt);
 
-            if ( ((uint8_t)KODE_OK != rsp->status)
-                || (verify_begin(me, rsp->size) != KODE_OK) )
+            if ( (uint8_t)KODE_OK != rsp->status )
             {
                 status = verify_fail(me, "the file could not be read through; "
                                          "nothing was given up");
+                break;
+            }
+            if ( verify_begin(me, rsp->size) != KODE_OK )
+            {
+                /* Another owner holds the one decoder: not the file's fault. */
+                appmgr_inst_why(APPMGR_WHY_OTHER);
+                status = verify_fail(me, "the decoder is busy; nothing was given up");
                 break;
             }
             me->verify_opened = true;

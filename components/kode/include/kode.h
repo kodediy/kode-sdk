@@ -1781,9 +1781,9 @@ typedef enum {
     KODE_REST_SOUND  = 1U << 3, /**< The speaker's amplifier and the audio chip off, once: the next sound
                                  *   brings them back, and kode_rest() asked again puts them away again.   */
     KODE_REST_CARD   = 1U << 4, /**< The card unmounted and unpowered, once: the next file on it brings it
-                                 *   back, and kode_rest() asked again puts it away again. An install that
-                                 *   would evict an app wakes the card to copy that app first, and the
-                                 *   card stays awake.                                                     */
+                                 *   back, and kode_rest() asked again puts it away again. In kodeOS, an
+                                 *   install that would evict an app brings the card back to check or
+                                 *   make that app's copy first, and the card then stays awake.            */
     KODE_REST_RADIO  = 1U << 5, /**< The radio chip asleep; Wi-Fi and Bluetooth keep their connections.
                                  *   A scan, Wi-Fi or Bluetooth, is refused while it rests: the radio
                                  *   sleeps between wakes too long for one. Needs KODE_REST_SOUND with it. */

@@ -4496,9 +4496,8 @@ static void answer_pair_move(QActive *who, uint8_t op, const char *src,
  * original back. One dispatch step, one answer. A reset between the two
  * renames leaves the name free, the original as `<dst>.bak` and @p src where it
  * was: the next replacement of the name puts its copy there and removes that
- * backup. A `<dst>.bak` that is there is removed, and said. Its one asker is
- * AO_AppMgr putting an app's copy on its name, a file kodeOS places itself, so
- * the card is said only while it has not proved it takes a write.
+ * backup. A `<dst>.bak` that is there is removed, and said. On the card it is
+ * said only while the card has not proved it takes a write, whoever asks.
  */
 static void answer_pair_replace(QActive *who, uint8_t op, const char *src,
                                 const char *dst)
