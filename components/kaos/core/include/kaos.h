@@ -2856,8 +2856,8 @@ bool radio_probe_request(QActive *who, const radio_probe_t *req);
 void radio_amp_request(bool on);
 
 /**
- * @brief Subscribe @p who to the pairings: BLE_PAIR_SIG, a code to show and
- *        how each pairing ended.
+ * @brief Subscribe @p who to the pairings: BLE_PAIR_SIG, a code to show, how
+ *        each pairing ended, and a pairing refused with no code.
  *
  * Beside AO_Radio's start, so the call links AO_Radio (tools/check_starts.sh).
  *

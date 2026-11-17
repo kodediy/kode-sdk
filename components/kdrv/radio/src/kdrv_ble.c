@@ -698,8 +698,8 @@ static uint32_t ble_passkey_pick(void)
 /**
  * @brief Record where a pairing is and nudge whoever asked to be told.
  *
- * @param phase   SHOW or DONE.
- * @param outcome How it ended; ignored in SHOW.
+ * @param phase   SHOW, DONE or REFUSED.
+ * @param outcome How it ended, or why it was refused; ignored in SHOW.
  * @param passkey The six digits; ignored in DONE.
  */
 static void pair_note(kdrv_ble_pair_phase_t phase,
@@ -3885,7 +3885,11 @@ static bool ble_pair_open(void)
 }
 
 /**
- * @brief Turn a pairing away: log it, optionally forget the peer, hang up.
+ * @brief Turn a pairing away: log it, note it with its cause, optionally
+ *        forget the peer, hang up.
+ *
+ * The note (KDRV_BLE_PAIR_REFUSED) only tells: nothing here opens the door,
+ * and a phone that retries is noted at each try.
  *
  * @param conn   The connection that asked.
  * @param forget Delete the peer's bond too: for a pairing that completed
@@ -3905,9 +3909,15 @@ static void ble_pair_refuse(uint16_t conn, bool forget)
         KLOG_N(TAG, "pairing refused: a new phone pairs in kodeOS; this app "
                     "serves bonded phones");
     }
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    pair_note(KDRV_BLE_PAIR_REFUSED, KDRV_BLE_PAIR_APP_CLOSED, 0U);
+#endif
 #else
     KLOG_N(TAG, "pairing refused: the board is hidden; Pair new device "
                 "makes it visible");
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
+    pair_note(KDRV_BLE_PAIR_REFUSED, KDRV_BLE_PAIR_HIDDEN, 0U);
+#endif
 #endif
     if ( forget && (ble_gap_conn_find(conn, &desc) == 0) )
     {

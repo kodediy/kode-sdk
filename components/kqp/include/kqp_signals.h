@@ -252,10 +252,10 @@ enum KodeSignals {
                                  *   change - a phone connecting is news
                                  *   nobody asked for - and on request.      */
     BLE_PAIR_SIG,               /**< AO_Radio: a pairing wants a code shown,
-                                 *   or has ended (BlePairEvt). One signal
-                                 *   with a phase rather than two, because
-                                 *   both halves are the same exchange told
-                                 *   at two moments.                         */
+                                 *   has ended, or was refused with no code
+                                 *   (BlePairEvt). One signal with a phase
+                                 *   rather than three, because each is the
+                                 *   same exchange told at another moment.   */
     BLE_SCAN_ENTRY_SIG,         /**< AO_Radio: one device seen (BleScanEvt). */
     BLE_SCAN_END_SIG,           /**< AO_Radio: that was the last one
                                  *   (WifiScanEndEvt: a count and whether
@@ -5216,18 +5216,22 @@ typedef struct {
 } BleStateEvt;
 
 /**
- * @brief A pairing wants a code shown, or has ended (BLE_PAIR_SIG).
+ * @brief A pairing wants a code shown, has ended, or was refused with no
+ *        code (BLE_PAIR_SIG).
  *
  * The two enums are kdrv_ble's, carried as plain integers exactly as
  * BleStateEvt carries kdrv_ble_state_t: this header cannot include a driver
  * one, and the subscriber names the values from kdrv_ble.h, which it already
- * includes for the state.
+ * includes for the state. A refusal is told at most once in
+ * KODE_BLE_PAIR_REFUSED_QUIET_MS, and changes nothing on the board.
  */
 typedef struct {
     QEvt     super;
-    uint8_t  phase;    /**< kdrv_ble_pair_phase_t: SHOW or DONE.           */
+    uint8_t  phase;    /**< kdrv_ble_pair_phase_t: SHOW, DONE or REFUSED.  */
     uint32_t passkey;  /**< Six digits, 0..999999. Valid in SHOW.          */
-    uint8_t  outcome;  /**< kdrv_ble_pair_outcome_t. Valid in DONE.        */
+    uint8_t  outcome;  /**< kdrv_ble_pair_outcome_t. Valid in DONE, and in
+                        *   REFUSED, where it says why: HIDDEN or
+                        *   APP_CLOSED.                                     */
 } BlePairEvt;
 
 /** @brief How long to listen (BLE_SCAN_REQ_SIG). */

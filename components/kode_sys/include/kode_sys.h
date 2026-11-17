@@ -2254,12 +2254,14 @@ kode_status_t kode_sys_ble_queue_room(const char *chr, size_t *room);
 #define KODE_SYS_BLE_HID_RING_SLOTS  16U    /**< Reports that wait for the link.               */
 #define KODE_SYS_BLE_PAIR_SHOW       1U     /**< kode_sys_ble_pair_t.phase: show @c passkey.   */
 #define KODE_SYS_BLE_PAIR_DONE       2U     /**< kode_sys_ble_pair_t.phase: it ended, @c outcome says how. */
+#define KODE_SYS_BLE_PAIR_REFUSED    3U     /**< kode_sys_ble_pair_t.phase: a device asked outside the time to pair and was hung up on, with no code. */
 #define KODE_SYS_BLE_PAIR_OK         0U     /**< kode_sys_ble_pair_t.outcome: bonded.          */
 
 /* cppcheck-suppress misra-c2012-2.3 ; an event's name for the apps that read it, never used inside the SDK */
 /**
- * @brief A pairing wants a code shown, or has ended (BLE_PAIR_SIG): @c phase;
- *        @c passkey, six digits, in SHOW; @c outcome in DONE.
+ * @brief A pairing wants a code shown, has ended, or was refused (BLE_PAIR_SIG):
+ *        @c phase; @c passkey, six digits, in SHOW; @c outcome in DONE. A
+ *        refusal is told at most once in KODE_BLE_PAIR_REFUSED_QUIET_MS.
  */
 typedef BlePairEvt kode_sys_ble_pair_t;
 

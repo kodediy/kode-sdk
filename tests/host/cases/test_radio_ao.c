@@ -10940,6 +10940,75 @@ TEST_CASE("a phone that encrypted and left gets a fast advert, and a stranger "
     ble_adv_case_end();
 }
 
+TEST_CASE("a pairing refused while the board hides is told once, with its cause, "
+          "and the board stays hidden", "[radio_ao]")
+{
+    radio_fresh();
+    fake_ble_reset();
+    fake_ble_pair_reset();
+    fake_ble_set_bonds(1U);
+    go_up();
+    /* AO_Radio outlives the case: what an earlier case told is past its quiet time. */
+    fake_time_advance_ms(KODE_BLE_PAIR_REFUSED_QUIET_MS);
+
+    dispatch(BLE_START_REQ_SIG);
+    pump();
+    finish_ble_start();
+    expect_adv((uint16_t)KDRV_BLE_ITVL_FAST, 30000U, true);
+
+    /* A new phone, two minutes in, asks to pair and is hung up on. */
+    fake_time_advance_ms(120000U);
+    ao_spy_drain();
+    fake_ble_secure(false);
+    fake_ble_central(true);
+    pump();
+    fake_ble_pair_refuse(KDRV_BLE_PAIR_HIDDEN);
+    pump();
+    fake_ble_central(false);
+    pump();
+
+    const BlePairEvt * const p = take_pair();
+    TEST_ASSERT_NOT_NULL_MESSAGE(p, "the refusal was not told");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BLE_PAIR_REFUSED, p->phase);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BLE_PAIR_HIDDEN, p->outcome);
+    TEST_ASSERT_NULL(take_pair());
+    /* The advert a stranger leaves behind: slow and still hidden. */
+    expect_adv((uint16_t)KDRV_BLE_ITVL_SLOW, 0U, true);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the refusal changed the advert");
+    ble_adv_case_end();
+}
+
+TEST_CASE("a phone that retries a refused pairing is told of once, and again "
+          "after the quiet time", "[radio_ao]")
+{
+    /* Five tries, the last before the quiet time is over. */
+    uint32_t const step = KODE_BLE_PAIR_REFUSED_QUIET_MS / 5U;
+
+    radio_fresh();
+    fake_ble_pair_reset();
+    go_up();
+    fake_time_advance_ms(KODE_BLE_PAIR_REFUSED_QUIET_MS);
+
+    for ( unsigned i = 0U; 5U > i; ++i )
+    {
+        fake_ble_pair_refuse(KDRV_BLE_PAIR_HIDDEN);
+        pump();
+        fake_time_advance_ms(step);
+    }
+    const BlePairEvt * const p = take_pair();
+    TEST_ASSERT_NOT_NULL_MESSAGE(p, "the first refusal was not told");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BLE_PAIR_REFUSED, p->phase);
+    TEST_ASSERT_NULL_MESSAGE(take_pair(), "a retry was told again");
+
+    /* The quiet time is over, though the phone still tries. */
+    fake_ble_pair_refuse(KDRV_BLE_PAIR_HIDDEN);
+    pump();
+    const BlePairEvt * const again = take_pair();
+    TEST_ASSERT_NOT_NULL_MESSAGE(again, "a refusal after the quiet time was not told");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BLE_PAIR_HIDDEN, again->outcome);
+    TEST_ASSERT_NULL(take_pair());
+}
+
 TEST_CASE("Pair new device with Bluetooth off puts nothing on the air", "[radio_ao]")
 {
     radio_fresh();

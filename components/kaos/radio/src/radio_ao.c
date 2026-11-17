@@ -413,6 +413,11 @@ typedef struct {
      * Kept across the link's loss and paid by the settle; the driver hangs up
      * on nobody once that link or its code is gone. */
     bool    ble_reject_owed;
+    /* The last pairing refused with no code that was told (BLE_PAIR_SIG,
+     * REFUSED). A phone retries a refused pairing several times; the ones
+     * within KODE_BLE_PAIR_REFUSED_QUIET_MS of it are not told again. */
+    bool     ble_refusal_told; /**< One was told since the boot.                */
+    uint32_t ble_refusal_at;   /**< When, in khal_time_ms().                    */
 
     /* The production row. `test_pending` is its debt, paid by the same
      * settle that pays the services' - after them, because the operator
@@ -4940,6 +4945,20 @@ static void radio_on_ble_pair(void)
     radio_knocks_post(RADIO_KNOCK_PAIR, 0U);
 }
 
+/**
+ * @brief Whether a pairing refused now falls in the quiet time of the last
+ *        one told (KODE_BLE_PAIR_REFUSED_QUIET_MS).
+ *
+ * @param me  The AO.
+ * @param now khal_time_ms() now.
+ * @return true when it is not told.
+ */
+static bool ble_refusal_quiet(Radio const * const me, uint32_t now)
+{
+    return me->ble_refusal_told
+        && ((uint32_t)KODE_BLE_PAIR_REFUSED_QUIET_MS > (now - me->ble_refusal_at));
+}
+
 /** @brief Collect what the driver is holding and put it on the bus. */
 static void ble_publish_pair(Radio * const me)
 {
@@ -4955,6 +4974,17 @@ static void ble_publish_pair(Radio * const me)
         return;
     }
 
+    /* A phone retries a refused pairing several times: one attempt is one
+     * notice, and the driver's line says each of them. */
+    uint32_t const now     = khal_time_ms();
+    bool const     refusal = (KDRV_BLE_PAIR_REFUSED == rec.phase);
+    if ( refusal && ble_refusal_quiet(me, now) )
+    {
+        KLOG_D(TAG, "pairing refused again within %u s; not told again",
+               (unsigned)KODE_BLE_PAIR_REFUSED_QUIET_MS / RADIO_MS_PER_S);
+        return;
+    }
+
     BlePairEvt *ev = Q_NEW_X(BlePairEvt, 0U, BLE_PAIR_SIG);
     if ( NULL == ev )
     {
@@ -4967,11 +4997,23 @@ static void ble_publish_pair(Radio * const me)
     ev->phase   = (uint8_t)rec.phase;
     ev->passkey = rec.passkey;
     ev->outcome = (uint8_t)rec.outcome;
-    if ( (KDRV_BLE_PAIR_DONE == rec.phase) && (KDRV_BLE_PAIR_OK == rec.outcome) )
+    if ( refusal )
+    {
+        /* Told only: the board stays as it was, hidden or in an app that is
+         * not pairing. A new device pairs after a deliberate act. */
+        me->ble_refusal_told = true;
+        me->ble_refusal_at   = now;
+        KLOG_D(TAG, "pairing refused: told");
+    }
+    else if ( (KDRV_BLE_PAIR_DONE == rec.phase) && (KDRV_BLE_PAIR_OK == rec.outcome) )
     {
         /* The new device is in: the board hides again once it leaves. */
         me->ble_pair_open = false;
         kdrv_ble_hid_pair_window(false);
+    }
+    else
+    {
+        /* A code to show or a pairing that failed: told, nothing to change. */
     }
     QACTIVE_PUBLISH(&ev->super, &me->super);
 }
@@ -9667,6 +9709,8 @@ void Radio_ctor(void)
     me->wifi_start_pending = false;
     me->ble_start_pending  = false;
     me->ble_reject_owed    = false;
+    me->ble_refusal_told   = false;
+    me->ble_refusal_at     = 0U;
     me->pb_phase     = (uint8_t)PB_IDLE;
     me->pb_job       = false;
     me->pb_rsp       = NULL;

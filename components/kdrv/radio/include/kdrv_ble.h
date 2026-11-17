@@ -91,26 +91,31 @@ kode_status_t kdrv_ble_set_cb(kdrv_ble_cb_t cb);
 typedef enum {
     KDRV_BLE_PAIR_NONE = 0,  /**< Nothing pending.                          */
     KDRV_BLE_PAIR_SHOW,      /**< A code is on offer; passkey is valid.     */
-    KDRV_BLE_PAIR_DONE       /**< It ended; outcome says how.               */
+    KDRV_BLE_PAIR_DONE,      /**< It ended; outcome says how.               */
+    KDRV_BLE_PAIR_REFUSED    /**< A device asked and was hung up on with no
+                              *   code; outcome says why. One per refusal.  */
 } kdrv_ble_pair_phase_t;
 
-/** @brief How a pairing ended. */
+/** @brief How a pairing ended, or why it was refused. */
 typedef enum {
     KDRV_BLE_PAIR_OK = 0,    /**< Bonded.                                   */
     KDRV_BLE_PAIR_GONE,      /**< The peer left with the pairing in flight. */
     KDRV_BLE_PAIR_FAILED,    /**< Encryption failed, or the SM gave up.     */
-    KDRV_BLE_PAIR_REJECTED   /**< This board hung up on it.                 */
+    KDRV_BLE_PAIR_REJECTED,  /**< This board hung up on it.                 */
+    KDRV_BLE_PAIR_HIDDEN,    /**< Refused: kodeOS hides the board from new
+                              *   devices until Pair new device.            */
+    KDRV_BLE_PAIR_APP_CLOSED /**< Refused: an app runs and is not pairing.  */
 } kdrv_ble_pair_outcome_t;
 
 /** @brief One moment in a pairing's life, as kdrv_ble_pair_take() reports it. */
 typedef struct {
     kdrv_ble_pair_phase_t   phase;
     uint32_t                passkey;  /**< 0..999999. Valid in SHOW.        */
-    kdrv_ble_pair_outcome_t outcome;  /**< Valid in DONE.                   */
+    kdrv_ble_pair_outcome_t outcome;  /**< Valid in DONE and REFUSED.       */
 } kdrv_ble_pair_t;
 
 /**
- * @brief Told that a pairing wants a code shown, or has ended.
+ * @brief Told that a pairing wants a code shown, has ended, or was refused.
  *
  * Carries nothing on purpose: it runs on NimBLE's host task, so it posts and
  * returns, and the reader collects the record with kdrv_ble_pair_take() on

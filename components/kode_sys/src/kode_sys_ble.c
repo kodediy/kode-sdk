@@ -459,6 +459,7 @@ _Static_assert(KODE_SYS_BLE_HID_KEY_MAX == KDRV_BLE_HID_KEY_MAX, "the last key i
 _Static_assert(KODE_SYS_BLE_HID_RING_SLOTS == KDRV_BLE_HID_RING_SLOTS, "the ring is the driver's");
 _Static_assert(KODE_SYS_BLE_PAIR_SHOW == (uint32_t)KDRV_BLE_PAIR_SHOW, "SHOW is the driver's");
 _Static_assert(KODE_SYS_BLE_PAIR_DONE == (uint32_t)KDRV_BLE_PAIR_DONE, "DONE is the driver's");
+_Static_assert(KODE_SYS_BLE_PAIR_REFUSED == (uint32_t)KDRV_BLE_PAIR_REFUSED, "REFUSED is the driver's");
 _Static_assert(KODE_SYS_BLE_PAIR_OK == (uint32_t)KDRV_BLE_PAIR_OK, "OK is the driver's");
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */

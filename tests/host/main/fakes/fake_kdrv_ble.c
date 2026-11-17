@@ -676,6 +676,19 @@ void fake_ble_pair_end(kdrv_ble_pair_outcome_t how)
     }
 }
 
+void fake_ble_pair_refuse(kdrv_ble_pair_outcome_t why)
+{
+    /* As ble_pair_refuse(): a note of its own, with no code and nothing in
+     * flight to end. */
+    s_p.rec.phase   = KDRV_BLE_PAIR_REFUSED;
+    s_p.rec.passkey = 0U;
+    s_p.rec.outcome = why;
+    if ( NULL != s_p.cb )
+    {
+        s_p.cb();
+    }
+}
+
 unsigned fake_ble_pair_rejects(void)
 {
     return s_p.rejects;

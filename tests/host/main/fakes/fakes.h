@@ -1008,6 +1008,10 @@ void fake_ble_pair_show(uint32_t passkey);
 /** @brief Play the host task's part: the pairing ended this way. */
 void fake_ble_pair_end(kdrv_ble_pair_outcome_t how);
 
+/** @brief Play the host task's part: a device asked to pair and was hung up
+ *         on with no code, for @p why (ble_pair_refuse()). */
+void fake_ble_pair_refuse(kdrv_ble_pair_outcome_t why);
+
 /** @brief How many times kdrv_ble_pair_reject() was called and had something
  *         to refuse - a refusal with nothing in flight does not count, which
  *         is what makes "the request reached the driver" assertable. */

@@ -639,6 +639,11 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  *         than one already does. */
 #define KODE_BLE_SCAN_MAX_MS    30000U
 
+/** @brief After AO_Radio tells of a pairing refused with no code, how long it
+ *         tells of no other, ms: a phone retries a refused pairing several
+ *         times, and one attempt is one notice. */
+#define KODE_BLE_PAIR_REFUSED_QUIET_MS  10000U
+
 /* There is no advertising window. A board with BLE on advertises until
  * somebody connects, and advertises again when they leave - see AO_Radio's
  * invariant. What used to bound the exposure was the clock; what bounds it
