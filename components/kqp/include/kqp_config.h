@@ -870,8 +870,9 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
  * and every asker's queue must hold that: AO_Gui and AO_Console are both
  * 64. It must also stay below the medium pool count. How many entries a
  * reader keeps in all is its own ceiling (KODE_APP_LIST_MAX for the launcher).
- * The one-medium listings (`sd_ls`, `fs_ls`, `ls`) are one page and stop at
- * this number, and say so.
+ * The one-medium listings (`sd_ls`, `fs_ls`) are one page and stop at this
+ * number, and say so. `ls` reads a folder page after page
+ * (storage_list_ask()) until its end.
  *
  * The WiFi scan's own cap (KDRV_WIFI_SCAN_MAX) is this number for the same
  * reason and must move with it - though that one really is per burst, since

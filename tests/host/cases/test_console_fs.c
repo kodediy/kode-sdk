@@ -450,7 +450,9 @@ TEST_CASE("the three ways a cd fails say three different things",
 
 /* `ls` is a STAT and then, only once that says directory, a LIST - two
  * round trips to AO_Storage, not one, so every case below settles twice:
- * once for the STAT, once for the burst the STAT's answer asks for. */
+ * once for the STAT, once for the page the STAT's answer asks for. A folder
+ * longer than a page takes one more round trip for each page past the
+ * first. */
 
 TEST_CASE("ls of the root names both volumes", "[console_fs]")
 {
@@ -513,10 +515,101 @@ TEST_CASE("ls with no path lists the working directory", "[console_fs]")
         replied_line(">|name=\"notes.txt\" type=file size=5 medium=fs"));
 }
 
-/* A listing answers with an unconditional terminator and no return code, so
- * a path naming no volume would otherwise come back as an empty, cheerful
- * `>ok` - which reads as "that directory is empty" and is not. This one
- * never reaches a second round trip: the STAT itself is refused. */
+/** @brief Files for two whole pages of a listing and part of a third. */
+#define LS_MANY_FILES    ((KODE_STORAGE_LIST_MAX * 2U) + 3U)
+/** @brief Round trips enough for the STAT and every page of LS_MANY_FILES. */
+#define LS_MANY_SETTLES  16U
+/** @brief Room for one listed record, quoted name and all. */
+#define LS_RECORD_MAX    96U
+
+/**
+ * @brief The index of the first reply that ENDS with @p needle, as
+ *        replied_line() matches it.
+ * @return The index, or -1 when no reply does.
+ */
+static int replied_at(const char *needle)
+{
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const l  = fake_klog_line(i);
+        const char        *at = NULL;
+        if ( NULL != l )
+        {
+            at = strstr(l, needle);
+        }
+        if ( NULL == at )
+        {
+            continue;
+        }
+        char const after = at[strlen(needle)];
+        if ( ('\0' == after) || ('\r' == after) || ('\n' == after)
+            || ('\x1b' == after) )
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* A folder longer than one page of AO_Storage's listing. `ls` asks for the
+ * next page itself, from where the last one ended, and answers `>ok` only
+ * after the last entry: an `>ok` after the first page alone reads as the
+ * whole folder, and a script looking for a file past it misses the file. */
+TEST_CASE("ls lists a folder longer than a page whole, then says ok",
+          "[console_fs]")
+{
+    char name[KODE_APP_FILE_MAX];
+    char want[LS_RECORD_MAX];
+
+    console_up_once();
+    for ( unsigned i = 0U; LS_MANY_FILES > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "f%02u.txt", i);
+        fake_media_put_fs_file(name, "x");
+    }
+
+    type_line("ls path=\"/storage\"");
+    for ( unsigned n = 0U; LS_MANY_SETTLES > n; ++n )
+    {
+        settle();
+    }
+
+    int const ok = replied_at(">ok");
+    TEST_ASSERT_TRUE_MESSAGE(0 <= ok, "the listing never ended with >ok");
+    TEST_ASSERT_FALSE_MESSAGE(replied(">err"), "a whole folder is no error");
+    for ( unsigned i = 0U; LS_MANY_FILES > i; ++i )
+    {
+        (void)snprintf(name, sizeof(name), "f%02u.txt", i);
+        (void)snprintf(want, sizeof(want),
+                       ">|name=\"%s\" type=file size=1 medium=fs", name);
+        int const at = replied_at(want);
+        TEST_ASSERT_TRUE_MESSAGE(0 <= at, name);
+        TEST_ASSERT_TRUE_MESSAGE(at < ok, name);
+    }
+}
+
+/* A listing that cannot go on says so. The folder goes between the STAT and
+ * its page, so AO_Storage cannot list the page, and `ls` ends `cut`: an
+ * `>ok` there would read as a folder with nothing in it. */
+TEST_CASE("ls of a folder that goes before its page ends cut, never ok",
+          "[console_fs]")
+{
+    console_up_once();
+    fake_media_put_fs_dir("gone");
+
+    type_line("ls path=\"/storage/gone\"");
+    settle();
+    TEST_ASSERT_FALSE_MESSAGE(replied(">err") || replied_line(">ok"),
+                              "the page is still to come");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_rmdir("/storage/gone"));
+    settle();
+    TEST_ASSERT_TRUE(replied_line(">err code=5 msg=cut"));
+    TEST_ASSERT_FALSE(replied_line(">ok"));
+}
+
+/* A path naming no volume must not come back as an empty, cheerful `>ok` -
+ * which reads as "that directory is empty" and is not. This one never
+ * reaches a second round trip: the STAT itself is refused. */
 TEST_CASE("ls of a path on no volume is refused, not answered empty",
           "[console_fs]")
 {

@@ -1495,7 +1495,8 @@ void storage_write_abandon_request(QActive *who)
  * @brief Send one event of a listing: to its asker, or to every subscriber.
  *
  * A page of bootable images goes to the AO that asked, so it sets the pace.
- * The one-medium and path listings (`sd_ls`, `fs_ls`, `ls`) are published.
+ * The one-medium listings (`sd_ls`, `fs_ls`) and a path listing asked with
+ * storage_path_request() are published.
  *
  * @param who The asker, or NULL to publish.
  * @param e   The event.
@@ -1882,8 +1883,8 @@ static void list_ask(const char *path, uint32_t skip)
  * An ask's listing is list_ask()'s.
  *
  * @param path The directory.
- * @param skip An ask's or a blocked task's entries to skip; 0 for a console
- *             listing, which asks for none.
+ * @param skip An ask's or a blocked task's entries to skip; 0 for a published
+ *             listing, which takes none.
  */
 static void do_path_list(const char *path, uint32_t skip)
 {

@@ -219,11 +219,14 @@ typedef enum {
                      *   fifty records, more than the large pool holds.   */
     KCLI_I2C_SCAN,  /**< i2c_scan: a few addresses probed per step, closed by
                      *   this AO after the last one.                      */
-    KCLI_FS_LIST_STAT, /**< ls, phase one: STAT first, as the LIST
-                        *   terminator carries no status. Closed by
-                        *   STORAGE_PATH_RSP_SIG, which refuses or promotes
-                        *   to KCLI_FS_LIST.                             */
-    KCLI_FS_LIST,   /**< ls, phase two: sd_ls's burst plus `type=`.       */
+    KCLI_FS_LIST_STAT, /**< ls, phase one: STAT first, so a missing
+                        *   directory is refused as `cd` refuses it. Closed
+                        *   by STORAGE_PATH_RSP_SIG, which refuses or
+                        *   promotes to KCLI_FS_LIST.                    */
+    KCLI_FS_LIST,   /**< ls, phase two: sd_ls's record plus `type=`, one
+                     *   page at a time, each asked from where the last
+                     *   ended. Closed by the last page's
+                     *   FILE_LIST_END_SIG.                              */
     KCLI_FS_STAT,   /**< stat: closed by STORAGE_PATH_RSP_SIG, one record. */
     KCLI_FS_CD,     /**< cd: closed by the same signal and no record.    */
     KCLI_FS_CAT_STAT, /**< cat, phase one: STAT first; a directory is
@@ -465,7 +468,9 @@ typedef struct {
                               *   is also the skip of the next page.       */
     uint16_t list_from;     /**< The skip the last page was asked with: a
                               *   page that ends with `more` and leaves
-                              *   list_next here brought nothing.          */
+                              *   list_next here brought nothing. `ls`
+                              *   adds its page's count to it for the
+                              *   next skip.                               */
     uint8_t  ad_n;          /**< Slots in use.                             */
     uint8_t  ad_at;         /**< The slot being asked about right now.     */
     uint8_t  ad_kind[KCLI_AD_MAX];                  /**< kcli_ad_kind_t.   */
@@ -1172,8 +1177,8 @@ static void fs_refuse(void)
  * @brief ls [path=]: STATs the path first, then entries and `>ok`.
  *
  * KCLI_FS_LIST_STAT until path_answer() sees a directory, then KCLI_FS_LIST
- * for the burst STORAGE_LIST_END_SIG closes. A path `cd` refuses, `ls`
- * refuses the same way.
+ * for the pages ls_page() asks, until ls_end() reads the last one. A path
+ * `cd` refuses, `ls` refuses the same way.
  */
 static void h_ls(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
@@ -1185,6 +1190,75 @@ static void h_ls(Console *me, const kcmd_t *c, const karg_val_t *v)
     if ( console_fs_ls(&me->super, v[0].s) != KODE_OK )
     {
         fs_refuse();
+    }
+}
+
+/**
+ * @brief Close `ls` on a listing that stopped before the folder's end.
+ *
+ * The records already sent stand; `>err code=5 msg=cut` says the rest did
+ * not come, where an `>ok` would read as the whole folder.
+ *
+ * @param listed Entries the pages brought before it stopped.
+ */
+static void ls_cut(uint32_t listed)
+{
+    KLOG_W(TAG, "ls: the listing stopped after %lu entries",
+           (unsigned long)listed);
+    console_reply_err(KCLI_ERR_REJECT, "cut");
+    console_end();
+}
+
+/**
+ * @brief Ask for the page of `ls` that starts at entry @p skip.
+ *
+ * Each page has the deadline the first one had. A page AO_Storage could not
+ * be asked for ends the listing as cut.
+ *
+ * @param me   The console.
+ * @param skip Entries the earlier pages brought.
+ */
+static void ls_page(Console *me, uint16_t skip)
+{
+    me->list_from = skip;
+    console_extend(KCLI_CMD_TIMEOUT_MS);
+    if ( console_fs_list_page(&me->super, skip) != KODE_OK )
+    {
+        ls_cut((uint32_t)skip);
+    }
+}
+
+/**
+ * @brief Read the end of a page of `ls`: `>ok` after the last page, the next
+ *        page while more follow, cut when the listing cannot go on.
+ *
+ * It cannot go on after a page AO_Storage could not list, after a page that
+ * brought nothing (asking again would bring nothing again), or past the last
+ * entry a page's skip can name.
+ *
+ * @param me  The console.
+ * @param end The page's end.
+ */
+static void ls_end(Console *me, FileRspEvt const *end)
+{
+    uint32_t const next = (uint32_t)me->list_from + (uint32_t)end->count;
+
+    if ( (uint8_t)KODE_OK != end->rc )
+    {
+        ls_cut(next);
+    }
+    else if ( !end->more )
+    {
+        console_reply(">ok");
+        console_end();
+    }
+    else if ( (0U == end->count) || ((uint32_t)UINT16_MAX < next) )
+    {
+        ls_cut(next);
+    }
+    else
+    {
+        ls_page(me, (uint16_t)next);
     }
 }
 
@@ -1629,12 +1703,11 @@ static void path_answer(Console *me, const StoragePathRspEvt *r)
     }
     else if ( (uint8_t)KCLI_FS_LIST_STAT == me->inflight )
     {
-        /* The STAT that guards `ls` found a directory. The command stays in
-         * flight under the one watchdog cmd_begin() already armed - only
-         * what it is waiting for changes - so this returns instead of
-         * falling through to console_end(). */
+        /* The STAT that guards `ls` found a directory: on to the first page.
+         * The command stays in flight - only what it is waiting for changes
+         * - so this returns instead of falling through to console_end(). */
         me->inflight = (uint8_t)KCLI_FS_LIST;
-        console_fs_list_begin(&me->super);
+        ls_page(me, 0U);
         return;
     }
     else if ( (uint8_t)KCLI_FS_CAT_STAT == me->inflight )
@@ -7138,9 +7211,9 @@ static QState console_own(Console * const me, QEvt const * const e)
             break;
         }
 
-        /* `sd_ls`, `fs_ls` and `ls` entries are published, so they also
-         * arrive when someone else asked: each record is gated on this AO's
-         * own command being in flight. */
+        /* `sd_ls` and `fs_ls` entries are published, so they also arrive
+         * when someone else asked; `ls`'s pages are posted to this AO alone.
+         * Each record is gated on this AO's own command being in flight. */
         case STORAGE_ENTRY_SIG: {
             StorageEntryEvt const * const en = Q_EVT_CAST(StorageEntryEvt);
             const char *medium = "fs";
@@ -7174,14 +7247,19 @@ static QState console_own(Console * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case STORAGE_LIST_END_SIG: {
+        /* Posted to this AO alone: the end of a page of `ls`. One that
+         * arrives after its command ended is nobody's. */
+        case FILE_LIST_END_SIG: {
             if ( (uint8_t)KCLI_FS_LIST == me->inflight )
             {
-                console_reply(">ok");
-                console_end();
+                ls_end(me, Q_EVT_CAST(FileRspEvt));
             }
-            else if ( ((uint8_t)KCLI_APPDATA_LS == me->inflight)
-                     || ((uint8_t)KCLI_APPDATA_INFO == me->inflight) )
+            status = Q_HANDLED();
+            break;
+        }
+        case STORAGE_LIST_END_SIG: {
+            if ( ((uint8_t)KCLI_APPDATA_LS == me->inflight)
+                || ((uint8_t)KCLI_APPDATA_INFO == me->inflight) )
             {
                 bool const more = Q_EVT_CAST(ListEndEvt)->more;
                 if ( ((uint8_t)KCLI_AD_FILES == me->ad_phase) && more

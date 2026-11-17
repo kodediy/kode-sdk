@@ -3516,6 +3516,8 @@ kode_status_t storage_stat_ask(QActive *who, const char *path);
  *
  * Each entry leaves KODE_STORAGE_LIST_FREE_SLOTS free in @p who's queue; no room
  * ends the page early with @c more set, or KODE_NO_RESOURCES if nothing fit.
+ * The console's `ls` reads a folder through it too, page after page, with a
+ * path it has resolved itself.
  * @param who  The asking AO.
  * @param path A directory, absolute and virtual.
  * @param skip Entries earlier pages sent.

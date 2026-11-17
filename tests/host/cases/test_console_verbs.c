@@ -17,6 +17,7 @@
 #include "Mockkdrv_slot.h"
 
 #include "ao_spy.h"
+#include "ask_support.h"
 #include "autotest_support.h"
 #include "fakes.h"
 #include "kaos.h"
@@ -393,24 +394,30 @@ static void drain_storage(void)
     }
 }
 
-TEST_CASE("a console verb in flight reads a signal an owner's hook also reads",
-          "[console_verbs]")
+/**
+ * @brief The `ls` half of the case below, answered by hand, in a child.
+ *
+ * `ls` asks its page through AO_Storage's list door, and only AO_Storage's
+ * own answer opens that door again. Answered by hand in this process, the
+ * console's door would stay shut for every `ls` after this file; in a child
+ * it ends with the child.
+ *
+ * @param arg Unused.
+ */
+static void ls_in_flight_body(void *arg)
 {
-    static const ListEndEvt end = { .super = QEVT_INITIALIZER(STORAGE_LIST_END_SIG), .more = false };
+    FileRspEvt        end;
     StoragePathRspEvt stat;
     StorageEntryEvt   entry;
 
-    console_up();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kverbs_add(&E_TABLE));
-    s_hook_a = 0U;
+    (void)arg;
+    (void)memset(&end, 0, sizeof(end));
+    end.super = (QEvt)QEVT_INITIALIZER(FILE_LIST_END_SIG);
+    end.rc    = (uint8_t)KODE_OK;
+    end.more  = false;
+    end.count = 1U;
 
-    /* An owner's listing first, so AO_Storage's hook is left in its listing
-     * kind: under the old order it would take the next listing too. */
-    type_line("sd_ls");
-    QASM_DISPATCH(AO_Console, &end.super, 0U);
-    TEST_ASSERT_TRUE(replied(">ok"));
-
-    /* `ls` stays in flight across two answers, the second of them the same
+    /* `ls` stays in flight across its answers, the entry among them the same
      * STORAGE_ENTRY_SIG that hook reads. */
     fake_klog_reset();
     type_line("ls path=\"/storage\"");
@@ -438,8 +445,26 @@ TEST_CASE("a console verb in flight reads a signal an owner's hook also reads",
     type_line("ls path=\"/storage\"");
     deliver();
     TEST_ASSERT_EQUAL_UINT32(0U, s_hook_a);
-    QASM_DISPATCH(AO_Console, &stat.super, 0U);
+}
+
+TEST_CASE("a console verb in flight reads a signal an owner's hook also reads",
+          "[console_verbs]")
+{
+    static const ListEndEvt end = { .super = QEVT_INITIALIZER(STORAGE_LIST_END_SIG), .more = false };
+
+    console_up();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kverbs_add(&E_TABLE));
+    s_hook_a = 0U;
+
+    /* An owner's listing first, so AO_Storage's hook is left in its listing
+     * kind: under the old order it would take the next listing too. */
+    type_line("sd_ls");
     QASM_DISPATCH(AO_Console, &end.super, 0U);
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)ASK_CHILD_RETURNED,
+        (uint32_t)ask_support_fork_run(&ls_in_flight_body, NULL),
+        "the `ls` half failed in its child");
     drain_storage();
     owners_back();
 }
