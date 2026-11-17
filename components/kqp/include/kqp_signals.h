@@ -1886,6 +1886,9 @@ enum KodeSignals {
     NET_JOB_FAST_SIG,           /**< AO_Net private QTimeEvt, one-shot: no job
                                  *   with either worker for NET_FAST_JOB_HOLD_MS,
                                  *   so the jobs' hold of the fast mode ends. */
+    NET_FAST_RETRY_SIG,         /**< AO_Net private QTimeEvt, one-shot: a
+                                 *   fast-mode wish AO_Radio had no room for
+                                 *   is asked again.                          */
 
     DISPLAY_TEST_REQ_SIG,       /**< AO_Display: `test component=display`;
                                  *   answers a published TEST_RESULT_SIG. No

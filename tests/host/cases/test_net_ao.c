@@ -4510,6 +4510,33 @@ TEST_CASE("lines the channel refuses do not turn the fast mode on",
     TEST_ASSERT_EQUAL_UINT(0U, f.on);
 }
 
+/* AO_Radio's doors leave KQP_RADIO_POST_MARGIN free: a wish posted into less
+ * than that is refused, and AO_Net asks again by itself (#151). */
+TEST_CASE("a fast-mode wish AO_Radio had no room for is asked again with nothing "
+          "else changing", "[net_ao][fast]")
+{
+    static const QEvt filler = QEVT_INITIALIZER(WIFI_STATE_REQ_SIG);
+    fast_posts_t      refused;
+    fast_posts_t      later;
+
+    cmd_fresh();
+    fast_idle();
+    while ( uxQueueSpacesAvailable(AO_Radio->eQueue) > (UBaseType_t)KQP_RADIO_POST_MARGIN )
+    {
+        (void)QACTIVE_POST_X(AO_Radio, &filler, 0U, NULL);
+    }
+
+    rx_mqtt(CHAN_T_IN, "ping", 4U, false);
+    refused = radio_fast_posts();       /* AO_Radio's queue is free again */
+    secs(1U);                           /* the holds stay as they are */
+    later = radio_fast_posts();
+    net_done();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, refused.on, "the queue had room for the wish");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, later.on, "a wish refused for room was never asked again");
+    TEST_ASSERT_TRUE(later.last_on);
+}
+
 TEST_CASE("losing the address ends the fast mode at once", "[net_ao][fast]")
 {
     fast_posts_t f;

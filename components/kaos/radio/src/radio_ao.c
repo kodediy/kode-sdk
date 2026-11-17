@@ -1028,9 +1028,10 @@ static void radio_sleep_note(const kdrv_radio_sleep_note_t *n, void *arg);
  * @brief Post a request through one of AO_Radio's doors.
  *
  * Every door leaves KQP_RADIO_POST_MARGIN of the queue to what AO_Radio
- * cannot refuse: its posts to itself, its time events and the answers it
- * waits for. With no room the request is refused, said in the log, and the
- * door tells its caller, who answers its own asker.
+ * cannot refuse (kqp_config.h names it): its posts to itself, its time
+ * events, the answers to its own asks and the publishes it subscribes to.
+ * With no room the request is refused, said in the log, and the door tells
+ * its caller, who answers its own asker.
  *
  * @param e    The request. A pool event goes back to the pool when refused.
  * @param what What the log calls it.

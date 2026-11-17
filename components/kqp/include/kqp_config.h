@@ -1916,8 +1916,11 @@ _Static_assert((KQP_BYTE_POOL_MARGIN > 0U) && (KQP_BYTE_POOL_MARGIN < KQP_SMALL_
  * margin reserves the slots it leaves. Every request door leaves
  * KQP_RADIO_POST_MARGIN and tells its caller when it could not post, and the
  * caller answers its own asker. What posts with no margin is what AO_Radio
- * cannot refuse: its posts to itself, its time events and AO_Net's answer to
- * a round of rest; a full queue is still an assertion for them. */
+ * cannot refuse: its posts to itself, its time events, the answers to its own
+ * asks (AO_Net's to a round of rest among them) and the publishes it
+ * subscribes to (LOWPOWER_ROUND_SIG, LOWPOWER_STATE_SIG, C5_RUN_REQ_SIG,
+ * C5_AMP_OFF_SIG, POWER_EVT_SIG), since a publish leaves no margin; a full
+ * queue is still an assertion for them. */
 #define KQP_RADIO_QUEUE_LEN     16U   /**< Events AO_Radio buffers.           */
 #define KQP_POWER_QUEUE_LEN     8U    /**< Events AO_Power buffers.           */
 #define KQP_RADIO_POST_MARGIN   8U    /**< Slots a request door leaves free.  */
