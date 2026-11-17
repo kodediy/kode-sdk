@@ -102,6 +102,60 @@ uint8_t kscreen_geom_grab_turns(uint8_t rot);
  */
 bool kscreen_geom_grab_fits(uint8_t rot, uint16_t pic_w, uint16_t pic_h);
 
+/**
+ * @brief What is known of a frame object when LVGL draws it: the facts the
+ *        accelerator's copy depends on, gathered from LVGL by kscreen_compose.c.
+ */
+typedef struct {
+    bool direct;   /**< The layer is the panel's framebuffer being drawn, unturned, in the accelerator's format. */
+    bool plain;    /**< The object would be drawn as its picture is: whole opacity, no recolour, no transform, nothing of the app's that changes the draw. */
+    bool hooked;   /**< A callback of the app's takes the object's DRAW_MAIN: a copy, which ends the event, would leave it out. */
+    bool idle;     /**< No draw task is waiting or running in any layer of the display. */
+    uint16_t pic_w;  /**< The picture's width. */
+    uint16_t pic_h;  /**< Its height. */
+    kscreen_geom_area_t obj;   /**< The object on the glass. */
+    kscreen_geom_area_t clip;  /**< The area of the glass this draw writes. */
+    kscreen_geom_area_t buf;   /**< The area of the glass the layer's buffer holds. */
+} kscreen_geom_frame_t;
+
+/** @brief Whether the accelerator copies a frame, and why not. */
+typedef enum {
+    KSCREEN_GEOM_FRAME_COPY = 0,  /**< It does. */
+    KSCREEN_GEOM_FRAME_LAYER,     /**< The layer is not the unturned framebuffer, or not in its format. */
+    KSCREEN_GEOM_FRAME_STYLED,    /**< The object is not drawn as its picture is. */
+    KSCREEN_GEOM_FRAME_HOOKED,    /**< A callback of the app's takes its DRAW_MAIN. */
+    KSCREEN_GEOM_FRAME_SIZE,      /**< The object is not its picture's size. */
+    KSCREEN_GEOM_FRAME_PART,      /**< The area drawn is empty, or reaches past the object or the buffer. */
+    KSCREEN_GEOM_FRAME_BUSY       /**< LVGL's draw units may still be writing the buffer. */
+} kscreen_geom_frame_why_t;
+
+/**
+ * @brief Whether a frame is copied by the accelerator, and from where to where.
+ *
+ * The lasting reasons are asked first and the one that changes from one draw
+ * to the next, @c idle, last, so a frame that can never be copied always says
+ * the same thing.
+ *
+ * @param f    The facts.
+ * @param from Receives the block of the picture to read; untouched on a refusal.
+ * @param at   Receives the block of the buffer to write, the same size; untouched on a refusal.
+ * @return KSCREEN_GEOM_FRAME_COPY, or the first reason it is not.
+ */
+kscreen_geom_frame_why_t kscreen_geom_frame_judge(const kscreen_geom_frame_t *f, kscreen_geom_block_t *from,
+                                                  kscreen_geom_block_t *at);
+
+/**
+ * @brief Whether a frame hides every pixel under it in the area drawn.
+ *
+ * Covering is about the pixels the object leaves, not about who draws them:
+ * @c direct, @c idle and @c buf are not asked, nor @c hooked - the app's
+ * callback runs after the picture is drawn, over it.
+ *
+ * @param f The facts.
+ * @return true for a plain object of its picture's size whose area lies inside it.
+ */
+bool kscreen_geom_frame_covers(const kscreen_geom_frame_t *f);
+
 #ifdef __cplusplus
 }
 #endif

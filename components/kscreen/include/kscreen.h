@@ -53,6 +53,12 @@ typedef struct {
                              *   kscreen's own.                           */
     bool          parked;   /**< DISPLAY_PARK_SIG stopped the render pass
                              *   until DISPLAY_REPAINT_SIG. kscreen's own. */
+    uint32_t      frame_copied; /**< Draws of a kscreen_frame_create() object
+                             *   the accelerator copied, since kscreen_ctor().
+                             *   A frame drawn as two tiles counts two.
+                             *   kscreen's own.                           */
+    uint32_t      frame_drawn; /**< Draws of one LVGL drew instead.
+                             *   kscreen's own.                           */
 } kscreen_t;
 
 /**
@@ -309,11 +315,34 @@ kode_status_t kscreen_pic_blend(kscreen_pic_t *dst, int32_t x, int32_t y, const 
 kode_status_t kscreen_pic_dim(kscreen_pic_t *dst, const kscreen_pic_t *src, lv_opa_t level);
 
 /**
- * @brief An LVGL object that shows @p pic: LVGL copies its rows into the frame as it draws.
+ * @brief An LVGL object that shows @p pic: its rows are copied into the frame as it is drawn.
  *
  * An image object the size of the picture, placed and layered as any other.
  * After composing into @p pic, lv_obj_invalidate() it. Delete it before the
  * picture.
+ *
+ * Left plain - its own picture at its size, no opacity, recolour, transform,
+ * offset or radius - it covers what is under it, and LVGL draws nothing
+ * there. Drawn straight into the panel's framebuffer, unturned, with nothing
+ * else of the frame still being drawn, its rows are copied by the pixel
+ * accelerator; otherwise LVGL copies them, as it does without
+ * CONFIG_KODE_COMPOSE. LVGL draws the glass as tiles, and a tile where other
+ * drawing is still pending - an object over the frame in the tile before, or
+ * the screen round a frame smaller than the area redrawn - is drawn by LVGL,
+ * so the gain depends on what sits above and around the frame. The
+ * renderer's @c frame_copied and @c frame_drawn count the two. The first
+ * pass the accelerator does not do hands every frame back to LVGL until the
+ * next boot, said once in the log.
+ *
+ * A copy takes the object's LV_EVENT_DRAW_MAIN and ends it, so a callback of
+ * the app's that would see DRAW_MAIN - added for LV_EVENT_DRAW_MAIN or for
+ * LV_EVENT_ALL - keeps the object with LVGL: it still covers, and LVGL copies
+ * its rows. Catch clicks with LV_EVENT_CLICKED, or any code but those two, to
+ * keep the copy. A PREPROCESS callback on DRAW_MAIN or LV_EVENT_ALL, or
+ * lv_obj_set_send_draw_task_events(), can change how LVGL draws the picture:
+ * the object then neither covers nor is copied. In LVGL 9.6 DRAW_MAIN
+ * reaches no parent or child (it neither bubbles nor trickles), so
+ * LV_OBJ_FLAG_EVENT_BUBBLE changes none of this.
  *
  * @param parent The object it goes on.
  * @param pic    The picture shown.

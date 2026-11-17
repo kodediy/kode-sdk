@@ -132,3 +132,199 @@ TEST_CASE("a dim takes two pictures of one size, never one picture twice", "[ksc
     TEST_ASSERT_FALSE(kscreen_geom_pair(a, b, GLASS_W, GLASS_H, GLASS_H, GLASS_W));
     TEST_ASSERT_FALSE(kscreen_geom_pair(a, b, GLASS_W, GLASS_H, GLASS_W, (uint16_t)(GLASS_H - 1U)));
 }
+
+/* ---- The frame object: copied by the accelerator, or drawn by LVGL ----------
+ * kscreen_frame_create()'s object is judged at every draw from a few facts
+ * about it and about the layer LVGL draws it in. These cases are those facts
+ * and what kscreen makes of them; gathering them from LVGL is the board's. */
+
+/**
+ * @brief A frame the glass's size, drawn whole into the panel's unturned
+ *        framebuffer with nothing else pending: the case the accelerator takes.
+ * @return The facts.
+ */
+static kscreen_geom_frame_t frame_glass(void)
+{
+    kscreen_geom_frame_t f;
+
+    f.direct = true;
+    f.plain  = true;
+    f.hooked = false;
+    f.idle   = true;
+    f.pic_w  = GLASS_W;
+    f.pic_h  = GLASS_H;
+    f.obj    = (kscreen_geom_area_t){ 0, 0, (int32_t)GLASS_W - 1, (int32_t)GLASS_H - 1 };
+    f.clip   = f.obj;
+    f.buf    = f.obj;
+    return f;
+}
+
+TEST_CASE("a frame over the whole glass is copied whole, onto the same place", "[kscreen_geom]")
+{
+    kscreen_geom_frame_t const f = frame_glass();
+    kscreen_geom_block_t from = { 9U, 9U, 9U, 9U };
+    kscreen_geom_block_t at   = { 9U, 9U, 9U, 9U };
+
+    TEST_ASSERT_EQUAL_INT(KSCREEN_GEOM_FRAME_COPY, kscreen_geom_frame_judge(&f, &from, &at));
+    TEST_ASSERT_EQUAL_UINT16(0U, from.x);
+    TEST_ASSERT_EQUAL_UINT16(0U, from.y);
+    TEST_ASSERT_EQUAL_UINT16(GLASS_W, from.w);
+    TEST_ASSERT_EQUAL_UINT16(GLASS_H, from.h);
+    TEST_ASSERT_EQUAL_UINT16(0U, at.x);
+    TEST_ASSERT_EQUAL_UINT16(0U, at.y);
+    TEST_ASSERT_EQUAL_UINT16(GLASS_W, at.w);
+    TEST_ASSERT_EQUAL_UINT16(GLASS_H, at.h);
+}
+
+/* With two draw units LVGL draws the glass as two tiles, a DRAW_MAIN each:
+ * each is a copy of its own rows, and the two together are the picture. */
+TEST_CASE("a tile of the glass is copied from where it falls in the picture", "[kscreen_geom]")
+{
+    kscreen_geom_frame_t f = frame_glass();
+    kscreen_geom_block_t from = { 0U, 0U, 0U, 0U };
+    kscreen_geom_block_t at   = { 0U, 0U, 0U, 0U };
+
+    f.clip.y1 = 251;
+    TEST_ASSERT_EQUAL_INT(KSCREEN_GEOM_FRAME_COPY, kscreen_geom_frame_judge(&f, &from, &at));
+    TEST_ASSERT_EQUAL_UINT16(0U, from.x);
+    TEST_ASSERT_EQUAL_UINT16(251U, from.y);
+    TEST_ASSERT_EQUAL_UINT16(GLASS_W, from.w);
+    TEST_ASSERT_EQUAL_UINT16(GLASS_H - 251U, from.h);
+    TEST_ASSERT_EQUAL_UINT16(251U, at.y);
+    TEST_ASSERT_EQUAL_UINT16(GLASS_H - 251U, at.h);
+}
+
+TEST_CASE("a frame placed inside the glass is copied from its own corner into the buffer's",
+          "[kscreen_geom]")
+{
+    kscreen_geom_frame_t f = frame_glass();
+    kscreen_geom_block_t from = { 0U, 0U, 0U, 0U };
+    kscreen_geom_block_t at   = { 0U, 0U, 0U, 0U };
+
+    f.pic_w = 100U;
+    f.pic_h = 50U;
+    f.obj   = (kscreen_geom_area_t){ 10, 20, 109, 69 };
+    f.clip  = (kscreen_geom_area_t){ 15, 25, 54, 44 };
+    TEST_ASSERT_EQUAL_INT(KSCREEN_GEOM_FRAME_COPY, kscreen_geom_frame_judge(&f, &from, &at));
+    TEST_ASSERT_EQUAL_UINT16(5U, from.x);
+    TEST_ASSERT_EQUAL_UINT16(5U, from.y);
+    TEST_ASSERT_EQUAL_UINT16(40U, from.w);
+    TEST_ASSERT_EQUAL_UINT16(20U, from.h);
+    TEST_ASSERT_EQUAL_UINT16(15U, at.x);
+    TEST_ASSERT_EQUAL_UINT16(25U, at.y);
+
+    /* A buffer that starts lower on the glass takes it that much higher. */
+    f.buf = (kscreen_geom_area_t){ 0, 20, (int32_t)GLASS_W - 1, 69 };
+    TEST_ASSERT_EQUAL_INT(KSCREEN_GEOM_FRAME_COPY, kscreen_geom_frame_judge(&f, &from, &at));
+    TEST_ASSERT_EQUAL_UINT16(15U, at.x);
+    TEST_ASSERT_EQUAL_UINT16(5U, at.y);
+    TEST_ASSERT_EQUAL_UINT16(40U, at.w);
+    TEST_ASSERT_EQUAL_UINT16(20U, at.h);
+}
+
+TEST_CASE("a frame the accelerator cannot copy as LVGL would draw it is left to LVGL, and says why",
+          "[kscreen_geom]")
+{
+    kscreen_geom_block_t from = { 0U, 0U, 0U, 0U };
+    kscreen_geom_block_t at   = { 0U, 0U, 0U, 0U };
+    kscreen_geom_frame_t f;
+
+    f = frame_glass();
+    f.direct = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KSCREEN_GEOM_FRAME_LAYER, kscreen_geom_frame_judge(&f, &from, &at),
+                                  "a band of a turned glass, or a layer of its own");
+    f = frame_glass();
+    f.plain = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KSCREEN_GEOM_FRAME_STYLED, kscreen_geom_frame_judge(&f, &from, &at),
+                                  "an opacity, a recolour, a transform, or the app changing the draw");
+    f = frame_glass();
+    f.hooked = true;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KSCREEN_GEOM_FRAME_HOOKED, kscreen_geom_frame_judge(&f, &from, &at),
+                                  "a callback of the app's on DRAW_MAIN, which a copy would end");
+    f = frame_glass();
+    f.pic_h = (uint16_t)(GLASS_H - 1U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KSCREEN_GEOM_FRAME_SIZE, kscreen_geom_frame_judge(&f, &from, &at),
+                                  "an object resized away from its picture");
+    f = frame_glass();
+    f.obj.y2 = (int32_t)GLASS_H - 2;
+    f.pic_h  = (uint16_t)(GLASS_H - 1U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KSCREEN_GEOM_FRAME_PART, kscreen_geom_frame_judge(&f, &from, &at),
+                                  "an area drawn one row past the object: what is under it shows");
+    f = frame_glass();
+    f.buf.y2 = 250;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KSCREEN_GEOM_FRAME_PART, kscreen_geom_frame_judge(&f, &from, &at),
+                                  "an area drawn past the buffer");
+    f = frame_glass();
+    f.clip.x1 = 20;
+    f.clip.x2 = 19;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KSCREEN_GEOM_FRAME_PART, kscreen_geom_frame_judge(&f, &from, &at),
+                                  "an empty area");
+    f = frame_glass();
+    f.idle = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KSCREEN_GEOM_FRAME_BUSY, kscreen_geom_frame_judge(&f, &from, &at),
+                                  "LVGL's draw units may still be writing the buffer");
+}
+
+/* The fact that changes from one draw to the next is asked last, so a frame
+ * that can never be copied says so the same way every time. */
+TEST_CASE("a frame refused for two reasons names the lasting one", "[kscreen_geom]")
+{
+    kscreen_geom_block_t from = { 0U, 0U, 0U, 0U };
+    kscreen_geom_block_t at   = { 0U, 0U, 0U, 0U };
+    kscreen_geom_frame_t f    = frame_glass();
+
+    f.idle   = false;
+    f.direct = false;
+    TEST_ASSERT_EQUAL_INT(KSCREEN_GEOM_FRAME_LAYER, kscreen_geom_frame_judge(&f, &from, &at));
+    f.direct = true;
+    f.plain  = false;
+    TEST_ASSERT_EQUAL_INT(KSCREEN_GEOM_FRAME_STYLED, kscreen_geom_frame_judge(&f, &from, &at));
+    f.plain  = true;
+    f.hooked = true;
+    TEST_ASSERT_EQUAL_INT(KSCREEN_GEOM_FRAME_HOOKED, kscreen_geom_frame_judge(&f, &from, &at));
+}
+
+TEST_CASE("a refused frame names no block", "[kscreen_geom]")
+{
+    kscreen_geom_block_t from = { 7U, 7U, 7U, 7U };
+    kscreen_geom_block_t at   = { 7U, 7U, 7U, 7U };
+    kscreen_geom_frame_t f    = frame_glass();
+
+    f.idle = false;
+    TEST_ASSERT_EQUAL_INT(KSCREEN_GEOM_FRAME_BUSY, kscreen_geom_frame_judge(&f, &from, &at));
+    TEST_ASSERT_EQUAL_UINT16(7U, from.x);
+    TEST_ASSERT_EQUAL_UINT16(7U, from.h);
+    TEST_ASSERT_EQUAL_UINT16(7U, at.y);
+    TEST_ASSERT_EQUAL_UINT16(7U, at.w);
+}
+
+/* LVGL skips everything under an object that covers the area it draws. An
+ * image with no background never says it does, so every frame drew the
+ * whole screen under the picture first. Covering is about the pixels the
+ * object leaves, not about who draws them: a turned glass and a busy LVGL
+ * do not change it. */
+TEST_CASE("a plain frame of its picture's size covers any area inside it, however it is drawn",
+          "[kscreen_geom]")
+{
+    kscreen_geom_frame_t f = frame_glass();
+
+    TEST_ASSERT_TRUE(kscreen_geom_frame_covers(&f));
+    f.direct = false;
+    f.idle   = false;
+    f.clip   = (kscreen_geom_area_t){ 100, 100, 199, 149 };
+    TEST_ASSERT_TRUE_MESSAGE(kscreen_geom_frame_covers(&f), "turned, busy, and a small area");
+    f = frame_glass();
+    f.hooked = true;
+    TEST_ASSERT_TRUE_MESSAGE(kscreen_geom_frame_covers(&f),
+                             "a callback of the app's on DRAW_MAIN draws after the picture, over it");
+
+    f = frame_glass();
+    f.plain = false;
+    TEST_ASSERT_FALSE_MESSAGE(kscreen_geom_frame_covers(&f), "drawn other than as it is");
+    f = frame_glass();
+    f.pic_w = (uint16_t)(GLASS_W - 1U);
+    TEST_ASSERT_FALSE_MESSAGE(kscreen_geom_frame_covers(&f), "an object wider than its picture");
+    f = frame_glass();
+    f.clip.x1 = -1;
+    TEST_ASSERT_FALSE_MESSAGE(kscreen_geom_frame_covers(&f), "an area reaching past its left edge");
+}

@@ -21,6 +21,8 @@
 #include "kui_test_dot.h"
 #endif
 
+#include "kscreen_priv.h"
+
 #define TAG "kscreen"
 
 #if LV_USE_OS != LV_OS_NONE
@@ -80,6 +82,11 @@ _Static_assert((KSCREEN_BUF_BYTES - KSCREEN_BUF_ROW_BYTES) < ((size_t)KBSP_LCD_H
  * and nothing logged.
  */
 #define KSCREEN_FLUSH_TIMEOUT_MS 500U
+
+#if defined(CONFIG_KODE_COMPOSE)
+/** @brief The renderer kscreen_open() bound to a display: one per image. */
+static kscreen_t *l_opened = NULL;
+#endif
 
 /**
  * @brief LVGL's clock.
@@ -377,6 +384,8 @@ void kscreen_ctor(kscreen_t *s, QActive *owner, enum_t tick_sig)
     s->part_buf[1] = NULL;
     s->rot_buf = NULL;
     s->parked  = false;
+    s->frame_copied = 0U;
+    s->frame_drawn  = 0U;
 }
 
 void kscreen_start(kscreen_t *s)
@@ -471,6 +480,9 @@ kode_status_t kscreen_open(kscreen_t *s, DisplayStateEvt const *d)
     {
         s->disp  = disp;
         s->indev = indev;
+#if defined(CONFIG_KODE_COMPOSE)
+        l_opened = s;
+#endif
         kui_init(disp);
         if ( direct )
         {
@@ -498,6 +510,19 @@ kode_status_t kscreen_open(kscreen_t *s, DisplayStateEvt const *d)
 
     return rc;
 }
+
+#if defined(CONFIG_KODE_COMPOSE)
+kscreen_t *kscreen_of(lv_display_t const *disp)
+{
+    kscreen_t *s = NULL;
+
+    if ( (NULL != disp) && (NULL != l_opened) && (l_opened->disp == disp) )
+    {
+        s = l_opened;
+    }
+    return s;
+}
+#endif
 
 void kscreen_tick(kscreen_t *s)
 {
