@@ -18,19 +18,24 @@ work="$(cd "$work" && pwd -P)"
 mkdir "$work/bin"
 cat > "$work/bin/cppcheck" <<'EOF'
 #!/usr/bin/env bash
-# The report goes to stderr with absolute paths, the way cppcheck prints it.
+# The report goes to stderr with absolute paths, the way cppcheck prints it,
+# then FAKE_ERR when a case sets it, and the exit FAKE_EXIT says.
 if [ "$1" = "--version" ]; then
     echo "Cppcheck 9.9.9"
     exit 0
 fi
 sed "s|^|$PWD/|" "$FAKE_REPORT" >&2
+if [ -n "${FAKE_ERR:-}" ]; then
+    echo "$FAKE_ERR" >&2
+fi
+exit "${FAKE_EXIT:-0}"
 EOF
 chmod +x "$work/bin/cppcheck"
 
 mkdir -p "$work/src/components/kaos/core/include" "$work/src/components/qpc" \
          "$work/src/components/kui/fonts" "$work/src/components/kode/internal/include"
 : > "$work/src/components/kaos/a_ao.c"
-: > "$work/src/components/kaos/include/a.h"
+: > "$work/src/components/kaos/core/include/a.h"
 : > "$work/src/components/qpc/qf.c"
 : > "$work/src/components/kui/fonts/kui_font.c"
 : > "$work/src/components/kode/internal/include/kode_colors.h"
@@ -48,7 +53,7 @@ cat > "$work/plain.report" <<'EOF'
 components/kaos/a_ao.c:10:misra-c2012-8.7
 components/kaos/a_ao.c:20:misra-c2012-8.7
 components/kaos/a_ao.c:30:misra-c2012-10.8
-components/kaos/include/a.h:5:misra-c2012-2.5
+components/kaos/core/include/a.h:5:misra-c2012-2.5
 components/qpc/qf.c:1:misra-c2012-8.7
 components/kui/fonts/kui_font.c:1:misra-c2012-8.7
 components/kode/internal/include/kode_colors.h:7:misra-c2012-2.5
@@ -57,7 +62,7 @@ cat > "$work/plain.baseline" <<'EOF'
 cppcheck 9.9.9
 components/kaos/a_ao.c misra-c2012-10.8 1
 components/kaos/a_ao.c misra-c2012-8.7 2
-components/kaos/include/a.h misra-c2012-2.5 1
+components/kaos/core/include/a.h misra-c2012-2.5 1
 EOF
 
 fail=0
@@ -65,6 +70,7 @@ check() {   # check <name> <report> <baseline> <expected_exit> [<text expected i
     local name="$1" report="$2" baseline="$3" expected_exit="$4" expected_text="${5:-}"
     local out rc
     out="$(cd "$work/src" && PATH="$work/bin:$PATH" FAKE_REPORT="$work/$report" \
+           FAKE_EXIT="${FAKE_EXIT:-0}" FAKE_ERR="${FAKE_ERR:-}" \
            "$script" "$work/db.json" "$work/$baseline" components 2>&1)"
     rc=$?
     if printf '%s' "$out" | grep -q 'check_misra.sh: line'; then
@@ -101,13 +107,34 @@ grep -v ':20:' "$work/plain.report" > "$work/fewer.report"
 check fewer fewer.report plain.baseline 0 "1 fewer than"
 
 # ---- a header included by two sources is one finding -----------------------
-{ cat "$work/plain.report"; echo 'components/kaos/include/a.h:5:misra-c2012-2.5'; } > "$work/twice.report"
+{ cat "$work/plain.report"; echo 'components/kaos/core/include/a.h:5:misra-c2012-2.5'; } > "$work/twice.report"
 check twice twice.report plain.baseline 0
 
 # ---- a file cppcheck could not read is never baselined ---------------------
 { cat "$work/plain.report"; echo 'components/kaos/a_ao.c:1:syntaxError'; } > "$work/blind.report"
 { cat "$work/plain.baseline"; echo 'components/kaos/a_ao.c syntaxError 1'; } > "$work/blind.baseline"
 check blind blind.report blind.baseline 1 "could not analyse"
+
+# ---- nor is one whose header stopped it, wherever that header lives --------
+# cppcheck reports a header's #error at the header, and the source that
+# included it is never analysed.
+{ cat "$work/plain.report"; echo '../idf/vfs/esp_vfs.h:35:preprocessorErrorDirective'; } > "$work/outside.report"
+check blind_outside outside.report plain.baseline 1 "esp_vfs.h:35 preprocessorErrorDirective"
+{ cat "$work/plain.report"; echo 'components/qpc/qf_port.h:9:syntaxError'; } > "$work/vendored.report"
+check blind_vendored vendored.report plain.baseline 1 "qf_port.h:9 syntaxError"
+
+# ---- a cppcheck that failed judged nothing, whatever it printed ------------
+: > "$work/empty.report"
+FAKE_EXIT=1 FAKE_ERR='cppcheck: error: could not find or open any of the paths given.' \
+    check failed empty.report plain.baseline 1 "cppcheck did not run cleanly (exit 1)"
+FAKE_EXIT=1 check failed_findings plain.report plain.baseline 1 "cppcheck did not run cleanly (exit 1)"
+
+# ---- nor did one that wrote something other than findings -----------------
+FAKE_ERR='Failed to load the misra addon' \
+    check stray plain.report plain.baseline 1 "Failed to load the misra addon"
+
+# ---- no finding at all over the files judged is a run that read none -------
+check nothing empty.report plain.baseline 1 "no finding in the 1 sources it was given"
 
 # ---- a baseline taken with another cppcheck --------------------------------
 sed '1s/.*/cppcheck 1.0.0/' "$work/plain.baseline" > "$work/version.baseline"

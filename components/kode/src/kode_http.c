@@ -211,7 +211,8 @@ static void http_fail(const char *url, kode_status_t rc)
  * @param body The text to post; NULL for a GET.
  * @return The answer's text; "" with the error set when there is none.
  */
-static const char *http_exchange(struct kode_http_state *s, const char *url, const char *body)
+static const char *http_text_exchange(struct kode_http_state *s, const char *url,
+                                      const char *body)
 {
     kode_sys_http_result_t res  = { .content_length = -1, .range_total = -1 };
     const char            *text = s_no_text;
@@ -287,7 +288,7 @@ static const char *http_request(const char *name, const char *url, const char *b
             }
             else if ( kode_net_ready() && body_ensure(s) )
             {
-                text = http_exchange(s, url, body);
+                text = http_text_exchange(s, url, body);
             }
             else
             {

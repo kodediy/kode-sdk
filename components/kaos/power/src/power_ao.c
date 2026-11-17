@@ -80,7 +80,7 @@ typedef struct {
 
 typedef struct {
     QActive  super;
-    QTimeEvt poll;
+    QTimeEvt poll_tmo;     /**< Power_polling's one-shot: the next reading.  */
     uint8_t  low_reads;    /**< Readings in a row under POWER_CUT_MV.       */
     bool     pmic;         /**< The BQ25896 answered and took the policy.   */
     bool     gauge;        /**< The CW2217 answered at startup.            */
@@ -301,7 +301,7 @@ void Power_ctor(void)
 {
     Power * const me = &l_power;
     QActive_ctor(&me->super, Q_STATE_CAST(&Power_initial));
-    QTimeEvt_ctorX(&me->poll, &me->super, POWER_POLL_SIG, 0U);
+    QTimeEvt_ctorX(&me->poll_tmo, &me->super, POWER_POLL_SIG, 0U);
     QTimeEvt_ctorX(&me->ctrl, &me->super, POWER_CTRL_TICK_SIG, 0U);
     QTimeEvt_ctorX(&me->pulse, &me->super, POWER_PULSE_SIG, 0U);
     QTimeEvt_ctorX(&me->plug, &me->super, POWER_TEST_STEP_SIG, 0U);
@@ -2603,19 +2603,19 @@ static QState Power_polling(Power * const me, QEvt const * const e)
              * margin, and a periodic one goes on posting whether or not this
              * AO has run, so a stall of a few periods fills the queue and
              * resets the board. One waits at most. */
-            QTimeEvt_armX(&me->poll, KQP_TICKS_PER_MS(KODE_POWER_FIRST_MS), 0U);
+            QTimeEvt_armX(&me->poll_tmo, KQP_TICKS_PER_MS(KODE_POWER_FIRST_MS), 0U);
             status = Q_HANDLED();
             break;
         }
         case Q_EXIT_SIG: {
-            (void)QTimeEvt_disarm(&me->poll);
+            (void)QTimeEvt_disarm(&me->poll_tmo);
             (void)QTimeEvt_disarm(&me->pulse);
             (void)QTimeEvt_disarm(&me->ship);
             status = Q_HANDLED();
             break;
         }
         case POWER_POLL_SIG: {
-            (void)QTimeEvt_rearm(&me->poll,
+            (void)QTimeEvt_rearm(&me->poll_tmo,
                                  KQP_TICKS_PER_MS(KODE_POWER_POLL_MS));
             /* A dark wake runs the tick while the ADC is rested: its
              * registers are stale and the minute's peek keeps the clock, so
