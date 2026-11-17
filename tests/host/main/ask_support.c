@@ -14,6 +14,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "unity.h"
+
+/** @brief The child's exit status when an assertion failed in its body. */
+#define ASK_SUPPORT_EXIT_FAILED  3
+
 /** @brief How long the parent sleeps between looks at the child, in nanoseconds. */
 #define ASK_SUPPORT_POLL_NS  1000000L
 
@@ -50,6 +55,10 @@ static ask_support_child_t classify(int status)
     {
         return ASK_CHILD_RETURNED;
     }
+    if ( WIFEXITED(status) && (WEXITSTATUS(status) == ASK_SUPPORT_EXIT_FAILED) )
+    {
+        return ASK_CHILD_FAILED;
+    }
     return ASK_CHILD_OTHER;
 }
 
@@ -70,11 +79,24 @@ ask_support_child_t ask_support_fork_run(ask_support_body_t body, void *arg)
     }
     if ( 0 == pid )
     {
+        int child_status = 0;
+
         /* The runner catches an abort to report it; the child must die of it, and leave no core. */
         (void)setrlimit(RLIMIT_CORE, &no_core);
         (void)signal(SIGABRT, SIG_DFL);
-        body(arg);
-        _exit(0);
+        /* A failed assertion leaves by longjmp to the last TEST_PROTECT().
+         * Without one here that is the runner's, copied with the stack: the
+         * child would go on with the rest of the suite as a second runner,
+         * forking children of its own that outlive the parent's kill. */
+        if ( TEST_PROTECT() )
+        {
+            body(arg);
+        }
+        if ( 0U != Unity.CurrentTestFailed )
+        {
+            child_status = ASK_SUPPORT_EXIT_FAILED;
+        }
+        _exit(child_status);
     }
 
     start = now_ms();
