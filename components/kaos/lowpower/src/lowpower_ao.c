@@ -95,6 +95,11 @@ _Static_assert((KODE_LP_PART_ALL & PART_WORD_OPEN) == 0U, "the parts leave the w
 /** @brief The owners the CPU part asks, in order: the wake lines, then the scheduler's next minute. */
 #define PART_CPU_OWNERS          { "ioexp", "scheduler" }
 
+/** @brief The KODE_LP_PART_* bits there are: a late answer can be owed for each of them at once. */
+#define PART_COUNT               7U
+
+_Static_assert(((1U << PART_COUNT) - 1U) == KODE_LP_PART_ALL, "one late answer for every part");
+
 /** @brief The bits of one byte of that word. */
 #define PART_WORD_BYTE_MASK      0xFFU
 
@@ -229,7 +234,9 @@ typedef struct {
                                    *   every wake but a timer's, and each real input after. */
     bool        rest_on;          /**< The request in hand, round or retry, is a rest (lowpower_request_rest()). */
     uint8_t     part_rest;        /**< The KODE_LP_PART_* an app's rest has put away. */
-    uint8_t     part_want;        /**< The parts the sequence in hand puts away. */
+    uint8_t     part_want;        /**< The parts the app's last request for a rest asked for: the
+                                   *   sequence in hand puts them away, and they stay wanted until
+                                   *   the next request or the board takes the rest. */
     uint8_t     part_step;        /**< The part whose owner is being asked; 0 with no sequence open. */
     uint8_t     part_who;         /**< The participant asked in that step.     */
     uint8_t     part_src;         /**< Who asked for the sequence in hand.     */
@@ -251,14 +258,16 @@ typedef struct {
     uint64_t    part_hop_us;      /**< khal_time_us() when the last one-shot armed for it comes due. */
     uint64_t    part_since_us;    /**< khal_time_us() when the CPU part last went to rest: off_after
                                    *   counts from it.                          */
-    uint32_t    part_late_round;  /**< The round of the step that ran out of time. */
+    uint32_t    part_late_round[PART_COUNT]; /**< By the part's bit (part_slot()): the round of its
+                                   *   step that ran out of time. */
     uint8_t     part_done;        /**< The parts the sequence in hand has put away, the ones that do
                                    *   not stay at rest among them.             */
     uint8_t     part_cpu_stage;   /**< Owners of the CPU part asked so far.     */
-    uint8_t     part_late;        /**< The part whose owner ran out of time: an answer that comes
-                                   *   late still counts, whatever was asked since. 0 for none:
-                                   *   cleared once that answer comes, or the board takes the rest. */
-    uint8_t     part_late_who;    /**< The participant that owes that answer.   */
+    uint8_t     part_late;        /**< The parts whose owners ran out of time: an answer that comes
+                                   *   late still counts, whatever was asked since. A part's bit is
+                                   *   cleared once its answer comes; all of them when the board
+                                   *   takes the rest. */
+    uint8_t     part_late_who[PART_COUNT]; /**< By the part's bit: the participant that owes its answer. */
     bool        part_pin_free;    /**< The header's position was free, not an input, before it was armed. */
     khal_gpio_pull_t part_pin_pulled; /**< The pull that input had: it gets it back. */
 } LowPower;
@@ -2743,7 +2752,6 @@ static void part_finish(LowPower * const me, kode_status_t rc, const char *why)
     tmo_stop(&me->round_tmo);
     me->part_step  = 0U;
     me->part_again = false;
-    me->part_want  = 0U;
     me->part_done  = 0U;
     if ( (KODE_OK == rc) && me->part_up )
     {
@@ -3228,45 +3236,119 @@ static void part_step_done(LowPower * const me)
 }
 
 /**
+ * @brief The slot of one part among the late answers: the position of its bit.
+ *
+ * @param part One KODE_LP_PART_* bit.
+ * @return 0 to PART_COUNT - 1.
+ */
+static uint8_t part_slot(uint8_t part)
+{
+    uint8_t slot = 0U;
+
+    while ( ((PART_COUNT - 1U) > slot) && (((uint32_t)part >> slot) > 1U) )
+    {
+        slot++;
+    }
+    return slot;
+}
+
+/**
+ * @brief Note that the step in hand ran out of time: its answer is owed.
+ *
+ * Each part has its own slot, so a second late step leaves the first one's
+ * answer owed as well.
+ *
+ * @param me The AO, a step open.
+ */
+static void part_late_note(LowPower * const me)
+{
+    uint8_t const slot = part_slot(me->part_step);
+
+    me->part_late             |= me->part_step;
+    me->part_late_round[slot]  = me->round;
+    me->part_late_who[slot]    = me->part_who;
+}
+
+/**
+ * @brief The late step an answer belongs to.
+ *
+ * @param me    The AO.
+ * @param round The round the answer names.
+ * @param who   The participant that answered.
+ * @return The part's KODE_LP_PART_* bit; 0 when no late step is the answer's.
+ */
+static uint8_t part_late_find(const LowPower * const me, uint32_t round, uint8_t who)
+{
+    uint8_t found = 0U;
+
+    for ( uint8_t slot = 0U; (PART_COUNT > slot) && (0U == found); slot++ )
+    {
+        uint8_t const part = (uint8_t)(1U << slot);
+
+        if ( ((me->part_late & part) != 0U) && (round == me->part_late_round[slot])
+            && (who == me->part_late_who[slot]) )
+        {
+            found = part;
+        }
+    }
+    return found;
+}
+
+/**
+ * @brief Whether a part put away after its time comes back at once.
+ *
+ * It does when the app has ended its rest since, and when the app's rest
+ * neither holds it nor asks for it: nothing else would ever bring it back.
+ * Otherwise it is held with that rest, and the rest's end brings it back.
+ *
+ * @param me   The AO.
+ * @param part One KODE_LP_PART_* bit.
+ * @return true when its owner is to be told to come back.
+ */
+static bool part_late_back(const LowPower * const me, uint8_t part)
+{
+    return me->part_up || (((me->part_want | me->part_rest) & part) == 0U);
+}
+
+/**
  * @brief LOWPOWER_READY_SIG outside a step: the answer of one that ran out of time.
  *
  * An owner that did put its part away after its time has it away all the
- * same. While the app still has its rest, the part is held from here and the
- * end of the rest brings it back. When the app has ended its rest since, the
- * owner is told to come back at once: nothing else would ever tell it. A busy
- * answer changes nothing.
+ * same. While the app's rest wants the part, it is held from here and the
+ * end of the rest brings it back. When the app has ended its rest since, or
+ * asked for a rest without it, the owner is told to come back at once
+ * (part_late_back()). A busy answer changes nothing.
  *
  * @param me The AO, AWAKE.
  * @param a  The answer.
- * @return true when the answer was the late step's.
+ * @return true when the answer was a late step's.
  */
 static bool part_late_ready(LowPower * const me, const LowPowerReadyEvt *a)
 {
-    bool const mine = (0U != me->part_late) && (a->round == me->part_late_round)
-                      && (a->who == me->part_late_who);
+    uint8_t const late = part_late_find(me, a->round, a->who);
 
-    if ( mine )
+    if ( 0U != late )
     {
-        if ( a->busy || !lowpower_part_stays(me->part_late) )
+        me->part_late &= (uint8_t)~late;
+        if ( a->busy || !lowpower_part_stays(late) )
         {
             /* Nothing to hold, nothing to bring back. */
         }
-        else if ( me->part_up )
+        else if ( part_late_back(me, late) )
         {
-            KLOG_N(TAG, "rest: the %s rested after its time and after the end; it comes back",
-                   lowpower_part_name(me->part_late));
+            KLOG_N(TAG, "rest: the %s rested after its time and no rest wants it; it comes back",
+                   lowpower_part_name(late));
             part_awake_post(me, a->who);
         }
         else
         {
-            me->part_rest |= me->part_late;
+            me->part_rest |= late;
             KLOG_N(TAG, "rest: the %s rested after its time; parts 0x%02x stay at rest",
-                   lowpower_part_name(me->part_late), (unsigned)me->part_rest);
+                   lowpower_part_name(late), (unsigned)me->part_rest);
             part_word_set(me);
         }
-        me->part_late = 0U;
     }
-    return mine;
+    return (0U != late);
 }
 
 /**
@@ -3379,7 +3461,9 @@ static void part_glass_woken(LowPower * const me, const DisplaySleepEvt *s)
  * Only the answers to this AO's own requests are judged (DISPLAY_SLEEP_WHO_REST):
  * an app's own door has its own, and is read only for a glass it woke
  * (part_glass_woken()). A sleep that ran out of time and came after it still
- * leaves the glass asleep, and is held from then.
+ * leaves the glass asleep: held from then while the app's rest wants it,
+ * woken otherwise (part_late_back()), and held all the same when its owner
+ * has no room for the wake, so the next end of the rest wakes it.
  *
  * @param me The AO, AWAKE.
  * @param s  The answer.
@@ -3410,16 +3494,22 @@ static void part_glass_answer(LowPower * const me, const DisplaySleepEvt *s)
             /* The answer of an earlier request: this step's is still to come. */
         }
     }
-    else if ( (KODE_LP_PART_SCREEN == me->part_late) && ((uint8_t)KODE_OK == s->rc) && s->asleep )
+    else if ( ((me->part_late & KODE_LP_PART_SCREEN) != 0U) && ((uint8_t)KODE_OK == s->rc)
+              && s->asleep )
     {
-        me->part_late = 0U;
-        if ( me->part_up )
+        uint8_t const who = me->part_late_who[part_slot(KODE_LP_PART_SCREEN)];
+
+        me->part_late &= (uint8_t)~KODE_LP_PART_SCREEN;
+        if ( part_late_back(me, KODE_LP_PART_SCREEN) )
         {
-            /* The rest ended before the glass slept: it wakes, as the end would have woken it. */
-            KLOG_N(TAG, "rest: the screen rested after its time and after the end; it wakes");
-            if ( !part_glass_post(me, me->part_late_who, false) )
+            /* No rest wants the glass asleep: it wakes, as the end would have woken it. */
+            KLOG_N(TAG, "rest: the screen rested after its time and no rest wants it; it wakes");
+            if ( !part_glass_post(me, who, false) )
             {
-                KLOG_E(TAG, "rest: out of events; the screen stays asleep");
+                /* Owed, not dropped: held, so the next end of the rest wakes it. */
+                me->part_rest |= KODE_LP_PART_SCREEN;
+                KLOG_E(TAG, "rest: out of events; the screen stays asleep until the rest ends again");
+                part_word_set(me);
             }
         }
         else
@@ -3455,9 +3545,7 @@ static void part_step_timeout(LowPower * const me)
     }
     else if ( !me->part_up )
     {
-        me->part_late       = me->part_step;
-        me->part_late_round = me->round;
-        me->part_late_who   = me->part_who;
+        part_late_note(me);
     }
     else
     {
@@ -4596,11 +4684,14 @@ void LowPower_ctor(void)
     me->part_due_us     = 0U;
     me->part_hop_us     = 0U;
     me->part_since_us   = 0U;
-    me->part_late_round = ROUND_NONE;
+    for ( uint8_t slot = 0U; PART_COUNT > slot; slot++ )
+    {
+        me->part_late_round[slot] = ROUND_NONE;
+        me->part_late_who[slot]   = KODE_LOWPOWER_WHO_NONE;
+    }
     me->part_done       = 0U;
     me->part_cpu_stage  = 0U;
     me->part_late       = 0U;
-    me->part_late_who   = KODE_LOWPOWER_WHO_NONE;
     me->part_pin_free   = false;
     me->part_pin_pulled = KHAL_GPIO_PULL_NONE;
     s_part_why[0]  = '\0';
