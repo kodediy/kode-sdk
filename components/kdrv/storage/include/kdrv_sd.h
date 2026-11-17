@@ -97,6 +97,20 @@ typedef struct {
     bool        writable; /**< True for the next-mount knobs and nothing else. */
 } kdrv_sd_field_info_t;
 
+/** @brief Why the card is not mounted, as the last bring-up that answered
+ *         found it (kdrv_sd_why()). */
+typedef enum {
+    KDRV_SD_WHY_NONE = 0,   /**< Nothing to say: a card is mounted, or no
+                             *   bring-up has answered since the boot or the
+                             *   card was unmounted.                        */
+    KDRV_SD_WHY_NO_CARD,    /**< No card answered: the slot is empty.       */
+    KDRV_SD_WHY_NO_FAT,     /**< A card answered with no FAT volume to read:
+                             *   exFAT, or not formatted.                   */
+    KDRV_SD_WHY_FAILED,     /**< A card is in and would not come up.        */
+
+    KDRV_SD_WHY_MAX         /**< How many reasons; not one of them.         */
+} kdrv_sd_why_t;
+
 /** @brief Data lines an everyday mount asks for: the slot's four. A card that
  *         takes no write on them is mounted on one (see kdrv_sd_mount()), and
  *         `width_req` overrides this for the next mount. */
@@ -195,9 +209,25 @@ typedef struct {
  *
  * @return The mount point, or NULL when there is no card. On failure the
  *         reason is logged, including the one that is nearly always right:
- *         the card's supply is the ESP32-C5's to switch.
+ *         the card's supply is the ESP32-C5's to switch; kdrv_sd_why() keeps
+ *         it.
  */
 const char *kdrv_sd_mount(void);
+
+/**
+ * @brief Why the card is not mounted, as the last bring-up that answered
+ *        found it.
+ *
+ * Every kdrv_sd_mount() that asks the slot sets it: an empty slot, a card
+ * with no FAT volume, or a card that would not come up, and KDRV_SD_WHY_NONE
+ * once a card mounts. A bring-up that was not tried (the link holds the
+ * controller and is down) or that khal refused answers nothing and leaves it
+ * as it was.
+ *
+ * @return The reason; KDRV_SD_WHY_NONE while a card is mounted, and when no
+ *         bring-up has answered since the boot or the card was unmounted.
+ */
+kdrv_sd_why_t kdrv_sd_why(void);
 
 /**
  * @brief Switch mount mode: true = reuse the SDMMC controller esp-hosted
@@ -316,7 +346,8 @@ const kdrv_sd_field_info_t *kdrv_sd_field_info(kdrv_sd_field_t f);
  */
 kode_status_t kdrv_sd_field_by_name(const char *name, kdrv_sd_field_t *f);
 
-/** @brief Log the whole table, as name=value pairs. */
+/** @brief Log the whole table, as name=value pairs; with nothing mounted, one
+ *         line that says why (kdrv_sd_why()). */
 void kdrv_sd_dump(void);
 
 /* ---- What the table cannot say ------------------------------------------- */

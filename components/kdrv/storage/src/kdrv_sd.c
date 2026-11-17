@@ -92,6 +92,43 @@ static card_id_t  s_proved;     /**< Who s_proof is about; valid with a proof. *
 /** @brief Whether the mount that stands was asked on everyday terms. */
 static bool s_everyday;
 
+/** @brief Why the card is not mounted: what the last bring-up that answered
+ *         found. KDRV_SD_WHY_NONE while one is. */
+static kdrv_sd_why_t s_why = KDRV_SD_WHY_NONE;
+
+/** @brief Why nothing is mounted, as the log says it, by kdrv_sd_why_t. */
+static const char *const WHY_SAID[KDRV_SD_WHY_MAX] = {
+    [KDRV_SD_WHY_NONE]    = "not looked for since the boot or the unmount",
+    [KDRV_SD_WHY_NO_CARD] = "the slot is empty",
+    [KDRV_SD_WHY_NO_FAT]  = "the card has no FAT volume to read",
+    [KDRV_SD_WHY_FAILED]  = "the card would not come up",
+};
+
+/**
+ * @brief Why a bring-up that answered left nothing mounted.
+ * @param st What card_mount() said: neither KODE_OK nor KODE_DENIED.
+ * @return KDRV_SD_WHY_NO_CARD for no answer, KDRV_SD_WHY_NO_FAT for a card
+ *         with no FAT volume, KDRV_SD_WHY_FAILED for any other failure.
+ */
+static kdrv_sd_why_t why_of(kode_status_t st)
+{
+    kdrv_sd_why_t why = KDRV_SD_WHY_FAILED;
+
+    if ( KODE_TIMEOUT == st )
+    {
+        why = KDRV_SD_WHY_NO_CARD;
+    }
+    else if ( KODE_IO_ERROR == st )
+    {
+        why = KDRV_SD_WHY_NO_FAT;
+    }
+    else
+    {
+        /* a card answered and would not come up */
+    }
+    return why;
+}
+
 /* ---- The table ----------------------------------------------------------- */
 
 /* Where a field's value comes from, which is also what decides its refusal. */
@@ -860,15 +897,11 @@ static kode_status_t card_mount(void)
  * @return KODE_OK with s_snap filled in; KODE_DENIED when no mount was tried
  *         (the link holds the controller and is down) or khal refused it
  *         without a try, which is no answer about the card and is said at
- *         debug level only; KODE_ERROR with s_snap cleared and the reason
- *         logged.
+ *         debug level only; any other status with s_snap cleared and the
+ *         reason kept in s_why, logged when it differs from the last one.
  */
 static kode_status_t card_up(void)
 {
-    /* Whether the last bring-up found no card it could mount and said so:
-     * a repeat is not news. */
-    static bool s_missing = false;
-
     s_everyday = false;
     card_power();
     if ( !khal_sdmmc_ready() )
@@ -890,23 +923,24 @@ static kode_status_t card_up(void)
     }
     if ( KODE_OK == st )
     {
-        s_missing  = false;
+        s_why      = KDRV_SD_WHY_NONE;
         s_everyday = s_check_req && ((uint8_t)KDRV_SD_WIDTH_USE == s_width_req);
     }
     else if ( KODE_DENIED == st )
     {
         KLOG_D(TAG, "the mount was refused");
     }
-    else if ( s_missing )
-    {
-        /* Every listing asks the slot again; an empty one was told once. */
-        (void)memset(&s_snap, 0, sizeof(s_snap));
-        KLOG_D(TAG, "still no card");
-    }
     else
     {
+        kdrv_sd_why_t const why = why_of(st);
+
         (void)memset(&s_snap, 0, sizeof(s_snap));
-        if ( KODE_TIMEOUT == st )
+        if ( why == s_why )
+        {
+            /* Every bring-up asks the slot again; what it found was told once. */
+            KLOG_D(TAG, "still: %s", WHY_SAID[why]);
+        }
+        else if ( KDRV_SD_WHY_NO_CARD == why )
         {
             /* An empty slot is a board without a card, not a fault. */
             KLOG_N(TAG, "no card");
@@ -914,7 +948,7 @@ static kode_status_t card_up(void)
                         "driven low: a card that is in and silent points at Q1",
                    (unsigned)KBSP_PIN_SD_PWR);
         }
-        else if ( KODE_IO_ERROR == st )
+        else if ( KDRV_SD_WHY_NO_FAT == why )
         {
             KLOG_W(TAG, "the card has no FAT volume to read (exFAT, or not "
                         "formatted); it stays unmounted");
@@ -923,7 +957,7 @@ static kode_status_t card_up(void)
         {
             KLOG_E(TAG, "the card would not come up (%d)", (int)st);
         }
-        s_missing = true;
+        s_why = why;
     }
     return st;
 }
@@ -946,6 +980,11 @@ const char *kdrv_sd_mount(void)
            (unsigned)s_snap.bus_width,
            (unsigned long)s_snap.freq_khz);
     return khal_sdmmc_mount_point();
+}
+
+kdrv_sd_why_t kdrv_sd_why(void)
+{
+    return s_why;
 }
 
 kode_status_t kdrv_sd_park(void)
@@ -1003,7 +1042,7 @@ void kdrv_sd_dump(void)
 
     if ( !khal_sdmmc_mounted() )
     {
-        KLOG_N(TAG, "no card mounted");
+        KLOG_N(TAG, "no card mounted: %s", WHY_SAID[s_why]);
         return;
     }
     /* Through klog, NOT sdmmc_card_print_info(stdout, ...): a raw printf

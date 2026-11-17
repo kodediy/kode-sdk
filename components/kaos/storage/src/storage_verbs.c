@@ -4,6 +4,7 @@
  * @brief AO_Storage's console verbs: `sd_*`, `fs_*`, the card's field table and `file_desc`, registered by kaos_storage_start().
  */
 #include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "kaos.h"
@@ -290,9 +291,22 @@ static bool storage_listing(QEvt const *e)
     return handled;
 }
 
+/** @brief Room for the card's ` why=` pair: the key and its longest word. */
+#define STORAGE_WHY_PAIR_MAX  sizeof(" why=no_card")
+
 /** @brief A medium's info, when it is the medium asked about. */
 static bool storage_info_answer(QEvt const *e)
 {
+    /** @brief Why the card is not mounted, as `sd_info` spells it, in
+     *         kdrv_sd_why_t's order. */
+    static const char *const SD_WHY[] = {
+        "none",     /* KDRV_SD_WHY_NONE */
+        "no_card",  /* KDRV_SD_WHY_NO_CARD */
+        "no_fat",   /* KDRV_SD_WHY_NO_FAT */
+        "failed",   /* KDRV_SD_WHY_FAILED */
+    };
+    _Static_assert((sizeof(SD_WHY) / sizeof(SD_WHY[0])) == (size_t)KDRV_SD_WHY_MAX,
+                   "SD_WHY is missing a word for a reason");
     bool handled = false;
 
     if ( (QSignal)STORAGE_INFO_SIG == e->sig )
@@ -303,20 +317,29 @@ static bool storage_info_answer(QEvt const *e)
          * this command's answer. */
         if ( i->medium == s_storage_medium )
         {
-            const char * const med =
-                storage_medium_word((uint8_t)KDRV_MEDIUM_SD == i->medium);
+            bool const         sd  = ((uint8_t)KDRV_MEDIUM_SD == i->medium);
+            const char * const med = storage_medium_word(sd);
+            char               why[STORAGE_WHY_PAIR_MAX];
 
+            /* The internal partition has no card to be missing. */
+            why[0] = '\0';
+            if ( sd )
+            {
+                (void)snprintf(why, sizeof(why), " why=%s",
+                               console_word(SD_WHY, sizeof(SD_WHY) / sizeof(SD_WHY[0]),
+                                            i->why));
+            }
             if ( i->usage_known )
             {
                 console_reply(">|medium=%s mounted=%s total_kb=%" PRIu32
-                              " free_kb=%" PRIu32,
+                              " free_kb=%" PRIu32 "%s",
                               med, console_on_off(i->mounted),
-                              (uint32_t)i->total_kb, (uint32_t)i->free_kb);
+                              (uint32_t)i->total_kb, (uint32_t)i->free_kb, why);
             }
             else
             {
-                console_reply(">|medium=%s mounted=%s", med,
-                              console_on_off(i->mounted));
+                console_reply(">|medium=%s mounted=%s%s", med,
+                              console_on_off(i->mounted), why);
             }
             console_reply(">ok");
             console_end();

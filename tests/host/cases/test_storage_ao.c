@@ -6158,6 +6158,116 @@ TEST_CASE("an info request over the hold queue's room is answered, not lost",
     ao_spy_drain();
 }
 
+/* ---- Why the card is not mounted ---------------------------------------------- */
+
+/** @brief Mount the card through the worker, the way a rescan does, and
+ *         forget the answer. */
+static void mount_through_worker(void)
+{
+    ask_mount_job();
+    (void)run_sd_job();
+    ao_spy_drain();
+}
+
+/**
+ * @brief Ask for a medium's info and take the event AO_Storage publishes.
+ * @param medium The medium.
+ * @return A copy of the event.
+ */
+static StorageInfoEvt info_of(kdrv_medium_t medium)
+{
+    StorageInfoEvt out;
+
+    ao_spy_subscribe(STORAGE_INFO_SIG);
+    storage_request(medium, STORAGE_OP_INFO);
+    settle_card();
+
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_INT(STORAGE_INFO_SIG, (int)e->sig);
+    out = *(const StorageInfoEvt *)(const void *)e;
+    QActive_unsubscribe(ao_spy(), STORAGE_INFO_SIG);
+    ao_spy_drain();
+    return out;
+}
+
+/* About and `sd_info` hear the card's state from this event alone: a card in
+ * the slot that cannot be read is not an empty slot. */
+TEST_CASE("the card's info says why the card is not mounted",
+          "[storage_ao][worker]")
+{
+    StorageInfoEvt i;
+
+    storage_fresh();
+    mount_through_worker();
+    i = info_of(KDRV_MEDIUM_SD);
+    TEST_ASSERT_TRUE(i.mounted);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_SD_WHY_NONE, i.why);
+
+    card_out();
+    fake_sdmmc_set_no_volume(true);
+    mount_through_worker();
+    i = info_of(KDRV_MEDIUM_SD);
+    TEST_ASSERT_FALSE(i.mounted);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_SD_WHY_NO_FAT, i.why);
+
+    /* A card that answers on neither width. */
+    fake_sdmmc_set_no_volume(false);
+    fake_sdmmc_set_max_width(0U);
+    mount_through_worker();
+    i = info_of(KDRV_MEDIUM_SD);
+    TEST_ASSERT_FALSE(i.mounted);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_SD_WHY_FAILED, i.why);
+
+    fake_sdmmc_set_max_width(4U);
+    fake_sdmmc_set_present(false);
+    mount_through_worker();
+    i = info_of(KDRV_MEDIUM_SD);
+    TEST_ASSERT_FALSE(i.mounted);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_SD_WHY_NO_CARD, i.why);
+
+    /* The internal partition has no card to be missing. */
+    i = info_of(KDRV_MEDIUM_FS);
+    TEST_ASSERT_TRUE(i.mounted);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_SD_WHY_NONE, i.why);
+}
+
+/* Refused while the card is busy, the info still carries what is known
+ * without asking the volume, the reason with it. */
+TEST_CASE("an info refused while the card is busy still says why it is not "
+          "mounted", "[storage_ao][worker]")
+{
+    storage_fresh();
+    card_out();
+    fake_sdmmc_set_no_volume(true);
+    mount_through_worker();
+
+    ao_spy_subscribe(STORAGE_INFO_SIG);
+    ask_mount_job();
+    for ( unsigned i = 0U; KODE_STORAGE_DEFER_DEPTH > i; ++i )
+    {
+        storage_path_request(ao_spy(), (uint8_t)STORAGE_PATH_STAT, "/sdcard/x");
+    }
+    (void)qf_support_pump(AO_Storage, 16U);
+    ao_spy_drain();
+
+    storage_request(KDRV_MEDIUM_SD, STORAGE_OP_INFO);
+    (void)qf_support_pump(AO_Storage, 4U);
+
+    const QEvt * const e = ao_spy_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_INT(STORAGE_INFO_SIG, (int)e->sig);
+    TEST_ASSERT_FALSE(((const StorageInfoEvt *)e)->usage_known);
+    TEST_ASSERT_FALSE(((const StorageInfoEvt *)e)->mounted);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_SD_WHY_NO_FAT,
+                            ((const StorageInfoEvt *)e)->why);
+
+    TEST_ASSERT_TRUE(run_sd_job());
+    settle_card();
+    QActive_unsubscribe(ao_spy(), STORAGE_INFO_SIG);
+    ao_spy_drain();
+}
+
 /* The radio asks for the card's unmount WITH an answer before it resets the C5
  * and reads the card's state when it comes: a request the worker cannot take
  * is answered, and the card is then still mounted. */

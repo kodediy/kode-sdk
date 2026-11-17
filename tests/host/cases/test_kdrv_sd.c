@@ -1581,3 +1581,113 @@ TEST_CASE("a card that lies about its size wraps a write onto itself",
     TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_read_sectors(42U, 1U, back));
     TEST_ASSERT_EQUAL_MEMORY(out, back, sizeof(out));
 }
+
+/* ---- Why the card is not mounted ------------------------------------------- */
+
+/* What the last look at the slot found outlives its log line: the console and
+ * the interface ask for it later, and an empty slot, a card with no FAT volume
+ * and a card that would not come up are three different answers. */
+TEST_CASE("each answer of a bring-up is kept as why the card is not mounted",
+          "[kdrv_sd]")
+{
+    install_card();
+    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_NONE, (int)kdrv_sd_why());
+
+    kdrv_sd_unmount();
+    fake_sdmmc_set_present(false);
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_NO_CARD, (int)kdrv_sd_why());
+
+    fake_sdmmc_set_present(true);
+    fake_sdmmc_set_no_volume(true);
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_NO_FAT, (int)kdrv_sd_why());
+
+    /* A card that answers on neither width. */
+    fake_sdmmc_set_no_volume(false);
+    fake_sdmmc_set_max_width(0U);
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_FAILED, (int)kdrv_sd_why());
+
+    fake_sdmmc_set_max_width(4U);
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_NONE, (int)kdrv_sd_why());
+}
+
+/* A card that answered on four lines and on neither try on one is a card that
+ * would not come up, whatever the last try said. */
+TEST_CASE("a card that comes up on neither width is kept as one that failed",
+          "[kdrv_sd]")
+{
+    fake_sdmmc_fail_wide_writes(true);
+    fake_sdmmc_fail_mounts(1U, 2U);
+    ready_one_mount();
+
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_FAILED, (int)kdrv_sd_why());
+}
+
+/* No try, or a try khal refused, says nothing about the card. */
+TEST_CASE("a bring-up that answered nothing leaves the reason as it was",
+          "[kdrv_sd]")
+{
+    kdrv_sd_unmount();
+    fake_sdmmc_set_no_volume(true);
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+
+    fake_sdmmc_set_refuse(true);
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_NO_FAT, (int)kdrv_sd_why());
+
+    fake_sdmmc_set_refuse(false);
+    fake_sdmmc_set_deny(true);
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_NO_FAT, (int)kdrv_sd_why());
+}
+
+/* A miss is told once; a miss of another kind is news. A card with no FAT
+ * volume taken out leaves an empty slot, and that is said. */
+TEST_CASE("a miss of another kind is told, not taken for the last one",
+          "[kdrv_sd]")
+{
+    kdrv_sd_unmount();
+    fake_sdmmc_set_no_volume(true);
+    fake_klog_reset();
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_UINT(1U, loud_lines());
+    TEST_ASSERT_EQUAL_UINT(0U, told_no_card());
+
+    fake_sdmmc_set_no_volume(false);
+    fake_sdmmc_set_present(false);
+    TEST_ASSERT_NULL(kdrv_sd_mount());
+    TEST_ASSERT_EQUAL_UINT(1U, told_no_card());
+}
+
+/* `sd` and `sd_info` log the table, and with nothing mounted that one line is
+ * all there is: it names what the last look found. */
+TEST_CASE("the dump of a card that is not mounted says why", "[kdrv_sd]")
+{
+    kdrv_sd_unmount();
+    fake_klog_reset();
+    kdrv_sd_dump();
+    TEST_ASSERT_EQUAL_UINT(1U, lines_saying('N', "no card mounted"));
+
+    fake_sdmmc_set_no_volume(true);
+    (void)kdrv_sd_mount();
+    fake_klog_reset();
+    kdrv_sd_dump();
+    TEST_ASSERT_EQUAL_UINT(1U, lines_saying('N', "no FAT volume"));
+
+    fake_sdmmc_set_no_volume(false);
+    fake_sdmmc_set_max_width(0U);
+    (void)kdrv_sd_mount();
+    fake_klog_reset();
+    kdrv_sd_dump();
+    TEST_ASSERT_EQUAL_UINT(1U, lines_saying('N', "would not come up"));
+
+    fake_sdmmc_set_present(false);
+    (void)kdrv_sd_mount();
+    fake_klog_reset();
+    kdrv_sd_dump();
+    TEST_ASSERT_EQUAL_UINT(1U, lines_saying('N', "the slot is empty"));
+}

@@ -6916,6 +6916,9 @@ typedef struct {
     uint8_t  medium;        /**< kdrv_medium_t                               */
     bool     mounted;
     bool     usage_known;   /**< false: total/free could not be read.        */
+    uint8_t  why;           /**< kdrv_sd_why_t: why the card is not mounted;
+                             *   KDRV_SD_WHY_NONE while it is, and for the
+                             *   internal partition.                         */
     uint32_t total_kb;      /**< The volume's size.                          */
     uint32_t free_kb;
     uint32_t card_mb;       /**< The card's own capacity; 0 when unknown.    */

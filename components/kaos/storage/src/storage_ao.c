@@ -4221,6 +4221,23 @@ static uint32_t kb_of(uint64_t bytes)
 }
 
 /**
+ * @brief Why @p medium is not mounted, as StorageInfoEvt carries it.
+ * @param medium The medium asked about.
+ * @return kdrv_sd_why_t: what the card's last bring-up found; none for the
+ *         internal partition, which has no card to be missing.
+ */
+static uint8_t info_why(kdrv_medium_t medium)
+{
+    uint8_t why = (uint8_t)KDRV_SD_WHY_NONE;
+
+    if ( KDRV_MEDIUM_SD == medium )
+    {
+        why = (uint8_t)kdrv_sd_why();
+    }
+    return why;
+}
+
+/**
  * @brief Answer a STORAGE_PATH_SPACE request: the ask's @c space, or a blocked
  *        task's waiter.
  *
@@ -8076,6 +8093,7 @@ static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
                 int32_t  mb    = 0;
                 ev->medium      = (uint8_t)medium;
                 ev->mounted     = kdrv_storage_mounted(medium);
+                ev->why         = info_why(medium);
                 ev->usage_known = (kdrv_storage_usage(medium, &total, &freeb)
                                    == KODE_OK);
                 ev->total_kb    = kb_of(total);
@@ -8961,6 +8979,7 @@ static bool card_refuse(Storage * const me, QEvt const * const e)
                     ev->medium      = c->medium;
                     ev->mounted     = kdrv_storage_mounted(
                                           (kdrv_medium_t)c->medium);
+                    ev->why         = info_why((kdrv_medium_t)c->medium);
                     ev->usage_known = false;
                     ev->total_kb    = 0U;
                     ev->free_kb     = 0U;
