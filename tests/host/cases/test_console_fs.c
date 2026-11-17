@@ -519,8 +519,10 @@ TEST_CASE("ls with no path lists the working directory", "[console_fs]")
 #define LS_MANY_FILES    ((KODE_STORAGE_LIST_MAX * 2U) + 3U)
 /** @brief Round trips enough for the STAT and every page of LS_MANY_FILES. */
 #define LS_MANY_SETTLES  16U
-/** @brief Room for one listed record, quoted name and all. */
-#define LS_RECORD_MAX    96U
+/** @brief The words of a listed record around its name, with the terminator. */
+#define LS_RECORD_WORDS  48U
+/** @brief Room for one listed record, quoted name and all, whatever the name's length. */
+#define LS_RECORD_MAX    (KODE_APP_FILE_MAX + LS_RECORD_WORDS)
 
 /**
  * @brief The index of the first reply that ENDS with @p needle, as
