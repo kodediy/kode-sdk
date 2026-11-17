@@ -145,14 +145,16 @@ typedef enum {
  *         supply, each followed by a try on one. */
 #define KDRV_SD_NARROW_MAX_MS     (KDRV_SD_ONE_LINE_TRIES \
                                    * (KDRV_SD_CYCLE_MS + KDRV_SD_TRY_MAX_MS))
-/** @brief A mount: the rail, a try on one line for a card remembered as one
- *         that takes no write on four, which another card in the slot then
- *         repeats on four, the write check behind that and, when the card
- *         takes no write on four lines, the way down to one; then the check
- *         on one line and, when the card takes no write there either, the way
- *         down again. A card that does not come up on four lines at all takes
- *         two tries before its check on one, which is less. */
-#define KDRV_SD_MOUNT_MAX_MS      (KDRV_SD_POWER_SETTLE_MS + (2U * KDRV_SD_TRY_MAX_MS) \
+/** @brief A mount: the rail, a cycle of the supply and a try on one line for
+ *         a card remembered as one that takes no write on four, which another
+ *         card in the slot then repeats on four, the write check behind that
+ *         and, when the card takes no write on four lines, the way down to
+ *         one; then the check on one line and, when the card takes no write
+ *         there either, the way down again. A card that does not come up on
+ *         four lines at all takes two tries before its check on one, which is
+ *         less. */
+#define KDRV_SD_MOUNT_MAX_MS      (KDRV_SD_POWER_SETTLE_MS + KDRV_SD_CYCLE_MS \
+                                   + (2U * KDRV_SD_TRY_MAX_MS) \
                                    + (2U * (KDRV_SD_CHECK_MAX_MS \
                                             + KDRV_SD_NARROW_MAX_MS)))
 /** @brief A transfer of 32 KB of sectors, which is the largest one asked. */
@@ -190,9 +192,10 @@ typedef enum {
  *
  * What a card took is remembered for the boot, in RAM, for the last card
  * judged: it is known by what its CID says of it. A card that took the write is
- * not checked again, and a card that took none is mounted on one line from the
- * start, with no failed write and no cycle of its supply; if the card that
- * answers there is another, it is judged as a card nobody judged. A different
+ * not checked again, and a card that took none, or that failed a write of a
+ * file on four lines since (kdrv_sd_write_failed()), is mounted on one line
+ * from the start, after a cycle of its supply and with no failed write; if the
+ * card that answers there is another, it is judged as a card nobody judged. A different
  * card is judged afresh, and a check that could not be made is no verdict.
  * With `check_req` at 0 the card is mounted on the lines asked for, with no
  * check and without consulting or changing what is remembered: the production
@@ -273,8 +276,9 @@ bool kdrv_sd_mounted_everyday(void);
  * which proves the way a write goes and not that the card keeps it.
  *
  * @return true for the card that took the check since it went in (on four lines, or
- *         on one after it took none on four), while it is mounted and until
- *         kdrv_sd_write_failed(); false with nothing mounted, for a card that
+ *         on one after it took none on four or failed a write of a file
+ *         there), while it is mounted and until kdrv_sd_write_failed(); false
+ *         with nothing mounted, for a card that
  *         took no write, for one whose check could not be made, and for a card
  *         mounted with the check off.
  */
@@ -283,11 +287,15 @@ bool kdrv_sd_took_write(void);
 /**
  * @brief Tell the driver that a write of a file on the mounted card failed.
  *
- * The card is no longer counted as one that takes a write until the boot ends
- * or a mount finds the slot empty (kdrv_sd_took_write() says false, a remount
- * of it included), and its next mount is on one line. A card put back after
- * the slot was found empty is judged afresh. Said once at NOTICE; nothing when the card was not
- * counted as one.
+ * On four lines the card is taken for one that takes no write there, as the
+ * counterfeit cards shipped with some units are: they take the check's one
+ * sector on four lines and fail the writes of files, and write on one. Its
+ * next mount is on one line, after a cycle of its supply, and the check there
+ * decides again whether it takes writes. On one line the card is no longer
+ * counted as one that takes a write until the boot ends or a mount finds the
+ * slot empty. Either way kdrv_sd_took_write() says false until its next mount.
+ * A card put back after the slot was found empty is judged afresh. Said once
+ * at NOTICE; nothing when the card was not counted as one.
  *
  * @return true when this call took the card's word back; false when there was
  *         none to take, already taken back or never given.

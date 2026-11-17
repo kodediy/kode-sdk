@@ -4,6 +4,7 @@
  * @brief A card in a slot: a real directory for its files, a sparse table for its sectors.
  */
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,7 @@ static bool s_fail_writes;
 static bool s_fail_reads;
 static bool s_fail_wide_writes;   /**< Writes fail while the mount is wider than one line. */
 static bool s_fail_wide_reads;    /**< Reads fail while the mount is wider than one line.  */
+static uint8_t s_fail_removes_from; /**< Deletes on the card fail on this many lines or more; 0: never. */
 static bool     s_reads_limited;  /**< Reads fail once s_reads_left have passed.           */
 static unsigned s_reads_left;     /**< Reads that still succeed while limited.             */
 static uint8_t  s_fail_mount_width; /**< The width the failing mounts ask for.             */
@@ -240,6 +242,7 @@ void fake_sdmmc_reset(void)
     s_fail_reads  = false;
     s_fail_wide_writes = false;
     s_fail_wide_reads  = false;
+    s_fail_removes_from = 0U;
     s_reads_limited    = false;
     s_reads_left       = 0U;
     s_fail_mount_width = 0U;
@@ -332,6 +335,35 @@ void fake_sdmmc_fail_wide_writes(bool fail)
 void fake_sdmmc_fail_wide_reads(bool fail)
 {
     s_fail_wide_reads = fail;
+}
+
+void fake_sdmmc_fail_removes(uint8_t from_width)
+{
+    s_fail_removes_from = from_width;
+}
+
+/* The C library's remove(), taken over for the whole suite: kdrv_storage.c
+ * deletes a file with it, and no permission bit or flag on a host directory
+ * makes a delete fail for root, who runs the suite in CI. A path under the
+ * card's mount point fails as fake_sdmmc_fail_removes() says; everything else
+ * goes as remove() goes, a directory to rmdir() and a file to unlink(). */
+int remove(const char *path)
+{
+    struct stat st;
+    size_t const n = strlen(s_dir);
+
+    if ( (0U != s_fail_removes_from) && s_mounted
+        && (s_fail_removes_from <= s_live.bus_width)
+        && (strncmp(path, s_dir, n) == 0) )
+    {
+        errno = EIO;
+        return -1;
+    }
+    if ( (lstat(path, &st) == 0) && S_ISDIR(st.st_mode) )
+    {
+        return rmdir(path);
+    }
+    return unlink(path);
 }
 
 void fake_sdmmc_fail_mounts(uint8_t width, unsigned n)

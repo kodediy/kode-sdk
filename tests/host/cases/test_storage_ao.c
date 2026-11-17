@@ -2323,6 +2323,121 @@ TEST_CASE("an app wipe takes the data folder on both media",
                              "another app's folder went");
 }
 
+/**
+ * @brief Let the wipe walk its files while the card's worker runs each call
+ *        the wipe asks of it, and take the wipe's one answer.
+ */
+static const StorageAppWipeRspEvt *take_wipe_with_card(void)
+{
+    for ( uint32_t i = 0U; (WIPE_STEPS_MAX > i) && (0U == ao_spy_count()); ++i )
+    {
+        (void)qf_support_pump(AO_Storage, 8U);
+        (void)run_sd_job();
+    }
+    return take_wipe();
+}
+
+/** @brief The data lines the card is mounted on now. */
+static int32_t sd_width(void)
+{
+    int32_t width = 0;
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)kdrv_sd_get(KDRV_SD_BUS_WIDTH, &width));
+    return width;
+}
+
+/* The counterfeit cards some units shipped with list and read their files on
+ * four lines and fail a delete there, and delete on one. The first delete
+ * that fails takes the card to one line, and the image is tried once more
+ * there: the app goes the first time it is asked to. */
+TEST_CASE("an app wipe whose image on the card will not go on four lines takes "
+          "it on one", "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_sd_image("demo.bin", "demo");
+    fake_sdmmc_fail_removes(4U);
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe_with_card();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->sd.files);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, r->sd.left, "the image was said as left");
+    TEST_ASSERT_FALSE_MESSAGE(on_sd("demo.bin"), "the image stayed on the card");
+    TEST_ASSERT_EQUAL_INT32(1, sd_width());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+}
+
+/* The same card when the first thing to go is the app's data folder. */
+TEST_CASE("an app wipe whose data folder on the card will not go on four lines "
+          "takes it on one", "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_sd_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_sdmmc_fail_removes(4U);
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe_with_card();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_NONE, r->fs.folder);
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_REMOVED, r->sd.folder);
+    TEST_ASSERT_FALSE(on_sd(".kode/appsdata/demo/app.json"));
+    TEST_ASSERT_EQUAL_INT32(1, sd_width());
+}
+
+/* One more try, and no more: a card that deletes nothing on one line either
+ * keeps the image, said as left, and is not counted as a card that takes a
+ * write. */
+TEST_CASE("an app wipe whose image on the card will not go on one line either "
+          "says it was left", "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_sd_image("demo.bin", "demo");
+    fake_sdmmc_fail_removes(1U);
+    fake_klog_reset();
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe_with_card();
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, r->status);
+    TEST_ASSERT_EQUAL_UINT8(0U, r->sd.files);
+    TEST_ASSERT_EQUAL_UINT8(1U, r->sd.left);
+    TEST_ASSERT_TRUE(on_sd("demo.bin"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, log_count("tried once more"),
+                                   "the image was tried more than once more");
+    TEST_ASSERT_EQUAL_UINT(1U, log_count("would not go"));
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+}
+
+/* A data folder that will not go on one line either leaves the card owing a
+ * remount when the wipe ends: the wipe pays it, so no later read of the card
+ * meets what the failed delete left in FATFS. */
+TEST_CASE("an app wipe whose data folder on the card will not go on one line "
+          "either mounts the card again when it ends", "[storage_ao][wipe]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_sd_path(".kode/appsdata/demo/app.json", JSON_OK,
+                           sizeof(JSON_OK) - 1U);
+    fake_sdmmc_fail_removes(1U);
+    fake_klog_reset();
+
+    ask_wipe("demo");
+    const StorageAppWipeRspEvt * const r = take_wipe_with_card();
+    settle_card();
+
+    TEST_ASSERT_EQUAL_UINT8(APP_WIPE_FOLDER_LEFT, r->sd.folder);
+    TEST_ASSERT_TRUE(on_sd(".kode/appsdata/demo/app.json"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, log_count("the card is mounted again"),
+        "the remount the last failed delete owed was not paid");
+    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+}
+
 /* Nothing there is an answer too, and not a failure: the asker decides what
  * an app with no file and no folder means. */
 TEST_CASE("an app wipe that finds nothing says so on both media",
@@ -8672,6 +8787,24 @@ TEST_CASE("a round during a download is refused, and is ready once it ends",
 
 /** @brief The driver's notice when the card's word is taken back. */
 #define CARD_WORD_BACK  "a write on the card failed"
+
+/**
+ * @brief Put a card in the slot that the write check took to one line, and
+ *        mount it there as a card that takes a write.
+ *
+ * A write of a file that fails on such a card has no narrower way to go, so
+ * the card's word stays taken back for the boot: what a card refused is
+ * refused again.
+ */
+static void card_on_one_line(void)
+{
+    kdrv_sd_unmount();
+    fake_sdmmc_fresh_card();
+    fake_sdmmc_fail_wide_writes(true);
+    TEST_ASSERT_NOT_NULL(kdrv_sd_mount());
+    fake_sdmmc_fail_wide_writes(false);
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+}
 #define FILL_FILES  11U   /**< Copies of s_big that fill a one-megabyte card. */
 
 /** @brief A payload two chunks long, the second 16 bytes. */
@@ -8740,7 +8873,7 @@ TEST_CASE("after a put the card refused, the next put and a bare name go "
 {
     storage_fresh();
     fake_psram_reset();
-    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    card_on_one_line();
     fake_sdmmc_fail_file_writes(true);
     fake_klog_reset();
 
@@ -8869,7 +9002,7 @@ TEST_CASE("a write that gives way and fails on the card takes its word back, "
     uint32_t written = 0U;
 
     fetch_fresh();
-    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    card_on_one_line();
     fake_klog_reset();
 
     ask_write_other(s_big, sizeof(s_big), true);
@@ -9328,7 +9461,8 @@ TEST_CASE("a replacement on the card that cannot be read back leaves the "
 
 /* On a card that fails a write, FATFS may hold sectors it cannot flush and
  * every later read comes back empty. Once the put is over the card is mounted
- * again, a call on its worker, and stays one that took no write. */
+ * again, a call on its worker: on one line, after a write that failed on four,
+ * where its check says again whether it takes writes. */
 TEST_CASE("a put the card fails mounts the card again once it is over",
           "[storage_ao][appdata][card][worker]")
 {
@@ -9357,8 +9491,10 @@ TEST_CASE("a put the card fails mounts the card again once it is over",
 
     TEST_ASSERT_EQUAL_UINT(mounts + 1U, fake_sdmmc_mounts());
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
-    TEST_ASSERT_FALSE_MESSAGE(kdrv_sd_took_write(),
-        "the remount gave the card its word back");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(1, sd_width(),
+        "a card that failed on four lines came back on four");
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_sd_took_write(),
+        "the card took the check on one line and was not counted as taking writes");
     TEST_ASSERT_TRUE(log_says("the card is mounted again after the write that "
                               "failed on it"));
     const QEvt * const e = ao_spy_take();
@@ -9380,7 +9516,8 @@ TEST_CASE("a bare name the card fails mounts the card again once it is over",
     TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(SD_WORKER));
     TEST_ASSERT_TRUE(run_sd_job());
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
-    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+    TEST_ASSERT_EQUAL_INT32(1, sd_width());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
     TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
 }
 
@@ -9544,7 +9681,8 @@ TEST_CASE("a download chunk the card fails takes the card's word back and "
     TEST_ASSERT_TRUE(run_sd_job());
     TEST_ASSERT_TRUE(log_says("the card is mounted again after the write that "
                               "failed on it"));
-    TEST_ASSERT_FALSE(kdrv_sd_took_write());
+    TEST_ASSERT_EQUAL_INT32(1, sd_width());
+    TEST_ASSERT_TRUE(kdrv_sd_took_write());
 }
 
 TEST_CASE("a download into a path on the card leaves the card's word alone when "
@@ -9684,7 +9822,7 @@ TEST_CASE("a card mounted again after a copy failed on it is told, swept, and ta
     uint32_t written = 0U;
 
     fetch_fresh();
-    TEST_ASSERT_TRUE(kdrv_sd_took_write());
+    card_on_one_line();
     fake_media_put_sd_path("dead.bin.tmp", "half", 4U);
     ao_spy_subscribe(STORAGE_CARD_SIG);
 

@@ -595,15 +595,23 @@ bool kdrv_sd_write_failed(void)
     {
         return false;   /* nothing to take back: said once */
     }
-    s_proof = SD_PROOF_REFUSED;
-    if ( is_judged(&s_snap) )
+    if ( (SD_WIDTH_NARROW < s_snap.bus_width) && is_judged(&s_snap) )
     {
-        /* A card that fails a write on four lines may leave the controller
-         * unable to bring it up there again: the next mount is on one. */
+        /* The counterfeit cards shipped with some units take the check's one
+         * sector on four lines, fail the writes of files there and write on
+         * one: the next mount is on one line, where the card is checked
+         * again. */
         s_verdict = SD_VERDICT_ONE;
+        s_proof   = SD_PROOF_NONE;
+        KLOG_N(TAG, "a write on the card failed on four lines; its next mount "
+                    "is on one, where it is checked again");
     }
-    KLOG_N(TAG, "a write on the card failed; until it comes out or the boot "
-                "ends it is not counted as a card that takes a write");
+    else
+    {
+        s_proof = SD_PROOF_REFUSED;
+        KLOG_N(TAG, "a write on the card failed; until it comes out or the "
+                    "boot ends it is not counted as a card that takes a write");
+    }
     return true;
 }
 
@@ -750,8 +758,9 @@ static kode_status_t card_prove_one(void)
  *        and proved there.
  *
  * What a card took is remembered for the boot, so a card is judged once: a
- * card that took the write is not checked again, and one that did not is
- * mounted on one line from then on (card_mount_known()). A check that could
+ * card that took the write is not checked again, and one that did not, or
+ * that failed a write of a file on four lines later (kdrv_sd_write_failed()),
+ * is mounted on one line from then on (card_mount_known()). A check that could
  * not be made is no verdict.
  *
  * @return KODE_OK with s_snap describing the mount that stands; what
@@ -835,14 +844,21 @@ static kode_status_t card_mount_asked(void)
 }
 
 /**
- * @brief Mount on one line first, as the last card judged is mounted, and
- *        take the four-line way when another card is the one that answers.
+ * @brief Mount on one line first, as the last card judged is mounted, after a
+ *        cycle of its supply, and take the four-line way when another card is
+ *        the one that answers.
+ *
+ * A card that failed a write may answer nothing until its supply is cycled,
+ * on one line too, and a mount that found nothing would forget what was
+ * judged of it as of a card taken out.
  *
  * @return What khal_sdmmc_mount() said of a card that does not answer, or
  *         card_mount_asked()'s answer for a card that was not judged.
  */
 static kode_status_t card_mount_known(void)
 {
+    card_cycle();
+
     kode_status_t st = khal_sdmmc_mount(SD_WIDTH_NARROW, s_freq_req, &s_snap);
 
     if ( KODE_OK != st )

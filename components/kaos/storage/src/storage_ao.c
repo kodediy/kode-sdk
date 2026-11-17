@@ -519,6 +519,9 @@ typedef struct {
                                     *   first of x->names.                    */
     uint16_t       x_count;        /**< Names in all; the card's follow.      */
     uint16_t       x_next;         /**< The next name to look at.             */
+    bool           x_again;        /**< What the wipe looked at last would not
+                                    *   go on the card: it is tried once more
+                                    *   after the card's remount.             */
     AppWipeMedium  x_fs;           /**< What went on the internal partition.  */
     AppWipeMedium  x_sd;           /**< What went on the card.                */
 } Storage;
@@ -2201,6 +2204,9 @@ static kode_status_t appdata_rm_tree(const char *folder)
 
 static void warn_if_card(const char *verb, const char *path);
 static void warn_if_unproven_card(const char *verb, const char *path);
+static bool card_write_failed(Storage * const me);
+static void card_remount_owed(Storage * const me);
+static void card_remount(Storage * const me);
 
 /**
  * @brief Delete @p project's data folder, from the medium that holds it, and
@@ -2577,6 +2583,10 @@ static void clear_folder_step(Storage * const me)
     {
         KLOG_W(TAG, "the data folder '%s' would not go", name);
         m->folder = (uint8_t)APP_WIPE_FOLDER_LEFT;
+        if ( APPDATA_MEDIUM_SD == md )
+        {
+            (void)card_write_failed(me);   /* the card's remount is the next step */
+        }
     }
 }
 
@@ -2660,6 +2670,7 @@ static void wipe_begin(Storage * const me, AppDataReqEvt const * const req)
     me->x_who   = req->who;
     me->x_count = 0U;
     me->x_next  = 0U;
+    me->x_again = false;
 
     if ( me->x->others )
     {
@@ -2817,14 +2828,80 @@ static AppWipeFolder wipe_folder(AppDataMedium m, const char *project)
 }
 
 /**
+ * @brief After a delete failed: on the card, tell the driver, and say whether
+ *        what would not go is tried once more after the remount that follows.
+ *
+ * The first delete that fails on a card mounted on four lines takes it to one
+ * (kdrv_sd_write_failed()), where the counterfeit cards shipped with some
+ * units write, so it is tried once more there. A try that was that one more
+ * is not repeated, and nor is one on the internal partition.
+ *
+ * @param me      The AO.
+ * @param on_card Whether the delete was on the card.
+ * @param again   Whether the delete was already the one more try.
+ * @return true when it is tried once more: x_again is set and the remount is
+ *         owed.
+ */
+static bool wipe_card_again(Storage * const me, bool on_card, bool again)
+{
+    bool owed = false;
+
+    if ( on_card )
+    {
+        owed = card_write_failed(me);
+    }
+    me->x_again = owed && (!again);
+    return me->x_again;
+}
+
+/**
+ * @brief Take the wiped app's data folders, the card's once more after its
+ *        remount when it would not go there.
+ *
+ * @param me The AO, with every kept name looked at.
+ * @return true when the card's folder waits for the remount: the wipe goes on
+ *         a step later and comes back here for that folder alone.
+ */
+static bool wipe_folders(Storage * const me)
+{
+    bool const again = me->x_again;
+    bool       waits = false;
+
+    me->x_again = false;
+    if ( me->x_fs.present && (!again) )
+    {
+        me->x_fs.folder = (uint8_t)wipe_folder(APPDATA_MEDIUM_FS,
+                                               me->x_project);
+    }
+    if ( me->x_sd.present )
+    {
+        me->x_sd.folder = (uint8_t)wipe_folder(APPDATA_MEDIUM_SD,
+                                               me->x_project);
+        if ( (uint8_t)APP_WIPE_FOLDER_LEFT == me->x_sd.folder )
+        {
+            waits = wipe_card_again(me, true, again);
+        }
+    }
+    return waits;
+}
+
+/**
  * @brief End the wipe: the folders, the answer, and the scratch given back.
  * @param me The AO, with every kept name looked at.
  */
 static void wipe_finish(Storage * const me)
 {
-    StorageAppWipeRspEvt *rsp = Q_NEW_X(StorageAppWipeRspEvt, 0U,
-                                        STORAGE_APP_WIPE_RSP_SIG);
+    StorageAppWipeRspEvt *rsp = NULL;
 
+    if ( !me->x->others )
+    {
+        if ( wipe_folders(me) )
+        {
+            QTimeEvt_armX(&me->x_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+            return;   /* the card's folder once more, after its remount */
+        }
+    }
+    rsp = Q_NEW_X(StorageAppWipeRspEvt, 0U, STORAGE_APP_WIPE_RSP_SIG);
     if ( me->x->others )
     {
         /* The folders went a step each; the kept one's is never touched. */
@@ -2848,16 +2925,6 @@ static void wipe_finish(Storage * const me)
     }
     else
     {
-        if ( me->x_fs.present )
-        {
-            me->x_fs.folder = (uint8_t)wipe_folder(APPDATA_MEDIUM_FS,
-                                                   me->x_project);
-        }
-        if ( me->x_sd.present )
-        {
-            me->x_sd.folder = (uint8_t)wipe_folder(APPDATA_MEDIUM_SD,
-                                                   me->x_project);
-        }
         KLOG_N(TAG, "the files of '%s': %u gone and %u left on the partition, "
                     "%u gone and %u left on the card", me->x_project,
                (unsigned)me->x_fs.files, (unsigned)me->x_fs.left,
@@ -2890,6 +2957,7 @@ static void wipe_finish(Storage * const me)
     khal_free(me->x);
     me->x     = NULL;
     me->x_who = NULL;
+    card_remount_owed(me);   /* one a folder's last try left owed */
 }
 
 /**
@@ -2930,6 +2998,7 @@ static void wipe_step(Storage * const me)
     const char    *root = KODE_CARD_APP_PREFIX;
     AppWipeMedium *m    = &me->x_sd;
     WipeMatch      match;
+    bool           again;
 
     if ( NULL == me->x_who )
     {
@@ -2939,6 +3008,14 @@ static void wipe_step(Storage * const me)
     {
         /* A call to the card is out on the worker: the volume is its own
          * until it returns. */
+        QTimeEvt_armX(&me->x_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+        return;
+    }
+    if ( me->remount_owed )
+    {
+        /* A delete failed on the card: it goes down and up again before the
+         * next file, nothing being open on it between two steps. */
+        card_remount(me);
         QTimeEvt_armX(&me->x_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
         return;
     }
@@ -2954,6 +3031,8 @@ static void wipe_step(Storage * const me)
     }
     (void)snprintf(path, sizeof(path), "%s%s", root, me->x->names[me->x_next]);
     ++me->x_next;
+    again       = me->x_again;
+    me->x_again = false;
 
     match = wipe_is_of(me, path);
     if ( WIPE_TAKE == match )
@@ -2971,6 +3050,12 @@ static void wipe_step(Storage * const me)
             }
             ++m->files;
             ++me->x->gone;
+        }
+        else if ( wipe_card_again(me, (&me->x_sd == m), again) )
+        {
+            KLOG_N(TAG, "'%s' did not go; it is tried once more once the card "
+                        "is mounted again", path);
+            --me->x_next;
         }
         else
         {
@@ -3312,8 +3397,6 @@ static void appdata_put_sweep(const char *folder)
 static bool appdata_put_inside(Storage * const me, kode_status_t *rc,
                                const char **why);
 static kode_status_t appdata_put_start(Storage * const me);
-static void card_write_failed(Storage * const me);
-static void card_remount_owed(Storage * const me);
 
 /**
  * @brief Whether a file reads back as exactly @p len bytes equal to @p data.
@@ -3471,7 +3554,7 @@ static void appdata_put_finish(Storage * const me, kode_status_t rc,
 
     if ( (KODE_OK != rc) && (APPDATA_MEDIUM_SD == me->g_medium) )
     {
-        card_write_failed(me);
+        (void)card_write_failed(me);
     }
     if ( (KODE_OK != rc) && appdata_put_inside(me, &end, &reason) )
     {
@@ -5856,7 +5939,7 @@ static void write_end(Storage * const me, kode_status_t st)
                 {
                     /* A read of the name looks at the card first and would
                      * find what stayed there, never a copy written inside. */
-                    card_write_failed(me);
+                    (void)card_write_failed(me);
                     KLOG_W(TAG, "what landed of '%s' on the card would not go; "
                                 "it is not written again inside", me->w_name);
                 }
@@ -5960,7 +6043,7 @@ static bool write_elsewhere(Storage * const me)
     }
     if ( (uint8_t)KDRV_MEDIUM_SD == me->w_medium )
     {
-        card_write_failed(me);
+        (void)card_write_failed(me);
         other = KDRV_MEDIUM_FS;
     }
     else if ( !kdrv_sd_took_write() )
@@ -6030,7 +6113,7 @@ static kode_status_t write_yielding_failed(Storage * const me, kode_status_t st)
         }
         else
         {
-            card_write_failed(me);
+            (void)card_write_failed(me);
         }
     }
     return rc;
@@ -6241,7 +6324,7 @@ bool storage_bare_path(const char *name, char *out, size_t cap)
 
 void storage_bare_failed(void)
 {
-    card_write_failed(&l_storage);
+    (void)card_write_failed(&l_storage);
 }
 
 /**
@@ -6359,7 +6442,7 @@ static void write_begin(Storage * const me, StorageWriteEvt const * const req)
         if ( (KDRV_MEDIUM_SD == first) && (KDRV_MEDIUM_SD != medium) )
         {
             /* The card it chose would not create the file. */
-            card_write_failed(me);
+            (void)card_write_failed(me);
         }
         if ( KODE_OK == st )
         {
@@ -6575,13 +6658,18 @@ static bool sd_job_submit(Storage * const me, SdOp op, SdThen then)
  *        back, and owe it a remount the first time.
  *
  * @param me The AO.
+ * @return true when this call took the card's word back and a remount is owed
+ *         for it; false when it had been taken back already.
  */
-static void card_write_failed(Storage * const me)
+static bool card_write_failed(Storage * const me)
 {
-    if ( kdrv_sd_write_failed() )
+    bool const owed = kdrv_sd_write_failed();
+
+    if ( owed )
     {
         me->remount_owed = true;
     }
+    return owed;
 }
 
 /**
@@ -6590,9 +6678,10 @@ static void card_write_failed(Storage * const me)
  *
  * A card that fails a write may leave FATFS holding sectors it can never
  * flush, and every later read of the volume comes back empty. An unmount and
- * a mount, one call on the card's worker, give the reads back. The card stays
- * one that took no write (kdrv_sd_took_write()) until the boot ends or a mount
- * finds the slot empty.
+ * a mount, one call on the card's worker, give the reads back. A card that
+ * failed on four lines comes back on one, where its check says again whether
+ * it takes writes; one that failed on one line stays one that took no write
+ * (kdrv_sd_took_write()) until the boot ends or a mount finds the slot empty.
  *
  * @param me The AO.
  */
@@ -6602,6 +6691,20 @@ static void card_remount_owed(Storage * const me)
     {
         return;   /* asked again when the transfer or the call ends */
     }
+    card_remount(me);
+}
+
+/**
+ * @brief Pay the remount owed since a write failed on the card, now.
+ *
+ * The caller has seen that nothing is open on the card and no call to it is
+ * out: card_remount_owed() between transfers, wipe_step() between two of a
+ * wipe's files.
+ *
+ * @param me The AO.
+ */
+static void card_remount(Storage * const me)
+{
     me->remount_owed = false;
     if ( !kdrv_storage_mounted(KDRV_MEDIUM_SD) )
     {
@@ -7844,6 +7947,7 @@ void Storage_ctor(void)
     me->g_spill    = false;
     me->g_full[0]  = '\0';
     me->x_who      = NULL;
+    me->x_again    = false;
     me->x          = NULL;     /* as g_buf: the heap's now */
     me->worker_up  = false;
     me->width_owed = false;

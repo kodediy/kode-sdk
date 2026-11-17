@@ -535,6 +535,19 @@ void fake_sdmmc_fail_wide_writes(bool fail);
 void fake_sdmmc_fail_wide_reads(bool fail);
 
 /**
+ * @brief Make a delete of a file on the card fail while the mount is on
+ *        @p from_width data lines or more.
+ *
+ * The counterfeit card, again: it lists and reads its files on four lines and
+ * fails the write a delete is, and takes the same delete on one.
+ *
+ * @param from_width The fewest lines a mount refusing deletes is on: 4 for the
+ *                   counterfeit card, 1 for a card that deletes nothing, 0 to
+ *                   let every delete through.
+ */
+void fake_sdmmc_fail_removes(uint8_t from_width);
+
+/**
  * @brief Make the next @p n mounts asked on @p width fail with KODE_TIMEOUT,
  *        as a card that has not recovered from a failed transfer does.
  * @param width Data lines the failing mounts ask for.
