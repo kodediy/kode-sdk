@@ -106,9 +106,11 @@ void kaos_ioexp_start(void)
  * `changed` is measured against the last reading that succeeded, so a chip
  * that went away and came back reports whatever moved while it was gone.
  *
+ * @param me  The AO.
+ * @param irq true when the read serves the INT line, false when it was asked for.
  * @return true when the register read.
  */
-static bool publish_inputs(IoExp * const me)
+static bool publish_inputs(IoExp * const me, bool irq)
 {
     int32_t raw = 0;
     bool const ok = (kdrv_tca6408a_get(KDRV_TCA_INPUT, &raw) == KODE_OK);
@@ -118,7 +120,8 @@ static bool publish_inputs(IoExp * const me)
     {
         return ok;   /* bounded: dropping a sample beats asserting */
     }
-    ev->ok = ok;
+    ev->ok  = ok;
+    ev->irq = irq;
     if ( ok )
     {
         uint8_t const levels = (uint8_t)raw;
@@ -147,7 +150,7 @@ static bool publish_inputs(IoExp * const me)
  */
 static void int_serve(IoExp * const me)
 {
-    if ( publish_inputs(me) )
+    if ( publish_inputs(me, true) )
     {
 #if CONFIG_KODE_LOWPOWER
         me->retrying = false;
@@ -284,7 +287,7 @@ static QState IoExp_initial(IoExp * const me, void const * const par)
         return Q_TRAN(&IoExp_dead);
     }
     inputs_face_in();
-    publish_inputs(me);
+    (void)publish_inputs(me, false);
     if ( kdrv_tca6408a_int_attach(&on_int, me) != KODE_OK )
     {
         KLOG_E(TAG, "the INT could not be armed; inputs will only be read "
@@ -430,6 +433,7 @@ static QState IoExp_dead(IoExp * const me, QEvt const * const e)
             if ( NULL != ev )
             {
                 ev->ok      = false;
+                ev->irq     = false;
                 ev->levels  = 0U;
                 ev->changed = 0U;
                 QACTIVE_PUBLISH(&ev->super, &me->super);
@@ -486,7 +490,7 @@ static QState IoExp_ready(IoExp * const me, QEvt const * const e)
             break;
         }
         case IOEXP_READ_REQ_SIG: {
-            (void)publish_inputs(me);
+            (void)publish_inputs(me, false);
             status = Q_HANDLED();
             break;
         }

@@ -500,6 +500,13 @@ void kdrv_storage_discard(void);
  */
 kode_status_t kdrv_storage_close(void);
 
+/**
+ * @brief Whether a file of the internal volume is open, for reading or writing.
+ *
+ * What a raw write of the partition checks before it unmounts the volume.
+ */
+bool kdrv_storage_fs_files_open(void);
+
 /* ---- Copying -------------------------------------------------------------
  * The one thing the two handles above exist for. A copy is a reader and a
  * writer held at the same instant, which a single handle could not do at

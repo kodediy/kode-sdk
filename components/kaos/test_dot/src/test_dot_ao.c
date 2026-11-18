@@ -15,6 +15,7 @@
 #include "kaos_start.h"
 #include "kbsp.h"
 #include "kdrv_buttons.h"
+#include "kdrv_ov5640.h"
 #include "kdrv_wifi.h"
 #include "khal_nvs.h"
 #include "khal_system.h"
@@ -25,6 +26,7 @@
 #include "kverbs.h"
 
 #include "test_dot_priv.h"
+#include "kdrv_kfw.h"
 
 _Static_assert(KODE_TEST_DOT_LINE_MS > KODE_TEST_DOT_RESET_MS,
                "the console's line outlasts the SHIP reset's bound, so the reset's own answer reaches it");
@@ -57,6 +59,7 @@ _Static_assert(KODE_TEST_DOT_ANSWER_MS > (KODE_POWER_POLL_MS + KODE_TEST_DOT_BOO
 #define TD_ROWS_TOTAL     13U   /**< Rows a run asks AO_Autotest for.                        */
 #define TD_TOUCH_TARGETS  2U    /**< The touch test's targets (KBSP_TOUCH_TEST_A and _B).   */
 #define TD_ERR_BUSY       4U    /**< kcli code 4: busy, or what is missing.                  */
+#define TD_MS_PER_S       1000U /**< Milliseconds in a second.                               */
 #define TD_ERR_REJECT     5U    /**< kcli code 5: refused.                                   */
 #define TD_ERR_TIMEOUT    6U    /**< kcli code 6: timed out.                                 */
 #define TD_MM10_PER_MM    10.0  /**< The place's limits arrive in tenths.                    */
@@ -128,6 +131,13 @@ typedef enum {
     REST_OPERATOR  /**< The operator's screen settling.  */
 } td_rest_t;
 
+/** @brief What the quiet's timer is armed for (TestDot.quiet_for). */
+enum {
+    QUIET_NONE = 0, /**< Nothing.                                    */
+    QUIET_IDLE,     /**< The pass's idle bound.                      */
+    QUIET_RETRY     /**< AO_Radio or AO_Net had no room: ask again.  */
+};
+
 /** @brief What the drain timer waits for. */
 typedef enum {
     DRAIN_NONE = 0, /**< Nothing.                             */
@@ -193,6 +203,7 @@ typedef struct {
     QTimeEvt      rest;               /**< TEST_DOT_REST_SIG: what td_rest_t says.         */
     QTimeEvt      watch;              /**< TEST_DOT_WATCH_SIG: the run's watchdog.         */
     QTimeEvt      drain;              /**< TEST_DOT_DRAIN_SIG: what td_drain_t says.       */
+    QTimeEvt      quiet_te;           /**< TEST_DOT_QUIET_SIG: the pass's idle bound, or a quiet asked again. */
     uint8_t       tmo_for;            /**< td_tmo_t.                                       */
     uint8_t       tmo_stale;          /**< Ticks of the tmo timer to let pass, disarmed late. */
     uint8_t       rest_for;           /**< td_rest_t.                                      */
@@ -221,6 +232,7 @@ typedef struct {
     bool          bright_wait;        /**< The next DISPLAY_STATE_SIG is the level before. */
     bool          bright_known;       /**< @c bright is what to put back.                  */
     uint8_t       bright;             /**< The level before the wake.                      */
+    uint8_t       glass_pct;          /**< The level a pass puts the glass at: test_dot_bright, until the next boot. */
     bool          dock_lent;          /**< The dock console's pins are lent.               */
     bool          boost_on;           /**< The boost test is on.                           */
     bool          subscribed;         /**< The wake's subscriptions are in.                */
@@ -290,6 +302,13 @@ typedef struct {
     uint8_t       ring_head;          /**< The oldest.                                     */
     uint8_t       ring_n;             /**< How many.                                       */
     uint32_t      ring_dropped;       /**< Pushed out by newer ones.                       */
+    uint8_t       place_lost;         /**< Looks in a row with no marks and the camera's settings lost. */
+    bool          welcome_on;         /**< The welcome app's write is under way.            */
+    bool          quiet_want;         /**< A station's pass runs: the network keeps quiet.  */
+    bool          quiet_held;         /**< AO_Radio and AO_Net were told @c quiet_want.     */
+    uint8_t       quiet_for;          /**< QUIET_*: what the quiet's timer is armed for. */
+    uint8_t       quiet_stale;        /**< Ticks of the quiet's timer to let pass, disarmed late. */
+    bool          storage_on;         /**< The storage partition's write is under way.      */
 } TestDot;
 
 static TestDot l_td;
@@ -298,9 +317,13 @@ QActive * const AO_TestDot = &l_td.super;
 /** @brief Set while a run goes: read by the console's `factory_reset`, from its own task. */
 static volatile bool s_run_going;
 
+/** @brief A station's pass runs: AO_TestDot's @c quiet_want, for test_dot_session(). */
+static volatile bool s_session;
+
 static QState TestDot_initial(TestDot * const me, void const * const par);
 static QState TestDot_active(TestDot * const me, QEvt const * const e);
 static void verb_start(TestDot *me, TestDotReqEvt const *e);
+static void td_inst_end(TestDot *me, bool ok);
 static void end_next(TestDot *me);
 static void out_drain(TestDot *me);
 static void cam_step_go(TestDot *me, uint8_t step);
@@ -308,16 +331,75 @@ static void row_next(TestDot *me);
 
 /* ---- The rows of a run ------------------------------------------------------- */
 
-/** @brief The rows before the camera: the SD first, then the motion while the Kode is still. */
-static const char *const ROWS_FIRST[] = { "sd", "imu" };
-/** @brief The rows after it, beside the operator: sound and buzz only once the photos are taken. */
-static const char *const ROWS_AFTER[] = { "audio", "haptic", "mag", "pmic", "gauge", "ioexp", "clocks",
-                                          "ir", "nfc", "rfid", "mem" };
+/** @brief The rows before the camera: the SD first, then the motion while the Kode is still,
+ *         then every row that keeps time (sound, buzz, crystals, IR, the readers), so the
+ *         welcome app's write can run beside the operator. */
+static const char *const ROWS_FIRST[] = { "sd", "imu", "audio", "haptic_pat", "mag", "clocks", "ir", "nfc", "rfid" };
+/** @brief The rows after it, beside the operator: register reads only, which a flash write does not upset. */
+static const char *const ROWS_AFTER[] = { "pmic", "gauge", "ioexp", "mem" };
+
+/** @brief The welcome app's file on the card, armed by test_dot_welcome; empty when not armed. */
+static char s_welcome[KODE_APP_FILE_MAX];
+
+void test_dot_welcome_arm(const char *name)
+{
+    s_welcome[0] = '\0';
+    if ( NULL != name )
+    {
+        (void)snprintf(s_welcome, sizeof(s_welcome), "%s", name);
+    }
+}
+
+/** @brief Looks in a row with the camera's settings lost and no marks before the placement gives up on the camera. */
+#define TD_PLACE_LOST_LOOKS 2U
+
+/** @brief The storage image's file on the card, armed by test_dot_storage; empty when not armed. */
+static char s_storage[KODE_APP_FILE_MAX];
+
+/* An install AppMgr turned away busy is asked again at the next station verb
+ * (the station polls every ~150 ms), for this long after the first ask. */
+#define TD_INSTALL_BUSY_MS 10000U
+static char     s_inst_file[KODE_APP_FILE_MAX];  /**< The file of the install under way. */
+static uint8_t  s_inst_dst;                      /**< Its destination.                   */
+static uint32_t s_inst_t0;                       /**< When it was first asked.           */
+static bool     s_inst_owed;                     /**< Turned away busy: ask again.       */
+
+/** @brief Ask AppMgr for an install from the card, and keep what to ask again. */
+static bool inst_ask(TestDot *me, const char *file, uint8_t dst)
+{
+    (void)snprintf(s_inst_file, sizeof(s_inst_file), "%s", file);
+    s_inst_dst  = dst;
+    s_inst_t0   = khal_time_ms();
+    s_inst_owed = false;
+    return appmgr_image_ask((uint8_t)KFW_SRC_SD, s_inst_file, dst, false, &me->super);
+}
+
+void test_dot_storage_arm(const char *name)
+{
+    s_storage[0] = '\0';
+    if ( NULL != name )
+    {
+        (void)snprintf(s_storage, sizeof(s_storage), "%s", name);
+    }
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; read by the host cases, which this check does not see */
+const char *test_dot_welcome_armed(void)
+{
+    return s_welcome;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; read by the host cases, which this check does not see */
+const char *test_dot_storage_armed(void)
+{
+    return s_storage;
+}
+
 /** @brief Every row in the timing record's order: @c row_ms follows it. */
-static const char *const ROWS_ALL[TD_ROWS_TOTAL] = { "sd", "imu", "audio", "haptic", "mag", "pmic", "gauge",
+static const char *const ROWS_ALL[TD_ROWS_TOTAL] = { "sd", "imu", "audio", "haptic_pat", "mag", "pmic", "gauge",
                                                      "ioexp", "clocks", "ir", "nfc", "rfid", "mem" };
 /** @brief The auto screen's cells after the first, in the order they show. */
-static const char *const GRID_ROWS[] = { "pmic", "gauge", "ioexp", "clocks", "imu", "mag", "haptic",
+static const char *const GRID_ROWS[] = { "pmic", "gauge", "ioexp", "clocks", "imu", "mag", "haptic_pat",
                                          "audio", "sd", "nfc", "rfid", "ir" };
 /** @brief The row states' words, by AUTOTEST_ROW_*. */
 static const char *const ROW_WORD[AUTOTEST_ROW_STATES] = { "running", "pass", "fail", "timeout", "skipped" };
@@ -671,6 +753,8 @@ static void ans_to(TestDot *me, QActive *who, uint8_t seq, uint8_t code, const c
 {
     td_out_t * const o = out_slot(me, (uint8_t)OUT_ANS, who, seq);
 
+    appmgr_hold(false);
+
     if ( NULL != o )
     {
         o->code = code;
@@ -905,12 +989,102 @@ static bool job_submit(TestDot *me, uint8_t kind, uint8_t arg)
     return ok;
 }
 
+/* ---- The station's quiet ------------------------------------------------------ */
+
+/*
+ * From the first station verb to `test_dot_end` AO_Radio joins no network by
+ * itself and leaves the one the board is on, and AO_Net starts no network work
+ * (radio_quiet_request(), net_quiet_request()): a join and its traffic take
+ * the C5's link, the CPU and the flash while the pass times the motor, the
+ * compass and the radio check. A pass whose station went away ends after
+ * KODE_TEST_DOT_QUIET_IDLE_MS with no verb and nothing woken.
+ */
+
+/** @brief Tell AO_Radio and AO_Net what the pass wants; one with no room is asked again by the timer. */
+static void quiet_sync(TestDot *me)
+{
+    s_session = me->quiet_want;
+    if ( me->quiet_want != me->quiet_held )
+    {
+        bool const radio_told = radio_quiet_request(me->quiet_want);
+        bool const net_told   = net_quiet_request(me->quiet_want);
+
+        if ( radio_told && net_told )
+        {
+            me->quiet_held = me->quiet_want;
+        }
+    }
+}
+
+/** @brief The quiet's timer: soon while an owner was not told, the idle bound while the pass runs. */
+static void quiet_arm(TestDot *me)
+{
+    if ( me->quiet_want != me->quiet_held )
+    {
+        timer_arm(&me->quiet_te, &me->quiet_stale, &me->quiet_for, (uint8_t)QUIET_RETRY,
+                  KODE_TEST_DOT_QUIET_RETRY_MS);
+    }
+    else if ( me->quiet_want )
+    {
+        timer_arm(&me->quiet_te, &me->quiet_stale, &me->quiet_for, (uint8_t)QUIET_IDLE,
+                  KODE_TEST_DOT_QUIET_IDLE_MS);
+    }
+    else
+    {
+        timer_stop(&me->quiet_te, &me->quiet_stale, &me->quiet_for);
+    }
+}
+
+/** @brief A station verb: the pass runs, and its idle bound starts again. */
+static void quiet_begin(TestDot *me)
+{
+    if ( !me->quiet_want )
+    {
+        me->quiet_want = true;
+        KLOG_N(TAG, "a station's pass: no network work until test_dot_end");
+    }
+    quiet_sync(me);
+    quiet_arm(me);
+}
+
+/** @brief The pass is over: the network goes back to its rules. */
+static void quiet_end(TestDot *me)
+{
+    me->quiet_want = false;
+    quiet_sync(me);
+    quiet_arm(me);
+}
+
+/** @brief TEST_DOT_QUIET_SIG: the idle bound, or a quiet asked again. */
+static void on_quiet(TestDot *me)
+{
+    uint8_t const why = me->quiet_for;
+
+    if ( timer_stale(&me->quiet_stale) )
+    {
+        return;
+    }
+    me->quiet_for = (uint8_t)QUIET_NONE;
+    if ( ((uint8_t)QUIET_IDLE == why) && me->quiet_want && ((uint8_t)MODE_DORMANT == me->mode)
+        && ((uint8_t)ACT_NONE == me->act) )
+    {
+        uint32_t const idle_s = KODE_TEST_DOT_QUIET_IDLE_MS / TD_MS_PER_S;
+
+        KLOG_W(TAG, "no station verb for %u s and nothing woken: the pass is taken as over",
+               (unsigned)idle_s);
+        me->quiet_want = false;
+    }
+    quiet_sync(me);
+    quiet_arm(me);
+}
+
 /* ---- The wake ----------------------------------------------------------------- */
 
 /** @brief The published signals a woken AO listens to. */
 static const enum_t WAKE_SUBS[] = {
     (enum_t)EXP_POWER_SIG,    (enum_t)DISPLAY_STATE_SIG, (enum_t)AUTOTEST_BEGIN_SIG, (enum_t)AUTOTEST_ROW_SIG,
     (enum_t)AUTOTEST_END_SIG, (enum_t)BTN_TEST_SIG,      (enum_t)TOUCH_TEST_SIG,     (enum_t)TEST_RESULT_SIG,
+    (enum_t)APP_FLASH_DONE_SIG, (enum_t)APP_FLASH_FAIL_SIG,
 };
 
 /** @brief Listen to the owners' answers, or stop. */
@@ -1032,11 +1206,15 @@ static void wake_done(TestDot *me)
     me->wake_ms = khal_time_ms() - me->wake_t0;
     me->mode    = (uint8_t)MODE_AWAKE;
     me->act     = (uint8_t)ACT_NONE;
-    /* The level before, then full: AO_Display answers the first before it takes the second. */
+    /* The level before, then the pass's: AO_Display answers the first before it takes the second. */
     me->bright_wait = true;
     display_state_request();
-    display_brightness_request(TD_BRIGHT_FULL, false);
+    display_brightness_request(me->glass_pct, false);
     KLOG_N(TAG, "wake: the station answers (%lu ms)", (unsigned long)me->wake_ms);
+    if ( (uint8_t)TD_BRIGHT_FULL != me->glass_pct )
+    {
+        KLOG_W(TAG, "wake: the glass at %u%%, set by test_dot_bright", (unsigned)me->glass_pct);
+    }
     verb_start(me, &me->pend);
 }
 
@@ -1052,6 +1230,24 @@ static void cam_submit(TestDot *me)
     {
         KLOG_E(TAG, "camera: step %u not taken by the worker", (unsigned)me->cam_step);
         cam_after(me, KODE_NO_RESOURCES);
+    }
+}
+
+/** @brief Write the storage image if one is armed: the card's file into the storage partition. */
+static void storage_start(TestDot *me)
+{
+    if ( '\0' != s_storage[0] )
+    {
+        appmgr_fast(true);
+        const char *word = "refused";
+        bool const asked = inst_ask(me, s_storage, (uint8_t)KODE_FLASH_DST_STORAGE);
+        me->storage_on = asked;
+        if ( asked )
+        {
+            word = "started";
+        }
+        run_rec(me, "storage=%s name=%s", word, s_storage);
+        s_storage[0] = '\0';
     }
 }
 
@@ -1079,6 +1275,27 @@ static void cam_finish(TestDot *me)
         me->cam_end_ms = khal_time_ms() - me->run_t0;
         ans_to(me, me->run_who, me->run_seq, 0U, NULL);
         me->line_open = false;
+        if ( '\0' != s_welcome[0] )
+        {
+            /* The rows a flash write starves ran before the camera, and the
+             * camera is done: the welcome app is written beside the operator. */
+            appmgr_fast(true);
+            const char *word = "refused";
+            bool const asked = inst_ask(me, s_welcome, (uint8_t)KFW_TARGET_APP);
+            me->welcome_on = asked;
+            if ( asked )
+            {
+                word = "started";
+            }
+            run_rec(me, "welcome=%s name=%s", word, s_welcome);
+            s_welcome[0] = '\0';
+        }
+        if ( !me->welcome_on )
+        {
+            /* No welcome app to wait for: the storage image goes now. With one,
+             * it goes when the welcome app's write ends. */
+            storage_start(me);
+        }
         /* The operator, and beside it the rest of the rows. */
         me->op = (uint8_t)OP_BUTTONS;
         (void)memset(me->keys, TEST_DOT_ST_PENDING, sizeof(me->keys));
@@ -1123,7 +1340,7 @@ static void cam_after(TestDot *me, kode_status_t rc)
     }
     else if ( (uint8_t)TD_CS_OFF == me->cam_step )
     {
-        display_brightness_request(TD_BRIGHT_FULL, false);
+        display_brightness_request(me->glass_pct, false);
     }
     else if ( (uint8_t)TD_CS_JUDGE == me->cam_step )
     {
@@ -1672,8 +1889,19 @@ static void place_after(TestDot *me, kode_status_t rc)
     }
     else
     {
-        rec(me, "place check n=%u marks=%d dx=%.2f dy=%.2f ang=%.2f win=\"%u,%u\"", (unsigned)me->place_tries,
-            (int)c->nmarks, c->place_dx, c->place_dy, c->place_ang, (unsigned)c->win_x, (unsigned)c->win_y);
+        uint32_t const lost = kdrv_ov5640_lost_take();
+
+        rec(me, "place check n=%u marks=%d dx=%.2f dy=%.2f ang=%.2f win=\"%u,%u\" lost=%lu", (unsigned)me->place_tries,
+            (int)c->nmarks, c->place_dx, c->place_dy, c->place_ang, (unsigned)c->win_x, (unsigned)c->win_y,
+            (unsigned long)lost);
+        if ( (0U < lost) && (0 == c->nmarks) )
+        {
+            me->place_lost++;
+        }
+        else
+        {
+            me->place_lost = 0U;
+        }
         good = c->place_ok && (fabs(c->place_dx) <= me->place_mm) && (fabs(c->place_dy) <= me->place_mm)
                && (fabs(c->place_ang) <= me->place_deg);
     }
@@ -1687,6 +1915,13 @@ static void place_after(TestDot *me, kode_status_t rc)
         {
             lend_to(me, me->cur_who, me->cur_seq, c->blob[loc].name, c->blob[loc].data, c->blob[loc].len);
         }
+        ans(me, 0U, NULL);
+    }
+    else if ( TD_PLACE_LOST_LOOKS <= me->place_lost )
+    {
+        /* The fixture's camera keeps dropping its settings: no seating
+         * can fix that, so the station is told now, not after mark_ms. */
+        rec(me, "place result=cam_lost looks=%u", (unsigned)me->place_lost);
         ans(me, 0U, NULL);
     }
     else if ( ms < me->place_mark_ms )
@@ -1719,6 +1954,8 @@ static void place_start(TestDot *me, TestDotReqEvt const *e)
     me->place_mm      = (double)e->a.place.dx_mm10 / TD_MM10_PER_MM;
     me->place_deg     = (double)e->a.place.deg10 / TD_MM10_PER_MM;
     me->place_tries   = 0U;
+    me->place_lost    = 0U;
+    (void)kdrv_ov5640_lost_take();
     me->place_t0      = khal_time_ms();
     me->act           = (uint8_t)ACT_PLACE;
     rec(me, "place mem psram_free=%lu largest=%lu", (unsigned long)khal_psram_free(),
@@ -2272,6 +2509,7 @@ static void end_next(TestDot *me)
                 me->res      = (uint8_t)RES_NONE;
                 me->end_wait = (uint8_t)END_WAIT_NONE;
                 me->mode     = (uint8_t)MODE_DORMANT;
+                quiet_end(me);
                 KLOG_N(TAG, "end: everything given back");
                 if ( me->end_answered )
                 {
@@ -2410,6 +2648,13 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
 {
     me->cur_who = e->who;
     me->cur_seq = e->seq;
+    /* The pads loop is not held: the UART takes its frames in hardware, and
+     * each frame's wait has room for a flash erase (kdrv_dock_loop.c). */
+    if ( ((uint8_t)TEST_DOT_VERB_BOOST == e->verb) || ((uint8_t)TEST_DOT_VERB_RELAYS == e->verb)
+        || ((uint8_t)TEST_DOT_VERB_ADC == e->verb) )
+    {
+        appmgr_hold(true);
+    }
     if ( verb_needs_cam(e->verb) && (NULL == me->cam) )
     {
         me->cam = td_cam_alloc();
@@ -2458,6 +2703,12 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
             break;
         case (uint8_t)TEST_DOT_VERB_INFO:
             info_answer(me);
+            break;
+        case (uint8_t)TEST_DOT_VERB_BRIGHT:
+            /* The bench's dim panel: the level the next passes put the glass at, until the next boot. */
+            me->glass_pct = e->a.pct;
+            rec(me, "bright pct=%u", (unsigned)me->glass_pct);
+            ans(me, 0U, NULL);
             break;
         case (uint8_t)TEST_DOT_VERB_LOCK:
             if ( khal_nvs_set_u8(KODE_STATION_NVS_NS, KODE_TEST_DOT_LOCK_KEY, KODE_TEST_DOT_LOCK_ON) == KODE_OK )
@@ -2577,6 +2828,7 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
                  * and the end gives the glass back whatever woke. With no
                  * test screen up the host takes it as nothing. */
                 screen_ask(me, TEST_DOT_SCR_END, NULL, 0U);
+                quiet_end(me);
                 ans(me, 0U, NULL);
             }
             else
@@ -2593,11 +2845,25 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
 /** @brief A station verb: the lock first, then whether anything is in the way, then the wake. */
 static void on_req(TestDot *me, TestDotReqEvt const *e)
 {
+    if ( s_inst_owed && (me->welcome_on || me->storage_on) )
+    {
+        s_inst_owed = false;
+        if ( !appmgr_image_ask((uint8_t)KFW_SRC_SD, s_inst_file, s_inst_dst, false, &me->super) )
+        {
+            td_inst_end(me, false);
+        }
+    }
+
     bool const is_end = ((uint8_t)TEST_DOT_VERB_END == e->verb);
     bool const run_verb = ((uint8_t)TEST_DOT_VERB_RUN == e->verb) || ((uint8_t)TEST_DOT_VERB_PLACE == e->verb)
                           || ((uint8_t)TEST_DOT_VERB_CAMERA == e->verb);
+    bool const refused = me->locked || (me->locked_now && !is_end);
 
-    if ( me->locked || (me->locked_now && !is_end) )
+    if ( (!refused) && (!is_end) )
+    {
+        quiet_begin(me);
+    }
+    if ( refused )
     {
         ans_to(me, e->who, e->seq, TD_ERR_REJECT, "locked");
     }
@@ -2860,12 +3126,15 @@ void TestDot_ctor(void)
     TestDot * const me = &l_td;
 
     (void)memset(me, 0, sizeof(*me));
+    me->glass_pct = (uint8_t)TD_BRIGHT_FULL;
     QActive_ctor(&me->super, Q_STATE_CAST(&TestDot_initial));
     QTimeEvt_ctorX(&me->tmo, &me->super, TEST_DOT_TMO_SIG, 0U);
     QTimeEvt_ctorX(&me->rest, &me->super, TEST_DOT_REST_SIG, 0U);
     QTimeEvt_ctorX(&me->watch, &me->super, TEST_DOT_WATCH_SIG, 0U);
     QTimeEvt_ctorX(&me->drain, &me->super, TEST_DOT_DRAIN_SIG, 0U);
+    QTimeEvt_ctorX(&me->quiet_te, &me->super, TEST_DOT_QUIET_SIG, 0U);
     s_run_going = false;
+    s_session   = false;
 }
 
 /** @brief Initial transition: read the lock, and nothing more - no claim, no allocation, no rail. */
@@ -2884,6 +3153,65 @@ static QState TestDot_initial(TestDot * const me, void const * const par)
     return Q_TRAN(&TestDot_active);
 }
 
+/**
+ * @brief An install this AO asked for has ended: say which, and start the one that waits for it.
+ *
+ * The welcome app goes first and the storage image after it, whether the welcome app
+ * installed or not.
+ *
+ * @param me TestDot.
+ * @param ok true when it installed.
+ */
+static void td_inst_end(TestDot *me, bool ok)
+{
+    const char *word = "failed";
+    if ( ok )
+    {
+        word = "installed";
+    }
+    if ( me->welcome_on )
+    {
+        me->welcome_on = false;
+        run_rec(me, "welcome=%s", word);
+        storage_start(me);
+    }
+    else if ( me->storage_on )
+    {
+        me->storage_on = false;
+        run_rec(me, "storage=%s", word);
+    }
+    else
+    {
+        /* An install that was not this AO's: nothing to note. */
+    }
+    if ( !me->welcome_on && !me->storage_on )
+    {
+        appmgr_fast(false);
+    }
+}
+
+/**
+ * @brief AppMgr turned this AO's install away for now: it is asked again at the next
+ *        station verb while TD_INSTALL_BUSY_MS has not run out since the first ask, and
+ *        fails after. AppMgr busy with somebody else's job is not this Kode's fault.
+ * @param me TestDot.
+ */
+static void inst_busy(TestDot *me)
+{
+    if ( (me->welcome_on || me->storage_on) && ((khal_time_ms() - s_inst_t0) < TD_INSTALL_BUSY_MS) )
+    {
+        if ( !s_inst_owed )
+        {
+            KLOG_W(TAG, "appmgr busy; '%s' is asked again", s_inst_file);
+        }
+        s_inst_owed = true;
+    }
+    else
+    {
+        td_inst_end(me, false);
+    }
+}
+
 /** @brief The AO's one state: what it does now is in @c mode and @c act. */
 static QState TestDot_active(TestDot * const me, QEvt const * const e)
 {
@@ -2893,6 +3221,29 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
     {
         case TEST_DOT_REQ_SIG:
             on_req(me, Q_EVT_CAST(TestDotReqEvt));
+            break;
+        case APP_FLASH_DONE_SIG:
+            td_inst_end(me, true);
+            break;
+        case APP_FLASH_FAIL_SIG:
+            /* "Refused for now" (KFAIL_BUSY: AO_Storage had another file
+             * open, or the card stayed busy while an app the write would
+             * evict was copied to it) is asked again, like a busy verdict. */
+            if ( (uint8_t)KFAIL_BUSY == Q_EVT_CAST(AppFlashFailEvt)->why )
+            {
+                inst_busy(me);
+            }
+            else
+            {
+                td_inst_end(me, false);
+            }
+            break;
+        case APP_REQ_RSP_SIG:
+            /* Busy is the one verdict that comes with no FLASH_FAIL after it. */
+            if ( (uint8_t)APP_REQ_BUSY == Q_EVT_CAST(AppReqRspEvt)->verdict )
+            {
+                inst_busy(me);
+            }
             break;
         case TEST_DOT_JOB_SIG:
             on_job(me, Q_EVT_CAST(KqpWorkerDoneEvt));
@@ -2928,6 +3279,9 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
         }
         case TEST_DOT_BACK_SIG:
             on_back(me);
+            break;
+        case TEST_DOT_QUIET_SIG:
+            on_quiet(me);
             break;
         case TEST_DOT_SCREEN_DONE_SIG:
             if ( me->scr_waiting && (Q_EVT_CAST(TestDotScreenDoneEvt)->kind == me->scr_wait)
@@ -3004,6 +3358,11 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
 bool test_dot_busy(void)
 {
     return s_run_going;
+}
+
+bool test_dot_session(void)
+{
+    return s_session;
 }
 
 void test_dot_screen_done(uint8_t kind, uint8_t seq)

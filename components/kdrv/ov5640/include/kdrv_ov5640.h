@@ -122,6 +122,12 @@ kode_status_t kdrv_ov5640_grab(uint32_t skip, uint32_t timeout_ms, const uint8_t
 void kdrv_ov5640_release(void);
 
 /**
+ * @brief How many times a grab found the sensor's settings lost since the last call, and zero it.
+ * @return The count.
+ */
+uint32_t kdrv_ov5640_lost_take(void);
+
+/**
  * @brief Keep @p cfg and write it to the sensor now if the camera is open.
  *
  * A change the sensor takes only with its mode's registers (the flips, or a

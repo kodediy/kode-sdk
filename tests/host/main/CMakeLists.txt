@@ -588,7 +588,8 @@ set_source_files_properties(
 # The E5 final test is the station's, and only the station's: the option is
 # scoped to AO_TestDot, the console that hands it `test component=all` and
 # refuses factory_reset during a run, the support that brings the AO up and
-# the case files. Project-wide it would take KODE_PRIO_USER_LOW, the level
+# the case files, and AO_Imu and AO_Haptic, whose rows wait and retry for a
+# station's pass. Project-wide it would take KODE_PRIO_USER_LOW, the level
 # ao_spy.c stands on. The case files refuse to build without it.
 set_property(SOURCE
     "${SDK_DIR}/components/kaos/console/src/console_ao.c"
@@ -596,7 +597,11 @@ set_property(SOURCE
     "${SDK_DIR}/components/kaos/test_dot/src/test_dot_worker.c"
     "${SDK_DIR}/components/kaos/test_dot/src/test_dot_cam.c"
     "${SDK_DIR}/components/kaos/test_dot/src/test_dot_verbs.c"
+    "${SDK_DIR}/components/kaos/imu/src/imu_ao.c"
+    "${SDK_DIR}/components/kaos/haptic/src/haptic_ao.c"
     "${CMAKE_CURRENT_LIST_DIR}/test_dot_support.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../cases/test_imu_ao.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../cases/test_haptic_ao.c"
     "${CMAKE_CURRENT_LIST_DIR}/../cases/test_test_dot_ao.c"
     "${CMAKE_CURRENT_LIST_DIR}/../cases/test_test_dot_run.c"
     "${CMAKE_CURRENT_LIST_DIR}/../cases/test_console_test_dot.c"

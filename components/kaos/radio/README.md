@@ -22,6 +22,8 @@ On the console a valid line from the port that asked for a scan takes the scan's
 
 An update of the C5's firmware, a join in flight, the board's own round, the production row and the radio check are not cut. The page linked above says what each request is answered behind them.
 
+A round of the board's rest, to ASLEEP or to OFF, ends the search of the board's own round: its sweep ends after the step on the air, and no look at a channel, no sweep and no join is begun after the job in hand. The round of the rest is answered busy (`radio busy`) until that job is back, and a join already begun goes to its end. The next round over the remembered networks is the wait's, or the wake's: a board that slept looks at once. An app's rest of the radio cuts nothing.
+
 Wi-Fi frames
 ------------
 

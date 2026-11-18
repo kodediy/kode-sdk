@@ -65,6 +65,9 @@ _Static_assert(KODE_LOWPOWER_PARTICIPANTS <= WAITING_BITS,
  *         KODE_LOWPOWER_WHY_USED, the refusal that means a person has the board. */
 #define WHY_INPUT       "board used"
 
+/** @brief Why a round is abandoned by a line AO_Scheduler handed the console. */
+#define WHY_LINE        "scheduled line"
+
 /** @brief Why a rest yields to another's request that waits to begin again.
  *         With WHO_REQUEST it is KODE_LOWPOWER_WHY_PENDING. */
 #define WHY_PENDING     "request pending"
@@ -178,14 +181,17 @@ typedef struct {
                                    *   owner is asked again. */
     Tmo         idle_tmo;         /**< LOWPOWER_IDLE_TMO_SIG: the idle time, AWAKE only. */
     Tmo         dark_tmo;         /**< LOWPOWER_DARK_TMO_SIG: the bound of a dark wake. */
-    Tmo         retry_tmo;        /**< LOWPOWER_RETRY_TMO_SIG: the wait before a requested round begins again. */
+    Tmo         retry_tmo;        /**< LOWPOWER_RETRY_TMO_SIG: the wait before a busy owner is asked
+                                   *   again in its round, or before a requested round that met a
+                                   *   silent owner begins again. */
     Participant parts[KODE_LOWPOWER_PARTICIPANTS]; /**< The table lowpower_join() fills. */
     uint8_t     joined;           /**< Entries of parts in use.              */
     bool        sealed;           /**< A round has begun: joins are refused. */
     uint32_t    round;            /**< The number of the last round begun.   */
     uint32_t    waiting;          /**< Bit n: participant n has not answered.*/
-    uint32_t    busy;             /**< Bit n: participant n answered busy to an order for OFF and is asked
-                                   *   again when retry_tmo runs out (round_order()). */
+    uint32_t    busy;             /**< Bit n: participant n answered busy to an order for OFF or to a
+                                   *   request inside its window, and is asked again when retry_tmo
+                                   *   runs out (round_order(), round_waits()). */
     uint32_t    held;             /**< Bit n: participant n owns what an app has at rest, and the
                                    *   round asks it last (round_begin()). */
     uint8_t     state;            /**< The board's state, a kode_lp_state_t. */
@@ -194,8 +200,8 @@ typedef struct {
     uint8_t     round_src;        /**< Who asked for the round (the request's
                                    *   source), KODE_LOG_SRC_NONE when no one
                                    *   did: the timers and the inputs.        */
-    bool        retry_on;         /**< A requested round was abandoned for a busy or silent owner
-                                   *   and begins again when retry_tmo runs out; target and
+    bool        retry_on;         /**< A requested round was abandoned for a silent owner and
+                                   *   begins again when retry_tmo runs out; target and
                                    *   round_src still name the request.      */
     uint64_t    request_us;       /**< khal_time_us() when the request in hand came in. */
     bool        power_ok;         /**< khal_power_init() succeeded.          */
@@ -790,7 +796,7 @@ static void round_leave(LowPower * const me, uint8_t cause)
     tmo_stop(&me->round_tmo);
     if ( !me->retry_on )
     {
-        /* An order's wait to ask a busy owner again (round_order()). */
+        /* The wait to ask a busy owner again (round_order(), round_waits()). */
         tmo_stop(&me->retry_tmo);
     }
     me->waiting = 0U;
@@ -837,9 +843,10 @@ static QState round_abort(LowPower * const me, uint8_t cause)
 /**
  * @brief Whether a moment falls inside the window a request is asked again in.
  *
- * One window for both kinds of request: a requested round is begun again
- * inside it (round_busy(), awake_retry()), and so is the busy step of an
- * app's rest (part_busy()).
+ * One window for both kinds of request: inside it a requested round waits for
+ * a busy owner (round_waits()) and is begun again after a silent one
+ * (round_silent(), awake_retry()), and so is the busy step of an app's rest
+ * (part_busy()).
  *
  * @param since_us khal_time_us() when the request came in.
  * @param at_us    The moment judged.
@@ -871,7 +878,24 @@ static void retry_stop(LowPower * const me, bool answer)
 }
 
 /**
- * @brief Abandon the round because an owner was busy or did not answer.
+ * @brief Whether the running round waits for an owner that answers busy.
+ *
+ * A round that a request began, while the window of the request lasts: the
+ * round stays open, the owners that rested stay at rest, and the busy owner
+ * alone is asked again (resting_retry()). An order waits too, on its own
+ * budget (round_order()).
+ *
+ * @param me The AO, Resting.
+ * @return true when a busy answer does not end the round.
+ */
+static bool round_waits(const LowPower *me)
+{
+    return ((uint8_t)KODE_LP_CAUSE_REQUEST == me->cause)
+           && retry_window_open(me->request_us, khal_time_us());
+}
+
+/**
+ * @brief Abandon the round because an owner did not answer.
  *
  * A round that a request began is not given up while the window of the
  * request lasts: the board is AWAKE and the round begins again after
@@ -882,11 +906,10 @@ static void retry_stop(LowPower * const me, bool answer)
  * @param cause What ended the round, a kode_lp_cause_t.
  * @return The transition back to AWAKE.
  */
-static QState round_busy(LowPower * const me, uint8_t cause)
+static QState round_silent(LowPower * const me, uint8_t cause)
 {
     QState status;
-    bool const again = ((uint8_t)KODE_LP_CAUSE_REQUEST == me->cause)
-                       && retry_window_open(me->request_us, khal_time_us());
+    bool const again = round_waits(me);
 
     if ( again )
     {
@@ -1549,14 +1572,15 @@ static uint8_t input_cause(uint8_t src)
 }
 
 /**
- * @brief Whether a use of the board abandons the round that is running.
+ * @brief Whether a button or a touch abandons the round that is running.
  *
  * A round that idle time began, and one that a rest asked for: a person at the
  * board wins over them. A round somebody else asked for stands (BOT, handled
- * apart, is the exception).
+ * apart, is the exception): the thumb that asked must not cancel it. A console
+ * line is judged apart (resting_line()).
  *
  * @param me The AO, Resting.
- * @return true when an input abandons the round.
+ * @return true when the input abandons the round.
  */
 static bool input_abandons(const LowPower *me)
 {
@@ -2501,15 +2525,18 @@ static QState resting_ready(LowPower * const me, const LowPowerReadyEvt *a)
         KLOG_D(TAG, "answer dropped: participant %u, round %u (this is %u)",
                (unsigned)a->who, (unsigned)a->round, (unsigned)me->round);
     }
-    else if ( a->busy && round_order(me) )
+    else if ( a->busy && (round_order(me) || round_waits(me)) )
     {
         char why[KODE_LOWPOWER_WHY_MAX];
 
+        /* The round stays open and no STATE(AWAKE) goes out: the owners that
+         * rested stay at rest, and this one is asked again, alone. */
         why_copy(why, sizeof(why), a->why);
         refusal_set(me->parts[a->who].name, why);
         me->busy |= (1U << a->who);
-        KLOG_N(TAG, "OFF waits for %s (%s): asked again in %u ms",
-               me->parts[a->who].name, why, (unsigned)KODE_LOWPOWER_REQUEST_RETRY_MS);
+        KLOG_N(TAG, "%s waits for %s (%s): asked again in %u ms",
+               state_name(me->target), me->parts[a->who].name, why,
+               (unsigned)KODE_LOWPOWER_REQUEST_RETRY_MS);
         if ( !me->retry_tmo.live )
         {
             tmo_start(&me->retry_tmo, KODE_LOWPOWER_REQUEST_RETRY_MS);
@@ -2521,7 +2548,7 @@ static QState resting_ready(LowPower * const me, const LowPowerReadyEvt *a)
 
         why_copy(why, sizeof(why), a->why);
         refusal_set(me->parts[a->who].name, why);
-        status = round_busy(me, me->cause);
+        status = round_abort(me, me->cause);
     }
     else
     {
@@ -2537,12 +2564,47 @@ static QState resting_ready(LowPower * const me, const LowPowerReadyEvt *a)
         }
         else
         {
-            if ( round_order(me) )
-            {
-                tmo_stop(&me->retry_tmo);
-            }
+            tmo_stop(&me->retry_tmo);
             status = round_done(me);
         }
+    }
+    return status;
+}
+
+/**
+ * @brief A console line came in while a round runs: the round is abandoned,
+ *        whatever began it, unless it is an order.
+ *
+ * The console runs the line next. An owner that has answered ready would take
+ * the work the line asks for and could not take its answer back, so the board
+ * would rest with that work begun: the tick stops under it. Whoever asked for
+ * the round is told, once, and nothing begins it again. The scheduler's own
+ * line abandons the round too, and is still nobody at the board.
+ *
+ * @param me  The AO, Resting.
+ * @param src The KODE_CONSOLE_SRC_* port the line came on.
+ * @return The transition back to AWAKE, or handled for an order.
+ */
+static QState resting_line(LowPower * const me, uint8_t src)
+{
+    QState status = Q_HANDLED();
+    bool const sched = input_is_sched(src);
+
+    if ( !sched )
+    {
+        me->used = true;
+    }
+    if ( !round_order(me) )
+    {
+        if ( sched )
+        {
+            refusal_set(WHO_INPUT, WHY_LINE);
+        }
+        else
+        {
+            refusal_set(WHO_INPUT, WHY_INPUT);
+        }
+        status = round_abort(me, me->cause);
     }
     return status;
 }
@@ -2551,24 +2613,31 @@ static QState resting_ready(LowPower * const me, const LowPowerReadyEvt *a)
  * @brief The round's budget ran out: name whoever has not answered.
  *
  * An order goes OFF all the same (round_order()); any other round is given up.
+ * An owner that answered busy and waits to be asked again has answered: with
+ * nobody else waited for, the budget ends nothing (resting_retry() counts it
+ * again from the next ask).
  *
  * @param me The AO, Resting.
- * @return The transition back to AWAKE, or to OFF for an order.
+ * @return The transition back to AWAKE, or to OFF for an order; handled when
+ *         only busy owners are waited for.
  */
 static QState resting_timeout(LowPower * const me)
 {
     bool const order = round_order(me);
+    uint32_t named = me->waiting & ~me->busy;   /* who said nothing */
     uint32_t budget = KODE_LOWPOWER_ROUND_MS;
     bool first = true;
-    QState status;
+    QState status = Q_HANDLED();
 
     if ( order )
     {
+        /* An order's budget ends the wait for a busy owner too. */
+        named  = me->waiting;
         budget = KODE_LOWPOWER_ORDER_MS;
     }
     for ( uint8_t i = 0U; i < me->joined; i++ )
     {
-        if ( (me->waiting & (1U << i)) != 0U )
+        if ( (named & (1U << i)) != 0U )
         {
             KLOG_W(TAG, "%s did not answer round %u in %u ms",
                    me->parts[i].name, (unsigned)me->round, (unsigned)budget);
@@ -2586,28 +2655,70 @@ static QState resting_timeout(LowPower * const me)
         me->busy = 0U;
         status   = round_done(me);
     }
+    else if ( 0U != named )
+    {
+        status = round_silent(me, me->cause);
+    }
     else
     {
-        status = round_busy(me, me->cause);
+        /* Only busy owners are waited for: the wait asks them again. */
     }
     return status;
 }
 
 /**
- * @brief The wait in an order ran out: ask the owners that were busy again.
+ * @brief The wait ran out: ask the owners that were busy again.
  *
  * Each is posted its own copy of the round, the same number, and the others
- * are left at rest. One that cannot be posted to keeps its place: the order's
- * budget ends the wait for it (resting_timeout()).
+ * are left at rest. One that cannot be posted to keeps its place: the budget
+ * ends the wait for it (resting_timeout()).
  *
- * @param me The AO, Resting an order.
+ * @param me The AO, Resting.
  */
-static void order_ask_again(LowPower * const me)
+static void round_ask_again(LowPower * const me)
 {
     uint32_t const again = me->busy;
 
     me->busy = 0U;
     round_post(me, again);
+}
+
+/**
+ * @brief The wait before a busy owner is asked again ran out.
+ *
+ * An order asks again until its own budget ends it. A request asks again
+ * inside its window, the round's budget counted from this ask; past the
+ * window the round is given up and whoever asked is told, with the reason of
+ * the last busy answer.
+ *
+ * @param me The AO, Resting, an owner busy.
+ * @return The QP status.
+ */
+static QState resting_retry(LowPower * const me)
+{
+    QState status = Q_HANDLED();
+
+    if ( round_order(me) )
+    {
+        round_ask_again(me);
+    }
+    else if ( 0U == me->busy )
+    {
+        /* Nobody is waited for as busy. */
+    }
+    else if ( round_waits(me) )
+    {
+        round_ask_again(me);
+        tmo_start(&me->round_tmo, KODE_LOWPOWER_ROUND_MS);
+    }
+    else
+    {
+        KLOG_N(TAG, "the request for %s gave up after %u ms: %s",
+               state_name(me->target),
+               (unsigned)KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS, s_refusal);
+        status = round_abort(me, me->cause);
+    }
+    return status;
 }
 
 /* ---- An app's rest, part by part ---------------------------------------------------
@@ -3531,7 +3642,7 @@ static bool part_late_ready(LowPower * const me, const LowPowerReadyEvt *a)
  * @brief The owner asked in this step is busy: ask it again later, or stop there.
  *
  * Busy is its answer, or no room for the wake that brings its part back
- * (part_ask_up()). As a requested round is begun again (round_busy()), the
+ * (part_ask_up()). As a requested round is begun again (round_silent()), the
  * owner is asked again KODE_LOWPOWER_REQUEST_RETRY_MS later, on the step's
  * own one-shot, as long as that ask falls inside the request's window. Past
  * it the sequence stops with this reason, and what rested stays at rest.
@@ -4450,11 +4561,14 @@ static QState LowPower_resting(LowPower * const me, QEvt const * const e)
             break;
         }
         case LOWPOWER_RETRY_TMO_SIG: {
-            if ( tmo_fresh(&me->retry_tmo) && round_order(me) )
+            if ( tmo_fresh(&me->retry_tmo) )
             {
-                order_ask_again(me);
+                status = resting_retry(me);
             }
-            status = Q_HANDLED();
+            else
+            {
+                status = Q_HANDLED();
+            }
             break;
         }
         case IOEXP_INPUT_SIG: {
@@ -4481,13 +4595,10 @@ static QState LowPower_resting(LowPower * const me, QEvt const * const e)
             break;
         }
         case BUTTON_EVT_SIG:
-        case TOUCH_EVT_SIG:
-        case LOWPOWER_INPUT_SIG: {
-            /* The scheduler's own line is not somebody at the board, and nor
-             * is the release of a contact that stopped counting. */
-            if ( (((QSignal)LOWPOWER_INPUT_SIG == e->sig)
-                  && input_is_sched(Q_EVT_CAST(LowPowerInputEvt)->src))
-                || (((QSignal)TOUCH_EVT_SIG == e->sig) && Q_EVT_CAST(TouchEvt)->stale) )
+        case TOUCH_EVT_SIG: {
+            /* The release of a contact that stopped counting is nobody at
+             * the board. */
+            if ( ((QSignal)TOUCH_EVT_SIG == e->sig) && Q_EVT_CAST(TouchEvt)->stale )
             {
                 status = Q_HANDLED();
             }
@@ -4504,6 +4615,10 @@ static QState LowPower_resting(LowPower * const me, QEvt const * const e)
                     status = Q_HANDLED();
                 }
             }
+            break;
+        }
+        case LOWPOWER_INPUT_SIG: {
+            status = resting_line(me, Q_EVT_CAST(LowPowerInputEvt)->src);
             break;
         }
         case POWER_EVT_SIG: {

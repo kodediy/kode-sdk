@@ -470,6 +470,8 @@ typedef struct {
     QTimeEvt    pacer;      /**< Spaces every kind of slice; see h_help.    */
     kcli_payload_t pay;     /**< The base64 producer's place in its source. */
     char        file_name[KODE_APP_FILE_MAX];  /**< screenshot / file_get.  */
+    bool        file_sha;   /**< KCLI_FILE is file_sha: hash, do not send.  */
+    uint32_t    sha_bytes;  /**< file_sha: the bytes hashed so far.         */
 
     /* appdata_ls / appdata_info: the gather. A slot holds a .bin's file name
      * until its manifest is read, then the project name, so it is as wide as
@@ -1821,6 +1823,8 @@ static void h_factory_reset(Console *me, const kcmd_t *c, const karg_val_t *v)
  * all happened), not an accept:
  *
  *     host:  install src="terminal" dst=app size=N crc32=C run=on name="x"
+ *     board: >|wait                 (one a second while an app it evicts is
+ *                                    copied to the card first, if any is)
  *     board: >|evicted name="y" kept=off   (one per app it costs, if any)
  *     board: >|ready chunk=4096     (destination open, wire switched to raw)
  *     host:  <4096 raw bytes>
@@ -1929,8 +1933,10 @@ void console_reply_app_verdict(uint8_t verdict)
  * @brief install src=<where from> dst=<where to> [run=on|off]
  *        [size=<n> crc32=<n>].
  *
- * `dst=` is `os`, `c5`, `pending` (the mailbox) or `app`, which boots once
- * only on `run=on`; `run` is refused for any other `dst`. `src=` is
+ * `dst=` is `os`, `c5`, `pending` (the mailbox), `storage` (the FAT
+ * partition, written as it is from a file; not from `terminal` or `pending`)
+ * or `app`, which boots once only on `run=on`; `run` is refused for any
+ * other `dst`. `src=` is
  * `fs:name`, `sd:name`, `http(s)://...`, `"pending"` or `"terminal"`. Only
  * `"terminal"` takes `size` and `crc32`, and only there is `>ok` a result: off
  * a medium or the mailbox it says AO_AppMgr took the install, and the
@@ -1948,6 +1954,14 @@ static void h_install(Console *me, const kcmd_t *c, const karg_val_t *v)
         return;
     }
     bool const run = v[2].present && v[2].b;
+
+    if ( ((uint8_t)KODE_FLASH_DST_STORAGE == dst)
+        && ((strcmp(spec, "terminal") == 0) || (strcmp(spec, "pending") == 0)) )
+    {
+        /* The partition's image comes from a file on a medium. */
+        console_reply_err(KCLI_ERR_VALUE, "dst");
+        return;
+    }
 
     /* Only a stream into the region needs telling what it replaces: a medium's
      * image is read before the room is made. */
@@ -2348,11 +2362,12 @@ static void h_appdata_rm(Console *me, const kcmd_t *c, const karg_val_t *v)
  *  answers every fetch, so this only bounds a lost answer. */
 #define KCLI_APPDATA_GET_MS  ((2U * KODE_APPMGR_OPEN_MS) + APPMGR_TIDY_MS + KCLI_CMD_TIMEOUT_MS)
 
-/** @brief appdata_get name=<project> url=<base> [install=on]: fetch the app's
+/** @brief appdata_get name=<project> url=<base> [install=off]: fetch the app's
  *        data folder from `<base>app.json` and `<base>icon.k64`; closed by
  *        APPDATA_GET_RSP_SIG, or at once when the request is refused.
- *        `install=on` says an install of the app comes next, and the card the
- *        fetch raises stays up for it (appmgr_appdata_get_request()). */
+ *        An install of the app comes next, and the card the fetch raises
+ *        stays up for it at 0 % (appmgr_appdata_get_request()), unless
+ *        `install=off` says the fetch is all there is. */
 static void h_appdata_get(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
     if ( console_owner_absent(&kaos_storage_start) )
@@ -2369,7 +2384,8 @@ static void h_appdata_get(Console *me, const kcmd_t *c, const karg_val_t *v)
         return;
     }
     cmd_begin(me, KCLI_APPDATA_GET, c->verb);
-    bool const install = v[2].present && v[2].b;
+    /* A line that does not say is the store's, with its install behind it. */
+    bool const install = (!v[2].present) || v[2].b;
     kode_status_t const rc = appmgr_appdata_get_request(v[0].s, v[1].s, install,
                                                         &me->super);
     if ( KODE_OK != rc )
@@ -6281,9 +6297,60 @@ static void h_file_get(Console *me, const kcmd_t *c, const karg_val_t *v)
     me->pay.total    = 0U;
     me->pay.borrowed = false;
     me->pay.n_carry  = 0U;
+    me->file_sha     = false;
 
     cmd_begin(me, KCLI_FILE, c->verb);
     storage_open_request(v[0].s, &me->super);
+}
+
+/**
+ * @brief file_sha name=<path>: the SHA-256 of a file, read on the board.
+ *
+ * The same read as file_get, but each chunk goes into the hash and back to
+ * AO_Storage instead of onto the wire. Answers
+ * `>|file name= size= medium=`, then `>|sha256=<64 hex> bytes=<n>` and `>ok`.
+ * A station checks an image on the card against the release before it
+ * installs it.
+ */
+static void h_file_sha(Console *me, const kcmd_t *c, const karg_val_t *v)
+{
+    if ( console_owner_absent(&kaos_storage_start) )
+    {
+        return;
+    }
+    if ( !kfw_sha256_start() )
+    {
+        console_reply_err(KCLI_ERR_BUSY, c->verb);
+        return;
+    }
+    (void)snprintf(me->file_name, sizeof(me->file_name), "%s", v[0].s);
+    me->pay.total    = 0U;
+    me->pay.borrowed = false;
+    me->pay.n_carry  = 0U;
+    me->file_sha     = true;
+    me->sha_bytes    = 0U;
+
+    cmd_begin(me, KCLI_FILE, c->verb);
+    storage_open_request(v[0].s, &me->super);
+}
+
+/** @brief file_sha's end of file: the digest, then the usual close. */
+static void file_sha_done(Console *me)
+{
+    uint8_t dg[KFW_SHA_LEN];
+    char    hex[(2U * KFW_SHA_LEN) + 1U];
+
+    if ( !kfw_sha256_end(dg) )
+    {
+        payload_fail(me, KCLI_ERR_REJECT);
+        return;
+    }
+    for ( uint32_t i = 0U; KFW_SHA_LEN > i; i++ )
+    {
+        (void)snprintf(&hex[2U * i], 3U, "%02x", (unsigned)dg[i]);
+    }
+    console_reply(">|sha256=%s bytes=%lu", hex, (unsigned long)me->sha_bytes);
+    payload_done(me);
 }
 
 /* ---- Handlers: halt and catch fire --------------------------------------- */
@@ -6310,7 +6377,7 @@ static void h_halt_and_catch_fire(Console *me, const kcmd_t *c, const karg_val_t
  */
 
 /** @brief `dst=`: where an image goes. Mirrors kfw_target_t's order. */
-static const char *const EN_DST[] = { "os", "app", "c5", "pending" };
+static const char *const EN_DST[] = { "os", "app", "c5", "pending", "storage" };
 
 /**
  * @brief `src=`: the prefixes, not the values.
@@ -6358,7 +6425,7 @@ static const char *const EN_COMPONENT[] = {
 #if CONFIG_KODEOS_RADIO
     "c5_user",
 #endif
-    "nfc_field", "rfid_field", "power_plug", "nfc_card", "rfid_card",
+    "nfc_field", "rfid_field", "power_plug", "nfc_card", "rfid_card", "haptic_pat",
     "main", "all", "user",
 };
 
@@ -6624,12 +6691,13 @@ _Static_assert((sizeof(A_EXP) / sizeof(A_EXP[0])) <= (size_t)KCLI_MAX_KEYS,
 static const karg_spec_t A_NAME[] = {
     { .key = "name", .required = true, .type = KARG_STRING },
 };
-/* `install=on` when the host sends the app's install next: the fetch's card
- * waits for it instead of closing between the two. */
+/* The host sends the app's install next, and the fetch's card waits for it
+ * instead of closing between the two: the store's line names no `install`,
+ * so that is what a bare line means. `install=off` is a fetch on its own. */
 static const karg_spec_t A_APPDATA_GET[] = {
     { .key = "name",    .required = true,  .type = KARG_STRING },
     { .key = "url",     .required = true,  .type = KARG_STRING },
-    { .key = "install", .required = false, .type = KARG_BOOL, .def = "off" },
+    { .key = "install", .required = false, .type = KARG_BOOL, .def = "on" },
 };
 /* `ls` may be typed bare (the cwd). `cd` and `stat` need a path, so a
  * mistyped key is not taken as the cwd. */
@@ -6831,6 +6899,7 @@ static const kcmd_t CMDS[] = {
     { "write",      A_WRITE,     4U, h_write      },
     { "file_put",   A_FILE_PUT,  3U, h_file_put   },
     { "file_get",   A_NAME,      1U, h_file_get   },
+    { "file_sha",   A_NAME,      1U, h_file_sha   },
     { "screenshot", A_SHOT,      6U, h_screenshot },
     { "install",    A_INSTALL,   6U, h_install    },
     { "appdata_ls",   NULL,      0U, h_appdata_ls   },
@@ -7272,6 +7341,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, APP_EVICTED_SIG);
     QActive_subscribe(&me->super, RECV_FAIL_SIG);
     QActive_subscribe(&me->super, RECV_AGAIN_SIG);
+    QActive_subscribe(&me->super, RECV_WAIT_SIG);
     QActive_subscribe(&me->super, RECV_STALL_SIG);
     QActive_subscribe(&me->super, APP_CAT_RSP_SIG);
     QActive_subscribe(&me->super, APP_ERASE_DONE_SIG);
@@ -7768,6 +7838,15 @@ static QState console_own(Console * const me, QEvt const * const e)
                     }
                     console_reply(">|step=%u result=noverdict why=%s",
                           (unsigned)t->step, why);
+                }
+                else if ( HAPTIC_TEST_CYCLE == t->phase )
+                {
+                    const char * const result = haptic_result(t->flags);
+                    console_reply(">|step=%u cycle=%u on=%ld off=%ld ratio=%lu.%lu result=%s",
+                          (unsigned)t->step, (unsigned)t->step,
+                          (long)t->on_x10, (long)t->floor_x10,
+                          (unsigned long)(t->ratio_x10 / 10UL),
+                          (unsigned long)(t->ratio_x10 % 10UL), result);
                 }
                 else if ( HAPTIC_TEST_FLOOR == t->phase )
                 {
@@ -8440,6 +8519,19 @@ static QState console_own(Console * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case RECV_WAIT_SIG: {
+            /* AO_AppMgr copies an app the image would evict to the card
+             * before it takes the wire: the host is told, on every one, and
+             * the command gets its time again, so a copy of any length is
+             * waited for while AO_AppMgr goes on saying it. */
+            if ( (uint8_t)KCLI_RECV == me->inflight )
+            {
+                console_extend(KCLI_CMD_TIMEOUT_MS);
+                console_reply(">|wait");
+            }
+            status = Q_HANDLED();
+            break;
+        }
         case RECV_ACK_SIG: {
             if ( (uint8_t)KCLI_RECV == me->inflight )
             {
@@ -8760,9 +8852,21 @@ static QState console_own(Console * const me, QEvt const * const e)
                 {
                     payload_fail(me, KCLI_ERR_REJECT);
                 }
+                else if ( d->eof && me->file_sha )
+                {
+                    file_sha_done(me);
+                }
                 else if ( d->eof )
                 {
                     payload_done(me);
+                }
+                else if ( me->file_sha )
+                {
+                    kfw_sha256_feed(storage_buf(d->idx), d->len);
+                    me->sha_bytes += (uint32_t)d->len;
+                    (void)QTimeEvt_rearm(&me->tmo,
+                                  KQP_TICKS_PER_MS(KCLI_CMD_TIMEOUT_MS));
+                    storage_next_request(d->idx);
                 }
                 else
                 {

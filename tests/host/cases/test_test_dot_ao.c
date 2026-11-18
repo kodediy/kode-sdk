@@ -23,6 +23,7 @@
 
 #define TD_BRIGHT_BEFORE  40U  /**< The glass's level before the wake, as AO_Display announces it. */
 #define TD_FULL           100  /**< The level the wake asks for. */
+#define TD_DIM            40U  /**< The bench's dim panel, as test_dot_bright sets it. */
 #define TD_LOOP_FRAMES    20U  /**< Frames the loop sends at each speed. */
 #define TD_STEP_MS        50U  /**< QP time a drive round gives the AO's rests when no job waits. */
 #define TD_ROUNDS         400U /**< Most drive rounds: well past the camera part's every step. */
@@ -242,6 +243,55 @@ TEST_CASE("test_place_wakes_and_all_finds_it_awake", "[test_dot_ao]")
     td_down();
 }
 
+/** @brief `test_dot_place` that keeps looking for the marks for @p mark_ms. */
+static void place_for(uint32_t mark_ms)
+{
+    TestDotReqEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.verb              = (uint8_t)TEST_DOT_VERB_PLACE;
+    r.a.place.win_x     = -1;
+    r.a.place.win_y     = -1;
+    r.a.place.mark_ms   = mark_ms;
+    r.a.place.dx_mm10   = (uint16_t)KODE_TEST_DOT_PLACE_MM10;
+    r.a.place.deg10     = (uint16_t)KODE_TEST_DOT_PLACE_DEG10;
+    td_verb(&r);
+}
+
+/* A fixture camera that keeps losing its settings sees no marks at any look,
+ * and waiting out the marks' time would blame the seating. Two looks in a row
+ * like that end the placement at once, with its own word. */
+TEST_CASE("test_place_with_the_camera_losing_its_settings_ends_cam_lost", "[test_dot_ao]")
+{
+    td_up();
+    fake_station_frames(true);
+    fake_station_lost(2U);
+    place_for(15000U);
+    td_wake_ok();
+    TEST_ASSERT_TRUE(drive_until("rec place result="));
+    TEST_ASSERT_TRUE(td_said("rec place result=cam_lost looks=2"));
+    TEST_ASSERT_TRUE(td_said("marks=0"));
+    TEST_ASSERT_TRUE(td_said("lost=2"));
+    TEST_ASSERT_FALSE_MESSAGE(td_said("n=3 "), "a third look after two lost ones");
+    td_end();
+    td_down();
+}
+
+TEST_CASE("test_place_with_one_lost_look_is_judged_as_before", "[test_dot_ao]")
+{
+    td_up();
+    fake_station_frames(true);
+    fake_station_lost(1U);
+    place_once();
+    td_wake_ok();
+    TEST_ASSERT_TRUE(drive_until("rec place result="));
+    TEST_ASSERT_TRUE(td_said("lost=1"));
+    TEST_ASSERT_FALSE_MESSAGE(td_said("cam_lost"), "one lost look ended the placement");
+    TEST_ASSERT_TRUE(td_said("rec place result=misplaced"));
+    td_end();
+    td_down();
+}
+
 TEST_CASE("test_end_gives_everything_back", "[test_dot_ao]")
 {
     TestDotReqEvt r;
@@ -305,6 +355,67 @@ TEST_CASE("test_end_gives_everything_back", "[test_dot_ao]")
     td_take();
     TEST_ASSERT_TRUE(td_said("state=dormant locked=0 run=none"));
     TEST_ASSERT_TRUE(td_said("j3=free"));
+    td_down();
+}
+
+/* The bench's dim panel: test_dot_bright sets the level the wake and the
+ * white after the dark photo put the glass at, and it stays for the next
+ * pass; the level before the wake still comes back at the end. */
+TEST_CASE("test_bright_sets_the_glass_of_the_wake_and_of_the_white", "[test_dot_ao]")
+{
+    TestDotReqEvt r;
+
+    td_up();
+    fake_station_frames(true);
+    (void)memset(&r, 0, sizeof(r));
+    r.verb  = (uint8_t)TEST_DOT_VERB_BRIGHT;
+    r.a.pct = (uint8_t)TD_DIM;
+    td_verb(&r);
+    td_take();
+    TEST_ASSERT_TRUE(td_said("rec bright pct=40"));
+    TEST_ASSERT_TRUE(td_said(">ok"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_station_probes(), "the verb wakes nothing");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, td_brightness(), "the glass is not touched before the wake");
+
+    for ( unsigned pass = 0U; 2U > pass; pass++ )
+    {
+        td_clear();
+        (void)memset(&r, 0, sizeof(r));
+        r.verb  = (uint8_t)TEST_DOT_VERB_CAMERA;
+        r.a.cam = (uint8_t)TEST_DOT_CAM_ALL;
+        td_verb(&r);
+        td_wake_ok();
+        TEST_ASSERT_EQUAL_INT_MESSAGE(TD_DIM, td_brightness(), "the wake asks for the bench's level");
+        display_says(TD_BRIGHT_BEFORE);
+        TEST_ASSERT_TRUE_MESSAGE(drive_until("test=cam_colour"), "the white was taken");
+        TEST_ASSERT_EQUAL_INT_MESSAGE(TD_DIM, td_brightness(), "after the dark photo, the bench's level again");
+        TEST_ASSERT_TRUE(drive_until(">"));
+        td_end();
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)TD_BRIGHT_BEFORE, td_brightness(), "the level before");
+    }
+    fake_station_frames(false);
+    td_down();
+}
+
+/* Without test_dot_bright the camera's white is taken at full. */
+TEST_CASE("test_without_bright_the_white_is_at_full", "[test_dot_ao]")
+{
+    TestDotReqEvt r;
+
+    td_up();
+    fake_station_frames(true);
+    (void)memset(&r, 0, sizeof(r));
+    r.verb  = (uint8_t)TEST_DOT_VERB_CAMERA;
+    r.a.cam = (uint8_t)TEST_DOT_CAM_ALL;
+    td_verb(&r);
+    td_wake_ok();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TD_FULL, td_brightness(), "the wake asks for full brightness");
+    display_says(TD_BRIGHT_BEFORE);
+    TEST_ASSERT_TRUE_MESSAGE(drive_until("test=cam_colour"), "the white was taken");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TD_FULL, td_brightness(), "after the dark photo, full again");
+    TEST_ASSERT_TRUE(drive_until(">"));
+    fake_station_frames(false);
+    td_end();
     td_down();
 }
 
@@ -619,7 +730,12 @@ static void radio_answer(uint8_t fw_patch, bool widest)
 {
     const QEvt *e = NULL;
 
+    /* The pass's quiet, told when its first verb came, goes first. */
     TEST_ASSERT_TRUE(xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE);
+    while ( (QSignal)RADIO_QUIET_REQ_SIG == e->sig )
+    {
+        TEST_ASSERT_TRUE(xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE);
+    }
     TEST_ASSERT_EQUAL_UINT(RADIO_PROBE_REQ_SIG, e->sig);
     RadioProbeEvt * const rsp = ((RadioProbeReqEvt const *)e)->rsp;
     rsp->status     = (uint8_t)KODE_OK;
@@ -737,5 +853,109 @@ TEST_CASE("test_a_discovery_of_a_whole_sweep_is_not_a_timeout", "[test_dot_ao]")
     radio_answer(TD_C5_FW_PATCH, false);
     td_take();
     TEST_ASSERT_FALSE(td_said("rec radio ok=1"));
+    td_down();
+}
+
+/* ---- The station's quiet ------------------------------------------------------------------ */
+
+/**
+ * @brief Read @p ao's queue for the pass's quiet: how many were told, and
+ *        the last one's edge. Every other event there is let go.
+ */
+static unsigned quiet_told(QActive *ao, enum_t sig, bool *last_on)
+{
+    const QEvt *e = NULL;
+    unsigned n = 0U;
+
+    while ( (NULL != ao->eQueue) && (xQueueReceive(ao->eQueue, &e, 0U) == pdTRUE) )
+    {
+        if ( (QSignal)sig == e->sig )
+        {
+            /* RadioQuietEvt and NetQuietEvt carry the same edge. */
+            *last_on = ((RadioQuietEvt const *)e)->on;
+            n++;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/* A join and its traffic during a pass take the CPU and the C5 from the
+ * motor's buzz, the compass and the radio check. The first verb quiets the
+ * network, the end gives it back, and both owners hear each edge once. */
+TEST_CASE("test_the_first_verb_quiets_the_network_and_the_end_gives_it_back", "[test_dot_ao][quiet]")
+{
+    bool on = false;
+
+    td_up();
+    td_verb_plain((uint8_t)TEST_DOT_VERB_INFO);
+    td_take();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on), "AO_Radio not told");
+    TEST_ASSERT_TRUE(on);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on), "AO_Net not told");
+    TEST_ASSERT_TRUE(on);
+
+    td_verb_plain((uint8_t)TEST_DOT_VERB_POLL);
+    td_take();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on), "told again at every verb");
+
+    td_verb_plain((uint8_t)TEST_DOT_VERB_END);
+    td_take();
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE_MESSAGE(on, "the end did not give the network back");
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE(on);
+    td_down();
+}
+
+TEST_CASE("test_a_woken_pass_keeps_quiet_until_its_end_gives_everything_back", "[test_dot_ao][quiet]")
+{
+    bool on = false;
+
+    td_up();
+    place_once();
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_TRUE(on);
+    td_wake_ok();
+    (void)td_job();
+    td_take();
+    td_wait_ms(KODE_TEST_DOT_QUIET_IDLE_MS + 1000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on),
+                                   "an awake pass let the network go on its idle bound");
+    td_end();
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE(on);
+    td_down();
+}
+
+TEST_CASE("test_a_locked_kode_leaves_the_network_alone", "[test_dot_ao][quiet]")
+{
+    bool on = false;
+
+    td_up_locked();
+    td_verb_plain((uint8_t)TEST_DOT_VERB_INFO);
+    td_take();
+    TEST_ASSERT_TRUE(td_said("msg=locked"));
+    TEST_ASSERT_EQUAL_UINT(0U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_EQUAL_UINT(0U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    td_down();
+}
+
+TEST_CASE("test_a_pass_whose_station_went_away_ends_on_the_idle_bound", "[test_dot_ao][quiet]")
+{
+    bool on = false;
+
+    td_up();
+    td_verb_plain((uint8_t)TEST_DOT_VERB_INFO);
+    td_take();
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    td_wait_ms(KODE_TEST_DOT_QUIET_IDLE_MS - 1000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on), "over before its bound");
+    td_wait_ms(2000U);
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE_MESSAGE(on, "a pass with no station kept the network quiet");
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE(on);
     td_down();
 }

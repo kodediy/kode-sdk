@@ -645,6 +645,57 @@ TEST_CASE("an automatic round whose sweep was cut is owed again, not ended", "[r
     probe_case_end();
 }
 
+/* A station's pass that begins during the boot's round cuts its sweep and
+ * ends the round, so the C5 is on no network when the radio check listens;
+ * the cut does not outlive the round, the check runs as always, and nothing
+ * joins until the pass ends. */
+TEST_CASE("a pass that begins during a round ends it, and the check after it runs whole",
+          "[radio_probe][quiet]")
+{
+    radio_probe_t req;
+
+    radio_fresh();
+    fake_ble_reset();
+    fake_time_reset();
+    go_up();
+    vault_lists(NET24);
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    TEST_ASSERT_TRUE(radio_quiet_request(true));
+    pump();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, run_real_sweep(), "the round's sweep was not cut");
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, s_sweep_rc);
+    TEST_ASSERT_TRUE(logged("the round stops here"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the round went on during the pass");
+    TEST_ASSERT_TRUE_MESSAGE(run_real_sweep() > 1U, "the cut outlived the round");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, s_sweep_rc);
+
+    req = full_request();
+    TEST_ASSERT_TRUE(ask(&req));
+    finish_card();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    leave_heard(true, (int8_t)RSSI_24, CH24, false);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    leave_heard(true, (int8_t)RSSI_5, CH5, true);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_BLE_FIND, running_job());
+    leave_found(true, (int8_t)RSSI_BLE);
+    finish(KDRV_RADIO_JOB_BLE_FIND, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, answer()->status);
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the round came back during the pass");
+
+    TEST_ASSERT_TRUE(radio_quiet_request(false));
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(), "the end did not look for the network");
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    probe_case_end();
+}
+
 TEST_CASE("a check asked behind a join is owed and cuts nothing", "[radio_probe]")
 {
     radio_probe_t req;
@@ -766,4 +817,15 @@ TEST_CASE("AO_Radio is left off after the radio check", "[radio_probe]")
 {
     radio_fresh();
     probe_case_end();
+}
+
+/* The beacon's first advert can come most of a second into the listen. The
+ * listen ends at the first advert, so its length costs only on a miss, and it
+ * fits the check's budget with both networks' passes at their longest. */
+TEST_CASE("the BLE listen outlasts the beacon's slowest advert and fits the check's budget",
+          "[radio_probe]")
+{
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(2500U, KODE_RADIO_FIND_MS);
+    TEST_ASSERT_LESS_THAN_UINT32(KODE_RADIO_PROBE_MS,
+        KODE_RADIO_FIND_MS + (2U * KODE_RADIO_PROBE_TRIES * KODE_RADIO_PROBE_PDWELL_MS));
 }

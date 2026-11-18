@@ -1221,6 +1221,7 @@ static void step_note(Autotest *me, QEvt const * const e)
                 me->step_timeout = true;
             }
             else if ( (HAPTIC_TEST_ABSENT != t->phase)
+                     && (HAPTIC_TEST_CYCLE != t->phase)
                      && ((t->flags & (HAPTIC_TF_PASS | HAPTIC_TF_LOUD
                                       | HAPTIC_TF_SHORT | HAPTIC_TF_MUTE))
                          == 0U) )
@@ -1229,7 +1230,7 @@ static void step_note(Autotest *me, QEvt const * const e)
             }
             else
             {
-                /* Absent, passed, or a reading the row could not use. */
+                /* Absent, passed, a pattern cycle (the row judges the pattern) or a reading the row could not use. */
             }
             break;
         }

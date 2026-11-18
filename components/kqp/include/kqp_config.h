@@ -256,6 +256,8 @@
 #define KODE_TEST_DOT_CHECK_MS      (KODE_TEST_DOT_RAIL_MS + KODE_TEST_DOT_PROBE_MS + KODE_TEST_DOT_CHECK_MARGIN_MS)
 #define KODE_TEST_DOT_POLL_RING     64U     /**< Records a run keeps for `test_dot_poll` after the line closed; the oldest goes. */
 #define KODE_TEST_DOT_DRAIN_MS      20U     /**< The wait before a record the console's queue refused is posted again. */
+#define KODE_TEST_DOT_QUIET_IDLE_MS 120000U /**< A station's pass with no verb this long, and nothing woken, is taken as over: the network goes back to its rules. */
+#define KODE_TEST_DOT_QUIET_RETRY_MS 100U   /**< The wait before the quiet AO_Radio or AO_Net had no room for is asked again. */
 #define KODE_TEST_DOT_RUN_MS        240000U /**< A run's watchdog: the operator part may take minutes; past it the run ends. */
 #define KODE_TEST_DOT_OP_SETTLE_MS  150U    /**< The operator's screen is on the glass before the first prompt. */
 #define KODE_TEST_DOT_SCREEN_MS     2000U   /**< The longest a screen or a pattern waits for its host; past it the step goes on. */
@@ -333,12 +335,12 @@
 #define KODE_LOWPOWER_SRC_SCHED        0xFDU   /**< lowpower_request_rest(): asked by AO_Scheduler, its work done. */
 #define KODE_LOWPOWER_ROUND_MS         2000U   /**< Longest wait for a round's answers. */
 #define KODE_LOWPOWER_OFF_GRACE_MS     100U    /**< Between STATE(OFF) and deep sleep, for the log to drain. */
-#define KODE_LOWPOWER_REQUEST_RETRY_MS 1000U   /**< A requested round that met a busy or silent owner begins again this long
-                                                *   after it was abandoned; in an app's rest, a busy owner is asked
-                                                *   again this long after its answer. */
-#define KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS 10000U /**< The longest a request is begun again, counted from the request;
-                                                *   the requester is answered once, when it runs out. An app's rest
-                                                *   asks a busy owner again only inside it. */
+#define KODE_LOWPOWER_REQUEST_RETRY_MS 1000U   /**< A busy owner is asked again this long after its answer, alone and in
+                                                *   the same round, and in an app's rest too; a requested round that met
+                                                *   a silent owner begins again this long after it was abandoned. */
+#define KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS 10000U /**< The longest a request waits for a busy owner or is begun again,
+                                                *   counted from the request; the requester is answered once, when it
+                                                *   runs out. An app's rest asks a busy owner again only inside it. */
 #define KODE_LOWPOWER_ORDER_MS         10000U  /**< The longest a request for OFF waits for a busy or silent owner;
                                                 *   the board goes OFF when it runs out, done or not. */
 #define KODE_LOWPOWER_QUEUE_LEN        48U     /**< AO_LowPower's queue: every participant's answer, a request and the inputs. */
@@ -610,6 +612,9 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  * nothing declares itself "for the mailbox" - it is an instruction to park
  * whatever arrives without decoding it. */
 #define KODE_FLASH_DST_PENDING     3U
+/* Nor is this one: `install dst=storage` writes the file, as it is, into the
+ * `storage` partition (the FAT image) from a medium. */
+#define KODE_FLASH_DST_STORAGE     4U
 /* A watchdog on the gap between chunks, not on the transfer: a 5 MB image
  * over a slow link must not time out, but a host that dies mid-image must not
  * leave the console waiting forever. AO_AppMgr rearms it on every chunk. */
@@ -1406,8 +1411,9 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 #define KODE_RADIO_PROBE_PDWELL_MS      250U
 /** @brief Passes the radio check makes over a network it has not heard. */
 #define KODE_RADIO_PROBE_TRIES          2U
-/** @brief How long the radio check listens for one BLE name, ms. */
-#define KODE_RADIO_FIND_MS              1000U
+/** @brief How long the radio check listens for one BLE name, ms. The listen
+ *         ends at the first advert heard; the length only bites on a miss. */
+#define KODE_RADIO_FIND_MS              2500U
 /** @brief What a BLE listen adds to the guard: its own length is the job. */
 #define KODE_RADIO_BLE_SCAN_SLACK_MS    30000U
 /** @brief How long kode_block_ble_value() waits, in all, for its claim, for
@@ -1529,6 +1535,14 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief The magnetometer row's own test budget: the identity, the
  *         self-test's 10 ms and one conversion, with room to spare. */
 #define KODE_MAG_TEST_BUDGET_MS   5000U
+/** @brief The longest the magnetometer row waits for a witness window or the
+ *         IMU's row to give the part back before it is refused: a window
+ *         nobody drains is closed after KODE_IMU_CAPTURE_MAX_MS. */
+#define KODE_MAG_TEST_WAIT_MS     1500U
+_Static_assert(KODE_MAG_TEST_WAIT_MS > KODE_IMU_CAPTURE_MAX_MS,
+               "the row outwaits a window nobody drains");
+_Static_assert(KODE_MAG_TEST_WAIT_MS < KODE_MAG_TEST_BUDGET_MS,
+               "the wait leaves the row its time inside the budget");
 
 /* ---- The haptic row -------------------------------------------------------
  * The motor is driven and the IMU is the witness; see
@@ -1758,16 +1772,22 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief The longest AO_AppMgr waits for AO_Storage or AO_Net to answer an
  *         open or a STAT of the card; then it gives that wait up. */
 #define KODE_APPMGR_OPEN_MS     32000U
-#define KODE_APP_BACKUP_IDLE_MS 5000U   /**< How long AO_AppMgr is idle before it copies apps to the card. */
-#define KODE_APP_BACKUP_GAP_MS  1000U   /**< The pause between one app's copy and the next, for AO_Storage's other askers. */
+#define KODE_APP_BACKUP_IDLE_MS 100U    /**< How long AO_AppMgr is idle before it looks at the copies of its apps: the time a request that follows another takes to come. */
+#define KODE_APP_BACKUP_GAP_MS  1000U   /**< The pause after an app's copy is written, or could not be, before the next app, for AO_Storage's other askers. */
+#define KODE_APP_BACKUP_DARK_MS 5000U   /**< How long after the board falls asleep AO_AppMgr asks for the dark wake its copies need. */
+/** @brief How many times the card may refuse as busy a step of the copy an
+ *         install waits for, a pause apart, before the install is refused as
+ *         busy. */
+#define KODE_APP_COPY_BUSY_TRIES 30U
 /** @brief How many times AO_AppMgr asks again for a fetched data folder's put
  *         that AO_Storage refused as busy, before the fetch fails busy. */
 #define KODE_APPMGR_PUT_TRIES   3U
 /** @brief The pause before each of those tries, in ms. */
 #define KODE_APPMGR_PUT_RETRY_MS 500U
 /** @brief How long the card of a fetch that announced an install
- *         (`appdata_get install=on`) waits for that install to begin, in ms:
- *         a whole number of seconds, counted on the beat that says the card.
+ *         (`appdata_get`, unless it says `install=off`) waits for that
+ *         install to begin, in ms: a whole number of seconds, counted on the
+ *         beat that says the card.
  *         The host sends it the moment the fetch is answered; this only bounds
  *         a host that never does, so the card does not stand for ever. */
 #define KODE_APPMGR_HOLD_MS     15000U

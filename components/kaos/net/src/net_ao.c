@@ -447,6 +447,8 @@ typedef struct {
     bool     leaving;  /**< A leave was asked: no channel session starts
                         *   again this boot.                                 */
     bool     leave_owed; /**< BOOT_NET_LEFT_SIG is owed to AO_Boot.          */
+    bool     quiet;    /**< A station's pass runs: no new work, no channel.  */
+    bool     quiet_rejoin; /**< The channel's start waited for the pass's end. */
     uint16_t leave_left; /**< Reply lines the leave may still publish before
                           *   it says offline; 0 while it is not draining.  */
 #if CONFIG_KODE_LOWPOWER
@@ -848,6 +850,26 @@ void net_leave_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(NET_LEAVE_REQ_SIG);
     QACTIVE_POST(AO_Net, &evt, NULL);
+}
+
+bool net_quiet_request(bool on)
+{
+    /* Static events, one per edge: the end of a pass is never lost to an empty pool. */
+    static const NetQuietEvt quiet_on  = { QEVT_INITIALIZER(NET_QUIET_REQ_SIG), true };
+    static const NetQuietEvt quiet_off = { QEVT_INITIALIZER(NET_QUIET_REQ_SIG), false };
+    QEvt const              *evt       = &quiet_off.super;
+    bool                     posted;
+
+    if ( on )
+    {
+        evt = &quiet_on.super;
+    }
+    posted = QACTIVE_POST_X(AO_Net, evt, KQP_NET_CMD_MARGIN, NULL);
+    if ( !posted )
+    {
+        KLOG_W(TAG, "AO_Net's queue is full; the station's quiet is refused");
+    }
+    return posted;
 }
 
 bool net_check_at(int64_t due_wall_s)
@@ -2702,6 +2724,11 @@ static void chan_enter(Net * const me, uint32_t settle_ms)
     if ( me->leaving )
     {
         return;   /* nor is it after a leave */
+    }
+    if ( me->quiet )
+    {
+        me->quiet_rejoin = true;   /* nothing starts during a station's pass */
+        return;
     }
 #if CONFIG_KODE_LOWPOWER
     if ( me->lp_rest )
@@ -5666,6 +5693,8 @@ void Net_ctor(void)
     me->leaving    = false;
     me->leave_owed = false;
     me->leave_left = 0U;
+    me->quiet      = false;
+    me->quiet_rejoin = false;
 #if CONFIG_KODE_LOWPOWER
     me->lp_who     = KODE_LOWPOWER_WHO_NONE;
     me->lp_rest    = false;
@@ -6915,6 +6944,21 @@ static QState Net_root(Net * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case NET_QUIET_REQ_SIG: {
+            me->quiet = Q_EVT_CAST(NetQuietEvt)->on;
+#if CONFIG_KODEOS_CHANNEL
+            if ( (!me->quiet) && me->quiet_rejoin )
+            {
+                me->quiet_rejoin = false;
+                if ( me->online )
+                {
+                    chan_enter(me, 0U);
+                }
+            }
+#endif
+            status = Q_HANDLED();
+            break;
+        }
         case NET_LEAVE_REQ_SIG: {
             net_leave(me);
             status = Q_HANDLED();
@@ -7308,12 +7352,94 @@ static void net_sntp_synced(uint64_t unix_s)
     }
 }
 
+/**
+ * @brief Refuse a request that would start work, the way the offline state
+ *        answers it: with the event the asker waits for.
+ *
+ * The sessions in place keep running.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return true when @p e was one of those and has been refused.
+ */
+static bool net_work_refuse(Net * const me, QEvt const * const e)
+{
+    bool refused = true;
+
+    switch ( e->sig )
+    {
+        case NET_PING_REQ_SIG:
+            net_publish_ping_end(me, false);
+            break;
+        case NET_HTTP_REQ_SIG:
+            net_publish_http_done(me, KODE_DENIED);
+            break;
+        case NET_UDP_REQ_SIG:
+            net_publish_udp(me, KODE_DENIED, 0U);
+            break;
+        case NET_TEST_REQ_SIG:
+            net_publish_test(me, false);
+            break;
+        case MQTT_UP_REQ_SIG:
+            /* The asker hears busy, as it does while the channel holds the
+             * client; the caller's line says why. */
+            mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
+            break;
+        case NET_STREAM_OPEN_REQ_SIG:
+            stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt)->who, false);
+            break;
+        case NET_STREAM_OPEN_FROM_SIG:
+            stream_open_refuse(Q_EVT_CAST(NetStreamFromEvt)->who, true);
+            break;
+#if CONFIG_KODEOS_CHANNEL && CONFIG_KODEOS_SHOT_HTTP
+        case NET_SHOT_REQ_SIG:
+            shot_refuse(me, Q_EVT_CAST(NetShotReqEvt)->who, KSHOT_R_BUSY);
+            break;
+#endif
+        default:
+            refused = false;
+            break;
+    }
+    return refused;
+}
+
+/**
+ * @brief During a station's pass, refuse a request that would start work,
+ *        an app's ask included, and say so once per request.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return true when @p e was one of those and has been refused.
+ */
+static bool net_quiet_refuses(Net * const me, QEvt const * const e)
+{
+    bool refused = false;
+
+    if ( me->quiet )
+    {
+        if ( ((QSignal)NET_HOST_ASK_SIG == e->sig) || ((QSignal)NET_HTTP_ASK_SIG == e->sig)
+            || ((QSignal)NET_UDP_ASK_SIG == e->sig) )
+        {
+            ask_refuse(e, KODE_DENIED);
+            refused = true;
+        }
+        else
+        {
+            refused = net_work_refuse(me, e);
+        }
+        if ( refused )
+        {
+            KLOG_W(TAG, "a station's pass runs; a request that starts network work is refused");
+        }
+    }
+    return refused;
+}
+
 #if CONFIG_KODE_LOWPOWER
 /**
  * @brief While the board sleeps, refuse a request that would start work.
  *
- * Each is answered the way the offline state answers it, with the event the
- * asker waits for, and logged once. The sessions in place keep running.
+ * Each is answered as net_work_refuse() answers it, and logged once.
  *
  * @param me The AO.
  * @param e  The event.
@@ -7321,44 +7447,11 @@ static void net_sntp_synced(uint64_t unix_s)
  */
 static bool net_lp_refuses(Net * const me, QEvt const * const e)
 {
-    bool refused = me->lp_rest;
+    bool refused = false;
 
-    if ( refused )
+    if ( me->lp_rest )
     {
-        switch ( e->sig )
-        {
-            case NET_PING_REQ_SIG:
-                net_publish_ping_end(me, false);
-                break;
-            case NET_HTTP_REQ_SIG:
-                net_publish_http_done(me, KODE_DENIED);
-                break;
-            case NET_UDP_REQ_SIG:
-                net_publish_udp(me, KODE_DENIED, 0U);
-                break;
-            case NET_TEST_REQ_SIG:
-                net_publish_test(me, false);
-                break;
-            case MQTT_UP_REQ_SIG:
-                /* The asker hears busy, as it does while the channel holds
-                 * the client; the line below says why. */
-                mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_BUSY);
-                break;
-            case NET_STREAM_OPEN_REQ_SIG:
-                stream_open_refuse(Q_EVT_CAST(NetStreamOpenEvt)->who, false);
-                break;
-            case NET_STREAM_OPEN_FROM_SIG:
-                stream_open_refuse(Q_EVT_CAST(NetStreamFromEvt)->who, true);
-                break;
-#if CONFIG_KODEOS_CHANNEL && CONFIG_KODEOS_SHOT_HTTP
-            case NET_SHOT_REQ_SIG:
-                shot_refuse(me, Q_EVT_CAST(NetShotReqEvt)->who, KSHOT_R_BUSY);
-                break;
-#endif
-            default:
-                refused = false;
-                break;
-        }
+        refused = net_work_refuse(me, e);
         if ( refused )
         {
             KLOG_W(TAG, "the board is asleep; a request that starts work is refused");
@@ -7366,11 +7459,13 @@ static bool net_lp_refuses(Net * const me, QEvt const * const e)
     }
     return refused;
 }
+#endif
 
 static QState Net_online_work(Net * const me, QEvt const * const e);
 
 /**
- * @brief With an address: work refused while the board sleeps, the rest to Net_online_work().
+ * @brief With an address: work refused during a station's pass or while the
+ *        board sleeps, the rest to Net_online_work().
  *
  * @param me The AO.
  * @param e  The event.
@@ -7381,10 +7476,16 @@ static QState Net_online(Net * const me, QEvt const * const e)
     QState status;
 
     chan_ask_pay(me, e);
-    if ( net_lp_refuses(me, e) )
+    if ( net_quiet_refuses(me, e) )
     {
         status = Q_HANDLED();
     }
+#if CONFIG_KODE_LOWPOWER
+    else if ( net_lp_refuses(me, e) )
+    {
+        status = Q_HANDLED();
+    }
+#endif
     else
     {
         status = Net_online_work(me, e);
@@ -7392,8 +7493,6 @@ static QState Net_online(Net * const me, QEvt const * const e)
     return status;
 }
 
-static QState Net_online_work(Net * const me, QEvt const * const e)
-#else
 /**
  * @brief With an address: transfers, asks, ping, HTTP, UDP, the test and MQTT.
  *
@@ -7401,14 +7500,10 @@ static QState Net_online_work(Net * const me, QEvt const * const e)
  * @param e  The event.
  * @return The QP status.
  */
-static QState Net_online(Net * const me, QEvt const * const e)
-#endif
+static QState Net_online_work(Net * const me, QEvt const * const e)
 {
     QState status;
 
-#if !CONFIG_KODE_LOWPOWER
-    chan_ask_pay(me, e);    /* with the board's rest, Net_online() paid */
-#endif
     switch ( e->sig )
     {
         case NET_STREAM_OPEN_REQ_SIG: {

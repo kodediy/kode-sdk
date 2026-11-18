@@ -286,7 +286,7 @@ static void go_asleep(void)
 /** @brief Hand AO_LowPower one expander reading. */
 static void expander(uint8_t levels, uint8_t changed)
 {
-    IoexpInputEvt in = { QEVT_INITIALIZER(IOEXP_INPUT_SIG), levels, changed, true };
+    IoexpInputEvt in = { QEVT_INITIALIZER(IOEXP_INPUT_SIG), levels, changed, true, true };
 
     QASM_DISPATCH(AO_LowPower, &in.super, 0U);
 }
@@ -417,7 +417,8 @@ TEST_CASE("all ready enters ASLEEP: the news, the tick, the lock, in that order"
     lp_down();
 }
 
-TEST_CASE("one busy answer abandons the round and says who and why", "[lowpower_ao]")
+TEST_CASE("a busy answer past the request's window abandons the round and says who and why",
+          "[lowpower_ao]")
 {
     uint32_t round;
 
@@ -427,6 +428,7 @@ TEST_CASE("one busy answer abandons the round and says who and why", "[lowpower_
     round = expect_round(KODE_LP_ASLEEP);
 
     say_ready(0U, round, false, NULL);
+    fake_time_advance_ms(KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS);
     say_ready(1U, round, true, "flash write");
 
     TEST_ASSERT_EQUAL_UINT(0U, s_hold_false);
@@ -853,7 +855,6 @@ TEST_CASE("a round somebody asked for ignores touches and buttons", "[lowpower_a
 
     touch_event();
     button_event();
-    console_line(KODE_CONSOLE_SRC_SERIAL);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 
     say_ready(0U, 1U, false, NULL);
@@ -1906,6 +1907,92 @@ TEST_CASE("an order for OFF asks a busy owner alone again, in the same round, an
     lp_down();
 }
 
+TEST_CASE("a request for ASLEEP asks a busy owner alone again, in the same round, and goes through",
+          "[lowpower_ao]")
+{
+    uint32_t round;
+
+    lp_up(KODE_OK);
+    join(2U);
+    watch_refusals();
+    ask(KODE_LP_ASLEEP);
+    round = expect_round(KODE_LP_ASLEEP);
+    say_ready(0U, round, false, NULL);
+    say_ready(1U, round, true, "radio busy");
+
+    /* The round stays open: the board does not come back AWAKE, so A, at
+     * rest, does not restore, and nobody is answered. */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "no STATE(AWAKE), no refusal");
+    TEST_ASSERT_EQUAL_STRING("B: radio busy", lowpower_last_refusal());
+    TEST_ASSERT_TRUE(log_has("ASLEEP waits for B (radio busy)"));
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS - 100U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the wait has not run out yet");
+    wait_real(200U);
+
+    TEST_ASSERT_EQUAL_UINT32(round, expect_round(KODE_LP_ASLEEP));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "A, at rest, is not asked again");
+    say_ready(1U, round, false, NULL);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "one success, no refusal");
+    QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+    lp_down();
+}
+
+/* The round's budget is for an owner that says nothing. One that said busy
+ * and waits to be asked again has answered. */
+TEST_CASE("the budget of a round that waits for a busy owner does not end it", "[lowpower_ao]")
+{
+    uint32_t round;
+
+    lp_up(KODE_OK);
+    join(1U);
+    watch_refusals();
+    ask(KODE_LP_ASLEEP);
+    round = expect_round(KODE_LP_ASLEEP);
+    wait_real(KODE_LOWPOWER_ROUND_MS - 500U);
+    say_ready(0U, round, true, "radio busy");
+
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS - 100U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the budget ran out and ended nothing");
+    TEST_ASSERT_FALSE(log_has("did not answer"));
+    wait_real(200U);
+
+    TEST_ASSERT_EQUAL_UINT32(round, expect_round(KODE_LP_ASLEEP));
+    say_ready(0U, round, false, NULL);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+    lp_down();
+}
+
+TEST_CASE("a busy owner that says nothing when asked again is a silent one", "[lowpower_ao]")
+{
+    uint32_t round;
+
+    lp_up(KODE_OK);
+    join(1U);
+    watch_refusals();
+    ask(KODE_LP_ASLEEP);
+    round = expect_round(KODE_LP_ASLEEP);
+    say_ready(0U, round, true, "radio busy");
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS + 10U);
+    TEST_ASSERT_EQUAL_UINT32(round, expect_round(KODE_LP_ASLEEP));
+
+    /* Its budget counts from the ask it did not answer. */
+    wait_real(KODE_LOWPOWER_ROUND_MS + 100U);
+    TEST_ASSERT_EQUAL_STRING("A: no answer", lowpower_last_refusal());
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a silence is not answered at once");
+
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS);
+    TEST_ASSERT_EQUAL_UINT32(round + 1U, expect_round(KODE_LP_ASLEEP));
+    say_ready(0U, round + 1U, false, NULL);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+    lp_down();
+}
+
 TEST_CASE("a request refused for longer than its window is answered once, after it",
           "[lowpower_ao]")
 {
@@ -1917,20 +2004,28 @@ TEST_CASE("a request refused for longer than its window is answered once, after 
     watch_refusals();
     ask_from(KODE_LP_ASLEEP, SRC_OTHER);
 
-    /* Busy at every round, answered at once: a round a second. */
+    /* Busy at every ask, answered at once: the same round, asked a second
+     * apart, and no AWAKE between the asks. */
+    round = expect_round(KODE_LP_ASLEEP);
     for ( uint32_t t = 0U; KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS > t;
          t += KODE_LOWPOWER_REQUEST_RETRY_MS )
     {
-        round = expect_round(KODE_LP_ASLEEP);
+        if ( 0U < t )
+        {
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(round, expect_round(KODE_LP_ASLEEP),
+                                             "asked again in the round it refused");
+        }
         rounds++;
         say_ready(0U, round, true, "last reason");
-        expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
-        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "nobody is answered inside the window");
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+                                       "no STATE(AWAKE) and no answer inside the window");
         wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS);
     }
 
     TEST_ASSERT_EQUAL_UINT32(KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS / KODE_LOWPOWER_REQUEST_RETRY_MS,
                              rounds);
+    TEST_ASSERT_TRUE(log_has("gave up after"));
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     expect_refused_for(SRC_OTHER, "A: last reason");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "exactly one refusal");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, queued(AO_LowPower, LOWPOWER_RETRY_TMO_SIG),
@@ -1941,7 +2036,8 @@ TEST_CASE("a request refused for longer than its window is answered once, after 
     lp_down();
 }
 
-TEST_CASE("an owner that does not answer is retried like a busy one", "[lowpower_ao]")
+TEST_CASE("an owner that does not answer gives the round up, and the request begins it again",
+          "[lowpower_ao]")
 {
     uint32_t round;
 
@@ -2024,20 +2120,22 @@ TEST_CASE("external power is not retried: one refusal at once", "[lowpower_ao]")
     lp_down();
 }
 
-TEST_CASE("a cable plugged in while the request waits ends the wait", "[lowpower_ao]")
+TEST_CASE("a cable plugged in while the request waits for a busy owner ends the round",
+          "[lowpower_ao]")
 {
     lp_up(KODE_OK);
     join(1U);
     watch_refusals();
     ask(KODE_LP_ASLEEP);
     say_ready(0U, expect_round(KODE_LP_ASLEEP), true, "radio busy");
-    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 
     charger_reading(true);
 
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_VBUS, KODE_LP_AWAKE);
     expect_refused_for(SRC_TEST, "cable: external power");
     wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "and the round does not begin again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "and nobody is asked again");
     QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
     lp_down();
 }
@@ -2063,33 +2161,33 @@ TEST_CASE("a cable plugged in while an order for OFF waits ends it: on a cable t
     lp_down();
 }
 
-TEST_CASE("BOT while the request waits ends the wait with the last refusal", "[lowpower_ao]")
+TEST_CASE("BOT while the request waits for a busy owner ends the round", "[lowpower_ao]")
 {
     lp_up(KODE_OK);
     join(1U);
     watch_refusals();
     ask_from(KODE_LP_ASLEEP, SRC_OTHER);
     say_ready(0U, expect_round(KODE_LP_ASLEEP), true, "radio busy");
-    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
     wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS / 2U);
 
     expander(LEVELS_BOT, CHANGED_BOT);
 
-    expect_refused_for(SRC_OTHER, "A: radio busy");
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_BOT, KODE_LP_AWAKE);
+    expect_refused_for(SRC_OTHER, "BOT: pressed");
     wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the round does not begin again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "and nobody is asked again");
     QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
     lp_down();
 }
 
-TEST_CASE("BOT in a round the retry began ends the request at once", "[lowpower_ao]")
+TEST_CASE("BOT after a busy owner was asked again ends the request at once", "[lowpower_ao]")
 {
     lp_up(KODE_OK);
     join(1U);
     watch_refusals();
     ask(KODE_LP_ASLEEP);
     say_ready(0U, expect_round(KODE_LP_ASLEEP), true, "radio busy");
-    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS + 10U);
     (void)expect_round(KODE_LP_ASLEEP);
 
@@ -2103,7 +2201,7 @@ TEST_CASE("BOT in a round the retry began ends the request at once", "[lowpower_
     lp_down();
 }
 
-TEST_CASE("the other inputs do not end the wait, as they do not end the round", "[lowpower_ao]")
+TEST_CASE("a button and a touch do not end the wait for a busy owner", "[lowpower_ao]")
 {
     uint32_t round;
 
@@ -2113,40 +2211,181 @@ TEST_CASE("the other inputs do not end the wait, as they do not end the round", 
     ask(KODE_LP_ASLEEP);
     round = expect_round(KODE_LP_ASLEEP);
     say_ready(0U, round, true, "radio busy");
-    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
 
     button_event();
     touch_event();
-    console_line((uint8_t)KODE_CONSOLE_SRC_SERIAL);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 
     wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS + 10U);
-    TEST_ASSERT_EQUAL_UINT32(round + 1U, expect_round(KODE_LP_ASLEEP));
-    say_ready(0U, round + 1U, false, NULL);
+    TEST_ASSERT_EQUAL_UINT32(round, expect_round(KODE_LP_ASLEEP));
+    say_ready(0U, round, false, NULL);
     expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
     lp_down();
 }
 
-TEST_CASE("a request for AWAKE ends the wait with the last refusal", "[lowpower_ao]")
+TEST_CASE("a console line abandons a round somebody asked for, from any port", "[lowpower_ao]")
+{
+    static const uint8_t ports[] = {
+        (uint8_t)KODE_CONSOLE_SRC_SERIAL, (uint8_t)KODE_CONSOLE_SRC_BLE,
+        (uint8_t)KODE_CONSOLE_SRC_NET,
+    };
+
+    for ( size_t i = 0U; Q_DIM(ports) > i; i++ )
+    {
+        uint32_t round;
+
+        lp_up(KODE_OK);
+        join(2U);
+        ask_from(KODE_LP_ASLEEP, SRC_OTHER);
+        round = expect_round(KODE_LP_ASLEEP);
+        watch_refusals();
+        say_ready(0U, round, false, NULL);    /* this owner may now begin what the line asks */
+
+        console_line(ports[i]);
+
+        expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+        expect_refused_for(SRC_OTHER, "input: board used");
+
+        say_ready(1U, round, false, NULL);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the last answer enters nothing");
+        TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running(), "the tick never stopped");
+        wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "and the request is not begun again");
+        QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+        lp_down();
+    }
+}
+
+TEST_CASE("a console line abandons the round off_after began, and the board is AWAKE",
+          "[lowpower_ao]")
+{
+    unsigned minutes = 0U;
+
+    lp_up(KODE_OK);
+    set_word(KSET_KEY_OFF_AFTER, WORD_1H);
+    go_asleep();
+    (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+    (void)queued(AO_Display, DISPLAY_MINUTE_REQ_SIG);
+    while ( (ao_spy_count() == 0U) && (100U > minutes) )
+    {
+        fire_one_shot();
+        minutes++;
+        (void)queued(AO_Display, DISPLAY_MINUTE_REQ_SIG);
+        (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+    }
+    (void)expect_round(KODE_LP_OFF);
+
+    console_line(KODE_CONSOLE_SRC_BLE);
+
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_OFF_AFTER, KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_STRING("input: board used", lowpower_last_refusal());
+    wait_ms(KODE_LOWPOWER_OFF_GRACE_MS + 10U);
+    TEST_ASSERT_EQUAL_UINT(0U, s_off_enter);
+    lp_down();
+}
+
+TEST_CASE("a console line does not end an order for OFF", "[lowpower_ao]")
+{
+    uint32_t round;
+
+    lp_up(KODE_OK);
+    join(1U);
+    ask(KODE_LP_OFF);
+    round = expect_round(KODE_LP_OFF);
+
+    console_line(KODE_CONSOLE_SRC_BLE);
+    console_line(KODE_CONSOLE_SRC_SCHED);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the order stands");
+
+    say_ready(0U, round, false, NULL);
+    expect_state(KODE_LP_OFF, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    wait_real(KODE_LOWPOWER_OFF_GRACE_MS + 10U);
+    TEST_ASSERT_EQUAL_UINT(1U, s_off_enter);
+    lp_down();
+}
+
+/* The round that waits for a busy owner is open for seconds, and the owner that
+ * answered ready is not asked again in it: the line that would give that owner
+ * work ends the round, and the owners at rest are told once. */
+TEST_CASE("a console line ends the wait for a busy owner, and nobody is asked again",
+          "[lowpower_ao]")
+{
+    static const uint8_t ports[] = {
+        (uint8_t)KODE_CONSOLE_SRC_SERIAL, (uint8_t)KODE_CONSOLE_SRC_BLE,
+        (uint8_t)KODE_CONSOLE_SRC_NET,
+    };
+
+    for ( size_t i = 0U; Q_DIM(ports) > i; i++ )
+    {
+        uint32_t round;
+
+        lp_up(KODE_OK);
+        join(2U);
+        watch_refusals();
+        ask_from(KODE_LP_ASLEEP, SRC_OTHER);
+        round = expect_round(KODE_LP_ASLEEP);
+        say_ready(0U, round, false, NULL);    /* at rest, and free to take the line's work */
+        say_ready(1U, round, true, "radio busy");
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the round waits, nobody is told");
+
+        console_line(ports[i]);
+
+        expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+        expect_refused_for(SRC_OTHER, "input: board used");
+        wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the busy owner is not asked again");
+        say_ready(1U, round, false, NULL);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a late ready enters nothing");
+        TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running(), "the tick never stopped");
+        QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+        lp_down();
+    }
+}
+
+TEST_CASE("a scheduled line ends the wait for a busy owner too", "[lowpower_ao]")
+{
+    uint32_t round;
+
+    lp_up(KODE_OK);
+    join(1U);
+    watch_refusals();
+    ask(KODE_LP_ASLEEP);
+    round = expect_round(KODE_LP_ASLEEP);
+    say_ready(0U, round, true, "radio busy");
+
+    console_line((uint8_t)KODE_CONSOLE_SRC_SCHED);
+
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    expect_refused_for(SRC_TEST, "input: scheduled line");
+    wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "and nobody is asked again");
+    QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+    lp_down();
+}
+
+TEST_CASE("a request for AWAKE ends the wait for a busy owner and answers its asker",
+          "[lowpower_ao]")
 {
     lp_up(KODE_OK);
     join(1U);
     watch_refusals();
     ask_from(KODE_LP_ASLEEP, SRC_OTHER);
     say_ready(0U, expect_round(KODE_LP_ASLEEP), true, "radio busy");
-    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 
     ask_from(KODE_LP_AWAKE, SRC_TEST);
 
-    expect_refused_for(SRC_OTHER, "A: radio busy");
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    expect_refused_for(SRC_OTHER, "request: cancelled");
     wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the round does not begin again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "and nobody is asked again");
     QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
     lp_down();
 }
 
-TEST_CASE("a new request replaces the waiting one and answers its asker", "[lowpower_ao]")
+TEST_CASE("a new request while one waits for a busy owner is refused: its round is running",
+          "[lowpower_ao]")
 {
     uint32_t round;
 
@@ -2156,11 +2395,36 @@ TEST_CASE("a new request replaces the waiting one and answers its asker", "[lowp
     ask_from(KODE_LP_ASLEEP, SRC_OTHER);
     round = expect_round(KODE_LP_ASLEEP);
     say_ready(0U, round, true, "radio busy");
+
+    ask_from(KODE_LP_ASLEEP, SRC_TEST);
+
+    expect_refused_for(SRC_TEST, "request: a round is running");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the one that waits is not answered");
+    wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS + 10U);
+    TEST_ASSERT_EQUAL_UINT32(round, expect_round(KODE_LP_ASLEEP));
+    say_ready(0U, round, false, NULL);
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+    lp_down();
+}
+
+TEST_CASE("a new request replaces one that waits to begin again and answers its asker",
+          "[lowpower_ao]")
+{
+    uint32_t round;
+
+    lp_up(KODE_OK);
+    join(1U);
+    watch_refusals();
+    ask_from(KODE_LP_ASLEEP, SRC_OTHER);
+    round = expect_round(KODE_LP_ASLEEP);
+    wait_real(KODE_LOWPOWER_ROUND_MS + 100U);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
 
     ask_from(KODE_LP_ASLEEP, SRC_TEST);
 
-    expect_refused_for(SRC_OTHER, "A: radio busy");
+    expect_refused_for(SRC_OTHER, "A: no answer");
     TEST_ASSERT_EQUAL_UINT32(round + 1U, expect_round(KODE_LP_ASLEEP));
     say_ready(0U, round + 1U, false, NULL);
     expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
@@ -2178,7 +2442,7 @@ TEST_CASE("the same port asking again is answered once, by the new request", "[l
     watch_refusals();
     ask(KODE_LP_ASLEEP);
     round = expect_round(KODE_LP_ASLEEP);
-    say_ready(0U, round, true, "radio busy");
+    wait_real(KODE_LOWPOWER_ROUND_MS + 100U);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
 
     ask(KODE_LP_ASLEEP);
@@ -2187,6 +2451,47 @@ TEST_CASE("the same port asking again is answered once, by the new request", "[l
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the old asker is the new one");
     say_ready(0U, round + 1U, false, NULL);
     expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+    lp_down();
+}
+
+/* The wait in AWAKE, before a round a silent owner gave up begins again. */
+TEST_CASE("BOT, a cable and a request for AWAKE end the wait of a request that begins again",
+          "[lowpower_ao]")
+{
+    lp_up(KODE_OK);
+    join(1U);
+    watch_refusals();
+
+    /* BOT: the last refusal. */
+    ask_from(KODE_LP_ASLEEP, SRC_OTHER);
+    (void)expect_round(KODE_LP_ASLEEP);
+    wait_real(KODE_LOWPOWER_ROUND_MS + 100U);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    expander(LEVELS_BOT, CHANGED_BOT);
+    expect_refused_for(SRC_OTHER, "A: no answer");
+    wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "BOT: the round does not begin again");
+
+    /* A request for AWAKE: the last refusal. */
+    ask_from(KODE_LP_ASLEEP, SRC_OTHER);
+    (void)expect_round(KODE_LP_ASLEEP);
+    wait_real(KODE_LOWPOWER_ROUND_MS + 100U);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    ask_from(KODE_LP_AWAKE, SRC_TEST);
+    expect_refused_for(SRC_OTHER, "A: no answer");
+    wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "AWAKE: the round does not begin again");
+
+    /* A cable: its own refusal. */
+    ask(KODE_LP_ASLEEP);
+    (void)expect_round(KODE_LP_ASLEEP);
+    wait_real(KODE_LOWPOWER_ROUND_MS + 100U);
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    charger_reading(true);
+    expect_refused_for(SRC_TEST, "cable: external power");
+    wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "a cable: the round does not begin again");
     QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
     lp_down();
 }
@@ -3321,7 +3626,7 @@ TEST_CASE("a person who comes while the rest's round runs ends it", "[lowpower_a
     lp_down();
 }
 
-TEST_CASE("a person who comes while the rest waits to begin again ends it", "[lowpower_ao]")
+TEST_CASE("a person who comes while the rest waits for a busy owner ends it", "[lowpower_ao]")
 {
     uint32_t round;
 
@@ -3332,14 +3637,14 @@ TEST_CASE("a person who comes while the rest waits to begin again ends it", "[lo
     round = expect_round(KODE_LP_ASLEEP);
     say_ready(0U, round, false, NULL);
     say_ready(1U, round, true, "radio busy");
-    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the rest waits, nobody is answered");
 
     touch_event();
 
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     expect_refused_for(KODE_LOWPOWER_SRC_SCHED, "input: board used");
     wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS + 100U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "no round begins under the thumb");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "nobody is asked again under the thumb");
     QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
     lp_down();
 }
@@ -3379,16 +3684,26 @@ TEST_CASE("a scheduled line is neither use of the board nor a wake", "[lowpower_
     lp_down();
 }
 
-TEST_CASE("a scheduled line does not end the rest's round", "[lowpower_ao]")
+TEST_CASE("a scheduled line ends the round that is running, and is still no use of the board",
+          "[lowpower_ao]")
 {
     lp_up(KODE_OK);
+    watch_refusals();
     timer_wake();
     ask_rest();
     (void)expect_round(KODE_LP_ASLEEP);
 
     console_line(KODE_CONSOLE_SRC_SCHED);
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the round stands");
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    expect_refused_for(KODE_LOWPOWER_SRC_SCHED, "input: scheduled line");
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    /* Nobody came: the rest asked again, its line's work done, goes through. */
+    ask_rest();
+    rest_round_agreed();
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
     lp_down();
 }
 
@@ -3418,7 +3733,7 @@ TEST_CASE("a rest yields to a person's request that waits to begin again", "[low
     ask(KODE_LP_ASLEEP);
     round = expect_round(KODE_LP_ASLEEP);
     say_ready(0U, round, false, NULL);
-    say_ready(1U, round, true, "radio busy");
+    wait_real(KODE_LOWPOWER_ROUND_MS + 100U);
     expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the request waits, nobody is answered");
 
@@ -3426,7 +3741,7 @@ TEST_CASE("a rest yields to a person's request that waits to begin again", "[low
 
     expect_refused_for(KODE_LOWPOWER_SRC_SCHED, KODE_LOWPOWER_WHY_PENDING);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "one refusal, and the requester is not told");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("B: radio busy", lowpower_last_refusal(),
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("B: no answer", lowpower_last_refusal(),
                                      "the waiting request keeps the refusal it will be answered with");
 
     wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS + 100U);
@@ -3564,7 +3879,7 @@ TEST_CASE("a press of BOT after a timer wake is use of the board", "[lowpower_ao
     lp_down();
 }
 
-TEST_CASE("a rest that meets a busy owner begins again, goes through, and is answered once",
+TEST_CASE("a rest that meets a busy owner waits for it, goes through, and is answered once",
           "[lowpower_ao]")
 {
     uint32_t round;
@@ -3576,13 +3891,12 @@ TEST_CASE("a rest that meets a busy owner begins again, goes through, and is ans
     round = expect_round(KODE_LP_ASLEEP);
     say_ready(0U, round, false, NULL);
     say_ready(1U, round, true, "check dwell");
-    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "no answer while the rest waits");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "no AWAKE and no answer while the rest waits");
 
     wait_real(KODE_LOWPOWER_REQUEST_RETRY_MS + 100U);
-    TEST_ASSERT_EQUAL_UINT32(round + 1U, expect_round(KODE_LP_ASLEEP));
-    say_ready(0U, round + 1U, false, NULL);
-    say_ready(1U, round + 1U, false, NULL);
+    TEST_ASSERT_EQUAL_UINT32(round, expect_round(KODE_LP_ASLEEP));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the busy owner alone is asked again");
+    say_ready(1U, round, false, NULL);
     expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "one answer, the state, and no refusal");
     QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);

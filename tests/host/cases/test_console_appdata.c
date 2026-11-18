@@ -684,14 +684,14 @@ TEST_CASE("appdata_get needs both its keys", "[console_appdata]")
     TEST_ASSERT_FALSE(get_asked(&req));
 }
 
-TEST_CASE("appdata_get says an install follows only when it is told so",
+TEST_CASE("appdata_get says an install follows unless it is told none does",
           "[console_appdata]")
 {
     static const struct {
         const char *tail;
         bool        install;
     } CASES[] = {
-        { "",             false },
+        { "",             true  },   /* the store's line names no install */
         { " install=off", false },
         { " install=on",  true  },
     };

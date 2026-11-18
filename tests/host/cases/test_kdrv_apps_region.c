@@ -23,6 +23,7 @@
 #include "kdrv_bounce.h"
 #include "kdrv_kfw.h"
 #include "khal_crc32.h"
+#include "psa/crypto.h"
 
 /** @brief The region, found the same way the driver finds it. */
 static const esp_partition_t *region(void)
@@ -1128,6 +1129,148 @@ TEST_CASE("a long write lands in the mailbox where the session has reached",
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_pending_consume());
 }
 
+/* ---- Blank flash is not erased and 0xFF is not written ----------------------- */
+
+/** @brief The `storage` partition, found the way the sink finds it. */
+static const esp_partition_t *storage_part(void)
+{
+    const esp_partition_t *p = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "storage");
+    TEST_ASSERT_NOT_NULL_MESSAGE(p, "the test project's partition table must "
+                                    "carry the board's storage partition");
+    return p;
+}
+
+TEST_CASE("a write into blank flash neither erases it nor writes its 0xFF pieces",
+          "[apps_region]")
+{
+    static uint8_t blank[0x2000];
+    static uint8_t data[0x40];
+    uint32_t const at = KAPPS_DATA_OFF + (2U * KAPPS_ALIGN);
+
+    apps_ready();
+    (void)memset(blank, 0xFFU, sizeof(blank));
+    (void)memset(data, 0x5AU, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(region(), at, KAPPS_ALIGN));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, sizeof(blank) + sizeof(data)));
+
+    /* From here any erase or write the driver issues fails: blank pieces of a
+     * blank block must not issue one. */
+    esp_partition_fail_after(0U, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kdrv_apps_write(blank, sizeof(blank)),
+        "a blank block was erased or an all-0xFF piece was written");
+
+    /* A piece with data in it is written, and the part refuses it. */
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, kdrv_apps_write(data, sizeof(data)));
+    cut_off();
+    kdrv_apps_write_abort();
+}
+
+TEST_CASE("a write into a block that is not blank erases it first, and lands whole",
+          "[apps_region]")
+{
+    static uint8_t out[0x3000];
+    static uint8_t in[0x3000];
+    uint32_t const at = KAPPS_DATA_OFF + (2U * KAPPS_ALIGN);
+
+    apps_ready();
+    fill_pattern(out, sizeof(out));
+    (void)memset(&out[0x1000], 0xFFU, 0x1000U);   /* a blank piece in the middle */
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(region(), at, KAPPS_ALIGN));
+    (void)memset(in, 0xA5U, sizeof(in));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(region(), at, in, sizeof(in)));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, sizeof(out)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    kdrv_apps_write_abort();
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_read(region(), at, in, sizeof(in)));
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(out, in, sizeof(out),
+        "the old bytes under a blank piece survived, or the data did not land");
+}
+
+/* ---- The storage partition as a destination ----------------------------------- */
+
+/** @brief The size of the image the storage cases write: two blocks and a part. */
+#define STO_IMAGE_LEN  ((2U * KAPPS_ALIGN) + 0x1800U)
+
+TEST_CASE("an image into the storage partition reads back and the volume is given back",
+          "[apps_region]")
+{
+    static uint8_t out[STO_IMAGE_LEN];
+    static uint8_t in[STO_IMAGE_LEN];
+    const kfw_sink_t * const sink = kdrv_apps_storage_sink();
+    const esp_partition_t * const sto = storage_part();
+
+    fill_pattern(out, sizeof(out));
+    (void)memset(&out[0x3000], 0xFFU, 0x4000U);   /* a long blank run */
+
+    /* The partition holds something else first, so its blocks are not blank. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(sto, 0U, 3U * KAPPS_ALIGN));
+    (void)memset(in, 0xA5U, sizeof(in));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(sto, 0U, in, sizeof(in)));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->begin(NULL, sizeof(out)));
+    TEST_ASSERT_TRUE_MESSAGE(fake_fs_raw_open(), "the volume was not taken for the write");
+    for ( size_t i = 0U; sizeof(out) > i; i += 0x1234U )
+    {
+        size_t n = sizeof(out) - i;
+        if ( 0x1234U < n )
+        {
+            n = 0x1234U;
+        }
+        TEST_ASSERT_EQUAL_INT(KODE_OK, sink->write(NULL, &out[i], n));
+    }
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->end(NULL));
+    TEST_ASSERT_FALSE_MESSAGE(fake_fs_raw_open(), "the volume was not given back");
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_read(sto, 0U, in, sizeof(in)));
+    TEST_ASSERT_EQUAL_MEMORY(out, in, sizeof(out));
+}
+
+TEST_CASE("an image of no bytes, or one that does not fit the storage partition, is refused untouched",
+          "[apps_region]")
+{
+    const kfw_sink_t * const sink = kdrv_apps_storage_sink();
+    unsigned const before = fake_fs_raw_begins();
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, sink->begin(NULL, 0U));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, sink->begin(NULL, (uint32_t)storage_part()->size + 1U));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(before, fake_fs_raw_begins(),
+        "a refused image took the volume");
+    TEST_ASSERT_FALSE(fake_fs_raw_open());
+}
+
+TEST_CASE("a second storage session is refused, and abandoning one gives the volume back",
+          "[apps_region]")
+{
+    static uint8_t one[0x10];
+    const kfw_sink_t * const sink = kdrv_apps_storage_sink();
+
+    (void)memset(one, 0x11U, sizeof(one));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->begin(NULL, sizeof(one)));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, sink->begin(NULL, sizeof(one)));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, sink->write(NULL, one, sizeof(one) + 1U));   /* past the promise */
+    sink->abort(NULL);
+    TEST_ASSERT_FALSE_MESSAGE(fake_fs_raw_open(), "an abandoned session kept the volume");
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, sink->write(NULL, one, sizeof(one)));
+}
+
+TEST_CASE("a storage image that falls short of its promise does not verify",
+          "[apps_region]")
+{
+    static uint8_t one[0x10];
+    const kfw_sink_t * const sink = kdrv_apps_storage_sink();
+
+    (void)memset(one, 0x22U, sizeof(one));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->begin(NULL, 2U * sizeof(one)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->write(NULL, one, sizeof(one)));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, sink->end(NULL));
+    TEST_ASSERT_FALSE_MESSAGE(fake_fs_raw_open(), "a failed end kept the volume");
+}
+
 /* ---- Taking an image out of circulation ------------------------------------ */
 
 /* Eviction erases the header sector rather than the whole image: an image
@@ -1780,4 +1923,216 @@ TEST_CASE("a word that is not the magic is not an intent", "[apps_region]")
     TEST_ASSERT_FALSE(kdrv_apps_pending_os_intent());
 
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_pending_consume());
+}
+
+/* ---- The SHA-256 of what is installed --------------------------------------
+ *
+ * A station hashes the file on its card and asks the board whether it already
+ * holds those bytes. The board answers from the flash itself, through the
+ * mapping: every byte of the extent, nothing after it, and any bit that
+ * differs gives another digest.
+ */
+
+/** @brief The window the driver maps at a time (APPS_CRC_WINDOW in kdrv_apps.c). */
+#define SHA_WINDOW    (512U * 1024U)
+
+/** @brief An extent past one window and not a multiple of it, nor of a sector. */
+#define SHA_EXT_LEN   (SHA_WINDOW + (5U * 4096U) + 7U)
+
+/** @brief Where the named app lies: past the blocks the other cases write. */
+#define SHA_EXT_OFF   (KAPPS_DATA_OFF + (8U * KAPPS_ALIGN))
+
+/** @brief Where another app lies, listed before it. */
+#define SHA_OTHER_OFF (KAPPS_DATA_OFF + (20U * KAPPS_ALIGN))
+
+/** @brief The extent, then a guard no extent byte is. */
+static uint8_t s_sha_img[SHA_EXT_LEN + GUARD_LEN];
+
+/** @brief The SHA-256 of @p n bytes at @p d, computed here and not by the driver. */
+static void sha_of(const uint8_t *d, size_t n, uint8_t *out)
+{
+    size_t len = 0U;
+
+    TEST_ASSERT_EQUAL_INT(PSA_SUCCESS, psa_crypto_init());
+    TEST_ASSERT_EQUAL_INT(PSA_SUCCESS, psa_hash_compute(PSA_ALG_SHA_256, d, n, out, 32U, &len));
+    TEST_ASSERT_EQUAL_UINT(32U, len);
+}
+
+/** @brief An image of @p len bytes named @p project in @p buf: a descriptor, then the pattern. */
+static void sha_image(uint8_t *buf, size_t len, const char *project, uint8_t salt)
+{
+    esp_app_desc_t desc;
+
+    fill_pattern(buf, len);
+    for ( size_t i = 0U; len > i; i += 997U )
+    {
+        buf[i] ^= salt;
+    }
+    (void)memset(&desc, 0, sizeof(desc));
+    desc.magic_word = ESP_APP_DESC_MAGIC_WORD;
+    (void)snprintf(desc.project_name, sizeof(desc.project_name), "%s", project);
+    (void)snprintf(desc.version, sizeof(desc.version), "%s", "0.0.5");
+    (void)memcpy(&buf[KAPP_IDF_DESC_OFF], &desc, sizeof(desc));
+}
+
+/** @brief Write @p len bytes at region offset @p off, erasing what is not blank, as an install does. */
+static void sha_put(uint32_t off, const uint8_t *buf, uint32_t len)
+{
+    kdrv_apps_write_abort();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(off, len));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(buf, len));
+    kdrv_apps_write_abort();
+}
+
+/**
+ * @brief "onboarding" at SHA_EXT_OFF with a guard after it, and "metronome"
+ *        listed before it; the directory committed. Returns the one it replaced.
+ */
+static kapps_dir_t sha_install(uint32_t onboarding_flags)
+{
+    static uint8_t other[0x3000];
+    kapps_dir_t const saved = *kdrv_apps_dir();
+    kapps_dir_t       d     = saved;
+
+    sha_image(s_sha_img, SHA_EXT_LEN, "onboarding", 0U);
+    (void)memset(&s_sha_img[SHA_EXT_LEN], 0xEEU, GUARD_LEN);
+    sha_put(SHA_EXT_OFF, s_sha_img, sizeof(s_sha_img));
+    sha_image(other, sizeof(other), "metronome", 0x5AU);
+    sha_put(SHA_OTHER_OFF, other, sizeof(other));
+
+    d.count = 2U;
+    d.e[0] = (kapps_entry_t){ .offset = SHA_OTHER_OFF, .size = sizeof(other), .seq = 1U,
+                              .flags = KAPPS_ENTRY_VALID };
+    d.e[1] = (kapps_entry_t){ .offset = SHA_EXT_OFF, .size = SHA_EXT_LEN, .seq = 2U,
+                              .flags = onboarding_flags };
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&d));
+    return saved;
+}
+
+/** @brief Put the directory back the way the rest of the binary expects it. */
+static void sha_restore(kapps_dir_t saved)
+{
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&saved));
+}
+
+TEST_CASE("an installed app's SHA-256 is that of its whole extent and nothing after it",
+          "[apps_region]")
+{
+    uint8_t want[32];
+    uint8_t got[32];
+    uint8_t with_guard[32];
+
+    apps_ready();
+    kapps_dir_t const saved = sha_install(KAPPS_ENTRY_VALID);
+
+    sha_of(s_sha_img, SHA_EXT_LEN, want);
+    sha_of(s_sha_img, sizeof(s_sha_img), with_guard);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_named_sha256("onboarding", got));
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(want, got, 32U, "not the SHA-256 of the extent's bytes");
+    TEST_ASSERT_FALSE_MESSAGE(0 == memcmp(with_guard, got, 32U), "the guard after the extent was hashed");
+
+    /* A byte after the extent is not the app's: changing it changes nothing. */
+    uint8_t const zero = 0U;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(region(), SHA_EXT_OFF + SHA_EXT_LEN, &zero, 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_named_sha256("onboarding", got));
+    TEST_ASSERT_EQUAL_MEMORY(want, got, 32U);
+
+    /* The other app, listed first, has its own digest. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_named_sha256("metronome", got));
+    TEST_ASSERT_FALSE(0 == memcmp(want, got, 32U));
+    sha_restore(saved);
+}
+
+/* The flash only clears bits, so each place is written afresh (the write
+ * erases the blocks that are not blank) and then one bit of it is cleared. */
+TEST_CASE("one bit cleared anywhere in an installed app gives another SHA-256", "[apps_region]")
+{
+    static const uint32_t at[] = { 0U, SHA_WINDOW - 1U, SHA_WINDOW, SHA_EXT_LEN - 1U };
+    uint8_t want[32];
+    uint8_t got[32];
+
+    apps_ready();
+    kapps_dir_t const saved = sha_install(KAPPS_ENTRY_VALID);
+    for ( size_t k = 0U; (sizeof(at) / sizeof(at[0])) > k; k++ )
+    {
+        s_sha_img[at[k]] = 0xA5U;
+        sha_put(SHA_EXT_OFF, s_sha_img, SHA_EXT_LEN);
+        sha_of(s_sha_img, SHA_EXT_LEN, want);
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_named_sha256("onboarding", got));
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(want, got, 32U, "the app written afresh does not hash as written");
+
+        uint8_t const cleared = 0xA4U;
+        TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(region(), SHA_EXT_OFF + at[k], &cleared, 1U));
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_named_sha256("onboarding", got));
+        char msg[64];
+        (void)snprintf(msg, sizeof(msg), "a bit cleared at byte %lu went unseen", (unsigned long)at[k]);
+        TEST_ASSERT_FALSE_MESSAGE(0 == memcmp(want, got, 32U), msg);
+    }
+    sha_restore(saved);
+}
+
+TEST_CASE("an app not live under that name has no SHA-256, and the digest is left alone",
+          "[apps_region]")
+{
+    uint8_t got[32];
+    uint8_t untouched[32];
+
+    apps_ready();
+    (void)memset(got, 0x55, sizeof(got));
+    (void)memset(untouched, 0x55, sizeof(untouched));
+
+    kapps_dir_t saved = sha_install(0U);   /* "onboarding" is there, its entry is not live */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR, kdrv_apps_named_sha256("onboarding", got),
+        "a dead entry was hashed");
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_apps_named_sha256("nobody", got));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_apps_named_sha256("", got));
+    TEST_ASSERT_EQUAL_MEMORY(untouched, got, sizeof(got));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_apps_named_sha256(NULL, got));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_apps_named_sha256("onboarding", NULL));
+    sha_restore(saved);
+
+    /* An empty directory names nothing. */
+    kapps_dir_t empty = *kdrv_apps_dir();
+    saved = empty;
+    empty.count = 0U;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_dir_commit(&empty));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_apps_named_sha256("onboarding", got));
+    sha_restore(saved);
+}
+
+TEST_CASE("the storage partition's SHA-256 covers it whole, and a blank one has none",
+          "[apps_region]")
+{
+    static uint8_t img[0x200000];
+    const esp_partition_t * const sto = storage_part();
+    uint8_t want[32];
+    uint8_t got[32];
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(sizeof(img), sto->size, "the board's storage partition is 2 MB");
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(sto, 0U, sto->size));
+    (void)memset(got, 0x55, sizeof(got));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR, kdrv_apps_storage_sha256(got),
+        "a partition with its first block blank holds no image");
+    TEST_ASSERT_EQUAL_HEX8(0x55U, got[0]);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_apps_storage_sha256(NULL));
+
+    /* A FAT image: data at the start, blank in the middle, data in the last block. */
+    (void)memset(img, 0xFF, sizeof(img));
+    fill_pattern(img, 0x3000U);
+    fill_pattern(&img[sizeof(img) - 0x100U], 0x100U);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(sto, 0U, img, 0x3000U));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(sto, sizeof(img) - 0x100U,
+                                                      &img[sizeof(img) - 0x100U], 0x100U));
+    sha_of(img, sizeof(img), want);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_storage_sha256(got));
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(want, got, 32U, "not the SHA-256 of the whole partition");
+
+    /* One bit in its last byte. */
+    uint8_t const last = (uint8_t)(img[sizeof(img) - 1U] & (img[sizeof(img) - 1U] - 1U));   /* lowest set bit cleared */
+    TEST_ASSERT_NOT_EQUAL(img[sizeof(img) - 1U], last);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(sto, sizeof(img) - 1U, &last, 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_storage_sha256(got));
+    TEST_ASSERT_FALSE_MESSAGE(0 == memcmp(want, got, 32U), "a bit cleared in the last block went unseen");
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(sto, 0U, sto->size));
 }

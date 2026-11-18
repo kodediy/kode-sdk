@@ -26,6 +26,19 @@ const char *kdrv_fs_mount_point(void);
 /** @brief Total and free bytes. */
 kode_status_t kdrv_fs_usage(uint64_t *total, uint64_t *free_bytes);
 /**
+ * @brief Take the partition for a raw write: unmount the volume and refuse
+ *        every mount (and so every format) until kdrv_fs_raw_end().
+ * @return KODE_OK; KODE_DENIED when a raw write already holds it; KODE_ERROR
+ *         when the lock cannot be made.
+ */
+kode_status_t kdrv_fs_raw_begin(void);
+/**
+ * @brief Give the partition back and mount it as it is, never formatting.
+ * @return KODE_OK when the volume mounts; KODE_ERROR when it does not (it
+ *         stays unmounted); KODE_DENIED with no raw write open.
+ */
+kode_status_t kdrv_fs_raw_end(void);
+/**
  * @brief The volume's allocation unit, in bytes: what a file of one byte takes.
  * @return The cluster size, or 0 when the volume is not mounted or will not say.
  */

@@ -9,6 +9,7 @@
 #include "kaos_start.h"
 #include "kaos_claim.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -45,6 +46,9 @@
                              *   last window or row, and a request that
                              *   arrived meanwhile waits for it (PENDING_*). */
 
+#define PHASE_CHAIN_HOLD 7U /**< A window of a chain was drained: the part waits,
+                             *   gyroscope off, for the next one.            */
+
 /* What waits out a settle. While the gyroscope is turning on, the part does
  * not act on a FIFO reset or a self-test trigger. */
 #define PENDING_NONE    0U
@@ -59,6 +63,13 @@
 #define CAP_CHUNK       16U
 /** @brief One chunk every 10 ms. */
 #define CAP_CHUNK_MS    10U
+/** @brief A chain's chunk: the FIFO's most per read, 192 bytes, about 4.3 ms
+ *         of bus at 400 kHz. */
+#define CAP_CHUNK_FAST  32U
+/** @brief One of a chain's chunks every 6 ms, so the bus is free a quarter of the time. */
+#define CAP_CHUNK_FAST_MS 6U
+/** @brief How long a chain waits for its next window before the part is put back. */
+#define CHAIN_HOLD_MS   300U
 
 /** @brief How often a running self-test is asked whether it has finished. */
 #define ST_POLL_MS      20U
@@ -121,8 +132,15 @@ typedef struct {
     uint16_t stored;       /**< Witness samples already in s_xyz.           */
     QActive *who;          /**< Who holds the capture.                      */
     uint16_t hz;           /**< The bin the drain was asked about.          */
+    bool     fast;         /**< The drain in flight is a chain's.           */
+    bool     more;         /**< Another window follows it.                  */
+    uint16_t skip;         /**< Samples at its head left out of the measure. */
     kdrv_qmc5883p_cal_t corr;  /**< The magnetometer's calibration, when one is stored. */
     bool     cal_present;      /**< `mag_cal` holds one.                    */
+    QTimeEvt mag_wait;     /**< MAG_WAIT_SIG: the row's patience for the IMU. */
+    uint32_t mag_stale;    /**< Expired MAG_WAIT_SIG events still queued.   */
+    bool     mag_live;     /**< The patience is armed and unexpired.        */
+    bool     mag_owed;     /**< The row waits for the IMU to be free.       */
 #if CONFIG_KODE_LOWPOWER
     uint8_t  lp_who;       /**< The id lowpower_join() gave.                */
 #endif
@@ -142,6 +160,11 @@ _Static_assert(MAG_CAL_AXES == KDRV_QMC5883P_AXES,
  * of them.
  */
 static int16_t s_xyz[3U * KDRV_QMI8658_FIFO_DEPTH];
+
+/** @brief How the next drain is taken: set by imu_chain_window(), taken by cap_drain(). */
+static atomic_bool   s_chain_set;
+static atomic_bool   s_chain_more;
+static atomic_ushort s_chain_skip;
 
 static Imu l_imu;
 QActive * const AO_Imu = &l_imu.super;
@@ -916,6 +939,19 @@ void imu_drain_request(QActive *who, uint16_t hz)
     QACTIVE_POST(AO_Imu, &e->super, NULL);
 }
 
+void imu_capture_release(QActive *who)
+{
+    ImuCaptureReqEvt *e = Q_NEW_X(ImuCaptureReqEvt, 0U, IMU_RELEASE_REQ_SIG);
+
+    if ( NULL == e )
+    {
+        KLOG_E(TAG, "out of events; a witness window is closed by its own time");
+        return;
+    }
+    e->who = who;
+    QACTIVE_POST(AO_Imu, &e->super, NULL);
+}
+
 void imu_test_request(void)
 {
     static const QEvt evt = QEVT_INITIALIZER(IMU_TEST_REQ_SIG);
@@ -1586,6 +1622,34 @@ static void cap_end(Imu * const me)
 }
 
 /**
+ * @brief End a window of a chain whose next window is coming: the gyroscope
+ *        stays off and the part waits for it.
+ *
+ * @param me The AO.
+ */
+static void cap_hold(Imu * const me)
+{
+    wait_stop(me);
+    if ( KODE_OK == kdrv_qmi8658_fifo_rearm() )
+    {
+        me->phase = PHASE_CHAIN_HOLD;
+        me->who   = NULL;
+        wait_start(me, CHAIN_HOLD_MS);
+    }
+    else
+    {
+        cap_end(me);
+    }
+}
+
+void imu_chain_window(bool more, uint16_t skip)
+{
+    atomic_store(&s_chain_more, more);
+    atomic_store(&s_chain_skip, skip);
+    atomic_store(&s_chain_set, true);
+}
+
+/**
  * @brief Arm one FIFO window for @p who, now.
  *
  * The outcome goes back as IMU_ARMED_SIG, a refusal included, and a window
@@ -1705,8 +1769,22 @@ static void cap_drain(Imu * const me, ImuDrainReqEvt const * const q)
     me->hz     = q->hz;
     me->left   = (uint16_t)samples;
     me->stored = 0U;
+    me->fast   = atomic_exchange(&s_chain_set, false);
+    me->more   = me->fast && atomic_load(&s_chain_more);
+    me->skip   = 0U;
+    if ( me->fast )
+    {
+        me->skip = (uint16_t)atomic_load(&s_chain_skip);
+    }
     me->phase  = PHASE_CAP_DRAIN;
-    wait_start(me, CAP_CHUNK_MS);
+    if ( me->fast )
+    {
+        wait_start(me, CAP_CHUNK_FAST_MS);
+    }
+    else
+    {
+        wait_start(me, CAP_CHUNK_MS);
+    }
 }
 
 /**
@@ -1756,10 +1834,17 @@ static void cap_chunk(Imu * const me)
     kimu_energy_t w;
     kode_status_t rc = KODE_OK;
     uint16_t      n  = me->left;
+    uint16_t      chunk = (uint16_t)CAP_CHUNK;
+    uint32_t      chunk_ms = CAP_CHUNK_MS;
 
-    if ( (uint16_t)CAP_CHUNK < n )
+    if ( me->fast )
     {
-        n = (uint16_t)CAP_CHUNK;
+        chunk    = (uint16_t)CAP_CHUNK_FAST;
+        chunk_ms = CAP_CHUNK_FAST_MS;
+    }
+    if ( chunk < n )
+    {
+        n = chunk;
     }
     if ( 0U < n )
     {
@@ -1773,20 +1858,32 @@ static void cap_chunk(Imu * const me)
     if ( (KODE_OK == rc) && (0U < me->left) )
     {
         /* A timer, not a self-post, which would keep the queue busy and starve every task below. */
-        wait_start(me, CAP_CHUNK_MS);
+        wait_start(me, chunk_ms);
         return;
     }
 
     (void)memset(&w, 0, sizeof(w));
+    if ( me->skip > me->stored )
+    {
+        me->skip = me->stored;
+    }
     if ( KODE_OK == rc )
     {
         window_describe(me->stored);
-        rc = kimu_energy(s_xyz, (size_t)me->stored, me->hz,
+        rc = kimu_energy(&s_xyz[3U * (size_t)me->skip],
+                         (size_t)(me->stored - me->skip), me->hz,
                          (uint16_t)KDRV_QMI8658_WITNESS_HZ,
                          (uint16_t)KDRV_QMI8658_UG_PER_LSB, &w);
     }
-    energy_post(me, me->who, rc, (size_t)me->stored, &w);
-    cap_end(me);
+    energy_post(me, me->who, rc, (size_t)(me->stored - me->skip), &w);
+    if ( me->more && (KODE_OK == rc) )
+    {
+        cap_hold(me);
+    }
+    else
+    {
+        cap_end(me);
+    }
 }
 
 /**
@@ -1808,6 +1905,11 @@ static void imu_tick(Imu * const me)
             cap_end(me);
             break;
         }
+        case PHASE_CHAIN_HOLD: {
+            /* No window followed: the part goes back as it runs. */
+            cap_end(me);
+            break;
+        }
         case PHASE_SETTLE: {
             imu_rest(me);
             break;
@@ -1825,6 +1927,41 @@ static void imu_tick(Imu * const me)
             /* a tick with nothing in flight: nothing to do */
             break;
         }
+    }
+}
+
+/**
+ * @brief IMU_RELEASE_REQ_SIG: the holder will not drain its window.
+ *
+ * Closed at once, so the next window or row need not wait out
+ * KODE_IMU_CAPTURE_MAX_MS. A window coming out is let finish: its answer goes
+ * to a holder that no longer waits for it.
+ *
+ * @param me  The AO.
+ * @param who The holder.
+ */
+static void cap_release(Imu * const me, const QActive *who)
+{
+    if ( (PHASE_CAP_ARMED == me->phase) && (who == me->who) )
+    {
+        KLOG_I(TAG, "a witness window was given back undrained; closed");
+        cap_end(me);
+    }
+    else if ( PHASE_CHAIN_HOLD == me->phase )
+    {
+        cap_end(me);
+    }
+    else if ( (PHASE_SETTLING == me->phase) && (PENDING_CAP == me->pending) && (who == me->who) )
+    {
+        /* Not armed yet: the gyroscope is turning on, and runs as it is. */
+        wait_stop(me);
+        me->pending = PENDING_NONE;
+        me->phase   = PHASE_NONE;
+        me->who     = NULL;
+    }
+    else
+    {
+        /* nothing of the holder's to close */
     }
 }
 
@@ -1995,6 +2132,78 @@ static QState Imu_initial(Imu * const me, void const * const par)
     return Q_TRAN(&Imu_up);
 }
 
+/** @brief Whether a station's pass runs: what the magnetometer row waits in. */
+static bool imu_station_pass(void)
+{
+#if CONFIG_KODE_TEST_DOT
+    return test_dot_session();
+#else
+    return false;
+#endif
+}
+
+/**
+ * @brief The magnetometer row found the IMU held: wait for it, at most
+ *        KODE_MAG_TEST_WAIT_MS. A second request meanwhile is the same row.
+ *
+ * @param me The AO.
+ */
+static void mag_owe(Imu * const me)
+{
+    if ( me->mag_owed )
+    {
+        return;
+    }
+    if ( timer_stale(&me->mag_wait, me->mag_live) )
+    {
+        me->mag_stale += 1U;
+    }
+    me->mag_owed = true;
+    me->mag_live = true;
+    uint32_t const ticks = KQP_TICKS_PER_MS(KODE_MAG_TEST_WAIT_MS);
+
+    QTimeEvt_armX(&me->mag_wait, (QTimeEvtCtr)ticks, 0U);
+    KLOG_I(TAG, "test mag: the IMU is held by a window or a row; waiting for it, %u ms at most",
+           (unsigned)KODE_MAG_TEST_WAIT_MS);
+}
+
+/**
+ * @brief The IMU is free and the magnetometer row waits for it: run it.
+ *
+ * @param me The AO.
+ */
+static void mag_owed_run(Imu * const me)
+{
+    if ( timer_stale(&me->mag_wait, me->mag_live) )
+    {
+        me->mag_stale += 1U;
+    }
+    me->mag_live = false;
+    me->mag_owed = false;
+    mag_row(me);
+}
+
+/**
+ * @brief MAG_WAIT_SIG: the IMU stayed held for the whole wait.
+ *
+ * @param me The AO.
+ */
+static void mag_wait_over(Imu * const me)
+{
+    if ( 0U < me->mag_stale )
+    {
+        me->mag_stale -= 1U;
+        return;
+    }
+    me->mag_live = false;
+    if ( me->mag_owed )
+    {
+        me->mag_owed = false;
+        KLOG_W(TAG, "test mag: the IMU stayed held for %u ms", (unsigned)KODE_MAG_TEST_WAIT_MS);
+        test_refused(me, "mag");
+    }
+}
+
 /**
  * @brief Serving: the rows, the witness window, and a sample on request.
  *
@@ -2127,6 +2336,16 @@ static QState Imu_up(Imu * const me, QEvt const * const e)
         case IMU_CAPTURE_REQ_SIG: {
             ImuCaptureReqEvt const * const q = Q_EVT_CAST(ImuCaptureReqEvt);
 
+            if ( PHASE_CHAIN_HOLD == me->phase )
+            {
+                /* The next window of a chain: the gyroscope is off and the
+                 * FIFO's registers are back, so there is nothing to settle. */
+                wait_stop(me);
+                me->phase = PHASE_NONE;
+                cap_arm(me, q->who);
+                status = Q_HANDLED();
+                break;
+            }
             if ( PHASE_NONE != me->phase )
             {
                 armed_post(me, q->who, KODE_DENIED);
@@ -2164,6 +2383,16 @@ static QState Imu_up(Imu * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        case IMU_RELEASE_REQ_SIG: {
+            cap_release(me, Q_EVT_CAST(ImuCaptureReqEvt)->who);
+            status = Q_HANDLED();
+            break;
+        }
+        case MAG_WAIT_SIG: {
+            mag_wait_over(me);
+            status = Q_HANDLED();
+            break;
+        }
         case IMU_WAIT_SIG: {
             /* The stale count first, as everywhere this one-shot is used:
              * an expiry queued before a wait_stop() is not this phase's. */
@@ -2198,12 +2427,20 @@ static QState Imu_up(Imu * const me, QEvt const * const e)
 #endif
         case MAG_TEST_REQ_SIG: {
             /* The magnetometer is its own part and its row holds the IMU
-             * for nothing, but the console runs one row at a time and the
-             * self-test's 10 ms sits inside this step: answered rather than
-             * run under a witness window somebody is timing. */
+             * for nothing, but the self-test's 10 ms sits inside this step:
+             * never run under a witness window somebody is timing. During a
+             * station's pass the row waits for the window or the IMU's row
+             * to end (below); otherwise it is answered at once. */
             if ( PHASE_NONE != me->phase )
             {
-                test_refused(me, "mag");
+                if ( imu_station_pass() )
+                {
+                    mag_owe(me);
+                }
+                else
+                {
+                    test_refused(me, "mag");
+                }
             }
             else
             {
@@ -2217,6 +2454,11 @@ static QState Imu_up(Imu * const me, QEvt const * const e)
             break;
         }
     }
+    /* Whatever freed the IMU, the magnetometer row that waits for it goes now. */
+    if ( me->mag_owed && (PHASE_NONE == me->phase) )
+    {
+        mag_owed_run(me);
+    }
     return status;
 }
 
@@ -2228,7 +2470,12 @@ void Imu_ctor(void)
     QTimeEvt_ctorX(&me->wait, &me->super, IMU_WAIT_SIG, 0U);
     QTimeEvt_ctorX(&me->imu.te, &me->super, IMU_REST_SIG, 0U);
     QTimeEvt_ctorX(&me->mag.te, &me->super, MAG_REST_SIG, 0U);
+    QTimeEvt_ctorX(&me->mag_wait, &me->super, MAG_WAIT_SIG, 0U);
+    me->mag_stale  = 0U;
+    me->mag_live   = false;
+    me->mag_owed   = false;
 
+    atomic_store(&s_chain_set, false);
     me->wait_stale = 0U;
     me->wait_live  = false;
     me->imu_up     = false;

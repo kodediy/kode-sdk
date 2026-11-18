@@ -183,8 +183,8 @@ TEST_CASE("a terminal install's failure closes with the verb named, and a "
     TEST_ASSERT_TRUE(replied(">err code=6 msg=install"));
 }
 
-/* AO_AppMgr refuses a stream for now when an app it would evict has no copy
- * on the card yet: nothing was armed, and the host asks again. */
+/* AO_AppMgr refuses a stream for now when the card stays busy for the copy
+ * of an app the image would evict: nothing was armed, and the host asks again. */
 TEST_CASE("a terminal install refused for now closes with code 4 and busy",
           "[console_install]")
 {
@@ -194,6 +194,31 @@ TEST_CASE("a terminal install refused for now closes with code 4 and busy",
     answer(RECV_AGAIN_SIG);
     TEST_ASSERT_TRUE(replied(">err code=4 msg=busy"));
     TEST_ASSERT_FALSE(replied(">|ready"));
+}
+
+/** @brief How long the case leaves a held install quiet between two waits: under the command's time. */
+#define HELD_QUIET_MS  4000U
+
+/* AO_AppMgr copies an app the image evicts before it takes the wire, and says
+ * so every second: the host is told to wait, and the command is not timed out
+ * while the waits keep coming. */
+TEST_CASE("a terminal install held for a copy answers wait, and keeps its time while it is told",
+          "[console_install]")
+{
+    console_up();
+    type_line("install src=\"terminal\" dst=app size=8 crc32=0");
+    drain_queue(AO_AppMgr);
+
+    for ( unsigned second = 0U; second < 3U; ++second )
+    {
+        answer(RECV_WAIT_SIG);
+        TEST_ASSERT_TRUE(replied(">|wait"));
+        /* Most of the command's time, each time: three of them outlast it. */
+        (void)qf_support_tick(AO_Console, QF_SUPPORT_STEPS(HELD_QUIET_MS));
+        TEST_ASSERT_FALSE_MESSAGE(replied(">err"), "a command told to wait was timed out");
+    }
+    answer(RECV_READY_SIG);
+    TEST_ASSERT_TRUE(replied(">|ready chunk="));
 }
 
 TEST_CASE("install from the terminal to the C5 typed at the BLE console is "
@@ -360,6 +385,17 @@ TEST_CASE("run is refused on every destination but an app, whichever way it "
     TEST_ASSERT_NULL(take(AO_AppMgr, FLASH_REQ_SIG));
 }
 
+TEST_CASE("the storage partition takes a file off a medium, never a stream or the mailbox",
+          "[console_install]")
+{
+    assert_refused("install src=\"terminal\" dst=storage size=4096 crc32=7",
+                   ">err code=3 msg=dst");
+    assert_refused("install src=\"pending\" dst=storage", ">err code=3 msg=dst");
+    assert_refused("install src=\"sd:storage.bin\" dst=storage run=on",
+                   ">err code=3 msg=run");
+    TEST_ASSERT_NULL(take(AO_AppMgr, FLASH_REQ_SIG));
+}
+
 TEST_CASE("the mailbox into itself is refused", "[console_install]")
 {
     assert_refused("install src=\"pending\" dst=pending", ">err code=3 msg=dst");
@@ -423,6 +459,21 @@ TEST_CASE("install off a medium waits for AO_AppMgr's verdict and hands it the "
     TEST_ASSERT_NOT_NULL(req);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KFW_SRC_HTTP, req->src_kind);
     TEST_ASSERT_TRUE(req->launch);
+    QF_gc(&req->super);
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+TEST_CASE("an install of a file into the storage partition is handed to AO_AppMgr as it is",
+          "[console_install]")
+{
+    const FlashReqEvt *req = install_asked("install src=\"sd:storage.bin\" dst=storage");
+
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KFW_SRC_SD, req->src_kind);
+    TEST_ASSERT_EQUAL_STRING("storage.bin", req->src);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_FLASH_DST_STORAGE, req->dst_kind);
+    TEST_ASSERT_FALSE(req->launch);
     QF_gc(&req->super);
     verdict(APP_REQ_TAKEN);
     TEST_ASSERT_TRUE(replied(">ok"));

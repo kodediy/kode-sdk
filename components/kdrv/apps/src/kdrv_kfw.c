@@ -153,6 +153,44 @@ void kfw_sha256(const void *data, size_t len, uint8_t *out)
                            out, (size_t)KFW_SHA_LEN, &got);
 }
 
+static psa_hash_operation_t s_stream_sha;   /* kfw_sha256_start()'s hash. */
+static bool                 s_sha_open;  /* s_stream_sha has been set up. */
+
+bool kfw_sha256_start(void)
+{
+    if ( s_sha_open )
+    {
+        (void)psa_hash_abort(&s_stream_sha);
+    }
+    (void)psa_crypto_init();
+    s_stream_sha  = (psa_hash_operation_t)PSA_HASH_OPERATION_INIT;
+    s_sha_open = (psa_hash_setup(&s_stream_sha, PSA_ALG_SHA_256) == PSA_SUCCESS);
+    return s_sha_open;
+}
+
+void kfw_sha256_feed(const void *data, size_t len)
+{
+    if ( s_sha_open )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; the caller's bytes come as void *, as kfw_sha256() takes them */
+        (void)psa_hash_update(&s_stream_sha, (const uint8_t *)data, len);
+    }
+}
+
+bool kfw_sha256_end(uint8_t *out)
+{
+    size_t got = 0U;
+    bool   ok  = false;
+
+    if ( s_sha_open )
+    {
+        ok = (psa_hash_finish(&s_stream_sha, out, (size_t)KFW_SHA_LEN, &got) == PSA_SUCCESS)
+             && ((size_t)KFW_SHA_LEN == got);
+        s_sha_open = false;
+    }
+    return ok;
+}
+
 /* ---- The header ---------------------------------------------------------- */
 
 /**

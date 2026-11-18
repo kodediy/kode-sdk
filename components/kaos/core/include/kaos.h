@@ -550,6 +550,34 @@ void imu_capture_request(QActive *who);
 void imu_drain_request(QActive *who, uint16_t hz);
 
 /**
+ * @brief Give back the witness window @p who holds and will not drain
+ *        (IMU_RELEASE_REQ_SIG).
+ *
+ * Posts and returns. A window armed for @p who, or waiting for the gyroscope
+ * to be armed for it, is closed at once and the part goes back as it runs;
+ * the next window or row need not wait out KODE_IMU_CAPTURE_MAX_MS. A window
+ * already coming out, or one @p who does not hold, is left alone. No answer.
+ *
+ * @param who The holder. Never NULL.
+ */
+void imu_capture_release(QActive *who);
+
+/**
+ * @brief Say how the next drain is taken, before asking for it.
+ *
+ * A window drained with @p more set leaves the part ready for the next
+ * capture with no wait for the gyroscope: the gyroscope stays off and the
+ * FIFO is re-armed at once. The chain closes by itself when the last window
+ * is drained with @p more clear, or when no capture follows within a few
+ * hundred milliseconds. A chain's drain also reads faster than a lone
+ * window's. Valid for the one drain that follows.
+ *
+ * @param more True when another window will be asked for right after.
+ * @param skip Samples at the head of the window left out of the measure.
+ */
+void imu_chain_window(bool more, uint16_t skip);
+
+/**
  * @brief Ask AO_Imu to self-test the IMU - `test component=imu`.
  *
  * Verdict: a published TEST_RESULT_SIG "imu". Checks the part's identity, each
@@ -640,8 +668,9 @@ kode_status_t mag_cal_ask(QActive *who, uint8_t op, const kdrv_qmc5883p_cal_t *c
  *
  * Verdict: a published TEST_RESULT_SIG "mag", each step a MAG_TEST_SIG record
  * first. The part names itself, then the field at rest is published unjudged;
- * the self-test shift is logged, not judged (no datasheet threshold). Fails
- * while a witness window or the IMU's row holds the part.
+ * the self-test shift is logged, not judged (no datasheet threshold). While a
+ * witness window or the IMU's row holds the part the row waits for it,
+ * KODE_MAG_TEST_WAIT_MS at most, and fails past that.
  */
 void mag_test_request(void);
 
@@ -2818,6 +2847,24 @@ bool c5_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value);
 bool exp_power_request(bool on);
 
 /**
+ * @brief Tell AO_Radio a station's pass begins or ends.
+ *
+ * AO_TestDot asks it from the first station verb to `test_dot_end`. While the
+ * pass runs nothing joins a network by itself (the boot's round, the waits to
+ * get back on one, a `wifi_auto`) and a network the board is on is left once,
+ * at the worker's next free moment. The network stays remembered and no
+ * setting is written; a network asked for by name is joined as always. At the
+ * end the `wifi_join` rule is back: a board that would be looking for a
+ * network starts its round. The radio check (`test_dot_radio`) is not
+ * touched. No answer.
+ *
+ * @param on true when the pass begins, false when it ends.
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
+ */
+bool radio_quiet_request(bool on);
+
+/**
  * @brief The event exp_power_request() posts, for a caller that posts it itself.
  * @param on true for the rail on, false for off.
  * @return A static event; never NULL.
@@ -3054,6 +3101,22 @@ void net_test_request(void);
  * dropped. Compiled under CONFIG_KODEOS_NET; guard the call the same way.
  */
 void net_leave_request(void);
+
+/**
+ * @brief Tell AO_Net a station's pass begins or ends.
+ *
+ * AO_TestDot asks it beside radio_quiet_request(). While the pass runs, with
+ * an address or without, a request that would start network work (an app's
+ * lookup, HTTP or UDP ask, a ping, a transfer, MQTT's start, a screenshot's
+ * upload) is answered refused, as the board's rest refuses it, and the Kode
+ * channel does not start; what runs already goes on. At the end the channel
+ * starts if it waited for it. No answer.
+ *
+ * @param on true when the pass begins, false when it ends.
+ * @return true when the request was posted; false when AO_Net's queue is
+ *         within KQP_NET_CMD_MARGIN of full, and then nothing was asked.
+ */
+bool net_quiet_request(bool on);
 
 /**
  * @brief Tell AO_Net when the scheduler's `mqtt` entry next falls due.
@@ -4026,6 +4089,16 @@ void storage_next_request(uint8_t idx);
 /** @brief Close the open file and release any buffers still on loan. */
 void storage_close_request(void);
 
+/**
+ * @brief Read the card file @p who has open again, from byte @p offset.
+ *
+ * For a chunk that came back with an error: the card is mounted again, the file
+ * opened again and read from @p offset (StorageRereadEvt). Every buffer lent
+ * before is taken back. Only a file found on the card is read again; anything
+ * else is answered with a STORAGE_DATA_SIG error at once.
+ */
+void storage_reread_request(uint32_t offset, QActive *who);
+
 /** @brief The tag of a write whose answer needs no number of its own. */
 #define KODE_STORAGE_TAG_NONE  0U
 
@@ -4252,6 +4325,13 @@ void appmgr_cat_request(const char *project, const char *cats, bool clear);
  * KODE_FLASH_DST_PENDING the mailbox (undecoded). Answered with RECV_READY_SIG,
  * then RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG, plus APP_FLASH_* progress.
  *
+ * An image for the region that would evict an app with no copy on the card
+ * yet is held back before the wire is taken: that app is copied first, with
+ * RECV_WAIT_SIG and APP_FLASH_PROGRESS_SIG at 0 % at once and every second of
+ * it, and the ready follows by itself. RECV_AGAIN_SIG ends a stream whose
+ * copy the card stayed busy for, and a compressed one whose image evicts an
+ * app with no copy that its wire length did not: nothing changed, ask again.
+ *
  * @param dst    KFW_TARGET_APP or KFW_TARGET_OS.
  * @param size   Payload length in bytes.
  * @param crc32  What khal_crc32() over the whole payload must equal.
@@ -4299,6 +4379,25 @@ void appmgr_image_request(uint8_t src_kind, const char *src,
  */
 bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
                       bool launch, QActive *who);
+
+/**
+ * @brief Hold or release a write off a medium between two chunks.
+ *
+ * Set by AO_TestDot while a station verb times something a flash write would
+ * slow down (the pads); the write goes on when it is released.
+ *
+ * @param on true to hold, false to release.
+ */
+void appmgr_hold(bool on);
+
+/**
+ * @brief Write off a medium without the GUI's gap between chunks.
+ *
+ * Set by AO_TestDot for the installs it starts, when nobody uses the glass.
+ *
+ * @param on true for no gap, false for the usual one.
+ */
+void appmgr_fast(bool on);
 
 /**
  * @brief appmgr_image_ask() for a console command: the install's record names
@@ -4973,8 +5072,11 @@ bool lowpower_request_rest(uint8_t src);
  * @brief Tell AO_LowPower a console line came in.
  *
  * Restarts the idle time; asleep, it wakes the board (MQTT, BLE or cable wake by
- * @p src). Buttons and touches need no call. KODE_CONSOLE_SRC_SCHED lines are not
- * input. Safe from any task: it posts a static event.
+ * @p src); while a round runs, it abandons the round unless it is an order for
+ * OFF, so the command the line asks for is not begun on a board about to rest.
+ * Buttons and touches need no call. KODE_CONSOLE_SRC_SCHED lines are not input:
+ * they abandon a round too, and nothing else. Safe from any task: it posts a
+ * static event.
  *
  * @param src The KODE_CONSOLE_SRC_* port the line came on.
  */
@@ -5001,7 +5103,7 @@ const char *lowpower_last_refusal(void);
  * The sound and the card are put away once and come back at their next use:
  * they are never among the parts held, and asking again asks their owners
  * again. An owner that answers busy is asked again
- * KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round is begun again,
+ * KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round asks its own,
  * while that ask falls inside KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS of the
  * request; busy past it, or silent for KODE_LOWPOWER_PART_STEP_MS, it ends
  * the request there. An owner with no room for the AWAKE that brings its
@@ -5457,6 +5559,18 @@ void test_dot_run_request(void);
  * @return true while a run goes.
  */
 bool test_dot_busy(void);
+
+/**
+ * @brief Whether a station's pass runs: from its first verb to `test_dot_end`
+ *        (or its idle bound), as AO_TestDot tells AO_Radio and AO_Net.
+ *
+ * What a row does differently for the station reads this, so a Kode with no
+ * station behaves as it always has. Read from other AOs, so it can be one
+ * step late.
+ *
+ * @return true while a pass runs.
+ */
+bool test_dot_session(void);
 
 /**
  * @brief The screen host has @p kind on the panel: posts

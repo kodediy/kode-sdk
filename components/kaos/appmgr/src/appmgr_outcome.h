@@ -61,9 +61,11 @@ typedef enum {
     APPMGR_WHY_NO_ROOM,      /**< It does not fit, even with every app gone.   */
     APPMGR_WHY_WRONG_BOARD,  /**< It was built for another chip or target.     */
     APPMGR_WHY_BUSY,         /**< The network's one download was someone
-                              *   else's: an app's file or GET.              */
-    APPMGR_WHY_KEEP,         /**< An app it would remove has no copy on the
-                              *   card yet: ask again.                         */
+                              *   else's: an app's file or GET; or, off a
+                              *   medium, AO_Storage's one open file.        */
+    APPMGR_WHY_KEEP,         /**< An app it would remove could not be copied
+                              *   to the card first, which stayed busy: ask
+                              *   again.                                       */
     APPMGR_WHY_CANCELLED,    /**< The person went back.                        */
     APPMGR_WHY_STALLED,      /**< The terminal stopped sending.                */
     APPMGR_WHY_RESET,        /**< A reset cut the install.                     */

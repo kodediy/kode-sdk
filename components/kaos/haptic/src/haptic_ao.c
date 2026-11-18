@@ -116,6 +116,82 @@ _Static_assert((HAPTIC_STALL_MS % KODE_HAPTIC_TICK_MS) == 0U,
 /** @brief The bit that tells an "off" segment from an "on" one. */
 #define HAPTIC_SEG_ODD_BIT  1U
 
+/* ---- The pattern row (`test component=haptic_pat`) --------------------
+ * A lock-in check: the motor is switched on and off in a known pattern while
+ * the IMU measures the energy at 235 Hz window by window, one window per
+ * segment, on, off, on, off... A bump or a hand on the bench lands in one or
+ * two windows and does not follow the pattern; the motor does. There is no
+ * floor to measure first and no bench to refuse.
+ *
+ * A window is one witness FIFO fill taken from AO_Imu as a chain: the
+ * gyroscope stays off between two windows, so the windows follow each other
+ * with no settle, and each costs its own length plus the arm and the drain.
+ * The motor is braked at the end of every "on" window by playing the drive
+ * back in opposite phase, and the head of every "off" window is left out of
+ * the measure: both keep the motor's ring-down out of the "off" energies.
+ */
+/** @brief On/off cycles of the pattern. */
+#define HAPTIC_PAT_CYCLES_N       3U
+/** @brief Windows of the pattern: one on and one off per cycle. */
+#define HAPTIC_PAT_WINDOWS_N      (2U * HAPTIC_PAT_CYCLES_N)
+/** @brief Samples of drive in an "on" window: 12 whole periods of 235 Hz at the
+ *         chip's 12 kHz, 51 ms, ending on a zero crossing of the sine. */
+#define HAPTIC_PAT_DRIVE_SAMPLES  613U
+/** @brief Samples of brake after the drive: the same sine in opposite phase,
+ *         6 periods, 26 ms. */
+#define HAPTIC_PAT_BRAKE_SAMPLES  311U
+/** @brief The "on" segment the chip plays, drive and brake, in milliseconds. */
+#define HAPTIC_PAT_ON_MS          77U
+/** @brief How long an "off" window is left to fill, in milliseconds. */
+#define HAPTIC_PAT_OFF_MS         105U
+/** @brief Samples at the head of an "off" window left out: the witness runs at
+ *         1 kHz, so 60 ms. What remains is about 10 periods. */
+#define HAPTIC_PAT_OFF_SKIP       60U
+/** @brief Amplitude of the "on" windows, per cent of full scale: the one
+ *         constant to raise when the row misses. */
+#define HAPTIC_PAT_GAIN_PCT       12U
+/** @brief What an "on" window must exceed its surrounding "off" windows by, x10. */
+#define HAPTIC_PAT_RATIO_X10      30U
+/** @brief Cycles that may miss the ratio and still pass: one bump or one hit. */
+#define HAPTIC_PAT_MISS_MAX       1U
+/** @brief Fewer samples than this, once the head is left out, is not a window:
+ *         the detector's own floor is 32. */
+#define HAPTIC_PAT_MIN_SAMPLES    33U
+/** @brief An "off" window counts for at most this many times the median of
+ *         the "off" windows, so one hit on one of them costs one cycle. */
+#define HAPTIC_PAT_OFF_CAP_X      2U
+/** @brief What one window is allowed, in milliseconds: its arm, its fill and
+ *         its drain with room to spare. */
+#define HAPTIC_PAT_WINDOW_MS      300U
+/** @brief The row's budget: every window at its allowance and a second more,
+ *         which covers the gyroscope's settle before the first. */
+#define HAPTIC_PAT_BUDGET_MS      ((HAPTIC_PAT_WINDOWS_N * HAPTIC_PAT_WINDOW_MS) + 1000U)
+
+/** @brief What a second go of the pattern needs of the budget: a whole pattern
+ *         and the gyroscope's settle before its first window. A row that ran
+ *         dry later than this has no time for it. */
+#define HAPTIC_PAT_AGAIN_MS       1500U
+_Static_assert(HAPTIC_PAT_AGAIN_MS < HAPTIC_PAT_BUDGET_MS,
+               "a second go of the pattern fits the row's budget");
+
+/** @brief The pattern row's id and place in a walk: the next free ones, the
+ *         row being in no group. */
+#define HAPTIC_PAT_ID             37U
+#define HAPTIC_PAT_ORDER          37U
+
+/** @brief The name the verdict and the row answer under. */
+#define HAPTIC_PAT_NAME           "haptic_pat"
+_Static_assert(sizeof(HAPTIC_PAT_NAME) <= KODE_TEST_NAME_LEN,
+               "the row's name must fit a test name");
+
+_Static_assert(KDRV_AW_SAMPLES(HAPTIC_PAT_ON_MS)
+               == (HAPTIC_PAT_DRIVE_SAMPLES + HAPTIC_PAT_BRAKE_SAMPLES),
+               "the \"on\" segment must be the drive and the brake, whole");
+_Static_assert(HAPTIC_PAT_MISS_MAX < HAPTIC_PAT_CYCLES_N,
+               "the pattern must keep at least one cycle that has to pass");
+_Static_assert(HAPTIC_PAT_WINDOWS_N <= 16U,
+               "the pattern's energies are kept in a small array");
+
 /** @brief Where the row is in its chain of windows. */
 typedef enum {
     ROW_NONE = 0,      /**< No row is running.                              */
@@ -124,7 +200,11 @@ typedef enum {
     ROW_FLOOR_DRAIN,   /**< Waiting for what the still window held.         */
     ROW_GAIN_ARM,      /**< Waiting for this gain's window to be armed.     */
     ROW_GAIN_PLAY,     /**< The motor is being driven into that window.     */
-    ROW_GAIN_DRAIN     /**< Waiting for what the driven window held.        */
+    ROW_GAIN_DRAIN,    /**< Waiting for what the driven window held.        */
+    ROW_PAT_ARM,       /**< Waiting for a pattern window to be armed.       */
+    ROW_PAT_STILL,     /**< An "off" window is filling.                     */
+    ROW_PAT_PLAY,      /**< The motor is being driven into an "on" window.  */
+    ROW_PAT_DRAIN      /**< Waiting for what a pattern window held.         */
 } row_phase_t;
 
 /** @brief One pattern or hold, while it is being fed. */
@@ -133,11 +213,13 @@ typedef struct {
     uint8_t       n;        /**< Segments in use.                           */
     bool          hold;     /**< On until a stop: total is not an end.      */
     uint32_t      total;    /**< Samples the pattern is made of.            */
+    uint32_t      brake_at; /**< From this sample on the sine is inverted; 0 is never. */
     uint32_t      fed;      /**< How many the chip has taken.               */
     uint32_t      phase;    /**< The sine's sample index, across bursts.    */
     uint32_t      stall;    /**< Consecutive feeds the FIFO took nothing.   */
     uint32_t      t_go;     /**< khal_time_ms() when GO was issued.         */
     bool          starved;  /**< The FIFO refused a burst at least once.    */
+    bool          dry;      /**< The chip left RTP with samples still owed. */
     bool          draining; /**< Fed whole: the tick watches it play out.   */
     uint8_t       gain;     /**< Per cent of full scale, as asked for.      */
     uint8_t       reg;      /**< The PLAYCFG2 byte the chip actually got.   */
@@ -152,6 +234,11 @@ typedef struct {
     int32_t     floor_x10;   /**< What the bench carries at f0, 0.1 mg.     */
     uint32_t    best_x10;    /**< The best on/off ratio any gain reached.   */
     uint8_t     best_gain;   /**< The PLAYCFG2 byte that reached it.        */
+    bool        pattern;     /**< This is the pattern row, not `haptic`.    */
+    uint8_t     win;         /**< The pattern window being measured.        */
+    bool        again;       /**< The pattern is on its second go.          */
+    uint32_t    t0;          /**< khal_time_ms() when the row began.        */
+    int32_t     en_x10[HAPTIC_PAT_WINDOWS_N]; /**< Energy at the bin per window, 0.1 mg: on, off, on... */
 } Row;
 
 typedef struct {
@@ -168,6 +255,7 @@ typedef struct {
     bool     looked;      /**< The first request has looked for the chip.   */
     bool     row_owed;    /**< The row was asked for during a buzz: it runs
                            *   when the buzz ends.                       */
+    bool     owed_pat;    /**< The row owed is the pattern row.           */
     uint8_t  scale;       /**< `haptic`: per cent of every gain an app asks
                            *   for; 0 silences them. The row's are its own. */
     Play     play;
@@ -179,6 +267,9 @@ typedef struct {
 
 /** @brief The motor's claim: taken by a request's door, freed on entering idle. */
 static _Atomic haptic_state_t s_state;
+
+/** @brief True from the pattern row's request until AO_Haptic takes it. */
+static atomic_bool s_pattern_pending;
 
 /** @brief True from a stop's post until the AO dispatches it. */
 static atomic_bool s_stop_pending;
@@ -537,11 +628,13 @@ static void play_start(Haptic * const me, const uint16_t *seg_ms, uint8_t n,
             me->play.total    += (uint32_t)KDRV_AW_SAMPLES((uint32_t)seg_ms[i]);
         }
     }
+    me->play.brake_at = 0U;
     me->play.fed     = 0U;
     me->play.phase   = 0U;
     me->play.stall   = 0U;
     me->play.t_go    = 0U;
     me->play.starved  = false;
+    me->play.dry      = false;
     me->play.draining = false;
     me->play.gain    = gain_pct;
     me->play.reg     = 0U;
@@ -608,6 +701,17 @@ static void play_fill(Haptic * const me, size_t n)
                 me->play.phase = 0U;
             }
             kdrv_aw86233_sine_fill(&s_pcm[done], run, &me->play.phase);
+            if ( 0U < me->play.brake_at )
+            {
+                /* The brake: the motor is pushed against its own motion. */
+                for ( size_t i = 0U; run > i; ++i )
+                {
+                    if ( (pos + (uint32_t)i) >= me->play.brake_at )
+                    {
+                        s_pcm[done + i] = (int8_t)(-(int32_t)s_pcm[done + i]);
+                    }
+                }
+            }
         }
         else
         {
@@ -665,7 +769,8 @@ static bool play_running(Haptic * const me)
     }
     if ( !rtp )
     {
-        me->play.rc = KODE_IO_ERROR;
+        me->play.rc  = KODE_IO_ERROR;
+        me->play.dry = true;
         KLOG_E(TAG, "the RTP FIFO ran dry: the chip left RTP within %u ms "
                     "of GO, with %u ms of the buzz fed",
                (unsigned)(khal_time_ms() - me->play.t_go),
@@ -877,6 +982,10 @@ static uint8_t row_step(Haptic const * const me)
 {
     uint8_t step = 2U;
 
+    if ( me->row.pattern )
+    {
+        return (uint8_t)(me->row.win + 1U);
+    }
     if ( (ROW_FLOOR_ARM == me->row.phase) || (ROW_FLOOR_STILL == me->row.phase)
         || (ROW_FLOOR_DRAIN == me->row.phase) )
     {
@@ -925,8 +1034,9 @@ static void row_publish(Haptic * const me, uint8_t step, uint8_t phase,
 static void row_end(Haptic * const me)
 {
     wait_stop(me);
-    me->row.active = false;
-    me->row.phase  = ROW_NONE;
+    me->row.active  = false;
+    me->row.phase   = ROW_NONE;
+    me->row.pattern = false;
 }
 
 /**
@@ -938,7 +1048,12 @@ static void row_end(Haptic * const me)
 static void verdict_publish(Haptic * const me, bool ok)
 {
     TestResultEvt *e;
+    const char    *name = "haptic";
 
+    if ( me->row.pattern )
+    {
+        name = HAPTIC_PAT_NAME;
+    }
     row_end(me);
 
     e = Q_NEW_X(TestResultEvt, 0U, TEST_RESULT_SIG);
@@ -947,7 +1062,7 @@ static void verdict_publish(Haptic * const me, bool ok)
         KLOG_E(TAG, "out of events; the haptic verdict is lost");
         return;
     }
-    (void)snprintf(e->name, sizeof(e->name), "%s", "haptic");
+    (void)snprintf(e->name, sizeof(e->name), "%s", name);
     e->ok = ok;
     e->origin = TEST_ORIGIN_AUTOTEST;
     QACTIVE_PUBLISH(&e->super, &me->super);
@@ -979,6 +1094,16 @@ static void row_verdict(Haptic * const me, bool ok, const char *why)
     verdict_publish(me, ok);
 }
 
+/** @brief Whether a station's pass runs: what the row's retry and its window's return wait on. */
+static bool haptic_station_pass(void)
+{
+#if CONFIG_KODE_TEST_DOT
+    return test_dot_session();
+#else
+    return false;
+#endif
+}
+
 /**
  * @brief The row could not measure. Say which half stopped it, and judge
  *        neither.
@@ -993,9 +1118,21 @@ static void row_verdict(Haptic * const me, bool ok, const char *why)
  */
 static void row_noverdict(Haptic * const me, uint8_t reason, const char *why)
 {
+    const char *name = "haptic";
+
+    if ( me->row.pattern )
+    {
+        name = HAPTIC_PAT_NAME;
+    }
     row_publish(me, row_step(me), (uint8_t)HAPTIC_TEST_NOVERDICT, reason, 0U,
                 0, 0, 0U, 0U);
-    KLOG_E(TAG, "test haptic: NO VERDICT - %s", why);
+    KLOG_E(TAG, "test %s: NO VERDICT - %s", name, why);
+    if ( haptic_station_pass() )
+    {
+        /* A window armed for this row is never drained now: given back, so
+         * the station's next row finds the IMU free. */
+        imu_capture_release(&me->super);
+    }
     verdict_publish(me, false);
 }
 
@@ -1007,10 +1144,52 @@ static void row_arm(Haptic * const me, row_phase_t phase)
     wait_start(me, KODE_HAPTIC_REPLY_MS);
 }
 
+/**
+ * @brief During a station's pass, a pattern whose buzz the chip cut short by
+ *        running dry - its feed came late, the motor is not in question - is
+ *        played once more from its first window, its window given back first.
+ *
+ * Once only, and only with HAPTIC_PAT_AGAIN_MS of the budget left; otherwise,
+ * and outside a pass, the row ends with no verdict as it always has.
+ *
+ * @param me The AO, the buzz over.
+ * @return true when the pattern starts again.
+ */
+static bool pat_again(Haptic * const me)
+{
+    uint32_t const spent = khal_time_ms() - me->row.t0;
+
+    if ( (!me->row.pattern) || (!me->play.dry) || me->row.again || (!haptic_station_pass())
+        || ((spent + HAPTIC_PAT_AGAIN_MS) > HAPTIC_PAT_BUDGET_MS) )
+    {
+        return false;
+    }
+    KLOG_W(TAG, "test %s: the chip ran dry in window %u, not the motor; the pattern once more",
+           HAPTIC_PAT_NAME, (unsigned)(me->row.win + 1U));
+    imu_capture_release(&me->super);
+    me->row.again = true;
+    me->row.win   = 0U;
+    (void)memset(me->row.en_x10, 0, sizeof(me->row.en_x10));
+    row_arm(me, ROW_PAT_ARM);
+    return true;
+}
+
 /** @brief Ask the witness what the window it is holding amounted to. */
 static void row_drain(Haptic * const me, row_phase_t phase)
 {
     me->row.phase = phase;
+    if ( ROW_PAT_DRAIN == phase )
+    {
+        /* A window of a chain: the next follows unless this is the last, and
+         * an "off" one leaves its ring-down out. */
+        uint16_t skip = 0U;
+
+        if ( !seg_is_on(me->row.win) )
+        {
+            skip = (uint16_t)HAPTIC_PAT_OFF_SKIP;
+        }
+        imu_chain_window((me->row.win + 1U) < HAPTIC_PAT_WINDOWS_N, skip);
+    }
     imu_drain_request(&me->super, (uint16_t)KDRV_AW_F0_HZ);
     wait_start(me, KODE_HAPTIC_REPLY_MS);
 }
@@ -1184,20 +1363,192 @@ static void row_energy(Haptic * const me, ImuEnergyEvt const * const q)
 /**
  * @brief Start the row: the bench first, and nothing driven yet.
  *
- * @param me The AO.
+ * @param me      The AO.
+ * @param pattern The pattern row: its first window is an "on" one, no floor.
  * @return false when a request holds the motor; nothing starts.
  */
-static bool row_start(Haptic * const me)
+static bool row_start(Haptic * const me, bool pattern)
 {
     bool const took = state_claim(HAPTIC_STATE_PLAYING);
 
     if ( took )
     {
         (void)memset(&me->row, 0, sizeof(me->row));
-        me->row.active = true;
-        row_arm(me, ROW_FLOOR_ARM);
+        me->row.active  = true;
+        me->row.pattern = pattern;
+        me->row.t0      = khal_time_ms();
+        if ( pattern )
+        {
+            row_arm(me, ROW_PAT_ARM);
+        }
+        else
+        {
+            row_arm(me, ROW_FLOOR_ARM);
+        }
     }
     return took;
+}
+
+/* ---- The pattern row's judgement --------------------------------------------- */
+
+/**
+ * @brief The median of the "off" windows, upper one of an even count.
+ *
+ * @param me The AO.
+ * @return Energy at the bin, 0.1 mg.
+ */
+static int32_t pat_off_median(Haptic const * const me)
+{
+    int32_t off[HAPTIC_PAT_CYCLES_N];
+
+    for ( uint8_t i = 0U; HAPTIC_PAT_CYCLES_N > i; ++i )
+    {
+        int32_t const v = me->row.en_x10[(2U * (uint32_t)i) + 1U];
+        uint8_t       j = i;
+
+        while ( (0U < j) && (off[j - 1U] > v) )
+        {
+            off[j] = off[j - 1U];
+            j -= 1U;
+        }
+        off[j] = v;
+    }
+    return off[HAPTIC_PAT_CYCLES_N / 2U];
+}
+
+/**
+ * @brief One "off" window's energy, held at the cap.
+ *
+ * @param me  The AO.
+ * @param win The window: odd.
+ * @param cap The most it may count for.
+ * @return Energy at the bin, 0.1 mg.
+ */
+static int32_t pat_off_at(Haptic const * const me, uint8_t win, int32_t cap)
+{
+    int32_t v = me->row.en_x10[win];
+
+    if ( v > cap )
+    {
+        v = cap;
+    }
+    return v;
+}
+
+/**
+ * @brief What the "off" windows around cycle @p cycle's "on" one amount to:
+ *        the louder of the one before it and the one after it.
+ *
+ * @param me    The AO.
+ * @param cycle 0-based.
+ * @param cap   The most one "off" window counts for.
+ * @return Energy at the bin, 0.1 mg.
+ */
+static int32_t pat_off_ref(Haptic const * const me, uint8_t cycle, int32_t cap)
+{
+    int32_t ref = pat_off_at(me, (uint8_t)((2U * (uint32_t)cycle) + 1U), cap);
+
+    if ( 0U < cycle )
+    {
+        int32_t const before = pat_off_at(me, (uint8_t)((2U * (uint32_t)cycle) - 1U), cap);
+
+        if ( before > ref )
+        {
+            ref = before;
+        }
+    }
+    return ref;
+}
+
+/**
+ * @brief Every window is in: judge each cycle, and the pattern.
+ *
+ * A cycle passes when its "on" window clears HAPTIC_PAT_RATIO_X10 over the
+ * louder of its neighbouring "off" windows. The pattern passes when at most
+ * HAPTIC_PAT_MISS_MAX cycles miss.
+ *
+ * @param me The AO.
+ */
+static void pat_judge(Haptic * const me)
+{
+    int32_t cap    = pat_off_median(me) * (int32_t)HAPTIC_PAT_OFF_CAP_X;
+    uint8_t passed = 0U;
+
+    if ( 1 > cap )
+    {
+        cap = 1;
+    }
+    for ( uint8_t c = 0U; HAPTIC_PAT_CYCLES_N > c; ++c )
+    {
+        int32_t const  on     = me->row.en_x10[2U * (uint32_t)c];
+        int32_t const  off    = pat_off_ref(me, c, cap);
+        uint32_t const ratio  = row_ratio(off, on);
+        uint8_t        flags  = 0U;
+
+        if ( (uint32_t)HAPTIC_PAT_RATIO_X10 <= ratio )
+        {
+            flags = (uint8_t)HAPTIC_TF_PASS;
+            passed += 1U;
+        }
+        row_publish(me, (uint8_t)(c + 1U), (uint8_t)HAPTIC_TEST_CYCLE, flags, 0U,
+                    off, on, ratio, 0U);
+    }
+
+    if ( (HAPTIC_PAT_CYCLES_N - HAPTIC_PAT_MISS_MAX) <= passed )
+    {
+        KLOG_N(TAG, "test %s: PASS - %u of %u cycles followed the motor",
+               HAPTIC_PAT_NAME, (unsigned)passed, (unsigned)HAPTIC_PAT_CYCLES_N);
+        verdict_publish(me, true);
+    }
+    else
+    {
+        KLOG_E(TAG, "test %s: FAIL - only %u of %u cycles followed the motor",
+               HAPTIC_PAT_NAME, (unsigned)passed, (unsigned)HAPTIC_PAT_CYCLES_N);
+        verdict_publish(me, false);
+    }
+}
+
+/**
+ * @brief A pattern window came back: keep it, and open the next or judge.
+ *
+ * @param me The AO.
+ * @param q  What the witness measured.
+ */
+static void pat_energy(Haptic * const me, ImuEnergyEvt const * const q)
+{
+    const char *kind = "off";
+
+    if ( seg_is_on(me->row.win) )
+    {
+        kind = "on";
+    }
+    if ( (kode_status_t)q->rc != KODE_OK )
+    {
+        row_noverdict(me, (uint8_t)HAPTIC_TF_MUTE,
+                      "the IMU could not measure the window; there is no witness");
+        return;
+    }
+    if ( (uint16_t)HAPTIC_PAT_MIN_SAMPLES > q->n )
+    {
+        KLOG_W(TAG, "test %s: window %u held %u samples", HAPTIC_PAT_NAME,
+               (unsigned)(me->row.win + 1U), (unsigned)q->n);
+        row_noverdict(me, (uint8_t)HAPTIC_TF_SHORT,
+                      "a witness window came back too short to measure");
+        return;
+    }
+    KLOG_N(TAG, "test %s: window %u (%s) at %u Hz = %d.%d mg, n=%u",
+           HAPTIC_PAT_NAME, (unsigned)(me->row.win + 1U), kind,
+           (unsigned)KDRV_AW_F0_HZ, (int)(q->bin_x10 / 10),
+           (int)(q->bin_x10 % 10), (unsigned)q->n);
+
+    me->row.en_x10[me->row.win] = q->bin_x10;
+    me->row.win += 1U;
+    if ( HAPTIC_PAT_WINDOWS_N > me->row.win )
+    {
+        row_arm(me, ROW_PAT_ARM);
+        return;
+    }
+    pat_judge(me);
 }
 
 /* ---- The state machine ------------------------------------------------------ */
@@ -1443,6 +1794,7 @@ static QState Haptic_absent(Haptic * const me, QEvt const * const e)
             /* Step 0 rather than a bare failure: the station has to tell a
              * missing Antenna PCB from a motor that will not move, and this
              * record is the only thing that says which it is. */
+            me->row.pattern = atomic_exchange(&s_pattern_pending, false);
             KLOG_E(TAG, "test haptic: ABSENT - no AW86233 at 0x5A");
             row_publish(me, 0U, (uint8_t)HAPTIC_TEST_ABSENT, 0U, 0U, 0, 0, 0U,
                         0U);
@@ -1582,6 +1934,8 @@ static QState Haptic_idle(Haptic * const me, QEvt const * const e)
             if ( me->row_owed )
             {
                 me->row_owed = false;
+                atomic_store(&s_pattern_pending, me->owed_pat);
+                me->owed_pat = false;
                 haptic_test_request();
             }
             status = Q_HANDLED();
@@ -1592,7 +1946,9 @@ static QState Haptic_idle(Haptic * const me, QEvt const * const e)
             break;
         }
         case HAPTIC_TEST_REQ_SIG: {
-            if ( row_start(me) )
+            bool const pattern = atomic_exchange(&s_pattern_pending, false);
+
+            if ( row_start(me, pattern) )
             {
                 status = Q_TRAN(&Haptic_row);
             }
@@ -1603,6 +1959,7 @@ static QState Haptic_idle(Haptic * const me, QEvt const * const e)
                  * swallowed. */
                 KLOG_I(TAG, "test haptic: a buzz is in flight; the row runs after it");
                 me->row_owed = true;
+                me->owed_pat = pattern;
                 status = Q_HANDLED();
             }
             break;
@@ -1748,19 +2105,34 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
             done_publish(me);
             if ( me->row.active && (KODE_OK != me->play.rc) )
             {
-                /* The buzz did not play through this gain's window: the bus
-                 * refused a burst, the FIFO stopped draining, or the chip ran
-                 * dry and went back to standby. Measuring it would judge the
-                 * motor on a buzz the chip cut short, so the cause is named
-                 * and no further gain is asked of the witness. */
-                row_noverdict(me, (uint8_t)HAPTIC_TF_MUTE,
-                              "the chip stopped playing before the buzz "
-                              "ended; the motor was not driven through it");
-                status = Q_TRAN(&Haptic_idle);
+                if ( pat_again(me) )
+                {
+                    status = Q_TRAN(&Haptic_row);
+                }
+                else
+                {
+                    /* The buzz did not play through this gain's window: the
+                     * bus refused a burst, the FIFO stopped draining, or the
+                     * chip ran dry and went back to standby. Measuring it
+                     * would judge the motor on a buzz the chip cut short, so
+                     * the cause is named and no further gain is asked of the
+                     * witness. */
+                    row_noverdict(me, (uint8_t)HAPTIC_TF_MUTE,
+                                  "the chip stopped playing before the buzz "
+                                  "ended; the motor was not driven through it");
+                    status = Q_TRAN(&Haptic_idle);
+                }
             }
             else if ( me->row.active )
             {
-                row_drain(me, ROW_GAIN_DRAIN);
+                if ( me->row.pattern )
+                {
+                    row_drain(me, ROW_PAT_DRAIN);
+                }
+                else
+                {
+                    row_drain(me, ROW_GAIN_DRAIN);
+                }
                 status = Q_TRAN(&Haptic_row);
             }
             else
@@ -1790,6 +2162,7 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
         case HAPTIC_TEST_REQ_SIG: {
             KLOG_I(TAG, "test haptic: a buzz is in flight; the row runs after it");
             me->row_owed = true;
+            me->owed_pat = atomic_exchange(&s_pattern_pending, false);
             status = Q_HANDLED();
             break;
         }
@@ -1818,7 +2191,8 @@ static QState Haptic_row(Haptic * const me, QEvt const * const e)
             ImuArmedEvt const * const q = Q_EVT_CAST(ImuArmedEvt);
 
             if ( (ROW_FLOOR_ARM != me->row.phase)
-                && (ROW_GAIN_ARM != me->row.phase) )
+                && (ROW_GAIN_ARM != me->row.phase)
+                && (ROW_PAT_ARM != me->row.phase) )
             {
                 /* A row acts only on the reply it is waiting for, and it does
                  * not touch its deadline on the way past. Stopping the timer
@@ -1844,6 +2218,25 @@ static QState Haptic_row(Haptic * const me, QEvt const * const e)
                 wait_start(me, KODE_HAPTIC_STILL_MS);
                 status = Q_HANDLED();
             }
+            else if ( ROW_PAT_ARM == me->row.phase )
+            {
+                if ( seg_is_on(me->row.win) )
+                {
+                    /* The pattern row's "on" window as a pattern of one segment. */
+                    static const uint16_t pat_buzz_ms = (uint16_t)HAPTIC_PAT_ON_MS;
+
+                    me->row.phase = ROW_PAT_PLAY;
+                    play_start(me, &pat_buzz_ms, 1U, false, (uint8_t)HAPTIC_PAT_GAIN_PCT);
+                    me->play.brake_at = (uint32_t)HAPTIC_PAT_DRIVE_SAMPLES;
+                    status = Q_TRAN(&Haptic_playing);
+                }
+                else
+                {
+                    me->row.phase = ROW_PAT_STILL;
+                    wait_start(me, HAPTIC_PAT_OFF_MS);
+                    status = Q_HANDLED();
+                }
+            }
             else
             {
                 me->row.phase = ROW_GAIN_PLAY;
@@ -1854,7 +2247,8 @@ static QState Haptic_row(Haptic * const me, QEvt const * const e)
         }
         case IMU_ENERGY_SIG: {
             if ( (ROW_FLOOR_DRAIN != me->row.phase)
-                && (ROW_GAIN_DRAIN != me->row.phase) )
+                && (ROW_GAIN_DRAIN != me->row.phase)
+                && (ROW_PAT_DRAIN != me->row.phase) )
             {
                 /* The same rule, and here it is the more expensive one to get
                  * wrong: a window measured before the motor was driven would
@@ -1866,7 +2260,14 @@ static QState Haptic_row(Haptic * const me, QEvt const * const e)
                 break;
             }
             wait_stop(me);
-            row_energy(me, Q_EVT_CAST(ImuEnergyEvt));
+            if ( me->row.pattern )
+            {
+                pat_energy(me, Q_EVT_CAST(ImuEnergyEvt));
+            }
+            else
+            {
+                row_energy(me, Q_EVT_CAST(ImuEnergyEvt));
+            }
             if ( me->row.active )
             {
                 status = Q_HANDLED();
@@ -1899,6 +2300,13 @@ static QState Haptic_row(Haptic * const me, QEvt const * const e)
                 status = Q_HANDLED();
                 break;
             }
+            if ( ROW_PAT_STILL == me->row.phase )
+            {
+                /* An "off" window is full: nothing was driven into it. */
+                row_drain(me, ROW_PAT_DRAIN);
+                status = Q_HANDLED();
+                break;
+            }
             row_noverdict(me, (uint8_t)HAPTIC_TF_MUTE,
                           "the IMU did not answer in time; there is no witness");
             status = Q_TRAN(&Haptic_idle);
@@ -1914,6 +2322,7 @@ static QState Haptic_row(Haptic * const me, QEvt const * const e)
              * and running it twice tells the operator nothing the first one
              * did not. */
             KLOG_W(TAG, "test haptic: already running; the request is ignored");
+            (void)atomic_exchange(&s_pattern_pending, false);
             status = Q_HANDLED();
             break;
         }
@@ -1941,6 +2350,8 @@ void Haptic_ctor(void)
     me->wait_live  = false;
     me->said       = false;
     me->looked     = false;
+    me->owed_pat   = false;
+    atomic_store(&s_pattern_pending, false);
     (void)memset(&me->play, 0, sizeof(me->play));
     (void)memset(&me->row,  0, sizeof(me->row));
     state_free();
@@ -1969,6 +2380,23 @@ static bool haptic_row_haptic(void)
     haptic_test_request();
     return false;
 }
+
+/**
+ * @brief `test component=haptic_pat`: the motor switched on and off in a
+ *        pattern, with the IMU watching for the pattern.
+ *
+ * In no station's list of rows: it is asked for by name. Every window's
+ * energy goes out as a log line and every cycle as a record before the
+ * verdict.
+ *
+ * @return false: AO_Haptic answers later, with TEST_RESULT_SIG.
+ */
+static bool haptic_row_pattern(void)
+{
+    atomic_store(&s_pattern_pending, true);
+    haptic_test_request();
+    return false;
+}
 #endif
 
 void kaos_haptic_register(void)
@@ -1979,6 +2407,10 @@ void kaos_haptic_register(void)
           NULL, 0U, "Vibration",
           "Motor not working",
           AUTOTEST_ORDER_HAPTIC },
+        { HAPTIC_PAT_NAME, HAPTIC_PAT_ID, haptic_row_pattern, KROW_ASYNC, AUTOTEST_G_NONE, HAPTIC_PAT_BUDGET_MS,
+          NULL, 0U, "Vibration pattern",
+          "Motor not following",
+          HAPTIC_PAT_ORDER },
     };
 
     kaos_require(krows_add(HAPTIC_ROWS, sizeof(HAPTIC_ROWS) / sizeof(HAPTIC_ROWS[0])),

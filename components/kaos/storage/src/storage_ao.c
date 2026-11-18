@@ -195,8 +195,10 @@ typedef enum {
     SD_THEN_FORMAT,        /**< The format.                                   */
     SD_THEN_NONE,          /**< Nothing: the remount a script owed the slot.  */
     SD_THEN_REST,          /**< An app's rest: answer its round.              */
-    SD_THEN_BACK           /**< The card back from an app's rest: nothing to
+    SD_THEN_BACK,          /**< The card back from an app's rest: nothing to
                             *   answer, the request that wanted it was held.  */
+    SD_THEN_REREAD         /**< The remount after a chunk of the reader's file
+                            *   failed: open it again and read on.            */
 } SdThen;
 
 /**
@@ -367,6 +369,12 @@ typedef struct {
     QActive *reader;                    /**< Who has the file open, if anyone. */
     uint8_t *buf[STORAGE_BUFS];         /**< PSRAM, allocated once at startup. */
     bool     lent[STORAGE_BUFS];        /**< Out on loan; do not touch.        */
+    char     rd_path[KODE_PATH_MAX];    /**< The reader's file, as a virtual path. */
+    uint32_t rd_off;                    /**< Where a read again starts.        */
+    bool     rd_sd;                     /**< The reader's file is on the card. */
+    bool     rd_failed;                 /**< A chunk failed: no read until the
+                                         *   file is read again or closed.     */
+    bool     rd_again;                  /**< The remount of a read again is out. */
 
     /* The write in progress. The payload is somebody else's memory, held for
      * the duration by the promise storage_write_all_request() documents. */
@@ -530,6 +538,12 @@ typedef struct {
  * AO_Radio and AO_Net are below it. A self-post keeps the queue non-empty and
  * starves them; going idle for 10 ms lets them run. */
 #define STORAGE_WRITE_GAP_TICKS  KQP_TICKS_PER_MS(10U)
+/* The card row's own gap: one tick. The 10 ms above would cost the row 1.3 s
+ * and time nothing: its rates count the transfers only. The reads go to the
+ * worker, so this AO is idle while each chunk moves; the file phases run here
+ * and leave the AOs below it a tick between chunks. `sd_verify` keeps the
+ * 10 ms. */
+#define SD_TEST_GAP_TICKS        KQP_TICKS_PER_MS(1U)
 
 /* How many lines of a `cat` one dispatch step may post before the pacer
  * brings it back for the rest, so lower-priority AOs get the CPU. 24, like
@@ -1432,6 +1446,21 @@ void storage_close_request(void)
     QACTIVE_POST(AO_Storage, &evt, NULL);
 }
 
+void storage_reread_request(uint32_t offset, QActive *who)
+{
+    StorageRereadEvt *e = Q_NEW_X(StorageRereadEvt, 0U, STORAGE_REREAD_REQ_SIG);
+
+    if ( NULL == e )
+    {
+        /* The reader's chunk deadline ends the transfer: nothing comes. */
+        KLOG_E(TAG, "out of events; the read again was not asked");
+        return;
+    }
+    e->offset = offset;
+    e->who    = who;
+    QACTIVE_POST(AO_Storage, &e->super, NULL);
+}
+
 const uint8_t *storage_buf(uint8_t idx)
 {
     return (STORAGE_BUFS > idx) ? l_storage.buf[idx] : NULL;
@@ -1974,6 +2003,12 @@ static void serve_read(Storage * const me)
     {
         return;                       /* nothing open; a stale request */
     }
+    if ( me->rd_failed || me->rd_again )
+    {
+        /* After a failed chunk the file's position is not known: nothing is
+         * read until the reader asks for the file again or closes it. */
+        return;
+    }
     uint8_t const idx = free_buf(me);
     if ( STORAGE_BUFS <= idx )
     {
@@ -1984,6 +2019,11 @@ static void serve_read(Storage * const me)
     size_t got = 0U;
     kode_status_t const st =
         kdrv_storage_read(me->buf[idx], STORAGE_CHUNK, &got);
+
+    if ( KODE_OK != st )
+    {
+        me->rd_failed = true;
+    }
 
     StorageDataEvt *ev = Q_NEW_X(StorageDataEvt, 0U, STORAGE_DATA_SIG);
     if ( NULL == ev )
@@ -2013,6 +2053,85 @@ static void close_file(Storage * const me)
     {
         me->lent[i] = false;
     }
+    me->rd_failed = false;
+    me->rd_again  = false;
+}
+
+/**
+ * @brief Note the file a reader opened, for a read again.
+ *
+ * @param me     The AO.
+ * @param name   What the opener asked for: a virtual path or a bare name.
+ * @param medium Where it was found.
+ */
+static void reader_note(Storage * const me, const char *name, kdrv_medium_t medium)
+{
+    int n;
+
+    if ( '/' == name[0] )
+    {
+        n = snprintf(me->rd_path, sizeof(me->rd_path), "%s", name);
+    }
+    else if ( KDRV_MEDIUM_SD == medium )
+    {
+        n = snprintf(me->rd_path, sizeof(me->rd_path), "%s/%s", STORAGE_SD_ROOT, name);
+    }
+    else
+    {
+        n = snprintf(me->rd_path, sizeof(me->rd_path), "%s/%s", STORAGE_FS_ROOT, name);
+    }
+    me->rd_sd     = (KDRV_MEDIUM_SD == medium) && (0 < n) && ((size_t)n < sizeof(me->rd_path));
+    me->rd_off    = 0U;
+    me->rd_failed = false;
+    me->rd_again  = false;
+}
+
+/**
+ * @brief Tell @p who that its read again did not happen: one chunk with an error.
+ *
+ * @param who The reader.
+ */
+static void reread_refused(QActive *who)
+{
+    StorageDataEvt *ev = NULL;
+
+    if ( NULL != who )
+    {
+        ev = Q_NEW_X(StorageDataEvt, 0U, STORAGE_DATA_SIG);
+    }
+    if ( NULL == ev )
+    {
+        KLOG_E(TAG, "a read again could not be answered");
+        return;
+    }
+    ev->idx    = 0U;
+    ev->len    = 0U;
+    ev->eof    = false;
+    ev->status = (uint8_t)KODE_ERROR;
+    QACTIVE_POST(who, &ev->super, &l_storage.super);
+}
+
+/**
+ * @brief The read again failed: the handle is closed, every buffer is back and
+ *        the reader gets one chunk with an error, as for a chunk that failed.
+ *
+ * The reader keeps its turn until its own close: a close carries no asker, and
+ * an open held meanwhile and served now would be the file that close ends.
+ * Nothing more is read, and nothing more is read again.
+ *
+ * @param me The AO.
+ */
+static void reread_fail(Storage * const me)
+{
+    (void)kdrv_storage_close();
+    for ( uint8_t i = 0U; STORAGE_BUFS > i; ++i )
+    {
+        me->lent[i] = false;
+    }
+    me->rd_again  = false;
+    me->rd_failed = true;
+    me->rd_sd     = false;   /* no remount owed at the close: this one was tried */
+    reread_refused(me->reader);
 }
 
 /**
@@ -2030,6 +2149,73 @@ static bool busy(const Storage * const me)
     return (NULL != me->reader) || (NULL != me->writer) || (0U != me->t_phase)
         || (NULL != me->c_who) || (NULL != me->p_who) || (NULL != me->r_who)
         || (NULL != me->g_who) || (NULL != me->x_who) || me->sdj.expired;
+}
+
+/** @brief The task name of @p ao, for a log line; "?" when it has none. */
+static const char *ao_name(QActive const *ao)
+{
+    const char *name = "?";
+
+    if ( NULL != ao )
+    {
+        (void)kqp_prio_taken((uint8_t)ao->prio, &name);
+    }
+    return name;
+}
+
+/**
+ * @brief Say why busy() holds, naming the file and who holds it, and that
+ *        @p refused is refused for it.
+ *
+ * @param me      The AO, busy.
+ * @param refused What was asked for.
+ */
+static void busy_say(Storage const * const me, const char *refused)
+{
+    if ( NULL != me->reader )
+    {
+        KLOG_W(TAG, "a file is already open: '%s', read by %s; '%s' refused",
+               me->rd_path, ao_name(me->reader), refused);
+    }
+    else if ( NULL != me->writer )
+    {
+        KLOG_W(TAG, "a file is already open: '%s', written by %s; '%s' refused",
+               me->w_name, ao_name(me->writer), refused);
+    }
+    else if ( NULL != me->p_who )
+    {
+        KLOG_W(TAG, "a file is already open: the copy to '%s' by %s; '%s' refused",
+               me->p_dst, ao_name(me->p_who), refused);
+    }
+    else if ( NULL != me->r_who )
+    {
+        KLOG_W(TAG, "a file is already open: '%s', arriving for %s; '%s' refused",
+               me->r_path, ao_name(me->r_who), refused);
+    }
+    else if ( NULL != me->c_who )
+    {
+        KLOG_W(TAG, "a file is already open: '%s', read out for %s; '%s' refused",
+               me->c_path, ao_name(me->c_who), refused);
+    }
+    else if ( NULL != me->g_who )
+    {
+        KLOG_W(TAG, "a file is already open: the data folder of '%s' for %s; '%s' refused",
+               me->g_project, ao_name(me->g_who), refused);
+    }
+    else if ( NULL != me->x_who )
+    {
+        KLOG_W(TAG, "a file is already open: the wipe of '%s' for %s; '%s' refused",
+               me->x_project, ao_name(me->x_who), refused);
+    }
+    else if ( 0U != me->t_phase )
+    {
+        KLOG_W(TAG, "a file is already open: the card test; '%s' refused", refused);
+    }
+    else
+    {
+        KLOG_W(TAG, "a file is already open: a call to the card past its "
+                    "deadline; '%s' refused", refused);
+    }
 }
 
 /**
@@ -6387,7 +6573,7 @@ static void write_begin(Storage * const me, StorageWriteEvt const * const req)
 
     if ( busy(me) )
     {
-        KLOG_W(TAG, "a file is already open; '%s' refused", req->name);
+        busy_say(me, req->name);
     }
     else if ( req->yields && (NULL != storage_fetch_running)
              && storage_fetch_running() )
@@ -6769,9 +6955,13 @@ static void sd_job_done(Storage * const me, KqpWorkerDoneEvt const * const e)
     }
     me->sdj.busy    = false;
     me->sdj.expired = false;
-    if ( (SD_OP_REMOUNT == me->sdj.op) || (SD_OP_FORMAT == me->sdj.op) )
+    if ( ((SD_OP_REMOUNT == me->sdj.op) && (SD_THEN_REREAD != me->sdj.then))
+        || (SD_OP_FORMAT == me->sdj.op) )
     {
-        me->card_fresh = true;   /* another mount, or another filesystem */
+        /* Another mount, or another filesystem. Not the remount of a read
+         * again: the same card, mounted again under a file being read, is no
+         * news; a card it lost is told all the same (card_note()). */
+        me->card_fresh = true;
     }
     if ( late )
     {
@@ -7068,6 +7258,18 @@ static void sd_test_verdict(Storage * const me)
     sd_test_finish(me);
 }
 
+/** @brief The pause between two steps: the row's tick, or `sd_verify`'s 10 ms. */
+static uint32_t sd_test_gap(Storage const * const me)
+{
+    uint32_t gap = SD_TEST_GAP_TICKS;
+
+    if ( me->t_verify )
+    {
+        gap = STORAGE_WRITE_GAP_TICKS;
+    }
+    return gap;
+}
+
 /** @brief Close this phase and start the next, or finish the run. */
 static void sd_test_advance(Storage * const me, uint32_t kb_s)
 {
@@ -7100,7 +7302,7 @@ static void sd_test_advance(Storage * const me, uint32_t kb_s)
     me->t_step    = 0U;
     me->t_ok      = true;
     me->t_busy_us = 0U;
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, sd_test_gap(me), 0U);
 }
 
 /** @brief Fail this phase, naming what failed, and go on to the next. */
@@ -7195,7 +7397,7 @@ static void sd_test_read4_done(Storage * const me, kode_status_t rc,
         sd_test_advance(me, kb_s);
         return;
     }
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, SD_TEST_GAP_TICKS, 0U);
 }
 
 /** @brief Ask for the next chunk of the 1-bit read. */
@@ -7277,7 +7479,7 @@ static void sd_test_read1_done(Storage * const me, kode_status_t rc,
         sd_test_advance(me, kb_s);
         return;
     }
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, SD_TEST_GAP_TICKS, 0U);
 }
 
 /* ---- Phases 4 and 5: a file there and back, for the write speed ---------- */
@@ -7351,7 +7553,7 @@ static void sd_test_write_chunk(Storage * const me)
         sd_test_advance(me, kb_s);
         return;
     }
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, SD_TEST_GAP_TICKS, 0U);
 }
 
 /** @brief One step of the write phase. */
@@ -7441,7 +7643,7 @@ static void sd_test_verify_step(Storage * const me)
         sd_test_advance(me, kb_s);
         return;
     }
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, SD_TEST_GAP_TICKS, 0U);
 }
 
 /* ---- sd_verify: is the CARD what it says it is? -------------------------- */
@@ -7816,6 +8018,103 @@ static void sd_script_start(Storage * const me, bool verify)
  * @param rc    The status the call returned.
  * @param value What it measured or found; see sd_job_run().
  */
+/**
+ * @brief A chunk of the reader's card file failed: close the file, take every
+ *        buffer back and mount the card again; reread_mounted() reads on.
+ *
+ * A failed read leaves FATFS in error until the card is mounted again, and
+ * the file's position unknown: the reader names where to start.
+ *
+ * @param me     The AO.
+ * @param who    The reader that asks.
+ * @param offset The file's byte the next chunk starts at.
+ */
+static void reread_begin(Storage * const me, QActive *who, uint32_t offset)
+{
+    if ( (NULL == who) || (who != me->reader) || (!me->rd_sd) || me->rd_again
+        || (!kdrv_storage_mounted(KDRV_MEDIUM_SD)) )
+    {
+        KLOG_W(TAG, "a read again from %lu was asked with no card file open "
+                    "for it", (unsigned long)offset);
+        if ( (NULL != who) && (who == me->reader) )
+        {
+            reread_fail(me);
+        }
+        else
+        {
+            reread_refused(who);
+        }
+        return;
+    }
+    (void)kdrv_storage_close();
+    for ( uint8_t i = 0U; STORAGE_BUFS > i; ++i )
+    {
+        me->lent[i] = false;
+    }
+    me->rd_failed = false;
+    me->rd_off    = offset;
+    if ( !sd_job_submit(me, SD_OP_REMOUNT, SD_THEN_REREAD) )
+    {
+        KLOG_W(TAG, "'%s' cannot be read again: no call to the card could "
+                    "be made", me->rd_path);
+        reread_fail(me);
+        return;
+    }
+    me->rd_again = true;
+    KLOG_W(TAG, "'%s': a chunk did not read; the card is mounted again to "
+                "read from %lu once more", me->rd_path, (unsigned long)offset);
+}
+
+/**
+ * @brief The remount of a read again returned: open the file again where the
+ *        reader left it and send it two chunks, as its open and two reads would.
+ *
+ * With the reader gone meanwhile, or for the remount a close owed, there is
+ * nothing to read: only the card's state is said.
+ *
+ * @param me The AO.
+ * @param rc What the remount returned.
+ */
+static void reread_mounted(Storage * const me, kode_status_t rc)
+{
+    uint32_t size = 0U;
+
+    if ( !me->rd_again )
+    {
+        if ( KODE_OK == rc )
+        {
+            KLOG_N(TAG, "the card is mounted again after a read failed on it");
+        }
+        else
+        {
+            KLOG_W(TAG, "the card did not mount again after a read failed on "
+                        "it (rc=%d)", (int)rc);
+        }
+        return;
+    }
+    me->rd_again = false;
+    if ( KODE_OK != rc )
+    {
+        KLOG_W(TAG, "'%s' cannot be read again: the card did not mount again "
+                    "(rc=%d)", me->rd_path, (int)rc);
+        reread_fail(me);
+        return;
+    }
+    if ( (kdrv_storage_open_path(me->rd_path, &size) != KODE_OK)
+        || (kdrv_storage_seek(me->rd_off) != KODE_OK) )
+    {
+        KLOG_W(TAG, "'%s' cannot be read again: it would not open at %lu",
+               me->rd_path, (unsigned long)me->rd_off);
+        reread_fail(me);
+        return;
+    }
+    KLOG_N(TAG, "'%s' is read again from %lu", me->rd_path, (unsigned long)me->rd_off);
+    for ( uint8_t i = 0U; STORAGE_BUFS > i; ++i )
+    {
+        serve_read(me);
+    }
+}
+
 static void sd_job_complete(Storage * const me, kode_status_t rc,
                             uint32_t value)
 {
@@ -7891,6 +8190,10 @@ static void sd_job_complete(Storage * const me, kode_status_t rc,
         case SD_THEN_NONE: {
             break;
         }
+        case SD_THEN_REREAD: {
+            reread_mounted(me, rc);
+            break;
+        }
 #ifdef CONFIG_KODE_LOWPOWER
         case SD_THEN_REST: {
             if ( KODE_OK == rc )
@@ -7926,6 +8229,11 @@ void Storage_ctor(void)
     QActive_ctor(&me->super, Q_STATE_CAST(&Storage_initial));
     me->reader = NULL;
     me->writer = NULL;
+    me->rd_path[0] = '\0';
+    me->rd_off     = 0U;
+    me->rd_sd      = false;
+    me->rd_failed  = false;
+    me->rd_again   = false;
     me->card_told  = false;
     me->card_told_away = false;
     me->card_fresh = false;
@@ -8432,10 +8740,11 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             uint32_t      size   = 0U;
             kdrv_medium_t medium = KDRV_MEDIUM_FS;
             kode_status_t st     = KODE_DENIED;
+            bool const    held   = busy(me);
 
-            if ( busy(me) )
+            if ( held )
             {
-                KLOG_W(TAG, "a file is already open; '%s' refused", req->name);
+                busy_say(me, req->name);
             }
             else if ( '/' == req->name[0] )
             {
@@ -8446,6 +8755,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 if ( KODE_OK == st )
                 {
                     me->reader = req->who;
+                    reader_note(me, req->name, medium);
                 }
             }
             else
@@ -8454,6 +8764,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 if ( KODE_OK == st )
                 {
                     me->reader = req->who;
+                    reader_note(me, req->name, medium);
                 }
             }
 
@@ -8464,6 +8775,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 rsp->size   = size;
                 rsp->status = (uint8_t)st;
                 rsp->medium = (uint8_t)medium;
+                rsp->busy   = held;
                 QACTIVE_POST(req->who, &rsp->super, &me->super);
             }
             else
@@ -8474,7 +8786,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                  * by. So the open is undone and refused. */
                 static const StorageOpenRspEvt s_open_dry_evt = {
                     QEVT_INITIALIZER(STORAGE_OPEN_RSP_SIG), 0U,
-                    (uint8_t)KODE_NO_RESOURCES, (uint8_t)KDRV_MEDIUM_FS
+                    (uint8_t)KODE_NO_RESOURCES, (uint8_t)KDRV_MEDIUM_FS, false
                 };
                 KLOG_E(TAG, "out of events; the open of '%s' is undone",
                        req->name);
@@ -8528,6 +8840,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             if ( NULL != rsp )
             {
                 (void)memset(rsp->project, 0, sizeof(rsp->project));
+                (void)memset(rsp->version, 0, sizeof(rsp->version));
                 (void)memset(rsp->display, 0, sizeof(rsp->display));
                 (void)memset(rsp->category, 0, sizeof(rsp->category));
                 (void)memset(rsp->build, 0, sizeof(rsp->build));
@@ -8538,6 +8851,10 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 {
                     (void)kapp_project_name(prefix, got, rsp->project,
                                             sizeof(rsp->project));
+                    /* The version beside the name, from the same descriptor:
+                     * what `app_list files=on` prints for a file. */
+                    (void)kapp_idf_desc(prefix, got, NULL, 0U, rsp->version,
+                                        sizeof(rsp->version), NULL, 0U, NULL, 0U);
                     (void)kapp_build_id(prefix, got, rsp->build);
                     kapp_desc_t man;
                     if ( kapp_desc_parse(prefix, got, &man) == KODE_OK )
@@ -8839,8 +9156,25 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             }
             else
             {
+                /* A card file that failed a chunk leaves FATFS in error until
+                 * the card is mounted again: the next read of the card would
+                 * meet it, so the remount is paid now. */
+                bool const owed = me->rd_failed && me->rd_sd
+                                  && kdrv_storage_mounted(KDRV_MEDIUM_SD);
+
                 close_file(me);
+                if ( owed && !sd_job_submit(me, SD_OP_REMOUNT, SD_THEN_REREAD) )
+                {
+                    me->remount_owed = true;
+                }
             }
+            status = Q_HANDLED();
+            break;
+        }
+        case STORAGE_REREAD_REQ_SIG: {
+            StorageRereadEvt const * const q = Q_EVT_CAST(StorageRereadEvt);
+
+            reread_begin(me, q->who, q->offset);
             status = Q_HANDLED();
             break;
         }
@@ -8993,6 +9327,10 @@ static bool needs_card(const Storage * const me, QEvt const * const e)
             card = ('/' != name[0]) || !path_is_fs(name);
             break;
         }
+        case STORAGE_REREAD_REQ_SIG: {
+            card = true;   /* it mounts the card again */
+            break;
+        }
         case STORAGE_WRITE_REQ_SIG: {
             const char *const name = Q_EVT_CAST(StorageWriteEvt)->name;
 
@@ -9142,6 +9480,7 @@ static bool card_refuse(Storage * const me, QEvt const * const e)
             if ( NULL != rsp )
             {
                 (void)memset(rsp->project, 0, sizeof(rsp->project));
+                (void)memset(rsp->version, 0, sizeof(rsp->version));
                 (void)memset(rsp->display, 0, sizeof(rsp->display));
                 (void)memset(rsp->category, 0, sizeof(rsp->category));
                 (void)memset(rsp->build, 0, sizeof(rsp->build));

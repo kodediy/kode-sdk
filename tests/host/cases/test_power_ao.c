@@ -3127,6 +3127,86 @@ TEST_CASE("test_boost_test_off_answers_with_a_reading_past_the_settle", "[power_
     Mockkhal_i2c_Destroy();
 }
 
+/**
+ * @brief Let @p ms go by on the clock and on QF's ticks (a multiple of 10),
+ *        and take the delivery test's answer, if it came.
+ */
+static const PowerBoostTestEvt *boost_test_wait(unsigned ms)
+{
+    const PowerBoostTestEvt *found = NULL;
+
+    ao_spy_drain();
+    for ( unsigned t = 0U; (ms / 10U) > t; ++t )
+    {
+        fake_time_advance_ms(10U);
+        (void)qf_support_tick(AO_Power, 1U);
+    }
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( POWER_BOOST_TEST_SIG == e->sig )
+        {
+            found = (const PowerBoostTestEvt *)e;
+        }
+    }
+    return found;
+}
+
+/** @brief The boost on, answered, for the cases about its off. */
+static void boost_test_on_answered(void)
+{
+    power_up_once();
+    pmic_on_the_line();
+    cell_reads(CELL_BOOST_OK_MV);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    (void)boost_test_poll();
+    boost_test_ask(true);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_BOOST;
+    fake_time_advance_ms(KODE_TEST_DOT_BOOST_SETTLE_MS);
+    TEST_ASSERT_NOT_NULL(boost_test_poll());
+}
+
+/* The station waited for the ordinary reading, up to 2 s, to hear the boost
+ * off: now the first reading past the settle that no longer sees the boost
+ * answers, and one is taken every 100 ms until one does. */
+TEST_CASE("test_boost_test_off_is_answered_by_the_first_reading_without_the_boost",
+          "[power_ao][test_dot]")
+{
+    boost_test_on_answered();
+
+    boost_test_ask(false);
+    TEST_ASSERT_NULL_MESSAGE(boost_test_wait(KODE_TEST_DOT_BOOST_SETTLE_MS + 40U),
+                             "a reading that still sees the boost answered the off");
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NO_INPUT;
+    const PowerBoostTestEvt * const a = boost_test_wait(110U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(a, "the first reading without the boost did not answer");
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, a->status);
+    TEST_ASSERT_FALSE(a->boost);
+    TEST_ASSERT_NULL_MESSAGE(boost_test_wait(KODE_POWER_POLL_MS), "answered twice");
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    ship_done();
+    Mockkhal_i2c_Destroy();
+}
+
+/* A boost that does not go is answered as before, at the ordinary period,
+ * with the boost on: the station's `off=yes` judges it. */
+TEST_CASE("test_boost_test_off_that_still_sees_the_boost_is_answered_at_the_period",
+          "[power_ao][test_dot]")
+{
+    boost_test_on_answered();
+
+    boost_test_ask(false);
+    TEST_ASSERT_NULL_MESSAGE(boost_test_wait(KODE_POWER_POLL_MS - 100U),
+                             "answered before the period with the boost still on");
+    const PowerBoostTestEvt * const a = boost_test_wait(200U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(a, "no answer at the period");
+    TEST_ASSERT_TRUE_MESSAGE(a->boost, "the answer hides the boost still on");
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    ship_done();
+    Mockkhal_i2c_Destroy();
+}
+
 TEST_CASE("test_boost_test_on_a_cable_is_refused_at_once_and_writes_nothing",
           "[power_ao][test_dot]")
 {

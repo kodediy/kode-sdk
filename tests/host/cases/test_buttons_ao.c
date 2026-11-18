@@ -105,6 +105,7 @@ static void feed(uint8_t levels, bool top_high)
     e.levels  = levels;
     e.changed = 0U;      /* the debounce does not care what the owner thinks moved */
     e.ok      = true;
+    e.irq     = true;
     khal_gpio_level_ExpectAndReturn(KBSP_PIN_BUTTON_TOP, top_high);
     QASM_DISPATCH(AO_Buttons, &e.super, 0U);
 }
@@ -662,6 +663,7 @@ TEST_CASE("a failed expander read is not a sample", "[buttons_ao]")
     dead.levels  = 0U;
     dead.changed = 0U;
     dead.ok      = false;
+    dead.irq     = false;
     QASM_DISPATCH(AO_Buttons, &dead.super, 0U);     /* no GPIO read either */
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_tick(AO_Buttons, 10U),
@@ -722,6 +724,7 @@ TEST_CASE("btn_read on an expander that did not answer says so", "[buttons_ao]")
     dead.levels  = 0U;
     dead.changed = 0U;
     dead.ok      = false;
+    dead.irq     = false;
     QASM_DISPATCH(AO_Buttons, &dead.super, 0U);
     TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
     const ButtonsStateEvt *s = (const ButtonsStateEvt *)ao_spy_take();

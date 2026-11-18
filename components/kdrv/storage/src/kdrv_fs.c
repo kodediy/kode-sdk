@@ -22,6 +22,7 @@
 
 static wl_handle_t       s_wl = WL_INVALID_HANDLE;
 static khal_mutex_t      s_lock;
+static bool              s_raw;    /* the partition is being written raw: nothing mounts it */
 
 /**
  * @brief Mount the volume once, formatting it first only when @p format.
@@ -79,6 +80,13 @@ const char *kdrv_fs_mount(void)
         khal_mutex_unlock(s_lock);
         return KDRV_FS_MOUNT;
     }
+    if ( s_raw )
+    {
+        /* A raw write owns the partition: a mount here would read half an
+         * image and, finding no volume, format it. */
+        khal_mutex_unlock(s_lock);
+        return NULL;
+    }
 
     /* A volume that mounts is mounted as it is. One that does not - a
      * factory-fresh partition, or a damaged volume - is formatted, and the
@@ -125,6 +133,62 @@ void kdrv_fs_unmount(void)
     (void)esp_vfs_fat_spiflash_unmount_rw_wl(KDRV_FS_MOUNT, s_wl);
     s_wl = WL_INVALID_HANDLE;
     KLOG_I(TAG, "storage unmounted");
+}
+
+kode_status_t kdrv_fs_raw_begin(void)
+{
+    if ( NULL == s_lock )
+    {
+        s_lock = khal_mutex_create();
+        if ( NULL == s_lock )
+        {
+            return KODE_ERROR;
+        }
+    }
+    khal_mutex_lock(s_lock);
+    if ( s_raw )
+    {
+        khal_mutex_unlock(s_lock);
+        return KODE_DENIED;
+    }
+    if ( WL_INVALID_HANDLE != s_wl )
+    {
+        (void)esp_vfs_fat_spiflash_unmount_rw_wl(KDRV_FS_MOUNT, s_wl);
+        s_wl = WL_INVALID_HANDLE;
+        KLOG_I(TAG, "storage unmounted for a raw write");
+    }
+    s_raw = true;
+    khal_mutex_unlock(s_lock);
+    return KODE_OK;
+}
+
+kode_status_t kdrv_fs_raw_end(void)
+{
+    if ( NULL == s_lock )
+    {
+        return KODE_DENIED;
+    }
+    khal_mutex_lock(s_lock);
+    if ( !s_raw )
+    {
+        khal_mutex_unlock(s_lock);
+        return KODE_DENIED;
+    }
+    s_raw = false;
+    kode_status_t rc = KODE_OK;
+    esp_err_t const err = mount_once(false);
+    if ( ESP_OK == err )
+    {
+        KLOG_I(TAG, "storage mounted again after a raw write");
+    }
+    else
+    {
+        KLOG_E(TAG, "'%s' does not mount after a raw write (%s); left "
+                    "unmounted, not formatted", KDRV_FS_LABEL, esp_err_to_name(err));
+        rc = KODE_ERROR;
+    }
+    khal_mutex_unlock(s_lock);
+    return rc;
 }
 
 uint32_t kdrv_fs_cluster_bytes(void)

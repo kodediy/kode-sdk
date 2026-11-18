@@ -573,7 +573,7 @@ void appmgr_inst_prepare(uint8_t src_kind, uint8_t dst_kind, uint8_t asker)
         }
         else
         {
-            /* The mailbox as a destination, the coprocessor: no record. */
+            /* The mailbox and the storage partition as destinations, the coprocessor: no record. */
         }
         s_inst->pending_src = asker;
         /* A stream answers its command when it ends; a file or a URL was

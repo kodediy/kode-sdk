@@ -33,6 +33,7 @@
 #include "kqp.h"
 #include "kset.h"
 #include "qf_support.h"
+#include "test_dot_support.h"
 
 /* Cases run in file-name order: this file runs before test_kdrv_qmi8658.c, while both
  * drivers are still down. */
@@ -1844,6 +1845,7 @@ TEST_CASE("a sample is refused KODE_DENIED while a window holds the part",
     imu_down();
 }
 
+/* With no station's pass, as it always has been: both rows answered at once. */
 TEST_CASE("a row asked for while a window holds the part is answered with a "
           "failed verdict, not queued", "[imu_ao]")
 {
@@ -1865,6 +1867,123 @@ TEST_CASE("a row asked for while a window holds the part is answered with a "
 
     (void)drain_req((uint16_t)WITNESS_HZ);
     imu_down();
+}
+
+/* ---- The magnetometer row during a station's pass ------------------------------
+ * Outside a pass the row is answered at once, as above. During one the next
+ * row of the station must not fail because the motor's row left its window
+ * armed: it waits for the IMU, KODE_MAG_TEST_WAIT_MS at most.
+ */
+
+/** @brief The whole magnetometer row, passed. */
+static void mag_row_passes(void)
+{
+    (void)mag_record(1U, (uint8_t)MAG_TEST_WHOAMI);
+    (void)mag_record(2U, (uint8_t)MAG_TEST_ST);
+    (void)mag_record(3U, (uint8_t)MAG_TEST_FIELD);
+    (void)mag_record(0U, (uint8_t)MAG_TEST_DONE);
+    expect_verdict("mag", true);
+}
+
+/** @brief A drain that keeps the chain: the part waits for the next window. */
+static void chain_drain(void)
+{
+    ImuDrainReqEvt q;
+
+    imu_chain_window(true, 0U);
+    q.super = (QEvt)QEVT_INITIALIZER(IMU_DRAIN_REQ_SIG);
+    q.who   = ao_spy();
+    q.hz    = (uint16_t)WITNESS_HZ;
+    QASM_DISPATCH(AO_Imu, &q.super, 0U);
+    (void)qf_support_tick(AO_Imu, QF_SUPPORT_STEPS(100U));
+    (void)spy_expect(IMU_ENERGY_SIG);
+}
+
+TEST_CASE("during a station's pass the mag row waits for a window and runs as it ends",
+          "[imu_ao][quiet]")
+{
+    td_session(true);
+    bus_up(true, true);
+    imu_up();
+
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, capture_req()->rc);
+    mag_row_req();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the mag row ran under the window");
+    TEST_ASSERT_TRUE(logged("waiting for it"));
+
+    (void)drain_req((uint16_t)WITNESS_HZ);
+    mag_row_passes();
+    imu_down();
+    td_session(false);
+}
+
+TEST_CASE("during a station's pass a window given back by its holder ends at once, "
+          "and the mag row waiting for it runs", "[imu_ao][quiet]")
+{
+    ImuCaptureReqEvt q;
+
+    td_session(true);
+    bus_up(true, true);
+    imu_up();
+
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, capture_req()->rc);
+    mag_row_req();
+    q.super = (QEvt)QEVT_INITIALIZER(IMU_RELEASE_REQ_SIG);
+    q.who   = ao_spy();
+    QASM_DISPATCH(AO_Imu, &q.super, 0U);
+    TEST_ASSERT_TRUE(logged("given back undrained"));
+    mag_row_passes();
+
+    /* The part is free for the next window, once the gyroscope is on. */
+    gyro_settled();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, capture_req()->rc);
+    (void)drain_req((uint16_t)WITNESS_HZ);
+    imu_down();
+    td_session(false);
+}
+
+TEST_CASE("a window given back by somebody who does not hold it stays armed",
+          "[imu_ao][quiet]")
+{
+    ImuCaptureReqEvt q;
+
+    bus_up(true, true);
+    imu_up();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, capture_req()->rc);
+    q.super = (QEvt)QEVT_INITIALIZER(IMU_RELEASE_REQ_SIG);
+    q.who   = AO_Haptic;
+    QASM_DISPATCH(AO_Imu, &q.super, 0U);
+    TEST_ASSERT_FALSE(logged("given back undrained"));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KODE_OK, drain_req((uint16_t)WITNESS_HZ)->rc,
+                                    "the holder's window was closed under it");
+    imu_down();
+}
+
+TEST_CASE("during a station's pass a mag row the IMU stays held for fails at its bound",
+          "[imu_ao][quiet]")
+{
+    td_session(true);
+    bus_up(true, true);
+    imu_up();
+
+    /* A chain of windows that keeps the part past the row's patience. */
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, capture_req()->rc);
+    mag_row_req();
+    chain_drain();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, capture_req()->rc);
+    (void)qf_support_tick(AO_Imu, QF_SUPPORT_STEPS(800U));
+    chain_drain();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_OK, capture_req()->rc);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the mag row ran under a window");
+
+    (void)qf_support_tick(AO_Imu, QF_SUPPORT_STEPS(600U));
+    TEST_ASSERT_TRUE(logged("stayed held"));
+    expect_verdict("mag", false);
+
+    (void)drain_req((uint16_t)WITNESS_HZ);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the refused row ran after all");
+    imu_down();
+    td_session(false);
 }
 
 TEST_CASE("a sample is refused while the row holds the rates", "[imu_ao]")

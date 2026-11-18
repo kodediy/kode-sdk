@@ -32,6 +32,7 @@ static unsigned      s_closes;              /**< Closes since the reset.  */
 static unsigned      s_opens;               /**< Opens since the reset.   */
 static unsigned      s_loops;               /**< Loops since the reset.   */
 static bool          s_frames;              /**< Grabs give s_frame.      */
+static uint32_t      s_lost;                /**< What every lost take answers. */
 
 void fake_station_reset(void)
 {
@@ -42,6 +43,17 @@ void fake_station_reset(void)
     s_opens    = 0U;
     s_loops    = 0U;
     s_frames   = false;
+    s_lost     = 0U;
+}
+
+void fake_station_lost(uint32_t n)
+{
+    s_lost = n;
+}
+
+uint32_t kdrv_ov5640_lost_take(void)
+{
+    return s_lost;
 }
 
 void fake_station_frames(bool on)

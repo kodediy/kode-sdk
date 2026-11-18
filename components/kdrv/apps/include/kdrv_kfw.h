@@ -244,6 +244,25 @@ kode_status_t kfw_hdr_parse(const void *buf, size_t len, kfw_hdr_t *out);
 /** @brief SHA-256 of @p data into the KFW_SHA_LEN bytes at @p out. */
 void kfw_sha256(const void *data, size_t len, uint8_t *out);
 
+/**
+ * @brief A SHA-256 over a stream, one at a time: start, feed, end.
+ *
+ * For a caller that cannot hold the whole input, such as a file read in
+ * chunks. Starting again drops whatever was in progress.
+ *
+ * @return kfw_sha256_start(): true when the hash is ready to be fed.
+ */
+bool kfw_sha256_start(void);
+
+/** @brief Add bytes to the hash kfw_sha256_start() opened. */
+void kfw_sha256_feed(const void *data, size_t len);
+
+/**
+ * @brief Close the hash and give the 32-byte digest.
+ * @return true when a hash was open and finished cleanly.
+ */
+bool kfw_sha256_end(uint8_t *out);
+
 /** @brief CRC32 over @p len bytes - the one the header seals itself with. */
 uint32_t kfw_crc32(const void *data, size_t len);
 

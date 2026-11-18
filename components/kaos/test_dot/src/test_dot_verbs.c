@@ -6,18 +6,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "sdkconfig.h"
 
 #include "kaos.h"
+#include "kdrv_apps.h"
 #include "kdrv_pcf8574.h"
 #include "khal_crc32.h"
+#include "khal_time.h"
 #include "kode_log.h"
 #include "kqp.h"
 
 #include "console_verbs.h"
 #include "kaos_wire.h"
 #include "kverbs.h"
+#include "test_dot_priv.h"
 
 /** @brief Characters of one `d=` line's base64, its terminator included. */
 #define TD_V_B64_CHARS   ((((KODE_TEST_DOT_BLOB_LINE + 2U) / 3U) * 4U) + 1U)
@@ -35,6 +39,10 @@
 #define TD_V_PAIR        (KDRV_PCF8574_R1_BIT | KDRV_PCF8574_R2_BIT)
 /** @brief The pair's forbidden value: R1 at rest (1) and R2 on (0). */
 #define TD_V_FORBIDDEN   KDRV_PCF8574_R1_BIT
+/** @brief The dimmest glass `test_dot_bright` takes, percent: the marks still show. */
+#define TD_V_BRIGHT_MIN  10U
+/** @brief The brightest, percent: full, what a pass uses without the verb. */
+#define TD_V_BRIGHT_MAX  100U
 
 /** @brief The command in flight, as this file knows it. */
 static uint8_t s_seq;            /**< The last number given.                       */
@@ -469,6 +477,108 @@ static void h_end(const kverb_t *c, const karg_val_t *v)
     td_plain(c, (uint8_t)TEST_DOT_VERB_END);
 }
 
+/**
+ * @brief Whether the board already holds the bytes whose SHA-256 is @p want.
+ *
+ * The app named @p project, or the whole storage partition. Asked before the
+ * run, with nothing writing the flash. No @p want, a malformed one or any
+ * read that fails says no, and the image is written as before.
+ *
+ * @param project The app's project name (ignored for the storage partition).
+ * @param want    64 hex digits, or NULL / empty.
+ * @param storage true for the storage partition.
+ * @return true only on a digest equal to @p want.
+ */
+static bool td_have(const char *project, const char *want, bool storage)
+{
+    uint8_t dg[32];
+    char    hex[65];
+
+    if ( (NULL == want) || (64U != strlen(want)) || (!storage && ((NULL == project) || ('\0' == project[0]))) )
+    {
+        return false;
+    }
+    kode_status_t st;
+    if ( storage )
+    {
+        st = kdrv_apps_storage_sha256(dg);
+    }
+    else
+    {
+        st = kdrv_apps_named_sha256(project, dg);
+    }
+    if ( KODE_OK != st )
+    {
+        return false;
+    }
+    for ( uint32_t i = 0U; 32U > i; i++ )
+    {
+        (void)snprintf(&hex[2U * i], 3U, "%02x", (unsigned)dg[i]);
+    }
+    /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+    return 0 == strcasecmp(hex, want);
+}
+
+/** @brief A verb's optional text: its value when given, NULL when not. */
+static const char *td_opt(const karg_val_t *v)
+{
+    const char *s = NULL;
+
+    if ( v->present )
+    {
+        s = v->s;
+    }
+    return s;
+}
+
+/** @brief test_dot_welcome name= [project= sha=]: the welcome app on the card, written during the next run unless the board already holds it. `name=""` disarms. */
+static void h_welcome(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c;
+    uint32_t const t0 = khal_time_ms();
+    if ( '\0' == v[0].s[0] )
+    {
+        /* The station takes back what it armed: a run it does not start. */
+        test_dot_welcome_arm(NULL);
+        console_reply(">|welcome armed=none");
+    }
+    else if ( td_have(td_opt(&v[1]), td_opt(&v[2]), false) )
+    {
+        /* The same bytes are already on the board: nothing to write. */
+        test_dot_welcome_arm(NULL);
+        console_reply(">|welcome armed=none present=yes ms=%lu", (unsigned long)(khal_time_ms() - t0));
+    }
+    else
+    {
+        test_dot_welcome_arm(v[0].s);
+        console_reply(">|welcome armed=%s present=no ms=%lu", v[0].s, (unsigned long)(khal_time_ms() - t0));
+    }
+    console_reply(">ok");
+}
+
+/** @brief test_dot_storage name= [sha=]: the storage image on the card, written after the welcome app unless the partition already holds it. `name=""` disarms. */
+static void h_storage(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c;
+    uint32_t const t0 = khal_time_ms();
+    if ( '\0' == v[0].s[0] )
+    {
+        test_dot_storage_arm(NULL);
+        console_reply(">|storage armed=none");
+    }
+    else if ( td_have(NULL, td_opt(&v[1]), true) )
+    {
+        test_dot_storage_arm(NULL);
+        console_reply(">|storage armed=none present=yes ms=%lu", (unsigned long)(khal_time_ms() - t0));
+    }
+    else
+    {
+        test_dot_storage_arm(v[0].s);
+        console_reply(">|storage armed=%s present=no ms=%lu", v[0].s, (unsigned long)(khal_time_ms() - t0));
+    }
+    console_reply(">ok");
+}
+
 /** @brief test_dot_info: where AO_TestDot is. */
 static void h_info(const kverb_t *c, const karg_val_t *v)
 {
@@ -495,6 +605,21 @@ static void h_camera(const kverb_t *c, const karg_val_t *v)
     {
         r.a.cam = (uint8_t)v[0].u;
     }
+    td_post(c->verb, &r, KCLI_ERR_BUSY, "busy");
+}
+
+/** @brief test_dot_bright pct=: the bench's dim panel, the level the passes put the glass at until the next boot. */
+static void h_bright(const kverb_t *c, const karg_val_t *v)
+{
+    TestDotReqEvt r;
+
+    if ( !console_src_allows(CONSOLE_NEED_CABLE) )
+    {
+        return;
+    }
+    (void)memset(&r, 0, sizeof(r));
+    r.verb  = (uint8_t)TEST_DOT_VERB_BRIGHT;
+    r.a.pct = (uint8_t)v[0].u;
     td_post(c->verb, &r, KCLI_ERR_BUSY, "busy");
 }
 
@@ -674,6 +799,16 @@ static const karg_spec_t A_RADIO[] = {
     { .key = "ble",      .required = false, .type = KARG_TEXT },
     { .key = "discover", .required = false, .type = KARG_BOOL },
 };
+/* The name is a text so that an empty one, `name=""`, can disarm. */
+static const karg_spec_t A_WELCOME[] = {
+    { .key = "name",    .required = true,  .type = KARG_TEXT },
+    { .key = "project", .required = false, .type = KARG_STRING },
+    { .key = "sha",     .required = false, .type = KARG_STRING },
+};
+static const karg_spec_t A_STORAGE[] = {
+    { .key = "name", .required = true,  .type = KARG_TEXT },
+    { .key = "sha",  .required = false, .type = KARG_STRING },
+};
 static const karg_spec_t A_BOOST[] = {
     { .key = "state", .required = true, .type = KARG_BOOL },
 };
@@ -685,6 +820,10 @@ static const karg_spec_t A_LOCK[] = {
 };
 static const karg_spec_t A_CAMERA[] = {
     { .key = "only", .required = false, .type = KARG_ENUM, .enums = EN_CAM, .n_enums = (uint8_t)Q_DIM(EN_CAM) },
+};
+
+static const karg_spec_t A_BRIGHT[] = {
+    { .key = "pct", .required = true, .type = KARG_UINT, .min = TD_V_BRIGHT_MIN, .max = TD_V_BRIGHT_MAX },
 };
 
 static const kverb_t TD_VERBS[] = {
@@ -702,7 +841,10 @@ static const kverb_t TD_VERBS[] = {
     { "test_dot_lock",   A_LOCK,   KVERB_KEYS(A_LOCK),   h_lock   },
     { "test_dot_end",    NULL,     0U,                   h_end    },
     { "test_dot_info",   NULL,     0U,                   h_info   },
+    { "test_dot_welcome", A_WELCOME, KVERB_KEYS(A_WELCOME), h_welcome },
+    { "test_dot_storage", A_STORAGE, KVERB_KEYS(A_STORAGE), h_storage },
     { "test_dot_camera", A_CAMERA, KVERB_KEYS(A_CAMERA), h_camera },
+    { "test_dot_bright", A_BRIGHT, KVERB_KEYS(A_BRIGHT), h_bright },
 };
 
 const kverbs_t test_dot_verbs = {

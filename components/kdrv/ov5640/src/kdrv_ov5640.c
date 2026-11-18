@@ -955,11 +955,26 @@ static bool cfg_write(void)
     return ok;
 }
 
+/** @brief Grabs that found the settings lost, for kdrv_ov5640_lost_take(). */
+static volatile uint32_t s_lost_count;
+/** @brief What the last cfg_holds() saw: false when a register read itself failed. */
+static bool s_holds_read_ok = true;
+
+uint32_t kdrv_ov5640_lost_take(void)
+{
+    uint32_t const n = s_lost_count;
+
+    s_lost_count = 0U;
+    return n;
+}
+
 /** @brief Whether the sensor still holds s_cfg: a reset puts its defaults back. */
 static bool cfg_holds(void)
 {
     uint8_t v     = 0U;
     bool    holds = true;
+
+    s_holds_read_ok = rd(OV_REG_AEC_MANUAL, &v);
 
     if ( s_cfg.exp_set || s_cfg.gain_set )
     {
@@ -1285,8 +1300,19 @@ kode_status_t kdrv_ov5640_grab(uint32_t skip, uint32_t timeout_ms, const uint8_t
                     s_cam_held = NO_BUF;
                     s_prog_win = false;
                     s_vcm_hw   = VCM_UNKNOWN;
-                    KLOG_W(TAG, "sensor settings lost; written again");
-                    (void)cfg_write();
+                    const char *seen = "the sensor does not answer on I2C";
+                    const char *put  = "write failed";
+
+                    s_lost_count++;
+                    if ( s_holds_read_ok )
+                    {
+                        seen = "registers changed";
+                    }
+                    if ( cfg_write() )
+                    {
+                        put = "ok";
+                    }
+                    KLOG_W(TAG, "sensor settings lost (%s); written again (%s)", seen, put);
                     need = skip + 2U;
                     while ( khal_sem_wait_timeout(s_frame, 0U) )
                     {

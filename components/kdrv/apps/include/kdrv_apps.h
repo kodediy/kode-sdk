@@ -169,6 +169,29 @@ kode_status_t kdrv_apps_read(uint32_t offset, void *buf, size_t len);
  */
 kode_status_t kdrv_apps_extent_crc(uint32_t offset, uint32_t size, uint32_t *crc);
 
+/**
+ * @brief The SHA-256 of the installed app named @p project, over its extent as it lies.
+ *
+ * Read through the mapping, a window at a time, like kdrv_apps_extent_crc().
+ * The station compares it with the SHA-256 of the file on the card: equal
+ * means the bytes on the board are the file's, and the install can be skipped.
+ *
+ * @param project The project name of a live entry.
+ * @param out     32 bytes; written on KODE_OK only.
+ * @return KODE_OK; KODE_DENIED with no region or NULL arguments; KODE_ERROR
+ *         when no live entry has that name or its extent cannot be read.
+ */
+kode_status_t kdrv_apps_named_sha256(const char *project, uint8_t *out);
+
+/**
+ * @brief The SHA-256 of the whole `storage` partition, mounted or not.
+ *
+ * @param out 32 bytes; written on KODE_OK only.
+ * @return KODE_OK; KODE_DENIED for a NULL @p out; KODE_ERROR with no partition,
+ *         a first 64 KB block that is blank, or one that cannot be read.
+ */
+kode_status_t kdrv_apps_storage_sha256(uint8_t *out);
+
 /** @brief What kdrv_apps_sink() needs: where kdrv_apps_plan() said to write. */
 typedef struct {
     uint32_t offset;   /**< Region-relative, 64 KB-aligned. */
@@ -322,6 +345,18 @@ void kdrv_apps_pending_write_abort(void);
 
 /** @brief The mailbox as a kfw_sink_t. Context unused. */
 const kfw_sink_t *kdrv_apps_pending_sink(void);
+
+/**
+ * @brief The `storage` partition as a kfw_sink_t: the image goes in as it is.
+ *
+ * begin() refuses an image of 0 bytes or larger than the partition, a file
+ * of the internal volume still open, and a second session; otherwise it
+ * unmounts the FAT. write() erases each 64 KB block as it is reached unless
+ * the block is blank. end() reads the partition back, compares its CRC-32
+ * with that of what was received and mounts the FAT again without formatting.
+ * abort() mounts it again the same way. Context unused.
+ */
+const kfw_sink_t *kdrv_apps_storage_sink(void);
 
 /** @brief Read @p len bytes from the mailbox at @p offset. */
 kode_status_t kdrv_apps_pending_read(uint32_t offset, void *buf, size_t len);

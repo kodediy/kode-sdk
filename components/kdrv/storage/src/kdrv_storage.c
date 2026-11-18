@@ -28,6 +28,7 @@
  * nothing here is any more concurrent than it was with one. */
 static FILE *s_read;    /**< kdrv_storage_open_path()   */
 static FILE *s_write;   /**< kdrv_storage_create_path() */
+static bool  s_read_fs; /**< s_read is a file of the internal volume. */
 
 /* Whether the two above are one copy rather than two unrelated files. See
  * the Copying section at the end of this file; it lives up here because
@@ -843,6 +844,24 @@ kode_status_t kdrv_storage_rename(const char *from, const char *to)
     return KODE_OK;
 }
 
+/**
+ * @brief Whether a real path lies on the internal volume.
+ * @param real A path as real_path() gives it.
+ * @return true when it is the mount point itself or below it.
+ */
+static bool real_on_fs(const char *real)
+{
+    const char *const mount = kdrv_fs_mount_point();
+
+    if ( NULL == mount )
+    {
+        return false;
+    }
+    size_t const n = strlen(mount);
+
+    return (strncmp(real, mount, n) == 0) && (('\0' == real[n]) || ('/' == real[n]));
+}
+
 kode_status_t kdrv_storage_open_path(const char *path, uint32_t *size)
 {
     if ( (NULL == path) || (NULL == size) || (NULL != s_read) )
@@ -878,8 +897,9 @@ kode_status_t kdrv_storage_open_path(const char *path, uint32_t *size)
         return KODE_DENIED;
     }
 
-    s_read = f;
-    *size  = (uint32_t)len;
+    s_read    = f;
+    s_read_fs = real_on_fs(real);
+    *size     = (uint32_t)len;
     return KODE_OK;
 }
 
@@ -966,6 +986,12 @@ kode_status_t kdrv_storage_seek(uint32_t offset)
 
 /** Where the file being written lives, so a failed write can undo itself. */
 static char s_write_path[KDRV_REAL_PATH_MAX];
+
+bool kdrv_storage_fs_files_open(void)
+{
+    return ((NULL != s_read) && s_read_fs)
+        || ((NULL != s_write) && real_on_fs(s_write_path));
+}
 
 /* Whether the open write is an append onto a file that may already have held
  * good data, as opposed to a truncating create that started the file from
@@ -1138,7 +1164,8 @@ kode_status_t kdrv_storage_close(void)
          * reach the medium, so the worst it can report is an error the read
          * calls already returned. */
         (void)fclose(s_read);
-        s_read = NULL;
+        s_read    = NULL;
+        s_read_fs = false;
     }
 
     if ( NULL != s_write )

@@ -1,4 +1,4 @@
-version: "0.1.2"
+version: "0.1.3"
 description: "Kode Dot SDK: the board's pins, addresses, owners and sdkconfig"
 url: "https://docs.kode.diy/sdk/kbsp"
 repository: "https://github.com/kodediy/kode-sdk.git"

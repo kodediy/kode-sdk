@@ -18,6 +18,9 @@ extern "C" {
 /** @brief Everything back to a camera that answers its probe and a loop that comes back whole. */
 void fake_station_reset(void);
 
+/** @brief What kdrv_ov5640_lost_take() answers from now on: grabs that found the settings lost. */
+void fake_station_lost(uint32_t n);
+
 /** @brief What kdrv_ov5640_probe() answers from now on. */
 void fake_station_probe_rc(kode_status_t rc);
 

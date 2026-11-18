@@ -27,6 +27,14 @@ extern "C" {
 /** @brief AO_TestDot built afresh, dormant, its neighbours' mailboxes empty and the station's fakes reset. */
 void td_up(void);
 
+/**
+ * @brief Leave a station's pass running (@p on) or none, AO_TestDot down, for
+ *        the cases of other AOs that behave otherwise during one
+ *        (test_dot_session()). Run before the subject comes up, and with
+ *        @p on false once it is down.
+ */
+void td_session(bool on);
+
 /** @brief Same, with the lock stored before the AO starts. */
 void td_up_locked(void);
 
