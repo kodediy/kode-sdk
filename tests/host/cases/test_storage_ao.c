@@ -10209,7 +10209,7 @@ TEST_CASE("a read again whose card will not mount again ends the read with an "
 static void break_reader_of(const char *rel)
 {
     char want[1024];
-    char real_want[1024];
+    char real_want[PATH_MAX];   /* realpath() writes up to PATH_MAX bytes */
     bool broke = false;
 
     (void)snprintf(want, sizeof(want), "%s/%s", fake_media_sd_dir(), rel);
@@ -10217,7 +10217,7 @@ static void break_reader_of(const char *rel)
     for ( int fd = 3; (1024 > fd) && !broke; ++fd )
     {
         char got[1024];
-        char real_got[1024];
+        char real_got[PATH_MAX];
 
 #ifdef F_GETPATH
         if ( fcntl(fd, F_GETPATH, got) == -1 )

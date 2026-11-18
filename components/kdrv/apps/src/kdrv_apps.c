@@ -22,6 +22,7 @@
 #include "esp_partition.h"
 #include "esp_rom_crc.h"
 #include "khal_crc32.h"
+#include "khal_system.h"
 #include "kdrv_image_walk.h"
 #include "psa/crypto.h"
 
@@ -568,8 +569,10 @@ kode_status_t kdrv_apps_write_begin(uint32_t offset, uint32_t size)
 /**
  * @brief Is the 64 KB block at `off` of a partition all 0xFF?
  *
- * Short reads, each holding the flash for microseconds. A read that fails
- * counts as not blank, so the block is erased as before.
+ * Short reads, each holding the flash for microseconds. The buffer is
+ * borrowed from PSRAM for the look and given back: nothing forces it into
+ * internal RAM. A read that fails, or no memory for the buffer, counts as
+ * not blank, so the block is erased as before.
  *
  * @param p   The partition.
  * @param off Partition offset of the block.
@@ -577,23 +580,29 @@ kode_status_t kdrv_apps_write_begin(uint32_t offset, uint32_t size)
  */
 static bool part_block_blank(const esp_partition_t *p, uint32_t off)
 {
-    static uint32_t s_buf[APPS_BLANK_READ / sizeof(uint32_t)];
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() hands back an untyped block aligned for any type */
+    uint32_t * const buf = (uint32_t *)khal_alloc_psram(sizeof(uint32_t), APPS_BLANK_READ);
+    bool             blank = (NULL != buf);
 
-    for ( uint32_t at = 0U; KAPPS_ALIGN > at; at += APPS_BLANK_READ )
+    for ( uint32_t at = 0U; blank && (KAPPS_ALIGN > at); at += APPS_BLANK_READ )
     {
-        if ( esp_partition_read(p, off + at, s_buf, sizeof(s_buf)) != ESP_OK )
+        if ( esp_partition_read(p, off + at, buf, APPS_BLANK_READ) != ESP_OK )
         {
-            return false;
+            blank = false;
         }
-        for ( uint32_t i = 0U; (sizeof(s_buf) / sizeof(s_buf[0])) > i; i++ )
+        for ( uint32_t i = 0U; blank && ((APPS_BLANK_READ / sizeof(uint32_t)) > i); i++ )
         {
-            if ( 0xFFFFFFFFU != s_buf[i] )
+            if ( 0xFFFFFFFFU != buf[i] )
             {
-                return false;
+                blank = false;
             }
         }
     }
-    return true;
+    if ( NULL != buf )
+    {
+        khal_free(buf);
+    }
+    return blank;
 }
 
 /**
