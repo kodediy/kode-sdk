@@ -1785,8 +1785,9 @@ _Static_assert(KODE_MAG_TEST_WAIT_MS < KODE_MAG_TEST_BUDGET_MS,
 /** @brief The pause before each of those tries, in ms. */
 #define KODE_APPMGR_PUT_RETRY_MS 500U
 /** @brief How long the card of a fetch that announced an install
- *         (`appdata_get install=on`) waits for that install to begin, in ms:
- *         a whole number of seconds, counted on the beat that says the card.
+ *         (`appdata_get`, unless it says `install=off`) waits for that
+ *         install to begin, in ms: a whole number of seconds, counted on the
+ *         beat that says the card.
  *         The host sends it the moment the fetch is answered; this only bounds
  *         a host that never does, so the card does not stand for ever. */
 #define KODE_APPMGR_HOLD_MS     15000U

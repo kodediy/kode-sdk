@@ -630,8 +630,8 @@ typedef struct {
     bool          get_open;        /**< A transfer is open with AO_Net.         */
 
     /* ---- The card a fetch kept up for the install it announced -----------
-     * Between `appdata_get install=on` and the install the host sends next,
-     * the glass would empty and fill again: the fetch's card stays at 0 %,
+     * Between `appdata_get` and the install the host sends next, the card
+     * would close whole and open again at 0 %: the fetch's card stays at 0 %,
      * said again every second on `beat`, while AppMgr_idle waits. An
      * install from a medium or a URL that begins takes the card over
      * (hold_release()); anything else that idle turns to, a terminal install
