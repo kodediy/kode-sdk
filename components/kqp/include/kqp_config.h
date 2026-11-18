@@ -335,12 +335,12 @@
 #define KODE_LOWPOWER_SRC_SCHED        0xFDU   /**< lowpower_request_rest(): asked by AO_Scheduler, its work done. */
 #define KODE_LOWPOWER_ROUND_MS         2000U   /**< Longest wait for a round's answers. */
 #define KODE_LOWPOWER_OFF_GRACE_MS     100U    /**< Between STATE(OFF) and deep sleep, for the log to drain. */
-#define KODE_LOWPOWER_REQUEST_RETRY_MS 1000U   /**< A requested round that met a busy or silent owner begins again this long
-                                                *   after it was abandoned; in an app's rest, a busy owner is asked
-                                                *   again this long after its answer. */
-#define KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS 10000U /**< The longest a request is begun again, counted from the request;
-                                                *   the requester is answered once, when it runs out. An app's rest
-                                                *   asks a busy owner again only inside it. */
+#define KODE_LOWPOWER_REQUEST_RETRY_MS 1000U   /**< A busy owner is asked again this long after its answer, alone and in
+                                                *   the same round, and in an app's rest too; a requested round that met
+                                                *   a silent owner begins again this long after it was abandoned. */
+#define KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS 10000U /**< The longest a request waits for a busy owner or is begun again,
+                                                *   counted from the request; the requester is answered once, when it
+                                                *   runs out. An app's rest asks a busy owner again only inside it. */
 #define KODE_LOWPOWER_ORDER_MS         10000U  /**< The longest a request for OFF waits for a busy or silent owner;
                                                 *   the board goes OFF when it runs out, done or not. */
 #define KODE_LOWPOWER_QUEUE_LEN        48U     /**< AO_LowPower's queue: every participant's answer, a request and the inputs. */

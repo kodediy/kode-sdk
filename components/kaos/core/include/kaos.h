@@ -5103,7 +5103,7 @@ const char *lowpower_last_refusal(void);
  * The sound and the card are put away once and come back at their next use:
  * they are never among the parts held, and asking again asks their owners
  * again. An owner that answers busy is asked again
- * KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round is begun again,
+ * KODE_LOWPOWER_REQUEST_RETRY_MS later, as a requested round asks its own,
  * while that ask falls inside KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS of the
  * request; busy past it, or silent for KODE_LOWPOWER_PART_STEP_MS, it ends
  * the request there. An owner with no room for the AWAKE that brings its
