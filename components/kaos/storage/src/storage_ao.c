@@ -530,6 +530,12 @@ typedef struct {
  * AO_Radio and AO_Net are below it. A self-post keeps the queue non-empty and
  * starves them; going idle for 10 ms lets them run. */
 #define STORAGE_WRITE_GAP_TICKS  KQP_TICKS_PER_MS(10U)
+/* The card row's own gap: one tick. The 10 ms above would cost the row 1.3 s
+ * and time nothing: its rates count the transfers only. The reads go to the
+ * worker, so this AO is idle while each chunk moves; the file phases run here
+ * and leave the AOs below it a tick between chunks. `sd_verify` keeps the
+ * 10 ms. */
+#define SD_TEST_GAP_TICKS        KQP_TICKS_PER_MS(1U)
 
 /* How many lines of a `cat` one dispatch step may post before the pacer
  * brings it back for the rest, so lower-priority AOs get the CPU. 24, like
@@ -7068,6 +7074,18 @@ static void sd_test_verdict(Storage * const me)
     sd_test_finish(me);
 }
 
+/** @brief The pause between two steps: the row's tick, or `sd_verify`'s 10 ms. */
+static uint32_t sd_test_gap(Storage const * const me)
+{
+    uint32_t gap = SD_TEST_GAP_TICKS;
+
+    if ( me->t_verify )
+    {
+        gap = STORAGE_WRITE_GAP_TICKS;
+    }
+    return gap;
+}
+
 /** @brief Close this phase and start the next, or finish the run. */
 static void sd_test_advance(Storage * const me, uint32_t kb_s)
 {
@@ -7100,7 +7118,7 @@ static void sd_test_advance(Storage * const me, uint32_t kb_s)
     me->t_step    = 0U;
     me->t_ok      = true;
     me->t_busy_us = 0U;
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, sd_test_gap(me), 0U);
 }
 
 /** @brief Fail this phase, naming what failed, and go on to the next. */
@@ -7195,7 +7213,7 @@ static void sd_test_read4_done(Storage * const me, kode_status_t rc,
         sd_test_advance(me, kb_s);
         return;
     }
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, SD_TEST_GAP_TICKS, 0U);
 }
 
 /** @brief Ask for the next chunk of the 1-bit read. */
@@ -7277,7 +7295,7 @@ static void sd_test_read1_done(Storage * const me, kode_status_t rc,
         sd_test_advance(me, kb_s);
         return;
     }
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, SD_TEST_GAP_TICKS, 0U);
 }
 
 /* ---- Phases 4 and 5: a file there and back, for the write speed ---------- */
@@ -7351,7 +7369,7 @@ static void sd_test_write_chunk(Storage * const me)
         sd_test_advance(me, kb_s);
         return;
     }
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, SD_TEST_GAP_TICKS, 0U);
 }
 
 /** @brief One step of the write phase. */
@@ -7441,7 +7459,7 @@ static void sd_test_verify_step(Storage * const me)
         sd_test_advance(me, kb_s);
         return;
     }
-    QTimeEvt_armX(&me->t_pacer, STORAGE_WRITE_GAP_TICKS, 0U);
+    QTimeEvt_armX(&me->t_pacer, SD_TEST_GAP_TICKS, 0U);
 }
 
 /* ---- sd_verify: is the CARD what it says it is? -------------------------- */
