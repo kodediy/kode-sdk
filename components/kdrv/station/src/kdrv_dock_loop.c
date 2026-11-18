@@ -22,8 +22,13 @@
 #define LOOP_BITS_PER_BYTE   10U
 /** @brief Milliseconds in a second. */
 #define LOOP_MS_PER_S        1000U
-/** @brief What a frame's wait adds to its own air time, ms. */
-#define LOOP_MARGIN_MS       30U
+/** @brief What a frame's wait adds to its own air time, ms: room for a flash
+ *         erase of the Welcome install that runs beside the loop. A frame
+ *         that comes back ends its wait at once. */
+#define LOOP_MARGIN_MS       200U
+/** @brief Frames of a pass sent with no byte back before the pass gives up:
+ *         a dead pad costs this many waits, not a whole pass of them. */
+#define LOOP_DEAD_FRAMES     3U
 /** @brief The frame's two first bytes, so a frame is recognisable on a scope. */
 #define LOOP_MAGIC_0         ((uint8_t)'E')
 #define LOOP_MAGIC_1         ((uint8_t)'5')
@@ -98,6 +103,7 @@ static uint8_t loop_pass(int u, int tx, int rx, uint32_t baud, uint8_t n, uint32
     uint32_t const wait_ms = ((KDRV_DOCK_LOOP_FRAME_BYTES * LOOP_BITS_PER_BYTE * LOOP_MS_PER_S) / baud)
                              + LOOP_MARGIN_MS;
     uint8_t good = 0U;
+    uint8_t back = 0U;
     uint8_t i;
 
     if ( (uart_param_config((uart_port_t)u, &cfg) != ESP_OK)
@@ -123,6 +129,14 @@ static uint8_t loop_pass(int u, int tx, int rx, uint32_t baud, uint8_t n, uint32
         if ( ((int)KDRV_DOCK_LOOP_FRAME_BYTES == got) && (memcmp(f, r, KDRV_DOCK_LOOP_FRAME_BYTES) == 0) )
         {
             good++;
+        }
+        if ( (0U == back) && (0 < got) )
+        {
+            back = 1U;
+        }
+        if ( (0U == back) && ((uint8_t)(i + 1U) >= (uint8_t)LOOP_DEAD_FRAMES) )
+        {
+            break;   /* nothing came back: the pass fails as it would have */
         }
     }
     return good;

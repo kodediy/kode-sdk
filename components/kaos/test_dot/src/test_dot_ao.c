@@ -2483,9 +2483,10 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
 {
     me->cur_who = e->who;
     me->cur_seq = e->seq;
+    /* The pads loop is not held: the UART takes its frames in hardware, and
+     * each frame's wait has room for a flash erase (kdrv_dock_loop.c). */
     if ( ((uint8_t)TEST_DOT_VERB_BOOST == e->verb) || ((uint8_t)TEST_DOT_VERB_RELAYS == e->verb)
-        || ((uint8_t)TEST_DOT_VERB_ADC == e->verb) || ((uint8_t)TEST_DOT_VERB_LOOP == e->verb)
-        || ((uint8_t)TEST_DOT_VERB_RADIO == e->verb) )
+        || ((uint8_t)TEST_DOT_VERB_ADC == e->verb) )
     {
         appmgr_hold(true);
     }

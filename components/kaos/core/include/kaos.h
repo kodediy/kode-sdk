@@ -4326,7 +4326,7 @@ bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
  * @brief Hold or release a write off a medium between two chunks.
  *
  * Set by AO_TestDot while a station verb times something a flash write would
- * slow down (the pads, the radio); the write goes on when it is released.
+ * slow down (the pads); the write goes on when it is released.
  *
  * @param on true to hold, false to release.
  */
