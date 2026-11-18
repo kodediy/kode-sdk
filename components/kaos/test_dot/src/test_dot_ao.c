@@ -15,6 +15,7 @@
 #include "kaos_start.h"
 #include "kbsp.h"
 #include "kdrv_buttons.h"
+#include "kdrv_ov5640.h"
 #include "kdrv_wifi.h"
 #include "khal_nvs.h"
 #include "khal_system.h"
@@ -291,6 +292,7 @@ typedef struct {
     uint8_t       ring_head;          /**< The oldest.                                     */
     uint8_t       ring_n;             /**< How many.                                       */
     uint32_t      ring_dropped;       /**< Pushed out by newer ones.                       */
+    uint8_t       place_lost;         /**< Looks in a row with no marks and the camera's settings lost. */
     bool          welcome_on;         /**< The welcome app's write is under way.            */
     bool          storage_on;         /**< The storage partition's write is under way.      */
 } TestDot;
@@ -329,6 +331,9 @@ void test_dot_welcome_arm(const char *name)
         (void)snprintf(s_welcome, sizeof(s_welcome), "%s", name);
     }
 }
+
+/** @brief Looks in a row with the camera's settings lost and no marks before the placement gives up on the camera. */
+#define TD_PLACE_LOST_LOOKS 2U
 
 /** @brief The storage image's file on the card, armed by test_dot_storage; empty when not armed. */
 static char s_storage[KODE_APP_FILE_MAX];
@@ -1745,8 +1750,19 @@ static void place_after(TestDot *me, kode_status_t rc)
     }
     else
     {
-        rec(me, "place check n=%u marks=%d dx=%.2f dy=%.2f ang=%.2f win=\"%u,%u\"", (unsigned)me->place_tries,
-            (int)c->nmarks, c->place_dx, c->place_dy, c->place_ang, (unsigned)c->win_x, (unsigned)c->win_y);
+        uint32_t const lost = kdrv_ov5640_lost_take();
+
+        rec(me, "place check n=%u marks=%d dx=%.2f dy=%.2f ang=%.2f win=\"%u,%u\" lost=%lu", (unsigned)me->place_tries,
+            (int)c->nmarks, c->place_dx, c->place_dy, c->place_ang, (unsigned)c->win_x, (unsigned)c->win_y,
+            (unsigned long)lost);
+        if ( (0U < lost) && (0 == c->nmarks) )
+        {
+            me->place_lost++;
+        }
+        else
+        {
+            me->place_lost = 0U;
+        }
         good = c->place_ok && (fabs(c->place_dx) <= me->place_mm) && (fabs(c->place_dy) <= me->place_mm)
                && (fabs(c->place_ang) <= me->place_deg);
     }
@@ -1760,6 +1776,13 @@ static void place_after(TestDot *me, kode_status_t rc)
         {
             lend_to(me, me->cur_who, me->cur_seq, c->blob[loc].name, c->blob[loc].data, c->blob[loc].len);
         }
+        ans(me, 0U, NULL);
+    }
+    else if ( TD_PLACE_LOST_LOOKS <= me->place_lost )
+    {
+        /* The fixture's camera keeps dropping its settings: no seating
+         * can fix that, so the station is told now, not after mark_ms. */
+        rec(me, "place result=cam_lost looks=%u", (unsigned)me->place_lost);
         ans(me, 0U, NULL);
     }
     else if ( ms < me->place_mark_ms )
@@ -1792,6 +1815,8 @@ static void place_start(TestDot *me, TestDotReqEvt const *e)
     me->place_mm      = (double)e->a.place.dx_mm10 / TD_MM10_PER_MM;
     me->place_deg     = (double)e->a.place.deg10 / TD_MM10_PER_MM;
     me->place_tries   = 0U;
+    me->place_lost    = 0U;
+    (void)kdrv_ov5640_lost_take();
     me->place_t0      = khal_time_ms();
     me->act           = (uint8_t)ACT_PLACE;
     rec(me, "place mem psram_free=%lu largest=%lu", (unsigned long)khal_psram_free(),

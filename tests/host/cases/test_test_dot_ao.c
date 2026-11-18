@@ -242,6 +242,55 @@ TEST_CASE("test_place_wakes_and_all_finds_it_awake", "[test_dot_ao]")
     td_down();
 }
 
+/** @brief `test_dot_place` that keeps looking for the marks for @p mark_ms. */
+static void place_for(uint32_t mark_ms)
+{
+    TestDotReqEvt r;
+
+    (void)memset(&r, 0, sizeof(r));
+    r.verb              = (uint8_t)TEST_DOT_VERB_PLACE;
+    r.a.place.win_x     = -1;
+    r.a.place.win_y     = -1;
+    r.a.place.mark_ms   = mark_ms;
+    r.a.place.dx_mm10   = (uint16_t)KODE_TEST_DOT_PLACE_MM10;
+    r.a.place.deg10     = (uint16_t)KODE_TEST_DOT_PLACE_DEG10;
+    td_verb(&r);
+}
+
+/* A fixture camera that keeps losing its settings sees no marks at any look,
+ * and waiting out the marks' time would blame the seating. Two looks in a row
+ * like that end the placement at once, with its own word. */
+TEST_CASE("test_place_with_the_camera_losing_its_settings_ends_cam_lost", "[test_dot_ao]")
+{
+    td_up();
+    fake_station_frames(true);
+    fake_station_lost(2U);
+    place_for(15000U);
+    td_wake_ok();
+    TEST_ASSERT_TRUE(drive_until("rec place result="));
+    TEST_ASSERT_TRUE(td_said("rec place result=cam_lost looks=2"));
+    TEST_ASSERT_TRUE(td_said("marks=0"));
+    TEST_ASSERT_TRUE(td_said("lost=2"));
+    TEST_ASSERT_FALSE_MESSAGE(td_said("n=3 "), "a third look after two lost ones");
+    td_end();
+    td_down();
+}
+
+TEST_CASE("test_place_with_one_lost_look_is_judged_as_before", "[test_dot_ao]")
+{
+    td_up();
+    fake_station_frames(true);
+    fake_station_lost(1U);
+    place_once();
+    td_wake_ok();
+    TEST_ASSERT_TRUE(drive_until("rec place result="));
+    TEST_ASSERT_TRUE(td_said("lost=1"));
+    TEST_ASSERT_FALSE_MESSAGE(td_said("cam_lost"), "one lost look ended the placement");
+    TEST_ASSERT_TRUE(td_said("rec place result=misplaced"));
+    td_end();
+    td_down();
+}
+
 TEST_CASE("test_end_gives_everything_back", "[test_dot_ao]")
 {
     TestDotReqEvt r;
