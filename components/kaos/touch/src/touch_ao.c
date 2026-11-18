@@ -102,7 +102,8 @@ typedef struct {
     QTimeEvt      restore_tmo;  /**< One-shot: the next try at the awake settings. */
     uint8_t       lp_who;       /**< The id lowpower_join() gave.            */
     bool          awake_known;  /**< @c awake was read at bring-up.          */
-    bool          rested;       /**< The controller holds the rest settings. */
+    bool          rested;       /**< The controller's interrupt is off for a rest. */
+    bool          slept;        /**< And it was sent to sleep, for OFF.      */
     touch_awake_t awake;        /**< What the rest puts back.                */
 #endif
 } Touch;
@@ -225,6 +226,7 @@ void Touch_ctor(void)
     me->lp_who      = KODE_LOWPOWER_WHO_NONE;
     me->awake_known = false;
     me->rested      = false;
+    me->slept       = false;
     me->awake       = (touch_awake_t){ 0, 0, 0 };
 #endif
 }
@@ -690,26 +692,43 @@ static void awake_read(Touch * const me)
 }
 
 /**
- * @brief Put the chip to rest: no interrupt, auto-sleep on and quick.
+ * @brief Put the chip to rest: no interrupt, and for OFF auto-sleep on and
+ *        quick as well.
  *
- * Each write may NAK if the chip has already gone to sleep, which is the rest
- * itself, so the results are not judged.
+ * Asleep, the board is one press from use, and a chip that sleeps answers
+ * nothing until a finger wakes it, which short taps take seconds to do: the
+ * awake settings could not be written back and the glass stayed deaf after
+ * the wake. So for ASLEEP the interrupt alone is taken away, and the chip
+ * stays on the bus for touch_wake(). Off, nothing reads a touch until the
+ * boot that resets the chip, and it sleeps.
  *
- * @param me The AO.
+ * Each step is written once. A write may NAK if the chip has already gone to
+ * sleep, which is the rest itself, so the results are not judged.
+ *
+ * @param me  The AO.
+ * @param off The round is for OFF.
  */
-static void touch_rest(Touch * const me)
+static void touch_rest(Touch * const me, bool off)
 {
     if ( me->awake_known )
     {
-        (void)kdrv_cst820_set(KDRV_CST_IRQ_CTL, 0);
-        (void)kdrv_cst820_set(KDRV_CST_DIS_AUTO_SLEEP, 0);
-        (void)kdrv_cst820_set(KDRV_CST_AUTO_SLEEP_TIME, (int32_t)KODE_TOUCH_REST_SLEEP_S);
-        me->rested = true;
+        if ( !me->rested )
+        {
+            (void)kdrv_cst820_set(KDRV_CST_IRQ_CTL, 0);
+            me->rested = true;
+        }
+        if ( off && (!me->slept) )
+        {
+            (void)kdrv_cst820_set(KDRV_CST_DIS_AUTO_SLEEP, 0);
+            (void)kdrv_cst820_set(KDRV_CST_AUTO_SLEEP_TIME, (int32_t)KODE_TOUCH_REST_SLEEP_S);
+            me->slept = true;
+        }
     }
 }
 
 /**
- * @brief Write the awake settings back; try again soon if the chip is asleep.
+ * @brief Write the awake settings back; try again soon if the chip is asleep,
+ *        as a rest for OFF that did not end in OFF leaves it.
  *
  * Idempotent: the writes are the same every time, and the retry timer is
  * disarmed before it is armed, so a stale expiry cannot arm it twice.
@@ -727,6 +746,7 @@ static void touch_wake(Touch * const me)
     if ( ok )
     {
         me->rested = false;
+        me->slept  = false;
         KLOG_D(TAG, "touch is back");
     }
     else
@@ -753,10 +773,7 @@ static void touch_round(Touch * const me, const LowPowerRoundEvt * const r)
         /* A wake still being retried is cancelled: the chip is still in its
          * rest settings, which is where this round wants it. */
         (void)QTimeEvt_disarm(&me->restore_tmo);
-        if ( !me->rested )
-        {
-            touch_rest(me);
-        }
+        touch_rest(me, (uint8_t)KODE_LP_OFF == r->target);
         lowpower_ready(me->lp_who, r->round, false, NULL);
     }
 }
