@@ -38,6 +38,36 @@
  * would hold the CPU for the whole write and the interface would crawl. 10 ms
  * costs ~1.6s over a 5MB image - cheap for a UI that stays alive. */
 #define APPMGR_CHUNK_GAP_TICKS KQP_TICKS_PER_MS(10U)
+
+/* Set while a station verb times something a flash write would upset: a
+ * write off a medium holds its next chunk until it clears. */
+static volatile bool s_hold;
+
+void appmgr_hold(bool on)
+{
+    s_hold = on;
+}
+
+/* Set while the station installs: nobody is using the glass, so a write off a
+ * medium takes its next chunk at once instead of leaving the GUI a gap. */
+static volatile bool s_fast;
+
+void appmgr_fast(bool on)
+{
+    s_fast = on;
+}
+
+/** @brief The gap before the next chunk of a write off a medium. */
+static uint32_t chunk_gap(void)
+{
+    uint32_t ticks = APPMGR_CHUNK_GAP_TICKS;
+
+    if ( s_fast )
+    {
+        ticks = 1U;
+    }
+    return ticks;
+}
 /* No chunk for this long during an install and the host is presumed gone -
  * KODE_RECV_IDLE_MS (kqp_config.h) in ticks - KODE_RECV_IDLE_BLE_MS when the
  * payload rides BLE - this AO's own watchdog on the
@@ -3375,9 +3405,18 @@ static void flash_finish(AppMgr * const me)
         /* Parked, not installed. The mailbox has no directory and what is in
          * it is a container, not an image - asking region_install() to
          * describe it produced an entry named after an offset that was never
-         * allocated, which is how this branch came to exist. */
-        KLOG_N(TAG, "parked %u bytes in the mailbox; `install src=\"pending\" "
-                    "dst=...` installs it", (unsigned)me->written);
+         * allocated, which is how this branch came to exist. The storage
+         * partition has none either: its image is the volume itself. */
+        if ( kdrv_apps_storage_sink() == me->sink )
+        {
+            KLOG_N(TAG, "wrote %u bytes into the storage partition",
+                   (unsigned)me->written);
+        }
+        else
+        {
+            KLOG_N(TAG, "parked %u bytes in the mailbox; `install src=\"pending\" "
+                        "dst=...` installs it", (unsigned)me->written);
+        }
         me->bypass = false;
         /* The card that rose for the write ends on the done, which names no
          * app: none was installed. */
@@ -4263,6 +4302,13 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
              * after it is the request's `run` (adopt_finish()). */
             if ( (uint8_t)KFW_SRC_PENDING == req->src_kind )
             {
+                if ( (uint8_t)KODE_FLASH_DST_STORAGE == req->dst_kind )
+                {
+                    KLOG_E(TAG, "dst=storage takes a file, not the mailbox");
+                    req_settle(me, APP_REQ_REFUSED);
+                    status = Q_HANDLED();
+                    break;
+                }
                 if ( (uint8_t)KFW_TARGET_C5 == req->dst_kind )
                 {
                     KLOG_E(TAG, "dst=c5 belongs to AO_Radio; the console routes it there");
@@ -4317,6 +4363,16 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                 me->bypass    = true;
                 me->launch    = false;
                 me->sink      = kdrv_apps_pending_sink();
+            }
+            else if ( (uint8_t)KODE_FLASH_DST_STORAGE == req->dst_kind )
+            {
+                /* The file goes into the partition as it is, like the
+                 * mailbox's park: the sink checks the size, takes the FAT
+                 * and reads the partition back when it ends. */
+                me->os_target = false;
+                me->bypass    = true;
+                me->launch    = false;
+                me->sink      = kdrv_apps_storage_sink();
             }
             else if ( (uint8_t)KFW_TARGET_OS == req->dst_kind )
             {
@@ -8350,13 +8406,21 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             if ( !me->pacing )
             {
                 me->pacing = true;
-                QTimeEvt_armX(&me->pacer, APPMGR_CHUNK_GAP_TICKS, 0U);
+                QTimeEvt_armX(&me->pacer, chunk_gap(), 0U);
             }
             status = Q_HANDLED();
             break;
         }
         case APP_FLASH_CHUNK_SIG: {
-            loans_return(me);
+            if ( s_hold )
+            {
+                /* A station verb is timing something: the next chunk waits. */
+                (void)QTimeEvt_rearm(&me->pacer, APPMGR_CHUNK_GAP_TICKS);
+            }
+            else
+            {
+                loans_return(me);
+            }
             status = Q_HANDLED();
             break;
         }

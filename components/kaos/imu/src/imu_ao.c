@@ -9,6 +9,7 @@
 #include "kaos_start.h"
 #include "kaos_claim.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -45,6 +46,9 @@
                              *   last window or row, and a request that
                              *   arrived meanwhile waits for it (PENDING_*). */
 
+#define PHASE_CHAIN_HOLD 7U /**< A window of a chain was drained: the part waits,
+                             *   gyroscope off, for the next one.            */
+
 /* What waits out a settle. While the gyroscope is turning on, the part does
  * not act on a FIFO reset or a self-test trigger. */
 #define PENDING_NONE    0U
@@ -59,6 +63,13 @@
 #define CAP_CHUNK       16U
 /** @brief One chunk every 10 ms. */
 #define CAP_CHUNK_MS    10U
+/** @brief A chain's chunk: the FIFO's most per read, 192 bytes, about 4.3 ms
+ *         of bus at 400 kHz. */
+#define CAP_CHUNK_FAST  32U
+/** @brief One of a chain's chunks every 6 ms, so the bus is free a quarter of the time. */
+#define CAP_CHUNK_FAST_MS 6U
+/** @brief How long a chain waits for its next window before the part is put back. */
+#define CHAIN_HOLD_MS   300U
 
 /** @brief How often a running self-test is asked whether it has finished. */
 #define ST_POLL_MS      20U
@@ -121,6 +132,9 @@ typedef struct {
     uint16_t stored;       /**< Witness samples already in s_xyz.           */
     QActive *who;          /**< Who holds the capture.                      */
     uint16_t hz;           /**< The bin the drain was asked about.          */
+    bool     fast;         /**< The drain in flight is a chain's.           */
+    bool     more;         /**< Another window follows it.                  */
+    uint16_t skip;         /**< Samples at its head left out of the measure. */
     kdrv_qmc5883p_cal_t corr;  /**< The magnetometer's calibration, when one is stored. */
     bool     cal_present;      /**< `mag_cal` holds one.                    */
 #if CONFIG_KODE_LOWPOWER
@@ -142,6 +156,11 @@ _Static_assert(MAG_CAL_AXES == KDRV_QMC5883P_AXES,
  * of them.
  */
 static int16_t s_xyz[3U * KDRV_QMI8658_FIFO_DEPTH];
+
+/** @brief How the next drain is taken: set by imu_chain_window(), taken by cap_drain(). */
+static atomic_bool   s_chain_set;
+static atomic_bool   s_chain_more;
+static atomic_ushort s_chain_skip;
 
 static Imu l_imu;
 QActive * const AO_Imu = &l_imu.super;
@@ -1586,6 +1605,34 @@ static void cap_end(Imu * const me)
 }
 
 /**
+ * @brief End a window of a chain whose next window is coming: the gyroscope
+ *        stays off and the part waits for it.
+ *
+ * @param me The AO.
+ */
+static void cap_hold(Imu * const me)
+{
+    wait_stop(me);
+    if ( KODE_OK == kdrv_qmi8658_fifo_rearm() )
+    {
+        me->phase = PHASE_CHAIN_HOLD;
+        me->who   = NULL;
+        wait_start(me, CHAIN_HOLD_MS);
+    }
+    else
+    {
+        cap_end(me);
+    }
+}
+
+void imu_chain_window(bool more, uint16_t skip)
+{
+    atomic_store(&s_chain_more, more);
+    atomic_store(&s_chain_skip, skip);
+    atomic_store(&s_chain_set, true);
+}
+
+/**
  * @brief Arm one FIFO window for @p who, now.
  *
  * The outcome goes back as IMU_ARMED_SIG, a refusal included, and a window
@@ -1705,8 +1752,22 @@ static void cap_drain(Imu * const me, ImuDrainReqEvt const * const q)
     me->hz     = q->hz;
     me->left   = (uint16_t)samples;
     me->stored = 0U;
+    me->fast   = atomic_exchange(&s_chain_set, false);
+    me->more   = me->fast && atomic_load(&s_chain_more);
+    me->skip   = 0U;
+    if ( me->fast )
+    {
+        me->skip = (uint16_t)atomic_load(&s_chain_skip);
+    }
     me->phase  = PHASE_CAP_DRAIN;
-    wait_start(me, CAP_CHUNK_MS);
+    if ( me->fast )
+    {
+        wait_start(me, CAP_CHUNK_FAST_MS);
+    }
+    else
+    {
+        wait_start(me, CAP_CHUNK_MS);
+    }
 }
 
 /**
@@ -1756,10 +1817,17 @@ static void cap_chunk(Imu * const me)
     kimu_energy_t w;
     kode_status_t rc = KODE_OK;
     uint16_t      n  = me->left;
+    uint16_t      chunk = (uint16_t)CAP_CHUNK;
+    uint32_t      chunk_ms = CAP_CHUNK_MS;
 
-    if ( (uint16_t)CAP_CHUNK < n )
+    if ( me->fast )
     {
-        n = (uint16_t)CAP_CHUNK;
+        chunk    = (uint16_t)CAP_CHUNK_FAST;
+        chunk_ms = CAP_CHUNK_FAST_MS;
+    }
+    if ( chunk < n )
+    {
+        n = chunk;
     }
     if ( 0U < n )
     {
@@ -1773,20 +1841,32 @@ static void cap_chunk(Imu * const me)
     if ( (KODE_OK == rc) && (0U < me->left) )
     {
         /* A timer, not a self-post, which would keep the queue busy and starve every task below. */
-        wait_start(me, CAP_CHUNK_MS);
+        wait_start(me, chunk_ms);
         return;
     }
 
     (void)memset(&w, 0, sizeof(w));
+    if ( me->skip > me->stored )
+    {
+        me->skip = me->stored;
+    }
     if ( KODE_OK == rc )
     {
         window_describe(me->stored);
-        rc = kimu_energy(s_xyz, (size_t)me->stored, me->hz,
+        rc = kimu_energy(&s_xyz[3U * (size_t)me->skip],
+                         (size_t)(me->stored - me->skip), me->hz,
                          (uint16_t)KDRV_QMI8658_WITNESS_HZ,
                          (uint16_t)KDRV_QMI8658_UG_PER_LSB, &w);
     }
-    energy_post(me, me->who, rc, (size_t)me->stored, &w);
-    cap_end(me);
+    energy_post(me, me->who, rc, (size_t)(me->stored - me->skip), &w);
+    if ( me->more && (KODE_OK == rc) )
+    {
+        cap_hold(me);
+    }
+    else
+    {
+        cap_end(me);
+    }
 }
 
 /**
@@ -1805,6 +1885,11 @@ static void imu_tick(Imu * const me)
         }
         case PHASE_CAP_ARMED: {
             KLOG_W(TAG, "a witness window was armed and never drained; closed");
+            cap_end(me);
+            break;
+        }
+        case PHASE_CHAIN_HOLD: {
+            /* No window followed: the part goes back as it runs. */
             cap_end(me);
             break;
         }
@@ -2127,6 +2212,16 @@ static QState Imu_up(Imu * const me, QEvt const * const e)
         case IMU_CAPTURE_REQ_SIG: {
             ImuCaptureReqEvt const * const q = Q_EVT_CAST(ImuCaptureReqEvt);
 
+            if ( PHASE_CHAIN_HOLD == me->phase )
+            {
+                /* The next window of a chain: the gyroscope is off and the
+                 * FIFO's registers are back, so there is nothing to settle. */
+                wait_stop(me);
+                me->phase = PHASE_NONE;
+                cap_arm(me, q->who);
+                status = Q_HANDLED();
+                break;
+            }
             if ( PHASE_NONE != me->phase )
             {
                 armed_post(me, q->who, KODE_DENIED);
@@ -2229,6 +2324,7 @@ void Imu_ctor(void)
     QTimeEvt_ctorX(&me->imu.te, &me->super, IMU_REST_SIG, 0U);
     QTimeEvt_ctorX(&me->mag.te, &me->super, MAG_REST_SIG, 0U);
 
+    atomic_store(&s_chain_set, false);
     me->wait_stale = 0U;
     me->wait_live  = false;
     me->imu_up     = false;

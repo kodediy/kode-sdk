@@ -659,3 +659,18 @@ kode_status_t kdrv_qmi8658_fifo_disarm(void)
     }
     return KODE_OK;
 }
+
+kode_status_t kdrv_qmi8658_fifo_rearm(void)
+{
+    if ( !s_up )
+    {
+        return KODE_DENIED;
+    }
+    if ( (khal_i2c_write_reg(s_dev, QMI_REG_FIFO_CTRL, QMI_FIFO_BYPASS) != KODE_OK)
+        || (khal_i2c_write_reg(s_dev, QMI_REG_CTRL1, QMI_CTRL1_SETUP) != KODE_OK) )
+    {
+        KLOG_E(TAG, "the part would not take its FIFO registers back");
+        return KODE_IO_ERROR;
+    }
+    return KODE_OK;
+}

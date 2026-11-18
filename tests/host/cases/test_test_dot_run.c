@@ -17,6 +17,7 @@
 #include "khal_nvs.h"
 #include "kqp.h"
 #include "test_dot_support.h"
+#include "test_dot_priv.h"
 
 #if !CONFIG_KODE_TEST_DOT
 #error "test_test_dot_run.c needs CONFIG_KODE_TEST_DOT: main/CMakeLists.txt spells it out"
@@ -25,7 +26,7 @@
 #define TD_ROWS_TEXT   200U  /**< Room for the names of the rows asked at once.                  */
 #define TD_STEP_MS     50U   /**< QP time a drive round gives the AO's rests when no job waits.   */
 #define TD_ROUNDS      400U  /**< Most drive rounds: well past the camera part's every step.      */
-#define TD_ROWS_AFTER  11U   /**< The rows a run asks for after the camera part.                  */
+#define TD_ROWS_AFTER  4U    /**< The rows a run asks for after the camera part.                  */
 #define TD_BTN_STEPS   6U    /**< Steps of the guided button test.                               */
 #define TD_TP_STEPS    2U    /**< Targets of the guided touch test.                              */
 #define TD_PRESS_MS    90U   /**< How long a press in these cases lasts.                         */
@@ -66,7 +67,10 @@ static void verdict(const char *name, bool ok)
     td_dispatch(&v.super);
 }
 
-/** @brief Start a run and take it through the two rows before the camera. */
+/** @brief The rows a run asks for before the camera part, in order. */
+static const char *const ROWS_BEFORE[] = { "sd", "imu", "audio", "haptic_pat", "mag", "clocks", "ir", "nfc", "rfid" };
+
+/** @brief Start a run and take it through the rows before the camera. */
 static void run_to_camera(void)
 {
     char rows[TD_ROWS_TEXT];
@@ -74,12 +78,12 @@ static void run_to_camera(void)
     td_up();
     td_verb_plain((uint8_t)TEST_DOT_VERB_RUN);
     td_wake_ok();
-    TEST_ASSERT_EQUAL_UINT(1U, td_rows_asked(rows, sizeof(rows)));
-    TEST_ASSERT_EQUAL_STRING("sd", rows);
-    td_row_answer(AUTOTEST_ROW_PASS);
-    TEST_ASSERT_EQUAL_UINT(1U, td_rows_asked(rows, sizeof(rows)));
-    TEST_ASSERT_EQUAL_STRING("imu", rows);
-    td_row_answer(AUTOTEST_ROW_PASS);
+    for ( unsigned i = 0U; (sizeof(ROWS_BEFORE) / sizeof(ROWS_BEFORE[0])) > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_UINT(1U, td_rows_asked(rows, sizeof(rows)));
+        TEST_ASSERT_EQUAL_STRING(ROWS_BEFORE[i], rows);
+        td_row_answer(AUTOTEST_ROW_PASS);
+    }
 }
 
 /** @brief Answer every row after the camera, then both operator tests: the run is over. */
@@ -172,13 +176,91 @@ TEST_CASE("test_rows_in_order_one_at_a_time", "[test_dot_run]")
     TEST_ASSERT_TRUE(td_said("rec timing=camera"));
     TEST_ASSERT_TRUE_MESSAGE(td_said_at("screen 0x05") > td_said_at(">ok"), "the buttons after the line");
     TEST_ASSERT_EQUAL_UINT(1U, td_rows_asked(rows, sizeof(rows)));
-    TEST_ASSERT_EQUAL_STRING("audio", rows);
+    TEST_ASSERT_EQUAL_STRING("pmic", rows);
 
     /* One at a time: the next only once this one ended. */
     td_row_answer(AUTOTEST_ROW_FAIL);
     TEST_ASSERT_EQUAL_UINT(1U, td_rows_asked(rows, sizeof(rows)));
-    TEST_ASSERT_EQUAL_STRING("haptic", rows);
+    TEST_ASSERT_EQUAL_STRING("gauge", rows);
     TEST_ASSERT_EQUAL_UINT(0U, td_rows_asked(rows, sizeof(rows)));
+    td_end();
+    td_down();
+}
+
+/** @brief Ask for the records the closed line kept, and wait until they are all out. */
+static void poll_records(void)
+{
+    td_verb_plain((uint8_t)TEST_DOT_VERB_POLL);
+    TEST_ASSERT_TRUE(drive_until("rec poll state="));
+}
+
+TEST_CASE("test_welcome_then_storage_install_after_the_camera_and_each_is_reported", "[test_dot_run]")
+{
+    QEvt done = QEVT_INITIALIZER(APP_FLASH_DONE_SIG);
+    QEvt fail = QEVT_INITIALIZER(APP_FLASH_FAIL_SIG);
+
+    test_dot_welcome_arm("welcome.kfw");
+    test_dot_storage_arm("storage.bin");
+    run_to_camera();
+    TEST_ASSERT_TRUE(drive_until(">ok"));
+    poll_records();
+    TEST_ASSERT_TRUE_MESSAGE(td_said("rec welcome=started name=welcome.kfw"),
+                             "the welcome app is written once the camera is done");
+    TEST_ASSERT_FALSE_MESSAGE(td_said("rec storage="), "the storage image waits for the welcome app");
+
+    td_clear();
+    td_dispatch(&done);
+    poll_records();
+    TEST_ASSERT_TRUE(td_said("rec welcome=installed"));
+    TEST_ASSERT_TRUE_MESSAGE(td_said("rec storage=started name=storage.bin"),
+                             "the storage image goes when the welcome app is in");
+
+    td_clear();
+    td_dispatch(&fail);
+    poll_records();
+    TEST_ASSERT_TRUE(td_said("rec storage=failed"));
+    td_end();
+    td_down();
+}
+
+TEST_CASE("test_storage_alone_goes_at_the_camera_end_and_a_failed_welcome_does_not_hold_it_back",
+          "[test_dot_run]")
+{
+    QEvt fail = QEVT_INITIALIZER(APP_FLASH_FAIL_SIG);
+
+    test_dot_storage_arm("storage.bin");
+    run_to_camera();
+    TEST_ASSERT_TRUE(drive_until(">ok"));
+    poll_records();
+    TEST_ASSERT_TRUE(td_said("rec storage=started name=storage.bin"));
+    TEST_ASSERT_FALSE(td_said("rec welcome="));
+    td_end();
+    td_down();
+
+    test_dot_welcome_arm("welcome.kfw");
+    test_dot_storage_arm("storage.bin");
+    run_to_camera();
+    TEST_ASSERT_TRUE(drive_until(">ok"));
+    poll_records();
+    td_clear();
+    td_dispatch(&fail);
+    poll_records();
+    TEST_ASSERT_TRUE(td_said("rec welcome=failed"));
+    TEST_ASSERT_TRUE_MESSAGE(td_said("rec storage=started"),
+                             "the storage image goes whether the welcome app installed or not");
+    td_end();
+    td_down();
+}
+
+TEST_CASE("test_nothing_armed_installs_nothing", "[test_dot_run]")
+{
+    test_dot_welcome_arm("");
+    test_dot_storage_arm("");
+    run_to_camera();
+    TEST_ASSERT_TRUE(drive_until(">ok"));
+    poll_records();
+    TEST_ASSERT_FALSE(td_said("rec welcome="));
+    TEST_ASSERT_FALSE(td_said("rec storage="));
     td_end();
     td_down();
 }
@@ -190,21 +272,21 @@ TEST_CASE("test_line_closes_at_the_camera_end_and_poll_drains_the_rest", "[test_
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, td_said_n(">ok"), "the run's line answered once");
 
     td_clear();
-    td_row_answer(AUTOTEST_ROW_PASS);   /* audio */
+    td_row_answer(AUTOTEST_ROW_PASS);   /* pmic */
     td_take();
-    TEST_ASSERT_FALSE_MESSAGE(td_said("test=audio"), "the line is closed: nothing goes out unasked");
+    TEST_ASSERT_FALSE_MESSAGE(td_said("test=pmic"), "the line is closed: nothing goes out unasked");
 
     td_verb_plain((uint8_t)TEST_DOT_VERB_POLL);
     td_take();
-    TEST_ASSERT_TRUE(td_said("rec test=audio result=pass"));
+    TEST_ASSERT_TRUE(td_said("rec test=pmic result=pass"));
     TEST_ASSERT_TRUE(td_said("rec poll state=running"));
-    TEST_ASSERT_TRUE(td_said_at("rec test=audio") < td_said_at("rec poll state="));
+    TEST_ASSERT_TRUE(td_said_at("rec test=pmic") < td_said_at("rec poll state="));
     TEST_ASSERT_EQUAL_UINT(1U, td_said_n(">ok"));
 
     td_clear();
     td_verb_plain((uint8_t)TEST_DOT_VERB_POLL);
     td_take();
-    TEST_ASSERT_FALSE_MESSAGE(td_said("test=audio"), "a record is drained once");
+    TEST_ASSERT_FALSE_MESSAGE(td_said("test=pmic"), "a record is drained once");
     TEST_ASSERT_TRUE(td_said("rec poll state=running"));
     td_end();
     td_down();

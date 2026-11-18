@@ -6720,6 +6720,10 @@ typedef struct {
                                    *   flags say which half stopped it:
                                    *   HAPTIC_TF_MUTE, HAPTIC_TF_SHORT or
                                    *   HAPTIC_TF_LOUD.                      */
+#define HAPTIC_TEST_CYCLE     4U  /**< the pattern row, one cycle: step is the
+                                   *   cycle, on_x10 its "on" window, floor_x10
+                                   *   the louder neighbouring "off" window,
+                                   *   ratio_x10; PASS or none.             */
 
 /* Bits of HapticTestEvt.flags. */
 #define HAPTIC_TF_PASS    0x01U  /**< This record's own verdict.            */

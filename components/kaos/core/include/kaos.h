@@ -550,6 +550,21 @@ void imu_capture_request(QActive *who);
 void imu_drain_request(QActive *who, uint16_t hz);
 
 /**
+ * @brief Say how the next drain is taken, before asking for it.
+ *
+ * A window drained with @p more set leaves the part ready for the next
+ * capture with no wait for the gyroscope: the gyroscope stays off and the
+ * FIFO is re-armed at once. The chain closes by itself when the last window
+ * is drained with @p more clear, or when no capture follows within a few
+ * hundred milliseconds. A chain's drain also reads faster than a lone
+ * window's. Valid for the one drain that follows.
+ *
+ * @param more True when another window will be asked for right after.
+ * @param skip Samples at the head of the window left out of the measure.
+ */
+void imu_chain_window(bool more, uint16_t skip);
+
+/**
  * @brief Ask AO_Imu to self-test the IMU - `test component=imu`.
  *
  * Verdict: a published TEST_RESULT_SIG "imu". Checks the part's identity, each
@@ -4306,6 +4321,25 @@ void appmgr_image_request(uint8_t src_kind, const char *src,
  */
 bool appmgr_image_ask(uint8_t src_kind, const char *src, uint8_t dst_kind,
                       bool launch, QActive *who);
+
+/**
+ * @brief Hold or release a write off a medium between two chunks.
+ *
+ * Set by AO_TestDot while a station verb times something a flash write would
+ * slow down (the pads, the radio); the write goes on when it is released.
+ *
+ * @param on true to hold, false to release.
+ */
+void appmgr_hold(bool on);
+
+/**
+ * @brief Write off a medium without the GUI's gap between chunks.
+ *
+ * Set by AO_TestDot for the installs it starts, when nobody uses the glass.
+ *
+ * @param on true for no gap, false for the usual one.
+ */
+void appmgr_fast(bool on);
 
 /**
  * @brief appmgr_image_ask() for a console command: the install's record names

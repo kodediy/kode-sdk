@@ -18,6 +18,7 @@
 #include "console_verbs.h"
 #include "kaos_wire.h"
 #include "kverbs.h"
+#include "test_dot_priv.h"
 
 /** @brief Characters of one `d=` line's base64, its terminator included. */
 #define TD_V_B64_CHARS   ((((KODE_TEST_DOT_BLOB_LINE + 2U) / 3U) * 4U) + 1U)
@@ -469,6 +470,24 @@ static void h_end(const kverb_t *c, const karg_val_t *v)
     td_plain(c, (uint8_t)TEST_DOT_VERB_END);
 }
 
+/** @brief test_dot_welcome name=: the welcome app on the card, written during the next run. */
+static void h_welcome(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c;
+    test_dot_welcome_arm(v[0].s);
+    console_reply(">|welcome armed=%s", v[0].s);
+    console_reply(">ok");
+}
+
+/** @brief test_dot_storage name=: the storage image on the card, written after the welcome app. */
+static void h_storage(const kverb_t *c, const karg_val_t *v)
+{
+    (void)c;
+    test_dot_storage_arm(v[0].s);
+    console_reply(">|storage armed=%s", v[0].s);
+    console_reply(">ok");
+}
+
 /** @brief test_dot_info: where AO_TestDot is. */
 static void h_info(const kverb_t *c, const karg_val_t *v)
 {
@@ -674,6 +693,12 @@ static const karg_spec_t A_RADIO[] = {
     { .key = "ble",      .required = false, .type = KARG_TEXT },
     { .key = "discover", .required = false, .type = KARG_BOOL },
 };
+static const karg_spec_t A_WELCOME[] = {
+    { .key = "name", .required = true, .type = KARG_STRING },
+};
+static const karg_spec_t A_STORAGE[] = {
+    { .key = "name", .required = true, .type = KARG_STRING },
+};
 static const karg_spec_t A_BOOST[] = {
     { .key = "state", .required = true, .type = KARG_BOOL },
 };
@@ -702,6 +727,8 @@ static const kverb_t TD_VERBS[] = {
     { "test_dot_lock",   A_LOCK,   KVERB_KEYS(A_LOCK),   h_lock   },
     { "test_dot_end",    NULL,     0U,                   h_end    },
     { "test_dot_info",   NULL,     0U,                   h_info   },
+    { "test_dot_welcome", A_WELCOME, KVERB_KEYS(A_WELCOME), h_welcome },
+    { "test_dot_storage", A_STORAGE, KVERB_KEYS(A_STORAGE), h_storage },
     { "test_dot_camera", A_CAMERA, KVERB_KEYS(A_CAMERA), h_camera },
 };
 

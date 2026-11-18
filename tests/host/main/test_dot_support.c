@@ -242,6 +242,7 @@ static void neighbours_empty(void)
     mailbox_empty(AO_Buttons);
     mailbox_empty(AO_Touch);
     mailbox_empty(AO_Boot);
+    mailbox_empty(AO_AppMgr);
     qf_support_margin_queue(AO_Log);
     mailbox_empty(AO_Log);
     /* Started by a file before this one, AO_LedMgr hears every colour the

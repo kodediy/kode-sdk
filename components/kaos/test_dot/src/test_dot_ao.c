@@ -25,6 +25,7 @@
 #include "kverbs.h"
 
 #include "test_dot_priv.h"
+#include "kdrv_kfw.h"
 
 _Static_assert(KODE_TEST_DOT_LINE_MS > KODE_TEST_DOT_RESET_MS,
                "the console's line outlasts the SHIP reset's bound, so the reset's own answer reaches it");
@@ -290,6 +291,8 @@ typedef struct {
     uint8_t       ring_head;          /**< The oldest.                                     */
     uint8_t       ring_n;             /**< How many.                                       */
     uint32_t      ring_dropped;       /**< Pushed out by newer ones.                       */
+    bool          welcome_on;         /**< The welcome app's write is under way.            */
+    bool          storage_on;         /**< The storage partition's write is under way.      */
 } TestDot;
 
 static TestDot l_td;
@@ -308,16 +311,42 @@ static void row_next(TestDot *me);
 
 /* ---- The rows of a run ------------------------------------------------------- */
 
-/** @brief The rows before the camera: the SD first, then the motion while the Kode is still. */
-static const char *const ROWS_FIRST[] = { "sd", "imu" };
-/** @brief The rows after it, beside the operator: sound and buzz only once the photos are taken. */
-static const char *const ROWS_AFTER[] = { "audio", "haptic", "mag", "pmic", "gauge", "ioexp", "clocks",
-                                          "ir", "nfc", "rfid", "mem" };
+/** @brief The rows before the camera: the SD first, then the motion while the Kode is still,
+ *         then every row that keeps time (sound, buzz, crystals, IR, the readers), so the
+ *         welcome app's write can run beside the operator. */
+static const char *const ROWS_FIRST[] = { "sd", "imu", "audio", "haptic_pat", "mag", "clocks", "ir", "nfc", "rfid" };
+/** @brief The rows after it, beside the operator: register reads only, which a flash write does not upset. */
+static const char *const ROWS_AFTER[] = { "pmic", "gauge", "ioexp", "mem" };
+
+/** @brief The welcome app's file on the card, armed by test_dot_welcome; empty when not armed. */
+static char s_welcome[KODE_APP_FILE_MAX];
+
+void test_dot_welcome_arm(const char *name)
+{
+    s_welcome[0] = '\0';
+    if ( NULL != name )
+    {
+        (void)snprintf(s_welcome, sizeof(s_welcome), "%s", name);
+    }
+}
+
+/** @brief The storage image's file on the card, armed by test_dot_storage; empty when not armed. */
+static char s_storage[KODE_APP_FILE_MAX];
+
+void test_dot_storage_arm(const char *name)
+{
+    s_storage[0] = '\0';
+    if ( NULL != name )
+    {
+        (void)snprintf(s_storage, sizeof(s_storage), "%s", name);
+    }
+}
+
 /** @brief Every row in the timing record's order: @c row_ms follows it. */
-static const char *const ROWS_ALL[TD_ROWS_TOTAL] = { "sd", "imu", "audio", "haptic", "mag", "pmic", "gauge",
+static const char *const ROWS_ALL[TD_ROWS_TOTAL] = { "sd", "imu", "audio", "haptic_pat", "mag", "pmic", "gauge",
                                                      "ioexp", "clocks", "ir", "nfc", "rfid", "mem" };
 /** @brief The auto screen's cells after the first, in the order they show. */
-static const char *const GRID_ROWS[] = { "pmic", "gauge", "ioexp", "clocks", "imu", "mag", "haptic",
+static const char *const GRID_ROWS[] = { "pmic", "gauge", "ioexp", "clocks", "imu", "mag", "haptic_pat",
                                          "audio", "sd", "nfc", "rfid", "ir" };
 /** @brief The row states' words, by AUTOTEST_ROW_*. */
 static const char *const ROW_WORD[AUTOTEST_ROW_STATES] = { "running", "pass", "fail", "timeout", "skipped" };
@@ -671,6 +700,8 @@ static void ans_to(TestDot *me, QActive *who, uint8_t seq, uint8_t code, const c
 {
     td_out_t * const o = out_slot(me, (uint8_t)OUT_ANS, who, seq);
 
+    appmgr_hold(false);
+
     if ( NULL != o )
     {
         o->code = code;
@@ -911,6 +942,7 @@ static bool job_submit(TestDot *me, uint8_t kind, uint8_t arg)
 static const enum_t WAKE_SUBS[] = {
     (enum_t)EXP_POWER_SIG,    (enum_t)DISPLAY_STATE_SIG, (enum_t)AUTOTEST_BEGIN_SIG, (enum_t)AUTOTEST_ROW_SIG,
     (enum_t)AUTOTEST_END_SIG, (enum_t)BTN_TEST_SIG,      (enum_t)TOUCH_TEST_SIG,     (enum_t)TEST_RESULT_SIG,
+    (enum_t)APP_FLASH_DONE_SIG, (enum_t)APP_FLASH_FAIL_SIG,
 };
 
 /** @brief Listen to the owners' answers, or stop. */
@@ -1055,6 +1087,25 @@ static void cam_submit(TestDot *me)
     }
 }
 
+/** @brief Write the storage image if one is armed: the card's file into the storage partition. */
+static void storage_start(TestDot *me)
+{
+    if ( '\0' != s_storage[0] )
+    {
+        appmgr_fast(true);
+        const char *word = "refused";
+        bool const asked = appmgr_image_ask((uint8_t)KFW_SRC_SD, s_storage,
+                                            (uint8_t)KODE_FLASH_DST_STORAGE, false, &me->super);
+        me->storage_on = asked;
+        if ( asked )
+        {
+            word = "started";
+        }
+        run_rec(me, "storage=%s name=%s", word, s_storage);
+        s_storage[0] = '\0';
+    }
+}
+
 /** @brief The camera part's timing record: the run's or the verb's, the same words. */
 #define TD_CAM_TIMING "timing=camera photos_ms=%lu analysis_ms=%lu led_ms=%lu total_ms=%lu"
 
@@ -1079,6 +1130,28 @@ static void cam_finish(TestDot *me)
         me->cam_end_ms = khal_time_ms() - me->run_t0;
         ans_to(me, me->run_who, me->run_seq, 0U, NULL);
         me->line_open = false;
+        if ( '\0' != s_welcome[0] )
+        {
+            /* The rows a flash write starves ran before the camera, and the
+             * camera is done: the welcome app is written beside the operator. */
+            appmgr_fast(true);
+            const char *word = "refused";
+            bool const asked = appmgr_image_ask((uint8_t)KFW_SRC_SD, s_welcome,
+                                                (uint8_t)KFW_TARGET_APP, false, &me->super);
+            me->welcome_on = asked;
+            if ( asked )
+            {
+                word = "started";
+            }
+            run_rec(me, "welcome=%s name=%s", word, s_welcome);
+            s_welcome[0] = '\0';
+        }
+        if ( !me->welcome_on )
+        {
+            /* No welcome app to wait for: the storage image goes now. With one,
+             * it goes when the welcome app's write ends. */
+            storage_start(me);
+        }
         /* The operator, and beside it the rest of the rows. */
         me->op = (uint8_t)OP_BUTTONS;
         (void)memset(me->keys, TEST_DOT_ST_PENDING, sizeof(me->keys));
@@ -2410,6 +2483,12 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
 {
     me->cur_who = e->who;
     me->cur_seq = e->seq;
+    if ( ((uint8_t)TEST_DOT_VERB_BOOST == e->verb) || ((uint8_t)TEST_DOT_VERB_RELAYS == e->verb)
+        || ((uint8_t)TEST_DOT_VERB_ADC == e->verb) || ((uint8_t)TEST_DOT_VERB_LOOP == e->verb)
+        || ((uint8_t)TEST_DOT_VERB_RADIO == e->verb) )
+    {
+        appmgr_hold(true);
+    }
     if ( verb_needs_cam(e->verb) && (NULL == me->cam) )
     {
         me->cam = td_cam_alloc();
@@ -2884,6 +2963,43 @@ static QState TestDot_initial(TestDot * const me, void const * const par)
     return Q_TRAN(&TestDot_active);
 }
 
+/**
+ * @brief An install this AO asked for has ended: say which, and start the one that waits for it.
+ *
+ * The welcome app goes first and the storage image after it, whether the welcome app
+ * installed or not.
+ *
+ * @param me TestDot.
+ * @param ok true when it installed.
+ */
+static void inst_end(TestDot *me, bool ok)
+{
+    const char *word = "failed";
+    if ( ok )
+    {
+        word = "installed";
+    }
+    if ( me->welcome_on )
+    {
+        me->welcome_on = false;
+        run_rec(me, "welcome=%s", word);
+        storage_start(me);
+    }
+    else if ( me->storage_on )
+    {
+        me->storage_on = false;
+        run_rec(me, "storage=%s", word);
+    }
+    else
+    {
+        /* An install that was not this AO's: nothing to note. */
+    }
+    if ( !me->welcome_on && !me->storage_on )
+    {
+        appmgr_fast(false);
+    }
+}
+
 /** @brief The AO's one state: what it does now is in @c mode and @c act. */
 static QState TestDot_active(TestDot * const me, QEvt const * const e)
 {
@@ -2893,6 +3009,19 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
     {
         case TEST_DOT_REQ_SIG:
             on_req(me, Q_EVT_CAST(TestDotReqEvt));
+            break;
+        case APP_FLASH_DONE_SIG:
+            inst_end(me, true);
+            break;
+        case APP_FLASH_FAIL_SIG:
+            inst_end(me, false);
+            break;
+        case APP_REQ_RSP_SIG:
+            /* Busy is the one verdict that comes with no FLASH_FAIL after it. */
+            if ( (uint8_t)APP_REQ_BUSY == Q_EVT_CAST(AppReqRspEvt)->verdict )
+            {
+                inst_end(me, false);
+            }
             break;
         case TEST_DOT_JOB_SIG:
             on_job(me, Q_EVT_CAST(KqpWorkerDoneEvt));

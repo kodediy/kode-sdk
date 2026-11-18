@@ -385,6 +385,17 @@ TEST_CASE("run is refused on every destination but an app, whichever way it "
     TEST_ASSERT_NULL(take(AO_AppMgr, FLASH_REQ_SIG));
 }
 
+TEST_CASE("the storage partition takes a file off a medium, never a stream or the mailbox",
+          "[console_install]")
+{
+    assert_refused("install src=\"terminal\" dst=storage size=4096 crc32=7",
+                   ">err code=3 msg=dst");
+    assert_refused("install src=\"pending\" dst=storage", ">err code=3 msg=dst");
+    assert_refused("install src=\"sd:storage.bin\" dst=storage run=on",
+                   ">err code=3 msg=run");
+    TEST_ASSERT_NULL(take(AO_AppMgr, FLASH_REQ_SIG));
+}
+
 TEST_CASE("the mailbox into itself is refused", "[console_install]")
 {
     assert_refused("install src=\"pending\" dst=pending", ">err code=3 msg=dst");
@@ -448,6 +459,21 @@ TEST_CASE("install off a medium waits for AO_AppMgr's verdict and hands it the "
     TEST_ASSERT_NOT_NULL(req);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KFW_SRC_HTTP, req->src_kind);
     TEST_ASSERT_TRUE(req->launch);
+    QF_gc(&req->super);
+    verdict(APP_REQ_TAKEN);
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+TEST_CASE("an install of a file into the storage partition is handed to AO_AppMgr as it is",
+          "[console_install]")
+{
+    const FlashReqEvt *req = install_asked("install src=\"sd:storage.bin\" dst=storage");
+
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KFW_SRC_SD, req->src_kind);
+    TEST_ASSERT_EQUAL_STRING("storage.bin", req->src);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_FLASH_DST_STORAGE, req->dst_kind);
+    TEST_ASSERT_FALSE(req->launch);
     QF_gc(&req->super);
     verdict(APP_REQ_TAKEN);
     TEST_ASSERT_TRUE(replied(">ok"));

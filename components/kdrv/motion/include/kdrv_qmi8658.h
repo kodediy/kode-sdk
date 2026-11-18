@@ -219,6 +219,18 @@ kode_status_t kdrv_qmi8658_fifo_read(int16_t *xyz, size_t n);
  */
 kode_status_t kdrv_qmi8658_fifo_disarm(void);
 
+/**
+ * @brief Put the FIFO's mode and the interface back for the next window,
+ *        leaving the sensors as they are.
+ *
+ * What a window chain does between two windows: FIFO bypass and the
+ * interface's auto-increment on, with the gyroscope still off. The next
+ * kdrv_qmi8658_fifo_arm() starts the next window.
+ *
+ * @return KODE_OK, KODE_DENIED before create, KODE_IO_ERROR for the bus.
+ */
+kode_status_t kdrv_qmi8658_fifo_rearm(void);
+
 #ifdef __cplusplus
 }
 #endif

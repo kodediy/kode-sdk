@@ -79,6 +79,13 @@ static void expect_w8(uint8_t reg, uint8_t val)
     khal_i2c_write_reg_IgnoreArg_dev();
 }
 
+/** @brief Expect a write the bus refuses. */
+static void expect_w8_fail(uint8_t reg, uint8_t val)
+{
+    khal_i2c_write_reg_ExpectAndReturn(NULL, reg, val, KODE_IO_ERROR);
+    khal_i2c_write_reg_IgnoreArg_dev();
+}
+
 /** @brief Expect a write that the driver reads back. */
 static void expect_w8_checked(uint8_t reg, uint8_t val)
 {
@@ -607,6 +614,27 @@ TEST_CASE("qmi8658: disarming returns the FIFO to bypass and both sensors on",
     TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_fifo_disarm());
 
     disarm_window();
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("qmi8658: re-arming between two windows puts back the FIFO mode and the interface only",
+          "[kdrv_qmi8658]")
+{
+    Mockkhal_i2c_Init();
+    test_qmi8658_bring_up();
+
+    /* FIFO bypass, then the interface with auto-increment on. CTRL7 is not
+     * written: the gyroscope stays off between the windows of a chain. */
+    expect_w8(REG_FIFO_CTRL, 0x00U);
+    expect_w8(REG_CTRL1, 0x58U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_fifo_rearm());
+
+    /* A part that will not take the second register is an I/O error. */
+    expect_w8(REG_FIFO_CTRL, 0x00U);
+    expect_w8_fail(REG_CTRL1, 0x58U);
+    TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_fifo_rearm());
+
     Mockkhal_i2c_Verify();
     Mockkhal_i2c_Destroy();
 }

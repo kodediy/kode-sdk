@@ -20,6 +20,7 @@
 #include "kqp.h"
 #include "qf_support.h"
 #include "test_dot_support.h"
+#include "test_dot_priv.h"
 
 #if !CONFIG_KODE_TEST_DOT
 #error "test_console_test_dot.c needs CONFIG_KODE_TEST_DOT: main/CMakeLists.txt spells it out"
@@ -261,6 +262,26 @@ TEST_CASE("test_relays_take_hex_or_decimal_and_refuse_the_forbidden_pair", "[con
     type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, "test_dot_relays state=0xFD");
     TEST_ASSERT_TRUE_MESSAGE(replied(">err code=5 msg=forbidden"), "R2 on through R1 off");
     TEST_ASSERT_EQUAL_UINT(0U, requests(NULL));
+    down();
+}
+
+TEST_CASE("test_welcome_and_storage_are_armed_by_the_file_name", "[console_test_dot]")
+{
+    up(false);
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, "test_dot_welcome name=\"welcome.kfw\"");
+    TEST_ASSERT_TRUE(replied(">|welcome armed=welcome.kfw"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    fake_klog_reset();
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, "test_dot_storage name=\"storage.bin\"");
+    TEST_ASSERT_TRUE(replied(">|storage armed=storage.bin"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    fake_klog_reset();
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, "test_dot_welcome");
+    TEST_ASSERT_TRUE_MESSAGE(replied(">err"), "a verb with no name arms nothing");
+    test_dot_welcome_arm("");
+    test_dot_storage_arm("");
     down();
 }
 

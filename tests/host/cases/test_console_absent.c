@@ -90,6 +90,7 @@ TEST_CASE("the file verbs answer absent with no AO_Storage", "[console_absent]")
     absent_answers(&kaos_storage_start, "ls");
     absent_answers(&kaos_storage_start, "cat path=\"/storage/x\"");
     absent_answers(&kaos_storage_start, "file_get name=\"x\"");
+    absent_answers(&kaos_storage_start, "file_sha name=\"x\"");
 }
 
 TEST_CASE("install answers absent with no owner for its destination",
