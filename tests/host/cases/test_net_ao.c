@@ -1435,6 +1435,25 @@ TEST_CASE("a C5 without a certificate says so once and the channel asks for noth
     net_done();
 }
 
+TEST_CASE("an address that comes during a station's pass starts the channel at "
+          "its end", "[net_ao][quiet]")
+{
+    IdReqEvt q;
+
+    chan_fresh();
+    TEST_ASSERT_TRUE(net_quiet_request(true));
+    (void)net_settle();
+    go_online();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)radio_take(&q, sizeof(q)), "the channel started during the pass");
+    TEST_ASSERT_EQUAL_UINT(0U, s_nreq);
+
+    TEST_ASSERT_TRUE(net_quiet_request(false));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(ID_REQ_SIG, (int)radio_take(&q, sizeof(q)), "the pass's end did not start it");
+    answer_end((uint8_t)KODE_ST_NOT_FOUND, 0U, 0U);
+    net_done();
+}
+
 TEST_CASE("the api refusing the certificate is terminal until the Wi-Fi cycles",
           "[net_ao]")
 {
@@ -8237,6 +8256,33 @@ TEST_CASE("kode_sys_net_lookup runs on the worker and answers the asking AO once
     a = (const NetHostRspEvt *)(const void *)sys_take(NET_LOOKUP_RSP_SIG);
     TEST_ASSERT_EQUAL_UINT_MESSAGE((uint32_t)KODE_ERROR, a->rc, "a name that does not resolve");
     TEST_ASSERT_EQUAL_HEX32(0U, a->stats.ip4);
+    worker_done();
+}
+
+/* During a station's pass an app's ask is answered refused at once and
+ * nothing reaches the worker; the pass's end opens the door again. */
+TEST_CASE("during a station's pass an app's ask is refused at once, and its end "
+          "opens the door again", "[net_ao][ask][quiet]")
+{
+    const NetHostRspEvt *a;
+
+    sys_fresh();
+    TEST_ASSERT_TRUE(net_quiet_request(true));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_net_lookup(ao_spy(), "example.com"));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_sys_calls, "the lookup reached the worker during the pass");
+    a = (const NetHostRspEvt *)(const void *)sys_take(NET_LOOKUP_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_DENIED, a->rc);
+
+    TEST_ASSERT_TRUE(net_quiet_request(false));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_net_lookup(ao_spy(), "example.com"));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_sys_calls, "the pass's end left the door shut");
+    deliver_held(KODE_OK);
+    a = (const NetHostRspEvt *)(const void *)sys_take(NET_LOOKUP_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
     worker_done();
 }
 

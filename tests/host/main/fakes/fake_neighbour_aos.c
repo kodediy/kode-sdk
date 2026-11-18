@@ -95,6 +95,9 @@ void fake_neighbours_reset(void)
      * transition asks it for the WiFi state from test_net_ao.c, which sorts
      * before the file that brings the radio up. */
     drain_static(AO_Radio);
+    /* AO_Net for the same reason: AO_TestDot tells it of a station's pass
+     * with a margin, from files that sort before test_net_ao.c. */
+    drain_static(AO_Net);
     /* AO_Ir for the same reason again: the console's `test component=ir` and
      * the walk under `test` post to it from test_console_power.c, which sorts
      * before test_ir_ao.c. */

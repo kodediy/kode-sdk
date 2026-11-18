@@ -1700,6 +1700,13 @@ enum KodeSignals {
                                  *   credentials (WIFI_FORGET_REQ_SIG
                                  *   forgets); nothing rejoins by itself
                                  *   until somebody asks.                    */
+    RADIO_QUIET_REQ_SIG,        /**< AO_Radio: a station's pass begins or
+                                 *   ends (RadioQuietEvt, a static event
+                                 *   each, radio_quiet_request()). While it
+                                 *   runs nothing joins a network by itself
+                                 *   and a network the board is on is left,
+                                 *   kept remembered; at its end the
+                                 *   `wifi_join` rule is back.               */
     WIFI_STATE_REQ_SIG,         /**< AO_Radio: publish WIFI_STATE_SIG now.
                                  *   Answerable in every state, link or no
                                  *   link: "not connected" is an answer.     */
@@ -1899,6 +1906,12 @@ enum KodeSignals {
                                  *   for the line it holds, or the post of
                                  *   the next line was refused and is tried
                                  *   again.                                  */
+    NET_QUIET_REQ_SIG,          /**< AO_Net (direct post, from
+                                 *   net_quiet_request()): a station's pass
+                                 *   begins or ends (NetQuietEvt, a static
+                                 *   event each). While it runs a request
+                                 *   that starts network work is refused and
+                                 *   the Kode channel does not start.        */
     NET_LEAVE_REQ_SIG,          /**< AO_Net (private, direct post, from
                                  *   net_leave_request()): leave the Kode
                                  *   channel cleanly and start no new session
@@ -2206,6 +2219,10 @@ enum KodeSignals {
     TEST_DOT_DRAIN_SIG,         /**< AO_TestDot private QTimeEvt, one-shot:
                                  *   post the records the console's queue
                                  *   refused.                                 */
+    TEST_DOT_QUIET_SIG,         /**< AO_TestDot private QTimeEvt, one-shot:
+                                 *   a station's pass with no verb for
+                                 *   KODE_TEST_DOT_QUIET_IDLE_MS, or a quiet
+                                 *   AO_Radio or AO_Net had no room for.      */
 
     MAX_SIG                   /**< First value free for a consumer's own
                                  *   private signals: kgui numbers its from
@@ -4865,6 +4882,18 @@ typedef struct {
     QEvt super;
     bool on;     /**< true: no power save; false: the default back.         */
 } WifiFastEvt;
+
+/** @brief What NET_QUIET_REQ_SIG carries: the pass, a static event each. */
+typedef struct {
+    QEvt super;
+    bool on;     /**< true: a station's pass begins; false: it is over.     */
+} NetQuietEvt;
+
+/** @brief What RADIO_QUIET_REQ_SIG carries: the pass, a static event each. */
+typedef struct {
+    QEvt super;
+    bool on;     /**< true: a station's pass begins; false: it is over.     */
+} RadioQuietEvt;
 
 /** @brief What EXP_POWER_REQ_SIG carries: the wish, a static event each. */
 typedef struct {

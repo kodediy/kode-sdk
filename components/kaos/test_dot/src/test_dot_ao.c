@@ -130,6 +130,13 @@ typedef enum {
     REST_OPERATOR  /**< The operator's screen settling.  */
 } td_rest_t;
 
+/** @brief What the quiet's timer is armed for. */
+typedef enum {
+    QUIET_NONE = 0, /**< Nothing.                                    */
+    QUIET_IDLE,     /**< The pass's idle bound.                      */
+    QUIET_RETRY     /**< AO_Radio or AO_Net had no room: ask again.  */
+} td_quiet_t;
+
 /** @brief What the drain timer waits for. */
 typedef enum {
     DRAIN_NONE = 0, /**< Nothing.                             */
@@ -195,6 +202,7 @@ typedef struct {
     QTimeEvt      rest;               /**< TEST_DOT_REST_SIG: what td_rest_t says.         */
     QTimeEvt      watch;              /**< TEST_DOT_WATCH_SIG: the run's watchdog.         */
     QTimeEvt      drain;              /**< TEST_DOT_DRAIN_SIG: what td_drain_t says.       */
+    QTimeEvt      quiet_te;           /**< TEST_DOT_QUIET_SIG: the pass's idle bound, or a quiet asked again. */
     uint8_t       tmo_for;            /**< td_tmo_t.                                       */
     uint8_t       tmo_stale;          /**< Ticks of the tmo timer to let pass, disarmed late. */
     uint8_t       rest_for;           /**< td_rest_t.                                      */
@@ -295,6 +303,10 @@ typedef struct {
     uint32_t      ring_dropped;       /**< Pushed out by newer ones.                       */
     uint8_t       place_lost;         /**< Looks in a row with no marks and the camera's settings lost. */
     bool          welcome_on;         /**< The welcome app's write is under way.            */
+    bool          quiet_want;         /**< A station's pass runs: the network keeps quiet.  */
+    bool          quiet_held;         /**< AO_Radio and AO_Net were told @c quiet_want.     */
+    uint8_t       quiet_for;          /**< td_quiet_t: what the quiet's timer is armed for. */
+    uint8_t       quiet_stale;        /**< Ticks of the quiet's timer to let pass, disarmed late. */
     bool          storage_on;         /**< The storage partition's write is under way.      */
 } TestDot;
 
@@ -969,6 +981,92 @@ static bool job_submit(TestDot *me, uint8_t kind, uint8_t arg)
         }
     }
     return ok;
+}
+
+/* ---- The station's quiet ------------------------------------------------------ */
+
+/*
+ * From the first station verb to `test_dot_end` AO_Radio joins no network by
+ * itself and leaves the one the board is on, and AO_Net starts no network work
+ * (radio_quiet_request(), net_quiet_request()): a join and its traffic take
+ * the C5's link, the CPU and the flash while the pass times the motor, the
+ * compass and the radio check. A pass whose station went away ends after
+ * KODE_TEST_DOT_QUIET_IDLE_MS with no verb and nothing woken.
+ */
+
+/** @brief Tell AO_Radio and AO_Net what the pass wants; one with no room is asked again by the timer. */
+static void quiet_sync(TestDot *me)
+{
+    if ( me->quiet_want != me->quiet_held )
+    {
+        bool const radio_told = radio_quiet_request(me->quiet_want);
+        bool const net_told   = net_quiet_request(me->quiet_want);
+
+        if ( radio_told && net_told )
+        {
+            me->quiet_held = me->quiet_want;
+        }
+    }
+}
+
+/** @brief The quiet's timer: soon while an owner was not told, the idle bound while the pass runs. */
+static void quiet_arm(TestDot *me)
+{
+    if ( me->quiet_want != me->quiet_held )
+    {
+        timer_arm(&me->quiet_te, &me->quiet_stale, &me->quiet_for, (uint8_t)QUIET_RETRY,
+                  KODE_TEST_DOT_QUIET_RETRY_MS);
+    }
+    else if ( me->quiet_want )
+    {
+        timer_arm(&me->quiet_te, &me->quiet_stale, &me->quiet_for, (uint8_t)QUIET_IDLE,
+                  KODE_TEST_DOT_QUIET_IDLE_MS);
+    }
+    else
+    {
+        timer_stop(&me->quiet_te, &me->quiet_stale, &me->quiet_for);
+    }
+}
+
+/** @brief A station verb: the pass runs, and its idle bound starts again. */
+static void quiet_begin(TestDot *me)
+{
+    if ( !me->quiet_want )
+    {
+        me->quiet_want = true;
+        KLOG_N(TAG, "a station's pass: no network work until test_dot_end");
+    }
+    quiet_sync(me);
+    quiet_arm(me);
+}
+
+/** @brief The pass is over: the network goes back to its rules. */
+static void quiet_end(TestDot *me)
+{
+    me->quiet_want = false;
+    quiet_sync(me);
+    quiet_arm(me);
+}
+
+/** @brief TEST_DOT_QUIET_SIG: the idle bound, or a quiet asked again. */
+static void on_quiet(TestDot *me)
+{
+    uint8_t const why = me->quiet_for;
+
+    if ( timer_stale(&me->quiet_stale) )
+    {
+        return;
+    }
+    me->quiet_for = (uint8_t)QUIET_NONE;
+    if ( ((uint8_t)QUIET_IDLE == why) && me->quiet_want && ((uint8_t)MODE_DORMANT == me->mode)
+        && ((uint8_t)ACT_NONE == me->act) )
+    {
+        KLOG_W(TAG, "no station verb for %u s and nothing woken: the pass is taken as over",
+               (unsigned)(KODE_TEST_DOT_QUIET_IDLE_MS / 1000U));
+        me->quiet_want = false;
+    }
+    quiet_sync(me);
+    quiet_arm(me);
 }
 
 /* ---- The wake ----------------------------------------------------------------- */
@@ -2402,6 +2500,7 @@ static void end_next(TestDot *me)
                 me->res      = (uint8_t)RES_NONE;
                 me->end_wait = (uint8_t)END_WAIT_NONE;
                 me->mode     = (uint8_t)MODE_DORMANT;
+                quiet_end(me);
                 KLOG_N(TAG, "end: everything given back");
                 if ( me->end_answered )
                 {
@@ -2720,6 +2819,7 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
                  * and the end gives the glass back whatever woke. With no
                  * test screen up the host takes it as nothing. */
                 screen_ask(me, TEST_DOT_SCR_END, NULL, 0U);
+                quiet_end(me);
                 ans(me, 0U, NULL);
             }
             else
@@ -2748,8 +2848,13 @@ static void on_req(TestDot *me, TestDotReqEvt const *e)
     bool const is_end = ((uint8_t)TEST_DOT_VERB_END == e->verb);
     bool const run_verb = ((uint8_t)TEST_DOT_VERB_RUN == e->verb) || ((uint8_t)TEST_DOT_VERB_PLACE == e->verb)
                           || ((uint8_t)TEST_DOT_VERB_CAMERA == e->verb);
+    bool const refused = me->locked || (me->locked_now && !is_end);
 
-    if ( me->locked || (me->locked_now && !is_end) )
+    if ( (!refused) && (!is_end) )
+    {
+        quiet_begin(me);
+    }
+    if ( refused )
     {
         ans_to(me, e->who, e->seq, TD_ERR_REJECT, "locked");
     }
@@ -3018,6 +3123,7 @@ void TestDot_ctor(void)
     QTimeEvt_ctorX(&me->rest, &me->super, TEST_DOT_REST_SIG, 0U);
     QTimeEvt_ctorX(&me->watch, &me->super, TEST_DOT_WATCH_SIG, 0U);
     QTimeEvt_ctorX(&me->drain, &me->super, TEST_DOT_DRAIN_SIG, 0U);
+    QTimeEvt_ctorX(&me->quiet_te, &me->super, TEST_DOT_QUIET_SIG, 0U);
     s_run_going = false;
 }
 
@@ -3163,6 +3269,9 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
         }
         case TEST_DOT_BACK_SIG:
             on_back(me);
+            break;
+        case TEST_DOT_QUIET_SIG:
+            on_quiet(me);
             break;
         case TEST_DOT_SCREEN_DONE_SIG:
             if ( me->scr_waiting && (Q_EVT_CAST(TestDotScreenDoneEvt)->kind == me->scr_wait)

@@ -2833,6 +2833,24 @@ bool c5_field_request(QActive *who, uint8_t op, uint16_t field, int32_t value);
 bool exp_power_request(bool on);
 
 /**
+ * @brief Tell AO_Radio a station's pass begins or ends.
+ *
+ * AO_TestDot asks it from the first station verb to `test_dot_end`. While the
+ * pass runs nothing joins a network by itself (the boot's round, the waits to
+ * get back on one, a `wifi_auto`) and a network the board is on is left once,
+ * at the worker's next free moment. The network stays remembered and no
+ * setting is written; a network asked for by name is joined as always. At the
+ * end the `wifi_join` rule is back: a board that would be looking for a
+ * network starts its round. The radio check (`test_dot_radio`) is not
+ * touched. No answer.
+ *
+ * @param on true when the pass begins, false when it ends.
+ * @return true when the request was posted; false when AO_Radio's queue is
+ *         within KQP_RADIO_POST_MARGIN of full, and then nothing was asked.
+ */
+bool radio_quiet_request(bool on);
+
+/**
  * @brief The event exp_power_request() posts, for a caller that posts it itself.
  * @param on true for the rail on, false for off.
  * @return A static event; never NULL.
@@ -3069,6 +3087,22 @@ void net_test_request(void);
  * dropped. Compiled under CONFIG_KODEOS_NET; guard the call the same way.
  */
 void net_leave_request(void);
+
+/**
+ * @brief Tell AO_Net a station's pass begins or ends.
+ *
+ * AO_TestDot asks it beside radio_quiet_request(). While the pass runs, with
+ * an address or without, a request that would start network work (an app's
+ * lookup, HTTP or UDP ask, a ping, a transfer, MQTT's start, a screenshot's
+ * upload) is answered refused, as the board's rest refuses it, and the Kode
+ * channel does not start; what runs already goes on. At the end the channel
+ * starts if it waited for it. No answer.
+ *
+ * @param on true when the pass begins, false when it ends.
+ * @return true when the request was posted; false when AO_Net's queue is
+ *         within KQP_NET_CMD_MARGIN of full, and then nothing was asked.
+ */
+bool net_quiet_request(bool on);
 
 /**
  * @brief Tell AO_Net when the scheduler's `mqtt` entry next falls due.

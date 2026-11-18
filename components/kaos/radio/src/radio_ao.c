@@ -553,7 +553,13 @@ typedef struct {
                                *   channel and the board allow.              */
     bool     wifi_left;       /**< The person stepped off the network: nothing
                                *   goes back until somebody asks.            */
+    bool     quiet_left;      /**< The station's pass has had its leave, or a
+                               *   network was asked for by name during it:
+                               *   nothing more is left until its end.       */
 #endif
+    bool     quiet;           /**< A station's pass runs (radio_quiet_request()):
+                               *   nothing joins by itself, and a network the
+                               *   board is on is left.                      */
     uint8_t  ask[RADIO_ASK_MAX]; /**< The asks of AO_Storage that are answered
                                *   and not yet heard, oldest first (radio_ask_t):
                                *   the answers come in the order the asks went. */
@@ -1842,6 +1848,21 @@ QEvt const *exp_power_evt(bool on)
 bool exp_power_request(bool on)
 {
     return radio_door_post(exp_power_evt(on), "a request for the header's 3.3 V");
+}
+
+bool radio_quiet_request(bool on)
+{
+    /* Static events, one per edge, as exp_power_evt(): the end of a pass
+     * can never be lost to an empty pool. */
+    static const RadioQuietEvt quiet_on  = { QEVT_INITIALIZER(RADIO_QUIET_REQ_SIG), true };
+    static const RadioQuietEvt quiet_off = { QEVT_INITIALIZER(RADIO_QUIET_REQ_SIG), false };
+    QEvt const                *evt       = &quiet_off.super;
+
+    if ( on )
+    {
+        evt = &quiet_on.super;
+    }
+    return radio_door_post(evt, "the station's quiet");
 }
 
 #if CONFIG_KODEOS_WIFI
@@ -3529,12 +3550,13 @@ static void wifi_publish_state(Radio * const me)
  * @brief Whether the board should be working on getting back on a network.
  * @param me The AO.
  * @return true with Wi-Fi on and off any network, automatic joins allowed, the
- *         person not having stepped off, and something remembered - or a
+ *         person not having stepped off, no station's pass running, and
+ *         something remembered - or a
  *         vault not heard from yet, which the round finds out about.
  */
 static bool wifi_retry_wanted(Radio const * const me)
 {
-    return me->wifi_want && me->join_auto && (!me->wifi_left)
+    return me->wifi_want && me->join_auto && (!me->wifi_left) && (!me->quiet)
            && (!(me->vlist_ok && (0U == me->vlist.count)))
            && (kdrv_wifi_state(NULL) != KDRV_WIFI_GOT_IP);
 }
@@ -8168,6 +8190,127 @@ static bool radio_exp_power(Radio * const me, QEvt const * const e)
     return handled;
 }
 
+/* ---- A station's pass -------------------------------------------------------
+ * From the first station verb to `test_dot_end` (radio_quiet_request(), from
+ * AO_TestDot) nothing joins a network by itself and a network the board is on
+ * is left: a join and the traffic behind it take the C5's link, the CPU and
+ * the flash while the station times the motor, the compass and the radio
+ * check. Nothing is forgotten and no setting is written; at the pass's end the
+ * `wifi_join` rule is back. A network asked for by name is joined as always.
+ */
+
+/**
+ * @brief Take a pass's beginning or end: the flag, and the waits.
+ * @param me The AO.
+ * @param on The pass begins.
+ */
+static void radio_quiet_mark(Radio * const me, bool on)
+{
+    if ( on == me->quiet )
+    {
+        return;
+    }
+    me->quiet = on;
+#if CONFIG_KODEOS_WIFI
+    me->quiet_left = false;
+    if ( on )
+    {
+        KLOG_N(TAG, "a station's pass begins: no network is joined by itself until it ends");
+        wifi_retry_stop(me);
+    }
+    else
+    {
+        KLOG_N(TAG, "the station's pass is over: networks are joined by the usual rules");
+    }
+#endif
+}
+
+#if CONFIG_KODEOS_WIFI
+/**
+ * @brief During a station's pass, leave the network the board is on, once.
+ *
+ * Not `wifi_leave`, which nothing undoes by itself: the network stays
+ * remembered and comes back at the pass's end.
+ *
+ * @param me The AO, its worker free.
+ * @return true when the leave is with the worker.
+ */
+static bool radio_quiet_leave(Radio * const me)
+{
+    kdrv_wifi_state_t const st = kdrv_wifi_state(NULL);
+
+    if ( (!me->quiet) || me->quiet_left
+        || ((KDRV_WIFI_GOT_IP != st) && (KDRV_WIFI_CONNECTING != st)) )
+    {
+        return false;
+    }
+    if ( !radio_submit(me, KDRV_RADIO_JOB_WIFI_LEAVE) )
+    {
+        return false;
+    }
+    me->quiet_left = true;
+    KLOG_N(TAG, "a station's pass: off the network until it ends; the network stays remembered");
+    return true;
+}
+
+/**
+ * @brief The pass is over: a board that would be looking for a network
+ *        starts its round now, from the first wait.
+ * @param me The AO, the link up.
+ */
+static void radio_quiet_resume(Radio * const me)
+{
+    if ( wifi_retry_wanted(me) )
+    {
+        me->retry_step = 0U;
+        wifi_auto_self();
+    }
+}
+#endif
+
+static void radio_settle(Radio * const me);
+
+/**
+ * @brief RADIO_QUIET_REQ_SIG in Radio_up and Radio_down.
+ *
+ * With the link up the beginning is paid at the worker's next free moment
+ * (radio_settle()) and the end asks for the round; with no link the flag is
+ * all, and the link's own bring-up reads it. Radio_autojoin and
+ * Radio_updating take it themselves.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return true when @p e was RADIO_QUIET_REQ_SIG.
+ */
+static bool radio_quiet(Radio * const me, QEvt const * const e)
+{
+    if ( (QSignal)RADIO_QUIET_REQ_SIG != e->sig )
+    {
+        return false;
+    }
+    bool const on = Q_EVT_CAST(RadioQuietEvt)->on;
+
+    radio_quiet_mark(me, on);
+#if CONFIG_KODEOS_WIFI
+    if ( (uint8_t)KRADIO_UP == me->link )
+    {
+        if ( !on )
+        {
+            radio_quiet_resume(me);
+        }
+        else if ( !me->busy )
+        {
+            radio_settle(me);
+        }
+        else
+        {
+            /* the job in flight settles, and the leave is a debt */
+        }
+    }
+#endif
+    return true;
+}
+
 /**
  * @brief Pay off a request that was made and could not be carried out.
  *
@@ -8231,6 +8374,13 @@ static void radio_settle(Radio * const me)
     {
         return;
     }
+#if CONFIG_KODEOS_WIFI
+    /* A station's pass on a network: off it, before the radio check. */
+    if ( radio_quiet_leave(me) )
+    {
+        return;
+    }
+#endif
     /* The radio check asked for in a hurry; it has its own budget. */
     if ( probe_owed_start(me) )
     {
@@ -9762,7 +9912,9 @@ void Radio_ctor(void)
     me->retry_on    = false;
     me->retry_owed  = false;
     me->wifi_left   = false;
+    me->quiet_left  = false;
 #endif
+    me->quiet       = false;
     /* Not known to be on: whoever ran before this boot may have left the
      * C5 driving the pin low, and a C5 still running keeps that level
      * across the P4's reset. */
@@ -11577,6 +11729,10 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
         }
         default: {
             if ( radio_exp_power(me, e) )
+            {
+                status = Q_HANDLED();
+            }
+            else if ( radio_quiet(me, e) )
             {
                 status = Q_HANDLED();
             }
@@ -13457,6 +13613,8 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 (void)snprintf(me->ssid, sizeof(me->ssid), "%s", j->ssid);
                 me->autojoin  = false;
                 me->wifi_left = false;
+                /* A network asked for by name is kept through a pass. */
+                me->quiet_left = me->quiet;
                 if ( by_vault )
                 {
                     /* A saved network: the C5 joins it from its vault, and
@@ -13559,6 +13717,20 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         }
 
         case WIFI_AUTO_REQ_SIG: {
+            if ( me->quiet )
+            {
+                /* A station's pass: the pass's end asks for the round again.
+                 * Settled as the empty vault's answer is, since this may be a
+                 * debt radio_settle() paid by posting it. */
+                KLOG_I(TAG, "a station's pass runs; the round waits for its end");
+                wifi_publish_state(me);
+                if ( !me->busy )
+                {
+                    radio_settle(me);
+                }
+                status = Q_HANDLED();
+                break;
+            }
             if ( me->busy )
             {
                 radio_say_busy("wifi_auto", RADIO_BUSY_OWED);
@@ -14037,6 +14209,10 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             {
                 status = Q_HANDLED();
             }
+            else if ( radio_quiet(me, e) )
+            {
+                status = Q_HANDLED();
+            }
             else if ( radio_amp(me, e) )
             {
                 status = Q_HANDLED();
@@ -14092,6 +14268,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
  * @return The QState the caller must return.
  */
 static QState auto_finish(Radio * const me);
+static QState auto_quiet(Radio * const me);
 
 /**
  * @brief The next candidate of the round: ready this side for the C5's join
@@ -14101,6 +14278,10 @@ static QState auto_finish(Radio * const me);
  */
 static QState auto_try(Radio * const me)
 {
+    if ( me->quiet )
+    {
+        return auto_quiet(me);
+    }
     if ( (uint8_t)WOWED_JOIN == me->wifi_owed )
     {
         return auto_finish(me);   /* somebody chose a network: it goes first */
@@ -14196,6 +14377,23 @@ static QState auto_abandon(Radio * const me)
 }
 
 /**
+ * @brief A station's pass began during the round: stop it here and finish.
+ *
+ * The cut of the sweep is withdrawn, so the radio check's own sweep runs
+ * whole; a join already with the C5 ends on its own, and radio_settle() leaves
+ * the network it lands on.
+ *
+ * @param me The AO (its busy flag already cleared by the caller).
+ * @return The QState the caller must return.
+ */
+static QState auto_quiet(Radio * const me)
+{
+    KLOG_N(TAG, "a station's pass began; the round stops here");
+    kdrv_wifi_scan_abort(false);
+    return auto_finish(me);
+}
+
+/**
  * @brief Getting onto a network we already know, without being asked twice.
  *
  * A child of Radio_up, like the update: it needs the link and owns the
@@ -14236,6 +14434,11 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                     if ( !me->wifi_want )
                     {
                         status = auto_abandon(me);
+                        break;
+                    }
+                    if ( me->quiet )
+                    {
+                        status = auto_quiet(me);
                         break;
                     }
                     if ( (uint8_t)WOWED_JOIN == me->wifi_owed )
@@ -14297,6 +14500,11 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                     if ( !me->wifi_want )
                     {
                         status = auto_abandon(me);
+                        break;
+                    }
+                    if ( me->quiet )
+                    {
+                        status = auto_quiet(me);
                         break;
                     }
                     kdrv_radio_probe_result_t heard;
@@ -14363,6 +14571,11 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                         status = auto_abandon(me);
                         break;
                     }
+                    if ( me->quiet )
+                    {
+                        status = auto_quiet(me);
+                        break;
+                    }
                     if ( ((uint8_t)WOWED_JOIN != me->wifi_owed)
                         && ((uint8_t)KODE_OK == job->status)
                         && radio_vault_join(me, me->ssid) )
@@ -14412,6 +14625,20 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                     break;
                 }
             }
+            break;
+        }
+        case RADIO_QUIET_REQ_SIG: {
+            bool const on = Q_EVT_CAST(RadioQuietEvt)->on;
+
+            radio_quiet_mark(me, on);
+            if ( on && me->winflight && (NULL != me->jobs)
+                && (KDRV_RADIO_JOB_WIFI_SCAN == me->jobs->wreq.type) )
+            {
+                /* The sweep ends after its step on the air, and the round
+                 * with it. */
+                kdrv_wifi_scan_abort(true);
+            }
+            status = Q_HANDLED();
             break;
         }
         case WIFI_SCAN_REQ_SIG: {
@@ -14742,6 +14969,12 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
          * unmount, so no stop is submitted: the asker is told BUSY, the
          * stream's scan stays on until the C5 reboots, and the knocks it
          * sends are dropped one at a time (RADIO_HEARD_KNOCK_SIG below). */
+        case RADIO_QUIET_REQ_SIG: {
+            /* The update owns the C5 and ends in a restart: the flag is all. */
+            radio_quiet_mark(me, Q_EVT_CAST(RadioQuietEvt)->on);
+            status = Q_HANDLED();
+            break;
+        }
         case Q_ENTRY_SIG: {
             (void)radio_frames_end(&me->frames, KWIFI_FRAMES_BUSY);
             (void)radio_heard_stream_end(me, KBLE_HEARD_BUSY);

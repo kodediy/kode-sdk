@@ -256,6 +256,8 @@
 #define KODE_TEST_DOT_CHECK_MS      (KODE_TEST_DOT_RAIL_MS + KODE_TEST_DOT_PROBE_MS + KODE_TEST_DOT_CHECK_MARGIN_MS)
 #define KODE_TEST_DOT_POLL_RING     64U     /**< Records a run keeps for `test_dot_poll` after the line closed; the oldest goes. */
 #define KODE_TEST_DOT_DRAIN_MS      20U     /**< The wait before a record the console's queue refused is posted again. */
+#define KODE_TEST_DOT_QUIET_IDLE_MS 120000U /**< A station's pass with no verb this long, and nothing woken, is taken as over: the network goes back to its rules. */
+#define KODE_TEST_DOT_QUIET_RETRY_MS 100U   /**< The wait before the quiet AO_Radio or AO_Net had no room for is asked again. */
 #define KODE_TEST_DOT_RUN_MS        240000U /**< A run's watchdog: the operator part may take minutes; past it the run ends. */
 #define KODE_TEST_DOT_OP_SETTLE_MS  150U    /**< The operator's screen is on the glass before the first prompt. */
 #define KODE_TEST_DOT_SCREEN_MS     2000U   /**< The longest a screen or a pattern waits for its host; past it the step goes on. */

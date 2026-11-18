@@ -9528,6 +9528,221 @@ TEST_CASE("Wi-Fi off, or nothing remembered, or wifi_join off: nothing is tried"
     wifi_owed_cleanup();
 }
 
+/* ---- A station's pass ------------------------------------------------------- */
+
+/* A Kode with Wi-Fi on and a network remembered is on it when a station's
+ * pass begins. The pass leaves the network without forgetting it or writing a
+ * setting, nothing joins by itself while it runs, and its end looks for the
+ * network again. */
+/* Opening the station's port resets the Kode, and the first station verb
+ * comes while the link is still connecting: the pass is kept from there, and
+ * the boot's round waits for its end. */
+TEST_CASE("a station's pass that begins during the boot's connect holds the boot's "
+          "round until it ends", "[radio_ao][quiet]")
+{
+    radio_fresh();
+    exp_ask(false);
+    dispatch(BLE_START_REQ_SIG);
+    dispatch(WIFI_START_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    TEST_ASSERT_TRUE(radio_quiet_request(true));
+    pump();
+    boot_step(KDRV_RADIO_JOB_CONNECT, KODE_OK, "the connect was not the job in flight");
+    boot_step(KDRV_RADIO_JOB_BLE_START, KODE_OK, "Bluetooth does not start right after the connect");
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the boot's round ran during the pass");
+    TEST_ASSERT_TRUE(logged("the round waits for its end"));
+
+    TEST_ASSERT_TRUE(radio_quiet_request(false));
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(), "the pass's end did not start the round");
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    dispatch(BLE_STOP_REQ_SIG);
+    dispatch(WIFI_STOP_REQ_SIG);
+    exp_case_end();
+}
+
+/** @brief Jobs a trace of the network's rules holds at most. */
+#define RULES_TRACE_MAX 8U
+
+/**
+ * @brief The network's rules with no station's pass, step by step: the round
+ *        Wi-Fi on asks for, a network joined and kept, its drop tried again
+ *        after the first wait and the second. What ran at each step, or -1.
+ */
+static unsigned rules_trace(int *jobs)
+{
+    unsigned n = 0U;
+
+    retry_ready();                          /* the round, over with nothing joined */
+    jobs[n++] = (int)last_req()->type;
+    wifi_station_up();
+    pump();
+    jobs[n++] = running_job();              /* on a network: kept */
+    retry_wait(60000U);
+    jobs[n++] = running_job();
+    retry_network_drops();
+    pump();
+    retry_wait(4000U);
+    jobs[n++] = running_job();              /* before the first wait */
+    retry_wait(2000U);
+    jobs[n++] = running_job();              /* after it: a round */
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    retry_wait(29000U);
+    jobs[n++] = running_job();
+    retry_wait(2000U);
+    jobs[n++] = running_job();              /* after the second */
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    wifi_owed_cleanup();
+    return n;
+}
+
+/* The board in use has no station: it follows the network's usual rules, and
+ * a pass that came and went leaves no trace of it. */
+TEST_CASE("with no station's pass the network keeps its rules, before any pass "
+          "and after one", "[radio_ao][quiet]")
+{
+    static const int TODAY[] = {
+        (int)KDRV_RADIO_JOB_WIFI_SCAN, -1, -1, -1,
+        (int)KDRV_RADIO_JOB_WIFI_SCAN, -1, (int)KDRV_RADIO_JOB_WIFI_SCAN,
+    };
+    int      before[RULES_TRACE_MAX];
+    int      after[RULES_TRACE_MAX];
+    unsigned nb;
+    unsigned na;
+
+    nb = rules_trace(before);
+    TEST_ASSERT_EQUAL_UINT(sizeof(TODAY) / sizeof(TODAY[0]), nb);
+    TEST_ASSERT_EQUAL_INT_ARRAY_MESSAGE(TODAY, before, nb, "the rules with no pass changed");
+    TEST_ASSERT_FALSE_MESSAGE(logged("station's pass"), "a pass was said with no station");
+
+    radio_fresh();
+    go_up();
+    TEST_ASSERT_TRUE(radio_quiet_request(true));
+    pump();
+    TEST_ASSERT_TRUE(radio_quiet_request(false));
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+
+    na = rules_trace(after);
+    TEST_ASSERT_EQUAL_UINT(nb, na);
+    TEST_ASSERT_EQUAL_INT_ARRAY_MESSAGE(before, after, nb, "a pass that ended changed the rules");
+}
+
+TEST_CASE("a station's pass leaves the network it is on, keeps it, and its end "
+          "looks for it again", "[radio_ao][quiet]")
+{
+    unsigned nvs;
+
+    retry_ready();
+    wifi_station_up();
+    pump();
+    nvs = fake_nvs_count();
+    TEST_ASSERT_TRUE(radio_quiet_request(true));
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(), "the network was kept");
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+    pump();
+    TEST_ASSERT_TRUE_MESSAGE(logged("the network stays remembered"), "the leave was not said");
+    TEST_ASSERT_FALSE_MESSAGE((KODE_SVC_VAULT == kode_sent()->service) && (KODE_VAULT_FORGET == kode_sent()->op),
+                              "the network was forgotten");
+    TEST_ASSERT_TRUE_MESSAGE(wifi_state_now().enabled, "Wi-Fi was switched off");
+    TEST_ASSERT_FALSE(wifi_state_now().reconnecting);
+    retry_wait(700000U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a round ran during the pass");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(nvs, fake_nvs_count(), "the pass wrote a setting");
+
+    TEST_ASSERT_TRUE(radio_quiet_request(false));
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(), "the end did not look for the network");
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_TRUE_MESSAGE(wifi_state_now().reconnecting, "the waits did not start again");
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("no round starts by itself during a station's pass, and its end "
+          "starts one", "[radio_ao][quiet]")
+{
+    radio_fresh();
+    TEST_ASSERT_TRUE(radio_quiet_request(true));
+    pump();
+    go_up();
+    vault_has("line-ap-0");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a round started during the pass");
+    TEST_ASSERT_TRUE(logged("the round waits for its end"));
+    TEST_ASSERT_TRUE(wifi_auto_request());
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "an asked round started during the pass");
+
+    TEST_ASSERT_TRUE(radio_quiet_request(false));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a round's join that lands during a station's pass is left at once",
+          "[radio_ao][quiet]")
+{
+    radio_fresh();
+    go_up();
+    vault_has("line-ap-0");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    seed_air(2U, -60);
+    run_scan();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+    vault_joins("line-ap-0");
+
+    /* The C5 is joining when the pass begins: the join ends on its own. */
+    TEST_ASSERT_TRUE(radio_quiet_request(true));
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_AWAIT, running_job());
+    wifi_station_up();
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(), "the joined network was kept");
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+    pump();
+    TEST_ASSERT_EQUAL_INT(-1, running_job());
+
+    TEST_ASSERT_TRUE(radio_quiet_request(false));
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a network the person stepped off stays off after a station's pass",
+          "[radio_ao][quiet]")
+{
+    retry_ready();
+    wifi_station_up();
+    pump();
+    dispatch(WIFI_LEAVE_REQ_SIG);
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+    pump();
+
+    TEST_ASSERT_TRUE(radio_quiet_request(true));
+    pump();
+    TEST_ASSERT_EQUAL_INT(-1, running_job());
+    TEST_ASSERT_TRUE(radio_quiet_request(false));
+    pump();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the pass's end undid the person's leave");
+    retry_wait(700000U);
+    TEST_ASSERT_EQUAL_INT(-1, running_job());
+    wifi_owed_cleanup();
+}
+
 TEST_CASE("asleep nothing is tried, and a wake tries at once from the first wait",
           "[radio_ao][retry]")
 {

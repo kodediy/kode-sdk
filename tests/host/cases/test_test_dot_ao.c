@@ -730,7 +730,12 @@ static void radio_answer(uint8_t fw_patch, bool widest)
 {
     const QEvt *e = NULL;
 
+    /* The pass's quiet, told when its first verb came, goes first. */
     TEST_ASSERT_TRUE(xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE);
+    while ( (QSignal)RADIO_QUIET_REQ_SIG == e->sig )
+    {
+        TEST_ASSERT_TRUE(xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE);
+    }
     TEST_ASSERT_EQUAL_UINT(RADIO_PROBE_REQ_SIG, e->sig);
     RadioProbeEvt * const rsp = ((RadioProbeReqEvt const *)e)->rsp;
     rsp->status     = (uint8_t)KODE_OK;
@@ -848,5 +853,109 @@ TEST_CASE("test_a_discovery_of_a_whole_sweep_is_not_a_timeout", "[test_dot_ao]")
     radio_answer(TD_C5_FW_PATCH, false);
     td_take();
     TEST_ASSERT_FALSE(td_said("rec radio ok=1"));
+    td_down();
+}
+
+/* ---- The station's quiet ------------------------------------------------------------------ */
+
+/**
+ * @brief Read @p ao's queue for the pass's quiet: how many were told, and
+ *        the last one's edge. Every other event there is let go.
+ */
+static unsigned quiet_told(QActive *ao, enum_t sig, bool *last_on)
+{
+    const QEvt *e = NULL;
+    unsigned n = 0U;
+
+    while ( (NULL != ao->eQueue) && (xQueueReceive(ao->eQueue, &e, 0U) == pdTRUE) )
+    {
+        if ( (QSignal)sig == e->sig )
+        {
+            /* RadioQuietEvt and NetQuietEvt carry the same edge. */
+            *last_on = ((RadioQuietEvt const *)e)->on;
+            n++;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/* A join and its traffic during a pass take the CPU and the C5 from the
+ * motor's buzz, the compass and the radio check. The first verb quiets the
+ * network, the end gives it back, and both owners hear each edge once. */
+TEST_CASE("test_the_first_verb_quiets_the_network_and_the_end_gives_it_back", "[test_dot_ao][quiet]")
+{
+    bool on = false;
+
+    td_up();
+    td_verb_plain((uint8_t)TEST_DOT_VERB_INFO);
+    td_take();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on), "AO_Radio not told");
+    TEST_ASSERT_TRUE(on);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on), "AO_Net not told");
+    TEST_ASSERT_TRUE(on);
+
+    td_verb_plain((uint8_t)TEST_DOT_VERB_POLL);
+    td_take();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on), "told again at every verb");
+
+    td_verb_plain((uint8_t)TEST_DOT_VERB_END);
+    td_take();
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE_MESSAGE(on, "the end did not give the network back");
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE(on);
+    td_down();
+}
+
+TEST_CASE("test_a_woken_pass_keeps_quiet_until_its_end_gives_everything_back", "[test_dot_ao][quiet]")
+{
+    bool on = false;
+
+    td_up();
+    place_once();
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_TRUE(on);
+    td_wake_ok();
+    (void)td_job();
+    td_take();
+    td_wait_ms(KODE_TEST_DOT_QUIET_IDLE_MS + 1000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on),
+                                   "an awake pass let the network go on its idle bound");
+    td_end();
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE(on);
+    td_down();
+}
+
+TEST_CASE("test_a_locked_kode_leaves_the_network_alone", "[test_dot_ao][quiet]")
+{
+    bool on = false;
+
+    td_up_locked();
+    td_verb_plain((uint8_t)TEST_DOT_VERB_INFO);
+    td_take();
+    TEST_ASSERT_TRUE(td_said("msg=locked"));
+    TEST_ASSERT_EQUAL_UINT(0U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_EQUAL_UINT(0U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    td_down();
+}
+
+TEST_CASE("test_a_pass_whose_station_went_away_ends_on_the_idle_bound", "[test_dot_ao][quiet]")
+{
+    bool on = false;
+
+    td_up();
+    td_verb_plain((uint8_t)TEST_DOT_VERB_INFO);
+    td_take();
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    td_wait_ms(KODE_TEST_DOT_QUIET_IDLE_MS - 1000U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on), "over before its bound");
+    td_wait_ms(2000U);
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Radio, RADIO_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE_MESSAGE(on, "a pass with no station kept the network quiet");
+    TEST_ASSERT_EQUAL_UINT(1U, quiet_told(AO_Net, NET_QUIET_REQ_SIG, &on));
+    TEST_ASSERT_FALSE(on);
     td_down();
 }
