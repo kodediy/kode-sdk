@@ -485,6 +485,10 @@ typedef struct {
     /* The board's rounds. */
     uint8_t   lp_who;          /**< The id lowpower_join() gave.              */
     uint32_t  lp_round;        /**< The round being answered.                 */
+    bool      renderer_late;   /**< That round was refused for a renderer that
+                                *   handed nothing over: the glass never moved,
+                                *   and asked again it waits for the renderer
+                                *   again (rest_round()).                     */
     uint8_t   rest_target;     /**< The kode_lp_state_t of the open round.    */
     bool      supply_off;      /**< An app's rest took the panel's supply: the
                                 *   way back powers it and starts it cold.    */
@@ -550,6 +554,7 @@ void Display_ctor(void)
 #if CONFIG_KODE_LOWPOWER
     l_display.lp_who           = KODE_LOWPOWER_WHO_NONE;
     l_display.lp_round         = 0U;
+    l_display.renderer_late    = false;
     l_display.rest_target      = (uint8_t)KODE_LP_AWAKE;
     l_display.supply_off       = false;
     l_display.supply_rising    = false;
@@ -1511,15 +1516,29 @@ static void supply_request(Display * const me, const DisplaySupplyReqEvt * const
 /**
  * @brief LOWPOWER_ROUND_SIG: rest for ASLEEP or OFF, and answer once.
  *
+ * AO_LowPower asks a busy owner again in the round it refused, with no AWAKE
+ * between the asks. A glass that refused for a renderer that was late had not
+ * moved: asked again it is put back as that AWAKE would put it, which gives
+ * the renderer its flushes and its repaint, and the wait for the glyphs
+ * starts over. The renderer is another owner, asked again in the same way.
+ *
  * @param me The AO.
  * @param r  The round.
  */
 static void rest_round(Display * const me, const LowPowerRoundEvt * const r)
 {
+    bool const late_again = me->renderer_late && (r->round == me->lp_round)
+                            && (REST_REFUSED == me->rest);
+
     /* The board's rest has the glass before an app's request. */
     sleep_yield(me);
-    me->lp_round    = r->round;
-    me->rest_target = r->target;
+    me->lp_round      = r->round;
+    me->rest_target   = r->target;
+    me->renderer_late = false;
+    if ( late_again )
+    {
+        rest_restore(me);
+    }
     /* A glass still being put back is not the round's to find half done: the
      * AWAKE that ends this round restores it. */
     me->restore_owed = false;
@@ -1691,6 +1710,7 @@ static void rest_glyphs_late(Display * const me)
         {
 #if CONFIG_KODE_LOWPOWER
             rest_set(me, REST_REFUSED);
+            me->renderer_late = true;
             KLOG_W(TAG, "the renderer handed over nothing in %u ms; the glass stays lit",
                    (unsigned)KODE_LOWPOWER_GLYPHS_WAIT_MS);
             rest_answer(me, true, "renderer not parked");

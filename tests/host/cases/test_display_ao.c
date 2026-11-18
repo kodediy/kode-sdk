@@ -461,6 +461,18 @@ static void round_for(kode_lp_state_t target)
     QASM_DISPATCH(AO_Display, &e.super, 0U);
 }
 
+/** @brief AO_LowPower asks again in the round already open, as it asks a busy owner. */
+static void round_again(kode_lp_state_t target)
+{
+    LowPowerRoundEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(LOWPOWER_ROUND_SIG);
+    e.target = (uint8_t)target;
+    e.round  = s_round_no;
+    QASM_DISPATCH(AO_Display, &e.super, 0U);
+}
+
 /** @brief AO_LowPower says the board is AWAKE (again), leaving @p prev. */
 static void state_awake(kode_lp_state_t prev)
 {
@@ -1756,6 +1768,70 @@ TEST_CASE("no glyphs in time: the round is refused and the link stays up",
     EXPECT_TRACE(T_LINK_UP, T_BRIGHT);
     TEST_ASSERT_EQUAL_INT((int)DISPLAY_REPAINT_SIG, (int)ao_spy_next_sig());
 
+    Mockkdrv_display_Destroy();
+}
+
+/* AO_LowPower keeps a requested round open for a busy owner and asks it
+ * again, alone, with no AWAKE between the asks. The glass that refused for a
+ * renderer that was late had not moved: asked again, it gives the renderer
+ * its flushes back, tells it to paint, and waits for its glyphs once more. */
+TEST_CASE("asked again in the round the renderer was late for, the glass waits for it again",
+          "[display_ao][lowpower]")
+{
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    rest_mocks();
+    strip_fill();
+    renderer_flushes();
+
+    round_for(KODE_LP_ASLEEP);
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 1U);
+    expect_answer(true, "renderer not parked");
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_flush_sent, "a flush reached a glass that had refused");
+    ao_spy_drain();
+    s_trace_n = 0U;
+
+    round_again(KODE_LP_ASLEEP);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)DISPLAY_REPAINT_SIG, (int)ao_spy_next_sig(),
+                                  "the renderer was not told to paint what it lost");
+    TEST_ASSERT_FALSE_MESSAGE(lp_queued() > 0U, "answered before the renderer stopped");
+    renderer_flushes();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_flush_sent, "the renderer's page was dropped while parking");
+    s_trace_n = 0U;
+
+    hand(s_strip, (uint16_t)GLYPH_X);
+    EXPECT_TRACE(T_BRIGHT, T_LINK_DOWN);
+    expect_answer(false, NULL);
+    expect_no_more_answers();
+
+    state_awake(KODE_LP_ASLEEP);
+    Mockkdrv_display_Destroy();
+}
+
+/* A renderer that stays late is said again, one wait after each ask. */
+TEST_CASE("a renderer late again in the same round refuses it again, by name",
+          "[display_ao][lowpower]")
+{
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    rest_mocks();
+    strip_fill();
+    renderer_flushes();
+
+    round_for(KODE_LP_ASLEEP);
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) + 1U);
+    expect_answer(true, "renderer not parked");
+
+    round_again(KODE_LP_ASLEEP);
+    (void)qf_support_tick(AO_Display, QF_SUPPORT_STEPS(KODE_LOWPOWER_GLYPHS_WAIT_MS) - 1U);
+    TEST_ASSERT_FALSE_MESSAGE(lp_queued() > 0U, "refused before the wait was over");
+    (void)qf_support_tick(AO_Display, 2U);
+    expect_answer(true, "renderer not parked");
+    expect_no_more_answers();
+
+    state_awake(KODE_LP_AWAKE);
     Mockkdrv_display_Destroy();
 }
 
