@@ -306,6 +306,7 @@ static volatile bool s_run_going;
 static QState TestDot_initial(TestDot * const me, void const * const par);
 static QState TestDot_active(TestDot * const me, QEvt const * const e);
 static void verb_start(TestDot *me, TestDotReqEvt const *e);
+static void inst_end(TestDot *me, bool ok);
 static void end_next(TestDot *me);
 static void out_drain(TestDot *me);
 static void cam_step_go(TestDot *me, uint8_t step);
@@ -337,6 +338,24 @@ void test_dot_welcome_arm(const char *name)
 
 /** @brief The storage image's file on the card, armed by test_dot_storage; empty when not armed. */
 static char s_storage[KODE_APP_FILE_MAX];
+
+/* An install AppMgr turned away busy is asked again at the next station verb
+ * (the station polls every ~150 ms), for this long after the first ask. */
+#define TD_INSTALL_BUSY_MS 10000U
+static char     s_inst_file[KODE_APP_FILE_MAX];  /**< The file of the install under way. */
+static uint8_t  s_inst_dst;                      /**< Its destination.                   */
+static uint32_t s_inst_t0;                       /**< When it was first asked.           */
+static bool     s_inst_owed;                     /**< Turned away busy: ask again.       */
+
+/** @brief Ask AppMgr for an install from the card, and keep what to ask again. */
+static bool inst_ask(TestDot *me, const char *file, uint8_t dst)
+{
+    (void)snprintf(s_inst_file, sizeof(s_inst_file), "%s", file);
+    s_inst_dst  = dst;
+    s_inst_t0   = khal_time_ms();
+    s_inst_owed = false;
+    return appmgr_image_ask((uint8_t)KFW_SRC_SD, s_inst_file, dst, false, &me->super);
+}
 
 void test_dot_storage_arm(const char *name)
 {
@@ -1099,8 +1118,7 @@ static void storage_start(TestDot *me)
     {
         appmgr_fast(true);
         const char *word = "refused";
-        bool const asked = appmgr_image_ask((uint8_t)KFW_SRC_SD, s_storage,
-                                            (uint8_t)KODE_FLASH_DST_STORAGE, false, &me->super);
+        bool const asked = inst_ask(me, s_storage, (uint8_t)KODE_FLASH_DST_STORAGE);
         me->storage_on = asked;
         if ( asked )
         {
@@ -1141,8 +1159,7 @@ static void cam_finish(TestDot *me)
              * camera is done: the welcome app is written beside the operator. */
             appmgr_fast(true);
             const char *word = "refused";
-            bool const asked = appmgr_image_ask((uint8_t)KFW_SRC_SD, s_welcome,
-                                                (uint8_t)KFW_TARGET_APP, false, &me->super);
+            bool const asked = inst_ask(me, s_welcome, (uint8_t)KFW_TARGET_APP);
             me->welcome_on = asked;
             if ( asked )
             {
@@ -2698,6 +2715,15 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
 /** @brief A station verb: the lock first, then whether anything is in the way, then the wake. */
 static void on_req(TestDot *me, TestDotReqEvt const *e)
 {
+    if ( s_inst_owed && (me->welcome_on || me->storage_on) )
+    {
+        s_inst_owed = false;
+        if ( !appmgr_image_ask((uint8_t)KFW_SRC_SD, s_inst_file, s_inst_dst, false, &me->super) )
+        {
+            inst_end(me, false);
+        }
+    }
+
     bool const is_end = ((uint8_t)TEST_DOT_VERB_END == e->verb);
     bool const run_verb = ((uint8_t)TEST_DOT_VERB_RUN == e->verb) || ((uint8_t)TEST_DOT_VERB_PLACE == e->verb)
                           || ((uint8_t)TEST_DOT_VERB_CAMERA == e->verb);
@@ -3026,6 +3052,28 @@ static void inst_end(TestDot *me, bool ok)
     }
 }
 
+/**
+ * @brief AppMgr turned this AO's install away for now: it is asked again at the next
+ *        station verb while TD_INSTALL_BUSY_MS has not run out since the first ask, and
+ *        fails after. AppMgr busy with somebody else's job is not this Kode's fault.
+ * @param me TestDot.
+ */
+static void inst_busy(TestDot *me)
+{
+    if ( (me->welcome_on || me->storage_on) && ((khal_time_ms() - s_inst_t0) < TD_INSTALL_BUSY_MS) )
+    {
+        if ( !s_inst_owed )
+        {
+            KLOG_W(TAG, "appmgr busy; '%s' is asked again", s_inst_file);
+        }
+        s_inst_owed = true;
+    }
+    else
+    {
+        inst_end(me, false);
+    }
+}
+
 /** @brief The AO's one state: what it does now is in @c mode and @c act. */
 static QState TestDot_active(TestDot * const me, QEvt const * const e)
 {
@@ -3040,13 +3088,23 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
             inst_end(me, true);
             break;
         case APP_FLASH_FAIL_SIG:
-            inst_end(me, false);
+            /* "Refused for now" (KFAIL_BUSY: AO_Storage had another file
+             * open, or the card stayed busy while an app the write would
+             * evict was copied to it) is asked again, like a busy verdict. */
+            if ( (uint8_t)KFAIL_BUSY == Q_EVT_CAST(AppFlashFailEvt)->why )
+            {
+                inst_busy(me);
+            }
+            else
+            {
+                inst_end(me, false);
+            }
             break;
         case APP_REQ_RSP_SIG:
             /* Busy is the one verdict that comes with no FLASH_FAIL after it. */
             if ( (uint8_t)APP_REQ_BUSY == Q_EVT_CAST(AppReqRspEvt)->verdict )
             {
-                inst_end(me, false);
+                inst_busy(me);
             }
             break;
         case TEST_DOT_JOB_SIG:

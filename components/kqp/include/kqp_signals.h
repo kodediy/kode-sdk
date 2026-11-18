@@ -2402,7 +2402,8 @@ typedef enum {
     KFAIL_WRITE = 0,  /**< The write itself: the image, the medium, the flash. */
     KFAIL_BUSY,       /**< Nothing was written: the card stayed busy while
                        *   an app this install would remove was copied to
-                       *   it. Ask again.                                     */
+                       *   it, or AO_Storage had another file open when the
+                       *   install's own was to open. Ask again.              */
     KFAIL_DATA,       /**< An app's data folder did not come or could not be
                        *   written. No app was installed or touched: the
                        *   folder is how an app looks, never what lets it
@@ -2445,7 +2446,7 @@ typedef struct {
 /** @brief What AO_AppMgr made of a request that asked for a verdict (AppReqRspEvt.verdict). */
 typedef enum {
     APP_REQ_TAKEN = 0,   /**< Taken: the install is under way, or the app is on its way to boot. */
-    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand: ask again.                           */
+    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand, or AO_Storage another file: ask again. */
     APP_REQ_MISSING,     /**< The file is not on the medium, or the app is not installed.      */
     APP_REQ_EMPTY,       /**< The mailbox holds nothing to install.                            */
     APP_REQ_REFUSED      /**< Refused for another reason, which the log gives.                 */
@@ -2818,6 +2819,8 @@ typedef struct {
     uint32_t size;
     uint8_t  status;    /**< kode_status_t                                    */
     uint8_t  medium;    /**< Where it was found.                              */
+    bool     busy;      /**< Refused because AO_Storage has another file open:
+                         *   the asker may ask again once it is closed.       */
 } StorageOpenRspEvt;
 
 /** @brief A borrowed buffer being handed back (STORAGE_NEXT_SIG). */

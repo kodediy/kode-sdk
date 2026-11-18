@@ -13917,3 +13917,52 @@ TEST_CASE("a chunk from the internal partition is not read again",
     TEST_ASSERT_EQUAL_UINT(0U, dones);
     TEST_ASSERT_EQUAL_UINT(1U, fails);
 }
+
+/* ---- An open AO_Storage refuses for now ------------------------------------
+ * AO_Storage has one file open at a time: an install whose open is refused
+ * because the handle is someone else's is refused for now (KFAIL_BUSY), so
+ * its asker may ask again; any other refusal is a failure, as before.
+ */
+
+/** @brief Ask for "new.bin" and answer its open refused, @p busy or not; the fail's why. */
+static uint8_t open_refused_why(bool busy)
+{
+    StorageOpenRspEvt o;
+    uint8_t           why = 0xFFU;
+
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    (void)memset(&o, 0, sizeof(o));
+    o.super  = (QEvt)QEVT_INITIALIZER(STORAGE_OPEN_RSP_SIG);
+    o.status = (uint8_t)KODE_DENIED;
+    o.medium = (uint8_t)KDRV_MEDIUM_SD;
+    o.busy   = busy;
+    QASM_DISPATCH(AO_AppMgr, &o.super, 0U);
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)e->sig == APP_FLASH_FAIL_SIG )
+        {
+            why = ((AppFlashFailEvt const *)e)->why;
+        }
+    }
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+    keep_end();
+    return why;
+}
+
+TEST_CASE("an install whose open is refused for another file is refused for now",
+          "[appmgr_ao][busy]")
+{
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KFAIL_BUSY, open_refused_why(true));
+}
+
+TEST_CASE("an install whose open is refused for the file itself fails as before",
+          "[appmgr_ao][busy]")
+{
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KFAIL_WRITE, open_refused_why(false));
+}

@@ -10370,3 +10370,47 @@ TEST_CASE("a read again asked by an AO that has no file open is refused, and "
     TEST_ASSERT_EQUAL_MEMORY(s_reread_body, storage_buf(d->idx), 64U);
     close_reader();
 }
+
+/* ---- An open refused for a file already open says whose ------------------- */
+
+TEST_CASE("an open refused for a file already open says which and whose, and "
+          "that it may be asked again", "[storage_ao][busy]")
+{
+    storage_fresh();
+    hold_reader();
+    fake_klog_reset();
+    make_file("other.bin", 8U);
+    ask_open("other.bin");
+
+    const QEvt *e = ao_spy_take();
+    while ( (NULL != e) && ((enum_t)e->sig != STORAGE_OPEN_RSP_SIG) )
+    {
+        e = ao_spy_take();
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the open went unanswered");
+    StorageOpenRspEvt const * const r = (StorageOpenRspEvt const *)e;
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, (int)r->status);
+    TEST_ASSERT_TRUE_MESSAGE(r->busy, "the refusal does not say it is for now");
+    TEST_ASSERT_EQUAL_UINT(1U, log_count("a file is already open: '/storage/held.bin', read by"));
+    TEST_ASSERT_EQUAL_UINT(1U, log_count("'other.bin' refused"));
+
+    static const QEvt close_evt = QEVT_INITIALIZER(STORAGE_CLOSE_REQ_SIG);
+    QASM_DISPATCH(AO_Storage, &close_evt, 0U);
+}
+
+TEST_CASE("an open refused for an empty file is not for now", "[storage_ao][busy]")
+{
+    storage_fresh();
+    make_file("empty.bin", 0U);
+    ask_open("/storage/empty.bin");
+
+    const QEvt *e = ao_spy_take();
+    while ( (NULL != e) && ((enum_t)e->sig != STORAGE_OPEN_RSP_SIG) )
+    {
+        e = ao_spy_take();
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the open went unanswered");
+    StorageOpenRspEvt const * const r = (StorageOpenRspEvt const *)e;
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, (int)r->status);
+    TEST_ASSERT_FALSE(r->busy);
+}

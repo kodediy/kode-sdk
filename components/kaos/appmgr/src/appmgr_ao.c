@@ -223,7 +223,8 @@ static const AppFlashFailEvt s_flash_fail_evt = {
     QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_WRITE
 };
 /* An install refused for now: the card stayed busy while an app it evicts
- * was copied to it. */
+ * was copied to it, or AO_Storage had another file open when the install's
+ * own was to open. */
 static const AppFlashFailEvt s_flash_busy_fail_evt = {
     QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_BUSY
 };
@@ -4924,6 +4925,17 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
                     flash_fail(me, me->from_net ? "the server said no"
                                                 : "file not found",
                                KFAIL_WRITE);
+                }
+                else if ( (!me->from_net) && rsp->busy )
+                {
+                    /* AO_Storage has one file open, and it is someone else's
+                     * (a scene the face streams, a copy to the card): the
+                     * file may well be there, the handle is not free yet.
+                     * Its asker may ask again. */
+                    KLOG_W(TAG, "'%s' cannot open yet: the storage has another "
+                                "file open", me->file);
+                    appmgr_inst_why(APPMGR_WHY_BUSY);
+                    flash_fail(me, "the storage is busy with another file", KFAIL_BUSY);
                 }
                 else if ( me->from_net
                           && (((uint8_t)KODE_DENIED == rsp->status)

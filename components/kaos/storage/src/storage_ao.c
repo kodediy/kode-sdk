@@ -2151,6 +2151,73 @@ static bool busy(const Storage * const me)
         || (NULL != me->g_who) || (NULL != me->x_who) || me->sdj.expired;
 }
 
+/** @brief The task name of @p ao, for a log line; "?" when it has none. */
+static const char *ao_name(QActive const *ao)
+{
+    const char *name = "?";
+
+    if ( NULL != ao )
+    {
+        (void)kqp_prio_taken((uint8_t)ao->prio, &name);
+    }
+    return name;
+}
+
+/**
+ * @brief Say why busy() holds, naming the file and who holds it, and that
+ *        @p refused is refused for it.
+ *
+ * @param me      The AO, busy.
+ * @param refused What was asked for.
+ */
+static void busy_say(Storage const * const me, const char *refused)
+{
+    if ( NULL != me->reader )
+    {
+        KLOG_W(TAG, "a file is already open: '%s', read by %s; '%s' refused",
+               me->rd_path, ao_name(me->reader), refused);
+    }
+    else if ( NULL != me->writer )
+    {
+        KLOG_W(TAG, "a file is already open: '%s', written by %s; '%s' refused",
+               me->w_name, ao_name(me->writer), refused);
+    }
+    else if ( NULL != me->p_who )
+    {
+        KLOG_W(TAG, "a file is already open: the copy to '%s' by %s; '%s' refused",
+               me->p_dst, ao_name(me->p_who), refused);
+    }
+    else if ( NULL != me->r_who )
+    {
+        KLOG_W(TAG, "a file is already open: '%s', arriving for %s; '%s' refused",
+               me->r_path, ao_name(me->r_who), refused);
+    }
+    else if ( NULL != me->c_who )
+    {
+        KLOG_W(TAG, "a file is already open: '%s', read out for %s; '%s' refused",
+               me->c_path, ao_name(me->c_who), refused);
+    }
+    else if ( NULL != me->g_who )
+    {
+        KLOG_W(TAG, "a file is already open: the data folder of '%s' for %s; '%s' refused",
+               me->g_project, ao_name(me->g_who), refused);
+    }
+    else if ( NULL != me->x_who )
+    {
+        KLOG_W(TAG, "a file is already open: the wipe of '%s' for %s; '%s' refused",
+               me->x_project, ao_name(me->x_who), refused);
+    }
+    else if ( 0U != me->t_phase )
+    {
+        KLOG_W(TAG, "a file is already open: the card test; '%s' refused", refused);
+    }
+    else
+    {
+        KLOG_W(TAG, "a file is already open: a call to the card past its "
+                    "deadline; '%s' refused", refused);
+    }
+}
+
 /**
  * @brief Read up to @p max bytes of @p path in one step, reader slot untouched.
  *
@@ -6506,7 +6573,7 @@ static void write_begin(Storage * const me, StorageWriteEvt const * const req)
 
     if ( busy(me) )
     {
-        KLOG_W(TAG, "a file is already open; '%s' refused", req->name);
+        busy_say(me, req->name);
     }
     else if ( req->yields && (NULL != storage_fetch_running)
              && storage_fetch_running() )
@@ -8673,10 +8740,11 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             uint32_t      size   = 0U;
             kdrv_medium_t medium = KDRV_MEDIUM_FS;
             kode_status_t st     = KODE_DENIED;
+            bool const    held   = busy(me);
 
-            if ( busy(me) )
+            if ( held )
             {
-                KLOG_W(TAG, "a file is already open; '%s' refused", req->name);
+                busy_say(me, req->name);
             }
             else if ( '/' == req->name[0] )
             {
@@ -8707,6 +8775,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 rsp->size   = size;
                 rsp->status = (uint8_t)st;
                 rsp->medium = (uint8_t)medium;
+                rsp->busy   = held;
                 QACTIVE_POST(req->who, &rsp->super, &me->super);
             }
             else
@@ -8717,7 +8786,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                  * by. So the open is undone and refused. */
                 static const StorageOpenRspEvt s_open_dry_evt = {
                     QEVT_INITIALIZER(STORAGE_OPEN_RSP_SIG), 0U,
-                    (uint8_t)KODE_NO_RESOURCES, (uint8_t)KDRV_MEDIUM_FS
+                    (uint8_t)KODE_NO_RESOURCES, (uint8_t)KDRV_MEDIUM_FS, false
                 };
                 KLOG_E(TAG, "out of events; the open of '%s' is undone",
                        req->name);

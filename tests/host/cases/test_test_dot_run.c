@@ -197,7 +197,7 @@ static void poll_records(void)
 TEST_CASE("test_welcome_then_storage_install_after_the_camera_and_each_is_reported", "[test_dot_run]")
 {
     QEvt done = QEVT_INITIALIZER(APP_FLASH_DONE_SIG);
-    QEvt fail = QEVT_INITIALIZER(APP_FLASH_FAIL_SIG);
+    AppFlashFailEvt fail = { QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_WRITE };
 
     test_dot_welcome_arm("welcome.kfw");
     test_dot_storage_arm("storage.bin");
@@ -216,7 +216,7 @@ TEST_CASE("test_welcome_then_storage_install_after_the_camera_and_each_is_report
                              "the storage image goes when the welcome app is in");
 
     td_clear();
-    td_dispatch(&fail);
+    td_dispatch(&fail.super);
     poll_records();
     TEST_ASSERT_TRUE(td_said("rec storage=failed"));
     td_end();
@@ -226,7 +226,7 @@ TEST_CASE("test_welcome_then_storage_install_after_the_camera_and_each_is_report
 TEST_CASE("test_storage_alone_goes_at_the_camera_end_and_a_failed_welcome_does_not_hold_it_back",
           "[test_dot_run]")
 {
-    QEvt fail = QEVT_INITIALIZER(APP_FLASH_FAIL_SIG);
+    AppFlashFailEvt fail = { QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_WRITE };
 
     test_dot_storage_arm("storage.bin");
     run_to_camera();
@@ -243,11 +243,94 @@ TEST_CASE("test_storage_alone_goes_at_the_camera_end_and_a_failed_welcome_does_n
     TEST_ASSERT_TRUE(drive_until(">ok"));
     poll_records();
     td_clear();
-    td_dispatch(&fail);
+    td_dispatch(&fail.super);
     poll_records();
     TEST_ASSERT_TRUE(td_said("rec welcome=failed"));
     TEST_ASSERT_TRUE_MESSAGE(td_said("rec storage=started"),
                              "the storage image goes whether the welcome app installed or not");
+    td_end();
+    td_down();
+}
+
+/** @brief How many installs AO_AppMgr was asked for since the last call; its mailbox emptied. */
+static unsigned installs_asked(void)
+{
+    const QEvt *e = NULL;
+    unsigned    n = 0U;
+
+    while ( xQueueReceive(AO_AppMgr->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( FLASH_REQ_SIG == e->sig )
+        {
+            ++n;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/** @brief Arm the welcome app and run until its install is asked for. */
+static void welcome_started(void)
+{
+    test_dot_welcome_arm("welcome.kfw");
+    test_dot_storage_arm("");
+    run_to_camera();
+    TEST_ASSERT_TRUE(drive_until(">ok"));
+    poll_records();
+    TEST_ASSERT_TRUE(td_said("rec welcome=started name=welcome.kfw"));
+    TEST_ASSERT_EQUAL_UINT(1U, installs_asked());
+}
+
+/* AppMgr refusing for now (another file holds AO_Storage's one handle, or an
+ * app it would evict has no copy on the card yet) is not this Kode's fault:
+ * the install is asked again at the station's next verb. */
+TEST_CASE("test_an_install_refused_for_now_is_asked_again_and_goes_on", "[test_dot_run]")
+{
+    QEvt            done = QEVT_INITIALIZER(APP_FLASH_DONE_SIG);
+    AppFlashFailEvt busy = { QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_BUSY };
+
+    welcome_started();
+    td_clear();
+    td_dispatch(&busy.super);
+    poll_records();
+    TEST_ASSERT_FALSE_MESSAGE(td_said("rec welcome=failed"), "a refusal for now failed the welcome app");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, installs_asked(), "the install was not asked again");
+
+    td_clear();
+    td_dispatch(&done);
+    poll_records();
+    TEST_ASSERT_TRUE(td_said("rec welcome=installed"));
+    td_end();
+    td_down();
+}
+
+TEST_CASE("test_an_install_still_refused_after_its_wait_fails", "[test_dot_run]")
+{
+    AppFlashFailEvt busy = { QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_BUSY };
+
+    welcome_started();
+    fake_time_advance_ms(10100U);
+    td_clear();
+    td_dispatch(&busy.super);
+    poll_records();
+    TEST_ASSERT_TRUE_MESSAGE(td_said("rec welcome=failed"), "a refusal that outlasted the wait did not fail");
+    TEST_ASSERT_EQUAL_UINT(0U, installs_asked());
+    td_end();
+    td_down();
+}
+
+/* A read or a write that failed is never asked again: written again from the
+ * top, it would hide a flash or a card that is bad. */
+TEST_CASE("test_an_install_that_failed_is_not_asked_again", "[test_dot_run]")
+{
+    AppFlashFailEvt fail = { QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_WRITE };
+
+    welcome_started();
+    td_clear();
+    td_dispatch(&fail.super);
+    poll_records();
+    TEST_ASSERT_TRUE(td_said("rec welcome=failed"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, installs_asked(), "a failed install was asked again");
     td_end();
     td_down();
 }
