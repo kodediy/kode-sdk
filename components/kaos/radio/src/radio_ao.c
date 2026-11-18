@@ -544,7 +544,17 @@ typedef struct {
                                *   board sleeps or is in a dark wake: nothing
                                *   this AO starts by itself may hold it up.  */
     bool     lp_slept;        /**< The board has been ASLEEP since last AWAKE. */
+    /* The flags of a station's pass sit in the bytes the timer below leaves
+     * before it for its alignment, so they add nothing to this object: it
+     * stays under the 2 KB an object in internal RAM may reach unlisted
+     * (tools/check_ram.sh). */
+    bool     quiet;           /**< A station's pass runs (radio_quiet_request()):
+                               *   nothing joins by itself, and a network the
+                               *   board is on is left.                      */
 #if CONFIG_KODEOS_WIFI
+    bool     quiet_left;      /**< The station's pass has had its leave, or a
+                               *   network was asked for by name during it:
+                               *   nothing more is left until its end.       */
     QTimeEvt wifi_retry;      /**< WIFI_RETRY_SIG: the next round to get back
                                *   on a network.                             */
     uint8_t  retry_step;      /**< Index into RADIO_RETRY_MS of the next wait. */
@@ -553,13 +563,7 @@ typedef struct {
                                *   channel and the board allow.              */
     bool     wifi_left;       /**< The person stepped off the network: nothing
                                *   goes back until somebody asks.            */
-    bool     quiet_left;      /**< The station's pass has had its leave, or a
-                               *   network was asked for by name during it:
-                               *   nothing more is left until its end.       */
 #endif
-    bool     quiet;           /**< A station's pass runs (radio_quiet_request()):
-                               *   nothing joins by itself, and a network the
-                               *   board is on is left.                      */
     uint8_t  ask[RADIO_ASK_MAX]; /**< The asks of AO_Storage that are answered
                                *   and not yet heard, oldest first (radio_ask_t):
                                *   the answers come in the order the asks went. */
