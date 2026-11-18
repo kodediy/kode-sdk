@@ -316,6 +316,9 @@ QActive * const AO_TestDot = &l_td.super;
 /** @brief Set while a run goes: read by the console's `factory_reset`, from its own task. */
 static volatile bool s_run_going;
 
+/** @brief A station's pass runs: AO_TestDot's @c quiet_want, for test_dot_session(). */
+static volatile bool s_session;
+
 static QState TestDot_initial(TestDot * const me, void const * const par);
 static QState TestDot_active(TestDot * const me, QEvt const * const e);
 static void verb_start(TestDot *me, TestDotReqEvt const *e);
@@ -997,6 +1000,7 @@ static bool job_submit(TestDot *me, uint8_t kind, uint8_t arg)
 /** @brief Tell AO_Radio and AO_Net what the pass wants; one with no room is asked again by the timer. */
 static void quiet_sync(TestDot *me)
 {
+    s_session = me->quiet_want;
     if ( me->quiet_want != me->quiet_held )
     {
         bool const radio_told = radio_quiet_request(me->quiet_want);
@@ -3125,6 +3129,7 @@ void TestDot_ctor(void)
     QTimeEvt_ctorX(&me->drain, &me->super, TEST_DOT_DRAIN_SIG, 0U);
     QTimeEvt_ctorX(&me->quiet_te, &me->super, TEST_DOT_QUIET_SIG, 0U);
     s_run_going = false;
+    s_session   = false;
 }
 
 /** @brief Initial transition: read the lock, and nothing more - no claim, no allocation, no rail. */
@@ -3348,6 +3353,11 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
 bool test_dot_busy(void)
 {
     return s_run_going;
+}
+
+bool test_dot_session(void)
+{
+    return s_session;
 }
 
 void test_dot_screen_done(uint8_t kind, uint8_t seq)

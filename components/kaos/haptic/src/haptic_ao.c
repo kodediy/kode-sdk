@@ -1085,6 +1085,16 @@ static void row_verdict(Haptic * const me, bool ok, const char *why)
     verdict_publish(me, ok);
 }
 
+/** @brief Whether a station's pass runs: what the row's retry and its window's return wait on. */
+static bool haptic_station_pass(void)
+{
+#if CONFIG_KODE_TEST_DOT
+    return test_dot_session();
+#else
+    return false;
+#endif
+}
+
 /**
  * @brief The row could not measure. Say which half stopped it, and judge
  *        neither.
@@ -1108,6 +1118,12 @@ static void row_noverdict(Haptic * const me, uint8_t reason, const char *why)
     row_publish(me, row_step(me), (uint8_t)HAPTIC_TEST_NOVERDICT, reason, 0U,
                 0, 0, 0U, 0U);
     KLOG_E(TAG, "test %s: NO VERDICT - %s", name, why);
+    if ( haptic_station_pass() )
+    {
+        /* A window armed for this row is never drained now: given back, so
+         * the station's next row finds the IMU free. */
+        imu_capture_release(&me->super);
+    }
     verdict_publish(me, false);
 }
 

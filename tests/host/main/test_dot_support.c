@@ -23,6 +23,7 @@
 #include "kqp_config.h"
 #include "probe_ao.h"
 #include "qf_support.h"
+#include "unity.h"
 #include "test_dot_priv.h"
 
 /** @brief The worker's name, as test_dot_ao.c starts it. */
@@ -309,6 +310,18 @@ static void up(bool locked)
 void td_up(void)
 {
     up(false);
+}
+
+void td_session(bool on)
+{
+    up(false);
+    if ( on )
+    {
+        td_verb_plain((uint8_t)TEST_DOT_VERB_INFO);
+        td_take();
+    }
+    td_down();
+    TEST_ASSERT_EQUAL_INT((int)on, (int)test_dot_session());
 }
 
 void td_up_locked(void)

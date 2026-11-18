@@ -30,6 +30,7 @@
 #include "lowpower_cases.h"
 #include "krows.h"
 #include "qf_support.h"
+#include "test_dot_support.h"
 
 #define REG_RSTCFG   0x00U
 #define REG_SYSST    0x01U
@@ -1506,6 +1507,38 @@ TEST_CASE("an IMU that does not answer is no verdict", "[haptic_ao]")
         QF_gc(stray);
     }
     haptic_down();
+}
+
+/** @brief The row up to an IMU that never answers its capture: no verdict. */
+static void row_mute_on_imu(void)
+{
+    test_req();
+    (void)imu_expect(IMU_CAPTURE_REQ_SIG);   /* asked, and never answered */
+    row_wait(KODE_HAPTIC_REPLY_MS);
+    (void)spy_expect(HAPTIC_TEST_SIG);
+    TEST_ASSERT_FALSE(((const TestResultEvt *)spy_expect(TEST_RESULT_SIG))->ok);
+}
+
+TEST_CASE("a row with no verdict gives its window back during a station's pass, "
+          "and only then", "[haptic_ao][quiet]")
+{
+    const ImuCaptureReqEvt *rel;
+
+    /* No pass: the IMU hears nothing more, as it always has. */
+    bus_up(true);
+    haptic_up();
+    row_mute_on_imu();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, imu_pending(), "a row outside a pass gave its window back");
+    haptic_down();
+
+    td_session(true);
+    bus_up(true);
+    haptic_up();
+    row_mute_on_imu();
+    rel = (const ImuCaptureReqEvt *)imu_expect(IMU_RELEASE_REQ_SIG);
+    TEST_ASSERT_EQUAL_PTR(AO_Haptic, rel->who);
+    haptic_down();
+    td_session(false);
 }
 
 /* The flag is taken for the whole row, not for each of its buzzes: a request

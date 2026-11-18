@@ -1400,6 +1400,9 @@ enum KodeSignals {
                                  *   Answered to @c who with IMU_ENERGY_SIG. */
     IMU_ENERGY_SIG,             /**< To whoever asked for the drain
                                  *   (ImuEnergyEvt).                        */
+    IMU_RELEASE_REQ_SIG,        /**< AO_Imu: the holder gives back the
+                                 *   witness window it will not drain
+                                 *   (ImuCaptureReqEvt: who). No answer.     */
     IMU_TEST_REQ_SIG,           /**< AO_Imu: `test component=imu`; answers a
                                  *   published TEST_RESULT_SIG, the
                                  *   AUDIO_TEST_REQ_SIG shape. No payload.  */
@@ -1417,6 +1420,9 @@ enum KodeSignals {
                                  *   was not. This one is the QMI8658A's.   */
     MAG_REST_SIG,               /**< AO_Imu private one-shot QTimeEvt: the
                                  *   same, for the QMC5883P.                */
+    MAG_WAIT_SIG,               /**< AO_Imu private one-shot QTimeEvt: the
+                                 *   magnetometer row has waited
+                                 *   KODE_MAG_TEST_WAIT_MS for the IMU.     */
     MAG_READ_REQ_SIG,           /**< AO_Imu: one magnetometer sample into the
                                  *   caller's own int32_t[3] (MagReadEvt),
                                  *   answered inside the step that receives

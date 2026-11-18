@@ -550,6 +550,19 @@ void imu_capture_request(QActive *who);
 void imu_drain_request(QActive *who, uint16_t hz);
 
 /**
+ * @brief Give back the witness window @p who holds and will not drain
+ *        (IMU_RELEASE_REQ_SIG).
+ *
+ * Posts and returns. A window armed for @p who, or waiting for the gyroscope
+ * to be armed for it, is closed at once and the part goes back as it runs;
+ * the next window or row need not wait out KODE_IMU_CAPTURE_MAX_MS. A window
+ * already coming out, or one @p who does not hold, is left alone. No answer.
+ *
+ * @param who The holder. Never NULL.
+ */
+void imu_capture_release(QActive *who);
+
+/**
  * @brief Say how the next drain is taken, before asking for it.
  *
  * A window drained with @p more set leaves the part ready for the next
@@ -655,8 +668,9 @@ kode_status_t mag_cal_ask(QActive *who, uint8_t op, const kdrv_qmc5883p_cal_t *c
  *
  * Verdict: a published TEST_RESULT_SIG "mag", each step a MAG_TEST_SIG record
  * first. The part names itself, then the field at rest is published unjudged;
- * the self-test shift is logged, not judged (no datasheet threshold). Fails
- * while a witness window or the IMU's row holds the part.
+ * the self-test shift is logged, not judged (no datasheet threshold). While a
+ * witness window or the IMU's row holds the part the row waits for it,
+ * KODE_MAG_TEST_WAIT_MS at most, and fails past that.
  */
 void mag_test_request(void);
 
@@ -5542,6 +5556,18 @@ void test_dot_run_request(void);
  * @return true while a run goes.
  */
 bool test_dot_busy(void);
+
+/**
+ * @brief Whether a station's pass runs: from its first verb to `test_dot_end`
+ *        (or its idle bound), as AO_TestDot tells AO_Radio and AO_Net.
+ *
+ * What a row does differently for the station reads this, so a Kode with no
+ * station behaves as it always has. Read from other AOs, so it can be one
+ * step late.
+ *
+ * @return true while a pass runs.
+ */
+bool test_dot_session(void);
 
 /**
  * @brief The screen host has @p kind on the panel: posts

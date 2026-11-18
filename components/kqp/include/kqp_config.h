@@ -1535,6 +1535,14 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief The magnetometer row's own test budget: the identity, the
  *         self-test's 10 ms and one conversion, with room to spare. */
 #define KODE_MAG_TEST_BUDGET_MS   5000U
+/** @brief The longest the magnetometer row waits for a witness window or the
+ *         IMU's row to give the part back before it is refused: a window
+ *         nobody drains is closed after KODE_IMU_CAPTURE_MAX_MS. */
+#define KODE_MAG_TEST_WAIT_MS     1500U
+_Static_assert(KODE_MAG_TEST_WAIT_MS > KODE_IMU_CAPTURE_MAX_MS,
+               "the row outwaits a window nobody drains");
+_Static_assert(KODE_MAG_TEST_WAIT_MS < KODE_MAG_TEST_BUDGET_MS,
+               "the wait leaves the row its time inside the budget");
 
 /* ---- The haptic row -------------------------------------------------------
  * The motor is driven and the IMU is the witness; see
