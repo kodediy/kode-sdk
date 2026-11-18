@@ -101,10 +101,19 @@ enum KodeSignals {
                                  *   bytes did not survive the trip - kcli
                                  *   error 5.                                 */
     RECV_AGAIN_SIG,             /**< The receive protocol: AO_AppMgr refused the
-                                 *   stream for now and nothing was armed - an
-                                 *   app the image would evict has no copy on
-                                 *   the card yet. Ask again: kcli error 4.
+                                 *   stream for now - the card stayed busy
+                                 *   while an app the image would evict was
+                                 *   copied to it, or a compressed image
+                                 *   evicts an app with no copy that its wire
+                                 *   length did not. Ask again: kcli error 4.
                                  *   Bare and static, as the endings beside it. */
+    RECV_WAIT_SIG,              /**< The receive protocol: AO_AppMgr holds the
+                                 *   stream back while an app the image would
+                                 *   evict is copied to the card; the ready
+                                 *   comes after. Said when the wait begins
+                                 *   and every second of it: AO_Console
+                                 *   answers `>|wait` and gives the command
+                                 *   its time again. Bare and static.         */
     RECV_STALL_SIG,             /**< The receive protocol: the host stopped
                                  *   sending and never came back - kcli
                                  *   error 6.                                 */
@@ -2388,8 +2397,9 @@ typedef struct {
 /** @brief Why a write failed, as far as the glass needs to know. */
 typedef enum {
     KFAIL_WRITE = 0,  /**< The write itself: the image, the medium, the flash. */
-    KFAIL_BUSY,       /**< Nothing was written: an app this install would
-                       *   remove has no copy on the card yet. Ask again.     */
+    KFAIL_BUSY,       /**< Nothing was written: the card stayed busy while
+                       *   an app this install would remove was copied to
+                       *   it. Ask again.                                     */
     KFAIL_DATA,       /**< An app's data folder did not come or could not be
                        *   written. No app was installed or touched: the
                        *   folder is how an app looks, never what lets it
@@ -2432,8 +2442,7 @@ typedef struct {
 /** @brief What AO_AppMgr made of a request that asked for a verdict (AppReqRspEvt.verdict). */
 typedef enum {
     APP_REQ_TAKEN = 0,   /**< Taken: the install is under way, or the app is on its way to boot. */
-    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand, or an app the install would evict
-                          *   has no copy on the card yet: ask again.                          */
+    APP_REQ_BUSY,        /**< AO_AppMgr has work in hand: ask again.                           */
     APP_REQ_MISSING,     /**< The file is not on the medium, or the app is not installed.      */
     APP_REQ_EMPTY,       /**< The mailbox holds nothing to install.                            */
     APP_REQ_REFUSED      /**< Refused for another reason, which the log gives.                 */

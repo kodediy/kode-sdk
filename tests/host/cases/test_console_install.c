@@ -183,8 +183,8 @@ TEST_CASE("a terminal install's failure closes with the verb named, and a "
     TEST_ASSERT_TRUE(replied(">err code=6 msg=install"));
 }
 
-/* AO_AppMgr refuses a stream for now when an app it would evict has no copy
- * on the card yet: nothing was armed, and the host asks again. */
+/* AO_AppMgr refuses a stream for now when the card stays busy for the copy
+ * of an app the image would evict: nothing was armed, and the host asks again. */
 TEST_CASE("a terminal install refused for now closes with code 4 and busy",
           "[console_install]")
 {
@@ -194,6 +194,31 @@ TEST_CASE("a terminal install refused for now closes with code 4 and busy",
     answer(RECV_AGAIN_SIG);
     TEST_ASSERT_TRUE(replied(">err code=4 msg=busy"));
     TEST_ASSERT_FALSE(replied(">|ready"));
+}
+
+/** @brief How long the case leaves a held install quiet between two waits: under the command's time. */
+#define HELD_QUIET_MS  4000U
+
+/* AO_AppMgr copies an app the image evicts before it takes the wire, and says
+ * so every second: the host is told to wait, and the command is not timed out
+ * while the waits keep coming. */
+TEST_CASE("a terminal install held for a copy answers wait, and keeps its time while it is told",
+          "[console_install]")
+{
+    console_up();
+    type_line("install src=\"terminal\" dst=app size=8 crc32=0");
+    drain_queue(AO_AppMgr);
+
+    for ( unsigned second = 0U; second < 3U; ++second )
+    {
+        answer(RECV_WAIT_SIG);
+        TEST_ASSERT_TRUE(replied(">|wait"));
+        /* Most of the command's time, each time: three of them outlast it. */
+        (void)qf_support_tick(AO_Console, QF_SUPPORT_STEPS(HELD_QUIET_MS));
+        TEST_ASSERT_FALSE_MESSAGE(replied(">err"), "a command told to wait was timed out");
+    }
+    answer(RECV_READY_SIG);
+    TEST_ASSERT_TRUE(replied(">|ready chunk="));
 }
 
 TEST_CASE("install from the terminal to the C5 typed at the BLE console is "

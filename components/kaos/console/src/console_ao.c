@@ -1821,6 +1821,8 @@ static void h_factory_reset(Console *me, const kcmd_t *c, const karg_val_t *v)
  * all happened), not an accept:
  *
  *     host:  install src="terminal" dst=app size=N crc32=C run=on name="x"
+ *     board: >|wait                 (one a second while an app it evicts is
+ *                                    copied to the card first, if any is)
  *     board: >|evicted name="y" kept=off   (one per app it costs, if any)
  *     board: >|ready chunk=4096     (destination open, wire switched to raw)
  *     host:  <4096 raw bytes>
@@ -7272,6 +7274,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, APP_EVICTED_SIG);
     QActive_subscribe(&me->super, RECV_FAIL_SIG);
     QActive_subscribe(&me->super, RECV_AGAIN_SIG);
+    QActive_subscribe(&me->super, RECV_WAIT_SIG);
     QActive_subscribe(&me->super, RECV_STALL_SIG);
     QActive_subscribe(&me->super, APP_CAT_RSP_SIG);
     QActive_subscribe(&me->super, APP_ERASE_DONE_SIG);
@@ -8436,6 +8439,19 @@ static QState console_own(Console * const me, QEvt const * const e)
                 /* chunk= is the transfer's window: the host sends that many
                  * bytes, then waits for one `>|ack` before the next. */
                 console_reply(">|ready chunk=%u", (unsigned)KODE_RECV_CHUNK);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case RECV_WAIT_SIG: {
+            /* AO_AppMgr copies an app the image would evict to the card
+             * before it takes the wire: the host is told, on every one, and
+             * the command gets its time again, so a copy of any length is
+             * waited for while AO_AppMgr goes on saying it. */
+            if ( (uint8_t)KCLI_RECV == me->inflight )
+            {
+                console_extend(KCLI_CMD_TIMEOUT_MS);
+                console_reply(">|wait");
             }
             status = Q_HANDLED();
             break;

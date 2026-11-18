@@ -75,10 +75,12 @@
 /* Region bytes read per step while an evicted app is copied out of the
  * region: the same 32 KB the writes use, so a step stays short (rule 5). */
 #define APPMGR_KEEP_CHUNK      (32U * 1024U)
-/* The wait before an idle AO_AppMgr copies apps to the card, and the pause
- * between one app and the next. */
+/* The wait before an idle AO_AppMgr looks at the copies of its apps, and the
+ * pause after a copy was written before the next app. */
 #define APPMGR_BACKUP_IDLE_TICKS KQP_TICKS_PER_MS(KODE_APP_BACKUP_IDLE_MS)
 #define APPMGR_BACKUP_GAP_TICKS  KQP_TICKS_PER_MS(KODE_APP_BACKUP_GAP_MS)
+_Static_assert(UINT8_MAX > KODE_APP_COPY_BUSY_TRIES,
+               "the busy answers of a copy an install waits for are counted in a byte");
 #define APPMGR_NO_SEQ            0U       /**< No install number: install numbers start at 1. */
 #define APPMGR_US_PER_MS         1000ULL   /**< Microseconds in a millisecond: a wake's time is in microseconds. */
 #define APPMGR_KEEP_TMP_SUFFIX KODE_CARD_APP_TMP   /**< What a copy's name carries while it is written. */
@@ -188,7 +190,8 @@ static const AppFlashDoneEvt s_flash_done_evt = {
 static const AppFlashFailEvt s_flash_fail_evt = {
     QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_WRITE
 };
-/* An install refused for now: an app it evicts has no copy on the card yet. */
+/* An install refused for now: the card stayed busy while an app it evicts
+ * was copied to it. */
 static const AppFlashFailEvt s_flash_busy_fail_evt = {
     QEVT_INITIALIZER(APP_FLASH_FAIL_SIG), (uint8_t)KFAIL_BUSY
 };
@@ -400,7 +403,8 @@ typedef struct {
      * place. */
     bool        verify_pending;                /**< appmgr_place() deferred: read the file through first. */
     bool        verify_done;                   /**< The file was read through, or needs no reading. */
-    bool        verify_restart;                /**< The next FLASH_REQ_SIG goes on with this install. */
+    bool        verify_restart;                /**< The next FLASH_REQ_SIG goes on with this install: its file
+                                                *   was read through, or the copy it waited for is seen to. */
     bool        verify_opened;                 /**< The read-through's own open has answered. */
 
     /* ---- The CRC of the victims before an eviction ----------------------
@@ -410,10 +414,12 @@ typedef struct {
      * so the second plan notes them and evicts. Victims are known by seq:
      * unique, and the directory cannot change between the two plans - this
      * AO is its only writer, and it is busy. The copies of the apps are not
-     * made here: AppMgr_backing makes them ahead of the install. */
+     * made here: AppMgr_backing makes them ahead of the install, and
+     * AppMgr_copying the one an install finds missing. */
     uint8_t     origin;                        /**< APPMGR_ORIGIN_*          */
-    bool        busy_pending;                  /**< appmgr_place() refused: an app this install
-                                                *   evicts has no copy on the card yet. */
+    bool        busy_pending;                  /**< appmgr_place() stopped: an app this install
+                                                *   evicts has no copy on the card yet, and is
+                                                *   copied first (AppMgr_copying). */
     bool        keep_round;                    /**< The CRCs were taken; the
                                                 *   install running now is the
                                                 *   restart.                  */
@@ -613,8 +619,12 @@ struct appmgr_bk {
     bool        lp_dark;                   /**< A dark wake is on and this AO has not said it is done. */
     bool        dark_off;                  /**< A dark wake's end cut a copy: no other is asked for until AWAKE. */
     bool        full_told;                 /**< The card mounted was said to be full. */
-    bool        front_on;                  /**< An install was refused for the app @c front: it is seen to next. */
+    bool        front_on;                  /**< An install waits for the copy of the app @c front: it is seen to next. */
     bool        adopt_owed;                /**< The mailbox waits for that app's copy: adopted again once it is seen to. */
+    bool        held;                      /**< The AO is in AppMgr_copying: a request waits for that app's copy. */
+    bool        held_said;                 /**< A stream held back said its 0 %: an end before its ready ends that card. */
+    uint8_t     busy_tries;                /**< Steps of that copy the card refused as busy. */
+    AppRecvReqEvt recv;                    /**< The stream held back, asked for again once the app is seen to. */
     uint32_t    front;                     /**< That app, by install number.  */
     uint8_t     step;                      /**< backup_step_t: what the app in hand waits for. */
     uint32_t    seq;                       /**< The app in hand, by install number. */
@@ -679,6 +689,7 @@ static void          adopt_wait(AppMgr * const me);
 #if CONFIG_KODE_LOWPOWER
 static void          backup_round(AppMgr * const me, const LowPowerRoundEvt * const r);
 static void          backup_lp_state(AppMgr * const me, const LowPowerStateEvt * const s);
+static void          backup_lp_busy(AppMgr * const me, const LowPowerStateEvt * const s);
 #endif
 static void          backup_schedule(AppMgr * const me);
 static void          backup_stop(AppMgr * const me);
@@ -686,6 +697,9 @@ static bool          backup_tick(AppMgr * const me);
 static bool          backup_wanted(const AppMgr * const me);
 static void          backup_card(AppMgr * const me, const StorageCardEvt * const c);
 static QState AppMgr_backing(AppMgr * const me, QEvt const * const e);
+static QState AppMgr_copying(AppMgr * const me, QEvt const * const e);
+static QState        copy_hold_stream(AppMgr * const me, const AppRecvReqEvt * const req);
+static void          copy_card_end(AppMgr * const me);
 static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e);
 static QState AppMgr_launching(AppMgr * const me, QEvt const * const e);
 
@@ -3590,7 +3604,7 @@ static bool consume_chunk(AppMgr * const me, const StorageDataEvt *d)
     kode_status_t const wst = xfer_feed(me, buf, d->len);
     if ( me->busy_pending )
     {
-        return false;            /* refused for now: the caller says so */
+        return false;            /* stopped at its plan: the caller copies the app first */
     }
     /* The image's first bytes are in and its plan was made: the verdict a
      * file's asker waited for. Nothing once it is given. */
@@ -4137,10 +4151,11 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                     status = Q_HANDLED();
                     break;
                 }
-                /* A stream cannot be stopped at its plan and asked for again
-                 * by this AO: the plan it will make once the wire is taken is
-                 * made here first, and an app it evicts with no copy yet
-                 * refuses the stream before the host sends a byte. */
+                /* A stream cannot be stopped at its plan once the host
+                 * sends: the plan it will make when the wire is taken is made
+                 * here first, and an app it evicts with no copy yet holds the
+                 * stream back before the console is armed. The app is copied
+                 * at once, and the request comes back by itself. */
                 kapps_plan_t plan;
                 kapps_dir_t  dir = *kdrv_apps_dir();
                 if ( (kdrv_apps_plan(&dir, kdrv_apps_region_size(), req->size,
@@ -4148,14 +4163,7 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                                      backup_copied(me, &dir), &plan) == KODE_OK)
                     && backup_blocks(me, &dir, &plan) )
                 {
-                    KLOG_N(TAG, "install refused for now: an app it would evict "
-                                "has no copy on the card yet; ask again");
-                    QACTIVE_PUBLISH(&s_recv_again_evt, &me->super);
-                    if ( !me->bk->on )
-                    {
-                        backup_schedule(me);
-                    }
-                    status = Q_HANDLED();
+                    status = copy_hold_stream(me, req);
                     break;
                 }
             }
@@ -4233,6 +4241,8 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
 
             xfer_reset(me);
             me->recv_src = (uint8_t)KODE_LOG_SRC_NONE;   /* no stream: no link to drain */
+            /* A restart goes on with its install: after the round of the
+             * CRCs, the read-through, or the copy the install waited for. */
             if ( !me->keep_round && !me->verify_restart )
             {
                 keep_clear(me);
@@ -4722,6 +4732,12 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
             }
             break;
         }
+    }
+    /* A stream a copy held back said its 0 % while it waited: one refused
+     * on its way back to the wire has that card to end. */
+    if ( ((QSignal)APP_RECV_REQ_SIG == e->sig) && (Q_RET_TRAN != status) )
+    {
+        copy_card_end(me);
     }
     /* The card a fetch kept up is the next install's from a medium or a URL,
      * and only one that begins takes it over; one refused before it began
@@ -5408,8 +5424,8 @@ static void backup_schedule(AppMgr * const me)
     }
     else if ( me->bk->front_on || me->bk->lp_dark )
     {
-        /* An install was refused for it and will be asked again, or a dark
-         * wake is held for the copies: no wait. */
+        /* The mailbox waits for it, or a dark wake is held for the copies:
+         * no wait. */
         backup_arm(me, APPMGR_CHUNK_GAP_TICKS);
     }
     else
@@ -5431,16 +5447,17 @@ static bool backup_owed(appmgr_backup_state_t state)
 /**
  * @brief Whether this plan evicts an app whose copy the card could still take.
  *
- * Such an install is refused for now: the first such app goes to the front
- * of the copies, and the asker asks again. A card at rest for an app counts
- * as in: the copy's first request brings it back. An app the card has, one
+ * Such an install waits: the first such app goes to the front of the copies
+ * and is copied at once (AppMgr_copying), and the install goes on by itself.
+ * A card at rest for an app counts as in: the copy's first request brings it
+ * back. An app the card has, one
  * whose copy could not be made, and every app when no card answers, are
  * evicted as the plan says. The app the install replaces is not lost by it.
  *
  * @param me   The AO.
  * @param d    The directory the plan was made on.
  * @param plan The plan.
- * @return true to refuse the install for now.
+ * @return true to hold the install back until that app is seen to.
  */
 static bool backup_blocks(AppMgr * const me, const kapps_dir_t *d,
                           const kapps_plan_t *plan)
@@ -5577,7 +5594,7 @@ static void backup_round(AppMgr * const me, const LowPowerRoundEvt * const r)
         if ( ((uint8_t)KODE_LP_ASLEEP == r->target) && backup_wanted(me) && (!me->bk->dark_off) )
         {
             (void)lowpower_wake_at(me->lp_who,
-                                   khal_time_us() + ((uint64_t)KODE_APP_BACKUP_IDLE_MS * APPMGR_US_PER_MS));
+                                   khal_time_us() + ((uint64_t)KODE_APP_BACKUP_DARK_MS * APPMGR_US_PER_MS));
         }
     }
     lowpower_ready(me->lp_who, r->round, false, NULL);
@@ -5634,6 +5651,39 @@ static void backup_lp_state(AppMgr * const me, const LowPowerStateEvt * const s)
     else
     {
         /* ASLEEP and OFF: the round did it all */
+    }
+}
+
+/**
+ * @brief LOWPOWER_STATE_SIG with work in hand: no copy is begun from here, and
+ *        what was noted of the board's rest is brought up to date.
+ *
+ * A dark wake is held for nothing. An AWAKE that comes during an install ends
+ * the rest all the same: left noted, no copy would be begun until the board
+ * had slept and woken again.
+ *
+ * @param me The AO, in a state under AppMgr_busy.
+ * @param s  The board's state.
+ */
+static void backup_lp_busy(AppMgr * const me, const LowPowerStateEvt * const s)
+{
+    if ( (uint8_t)KODE_LP_DARK == s->state )
+    {
+        if ( NULL != me->bk )
+        {
+            me->bk->lp_dark = false;
+        }
+        lowpower_dark_done(me->lp_who);
+    }
+    else if ( ((uint8_t)KODE_LP_AWAKE == s->state) && (NULL != me->bk) )
+    {
+        me->bk->rest     = false;
+        me->bk->lp_dark  = false;
+        me->bk->dark_off = false;
+    }
+    else
+    {
+        /* ASLEEP and OFF: a state under AppMgr_busy refused the round */
     }
 }
 #endif /* CONFIG_KODE_LOWPOWER */
@@ -5723,8 +5773,11 @@ static void backup_release(AppMgr * const me)
  * @brief The app in hand is seen to: note what is known and pause before the next.
  * @param me    The AO.
  * @param state What is known of its copy now.
+ * @param pause How long before the next app, in QP ticks: the pause after a
+ *              copy the card was asked to write, a short one after a copy
+ *              that was only found.
  */
-static void backup_settle(AppMgr * const me, appmgr_backup_state_t state)
+static void backup_settle(AppMgr * const me, appmgr_backup_state_t state, uint32_t pause)
 {
     appmgr_backup_set(&me->bk->table, me->bk->seq, state);
     if ( me->bk->front_on && (me->bk->front == me->bk->seq) && (!backup_owed(state)) )
@@ -5737,7 +5790,19 @@ static void backup_settle(AppMgr * const me, appmgr_backup_state_t state)
         me->bk->buf = NULL;
     }
     me->bk->step = (uint8_t)BK_WAIT;
-    backup_arm(me, APPMGR_BACKUP_GAP_TICKS);
+    backup_arm(me, pause);
+}
+
+/**
+ * @brief Count a step the card refused as busy while an install waits for the copy.
+ * @param me The AO.
+ */
+static void backup_busy_count(AppMgr * const me)
+{
+    if ( me->bk->held && (UINT8_MAX > me->bk->busy_tries) )
+    {
+        ++me->bk->busy_tries;
+    }
 }
 
 /**
@@ -5748,7 +5813,8 @@ static void backup_settle(AppMgr * const me, appmgr_backup_state_t state)
  * without its copy while a good card is in: KODE_DENIED is AO_Storage busy
  * with another asker's file or its queue of held requests full, the PSRAM
  * may be free at the next try, and a replacement that failed is made again
- * from its STAT.
+ * from its STAT. While an install waits for the copy each such step is
+ * counted, so the install is not held without end (AppMgr_copying).
  *
  * @param me  The AO.
  * @param why What stopped the step, for the log.
@@ -5756,6 +5822,7 @@ static void backup_settle(AppMgr * const me, appmgr_backup_state_t state)
 static void backup_later(AppMgr * const me, const char *why)
 {
     KLOG_I(TAG, "'%s' is seen to again after the pause: %s", me->bk->name, why);
+    backup_busy_count(me);
     if ( NULL != me->bk->buf )
     {
         khal_free(me->bk->buf);
@@ -5769,7 +5836,8 @@ static void backup_later(AppMgr * const me, const char *why)
  * @brief Take the next app in hand and ask the card about it.
  *
  * An app whose image has no name or no build id cannot have a copy told from
- * another file: it is skipped, and the one after it is taken.
+ * another file: it is skipped, and the one after it is taken. While an install
+ * waits for a copy (AppMgr_copying) only the app at the front is taken.
  *
  * @param me The AO, with no app in hand.
  * @return true when a STAT is out; false when no app is left to see to.
@@ -5796,7 +5864,7 @@ static bool backup_begin(AppMgr * const me)
                 ent = NULL;
             }
         }
-        if ( (NULL == ent) && (!me->bk->away) )
+        if ( (NULL == ent) && (!me->bk->away) && (!me->bk->held) )
         {
             /* At rest for an app, the card is woken for an install's app alone. */
             ent = appmgr_backup_next(&me->bk->table, kdrv_apps_dir());
@@ -5908,7 +5976,7 @@ static void backup_read_step(AppMgr * const me)
         && (kdrv_apps_read(me->bk->off + me->bk->fill, &me->bk->buf[me->bk->fill], n) != KODE_OK) )
     {
         KLOG_W(TAG, "'%s' could not be read out of the region", me->bk->name);
-        backup_settle(me, APPMGR_BACKUP_SKIPPED);
+        backup_settle(me, APPMGR_BACKUP_SKIPPED, APPMGR_BACKUP_GAP_TICKS);
     }
     else
     {
@@ -5967,7 +6035,7 @@ static QState backup_on_stat(AppMgr * const me, const StoragePathRspEvt * const 
     {
         KLOG_W(TAG, "'%s' on the card is a folder; '%s' cannot be copied there",
                me->bk->path, me->bk->name);
-        backup_settle(me, APPMGR_BACKUP_SKIPPED);
+        backup_settle(me, APPMGR_BACKUP_SKIPPED, APPMGR_BACKUP_GAP_TICKS);
     }
     else if ( card_has_copy(r, me->bk->len) )
     {
@@ -5998,8 +6066,10 @@ static void backup_on_desc(AppMgr * const me, const StorageDescRspEvt * const d)
     else if ( ((uint8_t)KODE_OK == d->status)
              && appmgr_backup_same(me->bk->len, d->build, me->bk->len, me->bk->build) )
     {
+        /* Found, not written: the card answered a STAT and a short read, and
+         * the next app is looked at without the pause. */
         KLOG_D(TAG, "'%s' has its copy on the card", me->bk->name);
-        backup_settle(me, APPMGR_BACKUP_COPIED);
+        backup_settle(me, APPMGR_BACKUP_COPIED, APPMGR_CHUNK_GAP_TICKS);
     }
     else
     {
@@ -6026,6 +6096,7 @@ static void backup_on_write(AppMgr * const me, const StorageWriteRspEvt * const 
          * the region. A request, or a card mounted again, gives it up. */
         KLOG_I(TAG, "'%s' is written again after the pause: the card is busy",
                me->bk->name);
+        backup_busy_count(me);
         me->bk->step = (uint8_t)BK_READ;    /* read whole: the next step asks the write */
         backup_arm(me, APPMGR_BACKUP_GAP_TICKS);
     }
@@ -6052,14 +6123,14 @@ static void backup_on_write(AppMgr * const me, const StorageWriteRspEvt * const 
                             "the card for the apps to be kept", me->bk->name);
                 QACTIVE_PUBLISH(&full_evt, &me->super);
             }
-            backup_settle(me, APPMGR_BACKUP_SKIPPED);
+            backup_settle(me, APPMGR_BACKUP_SKIPPED, APPMGR_BACKUP_GAP_TICKS);
         }
         else if ( (uint8_t)KODE_OK != w->status )
         {
             KLOG_W(TAG, "'%s' could not be copied to the card: %lu of %lu bytes written",
                    me->bk->name, (unsigned long)w->written, (unsigned long)me->bk->len);
             backup_drop_tmp(me);
-            backup_settle(me, APPMGR_BACKUP_SKIPPED);
+            backup_settle(me, APPMGR_BACKUP_SKIPPED, APPMGR_BACKUP_GAP_TICKS);
         }
         else
         {
@@ -6084,7 +6155,7 @@ static void backup_on_move(AppMgr * const me, const StoragePathRspEvt * const r)
     if ( (uint8_t)KODE_OK == r->rc )
     {
         KLOG_N(TAG, "'%s' copied to %s", me->bk->name, me->bk->path);
-        backup_settle(me, APPMGR_BACKUP_COPIED);
+        backup_settle(me, APPMGR_BACKUP_COPIED, APPMGR_BACKUP_GAP_TICKS);
     }
     else if ( (uint8_t)KODE_DENIED == r->rc )
     {
@@ -6102,42 +6173,24 @@ static void backup_on_move(AppMgr * const me, const StoragePathRspEvt * const r)
 }
 
 /**
- * @brief Background work of an idle AO: copy the apps to the card, one at a time.
+ * @brief Take an event that moves the copy in hand on: its one-shot, or an
+ *        answer of AO_Storage's.
  *
- * A request idle answers by doing something to the region or the card first
- * gives up the copy in hand, so the write's abandon reaches AO_Storage ahead
- * of whatever the request asks of it.
+ * What AppMgr_backing and AppMgr_copying do with the same four signals: the
+ * card is asked about the app, its image is read a piece a step, written
+ * under a temporary name and put on its own.
  *
- * @param me The AO.
- * @param e  The event.
- * @return The QP status.
+ * @param me The AO, with the copies' state had and bk->on set.
+ * @param e  APP_BACKUP_TMO_SIG, STORAGE_PATH_RSP_SIG, STORAGE_DESC_RSP_SIG or
+ *           STORAGE_WRITE_RSP_SIG.
+ * @return The QP status: handled, or a transition to AppMgr_idle when no app
+ *         is left to see to or no card answers.
  */
-static QState AppMgr_backing(AppMgr * const me, QEvt const * const e)
+static QState backup_step(AppMgr * const me, QEvt const * const e)
 {
     QState status;
     switch ( e->sig )
     {
-        case Q_ENTRY_SIG: {
-            me->bk->on   = true;
-            me->bk->step = (uint8_t)BK_WAIT;
-            if ( !backup_begin(me) )
-            {
-                /* Nothing could be begun: the next tick leaves the state,
-                 * which an entry action cannot. */
-                backup_arm(me, 1U);
-            }
-            status = Q_HANDLED();
-            break;
-        }
-        case Q_EXIT_SIG: {
-            backup_release(me);
-            me->bk->on = false;
-#if CONFIG_KODE_LOWPOWER
-            backup_dark_check(me);     /* left with nothing owed: the dark wake is done with */
-#endif
-            status = Q_HANDLED();
-            break;
-        }
         case APP_BACKUP_TMO_SIG: {
             status = Q_HANDLED();
             if ( !backup_tick(me) )
@@ -6221,6 +6274,58 @@ static QState AppMgr_backing(AppMgr * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+        default: {
+            status = Q_HANDLED();
+            break;
+        }
+    }
+    return status;
+}
+
+/**
+ * @brief Background work of an idle AO: copy the apps to the card, one at a time.
+ *
+ * A request idle answers by doing something to the region or the card first
+ * gives up the copy in hand, so the write's abandon reaches AO_Storage ahead
+ * of whatever the request asks of it.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return The QP status.
+ */
+static QState AppMgr_backing(AppMgr * const me, QEvt const * const e)
+{
+    QState status;
+    switch ( e->sig )
+    {
+        case Q_ENTRY_SIG: {
+            me->bk->on   = true;
+            me->bk->step = (uint8_t)BK_WAIT;
+            if ( !backup_begin(me) )
+            {
+                /* Nothing could be begun: the next tick leaves the state,
+                 * which an entry action cannot. */
+                backup_arm(me, 1U);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case Q_EXIT_SIG: {
+            backup_release(me);
+            me->bk->on = false;
+#if CONFIG_KODE_LOWPOWER
+            backup_dark_check(me);     /* left with nothing owed: the dark wake is done with */
+#endif
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BACKUP_TMO_SIG:
+        case STORAGE_PATH_RSP_SIG:
+        case STORAGE_DESC_RSP_SIG:
+        case STORAGE_WRITE_RSP_SIG: {
+            status = backup_step(me, e);
+            break;
+        }
         case APP_RECV_REQ_SIG:
         case FLASH_REQ_SIG:
         case APP_RUN_REQ_SIG:
@@ -6255,6 +6360,278 @@ static QState AppMgr_backing(AppMgr * const me, QEvt const * const e)
 #endif
         default: {
             status = Q_SUPER(&AppMgr_idle);
+            break;
+        }
+    }
+    return status;
+}
+
+/* ---- An install that waits for a copy ---------------------------------------
+ * An install whose plan evicts an app the card could still take a copy of is
+ * stopped before anything is committed. That app is copied at once, with the
+ * steps the idle copies use, and the request starts again from the top: a
+ * stream from its request, an install off a medium from its open.
+ */
+
+/**
+ * @brief Say the install waits: its 0 %, and for a stream the host's wait.
+ *
+ * The write card and the LED follow the reports alone, and AO_Console gives a
+ * stream's command its time again on each wait.
+ *
+ * @param me The AO, in AppMgr_copying.
+ */
+static void copy_say(AppMgr * const me)
+{
+    /* Bare and static, as the endings of the receive protocol are. */
+    static const QEvt wait = QEVT_INITIALIZER(RECV_WAIT_SIG);
+
+    progress_publish(me, 0U);
+    if ( (uint8_t)APPMGR_ORIGIN_CONSOLE == me->origin )
+    {
+        me->bk->held_said = true;
+        QACTIVE_PUBLISH(&wait, &me->super);
+    }
+}
+
+/**
+ * @brief End the card a stream raised while it waited for a copy, when it is
+ *        still that stream's to end.
+ * @param me The AO.
+ */
+static void copy_card_end(AppMgr * const me)
+{
+    if ( (NULL != me->bk) && me->bk->held_said )
+    {
+        me->bk->held_said = false;
+        QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);
+    }
+}
+
+/**
+ * @brief Hold a stream back before the console is armed: an app its plan
+ *        evicts has no copy on the card yet.
+ *
+ * The request is kept to be asked for again, and what the reports of the
+ * wait name is the stream's: no file, the project the host read.
+ *
+ * @param me  The AO, idle, with the app at the front of the copies.
+ * @param req The stream's request.
+ * @return The transition to AppMgr_copying.
+ */
+static QState copy_hold_stream(AppMgr * const me, const AppRecvReqEvt * const req)
+{
+    me->bk->recv   = *req;
+    me->origin     = (uint8_t)APPMGR_ORIGIN_CONSOLE;
+    me->os_target  = false;
+    me->launch     = req->launch;
+    me->total      = 0U;
+    me->written    = 0U;
+    me->file[0]    = '\0';
+    (void)snprintf(me->project, sizeof(me->project), "%s", req->name);
+    return Q_TRAN(&AppMgr_copying);
+}
+
+/**
+ * @brief End the install that waited, with nothing changed.
+ *
+ * A stream had armed nothing and opened no record: its console is answered,
+ * and the card its wait raised is ended. An install off a medium ends as any
+ * other that fails.
+ *
+ * @param me     The AO, in AppMgr_copying.
+ * @param why    The log's phrase.
+ * @param reason What the glass is told (kfail_t): KFAIL_BUSY to ask again.
+ */
+static void copy_fail(AppMgr * const me, const char *why, kfail_t reason)
+{
+    if ( (uint8_t)APPMGR_ORIGIN_CONSOLE != me->origin )
+    {
+        flash_fail(me, why, reason);
+    }
+    else if ( KFAIL_BUSY == reason )
+    {
+        KLOG_N(TAG, "install refused for now: %s", why);
+        me->bk->held_said = false;
+        keep_clear(me);
+        QACTIVE_PUBLISH(&s_recv_again_evt, &me->super);
+        QACTIVE_PUBLISH(&s_flash_busy_fail_evt.super, &me->super);
+    }
+    else
+    {
+        KLOG_E(TAG, "install failed: %s", why);
+        me->bk->held_said = false;
+        keep_clear(me);
+        QACTIVE_PUBLISH(&s_recv_fail_evt, &me->super);
+        QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);
+    }
+}
+
+/**
+ * @brief The app the install waited for is seen to: start the request again
+ *        from the top, ahead of any request already queued.
+ *
+ * LIFO, as install_again() posts: nothing runs between the copy and the
+ * install it was made for.
+ *
+ * @param me The AO, in AppMgr_copying.
+ */
+static void copy_resume(AppMgr * const me)
+{
+    KLOG_I(TAG, "the install goes on");
+    if ( (uint8_t)APPMGR_ORIGIN_CONSOLE != me->origin )
+    {
+        me->verify_restart = true;    /* the next FLASH_REQ_SIG is this install's */
+        install_again(me);            /* a failed post calls flash_fail() itself */
+    }
+    else
+    {
+        AppRecvReqEvt * const r = Q_NEW_X(AppRecvReqEvt, 0U, APP_RECV_REQ_SIG);
+
+        if ( NULL == r )
+        {
+            copy_fail(me, "out of events to take the stream", KFAIL_WRITE);
+        }
+        else
+        {
+            r->dst    = me->bk->recv.dst;
+            r->size   = me->bk->recv.size;
+            r->crc32  = me->bk->recv.crc32;
+            r->launch = me->bk->recv.launch;
+            r->src    = me->bk->recv.src;
+            (void)snprintf(r->name, sizeof(r->name), "%s", me->bk->recv.name);
+            QACTIVE_POST_LIFO(&me->super, &r->super);
+        }
+    }
+}
+
+/**
+ * @brief After a step of the copy an install waits for: go on, or end the wait.
+ *
+ * The wait ends when the app is seen to - copied, found copied, one the card
+ * takes no copy of - or when no card answers: the plan made again then evicts
+ * as it finds things. A card that refused as busy more than
+ * KODE_APP_COPY_BUSY_TRIES steps ends the install as busy, nothing changed.
+ *
+ * @param me   The AO, in AppMgr_copying.
+ * @param step What the step returned.
+ * @return The QP status: handled while the copy goes on, else the transition
+ *         to AppMgr_idle.
+ */
+static QState copy_judge(AppMgr * const me, QState step)
+{
+    QState status = step;
+
+    if ( (!me->bk->front_on) || me->bk->nocard || (Q_RET_TRAN == step) )
+    {
+        copy_resume(me);
+        status = Q_TRAN(&AppMgr_idle);
+    }
+    else if ( (uint8_t)KODE_APP_COPY_BUSY_TRIES < me->bk->busy_tries )
+    {
+        copy_fail(me, "the card stayed busy while an app the install would evict "
+                      "was copied to it; ask again", KFAIL_BUSY);
+        status = Q_TRAN(&AppMgr_idle);
+    }
+    else
+    {
+        /* the copy goes on */
+    }
+    return status;
+}
+
+/**
+ * @brief An install waits while an app it would evict is copied to the card.
+ *
+ * Entered with that app at the front of the copies (backup_blocks()) and
+ * nothing committed. The install's 0 % is said at once and again every
+ * second, so the write card and the LED have something to follow, and a
+ * stream's host is told to wait. Every other request is refused as busy, as
+ * during any install, and so is a round of rest.
+ *
+ * @param me The AO.
+ * @param e  The event.
+ * @return The QP status.
+ */
+static QState AppMgr_copying(AppMgr * const me, QEvt const * const e)
+{
+    QState status;
+    switch ( e->sig )
+    {
+        case Q_ENTRY_SIG: {
+            me->bk->on         = true;
+            me->bk->held       = true;
+            me->bk->busy_tries = 0U;
+            me->bk->step       = (uint8_t)BK_WAIT;
+            copy_say(me);
+            (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            if ( backup_begin(me) )
+            {
+                KLOG_N(TAG, "the install waits: '%s', which it would evict, is "
+                            "copied to the card first", me->bk->name);
+            }
+            else
+            {
+                /* Nothing could be begun: the next tick ends the wait, which
+                 * an entry action cannot. */
+                backup_arm(me, 1U);
+            }
+            status = Q_HANDLED();
+            break;
+        }
+        case Q_EXIT_SIG: {
+            backup_release(me);
+            me->bk->on   = false;
+            me->bk->held = false;
+            (void)QTimeEvt_disarm(&me->beat);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BEAT_SIG: {
+            copy_say(me);
+            (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_BACKUP_TMO_SIG:
+        case STORAGE_PATH_RSP_SIG:
+        case STORAGE_DESC_RSP_SIG:
+        case STORAGE_WRITE_RSP_SIG: {
+            status = copy_judge(me, backup_step(me, e));
+            break;
+        }
+        case STORAGE_CARD_SIG: {
+            /* A card that goes ends the wait; one that mounts is asked about
+             * the app again. */
+            backup_card(me, Q_EVT_CAST(StorageCardEvt));
+            status = copy_judge(me, Q_HANDLED());
+            break;
+        }
+        case APP_CANCEL_REQ_SIG: {
+            appmgr_inst_why(APPMGR_WHY_CANCELLED);
+            copy_fail(me, "the person went back", KFAIL_WRITE);
+            status = Q_TRAN(&AppMgr_idle);
+            break;
+        }
+        case FLASH_REQ_SIG:
+        case APP_RUN_REQ_SIG:
+        case APP_ERASE_REQ_SIG:
+        case APP_LIST_REQ_SIG:
+        case APP_RECV_REQ_SIG: {
+            KLOG_W(TAG, "busy copying an app an install evicts; request ignored");
+            busy_deny(e);
+            status = Q_HANDLED();
+            break;
+        }
+        case APP_CAT_REQ_SIG: {
+            KLOG_W(TAG, "busy copying an app an install evicts; app_cat request "
+                        "denied");
+            app_cat_deny(me);
+            status = Q_HANDLED();
+            break;
+        }
+        default: {
+            status = Q_SUPER(&AppMgr_busy);
             break;
         }
     }
@@ -7409,11 +7786,7 @@ static QState AppMgr_busy(AppMgr * const me, QEvt const * const e)
             break;
         }
         case LOWPOWER_STATE_SIG: {
-            /* No copy is made from here: a dark wake is held for nothing. */
-            if ( (uint8_t)KODE_LP_DARK == Q_EVT_CAST(LowPowerStateEvt)->state )
-            {
-                lowpower_dark_done(me->lp_who);
-            }
+            backup_lp_busy(me, Q_EVT_CAST(LowPowerStateEvt));
             status = Q_HANDLED();
             break;
         }
@@ -7945,9 +8318,13 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             {
                 if ( me->busy_pending )
                 {
-                    flash_fail(me, "an app it would evict has no copy on the "
-                                   "card yet; ask again", KFAIL_BUSY);
-                    status = Q_TRAN(&AppMgr_idle);
+                    /* Nothing was committed: the transfer and its medium are
+                     * let go, the app is copied, and the install starts
+                     * again. Its asker is told now that it is taken. */
+                    keep_pause(me);
+                    me->busy_pending = false;
+                    req_settle(me, APP_REQ_TAKEN);
+                    status = Q_TRAN(&AppMgr_copying);
                     break;
                 }
                 if ( me->verify_pending )
@@ -8429,8 +8806,15 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
 {
     /* Open means announced: the session opens in the same step that
      * publishes the ready and its 0 %, so only an install the glass has
-     * already seen start owes it a failure. */
-    bool const announced = me->writing;
+     * already seen start owes it a failure. A stream held back for a copy
+     * said its 0 % while it waited. */
+    bool announced = me->writing;
+
+    if ( (NULL != me->bk) && me->bk->held_said )
+    {
+        me->bk->held_said = false;
+        announced = true;
+    }
 
     QTimeEvt_disarm(&me->idle);
 

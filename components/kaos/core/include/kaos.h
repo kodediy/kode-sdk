@@ -4252,6 +4252,13 @@ void appmgr_cat_request(const char *project, const char *cats, bool clear);
  * KODE_FLASH_DST_PENDING the mailbox (undecoded). Answered with RECV_READY_SIG,
  * then RECV_DONE_SIG / RECV_FAIL_SIG / RECV_STALL_SIG, plus APP_FLASH_* progress.
  *
+ * An image for the region that would evict an app with no copy on the card
+ * yet is held back before the wire is taken: that app is copied first, with
+ * RECV_WAIT_SIG and APP_FLASH_PROGRESS_SIG at 0 % at once and every second of
+ * it, and the ready follows by itself. RECV_AGAIN_SIG ends a stream whose
+ * copy the card stayed busy for, and a compressed one whose image evicts an
+ * app with no copy that its wire length did not: nothing changed, ask again.
+ *
  * @param dst    KFW_TARGET_APP or KFW_TARGET_OS.
  * @param size   Payload length in bytes.
  * @param crc32  What khal_crc32() over the whole payload must equal.

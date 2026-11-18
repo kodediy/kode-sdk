@@ -12260,6 +12260,24 @@ TEST_CASE("an app whose copy is on the card is not copied",
 
 /* A new version of an app can be as long as the one before: the card's file
  * is the copy only with the build id of the image installed. */
+/* A copy found costs the card a STAT and a short read: the pause is for a
+ * copy that was written. */
+TEST_CASE("an app found copied lets the next one be asked about without the pause",
+          "[appmgr_ao][backup]")
+{
+    backup_fresh(2U);
+    backup_wait();
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/first.bin",
+                    "the oldest app was not asked about");
+    answer_copy_of(KAPPS_ALIGN);
+    storage_expect(STORAGE_DESC_REQ_SIG, "the file was not asked its build id");
+    answer_desc("/sdcard/first.bin", BACKUP_BUILD);
+
+    TEST_ASSERT_TRUE_MESSAGE(path_asked_within("/sdcard/second.bin", BACKUP_SLACK_STEPS),
+        "the next app waited a pause after a copy that was only found");
+    backup_end();
+}
+
 TEST_CASE("a file of the app's length made by another build is copied over",
           "[appmgr_ao][backup]")
 {
@@ -12460,8 +12478,8 @@ TEST_CASE("a round of rest gives up the copy in hand and is answered ready",
 
 /* ---- An install and the copies ---------------------------------------------------
  * An install evicts the apps the card has first. One that would evict an app
- * the card could still take a copy of is refused for now: that app is copied
- * next, and the asker asks again. */
+ * the card could still take a copy of waits: that app is copied at once, the
+ * install's card held at 0 %, and the install goes on by itself. */
 
 /** @brief "old" fills the region, and a card has just mounted: nothing is known of its copy. */
 static void busy_fresh(void)
@@ -12489,55 +12507,33 @@ static void old_is_copied_next(void)
     TEST_ASSERT_TRUE(klog_has("'old' copied to /sdcard/old.bin"));
 }
 
-TEST_CASE("an install that would evict an app with no copy is answered busy, and taken once the copy is made",
-          "[appmgr_ao][backup]")
+/**
+ * @brief Ask for "new.bin" off the internal FAT, the spy its asker, and bring
+ *        its first bytes: the plan names "old".
+ * @return The image's length.
+ */
+static uint32_t new_asked_for(void)
 {
-    uint8_t why = 0xFFU;
-
-    busy_fresh();
-    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
     uint32_t const len = image_named("new");
 
     ask_install_from((uint8_t)KFW_SRC_FS, "new.bin", (uint8_t)KFW_TARGET_APP);
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);                          /* the plan: "old" has to go */
+    return len;
+}
 
-    unsigned verdicts = 0U;
-    unsigned fails    = 0U;
-    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
-    {
-        if ( (enum_t)e->sig == APP_REQ_RSP_SIG )
-        {
-            TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_BUSY,
-                ((AppReqRspEvt const *)e)->verdict, "the asker was not told to ask again");
-            ++verdicts;
-        }
-        if ( (enum_t)e->sig == APP_FLASH_FAIL_SIG )
-        {
-            why = ((AppFlashFailEvt const *)e)->why;
-            ++fails;
-        }
-    }
-    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
-    TEST_ASSERT_EQUAL_UINT(1U, verdicts);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "what the install's start raised was left up");
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)KFAIL_BUSY, why);
-    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app with no copy was evicted");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, klog_count_of("is taken before this install"),
-        "a refused install went on to its round");
-
-    old_is_copied_next();
-
-    /* Asked again: its victim has its copy, and it goes. */
-    ask_install_from((uint8_t)KFW_SRC_FS, "new.bin", (uint8_t)KFW_TARGET_APP);
-    storage_expect(STORAGE_OPEN_REQ_SIG, "the install asked again never asked for its file");
+/**
+ * @brief The install held back for a copy goes on by itself, as far as the
+ *        plan that evicts "old": nobody asks for it again.
+ * @param len The image's length.
+ */
+static void held_install_goes_on(uint32_t len)
+{
+    storage_expect(STORAGE_OPEN_REQ_SIG,
+                   "the install did not go on by itself once its victim was seen to");
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);
-    verdicts_t const v = spy_verdicts();
-    TEST_ASSERT_EQUAL_UINT(1U, v.count);
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_TAKEN, v.first,
-        "an install whose victim has its copy was refused");
     if ( read_through_asked() )
     {
         read_through(s_named_img, len, len, len, (uint8_t)KDRV_MEDIUM_FS);
@@ -12545,10 +12541,234 @@ TEST_CASE("an install that would evict an app with no copy is answered busy, and
     storage_expect(STORAGE_OPEN_REQ_SIG, "the install did not start again after its round");
     answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
     answer_data(len);
+}
+
+/** @brief What the spy heard of an install: its verdicts and its failures; the spy is drained. */
+typedef struct {
+    unsigned verdicts;               /**< How many APP_REQ_RSP_SIG came.      */
+    uint8_t  verdict;                /**< The last one's verdict.             */
+    unsigned fails;                  /**< How many APP_FLASH_FAIL_SIG came.   */
+    uint8_t  why;                    /**< The last one's reason.              */
+} held_heard_t;
+
+/** @brief Count the verdicts and the failures the spy holds. */
+static held_heard_t spy_held(void)
+{
+    held_heard_t h = { 0U, 0xFFU, 0U, 0xFFU };
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)e->sig == APP_REQ_RSP_SIG )
+        {
+            h.verdict = ((AppReqRspEvt const *)e)->verdict;
+            ++h.verdicts;
+        }
+        if ( (enum_t)e->sig == APP_FLASH_FAIL_SIG )
+        {
+            h.why = ((AppFlashFailEvt const *)e)->why;
+            ++h.fails;
+        }
+    }
+    ao_spy_release();
+    return h;
+}
+
+TEST_CASE("an install that would evict an app with no copy waits for the copy, and goes on by itself",
+          "[appmgr_ao][backup][hold]")
+{
+    busy_fresh();
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+    uint32_t const len = new_asked_for();
+
+    held_heard_t h = spy_held();
+    TEST_ASSERT_EQUAL_UINT(1U, h.verdicts);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_TAKEN, h.verdict,
+        "an install that waits for a copy was not told it is taken");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, h.fails, "an install that waits for a copy was told as failed");
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app with no copy was evicted");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, klog_count_of("is taken before this install"),
+        "an install went on to its round before its victim's copy");
+
+    old_is_copied_next();
+
+    /* Nobody asks again: the install opens its file anew. */
+    held_install_goes_on(len);
     TEST_ASSERT_TRUE_MESSAGE(klog_has("evicting 'old' to make room; its copy is on the card"),
         "the app the card has was not evicted as one with its copy");
     answer_eof();
     run_ticks(4U);
+    h = spy_held();
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, h.verdicts, "the install held for a copy was answered twice");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, h.fails, "the install held for a copy failed");
+    TEST_ASSERT_FALSE_MESSAGE(old_installed(), "the install never evicted its victim");
+    backup_end();
+}
+
+/** @brief How long a case watches an install wait for a copy the card has not answered about. */
+#define HOLD_WATCH_MS  3000U
+
+/* The write card and the LED follow the reports alone: a copy that takes
+ * seconds says the install's 0 % again on the beat. */
+TEST_CASE("an install that waits for a copy says 0 % again every second",
+          "[appmgr_ao][backup][hold]")
+{
+    busy_fresh();
+    (void)new_asked_for();
+    ao_spy_drain();
+    ao_spy_subscribe(APP_FLASH_PROGRESS_SIG);
+
+    run_ticks(QF_SUPPORT_STEPS(HOLD_WATCH_MS) + BACKUP_SLACK_STEPS);   /* the STAT is out, unanswered */
+    progress_seen_t const seen = spy_progress();
+    QActive_unsubscribe(ao_spy(), APP_FLASH_PROGRESS_SIG);
+    TEST_ASSERT_TRUE_MESSAGE((HOLD_WATCH_MS / 1000U) <= seen.count,
+        "the card of an install that waits was left with nothing to follow");
+    for ( unsigned i = 0U; (i < seen.count) && (i < Q_DIM(seen.pct)); ++i )
+    {
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen.pct[i], "a wait was said as progress");
+    }
+
+    card_event(false);                         /* the card goes: the install goes on */
+    let_the_open_expire();
+    backup_end();
+}
+
+TEST_CASE("a request that comes while an install waits for a copy is told busy",
+          "[appmgr_ao][backup][hold]")
+{
+    busy_fresh();
+    (void)new_asked_for();
+    ao_spy_drain();
+
+    ask_run_from("old");
+    verdicts_t v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_BUSY, v.first,
+        "a run was taken under an install that waits for a copy");
+
+    ask_install_from((uint8_t)KFW_SRC_FS, "other.bin", (uint8_t)KFW_TARGET_APP);
+    v = spy_verdicts();
+    TEST_ASSERT_EQUAL_UINT(1U, v.count);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_BUSY, v.first,
+        "a second install was taken under one that waits for a copy");
+
+    lp_round(AO_AppMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(true, "app write");
+
+    card_event(false);
+    let_the_open_expire();
+    backup_end();
+}
+
+/* A card that takes no write would hold the install for ever: its victim goes
+ * with no copy, as with no card, and the log says so. */
+TEST_CASE("an install whose victim the card takes no copy of evicts it with no copy, and says so",
+          "[appmgr_ao][backup][hold]")
+{
+    busy_fresh();
+    uint32_t const len = new_asked_for();
+
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/old.bin",
+                    "the app the install waits for was not asked about");
+    answer_stat(false, (uint8_t)KODE_OK);
+    const QEvt * const wr = storage_wait_for(STORAGE_WRITE_REQ_SIG, 1000U);
+    TEST_ASSERT_NOT_NULL_MESSAGE(wr, "the app the install waits for was not copied");
+    QF_gc(wr);
+    answer_write((uint8_t)KODE_ERROR, 0U);     /* the card takes no write */
+
+    held_install_goes_on(len);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("evicting 'old' to make room; no copy kept"),
+        "an app evicted with no copy went without a word");
+    answer_eof();
+    run_ticks(4U);
+    TEST_ASSERT_FALSE(old_installed());
+    backup_end();
+}
+
+TEST_CASE("an install whose victim finds no card evicts it as with no card",
+          "[appmgr_ao][backup][hold]")
+{
+    busy_fresh();
+    uint32_t const len = new_asked_for();
+
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/old.bin",
+                    "the app the install waits for was not asked about");
+    answer_stat(false, (uint8_t)KODE_ERROR);   /* no card, or one that will not mount */
+
+    held_install_goes_on(len);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("evicting 'old' to make room; no copy kept"),
+        "the eviction with no card was not warned about");
+    answer_eof();
+    run_ticks(4U);
+    TEST_ASSERT_FALSE(old_installed());
+    backup_end();
+}
+
+/* AO_Storage drops a request on a dry pool without an answer: the install is
+ * not held past the question's own deadline. */
+TEST_CASE("an install whose victim the card never answers about goes on at the question's deadline",
+          "[appmgr_ao][backup][hold]")
+{
+    busy_fresh();
+    uint32_t const len = new_asked_for();
+
+    path_req_expect((uint8_t)STORAGE_PATH_STAT, "/sdcard/old.bin",
+                    "the app the install waits for was not asked about");
+    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + BACKUP_SLACK_STEPS);
+
+    held_install_goes_on(len);
+    TEST_ASSERT_TRUE(klog_has("evicting 'old' to make room; no copy kept"));
+    answer_eof();
+    run_ticks(4U);
+    backup_end();
+}
+
+/* A card busy with another asker's file answers DENIED: the copy is asked
+ * again after each pause, and an install is not held for it without end. */
+TEST_CASE("an install whose victim's copy the card stays busy for is refused as busy, with nothing changed",
+          "[appmgr_ao][backup][hold]")
+{
+    busy_fresh();
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+    (void)new_asked_for();
+    (void)spy_held();
+
+    for ( unsigned i = 0U; i <= KODE_APP_COPY_BUSY_TRIES; ++i )
+    {
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_held().fails,
+            "the install was given up before the card's tries were spent");
+        TEST_ASSERT_TRUE_MESSAGE(path_asked_within("/sdcard/old.bin", BACKUP_AGAIN_STEPS),
+            "a busy card was not asked again for the copy an install waits for");
+        answer_stat(false, (uint8_t)KODE_DENIED);
+    }
+    held_heard_t const h = spy_held();
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, h.fails, "an install held by a busy card never ended");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KFAIL_BUSY, h.why, "the glass was not told why");
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app with no copy was evicted");
+    TEST_ASSERT_NULL_MESSAGE(storage_wait_for(STORAGE_OPEN_REQ_SIG, BACKUP_SLACK_STEPS),
+        "an install refused as busy went on all the same");
+    backup_end();
+}
+
+TEST_CASE("going back while an install waits for a copy ends the install, and its victim stays",
+          "[appmgr_ao][backup][hold]")
+{
+    static const QEvt cancel = QEVT_INITIALIZER(APP_CANCEL_REQ_SIG);
+
+    busy_fresh();
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+    (void)new_asked_for();
+    (void)spy_held();
+
+    QASM_DISPATCH(AO_AppMgr, &cancel, 0U);
+    held_heard_t const h = spy_held();
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, h.fails, "the card of a cancelled install was left up");
+    TEST_ASSERT_TRUE(klog_has("the person went back"));
+    TEST_ASSERT_TRUE(old_installed());
+    TEST_ASSERT_NULL_MESSAGE(storage_wait_for(STORAGE_OPEN_REQ_SIG, BACKUP_SLACK_STEPS),
+        "a cancelled install went on all the same");
     backup_end();
 }
 
@@ -12589,28 +12809,26 @@ static void new_evicts_old(void)
 
 /* ---- An install and a card at rest for an app ---------------------------------
  * A card an app's rest put away is in: an install that would evict an app with
- * no copy is refused for now, and the copy's first request brings the card
- * back. Nothing else wakes it.
+ * no copy waits for it, and the copy's first request brings the card back.
+ * Nothing else wakes it.
  */
 
 /** @brief What AO_AppMgr says when an install wakes the card at rest to copy "old". */
 #define WAKE_SAID "an install wakes the card from its rest to copy 'old' first"
 
-/** @brief With the card at rest, install "new" over "old": refused for now, and "old"'s STAT asked. */
-static void install_waits_for_the_rested_card(void)
+/**
+ * @brief With the card at rest, install "new" over "old": held back, and "old"'s STAT asked.
+ * @return The image's length.
+ */
+static uint32_t install_waits_for_the_rested_card(void)
 {
     busy_fresh();
     card_news(false, true);                    /* an app's rest puts the card away */
-    uint32_t const len = image_named("new");
-
-    ask_install_from((uint8_t)KFW_SRC_FS, "new.bin", (uint8_t)KFW_TARGET_APP);
-    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
-    answer_open(len, (uint8_t)KDRV_MEDIUM_FS);
-    answer_data(len);                          /* the plan: "old" has to go */
+    uint32_t const len = new_asked_for();
     verdicts_t const v = spy_verdicts();
     TEST_ASSERT_EQUAL_UINT(1U, v.count);
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_BUSY, v.first,
-        "an install that evicts an app with no copy went on with the card at rest");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)APP_REQ_TAKEN, v.first,
+        "an install that waits for a copy was refused with the card at rest");
     TEST_ASSERT_TRUE_MESSAGE(old_installed(), "an app with no copy was evicted with the card at rest");
 
     const QEvt * const e = storage_wait_for(STORAGE_PATH_REQ_SIG, BACKUP_SLACK_STEPS);
@@ -12618,12 +12836,13 @@ static void install_waits_for_the_rested_card(void)
     TEST_ASSERT_EQUAL_STRING("/sdcard/old.bin", ((StoragePathEvt const *)e)->path);
     QF_gc(e);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, klog_count_of(WAKE_SAID), "the card's wake was not said once");
+    return len;
 }
 
-TEST_CASE("an install during a card's rest is refused for now and asks for its victim's copy",
-          "[appmgr_ao][backup][rest]")
+TEST_CASE("an install during a card's rest waits for its victim's copy, which wakes the card",
+          "[appmgr_ao][backup][rest][hold]")
 {
-    install_waits_for_the_rested_card();
+    uint32_t const len = install_waits_for_the_rested_card();
 
     card_news(true, false);                    /* AO_Storage brings it back for the STAT */
     answer_stat(false, (uint8_t)KODE_OK);
@@ -12633,6 +12852,11 @@ TEST_CASE("an install during a card's rest is refused for now and asks for its v
     answer_write_landed(old_bytes());
     TEST_ASSERT_TRUE(klog_has("'old' copied to /sdcard/old.bin"));
     TEST_ASSERT_EQUAL_UINT(1U, klog_count_of(WAKE_SAID));
+
+    held_install_goes_on(len);
+    TEST_ASSERT_TRUE(klog_has("evicting 'old' to make room; its copy is on the card"));
+    answer_eof();
+    run_ticks(4U);
     backup_end();
 }
 
@@ -12655,13 +12879,16 @@ TEST_CASE("a card's rest with no install asks the card nothing",
 }
 
 TEST_CASE("a card gone at the wake lets the install evict as with no card",
-          "[appmgr_ao][backup][rest]")
+          "[appmgr_ao][backup][rest][hold]")
 {
-    install_waits_for_the_rested_card();
+    uint32_t const len = install_waits_for_the_rested_card();
 
     card_news(false, false);                   /* the wake found no card */
     ao_spy_drain();
-    new_evicts_old();
+    held_install_goes_on(len);
+    answer_eof();
+    run_ticks(4U);
+    TEST_ASSERT_FALSE_MESSAGE(old_installed(), "the app the plan evicts is still installed");
     TEST_ASSERT_TRUE_MESSAGE(klog_has("evicting 'old' to make room; no copy kept"),
         "the eviction with no card was not warned about");
     backup_end();
@@ -12799,29 +13026,128 @@ TEST_CASE("an app whose copy could not be made does not refuse an install",
     backup_end();
 }
 
-/* A stream cannot be stopped at its plan: it is refused before the wire is taken. */
-TEST_CASE("a stream that would evict an app with no copy is refused before the console is armed",
-          "[appmgr_ao][backup]")
+/** @brief What the spy heard of a stream held back: the spy is drained. */
+typedef struct {
+    unsigned again;                  /**< RECV_AGAIN_SIG.                     */
+    unsigned fail;                   /**< RECV_FAIL_SIG.                      */
+    unsigned wait;                   /**< RECV_WAIT_SIG.                      */
+    unsigned stall;                  /**< RECV_STALL_SIG.                     */
+    unsigned progress;               /**< APP_FLASH_PROGRESS_SIG.             */
+    unsigned flash_fail;             /**< APP_FLASH_FAIL_SIG.                 */
+    uint8_t  why;                    /**< The last failure's reason.          */
+} stream_heard_t;
+
+/** @brief Put the spy on everything a held stream may say. */
+static void stream_listen(bool on)
+{
+    static const enum_t sigs[] = {
+        RECV_AGAIN_SIG, RECV_FAIL_SIG, RECV_WAIT_SIG, RECV_STALL_SIG,
+        APP_FLASH_PROGRESS_SIG, APP_FLASH_FAIL_SIG,
+    };
+
+    for ( unsigned i = 0U; i < Q_DIM(sigs); ++i )
+    {
+        if ( on )
+        {
+            ao_spy_subscribe(sigs[i]);
+        }
+        else
+        {
+            QActive_unsubscribe(ao_spy(), sigs[i]);
+        }
+    }
+}
+
+/** @brief Count what the spy holds of a held stream. */
+static stream_heard_t spy_stream(void)
+{
+    stream_heard_t h;
+
+    (void)memset(&h, 0, sizeof(h));
+    h.why = 0xFFU;
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        switch ( (enum_t)e->sig )
+        {
+            case RECV_AGAIN_SIG:         ++h.again;    break;
+            case RECV_FAIL_SIG:          ++h.fail;     break;
+            case RECV_WAIT_SIG:          ++h.wait;     break;
+            case RECV_STALL_SIG:         ++h.stall;    break;
+            case APP_FLASH_PROGRESS_SIG: ++h.progress; break;
+            case APP_FLASH_FAIL_SIG:
+                h.why = ((AppFlashFailEvt const *)e)->why;
+                ++h.flash_fail;
+                break;
+            default:
+                break;
+        }
+    }
+    ao_spy_release();                /* a long wait says more than the pool holds */
+    return h;
+}
+
+/* A stream cannot be stopped at its plan: it is held back before the wire is
+ * taken, the host told to wait, and taken by itself once the copy is made. */
+TEST_CASE("a stream that would evict an app with no copy waits for the copy before the console is armed",
+          "[appmgr_ao][backup][hold]")
 {
     busy_fresh();
-    ao_spy_subscribe(RECV_AGAIN_SIG);
-    ao_spy_subscribe(RECV_FAIL_SIG);
+    stream_listen(true);
 
     ask_recv(KAPPS_ALIGN, 0U, false);
-
-    unsigned again = spy_count(RECV_AGAIN_SIG);
-    QActive_unsubscribe(ao_spy(), RECV_AGAIN_SIG);
-    QActive_unsubscribe(ao_spy(), RECV_FAIL_SIG);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, again, "the host was not told to ask again");
-    TEST_ASSERT_FALSE_MESSAGE(log_saw(CONSOLE_RAW_REQ_SIG), "the wire was taken for a stream refused");
+    TEST_ASSERT_FALSE_MESSAGE(log_saw(CONSOLE_RAW_REQ_SIG), "the wire was taken with the copy still to make");
     TEST_ASSERT_TRUE(old_installed());
+    stream_heard_t h = spy_stream();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, h.wait, "the host was not told to wait at once");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, h.progress, "the wait did not raise the card at 0 %");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, h.again + h.fail, "a stream that waits was refused");
+
+    run_ticks(QF_SUPPORT_STEPS(HOLD_WATCH_MS) + BACKUP_SLACK_STEPS);
+    h = spy_stream();
+    TEST_ASSERT_TRUE_MESSAGE((HOLD_WATCH_MS / 1000U) <= h.wait, "the host was not told to go on waiting");
+    TEST_ASSERT_TRUE_MESSAGE((HOLD_WATCH_MS / 1000U) <= h.progress, "the card was left with nothing to follow");
 
     old_is_copied_next();
-    ask_recv(KAPPS_ALIGN, 0U, false);
+    run_ticks(1U);                             /* the request, back at the head of the queue */
     TEST_ASSERT_TRUE_MESSAGE(log_saw(CONSOLE_RAW_REQ_SIG),
-        "the stream asked again, its victim copied, was not taken");
+        "the stream held for a copy was not taken once it was made");
+    h = spy_stream();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, h.again + h.fail + h.flash_fail, "a stream that waited was refused");
 
-    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);     /* nobody arms the console: it gives up */
+    /* Nobody arms the console: the stream gives up, and the card it raised
+     * while it waited is ended. */
+    run_ticks(APPMGR_OPEN_DEADLINE_TICKS + 50U);
+    h = spy_stream();
+    stream_listen(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, h.flash_fail, "the card a held stream raised was left up");
+    backup_end();
+}
+
+TEST_CASE("a stream held for a copy the card stays busy for is told to ask again, and its card ended",
+          "[appmgr_ao][backup][hold]")
+{
+    busy_fresh();
+    stream_listen(true);
+    ask_recv(KAPPS_ALIGN, 0U, false);
+    (void)spy_stream();
+
+    for ( unsigned i = 0U; i <= KODE_APP_COPY_BUSY_TRIES; ++i )
+    {
+        /* The waits said meanwhile are taken off the spy as they come. */
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, spy_stream().again,
+            "the stream was given up before the card's tries were spent");
+        TEST_ASSERT_TRUE_MESSAGE(path_asked_within("/sdcard/old.bin", BACKUP_AGAIN_STEPS),
+            "a busy card was not asked again for the copy a stream waits for");
+        answer_stat(false, (uint8_t)KODE_DENIED);
+    }
+    stream_heard_t const h = spy_stream();
+    stream_listen(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, h.again, "the host was not told to ask again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, h.fail, "a refusal for now was told as a failure");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, h.flash_fail, "the card a held stream raised was left up");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KFAIL_BUSY, h.why);
+    TEST_ASSERT_FALSE_MESSAGE(log_saw(CONSOLE_RAW_REQ_SIG), "the wire was taken for a stream refused");
+    TEST_ASSERT_TRUE(old_installed());
     backup_end();
 }
 
@@ -13022,6 +13348,30 @@ TEST_CASE("a round with no copy owed, and a round for OFF, ask for no dark wake"
     card_event(false);                         /* no card: nothing to copy */
     board_sleeps();
     TEST_ASSERT_FALSE_MESSAGE(fake_lowpower_wake_take(&w), "a wake was asked with nothing to copy");
+    backup_end();
+}
+
+/* The board comes awake while an install is in hand: what was noted of its
+ * rest is cleared there too, or no copy would be begun until it slept again. */
+TEST_CASE("the board awake again during an install lets the copies go on after it",
+          "[appmgr_ao][backup][lowpower]")
+{
+    LowPowerWakeAtEvt w;
+
+    backup_fresh(1U);
+    board_sleeps();
+    (void)fake_lowpower_wake_take(&w);
+
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);     /* an install asked in the rest */
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    lp_awake(AO_AppMgr);                                    /* awake, with the install open */
+    run_ticks(APPMGR_OPEN_DEADLINE_TICKS - BACKUP_SLACK_STEPS);
+    (void)storage_tally();
+
+    /* The open runs out of time: idle again, and the wait before the copies. */
+    TEST_ASSERT_TRUE_MESSAGE(path_asked_within("/sdcard/first.bin",
+                                               BACKUP_WAIT_STEPS + (3U * BACKUP_SLACK_STEPS)),
+        "the copies stayed stopped with the board awake");
     backup_end();
 }
 

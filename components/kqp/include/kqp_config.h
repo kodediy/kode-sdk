@@ -1758,8 +1758,13 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 /** @brief The longest AO_AppMgr waits for AO_Storage or AO_Net to answer an
  *         open or a STAT of the card; then it gives that wait up. */
 #define KODE_APPMGR_OPEN_MS     32000U
-#define KODE_APP_BACKUP_IDLE_MS 5000U   /**< How long AO_AppMgr is idle before it copies apps to the card. */
-#define KODE_APP_BACKUP_GAP_MS  1000U   /**< The pause between one app's copy and the next, for AO_Storage's other askers. */
+#define KODE_APP_BACKUP_IDLE_MS 100U    /**< How long AO_AppMgr is idle before it looks at the copies of its apps: the time a request that follows another takes to come. */
+#define KODE_APP_BACKUP_GAP_MS  1000U   /**< The pause after an app's copy is written, or could not be, before the next app, for AO_Storage's other askers. */
+#define KODE_APP_BACKUP_DARK_MS 5000U   /**< How long after the board falls asleep AO_AppMgr asks for the dark wake its copies need. */
+/** @brief How many times the card may refuse as busy a step of the copy an
+ *         install waits for, a pause apart, before the install is refused as
+ *         busy. */
+#define KODE_APP_COPY_BUSY_TRIES 30U
 /** @brief How many times AO_AppMgr asks again for a fetched data folder's put
  *         that AO_Storage refused as busy, before the fetch fails busy. */
 #define KODE_APPMGR_PUT_TRIES   3U
