@@ -167,6 +167,13 @@ _Static_assert((HAPTIC_STALL_MS % KODE_HAPTIC_TICK_MS) == 0U,
  *         which covers the gyroscope's settle before the first. */
 #define HAPTIC_PAT_BUDGET_MS      ((HAPTIC_PAT_WINDOWS_N * HAPTIC_PAT_WINDOW_MS) + 1000U)
 
+/** @brief What a second go of the pattern needs of the budget: a whole pattern
+ *         and the gyroscope's settle before its first window. A row that ran
+ *         dry later than this has no time for it. */
+#define HAPTIC_PAT_AGAIN_MS       1500U
+_Static_assert(HAPTIC_PAT_AGAIN_MS < HAPTIC_PAT_BUDGET_MS,
+               "a second go of the pattern fits the row's budget");
+
 /** @brief The pattern row's id and place in a walk: the next free ones, the
  *         row being in no group. */
 #define HAPTIC_PAT_ID             37U
@@ -212,6 +219,7 @@ typedef struct {
     uint32_t      stall;    /**< Consecutive feeds the FIFO took nothing.   */
     uint32_t      t_go;     /**< khal_time_ms() when GO was issued.         */
     bool          starved;  /**< The FIFO refused a burst at least once.    */
+    bool          dry;      /**< The chip left RTP with samples still owed. */
     bool          draining; /**< Fed whole: the tick watches it play out.   */
     uint8_t       gain;     /**< Per cent of full scale, as asked for.      */
     uint8_t       reg;      /**< The PLAYCFG2 byte the chip actually got.   */
@@ -228,6 +236,8 @@ typedef struct {
     uint8_t     best_gain;   /**< The PLAYCFG2 byte that reached it.        */
     bool        pattern;     /**< This is the pattern row, not `haptic`.    */
     uint8_t     win;         /**< The pattern window being measured.        */
+    bool        again;       /**< The pattern is on its second go.          */
+    uint32_t    t0;          /**< khal_time_ms() when the row began.        */
     int32_t     en_x10[HAPTIC_PAT_WINDOWS_N]; /**< Energy at the bin per window, 0.1 mg: on, off, on... */
 } Row;
 
@@ -627,6 +637,7 @@ static void play_start(Haptic * const me, const uint16_t *seg_ms, uint8_t n,
     me->play.stall   = 0U;
     me->play.t_go    = 0U;
     me->play.starved  = false;
+    me->play.dry      = false;
     me->play.draining = false;
     me->play.gain    = gain_pct;
     me->play.reg     = 0U;
@@ -761,7 +772,8 @@ static bool play_running(Haptic * const me)
     }
     if ( !rtp )
     {
-        me->play.rc = KODE_IO_ERROR;
+        me->play.rc  = KODE_IO_ERROR;
+        me->play.dry = true;
         KLOG_E(TAG, "the RTP FIFO ran dry: the chip left RTP within %u ms "
                     "of GO, with %u ms of the buzz fed",
                (unsigned)(khal_time_ms() - me->play.t_go),
@@ -1135,6 +1147,36 @@ static void row_arm(Haptic * const me, row_phase_t phase)
     wait_start(me, KODE_HAPTIC_REPLY_MS);
 }
 
+/**
+ * @brief During a station's pass, a pattern whose buzz the chip cut short by
+ *        running dry - its feed came late, the motor is not in question - is
+ *        played once more from its first window, its window given back first.
+ *
+ * Once only, and only with HAPTIC_PAT_AGAIN_MS of the budget left; otherwise,
+ * and outside a pass, the row ends with no verdict as it always has.
+ *
+ * @param me The AO, the buzz over.
+ * @return true when the pattern starts again.
+ */
+static bool pat_again(Haptic * const me)
+{
+    uint32_t const spent = khal_time_ms() - me->row.t0;
+
+    if ( (!me->row.pattern) || (!me->play.dry) || me->row.again || (!haptic_station_pass())
+        || ((spent + HAPTIC_PAT_AGAIN_MS) > HAPTIC_PAT_BUDGET_MS) )
+    {
+        return false;
+    }
+    KLOG_W(TAG, "test %s: the chip ran dry in window %u, not the motor; the pattern once more",
+           HAPTIC_PAT_NAME, (unsigned)(me->row.win + 1U));
+    imu_capture_release(&me->super);
+    me->row.again = true;
+    me->row.win   = 0U;
+    (void)memset(me->row.en_x10, 0, sizeof(me->row.en_x10));
+    row_arm(me, ROW_PAT_ARM);
+    return true;
+}
+
 /** @brief Ask the witness what the window it is holding amounted to. */
 static void row_drain(Haptic * const me, row_phase_t phase)
 {
@@ -1337,6 +1379,7 @@ static bool row_start(Haptic * const me, bool pattern)
         (void)memset(&me->row, 0, sizeof(me->row));
         me->row.active  = true;
         me->row.pattern = pattern;
+        me->row.t0      = khal_time_ms();
         if ( pattern )
         {
             row_arm(me, ROW_PAT_ARM);
@@ -2065,15 +2108,23 @@ static QState Haptic_playing(Haptic * const me, QEvt const * const e)
             done_publish(me);
             if ( me->row.active && (KODE_OK != me->play.rc) )
             {
-                /* The buzz did not play through this gain's window: the bus
-                 * refused a burst, the FIFO stopped draining, or the chip ran
-                 * dry and went back to standby. Measuring it would judge the
-                 * motor on a buzz the chip cut short, so the cause is named
-                 * and no further gain is asked of the witness. */
-                row_noverdict(me, (uint8_t)HAPTIC_TF_MUTE,
-                              "the chip stopped playing before the buzz "
-                              "ended; the motor was not driven through it");
-                status = Q_TRAN(&Haptic_idle);
+                if ( pat_again(me) )
+                {
+                    status = Q_TRAN(&Haptic_row);
+                }
+                else
+                {
+                    /* The buzz did not play through this gain's window: the
+                     * bus refused a burst, the FIFO stopped draining, or the
+                     * chip ran dry and went back to standby. Measuring it
+                     * would judge the motor on a buzz the chip cut short, so
+                     * the cause is named and no further gain is asked of the
+                     * witness. */
+                    row_noverdict(me, (uint8_t)HAPTIC_TF_MUTE,
+                                  "the chip stopped playing before the buzz "
+                                  "ended; the motor was not driven through it");
+                    status = Q_TRAN(&Haptic_idle);
+                }
             }
             else if ( me->row.active )
             {

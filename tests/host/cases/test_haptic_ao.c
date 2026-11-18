@@ -3034,3 +3034,105 @@ TEST_CASE("the pattern row: a window the IMU cannot measure is no verdict, said 
     TEST_ASSERT_FALSE(verdict->ok);
     haptic_down();
 }
+
+/* ---- The pattern row whose chip runs dry --------------------------------------
+ * A chip that runs dry in an "on" window was fed late, which says nothing of
+ * the motor. Outside a station's pass the row ends with no verdict, as it
+ * always has; during one the pattern is played once more from its first
+ * window, and a second dry ends it with no verdict.
+ */
+
+/** @brief An "on" window whose chip runs dry after its first feed. */
+static void pat_window_dry(void)
+{
+    (void)imu_expect(IMU_CAPTURE_REQ_SIG);
+    imu_armed(KODE_OK);
+    feed_once();
+    s_regs[REG_GLBRD5] = 0x00U;   /* the FIFO ran dry: standby */
+    (void)play_finish();
+    TEST_ASSERT_TRUE(logged("ran dry"));
+}
+
+/** @brief The whole pattern, every cycle following the motor. */
+static void pat_passes(void)
+{
+    for ( unsigned w = 0U; PAT_WINDOWS > w; ++w )
+    {
+        bool const on  = (0U == (w % 2U));
+        int32_t    bin = PAT_OFF_X10;
+
+        if ( on )
+        {
+            bin = PAT_ON_X10;
+        }
+        pat_window(on, bin);
+    }
+    pat_cycle(1U, PAT_ON_X10, PAT_OFF_X10, true);
+    pat_cycle(2U, PAT_ON_X10, PAT_OFF_X10, true);
+    pat_cycle(3U, PAT_ON_X10, PAT_OFF_X10, true);
+}
+
+/** @brief The row's end with no verdict, said under the first window. */
+static void pat_no_verdict(void)
+{
+    const HapticTestEvt *rec = (const HapticTestEvt *)spy_expect(HAPTIC_TEST_SIG);
+    const TestResultEvt *verdict;
+
+    TEST_ASSERT_EQUAL_UINT(HAPTIC_TEST_NOVERDICT, rec->phase);
+    TEST_ASSERT_EQUAL_UINT(1U, rec->step);
+    verdict = (const TestResultEvt *)spy_expect(TEST_RESULT_SIG);
+    TEST_ASSERT_EQUAL_STRING("haptic_pat", verdict->name);
+    TEST_ASSERT_FALSE(verdict->ok);
+}
+
+TEST_CASE("the pattern row: a chip that runs dry is no verdict at once with no "
+          "station's pass", "[haptic_ao][quiet]")
+{
+    bus_up(true);
+    haptic_up();
+    pat_req();
+    pat_window_dry();
+    pat_no_verdict();
+    TEST_ASSERT_FALSE_MESSAGE(logged("once more"), "a row outside a pass played again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, imu_pending(), "a row outside a pass asked the IMU for more");
+    haptic_down();
+}
+
+TEST_CASE("the pattern row: during a station's pass a chip that runs dry plays "
+          "the pattern once more, and it can pass", "[haptic_ao][quiet]")
+{
+    const TestResultEvt *verdict;
+
+    td_session(true);
+    bus_up(true);
+    haptic_up();
+    pat_req();
+    pat_window_dry();
+    TEST_ASSERT_TRUE(logged("the pattern once more"));
+    TEST_ASSERT_EQUAL_PTR(AO_Haptic, ((const ImuCaptureReqEvt *)imu_expect(IMU_RELEASE_REQ_SIG))->who);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the first go said a verdict");
+
+    pat_passes();
+    verdict = (const TestResultEvt *)spy_expect(TEST_RESULT_SIG);
+    TEST_ASSERT_EQUAL_STRING("haptic_pat", verdict->name);
+    TEST_ASSERT_TRUE(verdict->ok);
+    haptic_down();
+    td_session(false);
+}
+
+TEST_CASE("the pattern row: during a station's pass a second dry is no verdict",
+          "[haptic_ao][quiet]")
+{
+    td_session(true);
+    bus_up(true);
+    haptic_up();
+    pat_req();
+    pat_window_dry();
+    (void)imu_expect(IMU_RELEASE_REQ_SIG);
+    pat_window_dry();
+    pat_no_verdict();
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(AO_Haptic, ((const ImuCaptureReqEvt *)imu_expect(IMU_RELEASE_REQ_SIG))->who,
+                                  "the window of the last go was kept");
+    haptic_down();
+    td_session(false);
+}
