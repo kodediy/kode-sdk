@@ -9,6 +9,8 @@
 #include "kdrv_kfw.h"
 #include "kdrv_desc_fill.h"
 #include "kdrv_bounce.h"
+#include "kdrv_fs.h"
+#include "kdrv_storage.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -488,6 +490,57 @@ static esp_err_t part_put(void *ctx, size_t at, const void *src, size_t len)
     return esp_partition_write(c->part, c->base + at, src, len);
 }
 
+/** Bytes of a write looked at, and skipped when all 0xFF, at a time. */
+#define APPS_SKIP_PIECE  0x1000U
+
+/** @brief Whether @p len bytes at @p data are all 0xFF. */
+static bool all_ff(const uint8_t *data, size_t len)
+{
+    for ( size_t i = 0U; len > i; i++ )
+    {
+        if ( 0xFFU != data[i] )
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Write @p len bytes at @p base of @p part, leaving out every 4 KB piece
+ *        that is all 0xFF.
+ *
+ * Only for flash that is blank where it lands (erased, or found blank): an
+ * erased byte already reads 0xFF, so writing it again costs time and changes
+ * nothing. The read-back verify that closes every write covers the pieces
+ * left out.
+ */
+static esp_err_t put_skip_blank(const esp_partition_t *part, size_t base, const void *data, size_t len)
+{
+    const uint8_t *d = (const uint8_t *)data;
+    size_t done = 0U;
+
+    while ( len > done )
+    {
+        size_t n = len - done;
+        if ( APPS_SKIP_PIECE < n )
+        {
+            n = APPS_SKIP_PIECE;
+        }
+        if ( !all_ff(&d[done], n) )
+        {
+            part_put_ctx_t at = { part, base + done };
+            esp_err_t const err = kdrv_bounce_write(&part_put, &at, &d[done], n);
+            if ( ESP_OK != err )
+            {
+                return err;
+            }
+        }
+        done += n;
+    }
+    return ESP_OK;
+}
+
 kode_status_t kdrv_apps_write_begin(uint32_t offset, uint32_t size)
 {
     if ( (NULL == s_part) || s_wr_open )
@@ -508,6 +561,51 @@ kode_status_t kdrv_apps_write_begin(uint32_t offset, uint32_t size)
     return KODE_OK;
 }
 
+/** Bytes read at a time when checking a block for blank. */
+#define APPS_BLANK_READ  4096U
+
+/**
+ * @brief Is the 64 KB block at `off` of a partition all 0xFF?
+ *
+ * Short reads, each holding the flash for microseconds. A read that fails
+ * counts as not blank, so the block is erased as before.
+ *
+ * @param p   The partition.
+ * @param off Partition offset of the block.
+ * @return true when every byte of the block is 0xFF.
+ */
+static bool part_block_blank(const esp_partition_t *p, uint32_t off)
+{
+    static uint32_t s_buf[APPS_BLANK_READ / sizeof(uint32_t)];
+
+    for ( uint32_t at = 0U; KAPPS_ALIGN > at; at += APPS_BLANK_READ )
+    {
+        if ( esp_partition_read(p, off + at, s_buf, sizeof(s_buf)) != ESP_OK )
+        {
+            return false;
+        }
+        for ( uint32_t i = 0U; (sizeof(s_buf) / sizeof(s_buf[0])) > i; i++ )
+        {
+            if ( 0xFFFFFFFFU != s_buf[i] )
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Is the 64 KB block at `off` of the apps region all 0xFF?
+ *
+ * @param off Region offset of the block.
+ * @return true when every byte of the block is 0xFF.
+ */
+static bool block_blank(uint32_t off)
+{
+    return part_block_blank(s_part, off);
+}
+
 kode_status_t kdrv_apps_write(const void *data, size_t len)
 {
     if ( !s_wr_open || (NULL == data) )
@@ -521,22 +619,27 @@ kode_status_t kdrv_apps_write(const void *data, size_t len)
 
     /* Erase 64 KB blocks one at a time as the write reaches into them - this
      * is what leaves the GUI room to breathe between chunks, exactly like
-     * esp_ota_begin(OTA_WITH_SEQUENTIAL_WRITES) does for the OTA slot. */
+     * esp_ota_begin(OTA_WITH_SEQUENTIAL_WRITES) does for the OTA slot. A block
+     * that is already blank is not erased: a block erase holds the flash for
+     * about 150 ms, long enough to starve the haptic feed and the RFID reader,
+     * and a board fresh from the line's full erase is blank everywhere. */
     uint32_t const reach = s_wr_off + s_wr_written + (uint32_t)len;
     while ( s_wr_erased < reach )
     {
         s_wr_reach = s_wr_erased + KAPPS_ALIGN;   /* before the erase: a failed one may have changed the block */
-        esp_err_t const err = esp_partition_erase_range(s_part, s_wr_erased, KAPPS_ALIGN);
-        if ( ESP_OK != err )
+        if ( !block_blank(s_wr_erased) )
         {
-            KLOG_E(TAG, "erase @0x%x failed (%s)", (unsigned)s_wr_erased, esp_err_to_name(err));
-            return KODE_ERROR;
+            esp_err_t const err = esp_partition_erase_range(s_part, s_wr_erased, KAPPS_ALIGN);
+            if ( ESP_OK != err )
+            {
+                KLOG_E(TAG, "erase @0x%x failed (%s)", (unsigned)s_wr_erased, esp_err_to_name(err));
+                return KODE_ERROR;
+            }
         }
         s_wr_erased += KAPPS_ALIGN;
     }
 
-    part_put_ctx_t at = { s_part, (size_t)s_wr_off + (size_t)s_wr_written };
-    esp_err_t const err = kdrv_bounce_write(&part_put, &at, data, len);
+    esp_err_t const err = put_skip_blank(s_part, (size_t)s_wr_off + (size_t)s_wr_written, data, len);
     if ( ESP_OK != err )
     {
         KLOG_E(TAG, "write @0x%x failed (%s)",
@@ -1359,4 +1462,201 @@ kode_status_t kdrv_apps_pending_consume(void)
         out = KODE_ERROR;
     }
     return out;
+}
+
+/* ---- The storage partition as a destination ---------------------------------
+ * `install dst=storage` writes the image as it is into the `storage` partition,
+ * the wear-levelled FAT image the factory builds: kode/ and .kode/. The
+ * FAT is unmounted for the whole write and mounted again, never formatted,
+ * when it ends. What is written is read back and its CRC-32 compared with the
+ * CRC-32 of what was received.
+ */
+
+#define STO_LABEL        "storage"   /**< The partition's label in the table. */
+#define STO_VERIFY_READ  1024U       /**< Bytes read back at a time.          */
+
+static const esp_partition_t *s_sto_part;      /* the partition while a session is open, else NULL */
+static uint32_t               s_sto_size;      /* bytes the session was told to expect             */
+static uint32_t               s_sto_written;   /* bytes written so far                             */
+static uint32_t               s_sto_erased;    /* partition offset erased or found blank up to     */
+static uint32_t               s_sto_crc;       /* CRC-32 of the bytes received                     */
+
+/**
+ * @brief Take the storage partition: refuse an image that cannot fit, then unmount the FAT.
+ * @param ctx Unused.
+ * @param n   Bytes the source will deliver. 0, or more than the partition
+ *            holds, is refused.
+ * @return KODE_OK; KODE_DENIED with a session open or a file of the volume
+ *         open; KODE_ERROR for no partition or a size that does not fit.
+ */
+static kode_status_t sto_sink_begin(void *ctx, uint32_t n)
+{
+    (void)ctx;
+    if ( NULL != s_sto_part )
+    {
+        return KODE_DENIED;
+    }
+    const esp_partition_t * const p = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, STO_LABEL);
+    if ( NULL == p )
+    {
+        KLOG_E(TAG, "no '%s' partition in the partition table", STO_LABEL);
+        return KODE_ERROR;
+    }
+    if ( (0U == n) || (n > (uint32_t)p->size) )
+    {
+        KLOG_E(TAG, "%lu bytes do not fit '%s' (%lu bytes)",
+               (unsigned long)n, STO_LABEL, (unsigned long)p->size);
+        return KODE_ERROR;
+    }
+    if ( kdrv_storage_fs_files_open() )
+    {
+        KLOG_E(TAG, "a file of the internal volume is open; '%s' is not written", STO_LABEL);
+        return KODE_DENIED;
+    }
+    if ( kdrv_fs_raw_begin() != KODE_OK )
+    {
+        KLOG_E(TAG, "the internal volume cannot be taken for a raw write");
+        return KODE_DENIED;
+    }
+    s_sto_size    = n;
+    s_sto_written = 0U;
+    s_sto_erased  = 0U;
+    s_sto_crc     = KHAL_CRC32_INIT;
+    s_sto_part    = p;
+    KLOG_N(TAG, "writing %lu bytes into '%s'", (unsigned long)n, STO_LABEL);
+    return KODE_OK;
+}
+
+/**
+ * @brief Append one chunk, erasing each 64 KB block as the write reaches it unless it is blank.
+ * @param ctx  Unused.
+ * @param data The chunk.
+ * @param len  Its length in bytes.
+ * @return KODE_OK; KODE_DENIED with no session open; KODE_ERROR past the
+ *         announced size or when the flash refuses.
+ */
+static kode_status_t sto_sink_write(void *ctx, const void *data, size_t len)
+{
+    (void)ctx;
+    const esp_partition_t * const p = s_sto_part;
+    if ( (NULL == p) || (NULL == data) )
+    {
+        return KODE_DENIED;
+    }
+    if ( ((uint64_t)s_sto_written + len) > (uint64_t)s_sto_size )
+    {
+        return KODE_ERROR;
+    }
+    uint32_t const reach = s_sto_written + (uint32_t)len;
+    while ( s_sto_erased < reach )
+    {
+        if ( !part_block_blank(p, s_sto_erased) )
+        {
+            esp_err_t const err = esp_partition_erase_range(p, s_sto_erased, KAPPS_ALIGN);
+            if ( ESP_OK != err )
+            {
+                KLOG_E(TAG, "'%s' erase @0x%x failed (%s)", STO_LABEL,
+                       (unsigned)s_sto_erased, esp_err_to_name(err));
+                return KODE_ERROR;
+            }
+        }
+        s_sto_erased += KAPPS_ALIGN;
+    }
+    if ( put_skip_blank(p, (size_t)s_sto_written, data, len) != ESP_OK )
+    {
+        KLOG_E(TAG, "'%s' write @0x%x failed", STO_LABEL, (unsigned)s_sto_written);
+        return KODE_ERROR;
+    }
+    s_sto_crc      = khal_crc32(s_sto_crc, data, len);
+    s_sto_written += (uint32_t)len;
+    return KODE_OK;
+}
+
+/**
+ * @brief Read what was written back, compare its CRC-32, and mount the FAT again.
+ * @param ctx Unused.
+ * @return KODE_OK when the bytes verify and the volume mounts; KODE_DENIED
+ *         with no session open; KODE_ERROR for a short count, a CRC that
+ *         differs or a volume that does not mount (it is left unmounted).
+ */
+static kode_status_t sto_sink_end(void *ctx)
+{
+    static uint8_t s_buf[STO_VERIFY_READ];
+
+    (void)ctx;
+    const esp_partition_t * const p = s_sto_part;
+    if ( NULL == p )
+    {
+        return KODE_DENIED;
+    }
+    s_sto_part = NULL;
+
+    kode_status_t out = KODE_OK;
+    if ( s_sto_written != s_sto_size )
+    {
+        KLOG_E(TAG, "'%s' got %lu of the %lu bytes promised", STO_LABEL,
+               (unsigned long)s_sto_written, (unsigned long)s_sto_size);
+        out = KODE_ERROR;
+    }
+    else
+    {
+        uint32_t crc = KHAL_CRC32_INIT;
+        for ( uint32_t at = 0U; (KODE_OK == out) && (at < s_sto_size); at += STO_VERIFY_READ )
+        {
+            uint32_t n = s_sto_size - at;
+            if ( STO_VERIFY_READ < n )
+            {
+                n = STO_VERIFY_READ;
+            }
+            if ( esp_partition_read(p, at, s_buf, n) != ESP_OK )
+            {
+                KLOG_E(TAG, "'%s' read back @0x%x failed", STO_LABEL, (unsigned)at);
+                out = KODE_ERROR;
+            }
+            else
+            {
+                crc = khal_crc32(crc, s_buf, n);
+            }
+        }
+        if ( (KODE_OK == out) && (crc != s_sto_crc) )
+        {
+            KLOG_E(TAG, "'%s' reads back crc 0x%08lx, wrote 0x%08lx", STO_LABEL,
+                   (unsigned long)crc, (unsigned long)s_sto_crc);
+            out = KODE_ERROR;
+        }
+    }
+    if ( kdrv_fs_raw_end() != KODE_OK )
+    {
+        out = KODE_ERROR;
+    }
+    if ( KODE_OK == out )
+    {
+        KLOG_N(TAG, "'%s' holds %lu bytes (crc 0x%08lx) and is mounted", STO_LABEL,
+               (unsigned long)s_sto_size, (unsigned long)s_sto_crc);
+    }
+    return out;
+}
+
+/**
+ * @brief Abandon the session: the FAT is mounted again if it will mount, as it is. What was written stays.
+ * @param ctx Unused.
+ */
+static void sto_sink_abort(void *ctx)
+{
+    (void)ctx;
+    if ( NULL != s_sto_part )
+    {
+        s_sto_part = NULL;
+        (void)kdrv_fs_raw_end();
+    }
+}
+
+static const kfw_sink_t STO_SINK = {
+    sto_sink_begin, sto_sink_write, sto_sink_end, sto_sink_abort
+};
+
+const kfw_sink_t *kdrv_apps_storage_sink(void)
+{
+    return &STO_SINK;
 }

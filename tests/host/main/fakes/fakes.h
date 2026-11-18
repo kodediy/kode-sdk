@@ -418,6 +418,13 @@ void fake_fs_mount_set_fails(bool fails);
 /** @brief How many times kdrv_fs_mount() was called since the last reset. */
 unsigned fake_fs_mount_calls(void);
 
+/** @brief Whether a raw write of the internal partition is open
+ *         (kdrv_fs_raw_begin() without its end). */
+bool fake_fs_raw_open(void);
+
+/** @brief How many raw writes of the internal partition began since the last reset. */
+unsigned fake_fs_raw_begins(void);
+
 /* ---- The SDMMC seam under kdrv_sd ----------------------------------------
  * kdrv_sd.c is compiled for real, so a case arranges the CARD rather than the
  * driver: what it says it is, how many data lines it will come up on, and

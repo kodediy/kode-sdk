@@ -323,6 +323,18 @@ void kdrv_apps_pending_write_abort(void);
 /** @brief The mailbox as a kfw_sink_t. Context unused. */
 const kfw_sink_t *kdrv_apps_pending_sink(void);
 
+/**
+ * @brief The `storage` partition as a kfw_sink_t: the image goes in as it is.
+ *
+ * begin() refuses an image of 0 bytes or larger than the partition, a file
+ * of the internal volume still open, and a second session; otherwise it
+ * unmounts the FAT. write() erases each 64 KB block as it is reached unless
+ * the block is blank. end() reads the partition back, compares its CRC-32
+ * with that of what was received and mounts the FAT again without formatting.
+ * abort() mounts it again the same way. Context unused.
+ */
+const kfw_sink_t *kdrv_apps_storage_sink(void);
+
 /** @brief Read @p len bytes from the mailbox at @p offset. */
 kode_status_t kdrv_apps_pending_read(uint32_t offset, void *buf, size_t len);
 

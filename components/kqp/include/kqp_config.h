@@ -610,6 +610,9 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  * nothing declares itself "for the mailbox" - it is an instruction to park
  * whatever arrives without decoding it. */
 #define KODE_FLASH_DST_PENDING     3U
+/* Nor is this one: `install dst=storage` writes the file, as it is, into the
+ * `storage` partition (the FAT image) from a medium. */
+#define KODE_FLASH_DST_STORAGE     4U
 /* A watchdog on the gap between chunks, not on the transfer: a 5 MB image
  * over a slow link must not time out, but a host that dies mid-image must not
  * leave the console waiting forever. AO_AppMgr rearms it on every chunk. */

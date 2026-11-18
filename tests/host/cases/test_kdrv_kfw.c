@@ -334,6 +334,57 @@ TEST_CASE("the digest of a known string matches", "[kdrv_kfw]")
     TEST_ASSERT_EQUAL_MEMORY(ABC_SHA256, got, KFW_SHA_LEN);
 }
 
+TEST_CASE("a streamed digest equals the one-shot digest, whatever the chunking",
+          "[kdrv_kfw]")
+{
+    static const char MSG[] = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    uint8_t whole[KFW_SHA_LEN];
+    uint8_t got[KFW_SHA_LEN];
+
+    kfw_sha256(MSG, sizeof(MSG) - 1U, whole);
+
+    TEST_ASSERT_TRUE(kfw_sha256_start());
+    for ( size_t at = 0U; (sizeof(MSG) - 1U) > at; at += 7U )
+    {
+        size_t n = (sizeof(MSG) - 1U) - at;
+        if ( 7U < n )
+        {
+            n = 7U;
+        }
+        kfw_sha256_feed(&MSG[at], n);
+    }
+    TEST_ASSERT_TRUE(kfw_sha256_end(got));
+    TEST_ASSERT_EQUAL_MEMORY(whole, got, KFW_SHA_LEN);
+}
+
+TEST_CASE("a stream with nothing fed is the digest of no bytes, and a second end is refused",
+          "[kdrv_kfw]")
+{
+    uint8_t empty[KFW_SHA_LEN];
+    uint8_t got[KFW_SHA_LEN];
+
+    kfw_sha256("", 0U, empty);
+    TEST_ASSERT_TRUE(kfw_sha256_start());
+    TEST_ASSERT_TRUE(kfw_sha256_end(got));
+    TEST_ASSERT_EQUAL_MEMORY(empty, got, KFW_SHA_LEN);
+    TEST_ASSERT_FALSE_MESSAGE(kfw_sha256_end(got),
+        "a stream that was already closed gave a digest");
+}
+
+TEST_CASE("starting a stream again drops what was in progress", "[kdrv_kfw]")
+{
+    uint8_t abc[KFW_SHA_LEN];
+    uint8_t got[KFW_SHA_LEN];
+
+    kfw_sha256("abc", 3U, abc);
+    TEST_ASSERT_TRUE(kfw_sha256_start());
+    kfw_sha256_feed("zzzz", 4U);
+    TEST_ASSERT_TRUE(kfw_sha256_start());
+    kfw_sha256_feed("abc", 3U);
+    TEST_ASSERT_TRUE(kfw_sha256_end(got));
+    TEST_ASSERT_EQUAL_MEMORY(abc, got, KFW_SHA_LEN);
+}
+
 /* The container's checksum is **not** zlib's default, and that is deliberate:
  * the ROM routine starts its running CRC at 0xFFFFFFFF where zlib starts at
  * ~0. mkkfw.py reproduces it by passing 0xFFFFFFFF as zlib's running value,

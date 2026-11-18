@@ -1128,6 +1128,148 @@ TEST_CASE("a long write lands in the mailbox where the session has reached",
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_pending_consume());
 }
 
+/* ---- Blank flash is not erased and 0xFF is not written ----------------------- */
+
+/** @brief The `storage` partition, found the way the sink finds it. */
+static const esp_partition_t *storage_part(void)
+{
+    const esp_partition_t *p = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "storage");
+    TEST_ASSERT_NOT_NULL_MESSAGE(p, "the test project's partition table must "
+                                    "carry the board's storage partition");
+    return p;
+}
+
+TEST_CASE("a write into blank flash neither erases it nor writes its 0xFF pieces",
+          "[apps_region]")
+{
+    static uint8_t blank[0x2000];
+    static uint8_t data[0x40];
+    uint32_t const at = KAPPS_DATA_OFF + (2U * KAPPS_ALIGN);
+
+    apps_ready();
+    (void)memset(blank, 0xFFU, sizeof(blank));
+    (void)memset(data, 0x5AU, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(region(), at, KAPPS_ALIGN));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, sizeof(blank) + sizeof(data)));
+
+    /* From here any erase or write the driver issues fails: blank pieces of a
+     * blank block must not issue one. */
+    esp_partition_fail_after(0U, ESP_PARTITION_FAIL_AFTER_MODE_BOTH);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kdrv_apps_write(blank, sizeof(blank)),
+        "a blank block was erased or an all-0xFF piece was written");
+
+    /* A piece with data in it is written, and the part refuses it. */
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, kdrv_apps_write(data, sizeof(data)));
+    cut_off();
+    kdrv_apps_write_abort();
+}
+
+TEST_CASE("a write into a block that is not blank erases it first, and lands whole",
+          "[apps_region]")
+{
+    static uint8_t out[0x3000];
+    static uint8_t in[0x3000];
+    uint32_t const at = KAPPS_DATA_OFF + (2U * KAPPS_ALIGN);
+
+    apps_ready();
+    fill_pattern(out, sizeof(out));
+    (void)memset(&out[0x1000], 0xFFU, 0x1000U);   /* a blank piece in the middle */
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(region(), at, KAPPS_ALIGN));
+    (void)memset(in, 0xA5U, sizeof(in));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(region(), at, in, sizeof(in)));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write_begin(at, sizeof(out)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_write(out, sizeof(out)));
+    kdrv_apps_write_abort();
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_read(region(), at, in, sizeof(in)));
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(out, in, sizeof(out),
+        "the old bytes under a blank piece survived, or the data did not land");
+}
+
+/* ---- The storage partition as a destination ----------------------------------- */
+
+/** @brief The size of the image the storage cases write: two blocks and a part. */
+#define STO_IMAGE_LEN  ((2U * KAPPS_ALIGN) + 0x1800U)
+
+TEST_CASE("an image into the storage partition reads back and the volume is given back",
+          "[apps_region]")
+{
+    static uint8_t out[STO_IMAGE_LEN];
+    static uint8_t in[STO_IMAGE_LEN];
+    const kfw_sink_t * const sink = kdrv_apps_storage_sink();
+    const esp_partition_t * const sto = storage_part();
+
+    fill_pattern(out, sizeof(out));
+    (void)memset(&out[0x3000], 0xFFU, 0x4000U);   /* a long blank run */
+
+    /* The partition holds something else first, so its blocks are not blank. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(sto, 0U, 3U * KAPPS_ALIGN));
+    (void)memset(in, 0xA5U, sizeof(in));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(sto, 0U, in, sizeof(in)));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->begin(NULL, sizeof(out)));
+    TEST_ASSERT_TRUE_MESSAGE(fake_fs_raw_open(), "the volume was not taken for the write");
+    for ( size_t i = 0U; sizeof(out) > i; i += 0x1234U )
+    {
+        size_t n = sizeof(out) - i;
+        if ( 0x1234U < n )
+        {
+            n = 0x1234U;
+        }
+        TEST_ASSERT_EQUAL_INT(KODE_OK, sink->write(NULL, &out[i], n));
+    }
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->end(NULL));
+    TEST_ASSERT_FALSE_MESSAGE(fake_fs_raw_open(), "the volume was not given back");
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_read(sto, 0U, in, sizeof(in)));
+    TEST_ASSERT_EQUAL_MEMORY(out, in, sizeof(out));
+}
+
+TEST_CASE("an image of no bytes, or one that does not fit the storage partition, is refused untouched",
+          "[apps_region]")
+{
+    const kfw_sink_t * const sink = kdrv_apps_storage_sink();
+    unsigned const before = fake_fs_raw_begins();
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, sink->begin(NULL, 0U));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, sink->begin(NULL, (uint32_t)storage_part()->size + 1U));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(before, fake_fs_raw_begins(),
+        "a refused image took the volume");
+    TEST_ASSERT_FALSE(fake_fs_raw_open());
+}
+
+TEST_CASE("a second storage session is refused, and abandoning one gives the volume back",
+          "[apps_region]")
+{
+    static uint8_t one[0x10];
+    const kfw_sink_t * const sink = kdrv_apps_storage_sink();
+
+    (void)memset(one, 0x11U, sizeof(one));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->begin(NULL, sizeof(one)));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, sink->begin(NULL, sizeof(one)));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, sink->write(NULL, one, sizeof(one) + 1U));   /* past the promise */
+    sink->abort(NULL);
+    TEST_ASSERT_FALSE_MESSAGE(fake_fs_raw_open(), "an abandoned session kept the volume");
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, sink->write(NULL, one, sizeof(one)));
+}
+
+TEST_CASE("a storage image that falls short of its promise does not verify",
+          "[apps_region]")
+{
+    static uint8_t one[0x10];
+    const kfw_sink_t * const sink = kdrv_apps_storage_sink();
+
+    (void)memset(one, 0x22U, sizeof(one));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->begin(NULL, 2U * sizeof(one)));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, sink->write(NULL, one, sizeof(one)));
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, sink->end(NULL));
+    TEST_ASSERT_FALSE_MESSAGE(fake_fs_raw_open(), "a failed end kept the volume");
+}
+
 /* ---- Taking an image out of circulation ------------------------------------ */
 
 /* Eviction erases the header sector rather than the whole image: an image

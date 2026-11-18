@@ -31,6 +31,10 @@ static uint32_t s_fs_cluster = FAKE_FS_CLUSTER_BYTES;
 static bool     s_fs_mount_fails;
 static unsigned s_fs_mount_calls;
 
+/* A raw write of the partition: open now, and how many have begun. */
+static bool     s_fs_raw;
+static unsigned s_fs_raw_begins;
+
 /**
  * @brief Empty @p dir recursively, leaving the directory itself.
  *
@@ -98,6 +102,8 @@ void fake_media_reset(void)
      * driver's own idea of what is mounted cannot outlive the fake's. */
     kdrv_sd_unmount();
     fake_sdmmc_reset();
+    s_fs_raw        = false;
+    s_fs_raw_begins = 0U;
 
     /* The next-mount knobs are statics in a driver that is real here, so
      * they outlive a case unless somebody puts them back. */
@@ -286,6 +292,43 @@ uint32_t kdrv_fs_cluster_bytes(void)
 void fake_media_set_fs_cluster(uint32_t bytes)
 {
     s_fs_cluster = bytes;
+}
+
+kode_status_t kdrv_fs_raw_begin(void)
+{
+    if ( s_fs_raw )
+    {
+        return KODE_DENIED;
+    }
+    s_fs_raw = true;
+    s_fs_raw_begins++;
+    s_fs_mounted = false;
+    return KODE_OK;
+}
+
+kode_status_t kdrv_fs_raw_end(void)
+{
+    if ( !s_fs_raw )
+    {
+        return KODE_DENIED;
+    }
+    s_fs_raw = false;
+    if ( s_fs_mount_fails )
+    {
+        return KODE_ERROR;
+    }
+    s_fs_mounted = true;
+    return KODE_OK;
+}
+
+bool fake_fs_raw_open(void)
+{
+    return s_fs_raw;
+}
+
+unsigned fake_fs_raw_begins(void)
+{
+    return s_fs_raw_begins;
 }
 
 kode_status_t kdrv_fs_usage(uint64_t *total, uint64_t *free_bytes)
