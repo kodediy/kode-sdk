@@ -10553,6 +10553,205 @@ TEST_CASE("a round that meets the start of the sentinel is still answered busy a
     lp_radio_awake();
 }
 
+/* ---- The board's rest and the automatic round --------------------------------
+ * The round over the remembered networks is something the AO starts by
+ * itself: its search gives way to a round for the board's rest, and a join
+ * it already has in hand does not. */
+
+/** @brief Longer than the wait after the first automatic round, ms. */
+#define LP_CUT_WAIT_MS   31000U
+
+/** @brief Wi-Fi on, off any network, and the second automatic round's sweep
+ *         with the worker. */
+static void lp_cut_sweeping(void)
+{
+    retry_ready();
+    retry_wait(LP_CUT_WAIT_MS);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+}
+
+/** @brief Leave nothing of a case that may have cut a sweep behind. */
+static void lp_cut_case_end(void)
+{
+    kdrv_wifi_scan_abort(false);
+    lp_radio_awake();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a round for the board's rest ends the automatic round's sweep after its step",
+          "[radio_ao][lowpower][retry]")
+{
+    lp_cut_sweeping();
+
+    lp_radio_round(KODE_LP_ASLEEP);
+    lp_expect_answer(true, "radio busy");
+    lp_expect_no_more();
+
+    /* The driver's sweep ends before its next step, and says it was cut. */
+    run_scan_rc(KODE_DENIED);
+    fake_klog_reset();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+
+    TEST_ASSERT_TRUE(logged("cut for the board's rest"));
+    TEST_ASSERT_FALSE_MESSAGE(logged("would let us on"), "a network was judged absent on half the air");
+    TEST_ASSERT_FALSE(logged("nothing to join"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the round went on under a board on its way to rest");
+
+    /* Asked again, the channel is free: the sentinel starts. */
+    lp_to_asleep();
+    lp_cut_case_end();
+}
+
+TEST_CASE("the sweep a rest cut is run whole when the board wakes", "[radio_ao][lowpower][retry]")
+{
+    lp_cut_sweeping();
+    lp_radio_round(KODE_LP_ASLEEP);
+    lp_expect_answer(true, "radio busy");
+    run_scan_rc(KODE_DENIED);
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+    lp_to_asleep();
+    retry_asleep();
+    retry_wait(700000U);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(),
+                                  "a sweep began under a board asleep");
+
+    lp_radio_awake();
+    pump();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(),
+                                  "a board that slept looks for its network at once");
+    run_scan();                               /* to its end: the cut was withdrawn */
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+    lp_cut_case_end();
+}
+
+TEST_CASE("an order for OFF ends the automatic round's sweep too", "[radio_ao][lowpower][retry]")
+{
+    lp_cut_sweeping();
+
+    lp_radio_round(KODE_LP_OFF);
+    lp_net_left();
+    lp_expect_answer(true, "radio busy");
+    run_scan_rc(KODE_DENIED);
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+    TEST_ASSERT_EQUAL_INT(-1, running_job());
+
+    /* Asked again, alone and in the same round: nothing is left to rest. */
+    lp_round_again(AO_Radio, KODE_LP_OFF);
+    drain();
+    lp_expect_answer(false, NULL);
+    lp_cut_case_end();
+}
+
+TEST_CASE("a round for the rest that meets a look at a hint lets it end, and no sweep follows",
+          "[radio_ao][lowpower][retry]")
+{
+    radio_fresh();
+    boot_with_hint("home", 6U);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+
+    lp_radio_round(KODE_LP_ASLEEP);
+    lp_expect_answer(true, "radio busy");
+    fake_klog_reset();
+    hint_heard(false);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "the sweep began under a board on its way to rest");
+    TEST_ASSERT_FALSE(logged("sweeping"));
+    TEST_ASSERT_TRUE(logged("ends for the board's rest"));
+    run_scan();                               /* no cut was left behind */
+
+    lp_radio_awake();
+    hint_case_end();
+}
+
+TEST_CASE("a network heard where it was under a round for the rest is left for the wake",
+          "[radio_ao][lowpower][retry]")
+{
+    radio_fresh();
+    boot_with_hint("home", 6U);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+
+    lp_radio_round(KODE_LP_ASLEEP);
+    lp_expect_answer(true, "radio busy");
+    hint_heard(true);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a join began under a board on its way to rest");
+    lp_radio_awake();
+    hint_case_end();
+}
+
+TEST_CASE("a join the automatic round has begun goes to its end under a round for the rest",
+          "[radio_ao][lowpower][retry]")
+{
+    radio_fresh();
+    boot_with_hint("home", 6U);
+    go_up();
+    vault_has("home");
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PROBE, running_job());
+    hint_heard(true);
+    finish(KDRV_RADIO_JOB_WIFI_PROBE, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+
+    lp_radio_round(KODE_LP_ASLEEP);
+    lp_expect_answer(true, "radio busy");
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job(),
+                                  "the round took the join's job from the worker");
+
+    /* Its three steps: the interface, the vault's join, the wait for the address. */
+    vault_joins("home");
+    fake_klog_reset();
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_DENIED);
+
+    /* It would not have the board, and nothing else is tried under the rest. */
+    TEST_ASSERT_TRUE(logged("ends for the board's rest"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "another try began under a board on its way to rest");
+    lp_radio_awake();
+    hint_case_end();
+}
+
+TEST_CASE("a sweep somebody asked for is not cut by a round for the rest",
+          "[radio_ao][lowpower]")
+{
+    radio_fresh();
+    go_up();
+    dispatch(WIFI_SCAN_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+
+    lp_radio_round(KODE_LP_ASLEEP);
+    lp_expect_answer(true, "radio busy");
+
+    run_scan();                               /* to its end */
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
+    lp_radio_awake();
+}
+
+TEST_CASE("an app's rest of the radio does not cut the automatic round's sweep",
+          "[radio_ao][lowpower][retry]")
+{
+    lp_cut_sweeping();
+
+    lp_part_round(AO_Radio, KODE_LP_PART_RADIO);
+    drain();
+    lp_expect_answer(true, "radio busy");
+
+    run_scan();                               /* to its end */
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    lp_cut_case_end();
+}
+
 TEST_CASE("a sentinel that stands down while ASLEEP asks for AWAKE",
           "[radio_ao][lowpower]")
 {

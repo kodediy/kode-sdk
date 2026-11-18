@@ -40,6 +40,23 @@ static inline void lp_round(QActive * const ao, kode_lp_state_t target)
 }
 
 /**
+ * @brief Ask @p ao again in the round already open, as AO_LowPower asks a busy owner.
+ *
+ * @param ao     The owner under test.
+ * @param target The open round's target.
+ */
+static inline void lp_round_again(QActive * const ao, kode_lp_state_t target)
+{
+    LowPowerRoundEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(LOWPOWER_ROUND_SIG);
+    e.target = (uint8_t)target;
+    e.round  = s_lp_round_no;
+    QASM_DISPATCH(ao, &e.super, 0U);
+}
+
+/**
  * @brief Open an app's rest on @p ao: a round posted to it alone, the board AWAKE.
  *
  * @param ao   The owner under test.

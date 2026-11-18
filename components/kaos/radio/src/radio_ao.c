@@ -563,6 +563,9 @@ typedef struct {
                                *   channel and the board allow.              */
     bool     wifi_left;       /**< The person stepped off the network: nothing
                                *   goes back until somebody asks.            */
+    bool     lp_yield;        /**< A round for the board's rest met the
+                               *   automatic round: its search ends with the
+                               *   job in hand (auto_rest_yield()).          */
 #endif
     uint8_t  ask[RADIO_ASK_MAX]; /**< The asks of AO_Storage that are answered
                                *   and not yet heard, oldest first (radio_ask_t):
@@ -9917,6 +9920,7 @@ void Radio_ctor(void)
     me->retry_owed  = false;
     me->wifi_left   = false;
     me->quiet_left  = false;
+    me->lp_yield    = false;
 #endif
     me->quiet       = false;
     /* Not known to be on: whoever ran before this boot may have left the
@@ -13776,6 +13780,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                     scan_next_drop(me, true);
                     me->tried    = 0UL;
                     me->autojoin = true;
+                    me->lp_yield = false;
                     /* Its end starts the next wait, if there is to be one. */
                     (void)QTimeEvt_disarm(&me->wifi_retry);
                     me->retry_owed = false;
@@ -14290,6 +14295,13 @@ static QState auto_try(Radio * const me)
     {
         return auto_finish(me);   /* somebody chose a network: it goes first */
     }
+    if ( me->lp_yield )
+    {
+        /* No look, no sweep and no join is begun under a board on its way to
+         * rest: the next round is the wait's, or the wake's. */
+        KLOG_N(TAG, "the automatic round ends for the board's rest");
+        return auto_finish(me);
+    }
     if ( me->hint_on )
     {
         if ( 0U != me->hint_fall )
@@ -14344,6 +14356,7 @@ static QState auto_finish(Radio * const me)
     me->hint_on   = false;
     me->hint_alt  = false;
     me->hint_fall = 0U;
+    me->lp_yield  = false;
     /* A round follows a round no sooner than the second wait. */
     if ( 0U == me->retry_step )
     {
@@ -14380,6 +14393,35 @@ static QState auto_abandon(Radio * const me)
     return auto_finish(me);
 }
 
+#if CONFIG_KODE_LOWPOWER
+/**
+ * @brief A round for the board's rest came while the automatic round runs:
+ *        its search gives way.
+ *
+ * The round over the remembered networks is this AO's own work, and tens of
+ * seconds of it. A sweep with the worker ends after its step on the air
+ * (KODE_DENIED), and from here no look, no sweep and no join is begun: the
+ * job in hand ends, and the round with it (auto_try()). A join already begun
+ * runs its three steps, which are seconds and leave the board on its network.
+ * An app's rest of the radio leaves the board awake and cuts nothing.
+ *
+ * @param me The AO, in the automatic round.
+ * @param r  The round.
+ */
+static void auto_rest_yield(Radio * const me, const LowPowerRoundEvt * const r)
+{
+    if ( 0U == r->parts )
+    {
+        me->lp_yield = true;
+        if ( me->winflight && (NULL != me->jobs)
+            && (KDRV_RADIO_JOB_WIFI_SCAN == me->jobs->wreq.type) )
+        {
+            kdrv_wifi_scan_abort(true);
+        }
+    }
+}
+#endif
+
 /**
  * @brief A station's pass began during the round: stop it here and finish.
  *
@@ -14401,7 +14443,9 @@ static QState auto_quiet(Radio * const me)
  * @brief Getting onto a network we already know, without being asked twice.
  *
  * A child of Radio_up, like the update: it needs the link and owns the
- * channel while it runs. First the channels the last networks were on
+ * channel while it runs. A round for the board's rest is answered busy while
+ * a job of it is out, and ends its search (auto_rest_yield()). First the
+ * channels the last networks were on
  * (auto_hint_next()), each with a look at the other channel the network was
  * heard on, if there is one: the join goes there when it is clearly stronger,
  * and back to the remembered channel if that access point will not have the
@@ -14451,6 +14495,19 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                          * own: the join goes now, and the cut is withdrawn. */
                         kdrv_wifi_scan_abort(false);
                         status = auto_finish(me);
+                        break;
+                    }
+                    if ( me->lp_yield )
+                    {
+                        /* Cut for the board's rest, or ended on its own under
+                         * it: the cut is withdrawn, no network is judged
+                         * absent and none is joined. */
+                        kdrv_wifi_scan_abort(false);
+                        if ( (uint8_t)KODE_DENIED == job->status )
+                        {
+                            KLOG_N(TAG, "the scan was cut for the board's rest");
+                        }
+                        status = auto_try(me);
                         break;
                     }
                     if ( (uint8_t)KODE_DENIED == job->status )
@@ -14509,6 +14566,11 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                     if ( me->quiet )
                     {
                         status = auto_quiet(me);
+                        break;
+                    }
+                    if ( me->lp_yield )
+                    {
+                        status = auto_try(me);   /* heard or not: for the wake */
                         break;
                     }
                     kdrv_radio_probe_result_t heard;
@@ -14645,6 +14707,16 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#if CONFIG_KODE_LOWPOWER
+        case LOWPOWER_ROUND_SIG: {
+            LowPowerRoundEvt const * const r = Q_EVT_CAST(LowPowerRoundEvt);
+
+            radio_lp_round(me, r);
+            auto_rest_yield(me, r);
+            status = Q_HANDLED();
+            break;
+        }
+#endif
         case WIFI_SCAN_REQ_SIG: {
             /* Answered, not merely logged: `wifi_scan` closes on the
              * scan-end event with its watchdog disarmed, and this state
