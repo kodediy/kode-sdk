@@ -183,9 +183,10 @@ enum KodeSignals {
     IOEXP_INPUT_SIG,            /**< AO_IoExp: what the expander's eight pins
                                  *   read (IoexpInputEvt). Every read of the
                                  *   input register goes out here - on the
-                                 *   chip's interrupt, and on request - so a
-                                 *   subscriber sees each change and can ask
-                                 *   for a confirming sample.                */
+                                 *   chip's interrupt, and on request (irq
+                                 *   says which) - so a subscriber sees each
+                                 *   change and can ask for a confirming
+                                 *   sample.                                 */
     IR_RX_SIG,                  /**< AO_Ir: one frame the receiver heard
                                  *   (IrRxEvt). Not published for a frame
                                  *   this board transmitted itself - see
@@ -3477,6 +3478,8 @@ typedef struct {
     uint8_t changed;    /**< Bits that differ from the previous read.  */
     bool    ok;         /**< false: the chip did not answer; levels and
                          *   changed are 0 and mean nothing.            */
+    bool    irq;        /**< true: the read served the chip's interrupt
+                         *   line; false: somebody asked for it.        */
 } IoexpInputEvt;
 
 /**

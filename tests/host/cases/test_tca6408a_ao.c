@@ -161,6 +161,7 @@ TEST_CASE("AO_IoExp owns the chip, puts a stray output back to an input, leaves 
     TEST_ASSERT_TRUE(in->ok);
     TEST_ASSERT_EQUAL_HEX8(0xFFU, in->levels);
     TEST_ASSERT_EQUAL_HEX8(0x00U, in->changed);
+    TEST_ASSERT_FALSE_MESSAGE(in->irq, "the boot's read served no interrupt");
     ao_spy_drain();
 
     mocks_down();
@@ -189,6 +190,7 @@ TEST_CASE("the interrupt callback becomes a read, a publish of what changed, and
     TEST_ASSERT_TRUE(in->ok);
     TEST_ASSERT_EQUAL_HEX8(0xFBU, in->levels);
     TEST_ASSERT_EQUAL_HEX8(0x04U, in->changed);
+    TEST_ASSERT_TRUE(in->irq);
     ao_spy_drain();
 
     /* And back: the change is measured against the last reading. */
@@ -238,6 +240,7 @@ TEST_CASE("a read the chip refused is published as not ok, the line is not re-ar
     in = (const IoexpInputEvt *)ao_spy_take();
     TEST_ASSERT_TRUE(in->ok);
     TEST_ASSERT_EQUAL_HEX8(0x01U, in->changed);
+    TEST_ASSERT_TRUE_MESSAGE(in->irq, "the retry serves the line too");
     ao_spy_drain();
     s_regs[REG_INPUT] = 0xFFU;
     khal_gpio_irq_enable_Expect(KBSP_PIN_IOEXP_INT);
@@ -297,6 +300,7 @@ TEST_CASE("a read request publishes the inputs even when nothing changed",
     TEST_ASSERT_TRUE(in->ok);
     TEST_ASSERT_EQUAL_HEX8(0xFFU, in->levels);
     TEST_ASSERT_EQUAL_HEX8(0x00U, in->changed);
+    TEST_ASSERT_FALSE_MESSAGE(in->irq, "a read asked for served no interrupt");
     ao_spy_drain();
 
     mocks_down();

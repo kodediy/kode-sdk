@@ -437,12 +437,36 @@ static kode_status_t field_do(TouchFieldReqEvt const *q, int32_t *value)
     return rc;
 }
 
-/** @brief Did the expander's owner just see the controller's IRQ fall? */
-static bool irq_fell(IoexpInputEvt const *in)
+/**
+ * @brief Did the controller's IRQ fire, as far as the expander's owner can tell?
+ *
+ * The plain case is P6 seen low. But the CST820 can pulse its IRQ for a tenth
+ * of a millisecond (`irq_pulse_width`, which the chip puts back by itself),
+ * and the expander is read about a millisecond after its own line fell, by
+ * when P6 is high again and the TCA6408A has let go: the read finds no pin
+ * moved. An interrupt with nothing to show for it was most likely that pulse,
+ * so it counts too, unless the controller rests with its IRQ off. A wrong
+ * guess costs TOUCH_EMPTY_POLLS reads.
+ *
+ * @param me The AO.
+ * @param in What the expander's owner read.
+ * @return true when a poll should look for a finger.
+ */
+static bool irq_seen(Touch const * const me, IoexpInputEvt const *in)
 {
-    return in->ok
-        && ((in->changed & TP_INT_BIT) != 0U)
-        && ((in->levels & TP_INT_BIT) == 0U);
+    bool const low  = ((in->changed & TP_INT_BIT) != 0U)
+                   && ((in->levels & TP_INT_BIT) == 0U);
+    bool missed     = in->irq && (0U == in->changed);
+
+#if CONFIG_KODE_LOWPOWER
+    if ( me->rested )
+    {
+        missed = false;
+    }
+#else
+    (void)me;
+#endif
+    return in->ok && (low || missed);
 }
 
 /* ---- The guided test ------------------------------------------------------ */
@@ -909,7 +933,7 @@ static QState Touch_idle(Touch * const me, QEvt const * const e)
             /* A controller in its low-power scan answers nothing until a
              * finger touches the glass, and this line is how it says so. */
             status = Q_HANDLED();
-            if ( me->missing && irq_fell(Q_EVT_CAST(IoexpInputEvt))
+            if ( me->missing && irq_seen(me, Q_EVT_CAST(IoexpInputEvt))
                 && (KODE_TOUCH_LOOK_EDGE_MS <= (khal_time_ms() - me->look_ms)) )
             {
                 if ( look_once(me) )
@@ -1075,9 +1099,9 @@ static QState Touch_armed(Touch * const me, QEvt const * const e)
     switch ( e->sig )
     {
         case IOEXP_INPUT_SIG: {
-            if ( irq_fell(Q_EVT_CAST(IoexpInputEvt)) )
+            if ( irq_seen(me, Q_EVT_CAST(IoexpInputEvt)) )
             {
-                KLOG_I(TAG, "edge: P6 fell, polling starts at t=%lums",
+                KLOG_I(TAG, "edge: the IRQ fired, polling starts at t=%lums",
                        (unsigned long)khal_time_ms());
                 me->empty = 0U;
                 status = Q_TRAN(&Touch_tracking);

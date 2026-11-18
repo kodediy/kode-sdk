@@ -286,7 +286,7 @@ static void go_asleep(void)
 /** @brief Hand AO_LowPower one expander reading. */
 static void expander(uint8_t levels, uint8_t changed)
 {
-    IoexpInputEvt in = { QEVT_INITIALIZER(IOEXP_INPUT_SIG), levels, changed, true };
+    IoexpInputEvt in = { QEVT_INITIALIZER(IOEXP_INPUT_SIG), levels, changed, true, true };
 
     QASM_DISPATCH(AO_LowPower, &in.super, 0U);
 }

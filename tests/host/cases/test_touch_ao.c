@@ -191,6 +191,24 @@ static void p6_moves(bool low)
     }
     e.changed = (uint8_t)(1U << KBSP_IOEXP_BIT_TP_INT);
     e.ok      = true;
+    e.irq     = true;
+    QASM_DISPATCH(AO_Touch, &e.super, 0U);
+}
+
+/**
+ * @brief The expander's owner read its pins and found none moved.
+ *
+ * @param irq true: the read served the interrupt line; false: it was asked for.
+ */
+static void nothing_moved(bool irq)
+{
+    IoexpInputEvt e;
+
+    e.super   = (QEvt)QEVT_INITIALIZER(IOEXP_INPUT_SIG);
+    e.levels  = 0xFFU;
+    e.changed = 0U;
+    e.ok      = true;
+    e.irq     = irq;
     QASM_DISPATCH(AO_Touch, &e.super, 0U);
 }
 
@@ -512,7 +530,9 @@ TEST_CASE("nothing is read until the controller's IRQ falls", "[touch_ao]")
     other.levels  = 0xFEU;                  /* a button, not the touch */
     other.changed = 0x01U;
     other.ok      = true;
+    other.irq     = true;
     QASM_DISPATCH(AO_Touch, &other.super, 0U);
+    nothing_moved(false);                   /* a read somebody asked for */
 
     TEST_ASSERT_EQUAL_UINT(0U, s_reads);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
@@ -545,6 +565,31 @@ TEST_CASE("the IRQ falling starts the poll, and a press is read from it",
 
     /* Back to rest for the cases that follow. */
     sample(false, 40, 50);
+    ao_spy_drain();
+    mock_down();
+}
+
+/* The CST820 can pulse its IRQ for a tenth of a millisecond, and it puts
+ * that width back by itself; the expander is read about a millisecond after
+ * its own line fell, with P6 high again. An interrupt whose read finds no pin
+ * moved is that pulse: polling has to start from it, or a quick tap is lost. */
+TEST_CASE("an interrupt whose read finds no pin moved starts the poll, and a press is read",
+          "[touch_ao]")
+{
+    touch_armed();
+
+    nothing_moved(true);
+    finger(true, 60, 70);
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_tick(AO_Touch, 1U));
+    TEST_ASSERT_EQUAL_UINT(1U, s_reads);
+
+    const TouchEvt * const e = published();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_TRUE(e->pressed);
+    TEST_ASSERT_EQUAL_INT16(60, e->x);
+    TEST_ASSERT_EQUAL_INT16(70, e->y);
+
+    sample(false, 60, 70);
     ao_spy_drain();
     mock_down();
 }
@@ -1479,6 +1524,26 @@ TEST_CASE("a round puts the controller to sleep: no interrupt, auto-sleep on",
     expect_answer(false, NULL);
 
     s_regs[REG_IRQ_CTL] = 0U;
+    state_awake();
+    expect_awake_settings();
+    mock_down();
+}
+
+/* A rested controller sends no interrupt at all, so an empty read then is
+ * another pin's bounce, and a look would only wake a chip that is asleep. */
+TEST_CASE("an empty interrupt read polls nothing while the controller rests",
+          "[touch_ao][lowpower]")
+{
+    touch_armed();
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+    unsigned const reads = s_reads;
+
+    nothing_moved(true);
+
+    TEST_ASSERT_EQUAL_UINT(reads, s_reads);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_tick(AO_Touch, 10U),
+                                   "resting, nothing polls");
     state_awake();
     expect_awake_settings();
     mock_down();
