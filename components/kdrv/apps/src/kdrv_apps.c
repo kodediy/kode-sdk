@@ -23,6 +23,7 @@
 #include "esp_rom_crc.h"
 #include "khal_crc32.h"
 #include "kdrv_image_walk.h"
+#include "psa/crypto.h"
 
 #define TAG              "kdrv.apps"
 #define APPS_SECTOR      0x1000U   /* the 4 KB unit every metadata sector is erased in */
@@ -742,6 +743,87 @@ kode_status_t kdrv_apps_extent_crc(uint32_t offset, uint32_t size, uint32_t *crc
         *crc = run;
     }
     return st;
+}
+
+/**
+ * @brief The SHA-256 of @p size bytes of partition @p p from @p offset, through the mapping.
+ *
+ * IDF invalidates the cache over every range it erases or writes, so the
+ * mapping reads what the flash holds, not what an earlier read left cached.
+ *
+ * @return KODE_OK with @p out written; KODE_ERROR when a window cannot be mapped or hashed.
+ */
+static kode_status_t part_sha256(const esp_partition_t *p, uint32_t offset, uint32_t size, uint8_t *out)
+{
+    psa_hash_operation_t op   = PSA_HASH_OPERATION_INIT;
+    uint32_t             done = 0U;
+    kode_status_t        st   = KODE_OK;
+
+    (void)psa_crypto_init();   /* idempotent; the hash must not depend on another having run first */
+    if ( psa_hash_setup(&op, PSA_ALG_SHA_256) != PSA_SUCCESS )
+    {
+        return KODE_ERROR;
+    }
+    while ( (KODE_OK == st) && (done < size) )
+    {
+        uint32_t                    n   = size - done;
+        const void                 *map = NULL;
+        esp_partition_mmap_handle_t h   = 0U;
+
+        if ( APPS_CRC_WINDOW < n )
+        {
+            n = APPS_CRC_WINDOW;
+        }
+        if ( esp_partition_mmap(p, offset + done, n, ESP_PARTITION_MMAP_DATA, &map, &h) != ESP_OK )
+        {
+            st = KODE_ERROR;
+        }
+        else
+        {
+            if ( psa_hash_update(&op, (const uint8_t *)map, n) != PSA_SUCCESS )
+            {
+                st = KODE_ERROR;
+            }
+            done += n;
+            esp_partition_munmap(h);
+        }
+    }
+    size_t len = 0U;
+    if ( (KODE_OK != st) || (psa_hash_finish(&op, out, 32U, &len) != PSA_SUCCESS) || (32U != len) )
+    {
+        (void)psa_hash_abort(&op);
+        return KODE_ERROR;
+    }
+    return KODE_OK;
+}
+
+kode_status_t kdrv_apps_named_sha256(const char *project, uint8_t *out)
+{
+    const kapps_dir_t * const d = kdrv_apps_dir();
+
+    if ( (NULL == s_part) || (NULL == d) || (NULL == project) || (NULL == out) )
+    {
+        return KODE_DENIED;
+    }
+    uint32_t count = d->count;
+
+    if ( KAPPS_MAX_ENTRIES < count )
+    {
+        count = KAPPS_MAX_ENTRIES;
+    }
+    for ( uint32_t i = 0U; i < count; ++i )
+    {
+        kdrv_slot_desc_t vd;
+
+        if ( ((d->e[i].flags & KAPPS_ENTRY_VALID) != 0U)
+            && (kdrv_apps_desc(&d->e[i], &vd, NULL) == KODE_OK)
+            && (strcmp(vd.project, project) == 0)
+            && (((uint64_t)d->e[i].offset + (uint64_t)d->e[i].size) <= (uint64_t)s_part->size) )
+        {
+            return part_sha256(s_part, d->e[i].offset, d->e[i].size, out);
+        }
+    }
+    return KODE_ERROR;
 }
 
 /* ---- The region as a kfw_sink_t -------------------------------------------
@@ -1655,6 +1737,23 @@ static void sto_sink_abort(void *ctx)
 static const kfw_sink_t STO_SINK = {
     sto_sink_begin, sto_sink_write, sto_sink_end, sto_sink_abort
 };
+
+kode_status_t kdrv_apps_storage_sha256(uint8_t *out)
+{
+    if ( NULL == out )
+    {
+        return KODE_DENIED;
+    }
+    const esp_partition_t * const p = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, STO_LABEL);
+    if ( (NULL == p) || part_block_blank(p, 0U) )
+    {
+        /* A partition whose first block is blank holds no FAT image: a Kode
+         * fresh from the line answers at once instead of hashing 2 MB of 0xFF. */
+        return KODE_ERROR;
+    }
+    return part_sha256(p, 0U, (uint32_t)p->size, out);
+}
 
 const kfw_sink_t *kdrv_apps_storage_sink(void)
 {

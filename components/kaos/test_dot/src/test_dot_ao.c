@@ -366,6 +366,16 @@ void test_dot_storage_arm(const char *name)
     }
 }
 
+const char *test_dot_welcome_armed(void)
+{
+    return s_welcome;
+}
+
+const char *test_dot_storage_armed(void)
+{
+    return s_storage;
+}
+
 /** @brief Every row in the timing record's order: @c row_ms follows it. */
 static const char *const ROWS_ALL[TD_ROWS_TOTAL] = { "sd", "imu", "audio", "haptic_pat", "mag", "pmic", "gauge",
                                                      "ioexp", "clocks", "ir", "nfc", "rfid", "mem" };

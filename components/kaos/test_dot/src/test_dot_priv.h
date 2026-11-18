@@ -257,6 +257,12 @@ void test_dot_welcome_arm(const char *name);
  */
 void test_dot_storage_arm(const char *name);
 
+/** @brief The welcome app's file armed for the next run; empty when none. */
+const char *test_dot_welcome_armed(void);
+
+/** @brief The storage image's file armed for the next run; empty when none. */
+const char *test_dot_storage_armed(void);
+
 /**
  * @brief Forget a pass's measurements and kept photos, keep the memory.
  * @param c The memory.

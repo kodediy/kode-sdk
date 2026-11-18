@@ -252,6 +252,24 @@ TEST_CASE("test_storage_alone_goes_at_the_camera_end_and_a_failed_welcome_does_n
     td_down();
 }
 
+/* test_dot_welcome with the bytes already on the board arms nothing, over
+ * whatever an earlier verb armed: the run writes no Welcome and the storage
+ * image goes at the camera's end. */
+TEST_CASE("test_a_welcome_found_on_the_board_is_not_written_and_storage_goes_at_the_camera_end",
+          "[test_dot_run]")
+{
+    test_dot_welcome_arm("welcome.kfw");
+    test_dot_welcome_arm(NULL);
+    test_dot_storage_arm("storage.bin");
+    run_to_camera();
+    TEST_ASSERT_TRUE(drive_until(">ok"));
+    poll_records();
+    TEST_ASSERT_FALSE_MESSAGE(td_said("rec welcome="), "a Welcome found on the board was written");
+    TEST_ASSERT_TRUE(td_said("rec storage=started name=storage.bin"));
+    td_end();
+    td_down();
+}
+
 /** @brief How many installs AO_AppMgr was asked for since the last call; its mailbox emptied. */
 static unsigned installs_asked(void)
 {

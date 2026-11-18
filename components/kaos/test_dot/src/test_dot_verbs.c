@@ -6,12 +6,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "sdkconfig.h"
 
 #include "kaos.h"
+#include "kdrv_apps.h"
 #include "kdrv_pcf8574.h"
 #include "khal_crc32.h"
+#include "khal_time.h"
 #include "kode_log.h"
 #include "kqp.h"
 
@@ -470,21 +473,104 @@ static void h_end(const kverb_t *c, const karg_val_t *v)
     td_plain(c, (uint8_t)TEST_DOT_VERB_END);
 }
 
-/** @brief test_dot_welcome name=: the welcome app on the card, written during the next run. */
+/**
+ * @brief Whether the board already holds the bytes whose SHA-256 is @p want.
+ *
+ * The app named @p project, or the whole storage partition. Asked before the
+ * run, with nothing writing the flash. No @p want, a malformed one or any
+ * read that fails says no, and the image is written as before.
+ *
+ * @param project The app's project name (ignored for the storage partition).
+ * @param want    64 hex digits, or NULL / empty.
+ * @param storage true for the storage partition.
+ * @return true only on a digest equal to @p want.
+ */
+static bool td_have(const char *project, const char *want, bool storage)
+{
+    uint8_t dg[32];
+    char    hex[65];
+
+    if ( (NULL == want) || (64U != strlen(want)) || (!storage && ((NULL == project) || ('\0' == project[0]))) )
+    {
+        return false;
+    }
+    kode_status_t st;
+    if ( storage )
+    {
+        st = kdrv_apps_storage_sha256(dg);
+    }
+    else
+    {
+        st = kdrv_apps_named_sha256(project, dg);
+    }
+    if ( KODE_OK != st )
+    {
+        return false;
+    }
+    for ( uint32_t i = 0U; 32U > i; i++ )
+    {
+        (void)snprintf(&hex[2U * i], 3U, "%02x", (unsigned)dg[i]);
+    }
+    return 0 == strcasecmp(hex, want);
+}
+
+/** @brief A verb's optional text: its value when given, NULL when not. */
+static const char *td_opt(const karg_val_t *v)
+{
+    const char *s = NULL;
+
+    if ( v->present )
+    {
+        s = v->s;
+    }
+    return s;
+}
+
+/** @brief test_dot_welcome name= [project= sha=]: the welcome app on the card, written during the next run unless the board already holds it. `name=""` disarms. */
 static void h_welcome(const kverb_t *c, const karg_val_t *v)
 {
     (void)c;
-    test_dot_welcome_arm(v[0].s);
-    console_reply(">|welcome armed=%s", v[0].s);
+    uint32_t const t0 = khal_time_ms();
+    if ( '\0' == v[0].s[0] )
+    {
+        /* The station takes back what it armed: a run it does not start. */
+        test_dot_welcome_arm(NULL);
+        console_reply(">|welcome armed=none");
+    }
+    else if ( td_have(td_opt(&v[1]), td_opt(&v[2]), false) )
+    {
+        /* The same bytes are already on the board: nothing to write. */
+        test_dot_welcome_arm(NULL);
+        console_reply(">|welcome armed=none present=yes ms=%lu", (unsigned long)(khal_time_ms() - t0));
+    }
+    else
+    {
+        test_dot_welcome_arm(v[0].s);
+        console_reply(">|welcome armed=%s present=no ms=%lu", v[0].s, (unsigned long)(khal_time_ms() - t0));
+    }
     console_reply(">ok");
 }
 
-/** @brief test_dot_storage name=: the storage image on the card, written after the welcome app. */
+/** @brief test_dot_storage name= [sha=]: the storage image on the card, written after the welcome app unless the partition already holds it. `name=""` disarms. */
 static void h_storage(const kverb_t *c, const karg_val_t *v)
 {
     (void)c;
-    test_dot_storage_arm(v[0].s);
-    console_reply(">|storage armed=%s", v[0].s);
+    uint32_t const t0 = khal_time_ms();
+    if ( '\0' == v[0].s[0] )
+    {
+        test_dot_storage_arm(NULL);
+        console_reply(">|storage armed=none");
+    }
+    else if ( td_have(NULL, td_opt(&v[1]), true) )
+    {
+        test_dot_storage_arm(NULL);
+        console_reply(">|storage armed=none present=yes ms=%lu", (unsigned long)(khal_time_ms() - t0));
+    }
+    else
+    {
+        test_dot_storage_arm(v[0].s);
+        console_reply(">|storage armed=%s present=no ms=%lu", v[0].s, (unsigned long)(khal_time_ms() - t0));
+    }
     console_reply(">ok");
 }
 
@@ -693,11 +779,15 @@ static const karg_spec_t A_RADIO[] = {
     { .key = "ble",      .required = false, .type = KARG_TEXT },
     { .key = "discover", .required = false, .type = KARG_BOOL },
 };
+/* The name is a text so that an empty one, `name=""`, can disarm. */
 static const karg_spec_t A_WELCOME[] = {
-    { .key = "name", .required = true, .type = KARG_STRING },
+    { .key = "name",    .required = true,  .type = KARG_TEXT },
+    { .key = "project", .required = false, .type = KARG_STRING },
+    { .key = "sha",     .required = false, .type = KARG_STRING },
 };
 static const karg_spec_t A_STORAGE[] = {
-    { .key = "name", .required = true, .type = KARG_STRING },
+    { .key = "name", .required = true,  .type = KARG_TEXT },
+    { .key = "sha",  .required = false, .type = KARG_STRING },
 };
 static const karg_spec_t A_BOOST[] = {
     { .key = "state", .required = true, .type = KARG_BOOL },
