@@ -2898,6 +2898,7 @@ typedef struct {
     QEvt    super;
     char    name[KODE_APP_FILE_MAX];             /**< Echoed: answers can cross. */
     char    project[32];                         /**< esp_app_desc_t.project_name. */
+    char    version[16];                         /**< esp_app_desc_t.version, cut as AppEntryEvt's; empty when none. */
     char    display[KODE_APP_DISPLAY_MAX];       /**< Empty when unmanifested.   */
     char    category[KODE_APP_CATEGORY_MAX];     /**< Empty when none is named.  */
     uint8_t build[KODE_APP_BUILD_LEN];           /**< The image's build id; zero when it has none. */

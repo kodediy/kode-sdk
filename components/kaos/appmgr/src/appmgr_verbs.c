@@ -23,6 +23,11 @@
 #define APPMGR_V_ERASE_MARGIN_MS 5000U  /**< What `app_erase` waits past AO_AppMgr's own bound on AO_Storage. */
 #define APPMGR_V_ERASE_MS     (APPMGR_WIPE_MS + APPMGR_V_ERASE_MARGIN_MS) /**< `app_erase`'s deadline. */
 #define APPMGR_V_RUN_MS       (KODE_APPMGR_OPEN_MS + APPMGR_V_ERASE_MARGIN_MS) /**< `app_run`'s: AO_AppMgr's bound on a medium's open, and the margin. */
+#define APPMGR_V_FILE_MS      1000U  /**< `app_list files=on`: what one question to AO_Storage, a page or a manifest, adds to the deadline. */
+#define APPMGR_V_FS_PREFIX    "/storage/"  /**< The internal partition's root, before a file's name. */
+#define APPMGR_V_AT_APP       "app"  /**< `at=`: installed, in the apps region. */
+#define APPMGR_V_AT_SD        "sd"   /**< `at=`: a file on the card. */
+#define APPMGR_V_AT_FS        "fs"   /**< `at=`: a file on the internal partition. */
 
 /** @brief Which app verb holds the console. */
 typedef enum {
@@ -48,12 +53,47 @@ static uint16_t s_appmgr_next;
  *         ends with `more` and leaves s_appmgr_next here brought nothing. */
 static uint16_t s_appmgr_from;
 
-/** @brief app_list: records arrive as APP_ENTRY_SIG pages, closed by the end. */
+/** @brief One app file a page of AO_Storage's listing named. */
+typedef struct {
+    char     name[KODE_APP_FILE_MAX];  /**< Its file name, as the listing gave it. */
+    uint32_t size;                     /**< Its size in bytes.                     */
+    bool     from_sd;                  /**< On the card; false is the internal partition. */
+} appmgr_file_t;
+
+/** @brief APPMGR_V_LIST: `files=on` was asked, so every record says where its
+ *         app is and the app files follow the installed apps. */
+static bool s_appmgr_files;
+
+/** @brief APPMGR_V_LIST: the installed apps have ended and the app files are
+ *         being listed. s_appmgr_next and s_appmgr_from count files from here. */
+static bool s_appmgr_on_files;
+
+/** @brief APPMGR_V_LIST: the app files of the page in hand, kept while their
+ *         manifests are read one at a time. One page, never the whole listing. */
+static appmgr_file_t s_appmgr_page[KODE_STORAGE_LIST_MAX];
+static uint8_t       s_appmgr_page_n;     /**< Files the page in hand holds.       */
+static uint8_t       s_appmgr_page_at;    /**< The one whose manifest is awaited.  */
+static bool          s_appmgr_page_more;  /**< Another page follows this one.      */
+
+/** @brief APPMGR_V_LIST: the path the manifest in flight was asked with; the
+ *         answer echoes it, and any other answer is not this listing's. */
+static char s_appmgr_asked[KODE_APP_FILE_MAX];
+
+/**
+ * @brief app_list [files=on|off]: records arrive as APP_ENTRY_SIG pages, closed by the end.
+ *
+ * With `files=on` every record ends with `at=`, and after the installed apps
+ * come the app files on the card and on the internal partition, one record
+ * each: the apps the board holds but has not installed, and the copies of the
+ * ones it has. Without it, or with `off`, the answer is the installed apps
+ * and nothing else, as it has always been.
+ */
 static void h_app_list(const kverb_t *c, const karg_val_t *v)
 {
-    (void)v;
     console_begin(c->verb);
     s_appmgr_kind = APPMGR_V_LIST;
+    s_appmgr_files    = v[0].present && v[0].b;
+    s_appmgr_on_files = false;
     s_appmgr_next = 0U;
     s_appmgr_from = 0U;
     appmgr_list_request(AO_Console);
@@ -199,31 +239,211 @@ static void h_app_cat(const kverb_t *c, const karg_val_t *v)
     }
 }
 
-/** @brief One app_list record. The fallbacks live here, in the one place that
- *         renders for a human, not in AO_AppMgr. */
-static void appmgr_entry(AppEntryEvt const *en)
+/**
+ * @brief One app_list record. The fallbacks live here, in the one place that
+ *        renders for a human, not in AO_AppMgr.
+ *
+ * @param name     The project name.
+ * @param version  Its version; empty prints as `-`.
+ * @param size     The image's size in bytes.
+ * @param category Its category; empty prints as `other`.
+ * @param display  Its display name; empty prints as @p name.
+ * @param at       `files=on` only: where the app is. NULL leaves the record
+ *                 as `app_list` has always printed it.
+ * @param file     With @p at: the file's name on its medium, or NULL for an
+ *                 installed app, which has none.
+ */
+static void appmgr_record(const char *name, const char *version, uint32_t size,
+                          const char *category, const char *display,
+                          const char *at, const char *file)
 {
-    char const *category = "other";
-    char const *display  = en->name;
-    char qn[CONSOLE_QUOTED_MAX(sizeof(en->name))];
-    char qv[CONSOLE_QUOTED_MAX(sizeof(en->version))];
-    char qc[CONSOLE_QUOTED_MAX(sizeof(en->category))];
-    char qd[CONSOLE_QUOTED_MAX(sizeof(en->display))];
+    char qn[CONSOLE_QUOTED_MAX(APPMGR_V_PROJECT_MAX)];
+    char qv[CONSOLE_QUOTED_MAX(sizeof(((AppEntryEvt *)0)->version))];
+    char qc[CONSOLE_QUOTED_MAX(KODE_APP_CATEGORY_MAX)];
+    char qd[CONSOLE_QUOTED_MAX(KODE_APP_DISPLAY_MAX)];
+    char qf[CONSOLE_QUOTED_MAX(KODE_APP_FILE_MAX)];
+    /* What `files=on` adds after the record `app_list` has always printed. */
+    char tail[sizeof(" at= file=") + sizeof(APPMGR_V_AT_APP) + sizeof(qf)];
 
-    if ( '\0' != en->category[0] )
+    if ( '\0' == category[0] )
     {
-        category = en->category;
+        category = "other";
     }
-    if ( '\0' != en->display[0] )
+    if ( '\0' == display[0] )
     {
-        display = en->display;
+        display = name;
     }
-    console_reply(">|name=%s version=%s size_kb=%" PRIu32 " category=%s display=%s",
-                  console_quote(qn, sizeof(qn), en->name),
-                  console_kv_text(qv, sizeof(qv), en->version),
-                  (uint32_t)(en->size / APPMGR_V_BYTES_PER_KB),
+    tail[0] = '\0';
+    if ( (NULL != at) && (NULL != file) )
+    {
+        (void)snprintf(tail, sizeof(tail), " at=%s file=%s", at,
+                       console_quote(qf, sizeof(qf), file));
+    }
+    else if ( NULL != at )
+    {
+        (void)snprintf(tail, sizeof(tail), " at=%s", at);
+    }
+    else
+    {
+        /* The record as it has always been. */
+    }
+    console_reply(">|name=%s version=%s size_kb=%" PRIu32 " category=%s display=%s%s",
+                  console_quote(qn, sizeof(qn), name),
+                  console_kv_text(qv, sizeof(qv), version),
+                  (uint32_t)(size / APPMGR_V_BYTES_PER_KB),
                   console_quote(qc, sizeof(qc), category),
-                  console_quote(qd, sizeof(qd), display));
+                  console_quote(qd, sizeof(qd), display), tail);
+}
+
+/** @brief Close app_list: every record that was going to be printed has been. */
+static void appmgr_list_done(void)
+{
+    console_reply(">ok");
+    console_end();
+}
+
+/**
+ * @brief Ask for the manifest of the next app file of the page in hand, for
+ *        the next page once the page is through, or close the listing.
+ */
+static void appmgr_file_next(void)
+{
+    if ( s_appmgr_page_at < s_appmgr_page_n )
+    {
+        appmgr_file_t const * const f = &s_appmgr_page[s_appmgr_page_at];
+        const char *prefix = APPMGR_V_FS_PREFIX;
+        int         len;
+
+        if ( f->from_sd )
+        {
+            prefix = KODE_CARD_APP_PREFIX;
+        }
+        /* By path, so the file read is the one the listing named: a bare
+         * name is searched for card first, and the two media may each hold a
+         * file of that name. A name too long to carry its volume is asked
+         * bare, which is all the request has room for. */
+        len = snprintf(s_appmgr_asked, sizeof(s_appmgr_asked), "%s%s", prefix, f->name);
+        if ( (0 > len) || ((size_t)len >= sizeof(s_appmgr_asked)) )
+        {
+            (void)snprintf(s_appmgr_asked, sizeof(s_appmgr_asked), "%s", f->name);
+        }
+        console_extend(APPMGR_V_FILE_MS);
+        storage_desc_request(s_appmgr_asked, AO_Console);
+    }
+    else if ( s_appmgr_page_more )
+    {
+        s_appmgr_page_n  = 0U;
+        s_appmgr_page_at = 0U;
+        s_appmgr_from    = s_appmgr_next;
+        console_extend(APPMGR_V_FILE_MS);
+        storage_list_page(s_appmgr_next, AO_Console);
+    }
+    else
+    {
+        appmgr_list_done();
+    }
+}
+
+/** @brief The installed apps have ended: go on to the app files. */
+static void appmgr_files_begin(void)
+{
+    s_appmgr_on_files  = true;
+    s_appmgr_next      = 0U;
+    s_appmgr_from      = 0U;
+    s_appmgr_page_n    = 0U;
+    s_appmgr_page_at   = 0U;
+    s_appmgr_page_more = false;
+    s_appmgr_asked[0]  = '\0';
+    console_extend(APPMGR_V_FILE_MS);
+    /* The card is mounted again first, so one put in or written on a
+     * computer since the last look is listed as it is now. */
+    storage_list_request(AO_Console);
+}
+
+/** @brief `files=on`: a page of the app files, and the manifest of each. */
+static bool appmgr_files_listing(QEvt const *e)
+{
+    bool handled = false;
+
+    if ( (QSignal)STORAGE_ENTRY_SIG == e->sig )
+    {
+        StorageEntryEvt const * const en = Q_EVT_CAST(StorageEntryEvt);
+
+        /* A page asked twice repeats its entries: only the next position is new. */
+        if ( en->pos == s_appmgr_next )
+        {
+            ++s_appmgr_next;
+            if ( !en->is_dir && console_is_bin(en->name)
+                && (s_appmgr_page_n < (uint8_t)KODE_STORAGE_LIST_MAX) )
+            {
+                appmgr_file_t * const f = &s_appmgr_page[s_appmgr_page_n];
+
+                (void)snprintf(f->name, sizeof(f->name), "%s", en->name);
+                f->size    = en->size;
+                f->from_sd = en->from_sd;
+                ++s_appmgr_page_n;
+            }
+        }
+        handled = true;
+    }
+    else if ( (QSignal)STORAGE_LIST_END_SIG == e->sig )
+    {
+        bool const more = Q_EVT_CAST(ListEndEvt)->more;
+
+        if ( more && (s_appmgr_next == s_appmgr_from) )
+        {
+            /* A page that ends with `more` but brought nothing would be asked
+             * again for ever, as with the installed apps. */
+            console_reply_err(KCLI_ERR_REJECT, "app_list");
+            console_end();
+        }
+        else
+        {
+            s_appmgr_page_more = more;
+            s_appmgr_page_at   = 0U;
+            appmgr_file_next();
+        }
+        handled = true;
+    }
+    else if ( (QSignal)STORAGE_DESC_RSP_SIG == e->sig )
+    {
+        StorageDescRspEvt const * const r = Q_EVT_CAST(StorageDescRspEvt);
+
+        /* Answers can cross: only the one that echoes the path asked is the
+         * manifest of the file in hand. */
+        if ( (s_appmgr_page_at < s_appmgr_page_n)
+            && (strcmp(r->name, s_appmgr_asked) == 0) )
+        {
+            appmgr_file_t const * const f = &s_appmgr_page[s_appmgr_page_at];
+
+            if ( ((kode_status_t)r->status == KODE_OK) && ('\0' != r->project[0]) )
+            {
+                const char *at = APPMGR_V_AT_FS;
+
+                if ( f->from_sd )
+                {
+                    at = APPMGR_V_AT_SD;
+                }
+                appmgr_record(r->project, r->version, f->size, r->category,
+                              r->display, at, f->name);
+            }
+            else
+            {
+                /* Not an app image, or one that would not be read: it is no
+                 * app, and the listing goes on without it. */
+                KLOG_D(TAG, "app_list: '%s' says nothing of an app (status %" PRIu32 ")",
+                       f->name, (uint32_t)r->status);
+            }
+            ++s_appmgr_page_at;
+            appmgr_file_next();
+        }
+        handled = true;
+    }
+    else
+    {
+        /* Not the listing's. */
+    }
+    return handled;
 }
 
 /** @brief app_list's pages: an entry at the expected position, and the end of a page. */
@@ -231,15 +451,26 @@ static bool appmgr_listing(QEvt const *e)
 {
     bool handled = false;
 
-    if ( (QSignal)APP_ENTRY_SIG == e->sig )
+    if ( s_appmgr_on_files )
+    {
+        handled = appmgr_files_listing(e);
+    }
+    else if ( (QSignal)APP_ENTRY_SIG == e->sig )
     {
         AppEntryEvt const * const en = Q_EVT_CAST(AppEntryEvt);
 
         /* A page asked twice repeats its entries: only the next position is new. */
         if ( en->pos == s_appmgr_next )
         {
+            const char *at = NULL;
+
+            if ( s_appmgr_files )
+            {
+                at = APPMGR_V_AT_APP;
+            }
             ++s_appmgr_next;
-            appmgr_entry(en);
+            appmgr_record(en->name, en->version, en->size, en->category,
+                          en->display, at, NULL);
         }
         handled = true;
     }
@@ -260,10 +491,13 @@ static bool appmgr_listing(QEvt const *e)
             s_appmgr_from = s_appmgr_next;
             appmgr_list_page(s_appmgr_next, AO_Console);
         }
+        else if ( s_appmgr_files )
+        {
+            appmgr_files_begin();
+        }
         else
         {
-            console_reply(">ok");
-            console_end();
+            appmgr_list_done();
         }
         handled = true;
     }
@@ -446,6 +680,10 @@ static bool appmgr_answer(QEvt const *e)
     return handled;
 }
 
+/* `files` is optional: without it `app_list` answers the installed apps alone. */
+static const karg_spec_t A_APP_LIST[] = {
+    { .key = "files", .required = false, .type = KARG_BOOL },
+};
 static const karg_spec_t A_APP_NAME[] = {
     { .key = "name", .required = true, .type = KARG_STRING },
 };
@@ -458,7 +696,7 @@ static const karg_spec_t A_APP_CAT[] = {
 };
 
 static const kverb_t APPMGR_VERBS[] = {
-    { "app_list",  NULL,       0U,                     h_app_list  },
+    { "app_list",  A_APP_LIST, KVERB_KEYS(A_APP_LIST), h_app_list  },
     { "app_run",   A_APP_NAME, KVERB_KEYS(A_APP_NAME), h_app_run   },
     { "app_erase", A_APP_NAME, KVERB_KEYS(A_APP_NAME), h_app_erase },
     { "app_cat",   A_APP_CAT,  KVERB_KEYS(A_APP_CAT),  h_app_cat   },

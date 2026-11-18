@@ -8528,6 +8528,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
             if ( NULL != rsp )
             {
                 (void)memset(rsp->project, 0, sizeof(rsp->project));
+                (void)memset(rsp->version, 0, sizeof(rsp->version));
                 (void)memset(rsp->display, 0, sizeof(rsp->display));
                 (void)memset(rsp->category, 0, sizeof(rsp->category));
                 (void)memset(rsp->build, 0, sizeof(rsp->build));
@@ -8538,6 +8539,10 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
                 {
                     (void)kapp_project_name(prefix, got, rsp->project,
                                             sizeof(rsp->project));
+                    /* The version beside the name, from the same descriptor:
+                     * what `app_list files=on` prints for a file. */
+                    (void)kapp_idf_desc(prefix, got, NULL, 0U, rsp->version,
+                                        sizeof(rsp->version), NULL, 0U, NULL, 0U);
                     (void)kapp_build_id(prefix, got, rsp->build);
                     kapp_desc_t man;
                     if ( kapp_desc_parse(prefix, got, &man) == KODE_OK )
@@ -9142,6 +9147,7 @@ static bool card_refuse(Storage * const me, QEvt const * const e)
             if ( NULL != rsp )
             {
                 (void)memset(rsp->project, 0, sizeof(rsp->project));
+                (void)memset(rsp->version, 0, sizeof(rsp->version));
                 (void)memset(rsp->display, 0, sizeof(rsp->display));
                 (void)memset(rsp->category, 0, sizeof(rsp->category));
                 (void)memset(rsp->build, 0, sizeof(rsp->build));

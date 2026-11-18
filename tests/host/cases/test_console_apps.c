@@ -711,3 +711,339 @@ TEST_CASE("app_list with an argument is refused and asks nobody", "[console_apps
 
     console_end();
 }
+
+/* ---- app_list files=on -------------------------------------------------------- */
+
+/** @brief A file name on the card, its project, and what its manifest says. */
+#define FILE_SD        "kody.bin"
+#define FILE_SD_PATH   "/sdcard/kody.bin"
+#define FILE_FS        "servo.bin"
+#define FILE_FS_PATH   "/storage/servo.bin"
+
+/** @brief Empty AO_Storage's queue, releasing what the console posted. */
+static void storage_queue_drained(void)
+{
+    const QEvt *e;
+
+    qf_support_give_queue(AO_Storage);
+    while ( xQueueReceive(AO_Storage->eQueue, &e, 0U) == pdTRUE )
+    {
+        QF_gc(e);
+    }
+}
+
+/**
+ * @brief Take what the console posted to AO_Storage, oldest first.
+ *
+ * @param sig  STORAGE_LIST_PAGE_SIG or STORAGE_DESC_REQ_SIG.
+ * @param skip Where a page request's offset is copied; may be NULL.
+ * @param name Where a manifest request's name is copied; may be NULL.
+ * @param name_sz Size of @p name.
+ * @return How many events of @p sig were found, each naming the console as
+ *         its asker; anything else is released.
+ */
+static unsigned take_storage(enum_t sig, uint16_t *skip, char *name, size_t name_sz)
+{
+    const QEvt *e;
+    unsigned    n = 0U;
+
+    while ( xQueueReceive(AO_Storage->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)sig == e->sig )
+        {
+            ++n;
+            if ( STORAGE_LIST_PAGE_SIG == sig )
+            {
+                StorageListPageEvt const * const req = (StorageListPageEvt const *)e;
+                TEST_ASSERT_TRUE_MESSAGE(req->who == AO_Console,
+                                         "the page would not come back to the console");
+                if ( NULL != skip )
+                {
+                    *skip = req->skip;
+                }
+            }
+            else
+            {
+                StorageDescReqEvt const * const req = (StorageDescReqEvt const *)e;
+                TEST_ASSERT_TRUE_MESSAGE(req->who == AO_Console,
+                                         "the manifest would not come back to the console");
+                if ( NULL != name )
+                {
+                    (void)snprintf(name, name_sz, "%s", req->name);
+                }
+            }
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/** @brief One installed app at @p pos, as AO_AppMgr posts it. */
+static void installed_app(uint16_t pos, const char *name)
+{
+    AppEntryEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(APP_ENTRY_SIG);
+    (void)snprintf(e.name, sizeof(e.name), "%s", name);
+    (void)snprintf(e.version, sizeof(e.version), "0.3.1");
+    e.size = 240U * 1024U;
+    e.pos  = pos;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief The end of a page: of the installed apps, or of the app files. */
+static void page_ends(enum_t sig, bool more)
+{
+    ListEndEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(sig);
+    e.more  = more;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief One app file at @p pos, as AO_Storage's listing posts it. */
+static void app_file(uint16_t pos, const char *name, uint32_t size, bool from_sd)
+{
+    StorageEntryEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(STORAGE_ENTRY_SIG);
+    (void)snprintf(e.name, sizeof(e.name), "%s", name);
+    e.size    = size;
+    e.from_sd = from_sd;
+    e.pos     = pos;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief What the file asked as @p asked says it is, or that it would not be read. */
+static void manifest(const char *asked, kode_status_t st, const char *project,
+                     const char *version, const char *display, const char *category)
+{
+    StorageDescRspEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(STORAGE_DESC_RSP_SIG);
+    (void)snprintf(e.name, sizeof(e.name), "%s", asked);
+    (void)snprintf(e.project, sizeof(e.project), "%s", project);
+    (void)snprintf(e.version, sizeof(e.version), "%s", version);
+    (void)snprintf(e.display, sizeof(e.display), "%s", display);
+    (void)snprintf(e.category, sizeof(e.category), "%s", category);
+    e.status = (uint8_t)st;
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+}
+
+/** @brief `app_list files=on` taken as far as the end of the installed apps. */
+static void files_listing_begun(void)
+{
+    console_up();
+    storage_queue_drained();
+    ask("app_list files=on");
+    installed_app(0U, "servo");
+    page_ends(APP_LIST_END_SIG, false);
+}
+
+/* Without the key, and with it off, the answer is the one every host already
+ * reads: no `at=`, and nothing asked of AO_Storage. */
+TEST_CASE("app_list without files, or with files=off, answers the installed apps as before",
+          "[console_apps][app_list_files]")
+{
+    static const char * const LINES[] = { "app_list", "app_list files=off" };
+
+    for ( unsigned i = 0U; (sizeof(LINES) / sizeof(LINES[0])) > i; ++i )
+    {
+        console_up();
+        storage_queue_drained();
+
+        ask(LINES[i]);
+        installed_app(0U, "servo");
+        page_ends(APP_LIST_END_SIG, false);
+
+        TEST_ASSERT_TRUE(replied(">|name=\"servo\" version=\"0.3.1\" size_kb=240 "
+                                 "category=\"other\" display=\"servo\""));
+        TEST_ASSERT_FALSE(replied(" at="));
+        TEST_ASSERT_TRUE(replied(">ok"));
+        TEST_ASSERT_EQUAL_UINT(0U, take_storage(STORAGE_LIST_PAGE_SIG, NULL, NULL, 0U));
+
+        console_end();
+    }
+}
+
+/* With the key on, an installed app says so, and the end of the installed
+ * apps is not the end: the first page of the app files is asked, from the
+ * start, and the line stays open for it. */
+TEST_CASE("app_list files=on marks an installed app and goes on to the app files",
+          "[console_apps][app_list_files]")
+{
+    uint16_t skip = 1U;
+
+    files_listing_begun();
+
+    TEST_ASSERT_TRUE(replied(">|name=\"servo\" version=\"0.3.1\" size_kb=240 "
+                             "category=\"other\" display=\"servo\" at=app"));
+    TEST_ASSERT_FALSE(replied(" file="));
+    TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), "the line closed before the files were listed");
+    TEST_ASSERT_EQUAL_UINT(1U, take_storage(STORAGE_LIST_PAGE_SIG, &skip, NULL, 0U));
+    TEST_ASSERT_EQUAL_UINT16(0U, skip);
+
+    /* No file anywhere closes it. */
+    page_ends(STORAGE_LIST_END_SIG, false);
+    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_FALSE(replied(">err"));
+
+    console_end();
+}
+
+/* Each file is asked what it says it is, by the path of the medium the
+ * listing found it on, one at a time; its record carries the manifest's
+ * words, the file's size, where it is and its name. */
+TEST_CASE("app_list files=on prints one record per app file, from its manifest",
+          "[console_apps][app_list_files]")
+{
+    char asked[KODE_APP_FILE_MAX];
+
+    files_listing_begun();
+    storage_queue_drained();
+
+    app_file(0U, FILE_SD, 812U * 1024U, true);
+    app_file(1U, FILE_FS, 240U * 1024U, false);
+    page_ends(STORAGE_LIST_END_SIG, false);
+
+    asked[0] = '\0';
+    TEST_ASSERT_EQUAL_UINT(1U, take_storage(STORAGE_DESC_REQ_SIG, NULL, asked, sizeof(asked)));
+    TEST_ASSERT_EQUAL_STRING(FILE_SD_PATH, asked);
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    manifest(FILE_SD_PATH, KODE_OK, "kody-runner", "1.2.0", "Kody Runner", "games");
+    TEST_ASSERT_TRUE(replied(">|name=\"kody-runner\" version=\"1.2.0\" size_kb=812 "
+                             "category=\"games\" display=\"Kody Runner\" at=sd "
+                             "file=\"" FILE_SD "\""));
+
+    asked[0] = '\0';
+    TEST_ASSERT_EQUAL_UINT(1U, take_storage(STORAGE_DESC_REQ_SIG, NULL, asked, sizeof(asked)));
+    TEST_ASSERT_EQUAL_STRING(FILE_FS_PATH, asked);
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    /* An image with no manifest: the same fallbacks as an installed app. */
+    manifest(FILE_FS_PATH, KODE_OK, "servo", "", "", "");
+    TEST_ASSERT_TRUE(replied(">|name=\"servo\" version=- size_kb=240 "
+                             "category=\"other\" display=\"servo\" at=fs "
+                             "file=\"" FILE_FS "\""));
+    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_FALSE(replied(">err"));
+
+    console_end();
+}
+
+/* A .bin that is no app image, or that would not be read, is no app: it gets
+ * no record and the listing goes on. */
+TEST_CASE("app_list files=on leaves out a file whose manifest does not read",
+          "[console_apps][app_list_files]")
+{
+    files_listing_begun();
+    storage_queue_drained();
+
+    app_file(0U, FILE_SD, 4096U, true);
+    app_file(1U, FILE_FS, 240U * 1024U, false);
+    page_ends(STORAGE_LIST_END_SIG, false);
+
+    manifest(FILE_SD_PATH, KODE_ERROR, "", "", "", "");
+    TEST_ASSERT_FALSE(replied("file=\"" FILE_SD "\""));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    /* Read, and with no project name in it. */
+    manifest(FILE_FS_PATH, KODE_OK, "", "", "", "");
+    TEST_ASSERT_FALSE(replied("file=\"" FILE_FS "\""));
+    TEST_ASSERT_TRUE(replied(">ok"));
+    TEST_ASSERT_FALSE(replied(">err"));
+
+    console_end();
+}
+
+/* Answers can cross: one that echoes another name is not the manifest of the
+ * file in hand, and neither prints a record nor moves the listing on. */
+TEST_CASE("app_list files=on ignores a manifest it did not ask for",
+          "[console_apps][app_list_files]")
+{
+    files_listing_begun();
+    storage_queue_drained();
+
+    app_file(0U, FILE_SD, 812U * 1024U, true);
+    page_ends(STORAGE_LIST_END_SIG, false);
+    TEST_ASSERT_EQUAL_UINT(1U, take_storage(STORAGE_DESC_REQ_SIG, NULL, NULL, 0U));
+
+    manifest("/sdcard/other.bin", KODE_OK, "other", "9.9.9", "Other", "games");
+    TEST_ASSERT_FALSE(replied("9.9.9"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+    TEST_ASSERT_EQUAL_UINT(0U, take_storage(STORAGE_DESC_REQ_SIG, NULL, NULL, 0U));
+
+    manifest(FILE_SD_PATH, KODE_OK, "kody-runner", "1.2.0", "Kody Runner", "games");
+    TEST_ASSERT_TRUE(replied(" at=sd file=\"" FILE_SD "\""));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    console_end();
+}
+
+/* A listing longer than a page: the next page is asked only once every file
+ * of this one has its record, from where this one stopped. */
+TEST_CASE("app_list files=on asks the next page of files after the manifests of this one",
+          "[console_apps][app_list_files]")
+{
+    uint16_t skip = 0U;
+
+    files_listing_begun();
+    storage_queue_drained();
+
+    app_file(0U, FILE_SD, 812U * 1024U, true);
+    page_ends(STORAGE_LIST_END_SIG, true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, take_storage(STORAGE_LIST_PAGE_SIG, NULL, NULL, 0U),
+                                   "the next page was asked before this one was through");
+
+    manifest(FILE_SD_PATH, KODE_OK, "kody-runner", "1.2.0", "Kody Runner", "games");
+    TEST_ASSERT_FALSE(replied(">ok"));
+    TEST_ASSERT_EQUAL_UINT(1U, take_storage(STORAGE_LIST_PAGE_SIG, &skip, NULL, 0U));
+    TEST_ASSERT_EQUAL_UINT16(1U, skip);
+
+    /* The same entry again is not new, and brings no second manifest. */
+    app_file(0U, FILE_SD, 812U * 1024U, true);
+    app_file(1U, FILE_FS, 240U * 1024U, false);
+    page_ends(STORAGE_LIST_END_SIG, false);
+    manifest(FILE_FS_PATH, KODE_OK, "servo", "0.3.1", "", "");
+    TEST_ASSERT_TRUE(replied(" at=fs file=\"" FILE_FS "\""));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    console_end();
+}
+
+/* A page that says there is more and brought nothing would be asked again for
+ * ever; the listing ends as an error, as the installed apps' does. */
+TEST_CASE("app_list files=on ends as an error on a page of files that brings nothing",
+          "[console_apps][app_list_files]")
+{
+    files_listing_begun();
+    storage_queue_drained();
+
+    page_ends(STORAGE_LIST_END_SIG, true);
+
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=app_list"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+    TEST_ASSERT_EQUAL_UINT(0U, take_storage(STORAGE_LIST_PAGE_SIG, NULL, NULL, 0U));
+
+    console_end();
+}
+
+/* `files` is a bool: any other word is refused before anybody is asked. */
+TEST_CASE("app_list files with a value that is not on or off is refused",
+          "[console_apps][app_list_files]")
+{
+    console_up();
+
+    ask("app_list files=yes");
+
+    TEST_ASSERT_TRUE(replied(">err code=3 msg=files"));
+    TEST_ASSERT_FALSE(replied(">ok"));
+    TEST_ASSERT_EQUAL_UINT(0U, take_posted(APP_LIST_REQ_SIG, NULL, 0U, NULL, NULL));
+
+    console_end();
+}
