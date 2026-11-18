@@ -2027,9 +2027,11 @@ enum KodeSignals {
                                  *   answer to a round (LowPowerReadyEvt).  */
     LOWPOWER_INPUT_SIG,         /**< AO_LowPower (direct post, from
                                  *   lowpower_input_note()): a console line
-                                 *   came in; the idle time starts over, and
-                                 *   asleep the board wakes. One static event
-                                 *   per port (LowPowerInputEvt).           */
+                                 *   came in; the idle time starts over,
+                                 *   asleep the board wakes, and a round
+                                 *   that is not an order is abandoned. One
+                                 *   static event per port
+                                 *   (LowPowerInputEvt).                    */
     LOWPOWER_REST_SIG,          /**< AO_LowPower (direct post, from
                                  *   lowpower_request_rest()): rest once the
                                  *   work is done, unless the board is in

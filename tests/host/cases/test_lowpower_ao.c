@@ -853,7 +853,6 @@ TEST_CASE("a round somebody asked for ignores touches and buttons", "[lowpower_a
 
     touch_event();
     button_event();
-    console_line(KODE_CONSOLE_SRC_SERIAL);
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 
     say_ready(0U, 1U, false, NULL);
@@ -2128,6 +2127,87 @@ TEST_CASE("the other inputs do not end the wait, as they do not end the round", 
     lp_down();
 }
 
+TEST_CASE("a console line abandons a round somebody asked for, from any port", "[lowpower_ao]")
+{
+    static const uint8_t ports[] = {
+        (uint8_t)KODE_CONSOLE_SRC_SERIAL, (uint8_t)KODE_CONSOLE_SRC_BLE,
+        (uint8_t)KODE_CONSOLE_SRC_NET,
+    };
+
+    for ( size_t i = 0U; Q_DIM(ports) > i; i++ )
+    {
+        uint32_t round;
+
+        lp_up(KODE_OK);
+        join(2U);
+        ask_from(KODE_LP_ASLEEP, SRC_OTHER);
+        round = expect_round(KODE_LP_ASLEEP);
+        watch_refusals();
+        say_ready(0U, round, false, NULL);    /* this owner may now begin what the line asks */
+
+        console_line(ports[i]);
+
+        expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+        expect_refused_for(SRC_OTHER, "input: board used");
+
+        say_ready(1U, round, false, NULL);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the last answer enters nothing");
+        TEST_ASSERT_TRUE_MESSAGE(fake_time_periodic_running(), "the tick never stopped");
+        wait_real(2U * KODE_LOWPOWER_REQUEST_RETRY_MS);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "and the request is not begun again");
+        QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
+        lp_down();
+    }
+}
+
+TEST_CASE("a console line abandons the round off_after began, and the board is AWAKE",
+          "[lowpower_ao]")
+{
+    unsigned minutes = 0U;
+
+    lp_up(KODE_OK);
+    set_word(KSET_KEY_OFF_AFTER, WORD_1H);
+    go_asleep();
+    (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+    (void)queued(AO_Display, DISPLAY_MINUTE_REQ_SIG);
+    while ( (ao_spy_count() == 0U) && (100U > minutes) )
+    {
+        fire_one_shot();
+        minutes++;
+        (void)queued(AO_Display, DISPLAY_MINUTE_REQ_SIG);
+        (void)queued(AO_Power, POWER_PEEK_REQ_SIG);
+    }
+    (void)expect_round(KODE_LP_OFF);
+
+    console_line(KODE_CONSOLE_SRC_BLE);
+
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_OFF_AFTER, KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_STRING("input: board used", lowpower_last_refusal());
+    wait_ms(KODE_LOWPOWER_OFF_GRACE_MS + 10U);
+    TEST_ASSERT_EQUAL_UINT(0U, s_off_enter);
+    lp_down();
+}
+
+TEST_CASE("a console line does not end an order for OFF", "[lowpower_ao]")
+{
+    uint32_t round;
+
+    lp_up(KODE_OK);
+    join(1U);
+    ask(KODE_LP_OFF);
+    round = expect_round(KODE_LP_OFF);
+
+    console_line(KODE_CONSOLE_SRC_BLE);
+    console_line(KODE_CONSOLE_SRC_SCHED);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the order stands");
+
+    say_ready(0U, round, false, NULL);
+    expect_state(KODE_LP_OFF, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    wait_real(KODE_LOWPOWER_OFF_GRACE_MS + 10U);
+    TEST_ASSERT_EQUAL_UINT(1U, s_off_enter);
+    lp_down();
+}
+
 TEST_CASE("a request for AWAKE ends the wait with the last refusal", "[lowpower_ao]")
 {
     lp_up(KODE_OK);
@@ -3379,16 +3459,26 @@ TEST_CASE("a scheduled line is neither use of the board nor a wake", "[lowpower_
     lp_down();
 }
 
-TEST_CASE("a scheduled line does not end the rest's round", "[lowpower_ao]")
+TEST_CASE("a scheduled line ends the round that is running, and is still no use of the board",
+          "[lowpower_ao]")
 {
     lp_up(KODE_OK);
+    watch_refusals();
     timer_wake();
     ask_rest();
     (void)expect_round(KODE_LP_ASLEEP);
 
     console_line(KODE_CONSOLE_SRC_SCHED);
 
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the round stands");
+    expect_state(KODE_LP_AWAKE, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    expect_refused_for(KODE_LOWPOWER_SRC_SCHED, "input: scheduled line");
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    /* Nobody came: the rest asked again, its line's work done, goes through. */
+    ask_rest();
+    rest_round_agreed();
+    expect_state(KODE_LP_ASLEEP, KODE_LP_CAUSE_REQUEST, KODE_LP_AWAKE);
+    QActive_unsubscribe(ao_spy(), LOWPOWER_REFUSED_SIG);
     lp_down();
 }
 

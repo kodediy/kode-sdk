@@ -4980,8 +4980,11 @@ bool lowpower_request_rest(uint8_t src);
  * @brief Tell AO_LowPower a console line came in.
  *
  * Restarts the idle time; asleep, it wakes the board (MQTT, BLE or cable wake by
- * @p src). Buttons and touches need no call. KODE_CONSOLE_SRC_SCHED lines are not
- * input. Safe from any task: it posts a static event.
+ * @p src); while a round runs, it abandons the round unless it is an order for
+ * OFF, so the command the line asks for is not begun on a board about to rest.
+ * Buttons and touches need no call. KODE_CONSOLE_SRC_SCHED lines are not input:
+ * they abandon a round too, and nothing else. Safe from any task: it posts a
+ * static event.
  *
  * @param src The KODE_CONSOLE_SRC_* port the line came on.
  */

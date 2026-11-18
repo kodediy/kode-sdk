@@ -65,6 +65,9 @@ _Static_assert(KODE_LOWPOWER_PARTICIPANTS <= WAITING_BITS,
  *         KODE_LOWPOWER_WHY_USED, the refusal that means a person has the board. */
 #define WHY_INPUT       "board used"
 
+/** @brief Why a round is abandoned by a line AO_Scheduler handed the console. */
+#define WHY_LINE        "scheduled line"
+
 /** @brief Why a rest yields to another's request that waits to begin again.
  *         With WHO_REQUEST it is KODE_LOWPOWER_WHY_PENDING. */
 #define WHY_PENDING     "request pending"
@@ -1549,14 +1552,15 @@ static uint8_t input_cause(uint8_t src)
 }
 
 /**
- * @brief Whether a use of the board abandons the round that is running.
+ * @brief Whether a button or a touch abandons the round that is running.
  *
  * A round that idle time began, and one that a rest asked for: a person at the
  * board wins over them. A round somebody else asked for stands (BOT, handled
- * apart, is the exception).
+ * apart, is the exception): the thumb that asked must not cancel it. A console
+ * line is judged apart (resting_line()).
  *
  * @param me The AO, Resting.
- * @return true when an input abandons the round.
+ * @return true when the input abandons the round.
  */
 static bool input_abandons(const LowPower *me)
 {
@@ -2543,6 +2547,44 @@ static QState resting_ready(LowPower * const me, const LowPowerReadyEvt *a)
             }
             status = round_done(me);
         }
+    }
+    return status;
+}
+
+/**
+ * @brief A console line came in while a round runs: the round is abandoned,
+ *        whatever began it, unless it is an order.
+ *
+ * The console runs the line next. An owner that has answered ready would take
+ * the work the line asks for and could not take its answer back, so the board
+ * would rest with that work begun: the tick stops under it. Whoever asked for
+ * the round is told, once, and nothing begins it again. The scheduler's own
+ * line abandons the round too, and is still nobody at the board.
+ *
+ * @param me  The AO, Resting.
+ * @param src The KODE_CONSOLE_SRC_* port the line came on.
+ * @return The transition back to AWAKE, or handled for an order.
+ */
+static QState resting_line(LowPower * const me, uint8_t src)
+{
+    QState status = Q_HANDLED();
+    bool const sched = input_is_sched(src);
+
+    if ( !sched )
+    {
+        me->used = true;
+    }
+    if ( !round_order(me) )
+    {
+        if ( sched )
+        {
+            refusal_set(WHO_INPUT, WHY_LINE);
+        }
+        else
+        {
+            refusal_set(WHO_INPUT, WHY_INPUT);
+        }
+        status = round_abort(me, me->cause);
     }
     return status;
 }
@@ -4481,13 +4523,10 @@ static QState LowPower_resting(LowPower * const me, QEvt const * const e)
             break;
         }
         case BUTTON_EVT_SIG:
-        case TOUCH_EVT_SIG:
-        case LOWPOWER_INPUT_SIG: {
-            /* The scheduler's own line is not somebody at the board, and nor
-             * is the release of a contact that stopped counting. */
-            if ( (((QSignal)LOWPOWER_INPUT_SIG == e->sig)
-                  && input_is_sched(Q_EVT_CAST(LowPowerInputEvt)->src))
-                || (((QSignal)TOUCH_EVT_SIG == e->sig) && Q_EVT_CAST(TouchEvt)->stale) )
+        case TOUCH_EVT_SIG: {
+            /* The release of a contact that stopped counting is nobody at
+             * the board. */
+            if ( ((QSignal)TOUCH_EVT_SIG == e->sig) && Q_EVT_CAST(TouchEvt)->stale )
             {
                 status = Q_HANDLED();
             }
@@ -4504,6 +4543,10 @@ static QState LowPower_resting(LowPower * const me, QEvt const * const e)
                     status = Q_HANDLED();
                 }
             }
+            break;
+        }
+        case LOWPOWER_INPUT_SIG: {
+            status = resting_line(me, Q_EVT_CAST(LowPowerInputEvt)->src);
             break;
         }
         case POWER_EVT_SIG: {
