@@ -10296,6 +10296,26 @@ TEST_CASE("a chunk that fails stops the reading, and a read again reads on "
     close_reader();
 }
 
+/**
+ * @brief Ask to open @p name with a pool event, put at the front of the queue
+ *        and taken from it the way the AO's own loop does.
+ *
+ * For an open AO_Storage holds behind a call to the card: a held request is
+ * kept by its reference and served later, and ask_open()'s event is its own
+ * frame's, gone by then.
+ */
+static void ask_open_held(const char *name)
+{
+    StorageOpenEvt *e = Q_NEW_X(StorageOpenEvt, 0U, STORAGE_OPEN_REQ_SIG);
+
+    TEST_ASSERT_NOT_NULL(e);
+    (void)snprintf(e->name, sizeof(e->name), "%s", name);
+    e->who = ao_spy();
+
+    QACTIVE_POST_LIFO(AO_Storage, &e->super);
+    (void)qf_support_pump(AO_Storage, 1U);
+}
+
 TEST_CASE("a close after a chunk that failed mounts the card again before the "
           "next open of the card", "[storage_ao][reread]")
 {
@@ -10316,7 +10336,7 @@ TEST_CASE("a close after a chunk that failed mounts the card again before the "
     fake_klog_reset();
     QASM_DISPATCH(AO_Storage, &close_evt, 0U);
     ao_spy_drain();
-    ask_open("pack.bin");                 /* held behind the remount */
+    ask_open_held("pack.bin");            /* held behind the remount */
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, chunks_held() + ao_spy_count(), "the open went before the remount");
     settle_card();
     TEST_ASSERT_EQUAL_UINT_MESSAGE(mounts + 1U, fake_sdmmc_mounts(), "the close did not mount the card again");
