@@ -80,7 +80,7 @@ dependencies:
   kodediy/kode:
     git: https://github.com/kodediy/kode-sdk.git
     path: components/kode
-    version: v0.1.3
+    version: v0.1.4
 ```
 
 Your project also sets `set(IDF_TARGET esp32p4)` in `CMakeLists.txt` and the board's partition table in `sdkconfig.defaults`. Copy both from an example: [Use the SDK](https://docs.kode.diy/sdk/overview) explains why.
