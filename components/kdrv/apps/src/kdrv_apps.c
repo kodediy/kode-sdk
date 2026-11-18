@@ -519,6 +519,7 @@ static bool all_ff(const uint8_t *data, size_t len)
  */
 static esp_err_t put_skip_blank(const esp_partition_t *part, size_t base, const void *data, size_t len)
 {
+    /* cppcheck-suppress misra-c2012-11.5 ; the bytes to write come as void *, as the partition's calls take them */
     const uint8_t *d = (const uint8_t *)data;
     size_t done = 0U;
 
@@ -789,6 +790,7 @@ static kode_status_t part_sha256(const esp_partition_t *p, uint32_t offset, uint
         }
         else
         {
+            /* cppcheck-suppress misra-c2012-11.5 ; the mapping is the partition's bytes, handed back as void * */
             if ( psa_hash_update(&op, (const uint8_t *)map, n) != PSA_SUCCESS )
             {
                 st = KODE_ERROR;
@@ -810,7 +812,7 @@ kode_status_t kdrv_apps_named_sha256(const char *project, uint8_t *out)
 {
     const kapps_dir_t * const d = kdrv_apps_dir();
 
-    if ( (NULL == s_part) || (NULL == d) || (NULL == project) || (NULL == out) )
+    if ( (NULL == s_part) || (NULL == project) || (NULL == out) )
     {
         return KODE_DENIED;
     }
@@ -1673,8 +1675,6 @@ static kode_status_t sto_sink_write(void *ctx, const void *data, size_t len)
  */
 static kode_status_t sto_sink_end(void *ctx)
 {
-    static uint8_t s_buf[STO_VERIFY_READ];
-
     (void)ctx;
     const esp_partition_t * const p = s_sto_part;
     if ( NULL == p )
@@ -1695,6 +1695,7 @@ static kode_status_t sto_sink_end(void *ctx)
         uint32_t crc = KHAL_CRC32_INIT;
         for ( uint32_t at = 0U; (KODE_OK == out) && (at < s_sto_size); at += STO_VERIFY_READ )
         {
+            static uint8_t s_buf[STO_VERIFY_READ];   /* static: too large for this task's stack */
             uint32_t n = s_sto_size - at;
             if ( STO_VERIFY_READ < n )
             {
@@ -1743,10 +1744,6 @@ static void sto_sink_abort(void *ctx)
     }
 }
 
-static const kfw_sink_t STO_SINK = {
-    sto_sink_begin, sto_sink_write, sto_sink_end, sto_sink_abort
-};
-
 kode_status_t kdrv_apps_storage_sha256(uint8_t *out)
 {
     if ( NULL == out )
@@ -1766,5 +1763,9 @@ kode_status_t kdrv_apps_storage_sha256(uint8_t *out)
 
 const kfw_sink_t *kdrv_apps_storage_sink(void)
 {
+    static const kfw_sink_t STO_SINK = {
+        sto_sink_begin, sto_sink_write, sto_sink_end, sto_sink_abort
+    };
+
     return &STO_SINK;
 }

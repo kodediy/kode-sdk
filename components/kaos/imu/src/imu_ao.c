@@ -1940,7 +1940,7 @@ static void imu_tick(Imu * const me)
  * @param me  The AO.
  * @param who The holder.
  */
-static void cap_release(Imu * const me, QActive *who)
+static void cap_release(Imu * const me, const QActive *who)
 {
     if ( (PHASE_CAP_ARMED == me->phase) && (who == me->who) )
     {
@@ -2160,7 +2160,9 @@ static void mag_owe(Imu * const me)
     }
     me->mag_owed = true;
     me->mag_live = true;
-    QTimeEvt_armX(&me->mag_wait, (QTimeEvtCtr)KQP_TICKS_PER_MS(KODE_MAG_TEST_WAIT_MS), 0U);
+    uint32_t const ticks = KQP_TICKS_PER_MS(KODE_MAG_TEST_WAIT_MS);
+
+    QTimeEvt_armX(&me->mag_wait, (QTimeEvtCtr)ticks, 0U);
     KLOG_I(TAG, "test mag: the IMU is held by a window or a row; waiting for it, %u ms at most",
            (unsigned)KODE_MAG_TEST_WAIT_MS);
 }

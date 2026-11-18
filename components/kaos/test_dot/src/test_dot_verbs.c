@@ -515,6 +515,7 @@ static bool td_have(const char *project, const char *want, bool storage)
     {
         (void)snprintf(&hex[2U * i], 3U, "%02x", (unsigned)dg[i]);
     }
+    /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
     return 0 == strcasecmp(hex, want);
 }
 

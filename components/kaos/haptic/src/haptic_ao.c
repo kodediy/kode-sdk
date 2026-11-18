@@ -289,9 +289,6 @@ static const uint8_t GAINS[KODE_HAPTIC_TEST_GAINS_N] = { 25U, 50U, 80U };
 /** @brief The row's buzz as a pattern of one segment. */
 static const uint16_t ROW_BUZZ_MS = (uint16_t)KODE_HAPTIC_TEST_MS;
 
-/** @brief The pattern row's "on" window as a pattern of one segment. */
-static const uint16_t PAT_BUZZ_MS = (uint16_t)HAPTIC_PAT_ON_MS;
-
 static Haptic l_haptic;
 QActive * const AO_Haptic = &l_haptic.super;
 
@@ -2225,8 +2222,11 @@ static QState Haptic_row(Haptic * const me, QEvt const * const e)
             {
                 if ( seg_is_on(me->row.win) )
                 {
+                    /* The pattern row's "on" window as a pattern of one segment. */
+                    static const uint16_t pat_buzz_ms = (uint16_t)HAPTIC_PAT_ON_MS;
+
                     me->row.phase = ROW_PAT_PLAY;
-                    play_start(me, &PAT_BUZZ_MS, 1U, false, (uint8_t)HAPTIC_PAT_GAIN_PCT);
+                    play_start(me, &pat_buzz_ms, 1U, false, (uint8_t)HAPTIC_PAT_GAIN_PCT);
                     me->play.brake_at = (uint32_t)HAPTIC_PAT_DRIVE_SAMPLES;
                     status = Q_TRAN(&Haptic_playing);
                 }

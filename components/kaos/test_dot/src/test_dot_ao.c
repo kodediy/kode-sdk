@@ -59,6 +59,7 @@ _Static_assert(KODE_TEST_DOT_ANSWER_MS > (KODE_POWER_POLL_MS + KODE_TEST_DOT_BOO
 #define TD_ROWS_TOTAL     13U   /**< Rows a run asks AO_Autotest for.                        */
 #define TD_TOUCH_TARGETS  2U    /**< The touch test's targets (KBSP_TOUCH_TEST_A and _B).   */
 #define TD_ERR_BUSY       4U    /**< kcli code 4: busy, or what is missing.                  */
+#define TD_MS_PER_S       1000U /**< Milliseconds in a second.                               */
 #define TD_ERR_REJECT     5U    /**< kcli code 5: refused.                                   */
 #define TD_ERR_TIMEOUT    6U    /**< kcli code 6: timed out.                                 */
 #define TD_MM10_PER_MM    10.0  /**< The place's limits arrive in tenths.                    */
@@ -130,12 +131,12 @@ typedef enum {
     REST_OPERATOR  /**< The operator's screen settling.  */
 } td_rest_t;
 
-/** @brief What the quiet's timer is armed for. */
-typedef enum {
+/** @brief What the quiet's timer is armed for (TestDot.quiet_for). */
+enum {
     QUIET_NONE = 0, /**< Nothing.                                    */
     QUIET_IDLE,     /**< The pass's idle bound.                      */
     QUIET_RETRY     /**< AO_Radio or AO_Net had no room: ask again.  */
-} td_quiet_t;
+};
 
 /** @brief What the drain timer waits for. */
 typedef enum {
@@ -305,7 +306,7 @@ typedef struct {
     bool          welcome_on;         /**< The welcome app's write is under way.            */
     bool          quiet_want;         /**< A station's pass runs: the network keeps quiet.  */
     bool          quiet_held;         /**< AO_Radio and AO_Net were told @c quiet_want.     */
-    uint8_t       quiet_for;          /**< td_quiet_t: what the quiet's timer is armed for. */
+    uint8_t       quiet_for;          /**< QUIET_*: what the quiet's timer is armed for. */
     uint8_t       quiet_stale;        /**< Ticks of the quiet's timer to let pass, disarmed late. */
     bool          storage_on;         /**< The storage partition's write is under way.      */
 } TestDot;
@@ -322,7 +323,7 @@ static volatile bool s_session;
 static QState TestDot_initial(TestDot * const me, void const * const par);
 static QState TestDot_active(TestDot * const me, QEvt const * const e);
 static void verb_start(TestDot *me, TestDotReqEvt const *e);
-static void inst_end(TestDot *me, bool ok);
+static void td_inst_end(TestDot *me, bool ok);
 static void end_next(TestDot *me);
 static void out_drain(TestDot *me);
 static void cam_step_go(TestDot *me, uint8_t step);
@@ -382,11 +383,13 @@ void test_dot_storage_arm(const char *name)
     }
 }
 
+/* cppcheck-suppress misra-c2012-8.7 ; read by the host cases, which this check does not see */
 const char *test_dot_welcome_armed(void)
 {
     return s_welcome;
 }
 
+/* cppcheck-suppress misra-c2012-8.7 ; read by the host cases, which this check does not see */
 const char *test_dot_storage_armed(void)
 {
     return s_storage;
@@ -1065,8 +1068,10 @@ static void on_quiet(TestDot *me)
     if ( ((uint8_t)QUIET_IDLE == why) && me->quiet_want && ((uint8_t)MODE_DORMANT == me->mode)
         && ((uint8_t)ACT_NONE == me->act) )
     {
+        uint32_t const idle_s = KODE_TEST_DOT_QUIET_IDLE_MS / TD_MS_PER_S;
+
         KLOG_W(TAG, "no station verb for %u s and nothing woken: the pass is taken as over",
-               (unsigned)(KODE_TEST_DOT_QUIET_IDLE_MS / 1000U));
+               (unsigned)idle_s);
         me->quiet_want = false;
     }
     quiet_sync(me);
@@ -2845,7 +2850,7 @@ static void on_req(TestDot *me, TestDotReqEvt const *e)
         s_inst_owed = false;
         if ( !appmgr_image_ask((uint8_t)KFW_SRC_SD, s_inst_file, s_inst_dst, false, &me->super) )
         {
-            inst_end(me, false);
+            td_inst_end(me, false);
         }
     }
 
@@ -3157,7 +3162,7 @@ static QState TestDot_initial(TestDot * const me, void const * const par)
  * @param me TestDot.
  * @param ok true when it installed.
  */
-static void inst_end(TestDot *me, bool ok)
+static void td_inst_end(TestDot *me, bool ok)
 {
     const char *word = "failed";
     if ( ok )
@@ -3203,7 +3208,7 @@ static void inst_busy(TestDot *me)
     }
     else
     {
-        inst_end(me, false);
+        td_inst_end(me, false);
     }
 }
 
@@ -3218,7 +3223,7 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
             on_req(me, Q_EVT_CAST(TestDotReqEvt));
             break;
         case APP_FLASH_DONE_SIG:
-            inst_end(me, true);
+            td_inst_end(me, true);
             break;
         case APP_FLASH_FAIL_SIG:
             /* "Refused for now" (KFAIL_BUSY: AO_Storage had another file
@@ -3230,7 +3235,7 @@ static QState TestDot_active(TestDot * const me, QEvt const * const e)
             }
             else
             {
-                inst_end(me, false);
+                td_inst_end(me, false);
             }
             break;
         case APP_REQ_RSP_SIG:
