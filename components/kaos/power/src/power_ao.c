@@ -126,6 +126,7 @@ typedef struct {
                             *   when no answer is owed.                    */
     uint8_t  bt_status;    /**< The kode_status_t that answer carries.     */
     uint32_t bt_ms;        /**< khal_time_ms() at that request's write.    */
+    bool     bt_on;        /**< That request was the boost on.             */
     bool     lim_raised;   /**< BOOST_LIM holds the delivery test's limit,
                             *   not the board's.                           */
 } Power;
@@ -139,6 +140,12 @@ typedef struct {
 /** @brief How many looks each ask and the settle are. */
 #define PLUG_LOOKS_STEP   (KODE_POWER_PLUG_STEP_MS / KODE_POWER_PLUG_LOOK_MS)
 #define PLUG_LOOKS_SETTLE (KODE_POWER_PLUG_SETTLE_MS / KODE_POWER_PLUG_LOOK_MS)
+
+/** @brief What the boost test's early poll adds to the settle: the tick's rounding. */
+#define POWER_BOOST_POLL_MARGIN_MS 30U
+/** @brief The boost off's early polls: one this often until a reading sees
+ *         the boost gone, and none past the ordinary period. */
+#define POWER_BOOST_OFF_STEP_MS    100U
 
 static Power l_power;
 QActive * const AO_Power = &l_power.super;
@@ -1988,7 +1995,9 @@ static void boost_lim_restore(Power * const me)
  *
  * The answer waits for the first poll taken KODE_TEST_DOT_BOOST_SETTLE_MS
  * or more after the write, which carries the charger's status once it has
- * caught up and the load's current; a refusal is answered at once. Nothing is stored: the board's limit comes back
+ * caught up and the load's current; a refusal is answered at once. For the
+ * boost on, that poll is brought forward to the settle; the boost off keeps
+ * the ordinary period. Nothing is stored: the board's limit comes back
  * on the cable's fall, at AO_Power's start and at the station's end.
  *
  * @param me The AO.
@@ -2036,6 +2045,7 @@ static void boost_test(Power * const me, PowerBoostTestReqEvt const * const r)
     me->bt_who    = r->who;
     me->bt_status = (uint8_t)rc;
     me->bt_ms     = khal_time_ms();
+    me->bt_on     = r->on;
     if ( KODE_OK != rc )
     {
         PowerBoostTestEvt * const ev = Q_NEW_X(PowerBoostTestEvt, 0U, POWER_BOOST_TEST_SIG);
@@ -2050,6 +2060,16 @@ static void boost_test(Power * const me, PowerBoostTestReqEvt const * const r)
             QACTIVE_POST(r->who, &ev->super, &me->super);
         }
     }
+    else
+    {
+        /* The answer is the first poll past the settle: that poll is brought
+         * to the settle, so the station does not wait up to a whole period
+         * for it. The tick's rounding is covered by its margin. The boost off
+         * is answered early only by a reading that no longer sees the boost
+         * (boost_test_answer); otherwise by the ordinary period, as before. */
+        (void)QTimeEvt_rearm(&me->poll_tmo,
+                             KQP_TICKS_PER_MS(KODE_TEST_DOT_BOOST_SETTLE_MS + POWER_BOOST_POLL_MARGIN_MS));
+    }
 }
 
 /**
@@ -2063,8 +2083,17 @@ static void boost_test_answer(Power * const me, const reading_t *r)
 {
     QActive * const who = me->bt_who;
 
-    if ( (NULL != who)
-        && ((khal_time_ms() - me->bt_ms) >= KODE_TEST_DOT_BOOST_SETTLE_MS) )
+    uint32_t const since = khal_time_ms() - me->bt_ms;
+
+    if ( (NULL != who) && (!me->bt_on) && r->boost && (since < KODE_POWER_POLL_MS) )
+    {
+        /* The boost off still read on: the next look comes soon, and the
+         * answer waits for the reading that sees it gone or for the
+         * ordinary period, whichever is first. */
+        (void)QTimeEvt_rearm(&me->poll_tmo, KQP_TICKS_PER_MS(POWER_BOOST_OFF_STEP_MS));
+        return;
+    }
+    if ( (NULL != who) && (since >= KODE_TEST_DOT_BOOST_SETTLE_MS) )
     {
         PowerBoostTestEvt * const ev = Q_NEW_X(PowerBoostTestEvt, 0U, POWER_BOOST_TEST_SIG);
 
