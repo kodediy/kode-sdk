@@ -767,3 +767,14 @@ TEST_CASE("AO_Radio is left off after the radio check", "[radio_probe]")
     radio_fresh();
     probe_case_end();
 }
+
+/* The beacon's first advert can come most of a second into the listen. The
+ * listen ends at the first advert, so its length costs only on a miss, and it
+ * fits the check's budget with both networks' passes at their longest. */
+TEST_CASE("the BLE listen outlasts the beacon's slowest advert and fits the check's budget",
+          "[radio_probe]")
+{
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(2500U, KODE_RADIO_FIND_MS);
+    TEST_ASSERT_LESS_THAN_UINT32(KODE_RADIO_PROBE_MS,
+        KODE_RADIO_FIND_MS + (2U * KODE_RADIO_PROBE_TRIES * KODE_RADIO_PROBE_PDWELL_MS));
+}

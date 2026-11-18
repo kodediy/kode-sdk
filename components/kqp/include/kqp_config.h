@@ -1409,8 +1409,9 @@ _Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TR
 #define KODE_RADIO_PROBE_PDWELL_MS      250U
 /** @brief Passes the radio check makes over a network it has not heard. */
 #define KODE_RADIO_PROBE_TRIES          2U
-/** @brief How long the radio check listens for one BLE name, ms. */
-#define KODE_RADIO_FIND_MS              1000U
+/** @brief How long the radio check listens for one BLE name, ms. The listen
+ *         ends at the first advert heard; the length only bites on a miss. */
+#define KODE_RADIO_FIND_MS              2500U
 /** @brief What a BLE listen adds to the guard: its own length is the job. */
 #define KODE_RADIO_BLE_SCAN_SLACK_MS    30000U
 /** @brief How long kode_block_ble_value() waits, in all, for its claim, for
