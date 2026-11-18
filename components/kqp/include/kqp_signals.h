@@ -7740,6 +7740,7 @@ typedef enum {
     TEST_DOT_VERB_END,      /**< `test_dot_end`.                       */
     TEST_DOT_VERB_INFO,     /**< `test_dot_info`.                      */
     TEST_DOT_VERB_CAMERA,   /**< `test_dot_camera`.                    */
+    TEST_DOT_VERB_BRIGHT,   /**< `test_dot_bright` (bench).            */
     TEST_DOT_VERBS          /**< How many.                             */
 } test_dot_verb_t;
 
@@ -7790,6 +7791,7 @@ typedef struct {
         bool    on;            /**< TEST_DOT_VERB_BOOST: the boost on.            */
         bool    pass;          /**< TEST_DOT_VERB_RESULT: the verdict.           */
         uint8_t cam;           /**< TEST_DOT_VERB_CAMERA: test_dot_cam_t.        */
+        uint8_t pct;           /**< TEST_DOT_VERB_BRIGHT: the glass's level, %.  */
     } a;               /**< The verb's keys, already checked by the console.    */
 } TestDotReqEvt;
 

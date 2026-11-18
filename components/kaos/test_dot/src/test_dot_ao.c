@@ -223,6 +223,7 @@ typedef struct {
     bool          bright_wait;        /**< The next DISPLAY_STATE_SIG is the level before. */
     bool          bright_known;       /**< @c bright is what to put back.                  */
     uint8_t       bright;             /**< The level before the wake.                      */
+    uint8_t       glass_pct;          /**< The level a pass puts the glass at: test_dot_bright, until the next boot. */
     bool          dock_lent;          /**< The dock console's pins are lent.               */
     bool          boost_on;           /**< The boost test is on.                           */
     bool          subscribed;         /**< The wake's subscriptions are in.                */
@@ -1098,11 +1099,15 @@ static void wake_done(TestDot *me)
     me->wake_ms = khal_time_ms() - me->wake_t0;
     me->mode    = (uint8_t)MODE_AWAKE;
     me->act     = (uint8_t)ACT_NONE;
-    /* The level before, then full: AO_Display answers the first before it takes the second. */
+    /* The level before, then the pass's: AO_Display answers the first before it takes the second. */
     me->bright_wait = true;
     display_state_request();
-    display_brightness_request(TD_BRIGHT_FULL, false);
+    display_brightness_request(me->glass_pct, false);
     KLOG_N(TAG, "wake: the station answers (%lu ms)", (unsigned long)me->wake_ms);
+    if ( (uint8_t)TD_BRIGHT_FULL != me->glass_pct )
+    {
+        KLOG_W(TAG, "wake: the glass at %u%%, set by test_dot_bright", (unsigned)me->glass_pct);
+    }
     verb_start(me, &me->pend);
 }
 
@@ -1228,7 +1233,7 @@ static void cam_after(TestDot *me, kode_status_t rc)
     }
     else if ( (uint8_t)TD_CS_OFF == me->cam_step )
     {
-        display_brightness_request(TD_BRIGHT_FULL, false);
+        display_brightness_request(me->glass_pct, false);
     }
     else if ( (uint8_t)TD_CS_JUDGE == me->cam_step )
     {
@@ -2591,6 +2596,12 @@ static void verb_start(TestDot *me, TestDotReqEvt const *e)
         case (uint8_t)TEST_DOT_VERB_INFO:
             info_answer(me);
             break;
+        case (uint8_t)TEST_DOT_VERB_BRIGHT:
+            /* The bench's dim panel: the level the next passes put the glass at, until the next boot. */
+            me->glass_pct = e->a.pct;
+            rec(me, "bright pct=%u", (unsigned)me->glass_pct);
+            ans(me, 0U, NULL);
+            break;
         case (uint8_t)TEST_DOT_VERB_LOCK:
             if ( khal_nvs_set_u8(KODE_STATION_NVS_NS, KODE_TEST_DOT_LOCK_KEY, KODE_TEST_DOT_LOCK_ON) == KODE_OK )
             {
@@ -3001,6 +3012,7 @@ void TestDot_ctor(void)
     TestDot * const me = &l_td;
 
     (void)memset(me, 0, sizeof(*me));
+    me->glass_pct = (uint8_t)TD_BRIGHT_FULL;
     QActive_ctor(&me->super, Q_STATE_CAST(&TestDot_initial));
     QTimeEvt_ctorX(&me->tmo, &me->super, TEST_DOT_TMO_SIG, 0U);
     QTimeEvt_ctorX(&me->rest, &me->super, TEST_DOT_REST_SIG, 0U);

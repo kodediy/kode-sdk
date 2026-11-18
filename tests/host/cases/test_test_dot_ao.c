@@ -23,6 +23,7 @@
 
 #define TD_BRIGHT_BEFORE  40U  /**< The glass's level before the wake, as AO_Display announces it. */
 #define TD_FULL           100  /**< The level the wake asks for. */
+#define TD_DIM            40U  /**< The bench's dim panel, as test_dot_bright sets it. */
 #define TD_LOOP_FRAMES    20U  /**< Frames the loop sends at each speed. */
 #define TD_STEP_MS        50U  /**< QP time a drive round gives the AO's rests when no job waits. */
 #define TD_ROUNDS         400U /**< Most drive rounds: well past the camera part's every step. */
@@ -354,6 +355,67 @@ TEST_CASE("test_end_gives_everything_back", "[test_dot_ao]")
     td_take();
     TEST_ASSERT_TRUE(td_said("state=dormant locked=0 run=none"));
     TEST_ASSERT_TRUE(td_said("j3=free"));
+    td_down();
+}
+
+/* The bench's dim panel: test_dot_bright sets the level the wake and the
+ * white after the dark photo put the glass at, and it stays for the next
+ * pass; the level before the wake still comes back at the end. */
+TEST_CASE("test_bright_sets_the_glass_of_the_wake_and_of_the_white", "[test_dot_ao]")
+{
+    TestDotReqEvt r;
+
+    td_up();
+    fake_station_frames(true);
+    (void)memset(&r, 0, sizeof(r));
+    r.verb  = (uint8_t)TEST_DOT_VERB_BRIGHT;
+    r.a.pct = (uint8_t)TD_DIM;
+    td_verb(&r);
+    td_take();
+    TEST_ASSERT_TRUE(td_said("rec bright pct=40"));
+    TEST_ASSERT_TRUE(td_said(">ok"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_station_probes(), "the verb wakes nothing");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, td_brightness(), "the glass is not touched before the wake");
+
+    for ( unsigned pass = 0U; 2U > pass; pass++ )
+    {
+        td_clear();
+        (void)memset(&r, 0, sizeof(r));
+        r.verb  = (uint8_t)TEST_DOT_VERB_CAMERA;
+        r.a.cam = (uint8_t)TEST_DOT_CAM_ALL;
+        td_verb(&r);
+        td_wake_ok();
+        TEST_ASSERT_EQUAL_INT_MESSAGE(TD_DIM, td_brightness(), "the wake asks for the bench's level");
+        display_says(TD_BRIGHT_BEFORE);
+        TEST_ASSERT_TRUE_MESSAGE(drive_until("test=cam_colour"), "the white was taken");
+        TEST_ASSERT_EQUAL_INT_MESSAGE(TD_DIM, td_brightness(), "after the dark photo, the bench's level again");
+        TEST_ASSERT_TRUE(drive_until(">"));
+        td_end();
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)TD_BRIGHT_BEFORE, td_brightness(), "the level before");
+    }
+    fake_station_frames(false);
+    td_down();
+}
+
+/* Without test_dot_bright the camera's white is taken at full. */
+TEST_CASE("test_without_bright_the_white_is_at_full", "[test_dot_ao]")
+{
+    TestDotReqEvt r;
+
+    td_up();
+    fake_station_frames(true);
+    (void)memset(&r, 0, sizeof(r));
+    r.verb  = (uint8_t)TEST_DOT_VERB_CAMERA;
+    r.a.cam = (uint8_t)TEST_DOT_CAM_ALL;
+    td_verb(&r);
+    td_wake_ok();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TD_FULL, td_brightness(), "the wake asks for full brightness");
+    display_says(TD_BRIGHT_BEFORE);
+    TEST_ASSERT_TRUE_MESSAGE(drive_until("test=cam_colour"), "the white was taken");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TD_FULL, td_brightness(), "after the dark photo, full again");
+    TEST_ASSERT_TRUE(drive_until(">"));
+    fake_station_frames(false);
+    td_end();
     td_down();
 }
 

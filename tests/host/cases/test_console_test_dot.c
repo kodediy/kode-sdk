@@ -200,7 +200,7 @@ TEST_CASE("test_locked_refuses_every_station_verb", "[console_test_dot]")
         "test component=all", "test_dot_place", "test_dot_poll", "test_dot_screen phase=connecting",
         "test_dot_photos", "test_dot_blob name=\"location\"", "test_dot_relays state=0xFF", "test_dot_adc ch=0",
         "test_dot_loop", "test_dot_boost state=on", "test_dot_result verdict=fail", "test_dot_lock confirm=on",
-        "test_dot_end", "test_dot_info", "test_dot_camera",
+        "test_dot_end", "test_dot_info", "test_dot_camera", "test_dot_bright pct=50",
     };
     unsigned const n = (unsigned)(sizeof(LINES) / sizeof(LINES[0]));
 
@@ -487,6 +487,34 @@ TEST_CASE("test_an_empty_name_disarms_welcome_and_storage", "[console_test_dot]"
     type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, "test_dot_welcome name=onboarding.bin");
     TEST_ASSERT_TRUE(replied(">err code="));
     TEST_ASSERT_EQUAL_STRING("", test_dot_welcome_armed());
+    down();
+}
+
+/* The bench's dim panel takes 10 to 100 percent and nothing else. */
+TEST_CASE("test_bright_takes_ten_to_a_hundred_percent", "[console_test_dot]")
+{
+    up(false);
+    type_line("test_dot_bright pct=40");
+    TEST_ASSERT_TRUE(replied(">|bright pct=40"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    fake_klog_reset();
+    type_line("test_dot_bright pct=10");
+    TEST_ASSERT_TRUE(replied(">|bright pct=10"));
+    fake_klog_reset();
+    type_line("test_dot_bright pct=100");
+    TEST_ASSERT_TRUE(replied(">|bright pct=100"));
+
+    fake_klog_reset();
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, "test_dot_bright pct=9");
+    TEST_ASSERT_TRUE(replied(">err code=3 msg=pct"));
+    fake_klog_reset();
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, "test_dot_bright pct=101");
+    TEST_ASSERT_TRUE(replied(">err code=3 msg=pct"));
+    fake_klog_reset();
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, "test_dot_bright");
+    TEST_ASSERT_TRUE(replied(">err code="));
+    TEST_ASSERT_FALSE(replied(">|bright"));
     down();
 }
 

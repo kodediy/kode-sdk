@@ -39,6 +39,10 @@
 #define TD_V_PAIR        (KDRV_PCF8574_R1_BIT | KDRV_PCF8574_R2_BIT)
 /** @brief The pair's forbidden value: R1 at rest (1) and R2 on (0). */
 #define TD_V_FORBIDDEN   KDRV_PCF8574_R1_BIT
+/** @brief The dimmest glass `test_dot_bright` takes, percent: the marks still show. */
+#define TD_V_BRIGHT_MIN  10U
+/** @brief The brightest, percent: full, what a pass uses without the verb. */
+#define TD_V_BRIGHT_MAX  100U
 
 /** @brief The command in flight, as this file knows it. */
 static uint8_t s_seq;            /**< The last number given.                       */
@@ -603,6 +607,21 @@ static void h_camera(const kverb_t *c, const karg_val_t *v)
     td_post(c->verb, &r, KCLI_ERR_BUSY, "busy");
 }
 
+/** @brief test_dot_bright pct=: the bench's dim panel, the level the passes put the glass at until the next boot. */
+static void h_bright(const kverb_t *c, const karg_val_t *v)
+{
+    TestDotReqEvt r;
+
+    if ( !console_src_allows(CONSOLE_NEED_CABLE) )
+    {
+        return;
+    }
+    (void)memset(&r, 0, sizeof(r));
+    r.verb  = (uint8_t)TEST_DOT_VERB_BRIGHT;
+    r.a.pct = (uint8_t)v[0].u;
+    td_post(c->verb, &r, KCLI_ERR_BUSY, "busy");
+}
+
 /* ---- The way out --------------------------------------------------------------------- */
 
 /** @brief The blob is written, or the command died under it: AO_TestDot may use it again. */
@@ -802,6 +821,10 @@ static const karg_spec_t A_CAMERA[] = {
     { .key = "only", .required = false, .type = KARG_ENUM, .enums = EN_CAM, .n_enums = (uint8_t)Q_DIM(EN_CAM) },
 };
 
+static const karg_spec_t A_BRIGHT[] = {
+    { .key = "pct", .required = true, .type = KARG_UINT, .min = TD_V_BRIGHT_MIN, .max = TD_V_BRIGHT_MAX },
+};
+
 static const kverb_t TD_VERBS[] = {
     { "test_dot_place",  A_PLACE,  KVERB_KEYS(A_PLACE),  h_place  },
     { "test_dot_poll",   NULL,     0U,                   h_poll   },
@@ -820,6 +843,7 @@ static const kverb_t TD_VERBS[] = {
     { "test_dot_welcome", A_WELCOME, KVERB_KEYS(A_WELCOME), h_welcome },
     { "test_dot_storage", A_STORAGE, KVERB_KEYS(A_STORAGE), h_storage },
     { "test_dot_camera", A_CAMERA, KVERB_KEYS(A_CAMERA), h_camera },
+    { "test_dot_bright", A_BRIGHT, KVERB_KEYS(A_BRIGHT), h_bright },
 };
 
 const kverbs_t test_dot_verbs = {
