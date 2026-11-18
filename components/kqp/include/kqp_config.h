@@ -938,8 +938,9 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 #define KODE_TOUCH_LOOK_EVERY_MS 10000U  /**< Between the looks after those. */
 #define KODE_TOUCH_LOOK_FOR_MS   300000U /**< How long the spaced looks go on: five minutes, AO_Display's own patience with a panel. */
 #define KODE_TOUCH_LOOK_EDGE_MS  1000U   /**< The least time between two looks the interrupt line asks for: a contact pulses it many times a second. */
-#define KODE_TOUCH_REST_SLEEP_S 1U    /**< The auto-sleep time written for the rest: the controller
-                                       *   sleeps a second after the last touch. */
+#define KODE_TOUCH_REST_SLEEP_S 1U    /**< The auto-sleep time written for OFF: the controller
+                                       *   sleeps a second after the last touch. Asleep it is
+                                       *   left awake with its interrupt off. */
 #define KODE_TOUCH_STILL_MS     60000U /**< A contact that stays within
                                        *   KODE_TOUCH_STILL_PX of where it
                                        *   settled this long is not a finger:

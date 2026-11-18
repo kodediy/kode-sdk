@@ -1504,23 +1504,30 @@ static void expect_awake_settings(void)
     TEST_ASSERT_EQUAL_HEX8(AWAKE_SLEEP_S, s_regs[REG_AUTO_SLEEP]);
 }
 
-/* The rest: the interrupt off, auto-sleep on and quick. A second round (OFF
- * after ASLEEP) finds the chip already there and writes nothing. */
-TEST_CASE("a round puts the controller to sleep: no interrupt, auto-sleep on",
+/* Asleep, the board is one press from use: the interrupt is taken away and
+ * nothing else, so the chip stays on the bus and AWAKE gives touch back with
+ * one write. A chip sent to sleep answers nothing until a finger wakes it,
+ * and short taps take seconds to. */
+TEST_CASE("a round for ASLEEP takes the interrupt away and leaves the controller awake",
           "[touch_ao][lowpower]")
 {
     touch_armed();
+    uint8_t const dis_sleep = s_regs[REG_DIS_SLEEP];
+    uint8_t const sleep_s   = s_regs[REG_AUTO_SLEEP];
 
     round_for(KODE_LP_ASLEEP);
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, s_regs[REG_IRQ_CTL], "INT still pulses");
-    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, s_regs[REG_DIS_SLEEP], "auto-sleep still disabled");
-    TEST_ASSERT_EQUAL_HEX8(KODE_TOUCH_REST_SLEEP_S, s_regs[REG_AUTO_SLEEP]);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(0U, dis_sleep, "the case needs a chip kept awake");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(dis_sleep, s_regs[REG_DIS_SLEEP],
+                                   "the chip was let go to sleep");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(sleep_s, s_regs[REG_AUTO_SLEEP],
+                                   "the chip's sleep time was changed");
     expect_answer(false, NULL);
     expect_no_more_answers();
 
     s_regs[REG_IRQ_CTL] = 0x55U;    /* anything a second rest would overwrite */
-    round_for(KODE_LP_OFF);
-    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x55U, s_regs[REG_IRQ_CTL], "OFF rewrote a rest already made");
+    round_for(KODE_LP_ASLEEP);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x55U, s_regs[REG_IRQ_CTL], "a rest already made was written again");
     expect_answer(false, NULL);
 
     s_regs[REG_IRQ_CTL] = 0U;
@@ -1529,8 +1536,50 @@ TEST_CASE("a round puts the controller to sleep: no interrupt, auto-sleep on",
     mock_down();
 }
 
+/* Off, nothing reads a touch until the boot that resets the chip: it sleeps,
+ * whether the round finds it awake or already resting for ASLEEP. */
+TEST_CASE("a round for OFF puts the controller to sleep: no interrupt, auto-sleep on",
+          "[touch_ao][lowpower]")
+{
+    touch_armed();
+
+    round_for(KODE_LP_OFF);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, s_regs[REG_IRQ_CTL], "INT still pulses");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, s_regs[REG_DIS_SLEEP], "auto-sleep still disabled");
+    TEST_ASSERT_EQUAL_HEX8(KODE_TOUCH_REST_SLEEP_S, s_regs[REG_AUTO_SLEEP]);
+    expect_answer(false, NULL);
+    expect_no_more_answers();
+
+    s_regs[REG_DIS_SLEEP] = 0x55U;  /* anything a second sleep would overwrite */
+    round_for(KODE_LP_OFF);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x55U, s_regs[REG_DIS_SLEEP], "a sleep already made was written again");
+    expect_answer(false, NULL);
+
+    state_awake();
+    expect_awake_settings();
+    mock_down();
+}
+
+TEST_CASE("a round for OFF puts to sleep a controller that rests for ASLEEP",
+          "[touch_ao][lowpower]")
+{
+    touch_armed();
+    round_for(KODE_LP_ASLEEP);
+    expect_answer(false, NULL);
+
+    round_for(KODE_LP_OFF);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, s_regs[REG_IRQ_CTL], "INT pulses again");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0U, s_regs[REG_DIS_SLEEP], "the chip stays awake with the board off");
+    TEST_ASSERT_EQUAL_HEX8(KODE_TOUCH_REST_SLEEP_S, s_regs[REG_AUTO_SLEEP]);
+    expect_answer(false, NULL);
+
+    state_awake();
+    expect_awake_settings();
+    mock_down();
+}
+
 /* A rested controller sends no interrupt at all, so an empty read then is
- * another pin's bounce, and a look would only wake a chip that is asleep. */
+ * another pin's bounce, and a touch the board rests through is no input. */
 TEST_CASE("an empty interrupt read polls nothing while the controller rests",
           "[touch_ao][lowpower]")
 {
@@ -1574,7 +1623,7 @@ TEST_CASE("a controller that NAKs the wake is tried again until it answers",
 {
     touch_armed();
 
-    round_for(KODE_LP_ASLEEP);
+    round_for(KODE_LP_OFF);
     expect_answer(false, NULL);
     s_bus_dead = true;      /* the chip has gone to sleep, as the rest meant it to */
 
@@ -1605,12 +1654,12 @@ TEST_CASE("a round during a retried wake cancels the retry", "[touch_ao][lowpowe
 {
     touch_armed();
 
-    round_for(KODE_LP_ASLEEP);
+    round_for(KODE_LP_OFF);
     expect_answer(false, NULL);
     s_bus_dead = true;
     state_awake();
 
-    round_for(KODE_LP_ASLEEP);
+    round_for(KODE_LP_OFF);
     expect_answer(false, NULL);
     s_bus_dead = false;
     s_regs[REG_IRQ_CTL] = 0U;
