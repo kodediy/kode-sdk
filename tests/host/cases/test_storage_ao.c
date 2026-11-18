@@ -3,6 +3,8 @@
  * @file test_storage_ao.c
  * @brief AO_Storage: the one file at a time, and who is allowed to close it.
  */
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10029,4 +10031,342 @@ TEST_CASE("the sweep walks the whole root, however many files and leftovers it h
         (void)snprintf(name, sizeof(name), "app%02u.bin", i);
         TEST_ASSERT_TRUE_MESSAGE(on_sd(name), "a file that is no leftover was removed");
     }
+}
+
+/* ---- A read again ------------------------------------------------------------
+ * A chunk of a card file that fails leaves FATFS in error until the card is
+ * mounted again. The reader asks for the file again from a byte: the card is
+ * mounted again, the file opened again there and two chunks sent, as after an
+ * open and two reads. Anything that does not go ends the read with an error.
+ */
+
+/** @brief What AO_Storage reads in one chunk (STORAGE_CHUNK). */
+#define REREAD_CHUNK  (32U * 1024U)
+/** @brief Bytes of the card file the read again cases use: a chunk and a half. */
+#define REREAD_BYTES  (REREAD_CHUNK + (REREAD_CHUNK / 2U))
+
+static uint8_t s_reread_body[REREAD_BYTES];
+
+/** @brief Put a card file whose every byte says where it is. */
+static void put_reread_file(void)
+{
+    for ( uint32_t i = 0U; REREAD_BYTES > i; ++i )
+    {
+        s_reread_body[i] = (uint8_t)((i * 7U) + (i >> 8));
+    }
+    fake_media_put_sd_path("again.bin", s_reread_body, REREAD_BYTES);
+}
+
+/** @brief Dispatch a read again from @p offset, asked by @p who. */
+static void ask_reread(uint32_t offset, QActive *who)
+{
+    StorageRereadEvt e;
+
+    (void)memset(&e, 0, sizeof(e));
+    e.super  = (QEvt)QEVT_INITIALIZER(STORAGE_REREAD_REQ_SIG);
+    e.offset = offset;
+    e.who    = who;
+    QASM_DISPATCH(AO_Storage, &e.super, 0U);
+}
+
+/** @brief Take the next chunk the spy holds, past anything else it heard. */
+static const StorageDataEvt *take_chunk(void)
+{
+    for ( ;; )
+    {
+        const QEvt * const e = ao_spy_take();
+
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "no chunk came");
+        if ( (enum_t)e->sig == STORAGE_DATA_SIG )
+        {
+            return (const StorageDataEvt *)e;
+        }
+    }
+}
+
+/** @brief How many chunks the spy holds, the rest of what it heard dropped. */
+static unsigned chunks_held(void)
+{
+    const QEvt *got[16];
+    unsigned    n = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( ((enum_t)e->sig == STORAGE_DATA_SIG) && (16U > n) )
+        {
+            got[n] = e;
+            ++n;
+        }
+    }
+    (void)got;
+    return n;
+}
+
+/** @brief Close the reader, as the reader does. */
+static void close_reader(void)
+{
+    static const QEvt close_evt = QEVT_INITIALIZER(STORAGE_CLOSE_REQ_SIG);
+
+    QASM_DISPATCH(AO_Storage, &close_evt, 0U);
+    settle_card();
+}
+
+TEST_CASE("a read again mounts the card again and reads on from the byte asked",
+          "[storage_ao][reread]")
+{
+    static const QEvt read_evt = QEVT_INITIALIZER(STORAGE_READ_REQ_SIG);
+    uint32_t const    off      = 1000U;
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_reread_file();
+    ask_open("again.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+    QASM_DISPATCH(AO_Storage, &read_evt, 0U);
+    TEST_ASSERT_EQUAL_UINT16(REREAD_CHUNK, take_chunk()->len);
+
+    unsigned const mounts = fake_sdmmc_mounts();
+    fake_klog_reset();
+    ask_reread(off, ao_spy());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, chunks_held(), "a chunk came before the card was mounted again");
+    settle_card();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(mounts + 1U, fake_sdmmc_mounts(), "the card was not mounted again");
+    const StorageDataEvt * const a = take_chunk();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)a->status);
+    TEST_ASSERT_EQUAL_UINT16(REREAD_CHUNK, a->len);
+    TEST_ASSERT_EQUAL_MEMORY(&s_reread_body[off], storage_buf(a->idx), a->len);
+    const StorageDataEvt * const b = take_chunk();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)b->status);
+    TEST_ASSERT_NOT_EQUAL(a->idx, b->idx);
+    TEST_ASSERT_EQUAL_UINT16(REREAD_BYTES - off - REREAD_CHUNK, b->len);
+    TEST_ASSERT_EQUAL_MEMORY(&s_reread_body[off + REREAD_CHUNK], storage_buf(b->idx), b->len);
+    TEST_ASSERT_EQUAL_UINT(1U, log_count("is read again from 1000"));
+    close_reader();
+}
+
+TEST_CASE("a buffer handed back while the card is mounted again reads nothing",
+          "[storage_ao][reread]")
+{
+    StorageBufEvt next;
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_reread_file();
+    ask_open("again.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+
+    ask_reread(0U, ao_spy());
+    (void)memset(&next, 0, sizeof(next));
+    next.super = (QEvt)QEVT_INITIALIZER(STORAGE_NEXT_SIG);
+    next.idx   = 0U;
+    QASM_DISPATCH(AO_Storage, &next.super, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, chunks_held(), "a buffer was read with the card going down");
+
+    settle_card();
+    TEST_ASSERT_EQUAL_MEMORY(s_reread_body, storage_buf(take_chunk()->idx), 64U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, chunks_held(), "the read again is two chunks, no more");
+    close_reader();
+}
+
+TEST_CASE("a read again whose card will not mount again ends the read with an "
+          "error, and the reader keeps its turn until it closes", "[storage_ao][reread]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_reread_file();
+    ask_open("again.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+
+    fake_sdmmc_set_present(false);
+    ask_reread(10U, ao_spy());
+    settle_card();
+    fake_sdmmc_set_present(true);
+
+    const StorageDataEvt * const d = take_chunk();
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, (int)d->status);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, chunks_held(), "more than the error came");
+
+    /* The reader's close is what lets the turn go: an open before it waits
+     * or is refused, and the close cannot end somebody else's file. */
+    ao_spy_drain();
+    make_file("next.bin", 8U);
+    ask_open("/storage/next.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, take_open_status());
+    close_reader();
+    ao_spy_drain();
+    ask_open("/storage/next.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+    close_reader();
+}
+
+#if defined(__APPLE__) && !defined(F_GETPATH)
+#define F_GETPATH 50   /* <sys/fcntl.h> hides it under a strict POSIX build */
+#endif
+
+/* The host's stand-in for a read the card's driver cuts short: the handle
+ * under the reader's FILE is closed, so its next read fails. */
+static void break_reader_of(const char *rel)
+{
+    char want[1024];
+    char real_want[1024];
+    bool broke = false;
+
+    (void)snprintf(want, sizeof(want), "%s/%s", fake_media_sd_dir(), rel);
+    TEST_ASSERT_NOT_NULL(realpath(want, real_want));
+    for ( int fd = 3; (1024 > fd) && !broke; ++fd )
+    {
+        char got[1024];
+        char real_got[1024];
+
+#ifdef F_GETPATH
+        if ( fcntl(fd, F_GETPATH, got) == -1 )
+        {
+            continue;
+        }
+#else
+        char link[64];
+        ssize_t n;
+
+        (void)snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+        n = readlink(link, got, sizeof(got) - 1U);
+        if ( 0 > n )
+        {
+            continue;
+        }
+        got[n] = '\0';
+#endif
+        if ( (NULL != realpath(got, real_got)) && (0 == strcmp(real_got, real_want)) )
+        {
+            (void)close(fd);
+            broke = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(broke, "the reader's handle was not found");
+}
+
+TEST_CASE("a chunk that fails stops the reading, and a read again reads on "
+          "from the byte asked without telling a new card", "[storage_ao][reread]")
+{
+    static const QEvt read_evt = QEVT_INITIALIZER(STORAGE_READ_REQ_SIG);
+    StorageBufEvt     next;
+    unsigned          news = 0U;
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_reread_file();
+    ask_open("again.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+    QASM_DISPATCH(AO_Storage, &read_evt, 0U);
+    const StorageDataEvt * const first = take_chunk();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)first->status);
+
+    break_reader_of("again.bin");
+    QASM_DISPATCH(AO_Storage, &read_evt, 0U);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(KODE_OK, (int)take_chunk()->status, "the broken read did not fail");
+
+    /* A buffer handed back after the failure reads nothing. */
+    (void)memset(&next, 0, sizeof(next));
+    next.super = (QEvt)QEVT_INITIALIZER(STORAGE_NEXT_SIG);
+    next.idx   = first->idx;
+    QASM_DISPATCH(AO_Storage, &next.super, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, chunks_held(), "a chunk was read after the failure");
+
+    ao_spy_subscribe(STORAGE_CARD_SIG);
+    ask_reread(REREAD_CHUNK, ao_spy());
+    settle_card();
+    const StorageDataEvt *a = NULL;
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)e->sig == STORAGE_CARD_SIG )
+        {
+            ++news;
+        }
+        if ( ((enum_t)e->sig == STORAGE_DATA_SIG) && (NULL == a) )
+        {
+            a = (const StorageDataEvt *)e;
+        }
+    }
+    QActive_unsubscribe(ao_spy(), STORAGE_CARD_SIG);
+    TEST_ASSERT_NOT_NULL_MESSAGE(a, "nothing came after the read again");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)a->status);
+    TEST_ASSERT_EQUAL_UINT16(REREAD_BYTES - REREAD_CHUNK, a->len);
+    TEST_ASSERT_EQUAL_MEMORY(&s_reread_body[REREAD_CHUNK], storage_buf(a->idx), a->len);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, news, "the card mounted again under the read was told as a new card");
+    close_reader();
+}
+
+TEST_CASE("a close after a chunk that failed mounts the card again before the "
+          "next open of the card", "[storage_ao][reread]")
+{
+    static const QEvt read_evt = QEVT_INITIALIZER(STORAGE_READ_REQ_SIG);
+    static const QEvt close_evt = QEVT_INITIALIZER(STORAGE_CLOSE_REQ_SIG);
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_reread_file();
+    fake_media_put_sd_path("pack.bin", s_reread_body, 64U);
+    ask_open("again.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+    break_reader_of("again.bin");
+    QASM_DISPATCH(AO_Storage, &read_evt, 0U);
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, (int)take_chunk()->status);
+
+    unsigned const mounts = fake_sdmmc_mounts();
+    fake_klog_reset();
+    QASM_DISPATCH(AO_Storage, &close_evt, 0U);
+    ao_spy_drain();
+    ask_open("pack.bin");                 /* held behind the remount */
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, chunks_held() + ao_spy_count(), "the open went before the remount");
+    settle_card();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(mounts + 1U, fake_sdmmc_mounts(), "the close did not mount the card again");
+    TEST_ASSERT_EQUAL_UINT(1U, log_count("mounted again after a read failed on it"));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+    close_reader();
+}
+
+TEST_CASE("a read again of a file on the internal partition is refused and "
+          "mounts nothing", "[storage_ao][reread]")
+{
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    make_file("inside.bin", 64U);
+    ask_open("/storage/inside.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+
+    unsigned const mounts = fake_sdmmc_mounts();
+    ask_reread(0U, ao_spy());
+    settle_card();
+
+    TEST_ASSERT_EQUAL_UINT(mounts, fake_sdmmc_mounts());
+    TEST_ASSERT_NOT_EQUAL(KODE_OK, (int)take_chunk()->status);
+    close_reader();
+}
+
+TEST_CASE("a read again asked by an AO that has no file open is refused, and "
+          "the reader keeps its file", "[storage_ao][reread]")
+{
+    static const QEvt read_evt = QEVT_INITIALIZER(STORAGE_READ_REQ_SIG);
+
+    storage_fresh();
+    fake_media_set_sd_present(true);
+    put_reread_file();
+    ask_open("again.bin");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
+
+    qf_support_give_queue(AO_Log);
+    ask_reread(0U, AO_Log);
+    settle_card();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, chunks_held(), "the reader was told something");
+    const QEvt *refused = NULL;
+    TEST_ASSERT_EQUAL_MESSAGE(pdTRUE, xQueueReceive(AO_Log->eQueue, &refused, 0U),
+                              "the asker was not told");
+    TEST_ASSERT_EQUAL_INT(STORAGE_DATA_SIG, (int)refused->sig);
+    QF_gc(refused);
+
+    QASM_DISPATCH(AO_Storage, &read_evt, 0U);
+    const StorageDataEvt * const d = take_chunk();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, (int)d->status);
+    TEST_ASSERT_EQUAL_MEMORY(s_reread_body, storage_buf(d->idx), 64U);
+    close_reader();
 }

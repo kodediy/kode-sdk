@@ -13732,3 +13732,188 @@ TEST_CASE("an owed final that another install of its kind replaces is never said
     TEST_ASSERT_EQUAL_UINT32(b, got.id);
     TEST_ASSERT_NOT_EQUAL_UINT32(91U, b);
 }
+
+/* ---- A chunk the card fails to give is read again --------------------------
+ * The card's driver cuts a read short while the flash erases a block of an
+ * apps region already written. The install asks AO_Storage for the chunk
+ * again, from where it starts, with the card mounted again: up to
+ * APPMGR_CHUNK_AGAIN times in a row, and only for a file on the card.
+ */
+
+/** @brief Hand AppMgr bytes [@p from, @p to) of image_named()'s image as one chunk. */
+static void answer_slice(uint32_t from, uint32_t to)
+{
+    uint8_t * const buf = (uint8_t *)storage_buf(0U);
+    StorageDataEvt  d;
+
+    TEST_ASSERT_NOT_NULL(buf);
+    (void)memcpy(buf, &s_named_img[from], to - from);
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DATA_SIG);
+    d.len    = (uint16_t)(to - from);
+    d.idx    = 0U;
+    d.status = (uint8_t)KODE_OK;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+}
+
+/** @brief A chunk that comes back with an error. */
+static void answer_read_error(void)
+{
+    StorageDataEvt d;
+
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(STORAGE_DATA_SIG);
+    d.idx    = 1U;
+    d.status = (uint8_t)KODE_ERROR;
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+}
+
+/**
+ * @brief Empty AO_Storage's queue, counting the reads again it holds.
+ * @param[out] offset The offset of the last one, when there was one.
+ * @return How many.
+ */
+static unsigned rereads_taken(uint32_t *offset)
+{
+    const QEvt *e = NULL;
+    unsigned    n = 0U;
+
+    while ( storage_pop(&e) == pdTRUE )
+    {
+        if ( (enum_t)e->sig == STORAGE_REREAD_REQ_SIG )
+        {
+            StorageRereadEvt const * const r = (StorageRereadEvt const *)e;
+
+            TEST_ASSERT_EQUAL_PTR_MESSAGE(AO_AppMgr, r->who, "the read again names somebody else");
+            *offset = r->offset;
+            ++n;
+        }
+        QF_gc(e);
+    }
+    return n;
+}
+
+/** @brief Start an install of image_named("new") from @p medium, up to its open. */
+static uint32_t chunk_again_begin(uint8_t medium)
+{
+    uint32_t const len = image_named("new");
+
+    Mockkdrv_slot_Init();
+    keep_fresh();
+    empty_region();
+    spy_write_listen();
+    ask_flash_dst("new.bin", (uint8_t)KFW_TARGET_APP);
+    storage_expect(STORAGE_OPEN_REQ_SIG, "the install never asked for its file");
+    answer_open(len, medium);
+    (void)storage_tally();                                /* its two reads */
+    return len;
+}
+
+TEST_CASE("a chunk the card fails to give is read again from where it starts, "
+          "and the install ends whole", "[appmgr_ao][reread]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        progress;
+    uint32_t        dones;
+    uint32_t        fails;
+    uint32_t        off  = 0xFFFFFFFFU;
+    uint32_t const  len  = chunk_again_begin((uint8_t)KDRV_MEDIUM_SD);
+    uint32_t const  half = len / 2U;
+
+    fake_klog_reset();
+    answer_slice(0U, half);
+    answer_read_error();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, rereads_taken(&off), "the chunk was not asked for again");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(half, off, "the read again starts somewhere else");
+    TEST_ASSERT_TRUE(klog_has("read again with the card mounted again (1 of 2)"));
+
+    answer_slice(half, len);
+    answer_eof();
+    run_ticks(4U);
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, dones, "the install read again did not end");
+    TEST_ASSERT_EQUAL_UINT(0U, fails);
+    TEST_ASSERT_EQUAL_STRING("new", done.name);
+}
+
+TEST_CASE("a chunk read again that fails once more is read again once more, "
+          "and a third failure ends the install as before", "[appmgr_ao][reread]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        progress;
+    uint32_t        dones;
+    uint32_t        fails;
+    uint32_t        off = 0xFFFFFFFFU;
+    uint32_t const  len = chunk_again_begin((uint8_t)KDRV_MEDIUM_SD);
+
+    answer_slice(0U, len / 2U);
+    answer_read_error();
+    answer_read_error();
+    TEST_ASSERT_EQUAL_UINT(2U, rereads_taken(&off));
+    TEST_ASSERT_EQUAL_UINT32(len / 2U, off);
+    answer_read_error();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, rereads_taken(&off), "a third read again");
+    run_ticks(4U);
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT(0U, dones);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "the install that kept failing did not fail");
+}
+
+TEST_CASE("each good chunk gives the next one its own reads again",
+          "[appmgr_ao][reread]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        progress;
+    uint32_t        dones;
+    uint32_t        fails;
+    uint32_t        off = 0xFFFFFFFFU;
+    uint32_t const  len = chunk_again_begin((uint8_t)KDRV_MEDIUM_SD);
+    uint32_t const  a   = len / 3U;
+    uint32_t const  b   = (2U * len) / 3U;
+
+    answer_read_error();
+    answer_read_error();
+    answer_slice(0U, a);
+    answer_read_error();
+    answer_read_error();
+    TEST_ASSERT_EQUAL_UINT(4U, rereads_taken(&off));
+    TEST_ASSERT_EQUAL_UINT32(a, off);
+    answer_slice(a, b);
+    answer_slice(b, len);
+    answer_eof();
+    run_ticks(4U);
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT(1U, dones);
+    TEST_ASSERT_EQUAL_UINT(0U, fails);
+}
+
+TEST_CASE("a chunk from the internal partition is not read again",
+          "[appmgr_ao][reread]")
+{
+    AppFlashDoneEvt done;
+    uint32_t        progress;
+    uint32_t        dones;
+    uint32_t        fails;
+    uint32_t        off = 0xFFFFFFFFU;
+    uint32_t const  len = chunk_again_begin((uint8_t)KDRV_MEDIUM_FS);
+
+    answer_slice(0U, len / 2U);
+    answer_read_error();
+    TEST_ASSERT_EQUAL_UINT(0U, rereads_taken(&off));
+    run_ticks(4U);
+    spy_write_ends(&progress, &dones, &fails, &done);
+    spy_write_unlisten();
+    keep_end();
+
+    TEST_ASSERT_EQUAL_UINT(0U, dones);
+    TEST_ASSERT_EQUAL_UINT(1U, fails);
+}

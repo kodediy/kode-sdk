@@ -96,6 +96,8 @@ static uint32_t chunk_gap(void)
  * the network stream's own 15 s, so a server that went quiet is reported
  * by AO_Net first, as what it is. */
 #define APPMGR_CHUNK_TICKS         KQP_TICKS_PER_MS(30000U)
+/* How many times in a row a chunk the card failed to give is read again. */
+#define APPMGR_CHUNK_AGAIN         2U
 /* Between "the image is installed" and the reset that boots it: long enough
  * for AO_Log's lower-priority task to put `>ok` on the wire first. */
 #define APPMGR_ANSWER_DRAIN_TICKS KQP_TICKS_PER_MS(50U)
@@ -327,6 +329,11 @@ typedef struct {
      * enough: the pacer would be armed twice and one buffer refilled twice. */
     uint8_t  to_return;      /**< Bitmask of buffer indices to hand back.    */
     bool     pacing;         /**< The pacer is armed; do not arm it again.   */
+    /* A chunk read from the card that comes back with an error is read again
+     * from where it starts, with the card mounted again (chunk_again()). */
+    bool     rd_card;        /**< The file being written is on the card.     */
+    uint8_t  rd_again;       /**< Reads again of the chunk now due.          */
+    uint32_t rd_off;         /**< The file's bytes delivered so far.         */
     size_t   total;
     /* What the sink has produced: kfw_produced(), or the fed length in bypass
      * mode. region_install() records it as the extent's size, and every
@@ -3603,6 +3610,49 @@ static void hold_end(AppMgr * const me)
 }
 
 /**
+ * @brief Count a chunk from the card, and read a failed one again.
+ *
+ * A chunk the card failed to give is read again from where it starts, with
+ * the card mounted again (storage_reread_request()), up to
+ * APPMGR_CHUNK_AGAIN times in a row: a read that fails while the flash erases
+ * a block of an apps region already written is cut short by the card's
+ * driver, not by the card. Every buffer goes back to AO_Storage with the
+ * request, so the ones held for the pacer are let go here.
+ *
+ * @param me The AO, writing.
+ * @param d  The chunk.
+ * @return true when the chunk is to be read again and nothing else is done
+ *         with it; false when consume_chunk() takes it as it is.
+ */
+static bool chunk_again(AppMgr * const me, const StorageDataEvt *d)
+{
+    if ( (uint8_t)KODE_OK == d->status )
+    {
+        if ( !d->eof )
+        {
+            me->rd_off += (uint32_t)d->len;
+            me->rd_again = 0U;
+        }
+        return false;
+    }
+    if ( (!me->rd_card) || (APPMGR_CHUNK_AGAIN <= me->rd_again) )
+    {
+        return false;
+    }
+    me->rd_again++;
+    (void)QTimeEvt_disarm(&me->pacer);
+    me->pacing    = false;
+    me->to_return = 0U;
+    KLOG_W(TAG, "'%s': the chunk at %lu did not read; it is read again with "
+                "the card mounted again (%u of %u)", me->file,
+           (unsigned long)me->rd_off, (unsigned)me->rd_again,
+           (unsigned)APPMGR_CHUNK_AGAIN);
+    storage_reread_request(me->rd_off, &me->super);
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_CHUNK_TICKS);
+    return true;
+}
+
+/**
  * @brief Write one delivered chunk into the region.
  * @return true while more chunks are wanted.
  */
@@ -4910,6 +4960,9 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
             {
                 me->origin = (uint8_t)APPMGR_ORIGIN_CARD;
             }
+            me->rd_card  = (!me->from_net) && ((uint8_t)KDRV_MEDIUM_SD == rsp->medium);
+            me->rd_again = 0U;
+            me->rd_off   = 0U;
             if ( xfer_begin(me, me->os_target ? (uint8_t)KFW_TARGET_OS
                                              : (uint8_t)KFW_TARGET_APP,
                            rsp->size) != KODE_OK )
@@ -8370,6 +8423,11 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
         case NET_STREAM_DATA_SIG: {
             StorageDataEvt const * const d = Q_EVT_CAST(StorageDataEvt);
             uint8_t const idx = d->idx;
+            if ( ((QSignal)STORAGE_DATA_SIG == e->sig) && chunk_again(me, d) )
+            {
+                status = Q_HANDLED();
+                break;
+            }
             if ( !consume_chunk(me, d) )
             {
                 if ( me->busy_pending )

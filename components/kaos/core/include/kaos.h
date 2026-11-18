@@ -4041,6 +4041,16 @@ void storage_next_request(uint8_t idx);
 /** @brief Close the open file and release any buffers still on loan. */
 void storage_close_request(void);
 
+/**
+ * @brief Read the card file @p who has open again, from byte @p offset.
+ *
+ * For a chunk that came back with an error: the card is mounted again, the file
+ * opened again and read from @p offset (StorageRereadEvt). Every buffer lent
+ * before is taken back. Only a file found on the card is read again; anything
+ * else is answered with a STORAGE_DATA_SIG error at once.
+ */
+void storage_reread_request(uint32_t offset, QActive *who);
+
 /** @brief The tag of a write whose answer needs no number of its own. */
 #define KODE_STORAGE_TAG_NONE  0U
 

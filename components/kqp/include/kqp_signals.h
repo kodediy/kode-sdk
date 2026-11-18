@@ -672,6 +672,9 @@ enum KodeSignals {
     STORAGE_NEXT_SIG,           /**< AO_Storage: here is StorageBufEvt.idx
                                  *   back - refill it and send it again.      */
     STORAGE_CLOSE_REQ_SIG,      /**< AO_Storage: close the open file.         */
+    STORAGE_REREAD_REQ_SIG,     /**< AO_Storage: a chunk of the card file open
+                                 *   for reading failed; mount the card again
+                                 *   and read on from StorageRereadEvt.offset. */
     STORAGE_OPEN_RSP_SIG,       /**< To the opener (StorageOpenRspEvt).       */
     STORAGE_DATA_SIG,           /**< To the reader (StorageDataEvt).          */
     STORAGE_WRITE_REQ_SIG,      /**< AO_Storage: put StorageWriteEvt.data in a
@@ -2822,6 +2825,21 @@ typedef struct {
     QEvt    super;
     uint8_t idx;
 } StorageBufEvt;
+
+/**
+ * @brief Read the open card file again from @c offset (STORAGE_REREAD_REQ_SIG).
+ *
+ * The answer is the read itself: every buffer comes back to AO_Storage, which
+ * mounts the card again, opens the same file, moves to @c offset and sends up
+ * to two chunks from there, as an open followed by two read requests would.
+ * When any of that fails the answer is one STORAGE_DATA_SIG with an error and
+ * the file is closed.
+ */
+typedef struct {
+    QEvt     super;
+    uint32_t offset;    /**< The file's byte the next chunk starts at.        */
+    QActive *who;       /**< The reader that asks: the one with the file open. */
+} StorageRereadEvt;
 
 /**
  * @brief A chunk of the open file (STORAGE_DATA_SIG).
