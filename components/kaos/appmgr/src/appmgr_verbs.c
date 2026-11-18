@@ -19,6 +19,7 @@
 #define TAG "kcli"  /**< The console's tag, which `log_level tag="kcli"` governs. */
 
 #define APPMGR_V_PROJECT_MAX  32U    /**< A project name, as kapp_cat_row_t keeps it. */
+#define APPMGR_V_VERSION_MAX  16U    /**< A version, as AppEntryEvt carries it. */
 #define APPMGR_V_BYTES_PER_KB 1024U  /**< `size_kb=`'s unit. */
 #define APPMGR_V_ERASE_MARGIN_MS 5000U  /**< What `app_erase` waits past AO_AppMgr's own bound on AO_Storage. */
 #define APPMGR_V_ERASE_MS     (APPMGR_WIPE_MS + APPMGR_V_ERASE_MARGIN_MS) /**< `app_erase`'s deadline. */
@@ -258,20 +259,23 @@ static void appmgr_record(const char *name, const char *version, uint32_t size,
                           const char *at, const char *file)
 {
     char qn[CONSOLE_QUOTED_MAX(APPMGR_V_PROJECT_MAX)];
-    char qv[CONSOLE_QUOTED_MAX(sizeof(((AppEntryEvt *)0)->version))];
+    char qv[CONSOLE_QUOTED_MAX(APPMGR_V_VERSION_MAX)];
     char qc[CONSOLE_QUOTED_MAX(KODE_APP_CATEGORY_MAX)];
     char qd[CONSOLE_QUOTED_MAX(KODE_APP_DISPLAY_MAX)];
     char qf[CONSOLE_QUOTED_MAX(KODE_APP_FILE_MAX)];
     /* What `files=on` adds after the record `app_list` has always printed. */
     char tail[sizeof(" at= file=") + sizeof(APPMGR_V_AT_APP) + sizeof(qf)];
 
-    if ( '\0' == category[0] )
+    const char *shown_category = "other";
+    const char *shown_display  = name;
+
+    if ( '\0' != category[0] )
     {
-        category = "other";
+        shown_category = category;
     }
-    if ( '\0' == display[0] )
+    if ( '\0' != display[0] )
     {
-        display = name;
+        shown_display = display;
     }
     tail[0] = '\0';
     if ( (NULL != at) && (NULL != file) )
@@ -291,8 +295,8 @@ static void appmgr_record(const char *name, const char *version, uint32_t size,
                   console_quote(qn, sizeof(qn), name),
                   console_kv_text(qv, sizeof(qv), version),
                   (uint32_t)(size / APPMGR_V_BYTES_PER_KB),
-                  console_quote(qc, sizeof(qc), category),
-                  console_quote(qd, sizeof(qd), display), tail);
+                  console_quote(qc, sizeof(qc), shown_category),
+                  console_quote(qd, sizeof(qd), shown_display), tail);
 }
 
 /** @brief Close app_list: every record that was going to be printed has been. */
