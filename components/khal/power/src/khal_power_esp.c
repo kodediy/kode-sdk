@@ -168,12 +168,39 @@ static esp_err_t IRAM_ATTR sleep_exit_cb(int64_t sleep_time_us, void *arg)
     return ESP_OK;
 }
 
+#if !defined(CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND) && !defined(CONFIG_PM_SLP_DISABLE_GPIO)
+/**
+ * @brief Keep every pad on its own configuration through light sleep.
+ *
+ * A pad whose sleep selection is set switches to its sleep configuration when
+ * the chip sleeps. ESP-IDF's light-sleep GPIO workaround sets the selection on
+ * every pad at startup, with a sleep configuration of no input, no output and
+ * no pull; this build has the workaround off. A software restart resets the
+ * CPUs and not the pads, so an image that ran before with the workaround on
+ * leaves every selection set, and in light sleep each input then reads low:
+ * a wake line that is active low fires as the sleep begins.
+ */
+static void pads_keep(void)
+{
+    for ( int pin = 0; (int)GPIO_NUM_MAX > pin; pin++ )
+    {
+        if ( GPIO_IS_VALID_GPIO(pin) )
+        {
+            (void)gpio_sleep_sel_dis((gpio_num_t)pin);
+        }
+    }
+}
+#endif
+
 kode_status_t khal_power_init(void)
 {
     if ( s_ready )
     {
         return KODE_OK;
     }
+#if !defined(CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND) && !defined(CONFIG_PM_SLP_DISABLE_GPIO)
+    pads_keep();
+#endif
     if ( lock_make(&s_awake, "kode.awake") != KODE_OK )
     {
         return KODE_NO_RESOURCES;
