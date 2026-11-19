@@ -47,6 +47,10 @@ typedef void (*khal_power_wake_cb_t)(void *arg);
  * is held. The awake lock starts held: the board is AWAKE until
  * khal_power_hold(false). A second call is a no-op.
  *
+ * In a build without ESP-IDF's light-sleep GPIO workaround, every pad's sleep
+ * selection is cleared first, so the pads keep their own configuration in
+ * light sleep whatever the image that ran before the restart left set.
+ *
  * @return KODE_OK; KODE_NO_RESOURCES when the lock could not be created;
  *         KODE_ERROR when power management would not configure.
  */
