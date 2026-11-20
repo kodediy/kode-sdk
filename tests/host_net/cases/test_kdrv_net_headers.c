@@ -62,13 +62,19 @@ static esp_err_t hdr_open(esp_http_client_handle_t client, int write_len, int nu
     return ESP_OK;
 }
 
-/** @brief A fresh client mock that records what the request asks of it. */
+/**
+ * @brief A fresh client mock that records what the request asks of it.
+ *
+ * Each wait of an exchange sets the client's timeout to what is left of its
+ * budget; these cases are about the headers and let those calls be.
+ */
 static void hdr_begin(void)
 {
     (void)memset(&s_seen, 0, sizeof(s_seen));
     log_stub_forget();
     Mockesp_http_client_Init();
     esp_http_client_init_Stub(hdr_init);
+    esp_http_client_set_timeout_ms_IgnoreAndReturn(ESP_OK);
 }
 
 /** @brief The answer: headers, the body, its end, the close. */
