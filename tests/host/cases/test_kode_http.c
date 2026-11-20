@@ -159,7 +159,7 @@ static uint8_t *bytes_of(const char *text)
  */
 static void expect_get(const char *url, kode_status_t rc, kdrv_net_http_result_t *res, const char *text)
 {
-    kdrv_net_http_get_ExpectAndReturn(url, NULL, KODE_HTTP_BODY_MAX, NULL, KODE_HTTP_TIMEOUT_MS, rc);
+    kdrv_net_http_get_ExpectAndReturn(url, NULL, NULL, KODE_HTTP_BODY_MAX, NULL, KODE_HTTP_TIMEOUT_MS, rc);
     kdrv_net_http_get_IgnoreArg_buf();
     kdrv_net_http_get_IgnoreArg_out();
     kdrv_net_http_get_ReturnThruPtr_out(res);
@@ -173,7 +173,7 @@ static void expect_get(const char *url, kode_status_t rc, kdrv_net_http_result_t
 static void expect_post(const char *body, const char *ctype, kode_status_t rc,
                         kdrv_net_http_result_t *res, const char *text)
 {
-    kdrv_net_http_post_ExpectAndReturn(HTTP_URL, body, (uint32_t)strlen(body), ctype, NULL,
+    kdrv_net_http_post_ExpectAndReturn(HTTP_URL, body, (uint32_t)strlen(body), ctype, NULL, NULL,
                                        KODE_HTTP_BODY_MAX, NULL, KODE_HTTP_TIMEOUT_MS, rc);
     kdrv_net_http_post_IgnoreArg_buf();
     kdrv_net_http_post_IgnoreArg_out();
@@ -191,7 +191,7 @@ TEST_CASE("a get returns the body as text and the status 200", "[kode_http]")
 
     online_up();
     expect_get(HTTP_URL, KODE_OK, &res, body);
-    TEST_ASSERT_EQUAL_STRING(body, kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING(body, kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_UINT16(HTTP_OK, kode_http_status());
     TEST_ASSERT_EQUAL_STRING("", kode_error());
     world_down();
@@ -204,7 +204,7 @@ TEST_CASE("a 404 returns its body, the status 404 and no error", "[kode_http]")
 
     online_up();
     expect_get(HTTP_URL, KODE_OK, &res, body);
-    TEST_ASSERT_EQUAL_STRING(body, kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING(body, kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_UINT16(HTTP_MISSING, kode_http_status());
     TEST_ASSERT_EQUAL_STRING("", kode_error());
     world_down();
@@ -216,7 +216,7 @@ TEST_CASE("an empty answer is the empty text with its status", "[kode_http]")
 
     online_up();
     expect_get(HTTP_URL, KODE_OK, &res, NULL);
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_UINT16(HTTP_CREATED, kode_http_status());
     TEST_ASSERT_EQUAL_STRING("", kode_error());
     world_down();
@@ -229,7 +229,7 @@ TEST_CASE("a post of a JSON object is sent as application/json", "[kode_http]")
 
     online_up();
     expect_post(body, "application/json", KODE_OK, &res, "ok");
-    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, body));
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, body, NULL));
     TEST_ASSERT_EQUAL_UINT16(HTTP_CREATED, kode_http_status());
     world_down();
 }
@@ -240,9 +240,9 @@ TEST_CASE("a post of plain text is sent as text/plain; charset=utf-8", "[kode_ht
 
     online_up();
     expect_post("hello", "text/plain; charset=utf-8", KODE_OK, &res, "ok");
-    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "hello"));
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "hello", NULL));
     expect_post("", "text/plain; charset=utf-8", KODE_OK, &res, "ok");
-    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, ""));
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "", NULL));
     world_down();
 }
 
@@ -252,11 +252,11 @@ TEST_CASE("a post whose body starts with white space then a bracket is JSON", "[
 
     online_up();
     expect_post("  [1]", "application/json", KODE_OK, &res, "ok");
-    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "  [1]"));
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "  [1]", NULL));
     expect_post("\r\n\t{}", "application/json", KODE_OK, &res, "ok");
-    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "\r\n\t{}"));
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "\r\n\t{}", NULL));
     expect_post("  x[1]", "text/plain; charset=utf-8", KODE_OK, &res, "ok");
-    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "  x[1]"));
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "  x[1]", NULL));
     world_down();
 }
 
@@ -269,10 +269,10 @@ TEST_CASE("the second request replaces the first's text in the one block", "[kod
 
     online_up();
     expect_get(HTTP_URL, KODE_OK, &first, "first");
-    a = kode_http_get(HTTP_URL);
+    a = kode_http_get(HTTP_URL, NULL);
     TEST_ASSERT_EQUAL_STRING("first", a);
     expect_get(HTTP_URL, KODE_OK, &second, "no");
-    b = kode_http_get(HTTP_URL);
+    b = kode_http_get(HTTP_URL, NULL);
     TEST_ASSERT_EQUAL_STRING("no", b);
     TEST_ASSERT_EQUAL_PTR(a, b);
     TEST_ASSERT_EQUAL_UINT16(HTTP_MISSING, kode_http_status());
@@ -290,7 +290,7 @@ TEST_CASE("an answer of exactly 64 KiB is returned whole", "[kode_http]")
     big[KODE_HTTP_BODY_MAX] = '\0';
     online_up();
     expect_get(HTTP_URL, KODE_OK, &res, big);
-    got = kode_http_get(HTTP_URL);
+    got = kode_http_get(HTTP_URL, NULL);
     TEST_ASSERT_EQUAL_UINT32(KODE_HTTP_BODY_MAX, (uint32_t)strlen(got));
     TEST_ASSERT_EQUAL_STRING("", kode_error());
     TEST_ASSERT_EQUAL_UINT16(HTTP_OK, kode_http_status());
@@ -304,7 +304,7 @@ TEST_CASE("an answer over 64 KiB is empty text with its status and the reason", 
 
     online_up();
     expect_get(HTTP_URL, KODE_OK, &res, "partial");
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_UINT16(HTTP_OK, kode_http_status());
     TEST_ASSERT_EQUAL_STRING(HTTP_OVER_MSG, kode_error());
     world_down();
@@ -317,10 +317,10 @@ TEST_CASE("a timeout is empty text, status 0 and says no answer in time", "[kode
 
     online_up();
     expect_get(HTTP_URL, KODE_OK, &ok, "ok");
-    TEST_ASSERT_EQUAL_STRING("ok", kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_UINT16(HTTP_OK, kode_http_status());
     expect_get(HTTP_URL, KODE_TIMEOUT, &cut, NULL);
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_UINT16(0U, kode_http_status());
     TEST_ASSERT_EQUAL_STRING(HTTP_URL ": no answer in time", kode_error());
     world_down();
@@ -332,11 +332,11 @@ TEST_CASE("a refused connection says it could not connect", "[kode_http]")
 
     online_up();
     expect_get(HTTP_URL, KODE_ERROR, &cut, NULL);
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_UINT16(0U, kode_http_status());
     TEST_ASSERT_EQUAL_STRING(HTTP_URL ": could not connect", kode_error());
     expect_post("x", "text/plain; charset=utf-8", KODE_ERROR, &cut, NULL);
-    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL, "x"));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL, "x", NULL));
     TEST_ASSERT_EQUAL_STRING(HTTP_URL ": could not connect", kode_error());
     world_down();
 }
@@ -347,7 +347,7 @@ TEST_CASE("a driver without a network says the firmware has none", "[kode_http]"
 
     online_up();
     expect_get(HTTP_URL, KODE_DENIED, &cut, NULL);
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_UINT16(0U, kode_http_status());
     TEST_ASSERT_EQUAL_STRING("this firmware has no network", kode_error());
     world_down();
@@ -356,10 +356,10 @@ TEST_CASE("a driver without a network says the firmware has none", "[kode_http]"
 TEST_CASE("a board with no address calls nothing and says to connect", "[kode_http]")
 {
     world_up();
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL, NULL));
     TEST_ASSERT_EQUAL_STRING(NO_NETWORK, kode_error());
     TEST_ASSERT_EQUAL_UINT16(0U, kode_http_status());
-    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL, "x"));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL, "x", NULL));
     TEST_ASSERT_EQUAL_STRING(NO_NETWORK, kode_error());
     world_down();
 }
@@ -369,22 +369,22 @@ TEST_CASE("an address that is not http or https is refused before anything is as
     char far[HTTP_URL_BYTES];
 
     online_up();
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL_BAD));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL_BAD, NULL));
     TEST_ASSERT_EQUAL_STRING("bad URL '" HTTP_URL_BAD "'", kode_error());
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(""));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get("", NULL));
     TEST_ASSERT_EQUAL_STRING("bad URL ''", kode_error());
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(NULL, NULL));
     TEST_ASSERT_EQUAL_STRING("bad URL '(null)'", kode_error());
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get("http:/example.test"));
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get("http"));
-    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL_BAD, "x"));
-    TEST_ASSERT_EQUAL_STRING("", kode_http_post(NULL, "x"));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get("http:/example.test", NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get("http", NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL_BAD, "x", NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_post(NULL, "x", NULL));
 
     (void)memset(far, 'a', sizeof(far));
     (void)memcpy(far, "http://", 7U);
     far[HTTP_URL_LONG] = '\0';
-    TEST_ASSERT_EQUAL_STRING("", kode_http_get(far));
-    TEST_ASSERT_EQUAL_STRING("", kode_http_post(far, "x"));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(far, NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_post(far, "x", NULL));
     TEST_ASSERT_EQUAL_UINT16(0U, kode_http_status());
     world_down();
 }
@@ -396,15 +396,15 @@ TEST_CASE("the scheme takes any case and a 255-byte address is accepted", "[kode
 
     online_up();
     expect_get("HTTP://example.test", KODE_OK, &res, "a");
-    TEST_ASSERT_EQUAL_STRING("a", kode_http_get("HTTP://example.test"));
+    TEST_ASSERT_EQUAL_STRING("a", kode_http_get("HTTP://example.test", NULL));
     expect_get("HtTpS://example.test", KODE_OK, &res, "b");
-    TEST_ASSERT_EQUAL_STRING("b", kode_http_get("HtTpS://example.test"));
+    TEST_ASSERT_EQUAL_STRING("b", kode_http_get("HtTpS://example.test", NULL));
 
     (void)memset(edge, 'a', sizeof(edge));
     (void)memcpy(edge, "http://", 7U);
     edge[HTTP_URL_EDGE] = '\0';
     expect_get(edge, KODE_OK, &res, "c");
-    TEST_ASSERT_EQUAL_STRING("c", kode_http_get(edge));
+    TEST_ASSERT_EQUAL_STRING("c", kode_http_get(edge, NULL));
     world_down();
 }
 
@@ -429,7 +429,7 @@ static kdrv_net_http_result_t drv_range(uint16_t status, uint32_t kept, bool tru
 static void expect_range(uint64_t offset, kode_status_t rc, kdrv_net_http_result_t *res,
                          const char *bytes)
 {
-    kdrv_net_http_get_range_ExpectAndReturn(HTTP_URL, offset, NULL, RANGE_CAP, NULL,
+    kdrv_net_http_get_range_ExpectAndReturn(HTTP_URL, offset, NULL, NULL, RANGE_CAP, NULL,
                                             KODE_HTTP_TIMEOUT_MS, rc);
     kdrv_net_http_get_range_IgnoreArg_buf();
     kdrv_net_http_get_range_IgnoreArg_out();
@@ -450,7 +450,7 @@ TEST_CASE("a range fills the caller's buffer and says how long the whole is", "[
 
     online_up();
     expect_range(RANGE_AT, KODE_OK, &res, part);
-    TEST_ASSERT_TRUE_MESSAGE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, &total),
+    TEST_ASSERT_TRUE_MESSAGE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, &total, NULL),
                              kode_error());
     TEST_ASSERT_EQUAL_UINT32((uint32_t)strlen(part), got);
     TEST_ASSERT_EQUAL_MEMORY(part, buf, strlen(part));
@@ -473,13 +473,13 @@ TEST_CASE("a range a server ignores or cannot serve is true, with the status tha
 
     online_up();
     expect_range(RANGE_AT, KODE_OK, &ignored, NULL);
-    TEST_ASSERT_TRUE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, &total));
+    TEST_ASSERT_TRUE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, &total, NULL));
     TEST_ASSERT_EQUAL_UINT16(HTTP_OK, kode_http_status());
     TEST_ASSERT_EQUAL_UINT32(RANGE_CAP, got);
     TEST_ASSERT_TRUE_MESSAGE(0U == total, "nobody said how long the whole is");
 
     expect_range(RANGE_AT, KODE_OK, &past, NULL);
-    TEST_ASSERT_TRUE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, NULL));
+    TEST_ASSERT_TRUE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, NULL, NULL));
     TEST_ASSERT_EQUAL_UINT16(HTTP_NO_RANGE, kode_http_status());
     TEST_ASSERT_EQUAL_UINT32(0U, got);
     world_down();
@@ -494,7 +494,7 @@ TEST_CASE("a range that gets no answer is false, with nothing got and the reason
 
     online_up();
     expect_range(0U, KODE_TIMEOUT, &none, NULL);
-    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, RANGE_CAP, &got, &total));
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, RANGE_CAP, &got, &total, NULL));
     TEST_ASSERT_EQUAL_STRING(HTTP_URL ": no answer in time", kode_error());
     TEST_ASSERT_EQUAL_UINT32(0U, got);
     TEST_ASSERT_TRUE(0U == total);
@@ -509,13 +509,13 @@ TEST_CASE("a range with a bad address or nowhere to go is refused before anythin
     uint32_t got = 99U;
 
     online_up();
-    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL_BAD, 0U, buf, RANGE_CAP, &got, NULL));
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL_BAD, 0U, buf, RANGE_CAP, &got, NULL, NULL));
     TEST_ASSERT_EQUAL_STRING("bad URL '" HTTP_URL_BAD "'", kode_error());
-    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, NULL, RANGE_CAP, &got, NULL));
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, NULL, RANGE_CAP, &got, NULL, NULL));
     TEST_ASSERT_EQUAL_STRING("no buffer for the range", kode_error());
-    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, 0U, &got, NULL));
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, 0U, &got, NULL, NULL));
     TEST_ASSERT_EQUAL_STRING("no buffer for the range", kode_error());
-    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, KODE_HTTP_OFF_MAX, buf, RANGE_CAP, &got, NULL));
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, KODE_HTTP_OFF_MAX, buf, RANGE_CAP, &got, NULL, NULL));
     TEST_ASSERT_EQUAL_STRING("the range runs past the last offset", kode_error());
     TEST_ASSERT_EQUAL_UINT32(0U, got);
     world_down();
@@ -526,7 +526,7 @@ TEST_CASE("a range on a board with no address calls nothing and says to connect"
     uint8_t buf[RANGE_CAP];
 
     world_up();
-    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, RANGE_CAP, NULL, NULL));
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, RANGE_CAP, NULL, NULL, NULL));
     TEST_ASSERT_EQUAL_STRING(NO_NETWORK, kode_error());
     world_down();
 }
@@ -534,7 +534,7 @@ TEST_CASE("a range on a board with no address calls nothing and says to connect"
 TEST_CASE("a post with no body is refused", "[kode_http]")
 {
     online_up();
-    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL, NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL, NULL, NULL));
     TEST_ASSERT_EQUAL_STRING("no body to post", kode_error());
     TEST_ASSERT_EQUAL_UINT16(0U, kode_http_status());
     world_down();
@@ -679,7 +679,7 @@ static void http_task_ends(void *arg)
     {
         fake_psram_refuse_after(1U, 1U);
     }
-    text = kode_http_get(HTTP_URL);
+    text = kode_http_get(HTTP_URL, NULL);
     fake_psram_refuse(0U);
     (void)snprintf(e->text, sizeof(e->text), "%s", text);
     e->status = kode_http_status();
@@ -738,4 +738,104 @@ TEST_CASE("a task whose HTTP state PSRAM refuses gets empty text and leaks nothi
     TEST_ASSERT_EQUAL_UINT16(0U, e.status);
     TEST_ASSERT_EQUAL_UINT32(1U, e.allocs);
     world_down();
+}
+
+/* ---- The request's own headers ---- */
+
+/** @brief The strings of the headers the cases send, named so the driver's twin shares them. */
+static const char s_hdr_auth[]   = "Authorization";
+static const char s_hdr_bearer[] = "Bearer abc123";
+static const char s_hdr_key[]    = "X-Api-Key";
+static const char s_hdr_k42[]    = "k-42";
+
+/** @brief The headers the cases send. */
+static const kode_http_header_t s_hdrs[] = {
+    { s_hdr_auth, s_hdr_bearer },
+    { s_hdr_key,  s_hdr_k42 },
+    { NULL, NULL },
+};
+
+/** @brief The same list as the driver gets it: a copy of every entry, the end included. */
+static const kdrv_net_header_t s_drv_hdrs[] = {
+    { s_hdr_auth, s_hdr_bearer },
+    { s_hdr_key,  s_hdr_k42 },
+    { NULL, NULL },
+};
+
+/** @brief Entries of s_drv_hdrs, its end included. */
+#define DRV_HDRS_N  3
+
+TEST_CASE("a get, a post and a range hand the driver a copy of the request's own headers",
+          "[kode_http][headers]")
+{
+    uint8_t                buf[RANGE_CAP];
+    uint32_t               got = 0U;
+    kdrv_net_http_result_t res = drv_result(HTTP_OK, 2U, 2U, false);
+
+    online_up();
+    kdrv_net_headers_ok_ExpectAndReturn(s_drv_hdrs, false, NULL, true);
+    kdrv_net_headers_ok_IgnoreArg_bad();
+    kdrv_net_http_get_ExpectWithArrayAndReturn(HTTP_URL, s_drv_hdrs, DRV_HDRS_N, NULL, 0,
+                                               KODE_HTTP_BODY_MAX, NULL, 0,
+                                               KODE_HTTP_TIMEOUT_MS, KODE_OK);
+    kdrv_net_http_get_IgnoreArg_buf();
+    kdrv_net_http_get_IgnoreArg_out();
+    kdrv_net_http_get_ReturnThruPtr_out(&res);
+    kdrv_net_http_get_ReturnMemThruPtr_buf(bytes_of("ok"), 2U);
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_get(HTTP_URL, s_hdrs));
+
+    kdrv_net_headers_ok_ExpectAndReturn(s_drv_hdrs, false, NULL, true);
+    kdrv_net_headers_ok_IgnoreArg_bad();
+    kdrv_net_http_post_ExpectWithArrayAndReturn(HTTP_URL, "{}", 2U, "application/json",
+                                                s_drv_hdrs, DRV_HDRS_N, NULL, 0,
+                                                KODE_HTTP_BODY_MAX, NULL, 0,
+                                                KODE_HTTP_TIMEOUT_MS, KODE_OK);
+    kdrv_net_http_post_IgnoreArg_buf();
+    kdrv_net_http_post_IgnoreArg_out();
+    kdrv_net_http_post_ReturnThruPtr_out(&res);
+    kdrv_net_http_post_ReturnMemThruPtr_buf(bytes_of("ok"), 2U);
+    TEST_ASSERT_EQUAL_STRING("ok", kode_http_post(HTTP_URL, "{}", s_hdrs));
+
+    kdrv_net_headers_ok_ExpectAndReturn(s_drv_hdrs, true, NULL, true);
+    kdrv_net_headers_ok_IgnoreArg_bad();
+    kdrv_net_http_get_range_ExpectWithArrayAndReturn(HTTP_URL, RANGE_AT, s_drv_hdrs, DRV_HDRS_N,
+                                                     NULL, 0, RANGE_CAP, NULL, 0,
+                                                     KODE_HTTP_TIMEOUT_MS, KODE_OK);
+    kdrv_net_http_get_range_IgnoreArg_buf();
+    kdrv_net_http_get_range_IgnoreArg_out();
+    kdrv_net_http_get_range_ReturnThruPtr_out(&res);
+    TEST_ASSERT_TRUE_MESSAGE(kode_http_get_range(HTTP_URL, RANGE_AT, buf, RANGE_CAP, &got, NULL,
+                                                 s_hdrs), kode_error());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    world_down();
+}
+
+TEST_CASE("a header that cannot be sent fails the call by its index, before anything is asked",
+          "[kode_http][headers]")
+{
+    uint8_t  buf[RANGE_CAP];
+    uint32_t bad = 1U;
+
+    online_up();
+    kdrv_net_headers_ok_ExpectAndReturn(s_drv_hdrs, false, NULL, false);
+    kdrv_net_headers_ok_IgnoreArg_bad();
+    kdrv_net_headers_ok_ReturnThruPtr_bad(&bad);
+    TEST_ASSERT_EQUAL_STRING("", kode_http_get(HTTP_URL, s_hdrs));
+    TEST_ASSERT_EQUAL_STRING("header 1 cannot be sent as written", kode_error());
+    TEST_ASSERT_EQUAL_UINT16(0U, kode_http_status());
+
+    bad = KODE_HTTP_HEADERS_MAX;
+    kdrv_net_headers_ok_ExpectAndReturn(s_drv_hdrs, false, NULL, false);
+    kdrv_net_headers_ok_IgnoreArg_bad();
+    kdrv_net_headers_ok_ReturnThruPtr_bad(&bad);
+    TEST_ASSERT_EQUAL_STRING("", kode_http_post(HTTP_URL, "x", s_hdrs));
+    TEST_ASSERT_EQUAL_STRING("more than 8 headers", kode_error());
+
+    bad = 0U;
+    kdrv_net_headers_ok_ExpectAndReturn(s_drv_hdrs, true, NULL, false);
+    kdrv_net_headers_ok_IgnoreArg_bad();
+    kdrv_net_headers_ok_ReturnThruPtr_bad(&bad);
+    TEST_ASSERT_FALSE(kode_http_get_range(HTTP_URL, 0U, buf, RANGE_CAP, NULL, NULL, s_hdrs));
+    TEST_ASSERT_EQUAL_STRING("header 0 cannot be sent as written", kode_error());
+    world_down();   /* and no driver call was made */
 }

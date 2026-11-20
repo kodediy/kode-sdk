@@ -247,7 +247,7 @@ static QState Network_idle(Network * const me, QEvt const * const e)
             {
                 /* LENT: AO_Net's worker writes l_body until NET_HTTP_RSP_SIG. */
                 rc = kode_sys_http_get(&me->super, NW_GET_URL, l_body,
-                                       NW_BODY_MAX);
+                                       NW_BODY_MAX, NULL);
                 if ( KODE_OK == rc )
                 {
                     KLOG_I(TAG, "GET %s", NW_GET_URL);

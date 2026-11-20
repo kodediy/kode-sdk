@@ -24,6 +24,7 @@
 #define kode_sys_http_get_range     kode_sys_http_get_range_off64
 #define kode_sys_http_post          kode_sys_http_post_off64
 #define kode_sys_udp_send           kode_sys_udp_send_off64
+#define kode_sys_http_headers_ok    kode_sys_http_headers_ok_off64
 #define kode_http_get               kode_http_get_off64
 #define kode_http_post              kode_http_post_off64
 #define kode_http_get_range         kode_http_get_range_off64
@@ -61,10 +62,10 @@ static uint64_t s_ask_offset;
 static uint32_t s_ask_cap;
 static unsigned s_asks;
 
-kode_status_t off64_range_ask(QActive *who, const char *url, uint64_t offset, void *buf,
-                              uint32_t cap)
+kode_status_t off64_range_ask(QActive *who, const char *url, uint64_t offset,
+                              const void *headers, void *buf, uint32_t cap)
 {
-    (void)who; (void)url; (void)buf;
+    (void)who; (void)url; (void)headers; (void)buf;
     s_ask_offset = offset;
     s_ask_cap    = cap;
     s_asks++;
@@ -80,12 +81,12 @@ TEST_CASE("with 64-bit offsets the request door carries one past 4 GB whole",
     s_asks = 0U;
 
     TEST_ASSERT_EQUAL_INT(KODE_DENIED,
-        kode_sys_http_get_range(ao_spy(), OFF64_URL, UINT64_MAX, buf, OFF64_CAP));
+        kode_sys_http_get_range(ao_spy(), OFF64_URL, UINT64_MAX, buf, OFF64_CAP, NULL));
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_asks,
         "a range that runs past the last offset is refused before it is asked");
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kode_sys_http_get_range(ao_spy(), OFF64_URL, OFF64_FAR, buf, OFF64_CAP));
+        kode_sys_http_get_range(ao_spy(), OFF64_URL, OFF64_FAR, buf, OFF64_CAP, NULL));
     TEST_ASSERT_EQUAL_UINT(1U, s_asks);
     TEST_ASSERT_EQUAL_UINT64(OFF64_FAR, s_ask_offset);
     TEST_ASSERT_EQUAL_UINT32(OFF64_CAP, s_ask_cap);
@@ -104,10 +105,10 @@ TEST_CASE("with 64-bit offsets the task's call takes one past 4 GB",
     fake_mutex_real(true);
     atomic_store(&kode_sys_init_once.state, KHAL_ONCE_DONE);
 
-    TEST_ASSERT_FALSE(kode_http_get_range(OFF64_URL, UINT64_MAX, buf, OFF64_CAP, &got, &total));
+    TEST_ASSERT_FALSE(kode_http_get_range(OFF64_URL, UINT64_MAX, buf, OFF64_CAP, &got, &total, NULL));
     TEST_ASSERT_EQUAL_STRING("the range runs past the last offset", kode_error());
 
-    TEST_ASSERT_FALSE(kode_http_get_range(OFF64_URL, OFF64_FAR, buf, OFF64_CAP, &got, &total));
+    TEST_ASSERT_FALSE(kode_http_get_range(OFF64_URL, OFF64_FAR, buf, OFF64_CAP, &got, &total, NULL));
     TEST_ASSERT_EQUAL_STRING("no network: call kode_wifi_connect() first", kode_error());
     TEST_ASSERT_EQUAL_UINT32(0U, got);
 

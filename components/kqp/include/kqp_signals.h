@@ -5676,7 +5676,8 @@ typedef struct {
     NetHostRspEvt *rsp;     /**< Its answer, taken with the request.         */
 } NetHostAskEvt;
 
-/** @brief An ask's GET or POST (NET_HTTP_ASK_SIG); @c body and @c buf are lent until the answer. */
+/** @brief An ask's GET or POST (NET_HTTP_ASK_SIG); @c body, @c headers and
+ *         @c buf are lent until the answer. */
 typedef struct {
     QEvt           super;
     bool           post;    /**< POST @c body; false GETs.                   */
@@ -5686,6 +5687,10 @@ typedef struct {
     char           ctype[KODE_NET_CTYPE_MAX]; /**< A POST's Content-Type; empty sends none. */
     const void    *body;    /**< A POST's body, read in place.               */
     uint32_t       len;     /**< Its bytes.                                  */
+    const void    *headers; /**< The asker's own headers, a list in
+                             *   kdrv_net_header_t's layout ended by a NULL
+                             *   name, copied when the job starts; NULL for
+                             *   none.                                       */
     void          *buf;     /**< Where the answer's body goes, in place.     */
     uint32_t       cap;     /**< Its room.                                   */
     QActive       *who;     /**< The asking AO.                              */
