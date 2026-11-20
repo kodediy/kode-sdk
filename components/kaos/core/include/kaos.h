@@ -3054,12 +3054,18 @@ kode_status_t net_ping_ask(QActive *who, const char *host, uint8_t count);
  * @param body  A POST's body, lent; NULL only when @p len is 0.
  * @param len   Its bytes.
  * @param ctype A POST's Content-Type, shorter than KODE_NET_CTYPE_MAX, copied; NULL for none.
+ * @param headers Headers of the asker's own, a list in kdrv_net_header_t's
+ *              layout ended by a NULL name, lent until the answer; NULL for
+ *              none. AO_Net copies the list when the job starts, not the
+ *              strings, and its driver refuses a list kdrv_net_headers_ok()
+ *              refuses, with KODE_ERROR in the answer.
  * @param buf   Where the answer's body goes, lent; NULL keeps none.
  * @param cap   Its room.
  * @return As the asks above.
  */
 kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void *body,
-                           uint32_t len, const char *ctype, void *buf, uint32_t cap);
+                           uint32_t len, const char *ctype,
+                           const void *headers, void *buf, uint32_t cap);
 
 /**
  * @brief GET the @p cap bytes of @p url from @p offset on; answered with
@@ -3073,12 +3079,13 @@ kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void 
  * @param who    The asking AO.
  * @param url    Shorter than KODE_NET_URL_MAX; copied.
  * @param offset The first byte wanted.
+ * @param headers As net_http_ask(); a Range among them is refused.
  * @param buf    Where the bytes go, lent.
  * @param cap    Its room, above 0.
  * @return As the asks above.
  */
-kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset, void *buf,
-                                 uint32_t cap);
+kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset,
+                                 const void *headers, void *buf, uint32_t cap);
 
 /**
  * @brief Send one datagram; answered with NET_UDP_RSP_SIG.

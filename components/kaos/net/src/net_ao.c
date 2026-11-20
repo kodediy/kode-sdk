@@ -165,6 +165,8 @@ typedef struct {
     char                   ctype[KODE_NET_CTYPE_MAX]; /**< A POST's type, or "". */
     const char            *body;   /**< A POST's body, lent.                     */
     uint32_t               len;    /**< Its bytes.                               */
+    kdrv_net_header_t      own[KDRV_NET_HEADERS_ROOM]; /**< HTTP: the asker's headers, copied. */
+    const kdrv_net_header_t *headers; /**< @c own, or NULL for none.            */
     uint8_t               *buf;    /**< HTTP: the answer's body, lent.           */
     uint32_t               cap;    /**< Its room.                                */
     const void            *data;   /**< UDP: the datagram, lent.                 */
@@ -684,6 +686,7 @@ typedef struct {
     const void *body;    /**< A POST's body, lent.                   */
     uint32_t    len;     /**< Its bytes.                             */
     const char *ctype;   /**< A POST's Content-Type; NULL for none.  */
+    const void *headers; /**< The asker's own, lent; NULL for none. */
     void       *buf;     /**< Where the answer's body goes, lent.    */
     uint32_t    cap;     /**< Its room.                              */
 } http_ask_t;
@@ -725,30 +728,34 @@ static kode_status_t http_ask(QActive *who, const char *url, const http_ask_t *q
     {
         (void)snprintf(e->ctype, sizeof(e->ctype), "%s", q->ctype);
     }
-    e->body = q->body;
-    e->len  = q->len;
-    e->buf  = q->buf;
-    e->cap  = q->cap;
-    e->who  = who;
-    e->rsp  = a;
+    e->body    = q->body;
+    e->len     = q->len;
+    e->headers = q->headers;
+    e->buf     = q->buf;
+    e->cap     = q->cap;
+    e->who     = who;
+    e->rsp     = a;
     return kaos_ask_post(&s_net_doors[NET_ASK_HTTP], who, AO_Net, &e->super, &a->super,
                          KQP_NET_CMD_MARGIN);
 }
 
 kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void *body,
-                           uint32_t len, const char *ctype, void *buf, uint32_t cap)
+                           uint32_t len, const char *ctype,
+                           const void *headers, void *buf, uint32_t cap)
 {
     http_ask_t const q = { .post = post, .ranged = false, .offset = 0U, .body = body,
-                           .len = len, .ctype = ctype, .buf = buf, .cap = cap };
+                           .len = len, .ctype = ctype, .headers = headers, .buf = buf,
+                           .cap = cap };
 
     return http_ask(who, url, &q);
 }
 
-kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset, void *buf,
-                                 uint32_t cap)
+kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset,
+                                 const void *headers, void *buf, uint32_t cap)
 {
     http_ask_t const q = { .post = false, .ranged = true, .offset = offset, .body = NULL,
-                           .len = 0U, .ctype = NULL, .buf = buf, .cap = cap };
+                           .len = 0U, .ctype = NULL, .headers = headers, .buf = buf,
+                           .cap = cap };
 
     return http_ask(who, url, &q);
 }
@@ -1899,17 +1906,18 @@ static kode_status_t net_ask_run(void *arg, uint32_t *value)
         {
             ctype = j->ctype;
         }
-        st = kdrv_net_http_post(j->url, j->body, j->len, ctype, j->buf, j->cap,
-                                &j->result, KODE_HTTP_TIMEOUT_MS);
+        st = kdrv_net_http_post(j->url, j->body, j->len, ctype, j->headers, j->buf,
+                                j->cap, &j->result, KODE_HTTP_TIMEOUT_MS);
     }
     else if ( j->ranged )
     {
-        st = kdrv_net_http_get_range(j->url, j->offset, j->buf, j->cap, &j->result,
-                                     KODE_HTTP_TIMEOUT_MS);
+        st = kdrv_net_http_get_range(j->url, j->offset, j->headers, j->buf, j->cap,
+                                     &j->result, KODE_HTTP_TIMEOUT_MS);
     }
     else
     {
-        st = kdrv_net_http_get(j->url, j->buf, j->cap, &j->result, KODE_HTTP_TIMEOUT_MS);
+        st = kdrv_net_http_get(j->url, j->headers, j->buf, j->cap, &j->result,
+                               KODE_HTTP_TIMEOUT_MS);
     }
     return st;
 }
@@ -2020,6 +2028,41 @@ static void ask_refuse(QEvt const * const e, kode_status_t rc)
 }
 
 /**
+ * @brief Copy an asker's lent headers into the job, so the driver reads a
+ *        list of its own type.
+ *
+ * The list is lent in kdrv_net_header_t's layout and copied entry by entry, up
+ * to its end or to the room's last entry: a list longer than the driver sends
+ * then reaches the driver too long, and is refused there.
+ *
+ * @param own  The job's room.
+ * @param lent The asker's list; NULL for none.
+ * @return @p own, or NULL for none.
+ */
+static const kdrv_net_header_t *headers_take(kdrv_net_header_t own[KDRV_NET_HEADERS_ROOM],
+                                             const void *lent)
+{
+    const kdrv_net_header_t *list = NULL;
+
+    if ( NULL != lent )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; the list is lent untyped in the event; it is addressed in the driver's layout and read by memcpy */
+        const kdrv_net_header_t * const from = (const kdrv_net_header_t *)lent;
+        uint32_t i   = 0U;
+        bool     end = false;
+
+        while ( (!end) && (KDRV_NET_HEADERS_ROOM > i) )
+        {
+            (void)memcpy(&own[i], &from[i], sizeof(own[i]));
+            end = (NULL == own[i].name);
+            i++;
+        }
+        list = own;
+    }
+    return list;
+}
+
+/**
  * @brief Make an ask the worker's job, or refuse it while the worker is busy.
  * @param me The AO.
  * @param e  NET_HOST_ASK_SIG, NET_HTTP_ASK_SIG or NET_UDP_ASK_SIG.
@@ -2071,6 +2114,7 @@ static void ask_take(Net * const me, QEvt const * const e)
         /* cppcheck-suppress misra-c2012-11.5 ; the asker lends its body as bytes, untyped in the event */
         j->body = q->body;
         j->len  = q->len;
+        j->headers = headers_take(j->own, q->headers);
         /* cppcheck-suppress misra-c2012-11.5 ; the asker lends its buffer as bytes, untyped in the event */
         j->buf  = q->buf;
         j->cap  = q->cap;

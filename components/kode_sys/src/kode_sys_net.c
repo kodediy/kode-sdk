@@ -15,7 +15,61 @@
 #include <stddef.h>
 #include <string.h>
 
+/* ---- The app's headers against the driver's ---- */
+_Static_assert(KODE_HTTP_HEADERS_MAX == KDRV_NET_HEADERS_MAX, "the most headers is the driver's");
+_Static_assert(KODE_HTTP_HEADER_MAX == KDRV_NET_HEADER_MAX, "a header's bytes are the driver's");
+_Static_assert(sizeof(kode_http_header_t) == sizeof(kdrv_net_header_t),
+               "an ask lends the list to AO_Net in the driver's layout");
+_Static_assert(offsetof(kode_http_header_t, name) == offsetof(kdrv_net_header_t, name),
+               "a header's name where the driver's is");
+_Static_assert(offsetof(kode_http_header_t, value) == offsetof(kdrv_net_header_t, value),
+               "a header's value where the driver's is");
+
 #if CONFIG_KODEOS_NET
+
+/**
+ * @brief The driver's copy of an app's headers.
+ *
+ * Copied up to the list's end or to the room's last entry: a list longer than
+ * the driver sends then reaches the driver too long, and is refused there.
+ *
+ * @param own     Room for the copy.
+ * @param headers The app's list, ended by a NULL name; NULL for none.
+ * @return @p own, or NULL for none.
+ */
+static const kdrv_net_header_t *net_headers(kdrv_net_header_t own[KDRV_NET_HEADERS_ROOM],
+                                            const kode_http_header_t *headers)
+{
+    const kdrv_net_header_t *list = NULL;
+
+    if ( NULL != headers )
+    {
+        uint32_t i   = 0U;
+        bool     end = false;
+
+        while ( (!end) && (KDRV_NET_HEADERS_ROOM > i) )
+        {
+            own[i].name  = headers[i].name;
+            own[i].value = headers[i].value;
+            end          = (NULL == headers[i].name);
+            i++;
+        }
+        list = own;
+    }
+    return list;
+}
+
+bool kode_sys_http_headers_ok(const kode_http_header_t *headers, bool ranged, uint32_t *bad)
+{
+    kdrv_net_header_t own[KDRV_NET_HEADERS_ROOM];
+    bool              ok = true;
+
+    if ( NULL != headers )
+    {
+        ok = kdrv_net_headers_ok(net_headers(own, headers), ranged, bad);
+    }
+    return ok;
+}
 
 kode_status_t kode_block_net_lookup(const char *host, uint32_t *ip4)
 {
@@ -47,6 +101,7 @@ kode_status_t kode_block_net_ping(const char *host, uint8_t count,
 }
 
 kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t cap,
+                            const kode_http_header_t *headers,
                             kode_sys_http_result_t *out)
 {
     if ( NULL == out )
@@ -60,7 +115,9 @@ kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t ca
     r.content_length = -1;
     r.range_total    = -1;
 
-    kode_status_t const rc = kdrv_net_http_get(url, (uint8_t *)buf, cap, &r,
+    kdrv_net_header_t              own[KDRV_NET_HEADERS_ROOM];
+    const kdrv_net_header_t *const list = net_headers(own, headers);
+    kode_status_t const rc = kdrv_net_http_get(url, list, (uint8_t *)buf, cap, &r,
                                                KODE_HTTP_TIMEOUT_MS);
 
     out->status         = r.status;
@@ -73,7 +130,8 @@ kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t ca
 }
 
 kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *buf,
-                                        uint32_t cap, kode_sys_http_result_t *out)
+                                        uint32_t cap, const kode_http_header_t *headers,
+                                        kode_sys_http_result_t *out)
 {
     if ( NULL == out )
     {
@@ -86,8 +144,10 @@ kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *
     r.content_length = -1;
     r.range_total    = -1;
 
+    kdrv_net_header_t              own[KDRV_NET_HEADERS_ROOM];
+    const kdrv_net_header_t *const list = net_headers(own, headers);
     /* cppcheck-suppress misra-c2012-11.5 ; the facade's buffer is void *, and the driver fills it with bytes */
-    kode_status_t const rc = kdrv_net_http_get_range(url, offset, (uint8_t *)buf, cap, &r,
+    kode_status_t const rc = kdrv_net_http_get_range(url, offset, list, (uint8_t *)buf, cap, &r,
                                                      KODE_HTTP_TIMEOUT_MS);
 
     out->status         = r.status;
@@ -101,7 +161,8 @@ kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *
 
 kode_status_t kode_block_http_post_buffer(const char *url, const void *body,
                             uint32_t len, const char *ctype, void *buf,
-                            uint32_t cap, kode_sys_http_result_t *out)
+                            uint32_t cap, const kode_http_header_t *headers,
+                            kode_sys_http_result_t *out)
 {
     if ( NULL == out )
     {
@@ -119,8 +180,9 @@ kode_status_t kode_block_http_post_buffer(const char *url, const void *body,
     kode_status_t rc = KODE_ERROR;
     if ( NULL != url )
     {
-        rc = kdrv_net_http_post(url, send_body, len, ctype, recv_buf, cap, &r,
-                                KODE_HTTP_TIMEOUT_MS);
+        kdrv_net_header_t own[KDRV_NET_HEADERS_ROOM];
+        rc = kdrv_net_http_post(url, send_body, len, ctype, net_headers(own, headers),
+                                recv_buf, cap, &r, KODE_HTTP_TIMEOUT_MS);
     }
 
     out->status         = r.status;
@@ -176,30 +238,41 @@ kode_status_t kode_sys_net_ping(QActive *me, const char *host, uint8_t count)
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
-kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap)
+kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap,
+                                const kode_http_header_t *headers)
 {
     if ( !kode_sys_text_fits(url, KODE_SYS_NET_URL_MAX) )
     {
         return KODE_DENIED;
     }
-    return net_http_ask(me, false, url, NULL, 0U, NULL, buf, cap);
+    if ( !kode_sys_http_headers_ok(headers, false, NULL) )
+    {
+        return KODE_DENIED;
+    }
+    return net_http_ask(me, false, url, NULL, 0U, NULL, headers, buf, cap);
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 kode_status_t kode_sys_http_get_range(QActive *me, const char *url, kode_http_off_t offset,
-                                      void *buf, uint32_t cap)
+                                      void *buf, uint32_t cap,
+                                      const kode_http_header_t *headers)
 {
     if ( !kode_sys_text_fits(url, KODE_SYS_NET_URL_MAX) || (NULL == buf) || (0U == cap)
         || (offset > (KODE_HTTP_OFF_MAX - ((kode_http_off_t)cap - 1U))) )
     {
         return KODE_DENIED;
     }
-    return net_http_range_ask(me, url, (uint64_t)offset, buf, cap);
+    if ( !kode_sys_http_headers_ok(headers, true, NULL) )
+    {
+        return KODE_DENIED;
+    }
+    return net_http_range_ask(me, url, (uint64_t)offset, headers, buf, cap);
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 kode_status_t kode_sys_http_post(QActive *me, const char *url, const void *body, uint32_t len,
-                                 const char *ctype, void *buf, uint32_t cap)
+                                 const char *ctype, void *buf, uint32_t cap,
+                                 const kode_http_header_t *headers)
 {
     if ( !kode_sys_text_fits(url, KODE_SYS_NET_URL_MAX) || ((NULL == body) && (0U < len)) )
     {
@@ -209,7 +282,11 @@ kode_status_t kode_sys_http_post(QActive *me, const char *url, const void *body,
     {
         return KODE_DENIED;
     }
-    return net_http_ask(me, true, url, body, len, ctype, buf, cap);
+    if ( !kode_sys_http_headers_ok(headers, false, NULL) )
+    {
+        return KODE_DENIED;
+    }
+    return net_http_ask(me, true, url, body, len, ctype, headers, buf, cap);
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
@@ -225,6 +302,13 @@ kode_status_t kode_sys_udp_send(QActive *me, const char *host, uint16_t port, co
 
 #else  /* !CONFIG_KODEOS_NET: the surface links and refuses */
 
+bool kode_sys_http_headers_ok(const kode_http_header_t *headers, bool ranged, uint32_t *bad)
+{
+    /* Nothing is sent without a network, so nothing is refused for its headers. */
+    (void)headers; (void)ranged; (void)bad;
+    return true;
+}
+
 kode_status_t kode_block_net_lookup(const char *host, uint32_t *ip4)
 {
     (void)host; (void)ip4;
@@ -239,25 +323,28 @@ kode_status_t kode_block_net_ping(const char *host, uint8_t count,
 }
 
 kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t cap,
+                            const kode_http_header_t *headers,
                             kode_sys_http_result_t *out)
 {
-    (void)url; (void)buf; (void)cap; (void)out;
+    (void)url; (void)buf; (void)cap; (void)headers; (void)out;
     return KODE_DENIED;
 }
 
 kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *buf,
-                                        uint32_t cap, kode_sys_http_result_t *out)
+                                        uint32_t cap, const kode_http_header_t *headers,
+                                        kode_sys_http_result_t *out)
 {
-    (void)url; (void)offset; (void)buf; (void)cap; (void)out;
+    (void)url; (void)offset; (void)buf; (void)cap; (void)headers; (void)out;
     return KODE_DENIED;
 }
 
 kode_status_t kode_block_http_post_buffer(const char *url, const void *body,
                             uint32_t len, const char *ctype, void *buf,
-                            uint32_t cap, kode_sys_http_result_t *out)
+                            uint32_t cap, const kode_http_header_t *headers,
+                            kode_sys_http_result_t *out)
 {
     (void)url; (void)body; (void)len; (void)ctype; (void)buf; (void)cap;
-    (void)out;
+    (void)headers; (void)out;
     return KODE_DENIED;
 }
 
@@ -283,25 +370,29 @@ kode_status_t kode_sys_net_ping(QActive *me, const char *host, uint8_t count)
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
-kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap)
+kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap,
+                                const kode_http_header_t *headers)
 {
-    (void)me; (void)url; (void)buf; (void)cap;
+    (void)me; (void)url; (void)buf; (void)cap; (void)headers;
     return KODE_DENIED;
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 kode_status_t kode_sys_http_get_range(QActive *me, const char *url, kode_http_off_t offset,
-                                      void *buf, uint32_t cap)
+                                      void *buf, uint32_t cap,
+                                      const kode_http_header_t *headers)
 {
-    (void)me; (void)url; (void)offset; (void)buf; (void)cap;
+    (void)me; (void)url; (void)offset; (void)buf; (void)cap; (void)headers;
     return KODE_DENIED;
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 kode_status_t kode_sys_http_post(QActive *me, const char *url, const void *body, uint32_t len,
-                                 const char *ctype, void *buf, uint32_t cap)
+                                 const char *ctype, void *buf, uint32_t cap,
+                                 const kode_http_header_t *headers)
 {
     (void)me; (void)url; (void)body; (void)len; (void)ctype; (void)buf; (void)cap;
+    (void)headers;
     return KODE_DENIED;
 }
 

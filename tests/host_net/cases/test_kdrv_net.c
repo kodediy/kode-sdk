@@ -386,15 +386,15 @@ TEST_CASE("the POST door refuses what it cannot send and never opens a client",
     kdrv_net_http_result_t res;
 
     Mockesp_http_client_Init();
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_net_http_post(NULL, "{}", 2U, NULL, buf,
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_net_http_post(NULL, "{}", 2U, NULL, NULL, buf,
                                           sizeof(buf), &res, POST_DOOR_TIMEOUT_MS));
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_net_http_post("", "{}", 2U, NULL, buf,
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_net_http_post("", "{}", 2U, NULL, NULL, buf,
                                           sizeof(buf), &res, POST_DOOR_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_net_http_post("https://example.invalid/x",
-                                          "{}", 2U, NULL, buf, sizeof(buf), NULL,
+                                          "{}", 2U, NULL, NULL, buf, sizeof(buf), NULL,
                                           POST_DOOR_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_net_http_post("https://example.invalid/x",
-                                          NULL, 2U, NULL, buf, sizeof(buf), &res,
+                                          NULL, 2U, NULL, NULL, buf, sizeof(buf), &res,
                                           POST_DOOR_TIMEOUT_MS));
     Mockesp_http_client_Verify();
     Mockesp_http_client_Destroy();
@@ -425,7 +425,7 @@ TEST_CASE("a POST of length 0 sends its headers and no body", "[kdrv_net]")
 
     /* A body that is there but 0 bytes long is not written; no write is expected. */
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_net_http_post("https://example.invalid/x",
-                                          "left out", 0U, NULL, buf, sizeof(buf),
+                                          "left out", 0U, NULL, NULL, buf, sizeof(buf),
                                           &res, POST_DOOR_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_UINT16(200U, res.status);
     TEST_ASSERT_EQUAL_UINT32(sizeof(answer) - 1U, res.kept);
@@ -1583,7 +1583,7 @@ TEST_CASE("a ranged GET asks for its bytes and reports the length of the whole",
     esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, buf,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, NULL, buf,
                                 RANGE_CAP, &res, RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_UINT16(206U, res.status);
     TEST_ASSERT_EQUAL_UINT32(RANGE_CAP, res.kept);
@@ -1617,7 +1617,7 @@ TEST_CASE("a ranged GET past four gigabytes keeps every digit", "[kdrv_net]")
     esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_http_get_range("http://example.invalid/big.bin", 6000000000ULL, buf,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", 6000000000ULL, NULL, buf,
                                 RANGE_CAP, &res, RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_INT64(9000000000LL, res.range_total);
 
@@ -1653,7 +1653,7 @@ TEST_CASE("a ranged GET a server ignores is cut at the buffer's room", "[kdrv_ne
     esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_http_get_range("http://example.invalid/big.bin", 0U, buf,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", 0U, NULL, buf,
                                 RANGE_CAP, &res, RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_UINT16(200U, res.status);
     TEST_ASSERT_EQUAL_UINT32(RANGE_CAP, res.kept);
@@ -1688,7 +1688,7 @@ TEST_CASE("a ranged GET from an offset a server ignores keeps none of the start"
     esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, buf,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, NULL, buf,
                                 RANGE_CAP, &res, RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_UINT16(200U, res.status);
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, res.kept, "the resource's start was handed over as the range");
@@ -1779,7 +1779,7 @@ TEST_CASE("a ranged GET past the end is the server's 416, with its total",
     esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, buf,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, NULL, buf,
                                 RANGE_CAP, &res, RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_UINT16(416U, res.status);
     TEST_ASSERT_EQUAL_UINT32(0U, res.kept);
@@ -1815,7 +1815,7 @@ TEST_CASE("a ranged GET answered with an error page keeps none of it",
     esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, buf,
+        kdrv_net_http_get_range("http://example.invalid/big.bin", RANGE_FROM, NULL, buf,
                                 RANGE_CAP, &res, RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_UINT16(404U, res.status);
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, res.kept, "the error page was kept as the range");
@@ -1834,18 +1834,18 @@ TEST_CASE("a ranged GET with nowhere to put its bytes never opens a client",
 
     Mockesp_http_client_Init();
     TEST_ASSERT_EQUAL_INT(KODE_ERROR,
-        kdrv_net_http_get_range(NULL, 0U, buf, RANGE_CAP, &res, RANGE_TIMEOUT_MS));
+        kdrv_net_http_get_range(NULL, 0U, NULL, buf, RANGE_CAP, &res, RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_INT(KODE_ERROR,
-        kdrv_net_http_get_range("http://example.invalid/x", 0U, NULL, RANGE_CAP, &res,
+        kdrv_net_http_get_range("http://example.invalid/x", 0U, NULL, NULL, RANGE_CAP, &res,
                                 RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_INT(KODE_ERROR,
-        kdrv_net_http_get_range("http://example.invalid/x", 0U, buf, 0U, &res,
+        kdrv_net_http_get_range("http://example.invalid/x", 0U, NULL, buf, 0U, &res,
                                 RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_INT(KODE_ERROR,
-        kdrv_net_http_get_range("http://example.invalid/x", 0U, buf, RANGE_CAP, NULL,
+        kdrv_net_http_get_range("http://example.invalid/x", 0U, NULL, buf, RANGE_CAP, NULL,
                                 RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_ERROR,
-        kdrv_net_http_get_range("http://example.invalid/x", UINT64_MAX - 10U, buf,
+        kdrv_net_http_get_range("http://example.invalid/x", UINT64_MAX - 10U, NULL, buf,
                                 RANGE_CAP, &res, RANGE_TIMEOUT_MS),
         "a range that runs past the last offset there is");
     Mockesp_http_client_Verify();
@@ -1872,7 +1872,7 @@ TEST_CASE("a plain GET sends no range and reports no total", "[kdrv_net]")
     esp_http_client_cleanup_ExpectAndReturn(STREAM_H, ESP_OK);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        kdrv_net_http_get("http://example.invalid/x", buf, RANGE_CAP, &res,
+        kdrv_net_http_get("http://example.invalid/x", NULL, buf, RANGE_CAP, &res,
                           RANGE_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_INT64(-1, res.range_total);
 

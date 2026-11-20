@@ -129,8 +129,26 @@
 #define NET_AUTH_SCHEME       "Bearer "
 /** ESP-IDF's HTTP client's log tag. At DEBUG it writes a request's headers
  *  whole - the request line with the token in its path, and the bearer - so a
- *  PUT holds it at INFO (kode_log_hold()) for as long as its exchange runs. */
+ *  PUT holds it at INFO for as long as its exchange runs, and a request with
+ *  headers of the caller's own while it goes out (net_quiet_take()). */
 #define NET_HTTP_LOG_TAG      "HTTP_CLIENT"
+/** The header a ranged request names its bytes in. */
+#define NET_RANGE_HEADER      "Range"
+/** What a header's name may not hold: a colon ends the name, a CR or a LF the line. */
+#define NET_HEADER_NAME_STOP  ":\r\n"
+/** What a header's value may not hold: a CR or a LF would end the line there. */
+#define NET_HEADER_VALUE_STOP "\r\n"
+/** The client's request buffer for a request with headers of the caller's
+ *  own: it writes each header whole into it, and with
+ *  CONFIG_ESP_HTTP_CLIENT_STRICT_HEADER_BUFFER fails a request whose header
+ *  does not fit. Taken from the heap for the request alone. */
+#define NET_HEADER_TX_BYTES   4096U
+/** What the client adds to a header's name and value in its buffer: ": ",
+ *  the CRLF, and the 3 bytes it keeps free. */
+#define NET_HEADER_OVERHEAD   7U
+
+_Static_assert((KDRV_NET_HEADER_MAX + NET_HEADER_OVERHEAD) <= NET_HEADER_TX_BYTES,
+               "the longest header kdrv_net_headers_ok() lets through fits the client's buffer");
 
 /** The last job's results. Written by the job, read by AO_Net between the
  *  done event and the next job - a window the AO controls. */
@@ -656,7 +674,7 @@ kode_status_t kdrv_net_stream_open(const char *url, uint32_t offset,
         char range[NET_RANGE_TEXT_MAX];
 
         (void)snprintf(range, sizeof(range), "bytes=%lu-", (unsigned long)offset);
-        (void)esp_http_client_set_header(h, "Range", range);
+        (void)esp_http_client_set_header(h, NET_RANGE_HEADER, range);
         want = NET_HTTP_PARTIAL;
     }
     if ( esp_http_client_open(h, 0) != ESP_OK )
@@ -906,6 +924,117 @@ static esp_http_client_handle_t put_take_kept(const char *url)
     return h;
 }
 
+/** Guards s_quiet_users: a request from AO_Net's worker and one from an
+ *  app's task can go out at once. */
+/* cppcheck-suppress misra-c2012-7.2 ; IDF's initialiser macro, no suffix to give it */
+static portMUX_TYPE s_quiet_lock = portMUX_INITIALIZER_UNLOCKED;
+/** Requests that need the client's log held quiet now. */
+static uint32_t     s_quiet_users;
+
+/**
+ * @brief Hold the HTTP client's log at INFO for one more request.
+ *
+ * Counted, so the first request to end does not lift the hold from under
+ * another one still going out.
+ *
+ * @return true when the hold stands; false when klog has no slot for it.
+ */
+static bool net_quiet_take(void)
+{
+    bool held = true;
+
+    taskENTER_CRITICAL(&s_quiet_lock);
+    if ( 0U == s_quiet_users )
+    {
+        held = kode_log_hold(NET_HTTP_LOG_TAG, KODE_LOG_INFO);
+    }
+    if ( held )
+    {
+        s_quiet_users++;
+    }
+    taskEXIT_CRITICAL(&s_quiet_lock);
+    return held;
+}
+
+/** @brief One request less needs the hold; the last lifts it. */
+static void net_quiet_give(void)
+{
+    taskENTER_CRITICAL(&s_quiet_lock);
+    if ( 0U < s_quiet_users )
+    {
+        s_quiet_users--;
+        if ( 0U == s_quiet_users )
+        {
+            kode_log_release(NET_HTTP_LOG_TAG);
+        }
+    }
+    taskEXIT_CRITICAL(&s_quiet_lock);
+}
+
+/**
+ * @brief Can one header go out as written?
+ * @param hd     The header; its name is not NULL.
+ * @param ranged It goes with a ranged GET.
+ * @return true when it can.
+ */
+static bool net_header_ok(const kdrv_net_header_t *hd, bool ranged)
+{
+    size_t const name_len = strlen(hd->name);
+    bool         ok       = (0U < name_len) && (NULL != hd->value);
+
+    if ( ok )
+    {
+        ok = (strcspn(hd->name, NET_HEADER_NAME_STOP) == name_len);
+    }
+    if ( ok )
+    {
+        size_t const value_len = strlen(hd->value);
+
+        ok = (strcspn(hd->value, NET_HEADER_VALUE_STOP) == value_len)
+             && ((name_len + value_len) <= (size_t)KDRV_NET_HEADER_MAX);
+    }
+    if ( ok && ranged )
+    {
+        /* cppcheck-suppress misra-c2012-17.3 ; a POSIX call: the compiler sees picolibc declare it, cppcheck does not */
+        ok = (strcasecmp(hd->name, NET_RANGE_HEADER) != 0);
+    }
+    return ok;
+}
+
+bool kdrv_net_headers_ok(const kdrv_net_header_t *headers, bool ranged, uint32_t *bad)
+{
+    uint32_t n  = 0U;
+    bool     ok = true;
+
+    if ( NULL == headers )
+    {
+        return true;   /* none: nothing to refuse */
+    }
+    while ( ok && (NULL != headers[n].name) )
+    {
+        if ( KDRV_NET_HEADERS_MAX <= n )
+        {
+            ok = false;
+        }
+        else
+        {
+            ok = net_header_ok(&headers[n], ranged);
+        }
+        if ( !ok )
+        {
+            if ( NULL != bad )
+            {
+                *bad = n;
+            }
+        }
+        else
+        {
+            n++;
+        }
+    }
+    return ok;
+}
+
 /**
  * @brief One request, one response: what GET, POST and PUT have in common.
  *
@@ -915,6 +1044,9 @@ static esp_http_client_handle_t put_take_kept(const char *url)
  * @param body_len Bytes of @p body.
  * @param ctype    Content-Type to send; NULL sends none.
  * @param auth     Authorization value to send; NULL sends none.
+ * @param headers  Headers of the caller's own, ended by a NULL name; NULL
+ *                 sends none. Sent last, so one of them replaces a header of
+ *                 the same name set before it.
  * @param keep     PUT only: leave the connection open when the exchange
  *                 succeeded, for the next PUT to the same URL to reuse.
  * @param range    A GET of one range: the bytes from @c first on, as many
@@ -925,13 +1057,14 @@ static esp_http_client_handle_t put_take_kept(const char *url)
  * @param out      Out: status and lengths.
  * @param timeout_ms Whole-exchange network timeout.
  * @return KODE_OK once the response was read to its end, or to @p cap for a
- *         range; KODE_ERROR when the request could not be sent, KODE_TIMEOUT
- *         when the body stopped.
+ *         range; KODE_ERROR when the request could not be sent, or its
+ *         headers were refused, KODE_TIMEOUT when the body stopped.
  */
 static kode_status_t http_exchange(const char *url,
                                    esp_http_client_method_t method,
                                    const char *body, size_t body_len,
                                    const char *ctype, const char *auth,
+                                   const kdrv_net_header_t *headers,
                                    bool keep, net_range_t *range,
                                    uint8_t *buf, uint32_t cap,
                                    kdrv_net_http_result_t *out,
@@ -952,6 +1085,15 @@ static kode_status_t http_exchange(const char *url,
         {
             (void)snprintf(host, sizeof(host), "%s", NET_HOST_UNKNOWN);
         }
+    }
+
+    /* Headers of the caller's own: checked here too, since a driver caller
+     * need not have asked kdrv_net_headers_ok() first. */
+    bool const own = (NULL != headers) && (NULL != headers[0].name);
+    if ( !kdrv_net_headers_ok(headers, (NULL != range), NULL) )
+    {
+        KLOG_W(TAG, "%s: a header cannot be sent as it is", shown);
+        return KODE_ERROR;
     }
 
     esp_http_client_handle_t h = NULL;
@@ -977,6 +1119,11 @@ static kode_status_t http_exchange(const char *url,
          * certificate to ship. Harmless on plain http, which never asks for
          * it. */
         cfg.crt_bundle_attach     = esp_crt_bundle_attach;
+        if ( own )
+        {
+            /* Room for the longest header kdrv_net_headers_ok() lets through. */
+            cfg.buffer_size_tx = (int)NET_HEADER_TX_BYTES;
+        }
         if ( NULL != range )
         {
             /* The total rides in a response header, which the client hands
@@ -1001,7 +1148,7 @@ static kode_status_t http_exchange(const char *url,
         (void)snprintf(text, sizeof(text), "bytes=%llu-%llu",
                        (unsigned long long)range->first,
                        (unsigned long long)(range->first + ((uint64_t)cap - 1U)));
-        (void)esp_http_client_set_header(h, "Range", text);
+        (void)esp_http_client_set_header(h, NET_RANGE_HEADER, text);
     }
     if ( NULL != ctype )
     {
@@ -1013,7 +1160,30 @@ static kode_status_t http_exchange(const char *url,
          * since the last one. */
         (void)esp_http_client_set_header(h, "Authorization", auth);
     }
-    esp_err_t err = esp_http_client_open(h, (int)body_len);
+    for ( uint32_t i = 0U; own && (NULL != headers[i].name); i++ )
+    {
+        (void)esp_http_client_set_header(h, headers[i].name, headers[i].value);
+    }
+    /* open() writes the request line and the headers, and at DEBUG the client
+     * logs them whole: a bearer among them is held out of the log. */
+    esp_err_t err   = ESP_ERR_INVALID_STATE;
+    bool      quiet = true;
+    if ( own )
+    {
+        quiet = net_quiet_take();
+    }
+    if ( !quiet )
+    {
+        KLOG_W(TAG, "%s: the HTTP client's log could not be held quiet", shown);
+    }
+    else
+    {
+        err = esp_http_client_open(h, (int)body_len);
+        if ( own )
+        {
+            net_quiet_give();
+        }
+    }
     if ( (ESP_OK == err) && (NULL != body) )
     {
         /* open() sent the headers with the length; the body is ours to write,
@@ -1173,7 +1343,8 @@ static kode_status_t http_exchange(const char *url,
     return rc;
 }
 
-kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
+kode_status_t kdrv_net_http_get(const char *url, const kdrv_net_header_t *headers,
+                                uint8_t *buf, uint32_t cap,
                                 kdrv_net_http_result_t *out,
                                 uint32_t timeout_ms)
 {
@@ -1181,11 +1352,12 @@ kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
     {
         return KODE_ERROR;
     }
-    return http_exchange(url, HTTP_METHOD_GET, NULL, 0U, NULL, NULL, false, NULL,
+    return http_exchange(url, HTTP_METHOD_GET, NULL, 0U, NULL, NULL, headers, false, NULL,
                          buf, cap, out, timeout_ms);
 }
 
 kode_status_t kdrv_net_http_get_range(const char *url, uint64_t offset,
+                                      const kdrv_net_header_t *headers,
                                       uint8_t *buf, uint32_t cap,
                                       kdrv_net_http_result_t *out,
                                       uint32_t timeout_ms)
@@ -1197,12 +1369,13 @@ kode_status_t kdrv_net_http_get_range(const char *url, uint64_t offset,
     {
         return KODE_ERROR;
     }
-    return http_exchange(url, HTTP_METHOD_GET, NULL, 0U, NULL, NULL, false, &range,
+    return http_exchange(url, HTTP_METHOD_GET, NULL, 0U, NULL, NULL, headers, false, &range,
                          buf, cap, out, timeout_ms);
 }
 
 kode_status_t kdrv_net_http_post(const char *url, const char *body,
                                  uint32_t len, const char *ctype,
+                                 const kdrv_net_header_t *headers,
                                  uint8_t *buf, uint32_t cap,
                                  kdrv_net_http_result_t *out,
                                  uint32_t timeout_ms)
@@ -1220,7 +1393,7 @@ kode_status_t kdrv_net_http_post(const char *url, const char *body,
         body = NULL;   /* nothing to write after the headers */
     }
     return http_exchange(url, HTTP_METHOD_POST, body, (size_t)len, ctype,
-                         NULL, false, NULL, buf, cap, out, timeout_ms);
+                         NULL, headers, false, NULL, buf, cap, out, timeout_ms);
 }
 
 /** The next POST's body. Allocated on first use; a job reads it, the setter
@@ -2208,7 +2381,7 @@ static kode_status_t net_do_http(const kdrv_net_req_t *req)
     {
         return KODE_NO_RESOURCES;
     }
-    return kdrv_net_http_get(req->url, r->body, (uint32_t)KDRV_NET_BODY_MAX,
+    return kdrv_net_http_get(req->url, NULL, r->body, (uint32_t)KDRV_NET_BODY_MAX,
                              &r->http, NET_HTTP_TIMEOUT_MS);
 }
 
@@ -2230,7 +2403,7 @@ static kode_status_t net_do_http_post(const kdrv_net_req_t *req)
         return KODE_ERROR;
     }
     return http_exchange(req->url, HTTP_METHOD_POST, s_post.body, s_post.len,
-                         "application/json", NULL, false, NULL,
+                         "application/json", NULL, NULL, false, NULL,
                          r->body, (uint32_t)KDRV_NET_BODY_MAX, &r->http,
                          NET_HTTP_TIMEOUT_MS);
 }
@@ -2258,7 +2431,7 @@ static kode_status_t net_do_http_put(const kdrv_net_req_t *req)
         r->http.content_length = -1;
         KLOG_W(TAG, "PUT: nothing was prepared");
     }
-    else if ( !kode_log_hold(NET_HTTP_LOG_TAG, KODE_LOG_INFO) )
+    else if ( !net_quiet_take() )
     {
         /* Sent unheld, the headers would reach the log at DEBUG. */
         (void)memset(&r->http, 0, sizeof(r->http));
@@ -2269,10 +2442,10 @@ static kode_status_t net_do_http_put(const kdrv_net_req_t *req)
     {
         rc = http_exchange(
             s_put->url, HTTP_METHOD_PUT, (const char *)s_put->body, s_put->len,
-            s_put->type, s_put->auth, req->keep, NULL,
+            s_put->type, s_put->auth, NULL, req->keep, NULL,
             r->body, (uint32_t)KDRV_NET_BODY_MAX, &r->http,
             NET_HTTP_TIMEOUT_MS);
-        kode_log_release(NET_HTTP_LOG_TAG);
+        net_quiet_give();
     }
     if ( NULL != s_put )
     {

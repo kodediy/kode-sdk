@@ -8189,12 +8189,33 @@ static void sys_stub_result(kdrv_net_http_result_t *out, uint8_t *buf, uint32_t 
     out->range_total    = -1;
 }
 
-static kode_status_t sys_stub_get(const char *url, uint8_t *buf, uint32_t cap,
+/** @brief A copy of the headers the HTTP stand-ins were handed last, to its end. */
+static kdrv_net_header_t s_sys_seen_list[KDRV_NET_HEADERS_ROOM];
+/** @brief Where that list was, NULL for none. */
+static const kdrv_net_header_t *s_sys_seen_headers;
+
+/** @brief Keep what the driver was handed, while the job's room still holds it. */
+static void sys_see_headers(const kdrv_net_header_t *headers)
+{
+    bool end = false;
+
+    s_sys_seen_headers = headers;
+    (void)memset(s_sys_seen_list, 0, sizeof(s_sys_seen_list));
+    for ( uint32_t i = 0U; (NULL != headers) && !end && (i < KDRV_NET_HEADERS_ROOM); i++ )
+    {
+        s_sys_seen_list[i] = headers[i];
+        end = (NULL == headers[i].name);
+    }
+}
+
+static kode_status_t sys_stub_get(const char *url, const kdrv_net_header_t *headers,
+                                  uint8_t *buf, uint32_t cap,
                                   kdrv_net_http_result_t *out, uint32_t timeout_ms, int n)
 {
     (void)url; (void)timeout_ms; (void)n;
     s_sys_calls++;
-    s_sys_seen_buf = buf;
+    sys_see_headers(headers);
+    s_sys_seen_buf     = buf;
     sys_stub_result(out, buf, cap);
     return s_sys_rc;
 }
@@ -8211,12 +8232,14 @@ static uint32_t s_sys_range_calls;
 /** @brief Where the ranged cases start: past what 32 bits hold. */
 #define SYS_RANGE_OFFSET  4294967296ULL
 
-static kode_status_t sys_stub_range(const char *url, uint64_t offset, uint8_t *buf, uint32_t cap,
+static kode_status_t sys_stub_range(const char *url, uint64_t offset,
+                                    const kdrv_net_header_t *headers, uint8_t *buf, uint32_t cap,
                                     kdrv_net_http_result_t *out, uint32_t timeout_ms, int n)
 {
     (void)url; (void)timeout_ms; (void)n;
     s_sys_calls++;
     s_sys_range_calls++;
+    sys_see_headers(headers);
     s_sys_seen_buf    = buf;
     s_sys_seen_offset = offset;
     s_sys_seen_cap    = cap;
@@ -8227,11 +8250,13 @@ static kode_status_t sys_stub_range(const char *url, uint64_t offset, uint8_t *b
 }
 
 static kode_status_t sys_stub_post(const char *url, const char *body, uint32_t len,
-                                   const char *ctype, uint8_t *buf, uint32_t cap,
+                                   const char *ctype, const kdrv_net_header_t *headers,
+                                   uint8_t *buf, uint32_t cap,
                                    kdrv_net_http_result_t *out, uint32_t timeout_ms, int n)
 {
     (void)url; (void)len; (void)timeout_ms; (void)n;
     s_sys_calls++;
+    sys_see_headers(headers);
     s_sys_seen_body = body;
     s_sys_seen_buf  = buf;
     s_sys_seen_ctype[0] = '\0';
@@ -8259,9 +8284,10 @@ static void sys_fresh(void)
     ao_spy_other_drain();
     s_sys_calls     = 0U;
     s_sys_rc        = KODE_OK;
-    s_sys_seen_body = NULL;
-    s_sys_seen_buf  = NULL;
-    s_sys_seen_data = NULL;
+    s_sys_seen_body    = NULL;
+    s_sys_seen_buf     = NULL;
+    s_sys_seen_data    = NULL;
+    sys_see_headers(NULL);
     kdrv_net_lookup_Stub(&sys_stub_lookup);
     kdrv_net_ping_Stub(&sys_stub_ping);
     kdrv_net_http_get_Stub(&sys_stub_get);
@@ -8372,7 +8398,7 @@ TEST_CASE("with no network every kode_sys network request is answered KODE_IO_ER
 
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_net_lookup(ao_spy(), "example.com"));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_net_ping(ao_spy(), "example.com", 1U));
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "http://example.com/", buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "http://example.com/", buf, SYS_BUF, NULL));
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_udp_send(ao_spy(), "example.com", 9U, buf, 4U));
     (void)net_settle();
 
@@ -8398,7 +8424,7 @@ TEST_CASE("kode_sys_http_get fills the lent buffer on the worker and answers the
 
     sys_fresh();
     (void)memset(buf, SYS_LENT_FILL, sizeof(buf));
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF, NULL));
     (void)net_settle();
     TEST_ASSERT_EQUAL_PTR_MESSAGE(buf, s_sys_seen_buf, "the worker wrote somewhere else");
     deliver_held(KODE_OK);
@@ -8425,9 +8451,9 @@ TEST_CASE("kode_sys_http_get_range asks the worker for the range and answers the
     sys_fresh();
     (void)memset(buf, SYS_LENT_FILL, sizeof(buf));
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        net_http_range_ask(ao_spy(), "https://example.com/big.bin", SYS_RANGE_OFFSET, buf, SYS_BUF));
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", SYS_RANGE_OFFSET, NULL, buf, SYS_BUF));
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
-        net_http_range_ask(ao_spy(), "https://example.com/big.bin", 0U, buf, SYS_BUF),
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", 0U, NULL, buf, SYS_BUF),
         "a range shares the door of a GET: one at a time");
     (void)net_settle();
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_sys_range_calls, "the range ran on the worker");
@@ -8456,13 +8482,13 @@ TEST_CASE("a plain GET after a range asks for no range and answers no total",
 
     sys_fresh();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        net_http_range_ask(ao_spy(), "https://example.com/big.bin", SYS_RANGE_OFFSET, buf, SYS_BUF));
+        net_http_range_ask(ao_spy(), "https://example.com/big.bin", SYS_RANGE_OFFSET, NULL, buf, SYS_BUF));
     (void)net_settle();
     deliver_held(KODE_OK);
     (void)sys_take(NET_HTTP_RSP_SIG);
     ao_spy_drain();
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF, NULL));
     (void)net_settle();
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_sys_range_calls, "the plain GET went out as a range");
     deliver_held(KODE_OK);
@@ -8482,7 +8508,7 @@ TEST_CASE("with no network a range is answered KODE_IO_ERROR with no total, the 
     go_offline();
     ao_spy_drain();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-        net_http_range_ask(ao_spy(), "http://example.com/big.bin", 0U, buf, SYS_BUF));
+        net_http_range_ask(ao_spy(), "http://example.com/big.bin", 0U, NULL, buf, SYS_BUF));
     (void)net_settle();
     a = (const NetHttpRspEvt *)(const void *)sys_take(NET_HTTP_RSP_SIG);
     TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_IO_ERROR, a->rc);
@@ -8503,18 +8529,18 @@ TEST_CASE("kode_sys_http_get_range refuses what cannot be a range and posts noth
     (void)memset(longurl, 'u', sizeof(longurl) - 1U);
     longurl[sizeof(longurl) - 1U] = '\0';
 
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(NULL, "http://x/", 0U, buf, SYS_BUF));
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), longurl, 0U, buf, SYS_BUF));
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), "http://x/", 0U, NULL, SYS_BUF));
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), "http://x/", 0U, buf, 0U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(NULL, "http://x/", 0U, buf, SYS_BUF, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), longurl, 0U, buf, SYS_BUF, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), "http://x/", 0U, NULL, SYS_BUF, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get_range(ao_spy(), "http://x/", 0U, buf, 0U, NULL));
     TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
-        kode_sys_http_get_range(ao_spy(), "http://x/", KODE_HTTP_OFF_MAX, buf, SYS_BUF),
+        kode_sys_http_get_range(ao_spy(), "http://x/", KODE_HTTP_OFF_MAX, buf, SYS_BUF, NULL),
         "a range that runs past the last offset the type holds");
     (void)net_settle();
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
     TEST_ASSERT_EQUAL_UINT32(0U, s_sys_calls);
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get_range(ao_spy(), "http://x/", 100U, buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get_range(ao_spy(), "http://x/", 100U, buf, SYS_BUF, NULL));
     (void)net_settle();
     TEST_ASSERT_EQUAL_UINT64(100U, s_sys_seen_offset);
     deliver_held(KODE_OK);
@@ -8533,7 +8559,7 @@ TEST_CASE("kode_sys_http_post sends the lent body in place with its type, and a 
     s_sys_rc = KODE_ERROR;
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_post(ao_spy(), "https://example.com/p", body,
                                                       (uint32_t)(sizeof(body) - 1U),
-                                                      "application/json", buf, SYS_BUF));
+                                                      "application/json", buf, SYS_BUF, NULL));
     (void)net_settle();
     TEST_ASSERT_EQUAL_PTR_MESSAGE(body, s_sys_seen_body, "the body was not read in place");
     TEST_ASSERT_EQUAL_STRING("application/json", s_sys_seen_ctype);
@@ -8543,6 +8569,118 @@ TEST_CASE("kode_sys_http_post sends the lent body in place with its type, and a 
     TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_ERROR, a->rc);
     TEST_ASSERT_TRUE(a->post);
     TEST_ASSERT_EQUAL_STRING("{\"a\":1}", body);
+    worker_done();
+}
+
+/** @brief The header the cases send, its strings named so the driver's twin shares them. */
+static const char s_hdr_auth[]   = "Authorization";
+static const char s_hdr_bearer[] = "Bearer abc123";
+static const char s_hdr_bad[]    = "a\r\nX-B: b";
+
+/** @brief Did the driver get a copy of the app's @c Authorization list, its end included? */
+static void sys_saw_auth(const kode_http_header_t *app, const char *what)
+{
+    TEST_ASSERT_NOT_NULL_MESSAGE(s_sys_seen_headers, what);
+    TEST_ASSERT_TRUE_MESSAGE((const void *)app != (const void *)s_sys_seen_headers, what);
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(s_hdr_auth, s_sys_seen_list[0].name, what);
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(s_hdr_bearer, s_sys_seen_list[0].value, what);
+    TEST_ASSERT_NULL_MESSAGE(s_sys_seen_list[1].name, what);
+}
+
+/* The app's own headers go with the request, lent as its body is: AO_Net
+ * copies the list into the job when it starts, and the driver reads that copy,
+ * the strings still the app's, for a GET, a range and a POST. */
+TEST_CASE("kode_sys's HTTP requests hand the driver a copy of the app's headers",
+          "[net_ao][ask]")
+{
+    static const kode_http_header_t hdrs[] = {
+        { s_hdr_auth, s_hdr_bearer },
+        { NULL, NULL },
+    };
+    static const kdrv_net_header_t drv[] = {
+        { s_hdr_auth, s_hdr_bearer },
+        { NULL, NULL },
+    };
+    static const char body[] = "{}";
+    uint8_t           buf[SYS_BUF];
+
+    sys_fresh();
+    kdrv_net_headers_ok_ExpectAndReturn(drv, false, NULL, true);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF, hdrs));
+    (void)net_settle();
+    sys_saw_auth(hdrs, "a GET's headers");
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
+    ao_spy_drain();
+
+    sys_see_headers(NULL);
+    kdrv_net_headers_ok_ExpectAndReturn(drv, true, NULL, true);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kode_sys_http_get_range(ao_spy(), "https://example.com/x", 0U, buf, SYS_BUF, hdrs));
+    (void)net_settle();
+    sys_saw_auth(hdrs, "a range's headers");
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
+    ao_spy_drain();
+
+    sys_see_headers(NULL);
+    kdrv_net_headers_ok_ExpectAndReturn(drv, false, NULL, true);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kode_sys_http_post(ao_spy(), "https://example.com/p", body,
+                           (uint32_t)(sizeof(body) - 1U), NULL, buf, SYS_BUF, hdrs));
+    (void)net_settle();
+    sys_saw_auth(hdrs, "a POST's headers");
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
+    ao_spy_drain();
+
+    /* No list, no copy: the driver gets NULL. */
+    sys_see_headers(NULL);
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF, NULL));
+    (void)net_settle();
+    TEST_ASSERT_NULL(s_sys_seen_headers);
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
+    worker_done();
+}
+
+/* A list the driver would refuse is refused at the door: nothing is asked of
+ * AO_Net, and the request costs the app no turn. */
+TEST_CASE("kode_sys's HTTP requests refuse headers that cannot be sent, before asking",
+          "[net_ao][ask]")
+{
+    static const kode_http_header_t hdrs[] = {
+        { s_hdr_auth, s_hdr_bad },
+        { NULL, NULL },
+    };
+    static const kdrv_net_header_t drv[] = {
+        { s_hdr_auth, s_hdr_bad },
+        { NULL, NULL },
+    };
+    uint8_t buf[SYS_BUF];
+
+    sys_fresh();
+    kdrv_net_headers_ok_ExpectAndReturn(drv, false, NULL, false);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+        kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF, hdrs));
+    kdrv_net_headers_ok_ExpectAndReturn(drv, true, NULL, false);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+        kode_sys_http_get_range(ao_spy(), "https://example.com/x", 0U, buf, SYS_BUF, hdrs));
+    kdrv_net_headers_ok_ExpectAndReturn(drv, false, NULL, false);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED,
+        kode_sys_http_post(ao_spy(), "https://example.com/p", NULL, 0U, NULL, buf, SYS_BUF,
+                           hdrs));
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Net->eQueue));
+    TEST_ASSERT_EQUAL_UINT(0U, s_sys_calls);
+
+    /* The turn was never taken: the next request goes out. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kode_sys_http_get(ao_spy(), "https://example.com/x", buf, SYS_BUF, NULL));
+    (void)net_settle();
+    deliver_held(KODE_OK);
+    (void)sys_take(NET_HTTP_RSP_SIG);
     worker_done();
 }
 
@@ -8570,7 +8708,7 @@ TEST_CASE("a GET whose guard fires is answered KODE_TIMEOUT only once the worker
     const NetHttpRspEvt *a;
 
     sys_fresh();
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/slow", buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/slow", buf, SYS_BUF, NULL));
     (void)net_settle();
     (void)net_tick(GUARD_STEPS(KODE_NET_GUARD_MS));
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
@@ -8582,7 +8720,7 @@ TEST_CASE("a GET whose guard fires is answered KODE_TIMEOUT only once the worker
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, a->result.kept, "a late body is not vouched for");
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/", buf, SYS_BUF),
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_OK, kode_sys_http_get(ao_spy(), "https://example.com/", buf, SYS_BUF, NULL),
                                   "the late answer opened the door and freed the worker");
     (void)net_settle();
     deliver_held(KODE_OK);
@@ -8651,10 +8789,10 @@ TEST_CASE("a plain task's or a badly asked network request is refused at once an
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_net_ping(ao_spy(), "example.com", 0U));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_net_ping(ao_spy(), "example.com",
                                                          KODE_SYS_NET_PING_MAX + 1U));
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get(NULL, "http://x/", buf, SYS_BUF));
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get(ao_spy(), longurl, buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get(NULL, "http://x/", buf, SYS_BUF, NULL));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_get(ao_spy(), longurl, buf, SYS_BUF, NULL));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_http_post(ao_spy(), "http://x/", NULL, 1U, NULL,
-                                                          buf, SYS_BUF));
+                                                          buf, SYS_BUF, NULL));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_udp_send(ao_spy(), "example.com", 9U, NULL, 1U));
     TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_udp_send(NULL, "example.com", 9U, buf, 1U));
     TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Net->eQueue));
@@ -8671,7 +8809,7 @@ TEST_CASE("a full AO_Net queue refuses kode_sys's network requests with no resou
     TEST_ASSERT_TRUE_MESSAGE(qf_support_queue_stuff(AO_Net, &s_sys_filler), "the queue never filled");
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_net_lookup(ao_spy(), "example.com"));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_net_ping(ao_spy(), "example.com", 1U));
-    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_http_get(ao_spy(), "http://x/", buf, SYS_BUF));
+    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_http_get(ao_spy(), "http://x/", buf, SYS_BUF, NULL));
     TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES, kode_sys_udp_send(ao_spy(), "example.com", 9U, buf, 1U));
     (void)net_settle();
 
