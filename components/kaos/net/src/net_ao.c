@@ -1151,6 +1151,7 @@ static NetPingEndEvt *net_new_ping_end(bool ok)
         e->avg_ms = s.avg_ms;
         e->max_ms = s.max_ms;
         e->ok     = ok;
+        e->busy   = false;
     }
     return e;
 }
@@ -1226,6 +1227,7 @@ static NetHttpDoneEvt *net_new_http_done(kode_status_t rc)
         e->status         = r.status;
         e->rc             = (uint8_t)rc;
         e->truncated      = r.truncated;
+        e->busy           = false;
     }
     return e;
 }
@@ -1296,15 +1298,75 @@ static void net_publish_http(Net * const me)
     }
 }
 
-/** @brief Publish whether the datagram left. */
-static void net_publish_udp(Net * const me, kode_status_t rc, uint16_t sent)
+/** @brief Take a datagram's answer from the pool and fill it in. */
+static NetUdpDoneEvt *net_new_udp_done(kode_status_t rc, uint16_t sent)
 {
     NetUdpDoneEvt *e = Q_NEW_X(NetUdpDoneEvt, 0U, NET_UDP_DONE_SIG);
     if ( NULL != e )
     {
         e->sent = sent;
         e->rc   = (uint8_t)rc;
+        e->busy = false;
+    }
+    return e;
+}
+
+/** @brief Publish whether the datagram left. */
+static void net_publish_udp(Net * const me, kode_status_t rc, uint16_t sent)
+{
+    NetUdpDoneEvt * const e = net_new_udp_done(rc, sent);
+    if ( NULL != e )
+    {
         QACTIVE_PUBLISH(&e->super, &me->super);
+    }
+}
+
+/**
+ * @brief Refuse a ping, a fetch or a datagram asked while the worker runs
+ *        another job: the terminator its asker waits for, marked busy, so a
+ *        script or an app asks again instead of reading a failure.
+ *
+ * @param sig NET_PING_REQ_SIG, NET_HTTP_REQ_SIG or NET_UDP_REQ_SIG.
+ */
+static void net_publish_busy(QSignal sig)
+{
+    QEvt const *done = NULL;
+
+    if ( (QSignal)NET_PING_REQ_SIG == sig )
+    {
+        NetPingEndEvt * const p = net_new_ping_end(false);
+        if ( NULL != p )
+        {
+            p->busy = true;
+            done    = &p->super;
+        }
+    }
+    else if ( (QSignal)NET_HTTP_REQ_SIG == sig )
+    {
+        NetHttpDoneEvt * const h = net_new_http_done(KODE_DENIED);
+        if ( NULL != h )
+        {
+            h->busy = true;
+            done    = &h->super;
+        }
+    }
+    else
+    {
+        NetUdpDoneEvt * const u = net_new_udp_done(KODE_DENIED, 0U);
+        if ( NULL != u )
+        {
+            u->busy = true;
+            done    = &u->super;
+        }
+    }
+    if ( NULL != done )
+    {
+        QACTIVE_PUBLISH(done, AO_Net);
+    }
+    else
+    {
+        KLOG_E(TAG, "no event blocks for a busy answer; whoever asked is "
+                    "still waiting");
     }
 }
 
@@ -1926,6 +1988,7 @@ static void udp_reply(QActive *who, NetUdpDoneEvt *a, kode_status_t rc, uint16_t
 {
     a->rc   = (uint8_t)rc;
     a->sent = sent;
+    a->busy = false;
     kaos_ask_answer(&s_net_doors[NET_ASK_UDP], who, &a->super, AO_Net);
 }
 
@@ -7651,7 +7714,7 @@ static QState Net_online_work(Net * const me, QEvt const * const e)
             if ( me->busy )
             {
                 net_say_busy("net_ping");
-                net_publish_ping_end(me, false);
+                net_publish_busy(e->sig);
             }
             else
             {
@@ -7673,7 +7736,7 @@ static QState Net_online_work(Net * const me, QEvt const * const e)
             if ( me->busy )
             {
                 net_say_busy("http_get");
-                net_publish_http_done(me, KODE_DENIED);
+                net_publish_busy(e->sig);
             }
             else
             {
@@ -7697,7 +7760,7 @@ static QState Net_online_work(Net * const me, QEvt const * const e)
             if ( me->busy )
             {
                 net_say_busy("udp_send");
-                net_publish_udp(me, KODE_DENIED, 0U);
+                net_publish_busy(e->sig);
             }
             else
             {

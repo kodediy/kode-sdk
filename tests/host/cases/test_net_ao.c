@@ -6011,11 +6011,64 @@ TEST_CASE("a ping while one is running is refused with its own end marker",
     TEST_ASSERT_NOT_NULL_MESSAGE(end, "the refused ping was left waiting");
     TEST_ASSERT_EQUAL_INT(NET_PING_END_SIG, (int)end->super.sig);
     TEST_ASSERT_FALSE(end->ok);
+    TEST_ASSERT_TRUE_MESSAGE(end->busy, "refused for the job in flight: ask again");
 
     job_done(KDRV_NET_JOB_PING, KODE_ERROR);
     end = (const NetPingEndEvt *)spy_next();
     TEST_ASSERT_NOT_NULL(end);
     TEST_ASSERT_FALSE_MESSAGE(end->ok, "a ping that failed ends without a session");
+    TEST_ASSERT_FALSE_MESSAGE(end->busy, "a failure is not busy");
+
+    worker_done();
+}
+
+TEST_CASE("a fetch and a datagram while a job runs are refused busy, a failed one is not",
+          "[net_ao]")
+{
+    NetHttpReqEvt         http;
+    NetUdpReqEvt          udp;
+    const NetHttpDoneEvt *done;
+    const NetUdpDoneEvt  *sent;
+
+    worker_fresh();
+    ao_spy_subscribe(NET_HTTP_DONE_SIG);
+    ao_spy_subscribe(NET_UDP_DONE_SIG);
+
+    ask_ping("192.168.0.1", 1U);
+    (void)memset(&http, 0, sizeof(http));
+    http.super = (QEvt)QEVT_INITIALIZER(NET_HTTP_REQ_SIG);
+    (void)snprintf(http.url, sizeof(http.url), "%s", "http://example.invalid/");
+    net_dispatch(&http.super);
+    (void)memset(&udp, 0, sizeof(udp));
+    udp.super = (QEvt)QEVT_INITIALIZER(NET_UDP_REQ_SIG);
+    (void)snprintf(udp.host, sizeof(udp.host), "%s", "192.168.0.1");
+    udp.port = 9U;
+    udp.len  = 1U;
+    net_dispatch(&udp.super);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_nreq, "neither reached the driver");
+
+    done = (const NetHttpDoneEvt *)spy_next();
+    TEST_ASSERT_NOT_NULL(done);
+    TEST_ASSERT_EQUAL_INT(NET_HTTP_DONE_SIG, (int)done->super.sig);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_DENIED, done->rc);
+    TEST_ASSERT_TRUE(done->busy);
+    sent = (const NetUdpDoneEvt *)spy_next();
+    TEST_ASSERT_NOT_NULL(sent);
+    TEST_ASSERT_EQUAL_INT(NET_UDP_DONE_SIG, (int)sent->super.sig);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KODE_DENIED, sent->rc);
+    TEST_ASSERT_TRUE(sent->busy);
+
+    /* The worker free again, a datagram that fails is a failure. */
+    job_done(KDRV_NET_JOB_PING, KODE_OK);
+    ao_spy_drain();
+    net_dispatch(&udp.super);
+    kdrv_net_udp_sent_ExpectAndReturn(0U);
+    job_done(KDRV_NET_JOB_UDP_SEND, KODE_ERROR);
+    sent = (const NetUdpDoneEvt *)spy_next();
+    TEST_ASSERT_NOT_NULL(sent);
+    TEST_ASSERT_EQUAL_INT(NET_UDP_DONE_SIG, (int)sent->super.sig);
+    TEST_ASSERT_NOT_EQUAL((int)KODE_OK, (int)sent->rc);
+    TEST_ASSERT_FALSE(sent->busy);
 
     worker_done();
 }

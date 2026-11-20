@@ -31,8 +31,9 @@ typedef enum {
                            *   rfid_field, rfid_read and rfid_write while
                            *   the front end is held, the power controls
                            *   while AO_Power waits out a boost or a
-                           *   reset, and touch or tap while a tap is
-                           *   armed. msg = busy.                          */
+                           *   reset, touch or tap while a tap is armed,
+                           *   and net_ping, http_get and udp_send while
+                           *   AO_Net's worker runs another job. msg = busy. */
     KCLI_ERR_REJECT  = 5, /**< Rejected or failed by the owning AO.
                            *   msg = the verb, or - when the verb alone
                            *   cannot say which way - one word naming the

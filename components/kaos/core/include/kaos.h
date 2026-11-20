@@ -2988,7 +2988,8 @@ void kaos_net_register(void);
  * @brief Ask for an ICMP ping of @p host.
  *
  * Answered on the bus: one NET_PING_ENTRY_SIG per echo, timeouts included, then
- * NET_PING_END_SIG, even with no network (ok false).
+ * NET_PING_END_SIG, even with no network (ok false). While AO_Net's worker
+ * runs another job the end comes alone with busy true: ask again.
  *
  * @param host  Name or dotted-quad literal.
  * @param count Echoes to send, one per second, capped at KODE_NET_PING_MAX.
@@ -3000,13 +3001,16 @@ void net_ping_request(const char *host, uint8_t count);
  *
  * Answered with up to KODE_NET_HTTP_CHUNKS NET_HTTP_DATA_SIG events carrying
  * a *printable preview* of the body, then NET_HTTP_DONE_SIG with the status
- * and the real lengths. Something that wants the bytes themselves wants
- * kode_sys_http_get(), which puts them in its caller's buffer.
+ * and the real lengths. While AO_Net's worker runs another job the
+ * terminator comes alone with busy true: ask again. Something that wants the
+ * bytes themselves wants kode_sys_http_get(), which puts them in its
+ * caller's buffer.
  */
 void net_http_get_request(const char *url);
 
 /**
- * @brief Ask for one UDP datagram. Answered with NET_UDP_DONE_SIG.
+ * @brief Ask for one UDP datagram. Answered with NET_UDP_DONE_SIG, busy true
+ *        while AO_Net's worker runs another job: ask again.
  *
  * @param len Cut to KODE_NET_UDP_MAX, because the payload rides in an event
  *        and events are bounded. An app with more to send calls

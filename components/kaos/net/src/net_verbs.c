@@ -467,7 +467,12 @@ static bool net_answer(QEvt const *e)
             if ( NET_V_PING == s_net_kind )
             {
                 NetPingEndEvt const * const p = Q_EVT_CAST(NetPingEndEvt);
-                if ( !p->ok )
+                if ( p->busy )
+                {
+                    /* Not a failure: the worker had another job. Ask again. */
+                    console_reply_err(KCLI_ERR_BUSY, "busy");
+                }
+                else if ( !p->ok )
                 {
                     console_reply_err(KCLI_ERR_REJECT, console_verb());
                 }
@@ -524,7 +529,11 @@ static bool net_answer(QEvt const *e)
             if ( NET_V_HTTP == s_net_kind )
             {
                 NetHttpDoneEvt const * const h = Q_EVT_CAST(NetHttpDoneEvt);
-                if ( (uint8_t)KODE_OK != h->rc )
+                if ( h->busy )
+                {
+                    console_reply_err(KCLI_ERR_BUSY, "busy");
+                }
+                else if ( (uint8_t)KODE_OK != h->rc )
                 {
                     console_reply_err(KCLI_ERR_REJECT, console_verb());
                 }
@@ -552,7 +561,11 @@ static bool net_answer(QEvt const *e)
             if ( NET_V_UDP == s_net_kind )
             {
                 NetUdpDoneEvt const * const u = Q_EVT_CAST(NetUdpDoneEvt);
-                if ( (uint8_t)KODE_OK != u->rc )
+                if ( u->busy )
+                {
+                    console_reply_err(KCLI_ERR_BUSY, "busy");
+                }
+                else if ( (uint8_t)KODE_OK != u->rc )
                 {
                     console_reply_err(KCLI_ERR_REJECT, console_verb());
                 }
