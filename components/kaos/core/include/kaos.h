@@ -4350,6 +4350,13 @@ void appmgr_cat_request(const char *project, const char *cats, bool clear);
  * copy the card stayed busy for, and a compressed one whose image evicts an
  * app with no copy that its wire length did not: nothing changed, ask again.
  *
+ * An image for the region that evicts anything is held whole in PSRAM and
+ * checked as it arrives; nothing is evicted before the wire has ended and the
+ * image holds together. The write follows the last `>|ack`, with
+ * RECV_WAIT_SIG every second of it, and RECV_DONE_SIG or RECV_FAIL_SIG at its
+ * end. No room in PSRAM, a cut wire or an image that does not hold together
+ * ends the install with every app in place.
+ *
  * @param dst    KFW_TARGET_APP or KFW_TARGET_OS.
  * @param size   Payload length in bytes.
  * @param crc32  What khal_crc32() over the whole payload must equal.
@@ -4368,6 +4375,12 @@ bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
  *
  * The grammar behind `install src= dst=`, and the only way to ask AO_AppMgr to
  * write an image.
+ *
+ * An install into the region that evicts anything reads its source through
+ * first, and gives nothing up unless the image holds together: a file is read
+ * again where it lies, a URL is downloaded again and held whole in PSRAM, and
+ * the install then reads that copy. No room in PSRAM ends a URL's install
+ * with every app in place.
  *
  * @param src_kind  kfw_src_t as a plain integer (kdrv_kfw.h).
  * @param src       File name for fs/sd, URL for http, ignored otherwise.

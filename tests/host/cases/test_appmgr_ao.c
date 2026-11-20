@@ -1426,6 +1426,41 @@ static void feed(const uint8_t *data, uint16_t len)
     QASM_DISPATCH(AO_AppMgr, &e.super, 0U);
 }
 
+/** @brief Steps the image held in memory takes to be written here: two 32 KB
+ *         pieces a step, and no image these cases stream is over four. */
+#define STAGE_WRITE_STEPS  4U
+
+/**
+ * @brief Let AO_AppMgr write the image it held in memory: a terminal install
+ *        whose plan evicts writes it once the wire has ended.
+ */
+static void stage_write(void)
+{
+    run_ticks(STAGE_WRITE_STEPS);
+}
+
+/**
+ * @brief Let the write of the held image go as far as its plan: its first
+ *        piece, whose header places the image, evicts and erases a block.
+ */
+static void stage_to_plan(void)
+{
+    (void)qf_support_pump(AO_AppMgr, 1U);
+}
+
+/**
+ * @brief The person goes back while the held image is written, past its plan:
+ *        one block erased, the rest not reached.
+ */
+static void stage_write_cancelled(void)
+{
+    static const QEvt cancel = QEVT_INITIALIZER(APP_CANCEL_REQ_SIG);
+
+    stage_to_plan();
+    QASM_DISPATCH(AO_AppMgr, &cancel, 0U);
+    run_ticks(STAGE_WRITE_STEPS);
+}
+
 /**
  * @brief Drain AO_Log's queue, reporting whether @p sig was among what
  *        landed there.
@@ -3691,6 +3726,7 @@ TEST_CASE("the console install evicts with no round, and says an app goes with n
     ask_recv(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len), false);
     raw_armed(true);
     feed(s_named_img, (uint16_t)len);
+    stage_write();
 
     unsigned const early = spy_done(&done);
     tidy_settle();                            /* the victim's folder goes first */
@@ -3783,6 +3819,7 @@ static unsigned reinstall_mine(const char *name, AppEvictedEvt *last)
                    name);
     raw_armed(true);
     feed(s_named_img, (uint16_t)len);
+    stage_write();
     tidy_settle();
     for ( ;; )
     {
@@ -3802,20 +3839,23 @@ static unsigned reinstall_mine(const char *name, AppEvictedEvt *last)
     return n;
 }
 
-/* Without a name the board cannot tell the image is a new "mine": the oldest
- * app goes, and the install says so on the bus. */
-TEST_CASE("an unnamed reinstall into a full region evicts the oldest app",
+/* Without a name, the plan made when the wire is taken would evict the oldest
+ * app. That plan commits nothing (#165): the header's does, and the header
+ * names the image "mine", so its own old copy makes room as a named one's
+ * does. */
+TEST_CASE("an unnamed reinstall into a full region is named by its header",
           "[appmgr_ao]")
 {
     AppEvictedEvt last;
 
     Mockkdrv_slot_Init();
     keep_fresh();
-    TEST_ASSERT_EQUAL_UINT(1U, reinstall_mine("", &last));
-    TEST_ASSERT_EQUAL_STRING("old", last.name);
-    TEST_ASSERT_FALSE(last.kept);
-    TEST_ASSERT_FALSE(named_installed("old"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, reinstall_mine("", &last),
+        "an eviction was published for the app being replaced");
+    TEST_ASSERT_TRUE_MESSAGE(named_installed("old"),
+        "the oldest app paid for the reinstall");
     TEST_ASSERT_TRUE(named_installed("mine"));
+    TEST_ASSERT_EQUAL_UINT32(2U, live_entries());
     keep_end();
 }
 
@@ -3837,11 +3877,11 @@ TEST_CASE("a named reinstall into a full region gives up its own old copy",
 }
 
 
-/* The victim here fills the region, so the image that then fails its CRC was
- * written over all of it: it is gone, and what is left is a directory without
- * the victim and without the image that never verified. A failed image can
- * never be left listed, or a boot request armed for it. */
-TEST_CASE("an install that evicts and then fails its CRC lists nothing new",
+/* The victim here fills the region. A terminal's image that would evict it is
+ * held in memory until its wire ends, so one that then fails its CRC gives
+ * nothing up: the victim stays, and the image that never verified is neither
+ * listed nor armed to boot. */
+TEST_CASE("a terminal install that would evict and fails its CRC lists nothing new",
           "[appmgr_ao][keep]")
 {
     uint32_t len;
@@ -3854,11 +3894,11 @@ TEST_CASE("an install that evicts and then fails its CRC lists nothing new",
     ask_recv(len, khal_crc32(KHAL_CRC32_INIT, s_named_img, len) ^ 1U, false);
     raw_armed(true);
     feed(s_named_img, (uint16_t)len);
-    (void)qf_support_pump(AO_AppMgr, 8U);
+    stage_write();
 
-    TEST_ASSERT_FALSE_MESSAGE(old_installed(),
-        "an app the write overwrote came back");
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, live_entries(),
+    TEST_ASSERT_TRUE_MESSAGE(old_installed(),
+        "an install that failed its CRC gave its victim up");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, live_entries(),
         "an image that failed its CRC is listed");
     TEST_ASSERT_FALSE_MESSAGE(kdrv_apps_req_present(),
         "a failed install left a boot request behind");
@@ -3964,7 +4004,9 @@ static const char *victims_left(void)
     return out;
 }
 
-TEST_CASE("a terminal install that fails its CRC gives back the apps it did not reach",
+/* kodediy/kode-sdk#165: a terminal install whose plan evicts holds its wire
+ * in memory and checks it, and evicts only once the wire has ended whole. */
+TEST_CASE("a terminal install that fails its CRC gives nothing up",
           "[appmgr_ao][undo]")
 {
     Mockkdrv_slot_Init();
@@ -3975,24 +4017,22 @@ TEST_CASE("a terminal install that fails its CRC gives back the apps it did not 
     ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN) ^ 1U,
                    false, "new");
     raw_armed(true);
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("k f", victims_left(),
-        "the plan did not take v1, v2 and v3 out");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v2 v3 k f", victims_left(),
+        "the plan evicted before the wire");
     feed_undo_image(UNDO_IMG_LEN);
-    (void)qf_support_pump(AO_AppMgr, 8U);
+    stage_write();
 
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 k f", victims_left(),
-        "the install's failure did not give back v1, whose blocks it never "
-        "touched, or gave back what it overwrote");
+    TEST_ASSERT_TRUE(klog_has("CRC mismatch"));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v2 v3 k f", victims_left(),
+        "an install that failed its CRC gave something up");
     TEST_ASSERT_FALSE(named_installed("new"));
-    TEST_ASSERT_TRUE(klog_has("kept 'v1' after the failed install"));
-    TEST_ASSERT_TRUE(klog_has("'v2' was overwritten and is gone"));
-    TEST_ASSERT_TRUE(klog_has("'v3' was overwritten and is gone"));
+    TEST_ASSERT_FALSE(klog_has("after the failed install"));
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, storage_folder_requests(),
         "a failed install deleted or wrote a data folder");
     keep_end();
 }
 
-TEST_CASE("a terminal install cut by the watchdog gives back every app it did not reach",
+TEST_CASE("a terminal install cut by the watchdog gives nothing up",
           "[appmgr_ao][undo]")
 {
     Mockkdrv_slot_Init();
@@ -4003,17 +4043,54 @@ TEST_CASE("a terminal install cut by the watchdog gives back every app it did no
     ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
                    false, "new");
     raw_armed(true);
-    feed_undo_image(KODE_RECV_CHUNK);          /* the first block is erased, no more */
+    feed_undo_image(KODE_RECV_CHUNK);          /* the plan evicts: the wire is held */
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("the image is held in memory"),
+        "the wire of an install that evicts was not held");
     run_ticks(APPMGR_RECV_IDLE_DEADLINE_TICKS + 50U);
 
     TEST_ASSERT_TRUE_MESSAGE(klog_has("the host is presumed gone"),
         "the watchdog did not run");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v2 v3 k f", victims_left(),
+        "a cut install gave something up");
+    TEST_ASSERT_FALSE(klog_has("after the failed install"));
+    (void)log_saw(CONSOLE_RAW_END_SIG);
+    keep_end();
+}
+
+/* The write from memory evicts at its plan and erases as it goes: one stopped
+ * past its plan gives back the victims whose blocks it never reached (#115),
+ * and the console hears it failed. */
+TEST_CASE("a terminal install stopped while its held image is written gives back what it did not reach",
+          "[appmgr_ao][undo]")
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+    ao_spy_subscribe(RECV_FAIL_SIG);
+
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
+                   false, "new");
+    raw_armed(true);
+    feed_undo_image(UNDO_IMG_LEN);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v2 v3 k f", victims_left(),
+        "the plan evicted before the wire ended");
+    stage_write_cancelled();
+
+    bool failed = false;
+    for ( const QEvt *got = ao_spy_take(); NULL != got; got = ao_spy_take() )
+    {
+        failed = failed || ((enum_t)got->sig == RECV_FAIL_SIG);
+    }
+    QActive_unsubscribe(ao_spy(), RECV_FAIL_SIG);
+    ao_spy_drain();
+    TEST_ASSERT_TRUE_MESSAGE(failed, "the console was not told the install failed");
     TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v3 k f", victims_left(),
-        "a cut install lost an app whose blocks it never reached");
+        "a stopped write lost an app whose blocks it never reached");
+    TEST_ASSERT_FALSE(named_installed("new"));
     TEST_ASSERT_TRUE(klog_has("kept 'v1' after the failed install"));
     TEST_ASSERT_TRUE(klog_has("kept 'v3' after the failed install"));
     TEST_ASSERT_TRUE(klog_has("'v2' was overwritten and is gone"));
-    (void)log_saw(CONSOLE_RAW_END_SIG);
     keep_end();
 }
 
@@ -4065,6 +4142,7 @@ TEST_CASE("an install that lands evicts its victims for good", "[appmgr_ao][undo
                    false, "new");
     raw_armed(true);
     feed_undo_image(UNDO_IMG_LEN);
+    stage_write();
     tidy_settle();
 
     TEST_ASSERT_EQUAL_STRING_MESSAGE("k f", victims_left(),
@@ -4087,12 +4165,12 @@ TEST_CASE("a second failed install in a row gives back what it did not reach too
         fake_klog_reset();
         region_of_victims();
         ask_recv_named(UNDO_IMG_LEN,
-                       khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN) ^ 1U,
+                       khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
                        false, "new");
         raw_armed(true);
         feed_undo_image(UNDO_IMG_LEN);
-        (void)qf_support_pump(AO_AppMgr, 8U);
-        TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 k f", victims_left(),
+        stage_write_cancelled();
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v3 k f", victims_left(),
             "a failure in a row gave back the wrong apps");
         TEST_ASSERT_TRUE(klog_has("kept 'v1' after the failed install"));
     }
@@ -4527,6 +4605,8 @@ TEST_CASE("an install that evicts records its victims and their CRCs in NVS befo
     ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
                    false, "new");
     raw_armed(true);
+    feed_undo_image(UNDO_IMG_LEN);
+    stage_to_plan();
     fake_nvs_set_hook(NULL);
 
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_writes_seen,
@@ -4652,13 +4732,14 @@ TEST_CASE("a landed install takes its table out of NVS, a failed one after its r
     region_of_victims();
     undo_image("new");
 
-    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN) ^ 1U,
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
                    false, "new");
     raw_armed(true);
+    feed_undo_image(UNDO_IMG_LEN);
+    stage_to_plan();
     TEST_ASSERT_TRUE(table_in_nvs());
-    feed_undo_image(UNDO_IMG_LEN);                         /* the CRC fails at the end */
-    (void)qf_support_pump(AO_AppMgr, 8U);
-    TEST_ASSERT_EQUAL_STRING("v1 k f", victims_left());
+    stage_write_cancelled();                                 /* stopped past its plan */
+    TEST_ASSERT_EQUAL_STRING("v1 v3 k f", victims_left());
     TEST_ASSERT_FALSE_MESSAGE(table_in_nvs(),
         "a failed install left its table in NVS after giving the apps back");
 
@@ -4666,8 +4747,10 @@ TEST_CASE("a landed install takes its table out of NVS, a failed one after its r
     ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
                    false, "new");
     raw_armed(true);
-    TEST_ASSERT_TRUE(table_in_nvs());
     feed_undo_image(UNDO_IMG_LEN);
+    stage_to_plan();
+    TEST_ASSERT_TRUE(table_in_nvs());
+    stage_write();
     tidy_settle();
     TEST_ASSERT_TRUE(named_installed("new"));
     TEST_ASSERT_FALSE_MESSAGE(table_in_nvs(),
@@ -4703,11 +4786,12 @@ TEST_CASE("an install that evicts nothing writes nothing to NVS, and one whose t
     undo_image("new2");
     ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
                    false, "new2");
-    fake_nvs_fail_next_set();   /* the table's write, after the record's */
     raw_armed(true);
+    feed_undo_image(UNDO_IMG_LEN);
+    fake_nvs_fail_next_set();   /* the table's write, at the plan of the held image */
+    stage_write();
     TEST_ASSERT_TRUE_MESSAGE(klog_has("cannot record the apps this install evicts"),
         "a table that could not be written went unsaid");
-    feed_undo_image(UNDO_IMG_LEN);
     tidy_settle();
     TEST_ASSERT_TRUE_MESSAGE(named_installed("new2"),
         "an install stopped because its table could not be written");
@@ -7814,6 +7898,7 @@ TEST_CASE("a deadline queued behind its answer does not cut the next request",
     uint32_t const len = container_named("fresh", true, false);
 
     install_container(len, false);
+    (void)qf_support_settle(AO_AppMgr);      /* the held image, written with no tick */
     storage_takes_the_put();
     run_ticks(APPMGR_TIDY_DEADLINE_TICKS - 3U);
     for ( unsigned i = 0U; (8U > i) && (uxQueueMessagesWaiting(AO_AppMgr->eQueue) == 0U); ++i )
@@ -7922,6 +8007,7 @@ TEST_CASE("an evicted app that was not kept loses its folder",
     uint32_t const len = container_named("fresh", true, false);
 
     install_container(len, false);
+    stage_write();
     const QEvt * const put = storage_take(APPDATA_PUT_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(put, "the new app's folder was never asked for");
     put_done(put);
@@ -8061,6 +8147,7 @@ TEST_CASE("an evicted app with the installed app's name keeps the new folder",
     uint32_t const len = container_named("old", true, false);
 
     install_container(len, false);
+    stage_write();
     const QEvt * const put = storage_take(APPDATA_PUT_REQ_SIG);
     TEST_ASSERT_NOT_NULL_MESSAGE(put, "the new app's folder was never asked for");
     put_done(put);
@@ -14100,4 +14187,327 @@ TEST_CASE("an install whose open is refused for the file itself fails as before"
           "[appmgr_ao][busy]")
 {
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KFAIL_WRITE, open_refused_why(false));
+}
+
+/* ---- An install from a URL or the terminal that evicts holds its image ------
+ * kodediy/kode-sdk#165: an install whose plan evicts reads its whole source
+ * into PSRAM and checks it before it gives anything up. A URL is downloaded
+ * again into that copy, a terminal's wire goes into it as it arrives, and the
+ * image is written from it: a download or a wire that ends cut or damaged,
+ * or no PSRAM to hold it, leaves every installed app in place.
+ */
+
+/** @brief The URL the cases below install from. */
+#define HELD_URL  "https://example.com/new.bin"
+
+/** @brief Enough steps for the victims' CRCs, then the write from memory. */
+#define HELD_WRITE_STEPS  64U
+
+/** @brief How long a case watches a held write the station holds back. */
+#define HELD_WAIT_WATCH_MS  3000U
+
+/**
+ * @brief Hand AppMgr @p len bytes of @p src as AO_Net's chunks.
+ *
+ * Each lies in AO_Net's buffer 0 (s_net_chunk) and is answered at once: a
+ * longer run is as many chunks as it takes.
+ */
+static void net_answer_bytes(const uint8_t *src, uint32_t len)
+{
+    for ( uint32_t off = 0U; off < len; off += (uint32_t)sizeof(s_net_chunk) )
+    {
+        StorageDataEvt d;
+        uint32_t       n = len - off;
+
+        if ( n > (uint32_t)sizeof(s_net_chunk) )
+        {
+            n = (uint32_t)sizeof(s_net_chunk);
+        }
+        (void)memcpy(s_net_chunk, &src[off], n);
+        (void)memset(&d, 0, sizeof(d));
+        d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+        d.len    = (uint16_t)n;
+        d.idx    = 0U;
+        d.status = (uint8_t)KODE_OK;
+        QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+    }
+}
+
+/** @brief AO_Net's end of the download: its end when @p ok, else its failure. */
+static void net_answer_end(bool ok)
+{
+    StorageDataEvt d;
+
+    (void)memset(&d, 0, sizeof(d));
+    d.super  = (QEvt)QEVT_INITIALIZER(NET_STREAM_DATA_SIG);
+    d.status = (uint8_t)KODE_OK;
+    d.eof    = true;
+    if ( !ok )
+    {
+        d.status = (uint8_t)KODE_ERROR;
+        d.eof    = false;
+    }
+    QASM_DISPATCH(AO_AppMgr, &d.super, 0U);
+}
+
+/** @brief The start of a case below: a fresh AppMgr over the five apps, the spy on failures. */
+static void held_url_fresh(void)
+{
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    fake_psram_reset();
+    (void)net_seen();
+    ao_spy_subscribe(APP_FLASH_FAIL_SIG);
+}
+
+/**
+ * @brief Ask for HELD_URL and bring its header to AppMgr: the plan evicts, so
+ *        the download is let go and asked for again.
+ *
+ * @param src   The download's bytes.
+ * @param size  The length the server says it has; 0 for none.
+ * @param first How many bytes the first download brings: the header's.
+ */
+static void held_url_asked(const uint8_t *src, uint32_t size, uint32_t first)
+{
+    ask_https(HELD_URL);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_seen().opens, "the install never asked for its URL");
+    fetch_opened((uint8_t)KODE_OK, size);
+    net_answer_bytes(src, first);
+    TEST_ASSERT_TRUE_MESSAGE(klog_has(READ_THROUGH_SAID),
+        "the install did not stop at its plan to hold the image");
+
+    net_seen_t const n = net_seen();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n.closes, "the first download was not let go");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n.opens, "the image was not downloaded again");
+    TEST_ASSERT_EQUAL_STRING(HELD_URL, n.url);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v2 v3 k f", victims_left(),
+        "the plan evicted before the image was held");
+}
+
+/** @brief held_url_asked() for the restore cases' image over the five apps. */
+static void held_url_begins(void)
+{
+    held_url_fresh();
+    undo_image("new");
+    held_url_asked(s_undo_img, UNDO_IMG_LEN, (uint32_t)sizeof(s_named_img));
+}
+
+/** @brief How many APP_FLASH_FAIL_SIG the spy holds; the spy is drained. */
+static unsigned held_fails(void)
+{
+    unsigned fails = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (enum_t)e->sig == APP_FLASH_FAIL_SIG )
+        {
+            ++fails;
+        }
+    }
+    return fails;
+}
+
+/** @brief The end of a case whose held image was refused: one failure, nothing given up, nothing held. */
+static void held_url_refused(const char *why)
+{
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    unsigned const fails = held_fails();
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fails, "the hold's end was not one failure");
+    TEST_ASSERT_TRUE(klog_has(why));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v2 v3 k f", victims_left(),
+        "an installed app was given up for an image refused");
+    TEST_ASSERT_FALSE(named_installed("new"));
+    TEST_ASSERT_FALSE(klog_has("after the failed install"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, net_seen().opens,
+        "an image refused started the install again");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(fake_psram_alloc_count(), fake_psram_free_count(),
+        "the image refused is still held");
+    keep_end();
+}
+
+TEST_CASE("a URL install that would evict holds its image, checks it and writes it from memory",
+          "[appmgr_ao][held]")
+{
+    held_url_begins();
+    fetch_opened((uint8_t)KODE_OK, UNDO_IMG_LEN);
+    net_answer_bytes(s_undo_img, UNDO_IMG_LEN);
+    net_answer_end(true);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    TEST_ASSERT_TRUE(klog_has("reads through whole"));
+    TEST_ASSERT_TRUE(klog_has("131072 bytes held in memory for the install"));
+
+    run_ticks(HELD_WRITE_STEPS);
+    tidy_settle();
+    unsigned const fails = held_fails();
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+    net_seen_t const n = net_seen();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fails, "the install from memory failed");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, n.opens, "the image was downloaded a third time");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, n.closes, "the second download was not let go");
+    TEST_ASSERT_TRUE_MESSAGE(klog_has("from the copy held in memory"),
+        "the install was not written from the image held");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("k f", victims_left(),
+        "the install from memory did not take its victims' blocks");
+    TEST_ASSERT_TRUE(named_installed("new"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(fake_psram_alloc_count(), fake_psram_free_count(),
+        "the image was still held after the install");
+    keep_end();
+}
+
+/* A raw image needs the server's length to be placed at all; a container says
+ * its own, so one that comes with no length is held as it arrives. */
+TEST_CASE("a container from a URL that says no length grows its copy as it arrives",
+          "[appmgr_ao][held]")
+{
+    held_url_fresh();
+    uint32_t const len = container_named("new", false, false);
+    char           held[64];
+
+    held_url_asked(s_cont, 0U, len);
+    fetch_opened((uint8_t)KODE_OK, 0U);
+    net_answer_bytes(s_cont, len);
+    net_answer_end(true);
+    (void)qf_support_pump(AO_AppMgr, 8U);
+    (void)snprintf(held, sizeof(held), "%u bytes held in memory for the install", (unsigned)len);
+    TEST_ASSERT_TRUE(klog_has(held));
+
+    run_ticks(HELD_WRITE_STEPS);
+    tidy_settle();
+    unsigned const fails = held_fails();
+    QActive_unsubscribe(ao_spy(), APP_FLASH_FAIL_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fails, "the install from memory failed");
+    TEST_ASSERT_EQUAL_STRING("v2 v3 k f", victims_left());
+    TEST_ASSERT_TRUE(named_installed("new"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(fake_psram_alloc_count(), fake_psram_free_count(),
+        "the image was still held after the install");
+    keep_end();
+}
+
+TEST_CASE("a URL download cut while its image is held gives nothing up",
+          "[appmgr_ao][held]")
+{
+    held_url_begins();
+    fetch_opened((uint8_t)KODE_OK, UNDO_IMG_LEN);
+    net_answer_bytes(s_undo_img, KAPPS_ALIGN);
+    net_answer_end(false);
+    held_url_refused("the download stopped; nothing was given up");
+}
+
+TEST_CASE("a URL download that ends early while its image is held gives nothing up",
+          "[appmgr_ao][held]")
+{
+    held_url_begins();
+    fetch_opened((uint8_t)KODE_OK, UNDO_IMG_LEN);
+    net_answer_bytes(s_undo_img, KAPPS_ALIGN);
+    net_answer_end(true);
+    held_url_refused("the download ended before its length; nothing was given up");
+}
+
+TEST_CASE("a URL whose download is refused the second time gives nothing up",
+          "[appmgr_ao][held]")
+{
+    held_url_begins();
+    fetch_opened((uint8_t)KODE_ERROR, 0U);
+    held_url_refused("the image could not be read through; nothing was given up");
+}
+
+TEST_CASE("a URL install with no PSRAM to hold its image gives nothing up",
+          "[appmgr_ao][held]")
+{
+    held_url_begins();
+    fake_psram_refuse(1U);                     /* the copy */
+    fetch_opened((uint8_t)KODE_OK, UNDO_IMG_LEN);
+    held_url_refused("no room in PSRAM to hold the image whole; nothing was given up");
+}
+
+TEST_CASE("a terminal install with no PSRAM to hold its image gives nothing up",
+          "[appmgr_ao][held]")
+{
+    bool failed = false;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+    ao_spy_subscribe(RECV_FAIL_SIG);
+
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
+                   false, "new");
+    raw_armed(true);
+    fake_psram_refuse(1U);                     /* the copy */
+    feed_undo_image(UNDO_IMG_LEN);
+    stage_write();
+    for ( const QEvt *got = ao_spy_take(); NULL != got; got = ao_spy_take() )
+    {
+        failed = failed || ((enum_t)got->sig == RECV_FAIL_SIG);
+    }
+    QActive_unsubscribe(ao_spy(), RECV_FAIL_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_TRUE(klog_has("no room in PSRAM to hold the image whole"));
+    TEST_ASSERT_TRUE_MESSAGE(failed, "the console was not told the install failed");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("v1 v2 v3 k f", victims_left(),
+        "an installed app was given up for an image never held");
+    TEST_ASSERT_FALSE(named_installed("new"));
+    TEST_ASSERT_FALSE(klog_has("after the failed install"));
+    keep_end();
+}
+
+/* The wire has ended and the console waits for the end of the write: it hears
+ * `>|wait` every second of it, then the done. */
+TEST_CASE("a terminal install's held write tells the console to wait, then that it landed",
+          "[appmgr_ao][held]")
+{
+    unsigned waits = 0U;
+    unsigned done  = 0U;
+    unsigned fails = 0U;
+
+    Mockkdrv_slot_Init();
+    undo_fresh();
+    region_of_victims();
+    undo_image("new");
+
+    ask_recv_named(UNDO_IMG_LEN, khal_crc32(KHAL_CRC32_INIT, s_undo_img, UNDO_IMG_LEN),
+                   false, "new");
+    raw_armed(true);
+    ao_spy_subscribe(RECV_WAIT_SIG);
+    ao_spy_subscribe(RECV_DONE_SIG);
+    ao_spy_subscribe(RECV_FAIL_SIG);
+    appmgr_hold(true);                         /* the write stops at its first pieces */
+    feed_undo_image(UNDO_IMG_LEN);
+    run_ticks(QF_SUPPORT_STEPS(HELD_WAIT_WATCH_MS));
+    appmgr_hold(false);
+    run_ticks(STAGE_WRITE_STEPS);
+    tidy_settle();
+    for ( const QEvt *got = ao_spy_take(); NULL != got; got = ao_spy_take() )
+    {
+        switch ( (enum_t)got->sig )
+        {
+            case RECV_WAIT_SIG: ++waits; break;
+            case RECV_DONE_SIG: ++done;  break;
+            case RECV_FAIL_SIG: ++fails; break;
+            default:                     break;
+        }
+    }
+    QActive_unsubscribe(ao_spy(), RECV_WAIT_SIG);
+    QActive_unsubscribe(ao_spy(), RECV_DONE_SIG);
+    QActive_unsubscribe(ao_spy(), RECV_FAIL_SIG);
+    ao_spy_drain();
+
+    TEST_ASSERT_TRUE_MESSAGE(((HELD_WAIT_WATCH_MS / 1000U) - 1U) <= waits,
+        "the console was not told to wait while the held image was written");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, done, "the console was not told the install landed");
+    TEST_ASSERT_EQUAL_UINT(0U, fails);
+    TEST_ASSERT_EQUAL_STRING("k f", victims_left());
+    TEST_ASSERT_TRUE(named_installed("new"));
+    keep_end();
 }
