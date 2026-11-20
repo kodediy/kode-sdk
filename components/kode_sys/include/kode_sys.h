@@ -323,6 +323,9 @@ kode_status_t kode_sys_mqtt_publish(const char *topic, const void *data,
  * runs at KODE_PRIO_NET (2), so a subscriber above it takes each message before
  * the next is read; one at KODE_PRIO_USER_LOW (1), below AO_Net, does not, and
  * must size its queue for the broker's rate.
+ *
+ * AO_Net subscribes it again after a reconnect, up to KODE_MQTT_SUBS_MAX
+ * topics at once; one past them is refused.
  * @param topic The topic filter, shorter than KODE_SYS_MQTT_TOPIC_MAX.
  * @return As the commands' rule above; KODE_DENIED for a topic that does not
  *         fit, and without CONFIG_KODEOS_NET.
