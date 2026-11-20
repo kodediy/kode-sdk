@@ -1663,6 +1663,7 @@ bool kode_udp_send(const char *host, uint16_t port, const void *data, uint32_t l
 #define KODE_MQTT_BUSY_MS     5000U  /**< How long a call waits for room in the network's queue. */
 #define KODE_MQTT_URI_LIMIT   95U    /**< Longest broker address, bytes. */
 #define KODE_MQTT_TOPIC_LIMIT 79U    /**< Longest topic, bytes. */
+#define KODE_MQTT_SUBS_LIMIT  16U    /**< Topics subscribed at once. */
 #define KODE_MQTT_TEXT_LIMIT  240U   /**< Longest message, bytes. */
 
 /**
@@ -1686,6 +1687,9 @@ bool kode_mqtt_publish(const char *topic, const char *text);
 
 /**
  * @brief Ask the broker for a topic; its messages arrive as "mqtt_message" events.
+ *
+ * The board asks again by itself after a reconnect. Up to KODE_MQTT_SUBS_LIMIT
+ * topics at once: one past them is refused.
  * @param topic 1 to KODE_MQTT_TOPIC_LIMIT bytes.
  * @return true when queued; false with kode_error() saying why.
  */

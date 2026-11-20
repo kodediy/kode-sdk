@@ -3204,6 +3204,11 @@ QEvt const *mqtt_pub_evt(const char *topic, const void *data, uint16_t len);
  * Messages arrive as MQTT_MSG_SIG on the bus, so receiving them means being
  * an Active Object. They are bounded and say when they were cut.
  *
+ * AO_Net keeps the topic and subscribes it again whenever the client
+ * reconnects without its session, up to KODE_MQTT_SUBS_MAX topics at once;
+ * one past them is answered KDRV_MQTT_ERR_REFUSED. The list empties when the
+ * client stops.
+ *
  * @param topic The topic.
  * @return true when the request was queued.
  */
@@ -3217,7 +3222,7 @@ bool mqtt_sub_request(const char *topic);
 QEvt const *mqtt_sub_evt(const char *topic);
 
 /**
- * @brief Stop receiving @p topic.
+ * @brief Stop receiving @p topic; AO_Net stops keeping it for a reconnect.
  *
  * @param topic The topic.
  * @return true when the request was queued.

@@ -712,6 +712,10 @@ _Static_assert(KODE_NET_CHECK_DWELL_MS < KODE_LOWPOWER_REQUEST_RETRY_WINDOW_MS,
 #define KODE_MQTT_USER_MAX      33U
 #define KODE_MQTT_PASS_MAX      65U
 #define KODE_MQTT_TOPIC_MAX     80U
+#define KODE_MQTT_SUBS_MAX      16U   /**< Topics AO_Net keeps for a client of the
+                                       *   user's and subscribes again after a
+                                       *   reconnect; a subscribe past them is
+                                       *   refused.                          */
 #define KODE_MQTT_PAYLOAD_MAX  KODE_CONSOLE_LINE_MAX   /**< Of one message,
                                        *   in or out: a whole console line,
                                        *   because a command arrives on a

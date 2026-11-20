@@ -10585,3 +10585,148 @@ TEST_CASE("test_chan_state_owed: a channel state ask a full queue refused is ans
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, up_again, "the owed ask was answered twice");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, down, "offline: the ask was not answered once");
 }
+
+/* ---- A client of the user's keeps its topics across a reconnect ---------- */
+
+/** @brief The channel has no identity, so a client of the user's is up, connected, with no topic. */
+static void user_client_up(void)
+{
+    IdReqEvt q;
+
+    chan_fresh();
+    go_online();
+    TEST_ASSERT_EQUAL_INT(ID_REQ_SIG, (int)radio_take(&q, sizeof(q)));
+    answer_end((uint8_t)KODE_ST_NOT_FOUND, 0U, 0U);   /* no identity: the client is free */
+    TEST_ASSERT_TRUE(mqtt_up_request("mqtt://broker.example:1883", "", ""));
+    (void)net_settle();
+    job_done(KDRV_NET_JOB_MQTT_START, KODE_OK);
+    mqtt_link(KDRV_NET_MQTT_CONNECTED);
+    ao_spy_drain();
+    fake_klog_reset();
+    s_nsub   = 0U;
+    s_nunsub = 0U;
+}
+
+/** @brief Subscribe @p topic and say how AO_Net answered. */
+static uint8_t user_sub(const char *topic)
+{
+    TEST_ASSERT_TRUE(mqtt_sub_request(topic));
+    (void)net_settle();
+    return next_state_err();
+}
+
+/** @brief The broker drops the client and takes it back, with or without its session. */
+static void user_reconnect(bool session_present)
+{
+    mqtt_link(KDRV_NET_MQTT_DISCONNECTED);
+    s_nsub = 0U;
+    mqtt_link_present(KDRV_NET_MQTT_CONNECTED, session_present);
+    ao_spy_drain();
+}
+
+/** @brief `mqtt_down`, and the worker stops the client. */
+static void user_client_down(void)
+{
+    TEST_ASSERT_TRUE(mqtt_down_request());
+    (void)net_settle();
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    ao_spy_drain();
+}
+
+TEST_CASE("a client of the user's subscribes its topics again after a reconnect "
+          "with no session", "[net_ao]")
+{
+    user_client_up();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_NONE, user_sub("a/b"));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_NONE, user_sub("c/d"));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_NONE, user_sub("a/b"));
+    TEST_ASSERT_EQUAL_UINT(3U, s_nsub);
+
+    user_reconnect(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, s_nsub, "each topic once, the second a/b kept once");
+    TEST_ASSERT_EQUAL_STRING("a/b", s_subs[0]);
+    TEST_ASSERT_EQUAL_STRING("c/d", s_subs[1]);
+    TEST_ASSERT_TRUE(logged("subscribed again to 2 topics"));
+
+    user_reconnect(true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nsub, "the broker kept the session and its topics");
+
+    user_client_down();
+    net_done();
+}
+
+TEST_CASE("mqtt_unsub stops keeping a topic, and a stopped client forgets them all",
+          "[net_ao]")
+{
+    unsigned freed;
+
+    user_client_up();
+    (void)user_sub("a/b");
+    (void)user_sub("c/d");
+    (void)user_sub("e/f");
+    TEST_ASSERT_TRUE(mqtt_unsub_request("c/d"));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_NONE, next_state_err());
+    TEST_ASSERT_EQUAL_UINT(1U, s_nunsub);
+
+    user_reconnect(false);
+    TEST_ASSERT_EQUAL_UINT(2U, s_nsub);
+    TEST_ASSERT_EQUAL_STRING("a/b", s_subs[0]);
+    TEST_ASSERT_EQUAL_STRING("e/f", s_subs[1]);
+
+    freed = fake_psram_free_count();
+    user_client_down();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(freed + 1U, fake_psram_free_count(),
+                                   "the kept topics' block went back");
+
+    /* A new client starts with nothing to subscribe again. */
+    TEST_ASSERT_TRUE(mqtt_up_request("mqtt://broker.example:1883", "", ""));
+    (void)net_settle();
+    job_done(KDRV_NET_JOB_MQTT_START, KODE_OK);
+    user_reconnect(false);
+    TEST_ASSERT_EQUAL_UINT(0U, s_nsub);
+
+    user_client_down();
+    net_done();
+}
+
+TEST_CASE("a subscribe past KODE_MQTT_SUBS_MAX topics is refused before the broker "
+          "is asked", "[net_ao]")
+{
+    char topic[KODE_MQTT_TOPIC_MAX];
+
+    user_client_up();
+    for ( unsigned i = 0U; KODE_MQTT_SUBS_MAX > i; ++i )
+    {
+        (void)snprintf(topic, sizeof(topic), "t/%u", i);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_NONE, user_sub(topic));
+    }
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_REFUSED, user_sub("t/extra"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KODE_MQTT_SUBS_MAX, s_nsub, "the broker was not asked");
+    TEST_ASSERT_TRUE(logged("topics are kept already"));
+
+    /* One kept already is still taken: nothing new to keep. */
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_NONE, user_sub("t/0"));
+
+    user_reconnect(false);
+    TEST_ASSERT_EQUAL_UINT(KODE_MQTT_SUBS_MAX, s_nsub);
+
+    user_client_down();
+    net_done();
+}
+
+TEST_CASE("a topic PSRAM cannot keep is refused and unsubscribed again", "[net_ao]")
+{
+    user_client_up();
+    fake_psram_refuse(1U);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_MQTT_ERR_REFUSED, user_sub("a/b"));
+    TEST_ASSERT_EQUAL_UINT(1U, s_nsub);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_nunsub, "not kept would vanish at the next reconnect");
+    TEST_ASSERT_TRUE(logged("no memory to keep it"));
+
+    user_reconnect(false);
+    TEST_ASSERT_EQUAL_UINT(0U, s_nsub);
+
+    user_client_down();
+    net_done();
+}
