@@ -12,6 +12,7 @@
 #include "mbedtls/x509.h"
 
 #include "kdrv_net.h"
+#include "khal_time.h"
 #include "host_spies.h"
 #include "time_stub.h"
 
@@ -298,6 +299,19 @@ static int post_write_checked(esp_http_client_handle_t client, const char *buffe
     return len;
 }
 
+/**
+ * @brief A fresh mocked client for an exchange.
+ *
+ * Every wait of an exchange is given what is left of its budget, so the
+ * client's timeout is set before each one. The cases about the budget expect
+ * those calls one by one; the rest are about other things and let them be.
+ */
+static void exchange_mock_init(void)
+{
+    Mockesp_http_client_Init();
+    esp_http_client_set_timeout_ms_IgnoreAndReturn(ESP_OK);
+}
+
 /* A server that takes the connection and hangs up before a status line: the
  * client reports no headers and a status of -1. That is no answer, and a GET
  * must say so instead of reporting a status nobody sent. */
@@ -308,7 +322,7 @@ TEST_CASE("a GET hung up on before its headers is an error with no status", "[kd
     kdrv_net_http_result_t         res;
     esp_http_client_handle_t const h = (esp_http_client_handle_t)&token;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_ExpectAnyArgsAndReturn(h);
     esp_http_client_open_ExpectAndReturn(h, 0, ESP_OK);
     esp_http_client_fetch_headers_ExpectAndReturn(h, (int64_t)-1);
@@ -342,7 +356,7 @@ TEST_CASE("a POST sends its body as JSON and reads the answer", "[kdrv_net]")
 
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_net_http_post_body("{}", 2U));
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_ExpectAnyArgsAndReturn(h);
     esp_http_client_set_header_ExpectAndReturn(h, "Content-Type",
                                                "application/json", ESP_OK);
@@ -408,7 +422,7 @@ TEST_CASE("a POST of length 0 sends its headers and no body", "[kdrv_net]")
     kdrv_net_http_result_t         res;
     esp_http_client_handle_t const h = (esp_http_client_handle_t)&token;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_ExpectAnyArgsAndReturn(h);
     esp_http_client_open_ExpectAndReturn(h, 0, ESP_OK);
     esp_http_client_fetch_headers_ExpectAndReturn(h, (int64_t)sizeof(answer) - 1);
@@ -429,6 +443,200 @@ TEST_CASE("a POST of length 0 sends its headers and no body", "[kdrv_net]")
                                           &res, POST_DOOR_TIMEOUT_MS));
     TEST_ASSERT_EQUAL_UINT16(200U, res.status);
     TEST_ASSERT_EQUAL_UINT32(sizeof(answer) - 1U, res.kept);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* ---- The exchange's budget ------------------------------------------------- */
+
+/* esp_http_client applies its timeout to each wait on the socket, and a read
+ * that runs out of time after some bytes hands those back as a success. So
+ * the budget is the driver's to keep: every wait is given what is left of it,
+ * and the clock below moves only when the stand-in client waits. */
+
+/** @brief The budget the cases below give an exchange: the worker's 15 s. */
+#define XCHG_BUDGET_MS  15000U
+
+/** @brief What the clock reads when an exchange starts. */
+#define XCHG_T0_MS      1000U
+
+/** @brief The length the stand-in server declares for its body. */
+#define XCHG_BODY_LEN   1000
+
+static uint32_t s_xchg_open_ms;     /**< How long the connect takes. */
+static uint32_t s_xchg_headers_ms;  /**< How long the headers take. */
+static uint32_t s_xchg_read_ms;     /**< How long each read waits. */
+static int      s_xchg_read_bytes;  /**< What each read hands back. */
+static int      s_xchg_reads;       /**< Reads the case allows; one more fails it. */
+
+/** @brief Stands in for the connect: it takes its time and succeeds. */
+static esp_err_t xchg_open(esp_http_client_handle_t client, int write_len,
+                           int num_calls)
+{
+    (void)client; (void)write_len; (void)num_calls;
+    time_stub_advance_ms(s_xchg_open_ms);
+    return ESP_OK;
+}
+
+/** @brief Stands in for the headers: a 200 that declares XCHG_BODY_LEN. */
+static int64_t xchg_headers(esp_http_client_handle_t client, int num_calls)
+{
+    (void)client; (void)num_calls;
+    time_stub_advance_ms(s_xchg_headers_ms);
+    return (int64_t)XCHG_BODY_LEN;
+}
+
+/** @brief Stands in for a read: it waits, then hands back a few bytes. */
+static int xchg_read(esp_http_client_handle_t client, char *buffer, int len,
+                     int num_calls)
+{
+    (void)client;
+    TEST_ASSERT_TRUE_MESSAGE(num_calls < s_xchg_reads,
+        "a read was asked for after the budget ran out");
+    TEST_ASSERT_TRUE(s_xchg_read_bytes <= len);
+    time_stub_advance_ms(s_xchg_read_ms);
+    (void)memset(buffer, 'x', (size_t)s_xchg_read_bytes);
+    return s_xchg_read_bytes;
+}
+
+/** @brief The clock at XCHG_T0_MS, a fresh client, and the log forgotten. */
+static void xchg_start(esp_http_client_handle_t h)
+{
+    time_stub_set_ms(XCHG_T0_MS);
+    log_stub_forget();
+    Mockesp_http_client_Init();
+    esp_http_client_init_ExpectAnyArgsAndReturn(h);
+    esp_http_client_open_Stub(xchg_open);
+}
+
+/* The bench's case (kode-sdk#215): the headers and a few bytes came, then the
+ * server said nothing more. The client's read ran out of time with those
+ * bytes and handed them back; a second read used to wait 15 s more. The GET
+ * ends when its 15 s are spent, and no read is asked for after that. */
+TEST_CASE("a GET whose body stops after some bytes ends when its budget is spent",
+          "[kdrv_net]")
+{
+    static int                     token;
+    uint8_t                        buf[64];
+    kdrv_net_http_result_t         res;
+    esp_http_client_handle_t const h = (esp_http_client_handle_t)&token;
+
+    s_xchg_open_ms    = 1000U;
+    s_xchg_headers_ms = 2000U;
+    s_xchg_read_ms    = 12000U;     /* the rest of the budget, waited out */
+    s_xchg_read_bytes = 10;
+    s_xchg_reads      = 1;
+
+    xchg_start(h);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 15000, ESP_OK);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 14000, ESP_OK);
+    esp_http_client_fetch_headers_Stub(xchg_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(h, 200);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 12000, ESP_OK);
+    esp_http_client_read_Stub(xchg_read);
+    esp_http_client_close_ExpectAndReturn(h, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(h, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT,
+        kdrv_net_http_get("http://example.invalid/slow", buf, sizeof(buf), &res,
+                          XCHG_BUDGET_MS));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(XCHG_BUDGET_MS, khal_time_ms() - XCHG_T0_MS,
+        "the GET waited past its budget");
+    TEST_ASSERT_EQUAL_UINT16(200U, res.status);
+    TEST_ASSERT_EQUAL_UINT32(10U, res.kept);
+    TEST_ASSERT_TRUE(log_stub_saw("http://example.invalid/slow: the body "
+                                  "outlasted its 15000 ms"));
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* A body that keeps coming, too slowly to finish: each read is given only
+ * what is left, so the budget holds however many reads it takes. */
+TEST_CASE("a body that comes too slowly gives each read only what is left",
+          "[kdrv_net]")
+{
+    static int                     token;
+    uint8_t                        buf[64];
+    kdrv_net_http_result_t         res;
+    esp_http_client_handle_t const h = (esp_http_client_handle_t)&token;
+
+    s_xchg_open_ms    = 0U;
+    s_xchg_headers_ms = 0U;
+    s_xchg_read_ms    = 5000U;
+    s_xchg_read_bytes = 10;
+    s_xchg_reads      = 3;
+
+    xchg_start(h);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 15000, ESP_OK);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 15000, ESP_OK);
+    esp_http_client_fetch_headers_Stub(xchg_headers);
+    esp_http_client_get_status_code_ExpectAndReturn(h, 200);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 15000, ESP_OK);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 10000, ESP_OK);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 5000, ESP_OK);
+    esp_http_client_read_Stub(xchg_read);
+    esp_http_client_close_ExpectAndReturn(h, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(h, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT,
+        kdrv_net_http_get("http://example.invalid/drip", buf, sizeof(buf), &res,
+                          XCHG_BUDGET_MS));
+    TEST_ASSERT_EQUAL_UINT32(XCHG_BUDGET_MS, khal_time_ms() - XCHG_T0_MS);
+    TEST_ASSERT_EQUAL_UINT32(30U, res.kept);
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* A connect that took the whole budget leaves the headers nothing to wait
+ * with: the request ends there, and the headers are not asked for. */
+TEST_CASE("a GET whose connect spent the budget waits for no headers",
+          "[kdrv_net]")
+{
+    static int                     token;
+    kdrv_net_http_result_t         res;
+    esp_http_client_handle_t const h = (esp_http_client_handle_t)&token;
+
+    s_xchg_open_ms = XCHG_BUDGET_MS;
+
+    xchg_start(h);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 15000, ESP_OK);
+    esp_http_client_get_and_clear_last_tls_error_ExpectAnyArgsAndReturn(ESP_FAIL);
+    esp_http_client_cleanup_ExpectAndReturn(h, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_http_get("http://example.invalid/far", NULL, 0U, &res,
+                          XCHG_BUDGET_MS));
+    TEST_ASSERT_EQUAL_UINT16(0U, res.status);
+    TEST_ASSERT_TRUE(log_stub_saw("GET http://example.invalid/far: ESP_ERR_TIMEOUT"));
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+}
+
+/* The same for a POST's body: it is not written with no time left to write
+ * it, and the request is one that could not be sent. */
+TEST_CASE("a POST whose connect spent the budget writes no body", "[kdrv_net]")
+{
+    static int                     token;
+    kdrv_net_http_result_t         res;
+    esp_http_client_handle_t const h = (esp_http_client_handle_t)&token;
+
+    s_xchg_open_ms = XCHG_BUDGET_MS;
+
+    xchg_start(h);
+    esp_http_client_set_header_ExpectAndReturn(h, "Content-Type",
+                                               "application/json", ESP_OK);
+    esp_http_client_set_timeout_ms_ExpectAndReturn(h, 15000, ESP_OK);
+    esp_http_client_get_and_clear_last_tls_error_ExpectAnyArgsAndReturn(ESP_FAIL);
+    esp_http_client_cleanup_ExpectAndReturn(h, ESP_OK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR,
+        kdrv_net_http_post("http://example.invalid/x", "{}", 2U, "application/json",
+                           NULL, 0U, &res, XCHG_BUDGET_MS));
+    TEST_ASSERT_TRUE(log_stub_saw("POST http://example.invalid/x: ESP_ERR_TIMEOUT"));
 
     Mockesp_http_client_Verify();
     Mockesp_http_client_Destroy();
@@ -658,7 +866,7 @@ TEST_CASE("a PUT sends the body with its type and the bearer, and follows no "
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     put_expect_headers(h);
     esp_http_client_open_ExpectAndReturn(h, (int)PUT_BODY_LEN, ESP_OK);
@@ -697,7 +905,7 @@ TEST_CASE("a kept PUT leaves the handle open and the next PUT to the same URL "
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
 
     /* First: opened, answered, and NOT closed. */
     esp_http_client_init_Stub(put_init_stub);
@@ -749,7 +957,7 @@ TEST_CASE("a PUT to another URL closes the kept handle first", "[kdrv_net]")
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     put_expect_headers(h);
     esp_http_client_open_ExpectAndReturn(h, (int)PUT_BODY_LEN, ESP_OK);
@@ -785,7 +993,7 @@ TEST_CASE("a kept PUT that fails does not keep its handle", "[kdrv_net]")
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     put_expect_headers(h);
     esp_http_client_open_ExpectAndReturn(h, (int)PUT_BODY_LEN, ESP_FAIL);
@@ -812,7 +1020,7 @@ TEST_CASE("a kept PUT whose connection died is an error, not a kept success",
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     esp_http_client_write_Stub(put_write_checked);
 
@@ -861,7 +1069,7 @@ TEST_CASE("a kept PUT is closed when the server does not keep the connection",
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     esp_http_client_write_Stub(put_write_checked);
 
@@ -900,7 +1108,7 @@ TEST_CASE("a renewed bearer reaches the request on a kept connection",
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     esp_http_client_write_Stub(put_write_checked);
 
@@ -970,7 +1178,7 @@ TEST_CASE("a PUT holds the HTTP client's log at INFO while it runs, and lets "
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     put_expect_headers(h);
     esp_http_client_open_Stub(put_open_held);
@@ -1025,7 +1233,7 @@ TEST_CASE("no copy of the link stays in PSRAM after a PUT that keeps nothing",
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     esp_http_client_write_Stub(put_write_checked);
 
@@ -1061,7 +1269,7 @@ TEST_CASE("a kept PUT keeps the link only with its handle, until the close",
     (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
     s_init_seen.hand_out = h;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     esp_http_client_write_Stub(put_write_checked);
 
@@ -1228,7 +1436,7 @@ static void cert_put_refused(int stack_err)
     s_init_seen.hand_out = h;
     log_stub_forget();
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(put_init_stub);
     put_expect_headers(h);
     esp_http_client_open_ExpectAndReturn(h, (int)PUT_BODY_LEN, ESP_FAIL);
@@ -1571,7 +1779,7 @@ TEST_CASE("a ranged GET asks for its bytes and reports the length of the whole",
     s_range_header = "bytes 1000-1299/5000";
     s_range_length = (int64_t)RANGE_CAP;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(range_init);
     esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=1000-1299", ESP_OK);
     esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
@@ -1604,7 +1812,7 @@ TEST_CASE("a ranged GET past four gigabytes keeps every digit", "[kdrv_net]")
     s_range_header = "bytes 6000000000-6000000299/9000000000";
     s_range_length = (int64_t)RANGE_CAP;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(range_init);
     esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range",
                                                "bytes=6000000000-6000000299", ESP_OK);
@@ -1636,7 +1844,7 @@ TEST_CASE("a ranged GET a server ignores is cut at the buffer's room", "[kdrv_ne
     s_range_header = NULL;
     s_range_length = 400000000;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(range_init);
     esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=0-299", ESP_OK);
     esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
@@ -1676,7 +1884,7 @@ TEST_CASE("a ranged GET from an offset a server ignores keeps none of the start"
     s_range_header = NULL;
     s_range_length = 400000000;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(range_init);
     esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=1000-1299", ESP_OK);
     esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
@@ -1767,7 +1975,7 @@ TEST_CASE("a ranged GET past the end is the server's 416, with its total",
     s_range_header = "bytes */5000";
     s_range_length = 0;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(range_init);
     esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=1000-1299", ESP_OK);
     esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
@@ -1802,7 +2010,7 @@ TEST_CASE("a ranged GET answered with an error page keeps none of it",
     s_range_length = 150;
     (void)memset(buf, 0x5A, sizeof(buf));
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_Stub(range_init);
     esp_http_client_set_header_ExpectAndReturn(STREAM_H, "Range", "bytes=1000-1299", ESP_OK);
     esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
@@ -1859,7 +2067,7 @@ TEST_CASE("a plain GET sends no range and reports no total", "[kdrv_net]")
     static uint8_t         buf[RANGE_CAP];
     kdrv_net_http_result_t res;
 
-    Mockesp_http_client_Init();
+    exchange_mock_init();
     esp_http_client_init_ExpectAnyArgsAndReturn(STREAM_H);
     esp_http_client_open_ExpectAndReturn(STREAM_H, 0, ESP_OK);
     esp_http_client_fetch_headers_ExpectAndReturn(STREAM_H, 0);

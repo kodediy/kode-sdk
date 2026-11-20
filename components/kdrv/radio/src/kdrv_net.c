@@ -514,13 +514,13 @@ static esp_http_client_handle_t s_stream_h;
  *
  * The smaller of the normal per-I/O timeout and what is left of the call's
  * total budget, so the budget is a real one: no single wait can carry the
- * call past it.
+ * call past it. The stream's open and an HTTP exchange are both such calls.
  *
  * @param t0     khal_time_ms() when the call began.
  * @param cap_ms The call's total budget.
  * @return Milliseconds for the next I/O; 0 when the budget is spent.
  */
-static uint32_t stream_time_left(uint32_t t0, uint32_t cap_ms)
+static uint32_t net_time_left(uint32_t t0, uint32_t cap_ms)
 {
     uint32_t const waited = khal_time_ms() - t0;
     uint32_t       left   = 0U;
@@ -631,7 +631,7 @@ kode_status_t kdrv_net_stream_open(const char *url, uint32_t offset,
     (void)memset(&cfg, 0, sizeof(cfg));
     cfg.url                   = url;
     cfg.method                = HTTP_METHOD_GET;
-    cfg.timeout_ms            = (int)stream_time_left(t0,
+    cfg.timeout_ms            = (int)net_time_left(t0,
                                     KDRV_NET_STREAM_OPEN_MAX_MS);
     /* The same bundle http_get attaches, so https:// behaves identically to
      * the run net.md recorded rather than merely similarly. */
@@ -667,7 +667,7 @@ kode_status_t kdrv_net_stream_open(const char *url, uint32_t offset,
         return KODE_ERROR;
     }
 
-    uint32_t const left = stream_time_left(t0, KDRV_NET_STREAM_OPEN_MAX_MS);
+    uint32_t const left = net_time_left(t0, KDRV_NET_STREAM_OPEN_MAX_MS);
     if ( 0U == left )
     {
         KLOG_W(TAG, "GET %.*s: the open outlasted its %lu ms", shown, url,
@@ -907,6 +907,33 @@ static esp_http_client_handle_t put_take_kept(const char *url)
 }
 
 /**
+ * @brief Give the client's next wait only what is left of the exchange's time.
+ *
+ * esp_http_client applies its timeout to each wait on the socket, not to the
+ * exchange: a read that runs out of time after some bytes hands those back,
+ * and the next read waits the whole timeout again. A server that sent part
+ * of a body and then went quiet held the worker for two timeouts. Each wait
+ * of the exchange is given what is left instead.
+ *
+ * @param h          The exchange's client.
+ * @param t0         khal_time_ms() when the exchange began.
+ * @param timeout_ms The exchange's budget.
+ * @return true when time is left and the client was given it, false when
+ *         the budget is spent.
+ */
+static bool exchange_time_set(esp_http_client_handle_t h, uint32_t t0,
+                              uint32_t timeout_ms)
+{
+    uint32_t const left = net_time_left(t0, timeout_ms);
+
+    if ( 0U < left )
+    {
+        (void)esp_http_client_set_timeout_ms(h, (int)left);
+    }
+    return (0U < left);
+}
+
+/**
  * @brief One request, one response: what GET, POST and PUT have in common.
  *
  * @param url      Target.
@@ -923,10 +950,12 @@ static esp_http_client_handle_t put_take_kept(const char *url)
  * @param buf      Where the response body goes; NULL keeps nothing.
  * @param cap      Room in @p buf.
  * @param out      Out: status and lengths.
- * @param timeout_ms Whole-exchange network timeout.
+ * @param timeout_ms The most the whole exchange may wait on the network:
+ *                 the connection, the request, the answer's headers and its
+ *                 body together.
  * @return KODE_OK once the response was read to its end, or to @p cap for a
- *         range; KODE_ERROR when the request could not be sent, KODE_TIMEOUT
- *         when the body stopped.
+ *         range; KODE_ERROR when the request could not be sent or no answer
+ *         came, KODE_TIMEOUT when the body stopped or outlasted the budget.
  */
 static kode_status_t http_exchange(const char *url,
                                    esp_http_client_method_t method,
@@ -937,6 +966,9 @@ static kode_status_t http_exchange(const char *url,
                                    kdrv_net_http_result_t *out,
                                    uint32_t timeout_ms)
 {
+    /* The budget runs from here: every wait below gets what is left of it. */
+    uint32_t const t0 = khal_time_ms();
+
     (void)memset(out, 0, sizeof(*out));
     out->content_length = -1;
     out->range_total    = -1;
@@ -1013,16 +1045,32 @@ static kode_status_t http_exchange(const char *url,
          * since the last one. */
         (void)esp_http_client_set_header(h, "Authorization", auth);
     }
+    /* A kept connection still holds the last wait of the exchange before it;
+     * this one starts with its whole budget. */
+    (void)esp_http_client_set_timeout_ms(h, (int)timeout_ms);
     esp_err_t err = esp_http_client_open(h, (int)body_len);
     if ( (ESP_OK == err) && (NULL != body) )
     {
         /* open() sent the headers with the length; the body is ours to write,
          * and a short write is a request the server will never answer. */
-        if ( esp_http_client_write(h, body, (int)body_len)
-            != (int)body_len )
+        if ( !exchange_time_set(h, t0, timeout_ms) )
+        {
+            err = ESP_ERR_TIMEOUT;
+        }
+        else if ( esp_http_client_write(h, body, (int)body_len)
+                  != (int)body_len )
         {
             err = ESP_FAIL;
         }
+        else
+        {
+            /* Written whole: the answer is next. */
+        }
+    }
+    /* The answer's headers wait with what is left, like every wait here. */
+    if ( (ESP_OK == err) && !exchange_time_set(h, t0, timeout_ms) )
+    {
+        err = ESP_ERR_TIMEOUT;
     }
     const char *verb = "GET";
     if ( HTTP_METHOD_POST == method )
@@ -1108,6 +1156,15 @@ static kode_status_t http_exchange(const char *url,
                 {
                     want = (int)room;
                 }
+            }
+            if ( !exchange_time_set(h, t0, timeout_ms) )
+            {
+                /* The budget is spent with the body unfinished: it stopped
+                 * after some bytes, or came too slowly. */
+                KLOG_W(TAG, "%s: the body outlasted its %lu ms", shown,
+                       (unsigned long)timeout_ms);
+                rc = KODE_TIMEOUT;
+                break;
             }
             int const n = esp_http_client_read(h, (char *)scratch, want);
             if ( 0 > n )

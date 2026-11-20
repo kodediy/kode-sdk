@@ -158,7 +158,10 @@ typedef struct {
  * @param buf        Out: the first @p cap bytes of the body. May be NULL.
  * @param cap        Room in @p buf.
  * @param out        Out: status, lengths and whether the body was cut.
- * @param timeout_ms Per-operation deadline handed to the client.
+ * @param timeout_ms The most the whole exchange waits on the network: the
+ *                   connection, the request, the headers and the body
+ *                   together. Past it the call ends with KODE_TIMEOUT, or
+ *                   KODE_ERROR when no answer had come.
  * @return KODE_OK, KODE_TIMEOUT, or KODE_ERROR.
  */
 kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
@@ -183,7 +186,10 @@ kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
  * @param buf        Out: the bytes. Required.
  * @param cap        Room in @p buf, above 0.
  * @param out        Out: status, lengths, the total and whether more follows.
- * @param timeout_ms Per-operation deadline handed to the client.
+ * @param timeout_ms The most the whole exchange waits on the network: the
+ *                   connection, the request, the headers and the body
+ *                   together. Past it the call ends with KODE_TIMEOUT, or
+ *                   KODE_ERROR when no answer had come.
  * @return KODE_OK, KODE_TIMEOUT, or KODE_ERROR (also for a NULL @p url,
  *         @p buf or @p out, a zero @p cap, or a range that runs past the last
  *         offset there is).
@@ -203,7 +209,10 @@ kode_status_t kdrv_net_http_get_range(const char *url, uint64_t offset,
  * @param buf        Out: the first @p cap bytes of the answer. May be NULL.
  * @param cap        Room in @p buf.
  * @param out        Out: status, lengths and whether the body was cut.
- * @param timeout_ms Per-operation deadline handed to the client.
+ * @param timeout_ms The most the whole exchange waits on the network: the
+ *                   connection, the request, the headers and the body
+ *                   together. Past it the call ends with KODE_TIMEOUT, or
+ *                   KODE_ERROR when no answer had come.
  * @return KODE_OK, KODE_TIMEOUT, or KODE_ERROR (also for a NULL @p url or
  *         @p out, or a NULL @p body with @p len above 0).
  */
