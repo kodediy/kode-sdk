@@ -20,6 +20,7 @@
 #include "kqp.h"
 #include "kode_init.h"
 #include "kode_http_off.h"   /* kode_http_off_t, KODE_HTTP_OFF_MAX */
+#include "kode_http_header.h" /* kode_http_header_t, the HTTP calls' own headers */
 
 #ifdef __cplusplus
 extern "C" {
@@ -322,6 +323,9 @@ kode_status_t kode_sys_mqtt_publish(const char *topic, const void *data,
  * runs at KODE_PRIO_NET (2), so a subscriber above it takes each message before
  * the next is read; one at KODE_PRIO_USER_LOW (1), below AO_Net, does not, and
  * must size its queue for the broker's rate.
+ *
+ * AO_Net subscribes it again after a reconnect, up to KODE_MQTT_SUBS_MAX
+ * topics at once; one past them is refused.
  * @param topic The topic filter, shorter than KODE_SYS_MQTT_TOPIC_MAX.
  * @return As the commands' rule above; KODE_DENIED for a topic that does not
  *         fit, and without CONFIG_KODEOS_NET.
@@ -1454,20 +1458,31 @@ kode_status_t kode_sys_net_ping(QActive *me, const char *host, uint8_t count);
 
 /**
  * @brief GET a URL into @p buf; https:// is verified.
- * @note LENT: AO_Net's worker writes @p buf until NET_HTTP_RSP_SIG arrives. A 404
- *       is KODE_OK with @c result.status 404.
- * @param me  The asking AO; NET_HTTP_RSP_SIG answers it.
- * @param url Shorter than KODE_SYS_NET_URL_MAX.
- * @param buf Where the body goes, its first @p cap bytes; NULL keeps none.
- * @param cap Its room.
- * @return As the requests' rules above.
+ * @note LENT: AO_Net's worker reads @p headers and writes @p buf until
+ *       NET_HTTP_RSP_SIG arrives. A 404 is KODE_OK with @c result.status 404.
+ * @note Headers of the app's own are sent as written, after the call's own; one
+ *       of the same name replaces the call's (the User-Agent, say). A list is
+ *       refused whole, never cut: more than KODE_HTTP_HEADERS_MAX headers, an
+ *       empty name, a name with a colon, a NULL value, a CR or a LF in a name
+ *       or a value, or a name and a value longer than KODE_HTTP_HEADER_MAX
+ *       together. While they go out the HTTP client's log stays at INFO, so a
+ *       bearer among them is never written to the log.
+ * @param me      The asking AO; NET_HTTP_RSP_SIG answers it.
+ * @param url     Shorter than KODE_SYS_NET_URL_MAX.
+ * @param buf     Where the body goes, its first @p cap bytes; NULL keeps none.
+ * @param cap     Its room.
+ * @param headers The app's own, ended by a NULL name; NULL sends none.
+ * @return As the requests' rules above; KODE_DENIED also for @p headers that
+ *         are refused.
  */
-kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap);
+kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_t cap,
+                                const kode_http_header_t *headers);
 
 /**
  * @brief GET the @p cap bytes of a URL from @p offset on: a resource too big
  *        for one buffer, a range at a time.
- * @note LENT: AO_Net's worker writes @p buf until NET_HTTP_RSP_SIG arrives.
+ * @note LENT: AO_Net's worker reads @p headers and writes @p buf until
+ *       NET_HTTP_RSP_SIG arrives.
  * @note The answer's @c result.status says where the bytes start: 206, at
  *       @p offset, and @c range_total is then the length of the whole
  *       resource when the server says it; 200, at byte 0 - the server ignores
@@ -1483,11 +1498,15 @@ kode_status_t kode_sys_http_get(QActive *me, const char *url, void *buf, uint32_
  * @param offset The first byte wanted.
  * @param buf    Where the bytes go.
  * @param cap    Its room, above 0.
+ * @param headers As kode_sys_http_get(); a Range among them is refused too,
+ *               since the call's own says which bytes come back.
  * @return As the requests' rules above; KODE_DENIED also for a NULL @p buf, a
- *         zero @p cap, or a range that runs past KODE_HTTP_OFF_MAX.
+ *         zero @p cap, a range that runs past KODE_HTTP_OFF_MAX, or @p headers
+ *         that are refused.
  */
 kode_status_t kode_sys_http_get_range(QActive *me, const char *url, kode_http_off_t offset,
-                                      void *buf, uint32_t cap);
+                                      void *buf, uint32_t cap,
+                                      const kode_http_header_t *headers);
 
 /** @brief The longest URL a download into a file names, NUL included. */
 #define KODE_SYS_HTTP_FILE_URL_MAX  256U
@@ -1543,7 +1562,8 @@ kode_status_t kode_sys_http_file_stop(QActive *me);
 
 /**
  * @brief POST @p body to a URL and keep the answer's body in @p buf.
- * @note LENT: @p body is read and @p buf written in place until NET_HTTP_RSP_SIG.
+ * @note LENT: @p body and @p headers are read and @p buf written in place until
+ *       NET_HTTP_RSP_SIG.
  * @param me    The asking AO; NET_HTTP_RSP_SIG answers it, @c post true.
  * @param url   Shorter than KODE_SYS_NET_URL_MAX.
  * @param body  The body; NULL only when @p len is 0.
@@ -1551,10 +1571,14 @@ kode_status_t kode_sys_http_file_stop(QActive *me);
  * @param ctype Content-Type, not empty, shorter than KODE_SYS_NET_CTYPE_MAX; NULL sends none.
  * @param buf   Where the answer's body goes; NULL keeps none.
  * @param cap   Its room.
- * @return As the requests' rules above.
+ * @param headers As kode_sys_http_get(); a Content-Type among them replaces
+ *              @p ctype, and the Content-Length is always the body's.
+ * @return As the requests' rules above; KODE_DENIED also for @p headers that
+ *         are refused.
  */
 kode_status_t kode_sys_http_post(QActive *me, const char *url, const void *body, uint32_t len,
-                                 const char *ctype, void *buf, uint32_t cap);
+                                 const char *ctype, void *buf, uint32_t cap,
+                                 const kode_http_header_t *headers);
 
 /**
  * @brief Send one UDP datagram.

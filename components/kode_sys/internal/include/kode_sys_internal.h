@@ -594,6 +594,19 @@ kode_status_t kode_block_net_ping(const char *host, uint8_t count,
                                   kode_sys_ping_stats_t *stats);
 
 /**
+ * @brief Will the HTTP calls send @p headers as they are? Does not block: the
+ *        check the HTTP calls make first, for kode.h to say which header fails.
+ * @param headers The caller's own, ended by a NULL name; NULL is a list of none.
+ * @param ranged  The list goes with a ranged GET.
+ * @param bad     Out, may be NULL: the index of the first header refused, or
+ *                KODE_HTTP_HEADERS_MAX when the list is too long; untouched
+ *                when the list is sent.
+ * @return true when every header goes out as written; true without
+ *         CONFIG_KODEOS_NET, where nothing is sent.
+ */
+bool kode_sys_http_headers_ok(const kode_http_header_t *headers, bool ranged, uint32_t *bad);
+
+/**
  * @brief GET @p url into @p buf.
  * @note https:// verifies against the Mozilla certificate bundle.
  *
@@ -603,11 +616,13 @@ kode_status_t kode_block_net_ping(const char *host, uint8_t count,
  * @param url The address.
  * @param buf Out: the first @p cap bytes of the body, raw; may be NULL when only the status is wanted.
  * @param cap How many bytes @p buf holds.
+ * @param headers Headers of the caller's own, ended by a NULL name; NULL sends none.
  * @param out Out: status, lengths, and whether the body was longer than @p cap; required.
- * @return KODE_OK when the transport worked; KODE_ERROR for a NULL @p out;
- *         otherwise the transport's status.
+ * @return KODE_OK when the transport worked; KODE_ERROR for a NULL @p out or
+ *         @p headers kode_sys_http_headers_ok() refuses; otherwise the transport's status.
  */
 kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t cap,
+                                         const kode_http_header_t *headers,
                                          kode_sys_http_result_t *out);
 
 /**
@@ -619,11 +634,13 @@ kode_status_t kode_block_http_get_buffer(const char *url, void *buf, uint32_t ca
  * @param offset The first byte wanted.
  * @param buf    Where the bytes go.
  * @param cap    Its room, above 0.
+ * @param headers As kode_block_http_get_buffer(); a Range among them is refused.
  * @param out    Out: status, lengths and the total; required.
  * @return KODE_OK, KODE_TIMEOUT or KODE_ERROR; KODE_DENIED without CONFIG_KODEOS_NET.
  */
 kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *buf,
-                                        uint32_t cap, kode_sys_http_result_t *out);
+                                        uint32_t cap, const kode_http_header_t *headers,
+                                        kode_sys_http_result_t *out);
 
 /**
  * @brief POST @p body to @p url and read the answer into @p buf.
@@ -634,14 +651,16 @@ kode_status_t kode_block_http_get_range(const char *url, uint64_t offset, void *
  * @param ctype The Content-Type header, or NULL for none.
  * @param buf   Out: the first @p cap bytes of the answer; may be NULL.
  * @param cap   How many bytes @p buf holds.
+ * @param headers As kode_block_http_get_buffer().
  * @param out   Out: status, lengths, and whether the answer was cut; required.
  * @return KODE_OK once the server answered, whatever its status; KODE_TIMEOUT;
- *         KODE_ERROR for a NULL @p url or @p out, or a failed request;
- *         KODE_DENIED without a network.
+ *         KODE_ERROR for a NULL @p url or @p out, refused @p headers, or a
+ *         failed request; KODE_DENIED without a network.
  */
 kode_status_t kode_block_http_post_buffer(const char *url, const void *body,
                                           uint32_t len, const char *ctype, void *buf,
-                                          uint32_t cap, kode_sys_http_result_t *out);
+                                          uint32_t cap, const kode_http_header_t *headers,
+                                          kode_sys_http_result_t *out);
 
 /**
  * @brief Send one UDP datagram to @p host : @p port.

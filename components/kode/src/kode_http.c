@@ -205,14 +205,41 @@ static void http_fail(const char *url, kode_status_t rc)
 }
 
 /**
+ * @brief Can @p headers go out as written? Sets the error when not.
+ * @param headers The app's own, ended by a NULL name; NULL for none.
+ * @param ranged  They go with a range.
+ * @return true when every one of them goes out.
+ */
+static bool headers_ok(const kode_http_header_t *headers, bool ranged)
+{
+    uint32_t   bad = 0U;
+    bool const ok  = kode_sys_http_headers_ok(headers, ranged, &bad);
+
+    if ( ok )
+    {
+        /* every one goes out */
+    }
+    else if ( KODE_HTTP_HEADERS_MAX <= bad )
+    {
+        kode_err_set("more than %u headers", (unsigned)KODE_HTTP_HEADERS_MAX);
+    }
+    else
+    {
+        kode_err_set("header %u cannot be sent as written", (unsigned)bad);
+    }
+    return ok;
+}
+
+/**
  * @brief The exchange itself, under the HTTP lock.
- * @param s    The task's state; its body block exists.
- * @param url  The address.
- * @param body The text to post; NULL for a GET.
+ * @param s       The task's state; its body block exists.
+ * @param url     The address.
+ * @param body    The text to post; NULL for a GET.
+ * @param headers The app's own; NULL for none.
  * @return The answer's text; "" with the error set when there is none.
  */
 static const char *http_text_exchange(struct kode_http_state *s, const char *url,
-                                      const char *body)
+                                      const char *body, const kode_http_header_t *headers)
 {
     kode_sys_http_result_t res  = { .content_length = -1, .range_total = -1 };
     const char            *text = s_no_text;
@@ -220,12 +247,12 @@ static const char *http_text_exchange(struct kode_http_state *s, const char *url
 
     if ( NULL == body )
     {
-        rc = kode_block_http_get_buffer(url, s->body, KODE_HTTP_BODY_MAX, &res);
+        rc = kode_block_http_get_buffer(url, s->body, KODE_HTTP_BODY_MAX, headers, &res);
     }
     else
     {
         rc = kode_block_http_post_buffer(url, body, (uint32_t)strlen(body), ctype_for(body),
-                                         s->body, KODE_HTTP_BODY_MAX, &res);
+                                         s->body, KODE_HTTP_BODY_MAX, headers, &res);
     }
     if ( KODE_OK != rc )
     {
@@ -247,13 +274,15 @@ static const char *http_text_exchange(struct kode_http_state *s, const char *url
 
 /**
  * @brief One request, from the checks to the answer.
- * @param name The public name of the call.
- * @param url  The address.
- * @param body The text to post; NULL for a GET.
- * @param post true for a POST, which refuses a NULL @p body.
+ * @param name    The public name of the call.
+ * @param url     The address.
+ * @param body    The text to post; NULL for a GET.
+ * @param post    true for a POST, which refuses a NULL @p body.
+ * @param headers The app's own; NULL for none.
  * @return The answer's text; "" with the error set when there is none.
  */
-static const char *http_request(const char *name, const char *url, const char *body, bool post)
+static const char *http_request(const char *name, const char *url, const char *body, bool post,
+                                const kode_http_header_t *headers)
 {
     const char *text = s_no_text;
 
@@ -286,9 +315,13 @@ static const char *http_request(const char *name, const char *url, const char *b
             {
                 kode_err_set("no body to post");
             }
+            else if ( !headers_ok(headers, false) )
+            {
+                /* the error is set */
+            }
             else if ( kode_net_ready() && body_ensure(s) )
             {
-                text = http_text_exchange(s, url, body);
+                text = http_text_exchange(s, url, body, headers);
             }
             else
             {
@@ -300,14 +333,14 @@ static const char *http_request(const char *name, const char *url, const char *b
     return text;
 }
 
-const char *kode_http_get(const char *url)
+const char *kode_http_get(const char *url, const kode_http_header_t *headers)
 {
-    return http_request("kode_http_get", url, NULL, false);
+    return http_request("kode_http_get", url, NULL, false, headers);
 }
 
-const char *kode_http_post(const char *url, const char *body)
+const char *kode_http_post(const char *url, const char *body, const kode_http_header_t *headers)
 {
-    return http_request("kode_http_post", url, body, true);
+    return http_request("kode_http_post", url, body, true, headers);
 }
 
 /**
@@ -342,13 +375,16 @@ static kode_http_off_t total_of(int64_t total)
  * @param cap    Its room.
  * @param got    Out, may be NULL: the bytes written.
  * @param total  Out, may be NULL: the length of the whole, 0 for none.
+ * @param headers The app's own; NULL for none.
  * @return true when the server answered; false with the error set.
  */
 static bool range_exchange(struct kode_http_state *s, const char *url, kode_http_off_t offset,
-                           void *buf, uint32_t cap, uint32_t *got, kode_http_off_t *total)
+                           void *buf, uint32_t cap, uint32_t *got, kode_http_off_t *total,
+                           const kode_http_header_t *headers)
 {
     kode_sys_http_result_t res = { .content_length = -1, .range_total = -1 };
-    kode_status_t const    rc  = kode_block_http_get_range(url, (uint64_t)offset, buf, cap, &res);
+    kode_status_t const    rc  = kode_block_http_get_range(url, (uint64_t)offset, buf, cap,
+                                                           headers, &res);
 
     if ( KODE_OK != rc )
     {
@@ -371,7 +407,8 @@ static bool range_exchange(struct kode_http_state *s, const char *url, kode_http
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 bool kode_http_get_range(const char *url, kode_http_off_t offset, void *buf, uint32_t cap,
-                         uint32_t *got, kode_http_off_t *total)
+                         uint32_t *got, kode_http_off_t *total,
+                         const kode_http_header_t *headers)
 {
     bool answered = false;
 
@@ -412,9 +449,13 @@ bool kode_http_get_range(const char *url, kode_http_off_t offset, void *buf, uin
             {
                 kode_err_set("the range runs past the last offset");
             }
+            else if ( !headers_ok(headers, true) )
+            {
+                /* the error is set */
+            }
             else if ( kode_net_ready() )
             {
-                answered = range_exchange(s, url, offset, buf, cap, got, total);
+                answered = range_exchange(s, url, offset, buf, cap, got, total, headers);
             }
             else
             {

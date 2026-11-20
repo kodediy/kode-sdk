@@ -144,8 +144,8 @@ static void link_standard_layer(void)
     (void)kode_ble_set_value("x", NULL, 0U);
     (void)kode_ble_notify("x", NULL, 0U);
 
-    (void)kode_http_get("http://x");
-    (void)kode_http_post("http://x", "y");
+    (void)kode_http_get("http://x", NULL);
+    (void)kode_http_post("http://x", "y", NULL);
     (void)kode_http_status();
     (void)kode_net_ping("x", 1U);
     (void)kode_net_resolve("x", NULL);
@@ -267,8 +267,8 @@ static void link_file_net_requests(void)
     (void)kode_sys_file_write(&s_link_ao, "/storage/x", buf, 1U, false);
     (void)kode_sys_net_lookup(&s_link_ao, "example.com");
     (void)kode_sys_net_ping(&s_link_ao, "example.com", 1U);
-    (void)kode_sys_http_get(&s_link_ao, "http://example.com/", buf, 1U);
-    (void)kode_sys_http_post(&s_link_ao, "http://example.com/", buf, 1U, NULL, buf, 1U);
+    (void)kode_sys_http_get(&s_link_ao, "http://example.com/", buf, 1U, NULL);
+    (void)kode_sys_http_post(&s_link_ao, "http://example.com/", buf, 1U, NULL, buf, 1U, NULL);
     (void)kode_sys_udp_send(&s_link_ao, "example.com", 9U, buf, 1U);
 }
 

@@ -143,6 +143,36 @@ typedef struct {
                                *   request.                                 */
 } kdrv_net_http_result_t;
 
+#define KDRV_NET_HEADERS_MAX  8U     /**< Headers of the caller's own one request sends at most. */
+#define KDRV_NET_HEADER_MAX   4000U  /**< Bytes of one such header's name and value together.   */
+#define KDRV_NET_HEADERS_ROOM (KDRV_NET_HEADERS_MAX + 1U) /**< Entries a copy of a list holds: the most sent and the end. */
+
+/** @brief One request header of the caller's own; a list ends at a NULL @c name. */
+typedef struct {
+    const char *name;   /**< "Authorization", "X-Api-Key"...; NULL ends the list. */
+    const char *value;  /**< Sent as written; "" sends an empty one.            */
+} kdrv_net_header_t;
+
+/**
+ * @brief Will the HTTP calls send @p headers as they are?
+ *
+ * A list is refused whole, never cut: more than KDRV_NET_HEADERS_MAX headers,
+ * an empty name, a name with a colon, a NULL value, a CR or a LF in a name or
+ * a value (it would end the header there and start another), a name and a
+ * value longer than KDRV_NET_HEADER_MAX together, or a Range on a ranged GET,
+ * whose own Range says which bytes come back. One of the same name replaces
+ * the Content-Type or the User-Agent the call would send; Content-Length is
+ * always the body's.
+ *
+ * @param headers The list, ended by a NULL name; NULL is a list of none.
+ * @param ranged  The list goes with kdrv_net_http_get_range().
+ * @param bad     Out, may be NULL: the index of the first header refused, or
+ *                KDRV_NET_HEADERS_MAX when the list is too long; untouched
+ *                when the list is sent.
+ * @return true when every header goes out as written.
+ */
+bool kdrv_net_headers_ok(const kdrv_net_header_t *headers, bool ranged, uint32_t *bad);
+
 /**
  * @brief GET @p url into @p buf. Blocks. https:// verifies against the
  *        Mozilla certificate bundle.
@@ -155,6 +185,11 @@ typedef struct {
  * it said. KODE_OK means the transport worked, nothing more - conflating the
  * two would leave a caller unable to tell "no such page" from "no network".
  *
+ * The client's own log tag is held at INFO while a request with @p headers
+ * goes out: at DEBUG it writes the headers whole, a bearer included.
+ *
+ * @param headers    Headers of the caller's own, ended by a NULL name; NULL
+ *                   sends none. Read only during the call.
  * @param buf        Out: the first @p cap bytes of the body. May be NULL.
  * @param cap        Room in @p buf.
  * @param out        Out: status, lengths and whether the body was cut.
@@ -162,9 +197,11 @@ typedef struct {
  *                   connection, the request, the headers and the body
  *                   together. Past it the call ends with KODE_TIMEOUT, or
  *                   KODE_ERROR when no answer had come.
- * @return KODE_OK, KODE_TIMEOUT, or KODE_ERROR.
+ * @return KODE_OK, KODE_TIMEOUT, or KODE_ERROR (also for @p headers
+ *         kdrv_net_headers_ok() refuses).
  */
-kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
+kode_status_t kdrv_net_http_get(const char *url, const kdrv_net_header_t *headers,
+                                uint8_t *buf, uint32_t cap,
                                 kdrv_net_http_result_t *out,
                                 uint32_t timeout_ms);
 
@@ -183,6 +220,7 @@ kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
  *
  * @param url        Target.
  * @param offset     The first byte wanted.
+ * @param headers    As for kdrv_net_http_get(); a Range among them is refused.
  * @param buf        Out: the bytes. Required.
  * @param cap        Room in @p buf, above 0.
  * @param out        Out: status, lengths, the total and whether more follows.
@@ -191,10 +229,11 @@ kode_status_t kdrv_net_http_get(const char *url, uint8_t *buf, uint32_t cap,
  *                   together. Past it the call ends with KODE_TIMEOUT, or
  *                   KODE_ERROR when no answer had come.
  * @return KODE_OK, KODE_TIMEOUT, or KODE_ERROR (also for a NULL @p url,
- *         @p buf or @p out, a zero @p cap, or a range that runs past the last
- *         offset there is).
+ *         @p buf or @p out, a zero @p cap, a range that runs past the last
+ *         offset there is, or @p headers kdrv_net_headers_ok() refuses).
  */
 kode_status_t kdrv_net_http_get_range(const char *url, uint64_t offset,
+                                      const kdrv_net_header_t *headers,
                                       uint8_t *buf, uint32_t cap,
                                       kdrv_net_http_result_t *out,
                                       uint32_t timeout_ms);
@@ -206,6 +245,7 @@ kode_status_t kdrv_net_http_get_range(const char *url, uint64_t offset,
  * @param body       The request body; may be NULL only when @p len is 0.
  * @param len        Bytes of @p body; 0 sends an empty body.
  * @param ctype      Content-Type header, or NULL to send none.
+ * @param headers    As for kdrv_net_http_get().
  * @param buf        Out: the first @p cap bytes of the answer. May be NULL.
  * @param cap        Room in @p buf.
  * @param out        Out: status, lengths and whether the body was cut.
@@ -214,10 +254,12 @@ kode_status_t kdrv_net_http_get_range(const char *url, uint64_t offset,
  *                   together. Past it the call ends with KODE_TIMEOUT, or
  *                   KODE_ERROR when no answer had come.
  * @return KODE_OK, KODE_TIMEOUT, or KODE_ERROR (also for a NULL @p url or
- *         @p out, or a NULL @p body with @p len above 0).
+ *         @p out, a NULL @p body with @p len above 0, or @p headers
+ *         kdrv_net_headers_ok() refuses).
  */
 kode_status_t kdrv_net_http_post(const char *url, const char *body,
                                  uint32_t len, const char *ctype,
+                                 const kdrv_net_header_t *headers,
                                  uint8_t *buf, uint32_t cap,
                                  kdrv_net_http_result_t *out,
                                  uint32_t timeout_ms);

@@ -70,6 +70,18 @@ typedef enum {
     MQTT_STOPPING,   /**< Teardown with the worker.                         */
 } mqtt_phase_t;
 
+/**
+ * @brief The topics a client of the user's subscribed, kept in PSRAM.
+ *
+ * That client runs a clean session, so a broker that drops it forgets its
+ * subscriptions, and esp-mqtt reconnects without them: AO_Net subscribes them
+ * again on the next connect.
+ */
+typedef struct {
+    char topic[KODE_MQTT_SUBS_MAX][KODE_MQTT_TOPIC_MAX];
+} MqttSubs;
+_Static_assert(KODE_MQTT_SUBS_MAX <= UINT8_MAX, "a place among the kept topics is a uint8_t");
+
 /* ---- A URL as a medium ----------------------------------------------------
  * Two buffers, lent by index and not refilled until the borrower gives one
  * back, so chunk N+1 is read while AO_AppMgr writes chunk N to flash.
@@ -165,6 +177,8 @@ typedef struct {
     char                   ctype[KODE_NET_CTYPE_MAX]; /**< A POST's type, or "". */
     const char            *body;   /**< A POST's body, lent.                     */
     uint32_t               len;    /**< Its bytes.                               */
+    kdrv_net_header_t      own[KDRV_NET_HEADERS_ROOM]; /**< HTTP: the asker's headers, copied. */
+    const kdrv_net_header_t *headers; /**< @c own, or NULL for none.            */
     uint8_t               *buf;    /**< HTTP: the answer's body, lent.           */
     uint32_t               cap;    /**< Its room.                                */
     const void            *data;   /**< UDP: the datagram, lent.                 */
@@ -467,6 +481,9 @@ typedef struct {
 #endif
     uint8_t  phase;    /**< mqtt_phase_t                                    */
     uint8_t  err;      /**< kdrv_mqtt_err_t: why MQTT is not up.            */
+    MqttSubs *subs;    /**< PSRAM, taken with the first topic kept; NULL
+                        *   while none is.                                   */
+    uint8_t  nsubs;    /**< Topics in @c subs.                              */
 
     QActive *reader;                     /**< Who has the transfer open.     */
     uint8_t *sbuf[NET_STREAM_BUFS];      /**< PSRAM, allocated on first use. */
@@ -684,6 +701,7 @@ typedef struct {
     const void *body;    /**< A POST's body, lent.                   */
     uint32_t    len;     /**< Its bytes.                             */
     const char *ctype;   /**< A POST's Content-Type; NULL for none.  */
+    const void *headers; /**< The asker's own, lent; NULL for none. */
     void       *buf;     /**< Where the answer's body goes, lent.    */
     uint32_t    cap;     /**< Its room.                              */
 } http_ask_t;
@@ -725,30 +743,34 @@ static kode_status_t http_ask(QActive *who, const char *url, const http_ask_t *q
     {
         (void)snprintf(e->ctype, sizeof(e->ctype), "%s", q->ctype);
     }
-    e->body = q->body;
-    e->len  = q->len;
-    e->buf  = q->buf;
-    e->cap  = q->cap;
-    e->who  = who;
-    e->rsp  = a;
+    e->body    = q->body;
+    e->len     = q->len;
+    e->headers = q->headers;
+    e->buf     = q->buf;
+    e->cap     = q->cap;
+    e->who     = who;
+    e->rsp     = a;
     return kaos_ask_post(&s_net_doors[NET_ASK_HTTP], who, AO_Net, &e->super, &a->super,
                          KQP_NET_CMD_MARGIN);
 }
 
 kode_status_t net_http_ask(QActive *who, bool post, const char *url, const void *body,
-                           uint32_t len, const char *ctype, void *buf, uint32_t cap)
+                           uint32_t len, const char *ctype,
+                           const void *headers, void *buf, uint32_t cap)
 {
     http_ask_t const q = { .post = post, .ranged = false, .offset = 0U, .body = body,
-                           .len = len, .ctype = ctype, .buf = buf, .cap = cap };
+                           .len = len, .ctype = ctype, .headers = headers, .buf = buf,
+                           .cap = cap };
 
     return http_ask(who, url, &q);
 }
 
-kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset, void *buf,
-                                 uint32_t cap)
+kode_status_t net_http_range_ask(QActive *who, const char *url, uint64_t offset,
+                                 const void *headers, void *buf, uint32_t cap)
 {
     http_ask_t const q = { .post = false, .ranged = true, .offset = offset, .body = NULL,
-                           .len = 0U, .ctype = NULL, .buf = buf, .cap = cap };
+                           .len = 0U, .ctype = NULL, .headers = headers, .buf = buf,
+                           .cap = cap };
 
     return http_ask(who, url, &q);
 }
@@ -1461,6 +1483,136 @@ static void mqtt_publish_refused(void)
     mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_REFUSED);
 }
 
+/**
+ * @brief Where @p topic is kept.
+ * @return Its place in @c subs, or KODE_MQTT_SUBS_MAX when it is not kept.
+ */
+static uint8_t mqtt_subs_find(Net const * const me, const char *topic)
+{
+    uint8_t at = (uint8_t)KODE_MQTT_SUBS_MAX;
+
+    for ( uint8_t i = 0U; (i < me->nsubs) && ((uint8_t)KODE_MQTT_SUBS_MAX == at); ++i )
+    {
+        if ( strcmp(me->subs->topic[i], topic) == 0 )
+        {
+            at = i;
+        }
+    }
+    return at;
+}
+
+/**
+ * @brief Whether @p topic can be kept: it is kept already, or a place is free.
+ * @return false when all KODE_MQTT_SUBS_MAX places are taken, which is logged.
+ */
+static bool mqtt_subs_room(Net const * const me, const char *topic)
+{
+    bool room = true;
+
+    if ( ((uint8_t)KODE_MQTT_SUBS_MAX <= me->nsubs)
+        && ((uint8_t)KODE_MQTT_SUBS_MAX == mqtt_subs_find(me, topic)) )
+    {
+        KLOG_W(TAG, "subscribe to '%s' refused: %u topics are kept already for a "
+                    "reconnect; `mqtt_unsub` one first", topic,
+               (unsigned)KODE_MQTT_SUBS_MAX);
+        room = false;
+    }
+    return room;
+}
+
+/**
+ * @brief Keep @p topic, which mqtt_subs_room() found room for. The PSRAM
+ *        block is taken with the first topic.
+ * @return false when PSRAM refused the block, which is logged.
+ */
+static bool mqtt_subs_keep(Net * const me, const char *topic)
+{
+    bool kept = true;
+
+    if ( NULL == me->subs )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+        me->subs = (MqttSubs *)khal_alloc_psram(sizeof(uint32_t), sizeof(MqttSubs));
+    }
+    if ( NULL == me->subs )
+    {
+        KLOG_W(TAG, "subscribe to '%s' refused: no memory to keep it for a "
+                    "reconnect", topic);
+        kept = false;
+    }
+    else if ( (uint8_t)KODE_MQTT_SUBS_MAX == mqtt_subs_find(me, topic) )
+    {
+        (void)snprintf(me->subs->topic[me->nsubs], sizeof(me->subs->topic[me->nsubs]),
+                       "%s", topic);
+        me->nsubs++;
+    }
+    else
+    {
+        /* Kept already: a second `mqtt_sub` of the same topic. */
+    }
+    return kept;
+}
+
+/** @brief Stop keeping @p topic; the last one takes its place. */
+static void mqtt_subs_drop(Net * const me, const char *topic)
+{
+    uint8_t const at = mqtt_subs_find(me, topic);
+
+    if ( (uint8_t)KODE_MQTT_SUBS_MAX != at )
+    {
+        me->nsubs--;
+        if ( at != me->nsubs )
+        {
+            (void)memcpy(me->subs->topic[at], me->subs->topic[me->nsubs],
+                         sizeof(me->subs->topic[at]));
+        }
+    }
+}
+
+/** @brief The client stopped: no topic is kept, and the block goes back. */
+static void mqtt_subs_forget(Net * const me)
+{
+    if ( NULL != me->subs )
+    {
+        khal_free(me->subs);
+        me->subs = NULL;
+    }
+    me->nsubs = 0U;
+}
+
+/**
+ * @brief The client connected: subscribe every kept topic again, unless the
+ *        broker says it kept the session, subscriptions and all.
+ * @param me              The AO.
+ * @param session_present The CONNACK's flag.
+ */
+static void mqtt_subs_again(Net * const me, bool session_present)
+{
+    if ( (!session_present) && (0U < me->nsubs) )
+    {
+        uint8_t taken = 0U;
+
+        for ( uint8_t i = 0U; i < me->nsubs; ++i )
+        {
+            if ( kdrv_net_mqtt_subscribe(me->subs->topic[i]) == KODE_OK )
+            {
+                taken++;
+            }
+        }
+        if ( taken == me->nsubs )
+        {
+            KLOG_N(TAG, "subscribed again to %u topics after the reconnect",
+                   (unsigned)taken);
+        }
+        else
+        {
+            KLOG_W(TAG, "subscribed again to %u of %u topics after the reconnect; "
+                        "the rest are tried at the next one", (unsigned)taken,
+                   (unsigned)me->nsubs);
+        }
+    }
+}
+
 #if CONFIG_KODEOS_CHANNEL
 /** @brief Refuse an MQTT request because the Kode channel holds the client.
  *
@@ -1899,17 +2051,18 @@ static kode_status_t net_ask_run(void *arg, uint32_t *value)
         {
             ctype = j->ctype;
         }
-        st = kdrv_net_http_post(j->url, j->body, j->len, ctype, j->buf, j->cap,
-                                &j->result, KODE_HTTP_TIMEOUT_MS);
+        st = kdrv_net_http_post(j->url, j->body, j->len, ctype, j->headers, j->buf,
+                                j->cap, &j->result, KODE_HTTP_TIMEOUT_MS);
     }
     else if ( j->ranged )
     {
-        st = kdrv_net_http_get_range(j->url, j->offset, j->buf, j->cap, &j->result,
-                                     KODE_HTTP_TIMEOUT_MS);
+        st = kdrv_net_http_get_range(j->url, j->offset, j->headers, j->buf, j->cap,
+                                     &j->result, KODE_HTTP_TIMEOUT_MS);
     }
     else
     {
-        st = kdrv_net_http_get(j->url, j->buf, j->cap, &j->result, KODE_HTTP_TIMEOUT_MS);
+        st = kdrv_net_http_get(j->url, j->headers, j->buf, j->cap, &j->result,
+                               KODE_HTTP_TIMEOUT_MS);
     }
     return st;
 }
@@ -2020,6 +2173,41 @@ static void ask_refuse(QEvt const * const e, kode_status_t rc)
 }
 
 /**
+ * @brief Copy an asker's lent headers into the job, so the driver reads a
+ *        list of its own type.
+ *
+ * The list is lent in kdrv_net_header_t's layout and copied entry by entry, up
+ * to its end or to the room's last entry: a list longer than the driver sends
+ * then reaches the driver too long, and is refused there.
+ *
+ * @param own  The job's room.
+ * @param lent The asker's list; NULL for none.
+ * @return @p own, or NULL for none.
+ */
+static const kdrv_net_header_t *headers_take(kdrv_net_header_t own[KDRV_NET_HEADERS_ROOM],
+                                             const void *lent)
+{
+    const kdrv_net_header_t *list = NULL;
+
+    if ( NULL != lent )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; the list is lent untyped in the event; it is addressed in the driver's layout and read by memcpy */
+        const kdrv_net_header_t * const from = (const kdrv_net_header_t *)lent;
+        uint32_t i   = 0U;
+        bool     end = false;
+
+        while ( (!end) && (KDRV_NET_HEADERS_ROOM > i) )
+        {
+            (void)memcpy(&own[i], &from[i], sizeof(own[i]));
+            end = (NULL == own[i].name);
+            i++;
+        }
+        list = own;
+    }
+    return list;
+}
+
+/**
  * @brief Make an ask the worker's job, or refuse it while the worker is busy.
  * @param me The AO.
  * @param e  NET_HOST_ASK_SIG, NET_HTTP_ASK_SIG or NET_UDP_ASK_SIG.
@@ -2071,6 +2259,7 @@ static void ask_take(Net * const me, QEvt const * const e)
         /* cppcheck-suppress misra-c2012-11.5 ; the asker lends its body as bytes, untyped in the event */
         j->body = q->body;
         j->len  = q->len;
+        j->headers = headers_take(j->own, q->headers);
         /* cppcheck-suppress misra-c2012-11.5 ; the asker lends its buffer as bytes, untyped in the event */
         j->buf  = q->buf;
         j->cap  = q->cap;
@@ -5734,6 +5923,8 @@ void Net_ctor(void)
     me->fast_asked = false;
     me->phase = (uint8_t)MQTT_IDLE;
     me->err   = (uint8_t)KDRV_MQTT_ERR_NONE;
+    me->subs  = NULL;
+    me->nsubs = 0U;
     me->sntp_asked = false;
     me->busy  = false;
     me->wreplied      = false;
@@ -6595,6 +6786,7 @@ static void net_done_net(Net * const me, kdrv_net_job_t type, kode_status_t rc,
                 (void)QTimeEvt_disarm(&me->tmo);
                 me->phase = (uint8_t)MQTT_IDLE;
                 me->err   = (uint8_t)KDRV_MQTT_ERR_REFUSED;
+                mqtt_subs_forget(me);
                 mqtt_publish_state(me);
             }
             /* Started is not connected: MQTT_EVENT_CONNECTED is the answer,
@@ -6606,6 +6798,7 @@ static void net_done_net(Net * const me, kdrv_net_job_t type, kode_status_t rc,
         }
         case KDRV_NET_JOB_MQTT_STOP: {
             me->phase = (uint8_t)MQTT_IDLE;
+            mqtt_subs_forget(me);
             mqtt_publish_state(me);
 #if CONFIG_KODEOS_CHANNEL
             chan_on_mqtt_job(me, type, rc);
@@ -7062,6 +7255,7 @@ static QState Net_root(Net * const me, QEvt const * const e)
                     (void)QTimeEvt_disarm(&me->tmo);
                     me->phase = (uint8_t)MQTT_LIVE;
                     me->err   = (uint8_t)KDRV_MQTT_ERR_NONE;
+                    mqtt_subs_again(me, l->session_present);
 #if CONFIG_KODEOS_CHANNEL
                     chan_on_connected(me, l->session_present);
 #endif
@@ -7929,9 +8123,19 @@ static QState Net_online_work(Net * const me, QEvt const * const e)
                 break;
             }
 #endif
-            if ( kdrv_net_mqtt_subscribe(t->topic) != KODE_OK )
+            if ( !mqtt_subs_room(me, t->topic) )
+            {
+                mqtt_publish_refused();
+            }
+            else if ( kdrv_net_mqtt_subscribe(t->topic) != KODE_OK )
             {
                 KLOG_W(TAG, "subscribe to '%s' refused: no broker", t->topic);
+                mqtt_publish_refused();
+            }
+            else if ( !mqtt_subs_keep(me, t->topic) )
+            {
+                /* Not kept would be lost at the next reconnect, unsaid. */
+                (void)kdrv_net_mqtt_unsubscribe(t->topic);
                 mqtt_publish_refused();
             }
             else
@@ -7962,6 +8166,7 @@ static QState Net_online_work(Net * const me, QEvt const * const e)
             }
             else
             {
+                mqtt_subs_drop(me, t->topic);
                 mqtt_publish_taken();
             }
             status = Q_HANDLED();

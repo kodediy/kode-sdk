@@ -1150,3 +1150,122 @@ TEST_CASE("net_ping, http_get and udp_send that failed still answer a failure",
     }
     assert_console_free();
 }
+
+/* ---- net_ping, http_get, udp_send: a value longer than its request ------ */
+
+/** @brief The scheme the URLs below start with. */
+#define LONG_URL_SCHEME  "http://"
+
+/** @brief Fill @p buf with @p n copies of @p c and end it there. */
+static const char *run_of(char *buf, size_t n, char c)
+{
+    (void)memset(buf, (int)c, n);
+    buf[n] = '\0';
+    return buf;
+}
+
+/** @brief The one event the console posted to AO_Net, or NULL; QF_gc() it. */
+static const QEvt *net_take(void)
+{
+    const QEvt *e = NULL;
+
+    qf_support_give_queue(AO_Net);
+    if ( xQueueReceive(AO_Net->eQueue, &e, 0U) != pdTRUE )
+    {
+        e = NULL;
+    }
+    return e;
+}
+
+TEST_CASE("net_ping, http_get and udp_send refuse a value longer than their "
+          "request by its key, and ask AO_Net nothing", "[console_net]")
+{
+    static const char *const ERRS[NET_JOB_VERBS + 1U] = {
+        ">err code=3 msg=host",
+        ">err code=3 msg=url",
+        ">err code=3 msg=host",
+        ">err code=3 msg=data",
+    };
+    char host[KODE_NET_HOST_MAX + 1U];
+    char path[KODE_NET_URL_MAX + 1U];
+    char data[KODE_NET_UDP_MAX + 2U];
+    char lines[NET_JOB_VERBS + 1U][KODE_CONSOLE_LINE_MAX];
+
+    /* Each one byte past its field: the terminator has no room. */
+    (void)run_of(host, KODE_NET_HOST_MAX, 'h');
+    (void)run_of(path, KODE_NET_URL_MAX - (sizeof(LONG_URL_SCHEME) - 1U), 'u');
+    (void)run_of(data, KODE_NET_UDP_MAX + 1U, 'd');
+    (void)snprintf(lines[0], sizeof(lines[0]), "net_ping host=\"%s\"", host);
+    (void)snprintf(lines[1], sizeof(lines[1]), "http_get url=\"%s%s\"",
+                   LONG_URL_SCHEME, path);
+    (void)snprintf(lines[2], sizeof(lines[2]),
+                   "udp_send host=\"%s\" port=9 data=\"hi\"", host);
+    (void)snprintf(lines[3], sizeof(lines[3]),
+                   "udp_send host=\"192.168.0.1\" port=9 data=\"%s\"", data);
+
+    console_up();
+    for ( unsigned i = 0U; (NET_JOB_VERBS + 1U) > i; ++i )
+    {
+        fake_klog_reset();
+        type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, lines[i]);
+
+        TEST_ASSERT_TRUE_MESSAGE(replied(ERRS[i]), lines[i]);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, drain_queue(AO_Net), lines[i]);
+    }
+    assert_console_free();
+}
+
+TEST_CASE("net_ping, http_get and udp_send take the longest value their "
+          "request holds, whole", "[console_net]")
+{
+    char        host[KODE_NET_HOST_MAX];
+    char        path[KODE_NET_URL_MAX];
+    char        data[KODE_NET_UDP_MAX + 1U];
+    char        line[KODE_CONSOLE_LINE_MAX];
+    const QEvt *e;
+
+    (void)run_of(host, KODE_NET_HOST_MAX - 1U, 'h');
+    (void)run_of(path, KODE_NET_URL_MAX - sizeof(LONG_URL_SCHEME), 'u');
+    (void)run_of(data, KODE_NET_UDP_MAX, 'd');
+    console_up();
+
+    (void)snprintf(line, sizeof(line), "net_ping host=\"%s\"", host);
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, line);
+    e = net_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_UINT((unsigned)NET_PING_REQ_SIG, (unsigned)e->sig);
+    TEST_ASSERT_EQUAL_STRING(host, ((const NetPingReqEvt *)e)->host);
+    QF_gc(e);
+    net_answer(0U, false);
+
+    (void)snprintf(line, sizeof(line), "http_get url=\"%s%s\"",
+                   LONG_URL_SCHEME, path);
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, line);
+    e = net_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_UINT((unsigned)NET_HTTP_REQ_SIG, (unsigned)e->sig);
+    {
+        const char * const url = ((const NetHttpReqEvt *)e)->url;
+
+        TEST_ASSERT_EQUAL_STRING_LEN(LONG_URL_SCHEME, url,
+                                     sizeof(LONG_URL_SCHEME) - 1U);
+        TEST_ASSERT_EQUAL_STRING(path, &url[sizeof(LONG_URL_SCHEME) - 1U]);
+    }
+    QF_gc(e);
+    net_answer(1U, false);
+
+    (void)snprintf(line, sizeof(line), "udp_send host=\"%s\" port=9 data=\"%s\"",
+                   host, data);
+    type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, line);
+    e = net_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_UINT((unsigned)NET_UDP_REQ_SIG, (unsigned)e->sig);
+    TEST_ASSERT_EQUAL_STRING(host, ((const NetUdpReqEvt *)e)->host);
+    TEST_ASSERT_EQUAL_UINT(KODE_NET_UDP_MAX, ((const NetUdpReqEvt *)e)->len);
+    TEST_ASSERT_EQUAL_MEMORY(data, ((const NetUdpReqEvt *)e)->data,
+                             KODE_NET_UDP_MAX);
+    QF_gc(e);
+    net_answer(2U, false);
+
+    assert_console_free();
+}

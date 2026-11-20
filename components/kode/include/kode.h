@@ -16,6 +16,7 @@
 #include "kode_defs.h"
 #include "kode_init.h"
 #include "kode_http_off.h"   /* kode_http_off_t, KODE_HTTP_OFF_MAX */
+#include "kode_http_header.h" /* kode_http_header_t, a request's own headers */
 #include "kapp_desc.h"
 
 #ifdef __cplusplus
@@ -1534,7 +1535,24 @@ bool kode_ble_pair_open(void);
 /* ---- HTTP ---- */
 
 /* The calls block, one task at a time. A redirect is not followed: it comes back
- * as the answer, and kode_http_status() says 301 or 302. */
+ * as the answer, and kode_http_status() says 301 or 302.
+ *
+ * Each call takes the request's own headers last: a kode_http_header_t list
+ * ended by a NULL name, or NULL for none. They go out as written, after the
+ * call's own, and one of the same name replaces the call's (a Content-Type
+ * replaces the one kode_http_post() picks; the Content-Length is always the
+ * body's). A list is refused whole, never cut, and the call fails with
+ * kode_error() saying which header: more than KODE_HTTP_HEADERS_MAX of them,
+ * an empty name, a name with a colon, a NULL value, a CR or a LF in a name or
+ * a value, or a name and a value longer than KODE_HTTP_HEADER_MAX together.
+ * The board's log never shows them, so a token among them stays out of it.
+ *
+ *     static const kode_http_header_t auth[] = {
+ *         { "Authorization", "Bearer abc123" },
+ *         { NULL, NULL },
+ *     };
+ *     const char *me = kode_http_get("https://api.example.com/me", auth);
+ */
 
 #define KODE_HTTP_BODY_MAX 65536U  /**< Largest answer a request returns, bytes. */
 #define KODE_HTTP_URL_MAX  256U    /**< Bytes of a URL, NUL included.            */
@@ -1549,12 +1567,13 @@ bool kode_ble_pair_open(void);
  * every https:// call fails while kode_time_unix() answers -1. Ask again once
  * the clock is set; the board sets it from the network soon after it joins.
  *
- * @param url An http:// or https:// address, under KODE_HTTP_URL_MAX bytes.
+ * @param url     An http:// or https:// address, under KODE_HTTP_URL_MAX bytes.
+ * @param headers The request's own, ended by a NULL name; NULL for none.
  * @return The body, valid until this task's next kode_http_get() or
  *         kode_http_post(); "" with kode_error() saying why when there is no
- *         answer, or one over KODE_HTTP_BODY_MAX.
+ *         answer, one over KODE_HTTP_BODY_MAX, or a header that cannot be sent.
  */
-const char *kode_http_get(const char *url);
+const char *kode_http_get(const char *url, const kode_http_header_t *headers);
 
 /**
  * @brief POST @p body to a page and return the answer's body as text.
@@ -1562,11 +1581,12 @@ const char *kode_http_get(const char *url);
  * The body is sent as application/json when its first character that is not
  * a space starts a JSON object or array, as text/plain otherwise.
  *
- * @param url  As for kode_http_get().
- * @param body The text to send; "" sends an empty body.
+ * @param url     As for kode_http_get().
+ * @param body    The text to send; "" sends an empty body.
+ * @param headers As for kode_http_get().
  * @return As for kode_http_get().
  */
-const char *kode_http_post(const char *url, const char *body);
+const char *kode_http_post(const char *url, const char *body, const kode_http_header_t *headers);
 
 /**
  * @brief Fetch the @p cap bytes of @p url from @p offset on, into a buffer of
@@ -1594,10 +1614,13 @@ const char *kode_http_post(const char *url, const char *body);
  * @param total  Out, may be NULL: the length of the whole resource when the
  *               server says it (a 206 and a 416 do), else 0; one longer than
  *               the type holds reads as KODE_HTTP_OFF_MAX.
+ * @param headers As for kode_http_get(); a Range among them is refused too,
+ *               since the call's own says which bytes come back.
  * @return true when the server answered; false with kode_error() saying why.
  */
 bool kode_http_get_range(const char *url, kode_http_off_t offset, void *buf, uint32_t cap,
-                         uint32_t *got, kode_http_off_t *total);
+                         uint32_t *got, kode_http_off_t *total,
+                         const kode_http_header_t *headers);
 
 /**
  * @brief The status this task's last request was answered with.
@@ -1663,6 +1686,7 @@ bool kode_udp_send(const char *host, uint16_t port, const void *data, uint32_t l
 #define KODE_MQTT_BUSY_MS     5000U  /**< How long a call waits for room in the network's queue. */
 #define KODE_MQTT_URI_LIMIT   95U    /**< Longest broker address, bytes. */
 #define KODE_MQTT_TOPIC_LIMIT 79U    /**< Longest topic, bytes. */
+#define KODE_MQTT_SUBS_LIMIT  16U    /**< Topics subscribed at once. */
 #define KODE_MQTT_TEXT_LIMIT  240U   /**< Longest message, bytes. */
 
 /**
@@ -1686,6 +1710,9 @@ bool kode_mqtt_publish(const char *topic, const char *text);
 
 /**
  * @brief Ask the broker for a topic; its messages arrive as "mqtt_message" events.
+ *
+ * The board asks again by itself after a reconnect. Up to KODE_MQTT_SUBS_LIMIT
+ * topics at once: one past them is refused.
  * @param topic 1 to KODE_MQTT_TOPIC_LIMIT bytes.
  * @return true when queued; false with kode_error() saying why.
  */

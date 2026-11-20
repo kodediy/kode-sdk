@@ -71,7 +71,7 @@ TEST_CASE("post_buffer hands every argument to the driver and copies its answer"
 
     kdrv_net_http_post_ExpectAndReturn(POST_URL, POST_BODY,
                                        POST_BODY_SIZE,
-                                       POST_CTYPE, buf, POST_CAP, NULL,
+                                       POST_CTYPE, NULL, buf, POST_CAP, NULL,
                                        KODE_HTTP_TIMEOUT_MS, KODE_OK);
     kdrv_net_http_post_IgnoreArg_out();
     kdrv_net_http_post_ReturnThruPtr_out(&drv);
@@ -81,7 +81,7 @@ TEST_CASE("post_buffer hands every argument to the driver and copies its answer"
                           kode_block_http_post_buffer(POST_URL, POST_BODY,
                                                       POST_BODY_SIZE,
                                                       POST_CTYPE, buf, POST_CAP,
-                                                      &out));
+                                                      NULL, &out));
     TEST_ASSERT_EQUAL_UINT16(POST_STATUS, out.status);
     TEST_ASSERT_EQUAL_INT32(LEN_UNKNOWN, out.content_length);
     TEST_ASSERT_EQUAL_UINT32(POST_BODY_LEN, out.body_len);
@@ -99,7 +99,7 @@ TEST_CASE("post_buffer returns a transport timeout with the result cleared",
     net_fresh();
     kdrv_net_http_post_ExpectAndReturn(POST_URL, POST_BODY,
                                        POST_BODY_SIZE,
-                                       POST_CTYPE, buf, POST_CAP, NULL,
+                                       POST_CTYPE, NULL, buf, POST_CAP, NULL,
                                        KODE_HTTP_TIMEOUT_MS, KODE_TIMEOUT);
     kdrv_net_http_post_IgnoreArg_out();
 
@@ -108,7 +108,7 @@ TEST_CASE("post_buffer returns a transport timeout with the result cleared",
                           kode_block_http_post_buffer(POST_URL, POST_BODY,
                                                       POST_BODY_SIZE,
                                                       POST_CTYPE, buf, POST_CAP,
-                                                      &out));
+                                                      NULL, &out));
     TEST_ASSERT_EQUAL_UINT16(0U, out.status);
     TEST_ASSERT_EQUAL_INT32(LEN_UNKNOWN, out.content_length);
     TEST_ASSERT_EQUAL_UINT32(0U, out.body_len);
@@ -130,7 +130,7 @@ TEST_CASE("post_buffer with no URL is an error and never reaches the driver",
                           kode_block_http_post_buffer(NULL, POST_BODY,
                                                       POST_BODY_SIZE,
                                                       POST_CTYPE, buf, POST_CAP,
-                                                      &out));
+                                                      NULL, &out));
     TEST_ASSERT_EQUAL_UINT16(0U, out.status);
     TEST_ASSERT_EQUAL_INT32(LEN_UNKNOWN, out.content_length);
     TEST_ASSERT_EQUAL_UINT32(0U, out.body_len);
@@ -153,14 +153,14 @@ TEST_CASE("get_buffer still hands its arguments through and copies the answer",
     drv.body_len       = GET_BODY_LEN;
     drv.kept           = GET_BODY_LEN;
 
-    kdrv_net_http_get_ExpectAndReturn(POST_URL, buf, POST_CAP, NULL,
+    kdrv_net_http_get_ExpectAndReturn(POST_URL, NULL, buf, POST_CAP, NULL,
                                       KODE_HTTP_TIMEOUT_MS, KODE_OK);
     kdrv_net_http_get_IgnoreArg_out();
     kdrv_net_http_get_ReturnThruPtr_out(&drv);
 
     TEST_ASSERT_EQUAL_INT(KODE_OK,
                           kode_block_http_get_buffer(POST_URL, buf, POST_CAP,
-                                                     &out));
+                                                     NULL, &out));
     TEST_ASSERT_EQUAL_UINT16(GET_STATUS, out.status);
     TEST_ASSERT_EQUAL_INT32((int32_t)GET_BODY_LEN, out.content_length);
     TEST_ASSERT_EQUAL_UINT32(GET_BODY_LEN, out.body_len);
