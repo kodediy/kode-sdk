@@ -70,6 +70,18 @@ typedef enum {
     MQTT_STOPPING,   /**< Teardown with the worker.                         */
 } mqtt_phase_t;
 
+/**
+ * @brief The topics a client of the user's subscribed, kept in PSRAM.
+ *
+ * That client runs a clean session, so a broker that drops it forgets its
+ * subscriptions, and esp-mqtt reconnects without them: AO_Net subscribes them
+ * again on the next connect.
+ */
+typedef struct {
+    char topic[KODE_MQTT_SUBS_MAX][KODE_MQTT_TOPIC_MAX];
+} MqttSubs;
+_Static_assert(KODE_MQTT_SUBS_MAX <= UINT8_MAX, "a place among the kept topics is a uint8_t");
+
 /* ---- A URL as a medium ----------------------------------------------------
  * Two buffers, lent by index and not refilled until the borrower gives one
  * back, so chunk N+1 is read while AO_AppMgr writes chunk N to flash.
@@ -469,6 +481,9 @@ typedef struct {
 #endif
     uint8_t  phase;    /**< mqtt_phase_t                                    */
     uint8_t  err;      /**< kdrv_mqtt_err_t: why MQTT is not up.            */
+    MqttSubs *subs;    /**< PSRAM, taken with the first topic kept; NULL
+                        *   while none is.                                   */
+    uint8_t  nsubs;    /**< Topics in @c subs.                              */
 
     QActive *reader;                     /**< Who has the transfer open.     */
     uint8_t *sbuf[NET_STREAM_BUFS];      /**< PSRAM, allocated on first use. */
@@ -1466,6 +1481,136 @@ static void mqtt_publish_taken(void)
 static void mqtt_publish_refused(void)
 {
     mqtt_publish_answer((uint8_t)KDRV_MQTT_ERR_REFUSED);
+}
+
+/**
+ * @brief Where @p topic is kept.
+ * @return Its place in @c subs, or KODE_MQTT_SUBS_MAX when it is not kept.
+ */
+static uint8_t mqtt_subs_find(Net const * const me, const char *topic)
+{
+    uint8_t at = (uint8_t)KODE_MQTT_SUBS_MAX;
+
+    for ( uint8_t i = 0U; (i < me->nsubs) && ((uint8_t)KODE_MQTT_SUBS_MAX == at); ++i )
+    {
+        if ( strcmp(me->subs->topic[i], topic) == 0 )
+        {
+            at = i;
+        }
+    }
+    return at;
+}
+
+/**
+ * @brief Whether @p topic can be kept: it is kept already, or a place is free.
+ * @return false when all KODE_MQTT_SUBS_MAX places are taken, which is logged.
+ */
+static bool mqtt_subs_room(Net const * const me, const char *topic)
+{
+    bool room = true;
+
+    if ( ((uint8_t)KODE_MQTT_SUBS_MAX <= me->nsubs)
+        && ((uint8_t)KODE_MQTT_SUBS_MAX == mqtt_subs_find(me, topic)) )
+    {
+        KLOG_W(TAG, "subscribe to '%s' refused: %u topics are kept already for a "
+                    "reconnect; `mqtt_unsub` one first", topic,
+               (unsigned)KODE_MQTT_SUBS_MAX);
+        room = false;
+    }
+    return room;
+}
+
+/**
+ * @brief Keep @p topic, which mqtt_subs_room() found room for. The PSRAM
+ *        block is taken with the first topic.
+ * @return false when PSRAM refused the block, which is logged.
+ */
+static bool mqtt_subs_keep(Net * const me, const char *topic)
+{
+    bool kept = true;
+
+    if ( NULL == me->subs )
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+        me->subs = (MqttSubs *)khal_alloc_psram(sizeof(uint32_t), sizeof(MqttSubs));
+    }
+    if ( NULL == me->subs )
+    {
+        KLOG_W(TAG, "subscribe to '%s' refused: no memory to keep it for a "
+                    "reconnect", topic);
+        kept = false;
+    }
+    else if ( (uint8_t)KODE_MQTT_SUBS_MAX == mqtt_subs_find(me, topic) )
+    {
+        (void)snprintf(me->subs->topic[me->nsubs], sizeof(me->subs->topic[me->nsubs]),
+                       "%s", topic);
+        me->nsubs++;
+    }
+    else
+    {
+        /* Kept already: a second `mqtt_sub` of the same topic. */
+    }
+    return kept;
+}
+
+/** @brief Stop keeping @p topic; the last one takes its place. */
+static void mqtt_subs_drop(Net * const me, const char *topic)
+{
+    uint8_t const at = mqtt_subs_find(me, topic);
+
+    if ( (uint8_t)KODE_MQTT_SUBS_MAX != at )
+    {
+        me->nsubs--;
+        if ( at != me->nsubs )
+        {
+            (void)memcpy(me->subs->topic[at], me->subs->topic[me->nsubs],
+                         sizeof(me->subs->topic[at]));
+        }
+    }
+}
+
+/** @brief The client stopped: no topic is kept, and the block goes back. */
+static void mqtt_subs_forget(Net * const me)
+{
+    if ( NULL != me->subs )
+    {
+        khal_free(me->subs);
+        me->subs = NULL;
+    }
+    me->nsubs = 0U;
+}
+
+/**
+ * @brief The client connected: subscribe every kept topic again, unless the
+ *        broker says it kept the session, subscriptions and all.
+ * @param me              The AO.
+ * @param session_present The CONNACK's flag.
+ */
+static void mqtt_subs_again(Net * const me, bool session_present)
+{
+    if ( (!session_present) && (0U < me->nsubs) )
+    {
+        uint8_t taken = 0U;
+
+        for ( uint8_t i = 0U; i < me->nsubs; ++i )
+        {
+            if ( kdrv_net_mqtt_subscribe(me->subs->topic[i]) == KODE_OK )
+            {
+                taken++;
+            }
+        }
+        if ( taken == me->nsubs )
+        {
+            KLOG_N(TAG, "subscribed again to %u topics after the reconnect",
+                   (unsigned)taken);
+        }
+        else
+        {
+            KLOG_W(TAG, "subscribed again to %u of %u topics after the reconnect; "
+                        "the rest are tried at the next one", (unsigned)taken,
+                   (unsigned)me->nsubs);
+        }
+    }
 }
 
 #if CONFIG_KODEOS_CHANNEL
@@ -5778,6 +5923,8 @@ void Net_ctor(void)
     me->fast_asked = false;
     me->phase = (uint8_t)MQTT_IDLE;
     me->err   = (uint8_t)KDRV_MQTT_ERR_NONE;
+    me->subs  = NULL;
+    me->nsubs = 0U;
     me->sntp_asked = false;
     me->busy  = false;
     me->wreplied      = false;
@@ -6639,6 +6786,7 @@ static void net_done_net(Net * const me, kdrv_net_job_t type, kode_status_t rc,
                 (void)QTimeEvt_disarm(&me->tmo);
                 me->phase = (uint8_t)MQTT_IDLE;
                 me->err   = (uint8_t)KDRV_MQTT_ERR_REFUSED;
+                mqtt_subs_forget(me);
                 mqtt_publish_state(me);
             }
             /* Started is not connected: MQTT_EVENT_CONNECTED is the answer,
@@ -6650,6 +6798,7 @@ static void net_done_net(Net * const me, kdrv_net_job_t type, kode_status_t rc,
         }
         case KDRV_NET_JOB_MQTT_STOP: {
             me->phase = (uint8_t)MQTT_IDLE;
+            mqtt_subs_forget(me);
             mqtt_publish_state(me);
 #if CONFIG_KODEOS_CHANNEL
             chan_on_mqtt_job(me, type, rc);
@@ -7106,6 +7255,7 @@ static QState Net_root(Net * const me, QEvt const * const e)
                     (void)QTimeEvt_disarm(&me->tmo);
                     me->phase = (uint8_t)MQTT_LIVE;
                     me->err   = (uint8_t)KDRV_MQTT_ERR_NONE;
+                    mqtt_subs_again(me, l->session_present);
 #if CONFIG_KODEOS_CHANNEL
                     chan_on_connected(me, l->session_present);
 #endif
@@ -7973,9 +8123,19 @@ static QState Net_online_work(Net * const me, QEvt const * const e)
                 break;
             }
 #endif
-            if ( kdrv_net_mqtt_subscribe(t->topic) != KODE_OK )
+            if ( !mqtt_subs_room(me, t->topic) )
+            {
+                mqtt_publish_refused();
+            }
+            else if ( kdrv_net_mqtt_subscribe(t->topic) != KODE_OK )
             {
                 KLOG_W(TAG, "subscribe to '%s' refused: no broker", t->topic);
+                mqtt_publish_refused();
+            }
+            else if ( !mqtt_subs_keep(me, t->topic) )
+            {
+                /* Not kept would be lost at the next reconnect, unsaid. */
+                (void)kdrv_net_mqtt_unsubscribe(t->topic);
                 mqtt_publish_refused();
             }
             else
@@ -8006,6 +8166,7 @@ static QState Net_online_work(Net * const me, QEvt const * const e)
             }
             else
             {
+                mqtt_subs_drop(me, t->topic);
                 mqtt_publish_taken();
             }
             status = Q_HANDLED();

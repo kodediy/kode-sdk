@@ -21,6 +21,8 @@ _Static_assert(KODE_MQTT_TOPIC_LIMIT == (KODE_MQTT_TOPIC_MAX - 1U),
                "the topic limit is what the request events carry, less their NUL");
 _Static_assert(KODE_MQTT_TEXT_LIMIT == KODE_MQTT_PAYLOAD_MAX,
                "the text limit is what a request event carries");
+_Static_assert(KODE_MQTT_SUBS_LIMIT == KODE_MQTT_SUBS_MAX,
+               "the subscription limit is the topics AO_Net keeps");
 
 _Static_assert(KODE_MQTT_WAIT_MS > KODE_MQTT_CONNECT_MS,
                "AO_Net's own timeout answer arrives inside the call that asked");

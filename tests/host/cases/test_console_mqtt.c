@@ -381,3 +381,159 @@ TEST_CASE("the MQTT verbs answer an error and free the console when AO_Net is wi
     type_line("ping");
     TEST_ASSERT_FALSE(replied(">err"));
 }
+
+/* ---- a value longer than its request ------------------------------------ */
+
+/** @brief A broker every check passes; the path after it is not looked at. */
+#define LONG_URI_BASE  "mqtt://127.0.0.1:1883/"
+
+/** @brief How many lines the long-value cases type. */
+#define LONG_LINES  6U
+
+/** @brief Fill @p buf with @p n copies of @p c and end it there. */
+static const char *run_of(char *buf, size_t n, char c)
+{
+    (void)memset(buf, (int)c, n);
+    buf[n] = '\0';
+    return buf;
+}
+
+/** @brief The one event the console posted to AO_Net, or NULL; QF_gc() it. */
+static const QEvt *net_take(void)
+{
+    const QEvt *e = NULL;
+
+    qf_support_give_queue(AO_Net);
+    if ( xQueueReceive(AO_Net->eQueue, &e, 0U) != pdTRUE )
+    {
+        e = NULL;
+    }
+    return e;
+}
+
+TEST_CASE("mqtt_up, mqtt_pub, mqtt_sub and mqtt_unsub refuse a value longer "
+          "than their request by its key, and ask AO_Net nothing",
+          "[console_mqtt]")
+{
+    static const char *const ERRS[LONG_LINES] = {
+        ">err code=3 msg=uri",
+        ">err code=3 msg=user",
+        ">err code=3 msg=pass",
+        ">err code=3 msg=topic",
+        ">err code=3 msg=topic",
+        ">err code=3 msg=topic",
+    };
+    char path[KODE_MQTT_URI_MAX + 1U];
+    char user[KODE_MQTT_USER_MAX + 1U];
+    char pass[KODE_MQTT_PASS_MAX + 1U];
+    char topic[KODE_MQTT_TOPIC_MAX + 1U];
+    char lines[LONG_LINES][KODE_CONSOLE_LINE_MAX];
+
+    /* Each one byte past its field: the terminator has no room. */
+    (void)run_of(path, KODE_MQTT_URI_MAX - (sizeof(LONG_URI_BASE) - 1U), 'p');
+    (void)run_of(user, KODE_MQTT_USER_MAX, 'u');
+    (void)run_of(pass, KODE_MQTT_PASS_MAX, 'w');
+    (void)run_of(topic, KODE_MQTT_TOPIC_MAX, 't');
+    (void)snprintf(lines[0], sizeof(lines[0]), "mqtt_up uri=\"%s%s\"",
+                   LONG_URI_BASE, path);
+    (void)snprintf(lines[1], sizeof(lines[1]),
+                   "mqtt_up uri=\"%s\" user=\"%s\"", LONG_URI_BASE, user);
+    (void)snprintf(lines[2], sizeof(lines[2]),
+                   "mqtt_up uri=\"%s\" pass=\"%s\"", LONG_URI_BASE, pass);
+    (void)snprintf(lines[3], sizeof(lines[3]),
+                   "mqtt_pub topic=\"%s\" data=\"x\"", topic);
+    (void)snprintf(lines[4], sizeof(lines[4]), "mqtt_sub topic=\"%s\"", topic);
+    (void)snprintf(lines[5], sizeof(lines[5]), "mqtt_unsub topic=\"%s\"", topic);
+
+    console_up();
+    net_mailbox_drain();
+    for ( unsigned i = 0U; LONG_LINES > i; ++i )
+    {
+        const QEvt *e;
+
+        fake_klog_reset();
+        type_line(lines[i]);
+        e = net_take();
+
+        TEST_ASSERT_TRUE_MESSAGE(replied(ERRS[i]), lines[i]);
+        TEST_ASSERT_NULL_MESSAGE(e, lines[i]);
+        if ( NULL != e )
+        {
+            QF_gc(e);
+        }
+    }
+
+    /* No refusal left a command open: the next one runs. */
+    fake_klog_reset();
+    type_line("ping");
+    TEST_ASSERT_TRUE(replied(">|pong"));
+    TEST_ASSERT_FALSE(replied(">err"));
+}
+
+TEST_CASE("mqtt_up, mqtt_pub, mqtt_sub and mqtt_unsub take the longest value "
+          "their request holds, whole", "[console_mqtt]")
+{
+    static const char *const VERBS[2] = { "mqtt_sub", "mqtt_unsub" };
+    static const QSignal SIGS[2] = { MQTT_SUB_REQ_SIG, MQTT_UNSUB_REQ_SIG };
+    char        path[(KODE_MQTT_URI_MAX - sizeof(LONG_URI_BASE)) + 1U];
+    char        user[KODE_MQTT_USER_MAX];
+    char        pass[KODE_MQTT_PASS_MAX];
+    char        topic[KODE_MQTT_TOPIC_MAX];
+    char        line[KODE_CONSOLE_LINE_MAX];
+    const QEvt *e;
+
+    (void)run_of(path, KODE_MQTT_URI_MAX - sizeof(LONG_URI_BASE), 'p');
+    (void)run_of(user, KODE_MQTT_USER_MAX - 1U, 'u');
+    (void)run_of(pass, KODE_MQTT_PASS_MAX - 1U, 'w');
+    (void)run_of(topic, KODE_MQTT_TOPIC_MAX - 1U, 't');
+    console_up();
+    net_mailbox_drain();
+
+    (void)snprintf(line, sizeof(line),
+                   "mqtt_up uri=\"%s%s\" user=\"%s\" pass=\"%s\"",
+                   LONG_URI_BASE, path, user, pass);
+    type_line(line);
+    e = net_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_UINT((unsigned)MQTT_UP_REQ_SIG, (unsigned)e->sig);
+    {
+        const MqttUpEvt * const up = (const MqttUpEvt *)e;
+
+        TEST_ASSERT_EQUAL_STRING_LEN(LONG_URI_BASE, up->uri,
+                                     sizeof(LONG_URI_BASE) - 1U);
+        TEST_ASSERT_EQUAL_STRING(path, &up->uri[sizeof(LONG_URI_BASE) - 1U]);
+        TEST_ASSERT_EQUAL_STRING(user, up->user);
+        TEST_ASSERT_EQUAL_STRING(pass, up->pass);
+    }
+    QF_gc(e);
+    state_from_net((uint8_t)KDRV_MQTT_UP, (uint8_t)KDRV_MQTT_ERR_NONE);
+
+    (void)snprintf(line, sizeof(line), "mqtt_pub topic=\"%s\" data=\"x\"", topic);
+    type_line(line);
+    e = net_take();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_UINT((unsigned)MQTT_PUB_REQ_SIG, (unsigned)e->sig);
+    TEST_ASSERT_EQUAL_STRING(topic, ((const MqttPubEvt *)e)->topic);
+    QF_gc(e);
+    state_from_net((uint8_t)KDRV_MQTT_UP, (uint8_t)KDRV_MQTT_ERR_NONE);
+
+    for ( unsigned i = 0U; 2U > i; ++i )
+    {
+        (void)snprintf(line, sizeof(line), "%s topic=\"%s\"", VERBS[i], topic);
+        type_line(line);
+        e = net_take();
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, VERBS[i]);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)SIGS[i], (unsigned)e->sig,
+                                       VERBS[i]);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(topic,
+                                         ((const MqttTopicEvt *)e)->topic,
+                                         VERBS[i]);
+        QF_gc(e);
+        state_from_net((uint8_t)KDRV_MQTT_UP, (uint8_t)KDRV_MQTT_ERR_NONE);
+    }
+
+    fake_klog_reset();
+    type_line("ping");
+    TEST_ASSERT_TRUE(replied(">|pong"));
+    TEST_ASSERT_FALSE(replied(">err"));
+}
