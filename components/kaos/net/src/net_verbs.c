@@ -44,6 +44,34 @@ static net_verb_kind_t s_net_kind;
 #define NET_V_BODY_PARTS        2U   /**< A body chunk too wide for one record goes out as this many. */
 #define NET_V_MQTT_SCHEME       "mqtt://"   /**< The plain broker scheme `mqtt_up` takes.  */
 #define NET_V_MQTTS_SCHEME      "mqtts://"  /**< The TLS broker scheme `mqtt_up` takes.    */
+#define NET_V_UDP_DATA_ROOM     (KODE_NET_UDP_MAX + 1U)  /**< `data=` is copied without its
+                                                          *   terminator: KODE_NET_UDP_MAX
+                                                          *   bytes fit.                   */
+
+/**
+ * @brief Does @p text fit the field of the event it is copied into? Answers
+ *        when it does not.
+ *
+ * The parser takes a quoted value as long as the line, and each request below
+ * copies it into a field of fixed size. Cut to fit, it would be another host,
+ * URL or topic, answered as if it were the one asked for. It is refused
+ * instead, before anything is posted.
+ *
+ * @param text The value as typed.
+ * @param room The bytes of the field, its terminator included.
+ * @param key  The key, named in the refusal.
+ * @return true when it fits; false once `>err code=3 msg=<key>` is out.
+ */
+static bool net_v_fits(const char *text, size_t room, const char *key)
+{
+    bool const fits = (strlen(text) < room);
+
+    if ( !fits )
+    {
+        console_reply_err(KCLI_ERR_VALUE, key);
+    }
+    return fits;
+}
 
 /* ---- Handlers: the network -----------------------------------------------
  * These run on the P4's own lwIP, so they do not queue behind the radio.
@@ -52,6 +80,10 @@ static net_verb_kind_t s_net_kind;
 /** @brief net_ping host=<h> [count=<n>]: entries, then the summary. */
 static void h_net_ping(const kverb_t *c, const karg_val_t *v)
 {
+    if ( !net_v_fits(v[0].s, KODE_NET_HOST_MAX, "host") )
+    {
+        return;
+    }
     /* Four echoes a second apart outlast the console's 5 s deadline, so the
      * watchdog stands down and AO_Net's answer, which always comes, closes
      * the command. */
@@ -76,13 +108,13 @@ static void h_net_info(const kverb_t *c, const karg_val_t *v)
     net_info_request();
 }
 
-/**
- * @brief http_get url=<u>: a printable preview of the body, then the status.
- *
- * The console's line is 80 bytes, so a URL typed here fits in about 70.
- */
+/** @brief http_get url=<u>: a printable preview of the body, then the status. */
 static void h_http_get(const kverb_t *c, const karg_val_t *v)
 {
+    if ( !net_v_fits(v[0].s, KODE_NET_URL_MAX, "url") )
+    {
+        return;
+    }
     console_begin(c->verb);
     s_net_kind = NET_V_HTTP;
     console_unwatched();   /* a handshake plus a download */
@@ -92,6 +124,14 @@ static void h_http_get(const kverb_t *c, const karg_val_t *v)
 /** @brief udp_send host=<h> port=<p> data=<d>: one datagram. */
 static void h_udp_send(const kverb_t *c, const karg_val_t *v)
 {
+    if ( !net_v_fits(v[0].s, KODE_NET_HOST_MAX, "host") )
+    {
+        return;
+    }
+    if ( !net_v_fits(v[2].s, NET_V_UDP_DATA_ROOM, "data") )
+    {
+        return;
+    }
     console_begin(c->verb);
     s_net_kind = NET_V_UDP;
     /* A host that does not resolve costs the whole DNS retry budget, more
@@ -286,24 +326,36 @@ static void h_mqtt_up(const kverb_t *c, const karg_val_t *v)
     const char *user = "";
     const char *pass = "";
 
+    if ( !net_v_fits(v[0].s, KODE_MQTT_URI_MAX, "uri") )
+    {
+        return;
+    }
     if ( !net_mqtt_uri_ok(v[0].s) )
     {
         console_reply_err(KCLI_ERR_VALUE, "uri");
         return;
+    }
+    if ( v[1].present )
+    {
+        if ( !net_v_fits(v[1].s, KODE_MQTT_USER_MAX, "user") )
+        {
+            return;
+        }
+        user = v[1].s;
+    }
+    if ( v[2].present )
+    {
+        if ( !net_v_fits(v[2].s, KODE_MQTT_PASS_MAX, "pass") )
+        {
+            return;
+        }
+        pass = v[2].s;
     }
     console_begin(c->verb);
     s_net_kind = NET_V_MQTT_UP;
     /* Reaching a broker outlasts any console deadline; AO_Net carries its own
      * (KODE_MQTT_CONNECT_MS) and answers with it. */
     console_unwatched();
-    if ( v[1].present )
-    {
-        user = v[1].s;
-    }
-    if ( v[2].present )
-    {
-        pass = v[2].s;
-    }
     /* With the watchdog disarmed, only MQTT_STATE_SIG closes the command,
      * and a request the queue or the pool refused will never have one. */
     if ( !mqtt_up_request(v[0].s, user, pass) )
@@ -341,6 +393,10 @@ static void h_mqtt_info(const kverb_t *c, const karg_val_t *v)
     mqtt_state_request();
 }
 
+/* A payload needs no check of its own: a whole line fits the event's. */
+_Static_assert(KODE_MQTT_PAYLOAD_MAX >= KODE_CONSOLE_LINE_MAX,
+               "a payload typed on one line fits the event");
+
 /**
  * @brief mqtt_pub topic=<t> data=<d>: an accept, like `install` off a medium.
  *
@@ -351,6 +407,10 @@ static void h_mqtt_info(const kverb_t *c, const karg_val_t *v)
  */
 static void h_mqtt_pub(const kverb_t *c, const karg_val_t *v)
 {
+    if ( !net_v_fits(v[0].s, KODE_MQTT_TOPIC_MAX, "topic") )
+    {
+        return;
+    }
     console_begin(c->verb);
     s_net_kind = NET_V_MQTT_ACK;
     if ( !mqtt_pub_request(v[0].s, v[1].s, (uint16_t)strlen(v[1].s)) )
@@ -363,6 +423,10 @@ static void h_mqtt_pub(const kverb_t *c, const karg_val_t *v)
 /** @brief mqtt_sub topic=<t>: an accept; messages arrive as '!' lines. */
 static void h_mqtt_sub(const kverb_t *c, const karg_val_t *v)
 {
+    if ( !net_v_fits(v[0].s, KODE_MQTT_TOPIC_MAX, "topic") )
+    {
+        return;
+    }
     console_begin(c->verb);
     s_net_kind = NET_V_MQTT_ACK;
     if ( !mqtt_sub_request(v[0].s) )
@@ -375,6 +439,10 @@ static void h_mqtt_sub(const kverb_t *c, const karg_val_t *v)
 /** @brief mqtt_unsub topic=<t>: an accept. */
 static void h_mqtt_unsub(const kverb_t *c, const karg_val_t *v)
 {
+    if ( !net_v_fits(v[0].s, KODE_MQTT_TOPIC_MAX, "topic") )
+    {
+        return;
+    }
     console_begin(c->verb);
     s_net_kind = NET_V_MQTT_ACK;
     if ( !mqtt_unsub_request(v[0].s) )

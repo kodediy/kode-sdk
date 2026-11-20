@@ -18,6 +18,7 @@ typedef enum {
     KCLI_ERR_MISSING = 2, /**< Missing required key, or a token without
                            *   `=`. msg = the key / the token.             */
     KCLI_ERR_VALUE   = 3, /**< Bad value: wrong type, out of range,
+                           *   longer than the request that carries it,
                            *   unknown enum member, or unknown key.
                            *   msg = the key.                              */
     KCLI_ERR_BUSY    = 4, /**< A multi-record command is still in flight;
