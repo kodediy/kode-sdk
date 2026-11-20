@@ -431,6 +431,9 @@ typedef struct {
                              *   its answer hook sees the events. */
     uint8_t  inflight;      /**< kcli_inflight_t: the command awaiting its
                              *   terminator, or KCLI_IDLE.                  */
+    bool     recv_ready;    /**< KCLI_RECV: `>|ready` was said. From there
+                             *   AO_AppMgr's watchdogs end the transfer, and
+                             *   a `>|wait` gives the command no time.      */
     bool     test_wait_begin;   /**< `test`: asked, and AO_Autotest has not
                                  *   yet said whether it took the run.    */
     uint8_t  test_rows;         /**< `test`: how many rows AO_Autotest said
@@ -726,8 +729,9 @@ void console_reply_posted(const char *verb, bool delivered)
  */
 static void cmd_begin(Console *me, kcli_inflight_t what, const char *verb)
 {
-    me->inflight = (uint8_t)what;
-    me->verb     = verb;
+    me->inflight   = (uint8_t)what;
+    me->verb       = verb;
+    me->recv_ready = false;
     QTimeEvt_armX(&me->tmo, KQP_TICKS_PER_MS(KCLI_CMD_TIMEOUT_MS), 0U);
 }
 
@@ -8597,6 +8601,7 @@ static QState console_own(Console * const me, QEvt const * const e)
                  * (RECV_STALL_SIG) tells a slow host from a dead one; this
                  * AO's deadline stops. */
                 console_unwatched();
+                me->recv_ready = true;
                 /* chunk= is the transfer's window: the host sends that many
                  * bytes, then waits for one `>|ack` before the next. */
                 console_reply(">|ready chunk=%u", (unsigned)KODE_RECV_CHUNK);
@@ -8608,10 +8613,15 @@ static QState console_own(Console * const me, QEvt const * const e)
             /* AO_AppMgr copies an app the image would evict to the card
              * before it takes the wire: the host is told, on every one, and
              * the command gets its time again, so a copy of any length is
-             * waited for while AO_AppMgr goes on saying it. */
+             * waited for while AO_AppMgr goes on saying it. After the wire,
+             * an image AO_AppMgr held in memory is being written: the host
+             * is told, and AO_AppMgr's own watchdogs bound the wait. */
             if ( (uint8_t)KCLI_RECV == me->inflight )
             {
-                console_extend(KCLI_CMD_TIMEOUT_MS);
+                if ( !me->recv_ready )
+                {
+                    console_extend(KCLI_CMD_TIMEOUT_MS);
+                }
                 console_reply(">|wait");
             }
             status = Q_HANDLED();

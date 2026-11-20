@@ -117,6 +117,8 @@ _Static_assert(UINT8_MAX > KODE_APP_COPY_BUSY_TRIES,
 #define APPMGR_US_PER_MS         1000ULL   /**< Microseconds in a millisecond: a wake's time is in microseconds. */
 #define APPMGR_KEEP_TMP_SUFFIX KODE_CARD_APP_TMP   /**< What a copy's name carries while it is written. */
 #define APPMGR_LOAN_BITS       8U       /**< Bits of to_return: one per buffer a medium can lend. */
+#define APPMGR_STAGE_PIECE     (32U * 1024U)   /**< Bytes of the held image one APP_STAGE_DATA_SIG serves: a medium's chunk. */
+#define APPMGR_STAGE_GROW      (1024U * 1024U) /**< Bytes the held copy grows by when a download did not say its length. */
 /* Re-publish the percent this often while the AO waits on the network: the
  * open of a download, a file that stops arriving, a data folder being fetched.
  * AO_Power takes the LED's orange pulse back after three seconds without a
@@ -428,22 +430,38 @@ typedef struct {
                               *   host's byte count is the wire's only
                               *   boundary) but no longer written.           */
 
-    /* ---- Reading a file through before an install gives anything up ------
-     * An install from a file that has to give up something installed (it
-     * evicts, or drops the old copy of the app it replaces) stops at its plan
-     * and the file is read through once, by AppMgr_verifying, through the
-     * decoder into kdrv_image_check's sink: a bare image as it is, a .kfw
-     * container as the image its payload decodes to, the container's digest
-     * compared at its end. A file that does not hold together ends the install
-     * with nothing given up. A file that does starts the install again from
-     * the top with verify_done set, as the keep round does. A URL and a
-     * terminal install cannot be read twice; the mailbox is verified in
-     * place. */
-    bool        verify_pending;                /**< appmgr_place() deferred: read the file through first. */
-    bool        verify_done;                   /**< The file was read through, or needs no reading. */
-    bool        verify_restart;                /**< The next FLASH_REQ_SIG goes on with this install: its file
+    /* ---- Reading the source through before an install gives anything up --
+     * An install whose plan evicts stops at that plan and its source is read
+     * through once, through the decoder into kdrv_image_check's sink: a bare
+     * image as it is, a .kfw container as the image its payload decodes to,
+     * the container's digest compared at its end. A source that does not hold
+     * together ends the install with nothing given up; one that does starts
+     * the install again from the top with verify_done set, as the keep round
+     * does. A file is read again from where it lies (AppMgr_verifying). A URL
+     * and a terminal install cannot be read twice, so their read-through keeps
+     * every byte in `stage`, in PSRAM, and the install reads that copy: a URL
+     * is downloaded again into it by AppMgr_verifying, a terminal's wire goes
+     * into it from its first chunk (AppMgr_receiving, `staging`) and is
+     * written once the wire has ended. No PSRAM for the copy ends the install
+     * with nothing given up. The mailbox is verified in place. */
+    bool        verify_pending;                /**< appmgr_place() deferred: read the source through first. */
+    bool        verify_done;                   /**< The source was read through, or needs no reading. */
+    bool        verify_restart;                /**< The next FLASH_REQ_SIG goes on with this install: its source
                                                 *   was read through, or the copy it waited for is seen to. */
     bool        verify_opened;                 /**< The read-through's own open has answered. */
+    uint8_t    *stage;                         /**< PSRAM: a URL's or a terminal's image, held whole;
+                                                *   NULL when none. Freed by keep_clear(). */
+    uint32_t    stage_cap;                     /**< Bytes `stage` has room for.               */
+    uint32_t    stage_len;                     /**< Bytes `stage` holds.                      */
+    uint32_t    stage_said;                    /**< Bytes the download said it holds; 0 for none. */
+    uint32_t    stage_at;                      /**< The first byte not yet served.            */
+    uint32_t    stage_off[APPMGR_LOAN_BITS];   /**< Where each piece lent out starts.         */
+    uint8_t     stage_lent;                    /**< Bit n: piece n is lent, not yet returned. */
+    uint8_t     stage_asked;                   /**< Pieces asked for and not yet served.     */
+    bool        from_stage;                    /**< The install reads `stage`, not a medium.  */
+    bool        staging;                       /**< A terminal's wire goes into `stage` and the check. */
+    bool        recv_owed;                     /**< A terminal install written from `stage`: the
+                                                *   console's `>ok` or `>err` is still owed. */
 
     /* ---- The CRC of the victims before an eviction ----------------------
      * One round per install: the first plan that names victims abandons the
@@ -1134,6 +1152,25 @@ static void undo_clear(AppMgr * const me)
     me->undo_count = 0U;
 }
 
+/** @brief Let go of the image held in PSRAM, and of every piece lent from it. */
+static void stage_free(AppMgr * const me)
+{
+    if ( NULL != me->stage )
+    {
+        khal_free(me->stage);
+        me->stage = NULL;
+    }
+    me->stage_cap   = 0U;
+    me->stage_len   = 0U;
+    me->stage_said  = 0U;
+    me->stage_at    = 0U;
+    me->stage_lent  = 0U;
+    me->stage_asked = 0U;
+    me->from_stage  = false;
+    me->staging     = false;
+    me->recv_owed   = false;
+}
+
 /** @brief Forget the round: the install it belonged to has ended. */
 static void keep_clear(AppMgr * const me)
 {
@@ -1142,6 +1179,7 @@ static void keep_clear(AppMgr * const me)
         khal_free(me->keep_crcs);
         me->keep_crcs = NULL;
     }
+    stage_free(me);         /* the image held for the install goes with it */
     victims_clear(me);      /* an install that ends owes no folder to anyone */
     undo_clear(me);         /* nor is anything left to give back */
     me->keep_round   = false;
@@ -1274,11 +1312,11 @@ static void app_list_page(AppListReqEvt const * const req)
 }
 
 /**
- * @brief Decide whether the file must be read through before this plan is acted on.
+ * @brief Decide whether the source must be read through before this plan is acted on.
  *
- * Only an install that gives something up needs it, and only from a file: a
- * URL and a terminal install cannot be read twice, and the mailbox is verified
- * in place.
+ * Only an install that evicts needs it. A file is read again where it lies, a
+ * URL and a terminal's wire into the copy held in PSRAM; the mailbox is
+ * verified in place.
  *
  * @param me   The AO.
  * @param plan The plan the decoder's header made.
@@ -1286,10 +1324,9 @@ static void app_list_page(AppListReqEvt const * const req)
  */
 static bool verify_defer(const AppMgr * const me, const kapps_plan_t *plan)
 {
-    bool const file = ((uint8_t)APPMGR_ORIGIN_FILE == me->origin)
-                   || ((uint8_t)APPMGR_ORIGIN_CARD == me->origin);
+    bool const mailbox = ((uint8_t)APPMGR_ORIGIN_MAILBOX == me->origin);
 
-    return file && !me->verify_done && !me->bypass && (0U < plan->evict_count);
+    return (!mailbox) && !me->verify_done && !me->bypass && (0U < plan->evict_count);
 }
 
 /**
@@ -2274,6 +2311,7 @@ static void xfer_reset(AppMgr * const me)
     me->dst_forced = false;
     me->from_net   = false;
     me->net_held   = false;
+    me->from_stage = false;
     me->launch     = false;
 }
 
@@ -2377,6 +2415,8 @@ static void flash_cleanup(AppMgr * const me)
  */
 static void flash_fail(AppMgr * const me, const char *why, kfail_t reason)
 {
+    bool const owed = me->recv_owed;   /* keep_clear() below forgets it */
+
     if ( KFAIL_BUSY == reason )
     {
         KLOG_N(TAG, "install refused for now: %s", why);
@@ -2401,10 +2441,18 @@ static void flash_fail(AppMgr * const me, const char *why, kfail_t reason)
     keep_clear(me);          /* the install ends here; so does its round */
     if ( KFAIL_BUSY == reason )
     {
+        if ( owed )
+        {
+            QACTIVE_PUBLISH(&s_recv_again_evt, &me->super);   /* the console's `>err` */
+        }
         QACTIVE_PUBLISH(&s_flash_busy_fail_evt.super, &me->super);
     }
     else
     {
+        if ( owed )
+        {
+            QACTIVE_PUBLISH(&s_recv_fail_evt, &me->super);    /* the console's `>err` */
+        }
         QACTIVE_PUBLISH(&s_flash_fail_evt.super, &me->super);
     }
 }
@@ -3138,7 +3186,7 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
     if ( verify_defer(me, &plan) )
     {
         me->verify_pending = true;
-        KLOG_I(TAG, "the file is to be read through before this install gives "
+        KLOG_I(TAG, "the image is to be read through before this install gives "
                     "anything up");
         return KODE_ERROR;       /* the decoder stops before the sink opens */
     }
@@ -3169,19 +3217,152 @@ static kode_status_t appmgr_place(void *ctx, uint32_t img_len, const char *name)
  * spread across the state machine.
  */
 
+/* ---- The image held in PSRAM ----------------------------------------------
+ * A URL's or a terminal's image kept whole, so an install that evicts reads
+ * it twice: once into the check, once into the region. Served to
+ * AppMgr_flashing as a third medium, a piece per APP_STAGE_DATA_SIG.
+ */
+
+_Static_assert(UINT16_MAX >= APPMGR_STAGE_PIECE,
+               "a piece of the held image fits StorageDataEvt.len");
+
+/**
+ * @brief Give the held image room for @p want bytes.
+ *
+ * Never more than the apps region: an image bigger than that could not be
+ * installed, so it is not held either.
+ *
+ * @param me   The AO.
+ * @param want Bytes `stage` must have room for.
+ * @return true when it has; false when PSRAM had not, or @p want is too big.
+ */
+static bool stage_room(AppMgr * const me, uint32_t want)
+{
+    if ( want <= me->stage_cap )
+    {
+        return true;
+    }
+    if ( kdrv_apps_region_size() < want )
+    {
+        return false;
+    }
+    /* cppcheck-suppress misra-c2012-11.5 ; a byte buffer from a void * allocator */
+    uint8_t * const grown = (uint8_t *)khal_realloc_psram(me->stage, (size_t)want);
+    if ( NULL == grown )
+    {
+        return false;
+    }
+    me->stage     = grown;
+    me->stage_cap = want;
+    return true;
+}
+
+/**
+ * @brief Add @p len bytes at the end of the held image, growing it if need be.
+ *
+ * @param me   The AO.
+ * @param data The bytes.
+ * @param len  How many.
+ * @return true when they are held; false when there was no room for them.
+ */
+static bool stage_put(AppMgr * const me, const uint8_t *data, uint32_t len)
+{
+    uint32_t const end = me->stage_len + len;
+
+    if ( end > me->stage_cap )
+    {
+        uint32_t want = me->stage_cap + APPMGR_STAGE_GROW;
+
+        if ( want < end )
+        {
+            want = end;
+        }
+        if ( (kdrv_apps_region_size() < want) && (kdrv_apps_region_size() >= end) )
+        {
+            want = kdrv_apps_region_size();   /* the last step stops at the region */
+        }
+        if ( !stage_room(me, want) )
+        {
+            return false;
+        }
+    }
+    (void)memcpy(&me->stage[me->stage_len], data, (size_t)len);
+    me->stage_len = end;
+    return true;
+}
+
+/**
+ * @brief Take an APP_STAGE_DATA_SIG: the next piece of the held image, as a
+ *        medium's chunk.
+ *
+ * The piece is chosen here, not when it was asked for, so an ask left over
+ * from a transfer given up (medium_close() forgets every ask) serves nothing.
+ *
+ * @param me  The AO.
+ * @param out Receives the piece: a lent index and its length, or the end.
+ * @return true when @p out is a piece to consume; false for a stale ask.
+ */
+static bool stage_serve(AppMgr * const me, StorageDataEvt * const out)
+{
+    uint8_t idx = 0U;
+
+    if ( (!me->from_stage) || (0U == me->stage_asked) )
+    {
+        return false;
+    }
+    while ( (APPMGR_LOAN_BITS > idx) && ((me->stage_lent & (uint8_t)(1U << idx)) != 0U) )
+    {
+        ++idx;
+    }
+    if ( APPMGR_LOAN_BITS <= idx )
+    {
+        return false;   /* every piece is out: an ask no medium would answer */
+    }
+    --me->stage_asked;
+    (void)memset(out, 0, sizeof(*out));
+    out->status = (uint8_t)KODE_OK;
+    if ( me->stage_at >= me->stage_len )
+    {
+        out->eof = true;
+        return true;
+    }
+    uint32_t n = me->stage_len - me->stage_at;
+    if ( APPMGR_STAGE_PIECE < n )
+    {
+        n = APPMGR_STAGE_PIECE;
+    }
+    me->stage_off[idx] = me->stage_at;
+    me->stage_lent    |= (uint8_t)(1U << idx);
+    me->stage_at      += n;
+    out->idx = idx;
+    out->len = (uint16_t)n;
+    return true;
+}
+
 /* ---- The medium, whichever it is ------------------------------------------
  * A file and a URL are the same conversation; only the AO on the other end
- * differs. Three wrappers keep that fact in one place instead of at every
- * call site.
+ * differs. The image held in PSRAM is served the same way, by this AO to
+ * itself. Four wrappers keep that fact in one place instead of at every call
+ * site.
  */
 
 /**
- * @brief Ask the medium in use, AO_Net's stream or AO_Storage's file, for a chunk.
+ * @brief Ask the medium in use for a chunk: the held image, AO_Net's stream
+ *        or AO_Storage's file.
  *
  * @param me The AO.
  */
 static void medium_read(AppMgr * const me)
 {
+    if ( me->from_stage )
+    {
+        /* Bare and static: the piece is chosen when it is taken. */
+        static const QEvt piece = QEVT_INITIALIZER(APP_STAGE_DATA_SIG);
+
+        ++me->stage_asked;
+        QACTIVE_POST(&me->super, &piece, &me->super);
+        return;
+    }
 #if CONFIG_KODEOS_NET
     if ( me->from_net )
     {
@@ -3194,12 +3375,20 @@ static void medium_read(AppMgr * const me)
 
 /**
  * @brief Close the medium in use: AO_Net's stream, when this install holds
- *        it, or AO_Storage's file.
+ *        it, or AO_Storage's file; the held image is kept.
  *
  * @param me The AO.
  */
 static void medium_close(AppMgr * const me)
 {
+    if ( me->from_stage )
+    {
+        /* Nothing to close: the image stays held for a restart, and every
+         * ask still queued now serves nothing (stage_serve()). */
+        me->stage_lent  = 0U;
+        me->stage_asked = 0U;
+        return;
+    }
 #if CONFIG_KODEOS_NET
     if ( me->from_net )
     {
@@ -3223,6 +3412,14 @@ static void medium_close(AppMgr * const me)
  */
 static const uint8_t *medium_buf(AppMgr * const me, uint8_t idx)
 {
+    if ( me->from_stage )
+    {
+        if ( (APPMGR_LOAN_BITS <= idx) || ((me->stage_lent & (uint8_t)(1U << idx)) == 0U) )
+        {
+            return NULL;
+        }
+        return &me->stage[me->stage_off[idx]];
+    }
 #if CONFIG_KODEOS_NET
     if ( me->from_net )
     {
@@ -3240,6 +3437,12 @@ static const uint8_t *medium_buf(AppMgr * const me, uint8_t idx)
  */
 static void medium_return(AppMgr * const me, uint8_t idx)
 {
+    if ( me->from_stage )
+    {
+        me->stage_lent &= (uint8_t)~(uint8_t)(1U << idx);
+        medium_read(me);      /* as a medium refills what it is handed back */
+        return;
+    }
 #if CONFIG_KODEOS_NET
     if ( me->from_net )
     {
@@ -3443,8 +3646,16 @@ static void flash_finish(AppMgr * const me)
         flash_fail(me, why, KFAIL_WRITE);
         return;
     }
-    /* The done and the launch come after the folders (tidy_finish()). */
-    tidy_begin(me, name, (uint8_t)TIDY_AFTER_FLASH);
+    /* The done and the launch come after the folders (tidy_finish()); a
+     * terminal's image written from memory also owes the console its `>ok`. */
+    if ( me->recv_owed )
+    {
+        tidy_begin(me, name, (uint8_t)TIDY_AFTER_RECV);
+    }
+    else
+    {
+        tidy_begin(me, name, (uint8_t)TIDY_AFTER_FLASH);
+    }
 }
 
 /**
@@ -4104,6 +4315,111 @@ static QState erase_begin(AppMgr * const me, AppFlashEvt const * const req)
 }
 
 /**
+ * @brief The source is open: start the transfer, prime the medium, and write.
+ *
+ * Shared by the answer to an open (AppMgr_opening) and by an install that
+ * reads the image it holds in PSRAM, which has nothing to open. Placement,
+ * eviction and the sink all happen inside the decoder's header callback: only
+ * there is the image's real length known, and for a compressed container it
+ * is not the source's.
+ *
+ * @param me     The AO, its medium chosen (from_net, from_stage).
+ * @param size   The bytes the source will deliver.
+ * @param medium Where a file was found (kdrv_medium_t); read for a file only.
+ * @return AppMgr_flashing, or AppMgr_idle when the transfer would not start.
+ */
+static QState transfer_start(AppMgr * const me, uint32_t size, uint8_t medium)
+{
+    bool const  file   = (!me->from_net) && (!me->from_stage);
+    const char *from   = "the network";
+    const char *what   = me->file;
+    const char *into   = "the apps region";
+    uint8_t     target = (uint8_t)KFW_TARGET_APP;
+
+    if ( me->os_target )
+    {
+        into   = "the kodeOS slot";
+        target = (uint8_t)KFW_TARGET_OS;
+    }
+    /* Not in bypass: there the destination was chosen when the request
+     * arrived and must not be second-guessed here. */
+    if ( !me->bypass )
+    {
+        if ( me->os_target )
+        {
+            me->sink = kdrv_slot_sink();
+        }
+        else
+        {
+            me->sink = kdrv_apps_sink();
+        }
+    }
+    if ( file && ((uint8_t)KDRV_MEDIUM_SD == medium) )
+    {
+        me->origin = (uint8_t)APPMGR_ORIGIN_CARD;
+    }
+    me->rd_card  = file && ((uint8_t)KDRV_MEDIUM_SD == medium);
+    me->rd_again = 0U;
+    me->rd_off   = 0U;
+    me->stage_at = 0U;     /* every pass reads the held image from its first byte */
+    if ( xfer_begin(me, target, size) != KODE_OK )
+    {
+        flash_fail(me, "cannot start a transfer", KFAIL_WRITE);
+        return Q_TRAN(&AppMgr_idle);
+    }
+    appmgr_inst_taken();   /* its record goes out before the verdict */
+    if ( me->os_target || me->bypass )
+    {
+        /* The slot and the mailbox are planned by nobody: the file is open
+         * and the write has begun. An app's verdict waits for its plan, at
+         * the first chunk (consume_chunk()). */
+        req_settle(me, APP_REQ_TAKEN);
+    }
+
+    me->writing     = true;
+    me->pacing      = false;
+    me->to_return   = 0U;
+
+    /* Announce the start, not just the first percent. Subscribers use this
+     * to know a write is happening at all - it is what raises the Opening
+     * sheet and the LED's pulse - and the medium has not delivered a byte
+     * yet. The console's road announces at its ready (AppMgr_receiving). */
+    me->total       = (size_t)size;
+    me->written     = 0U;
+    me->next_report = APPMGR_PROGRESS;
+    progress_publish(me, progress_pct(me));   /* a restart resumes where the
+                                               * copies left the bar */
+    /* The source's size and not the image's, and no offset: with a container
+     * neither is known until the header is parsed, and appmgr_place() logs
+     * the real ones the moment they are. Naming a number here that the next
+     * line might contradict is worse than naming none. */
+    if ( me->from_stage )
+    {
+        from = "the copy held in memory";
+    }
+    else if ( file )
+    {
+        from = kdrv_storage_mount_point((kdrv_medium_t)medium);
+    }
+    else
+    {
+        /* a URL: the network */
+    }
+    if ( '\0' == what[0] )
+    {
+        what = me->project;   /* a stream has no file name */
+    }
+    KLOG_N(TAG, "writing %s from %s (%u bytes on the medium) into %s",
+           what, from, (unsigned)size, into);
+
+    /* Prime both buffers: from here on one is being written to flash while
+     * the other is being filled from the medium. */
+    medium_read(me);
+    medium_read(me);
+    return Q_TRAN(&AppMgr_flashing);
+}
+
+/**
  * @brief Nothing in flight: installs, runs, erases, listings and the other requests.
  *
  * @param me The AO.
@@ -4488,6 +4804,16 @@ static QState AppMgr_idle(AppMgr * const me, QEvt const * const e)
                  * differ in size on purpose. */
                 (void)snprintf(me->file, sizeof(me->file), "%.*s",
                                (int)(sizeof(me->file) - 1U), req->src);
+            }
+            if ( NULL != me->stage )
+            {
+                /* A restart of an install whose image is held whole: it reads
+                 * that copy, and a URL is not downloaded again. A fresh
+                 * request finds none: keep_clear() above let it go. */
+                me->from_net   = false;
+                me->from_stage = true;
+                status = transfer_start(me, me->stage_len, (uint8_t)KDRV_MEDIUM_COUNT);
+                break;
             }
             /* Never true without CONFIG_KODEOS_NET (refused above), but the
              * guard stays: without it the call does not link. */
@@ -4960,71 +5286,7 @@ static QState AppMgr_opening(AppMgr * const me, QEvt const * const e)
                 status = Q_TRAN(&AppMgr_idle);
                 break;
             }
-            /* Placement, eviction and the sink all happen inside the
-             * decoder's header callback now: only there is the image's real
-             * length known, and for a compressed container it is not the
-             * file's. */
-            /* Not in bypass: there the destination was chosen when the
-             * request arrived and must not be second-guessed here. */
-            if ( !me->bypass )
-            {
-                me->sink = me->os_target ? kdrv_slot_sink() : kdrv_apps_sink();
-            }
-            if ( (!me->from_net) && ((uint8_t)KDRV_MEDIUM_SD == rsp->medium) )
-            {
-                me->origin = (uint8_t)APPMGR_ORIGIN_CARD;
-            }
-            me->rd_card  = (!me->from_net) && ((uint8_t)KDRV_MEDIUM_SD == rsp->medium);
-            me->rd_again = 0U;
-            me->rd_off   = 0U;
-            if ( xfer_begin(me, me->os_target ? (uint8_t)KFW_TARGET_OS
-                                             : (uint8_t)KFW_TARGET_APP,
-                           rsp->size) != KODE_OK )
-            {
-                flash_fail(me, "cannot start a transfer", KFAIL_WRITE);
-                status = Q_TRAN(&AppMgr_idle);
-                break;
-            }
-            appmgr_inst_taken();   /* its record goes out before the verdict */
-            if ( me->os_target || me->bypass )
-            {
-                /* The slot and the mailbox are planned by nobody: the file
-                 * is open and the write has begun. An app's verdict waits
-                 * for its plan, at the first chunk (consume_chunk()). */
-                req_settle(me, APP_REQ_TAKEN);
-            }
-
-            me->writing     = true;
-            me->pacing      = false;
-            me->to_return   = 0U;
-
-            /* Announce the start, not just the first percent. Subscribers use
-             * this to know a write is happening at all - it is what raises
-             * the Opening sheet and the LED's pulse - and the medium has not
-             * delivered a byte yet. The console's road announces at its
-             * ready (AppMgr_receiving). */
-            me->total       = (size_t)rsp->size;
-            me->written     = 0U;
-            me->next_report = APPMGR_PROGRESS;
-            progress_publish(me, progress_pct(me));   /* a restart resumes where
-                                                       * the copies left the bar */
-            /* The file's size and not the image's, and no offset: with a
-             * container neither is known until the header is parsed, and
-             * appmgr_place() logs the real ones the moment they are. Naming
-             * a number here that the next line might contradict is worse
-             * than naming none. */
-            KLOG_N(TAG, "writing %s from %s (%u bytes on the medium) into %s",
-                   me->file,
-                   me->from_net ? "the network"
-                                : kdrv_storage_mount_point((kdrv_medium_t)rsp->medium),
-                   (unsigned)rsp->size,
-                   me->os_target ? "the kodeOS slot" : "the apps region");
-
-            /* Prime both buffers: from here on one is being written to flash
-             * while the other is being filled from the medium. */
-            medium_read(me);
-            medium_read(me);
-            status = Q_TRAN(&AppMgr_flashing);
+            status = transfer_start(me, rsp->size, rsp->medium);
             break;
         }
         /* A request arriving now would interleave with the one in flight. */
@@ -5081,10 +5343,11 @@ static void keep_pause(AppMgr * const me)
 static void install_again(AppMgr * const me);
 
 /**
- * @brief Stop the install at its plan and open its file again, to read it through.
+ * @brief Stop the install at its plan and open its source again, to read it through.
  *
- * Nothing was committed: the transfer is abandoned, the file closed and opened
- * anew for AppMgr_verifying.
+ * Nothing was committed: the transfer is abandoned, the file or the download
+ * closed and opened anew for AppMgr_verifying. A download is kept whole in
+ * PSRAM as it is read.
  *
  * @param me The AO, with verify_pending set.
  * @return The state to go on in.
@@ -5094,6 +5357,14 @@ static QState verify_start(AppMgr * const me)
     keep_pause(me);
     me->verify_pending = false;
     me->verify_opened  = false;
+#if CONFIG_KODEOS_NET
+    if ( me->from_net )
+    {
+        net_stream_open_request(me->keep_req.src, &me->super);
+        me->net_held = true;
+        return Q_TRAN(&AppMgr_verifying);
+    }
+#endif
     storage_open_request(me->file, &me->super);
     return Q_TRAN(&AppMgr_verifying);
 }
@@ -8446,7 +8717,86 @@ static QState AppMgr_tidying(AppMgr * const me, QEvt const * const e)
 }
 
 /**
- * @brief Writing a file's or a URL's chunks, each buffer handed back after a gap.
+ * @brief Write one chunk of the medium in use, and say where the install goes on.
+ *
+ * @param me   The AO, in AppMgr_flashing.
+ * @param d    The chunk: a medium's data event, or a piece of the held image.
+ * @param card The chunk came from AO_Storage, which can read a failed one again.
+ * @return The QP status.
+ */
+static QState flashing_chunk(AppMgr * const me, StorageDataEvt const * const d, bool card)
+{
+    uint8_t const idx = d->idx;
+
+    if ( card && chunk_again(me, d) )
+    {
+        return Q_HANDLED();
+    }
+    if ( !consume_chunk(me, d) )
+    {
+        if ( me->busy_pending && me->recv_owed )
+        {
+            /* A terminal's image held in memory has no request to start
+             * again from: the host asks again, as when its stream was held
+             * back before the wire. Nothing was committed. */
+            me->busy_pending = false;
+            flash_fail(me, "an app it would evict has no copy on the card yet; "
+                           "ask again", KFAIL_BUSY);
+            return Q_TRAN(&AppMgr_idle);
+        }
+        if ( me->busy_pending )
+        {
+            /* Nothing was committed: the transfer and its medium are let go,
+             * the app is copied, and the install starts again. Its asker is
+             * told now that it is taken. */
+            keep_pause(me);
+            me->busy_pending = false;
+            req_settle(me, APP_REQ_TAKEN);
+            return Q_TRAN(&AppMgr_copying);
+        }
+        if ( me->verify_pending )
+        {
+            return verify_start(me);
+        }
+        if ( me->keep_pending )
+        {
+            keep_pause(me);
+            return Q_TRAN(&AppMgr_keeping);
+        }
+        return tidy_state(me);   /* tidying after a commit, else idle */
+    }
+    (void)QTimeEvt_rearm(&me->idle, APPMGR_CHUNK_TICKS);
+    /* Remember the buffer rather than returning it now: the gap is what keeps
+     * the GUI alive across the erase. One pacer for however many buffers are
+     * waiting - arming it per buffer is what produced two "next" requests for
+     * one loan. */
+    me->to_return |= (uint8_t)(1U << idx);
+    if ( !me->pacing )
+    {
+        me->pacing = true;
+        QTimeEvt_armX(&me->pacer, chunk_gap(), 0U);
+    }
+    return Q_HANDLED();
+}
+
+/**
+ * @brief Say, once a second, that a terminal's image held in memory is being
+ *        written: the host waits for its `>ok` on each.
+ *
+ * @param me The AO, writing from `stage` with recv_owed set.
+ */
+static void recv_wait_say(AppMgr * const me)
+{
+    /* Bare and static, as the endings of the receive protocol are. */
+    static const QEvt wait = QEVT_INITIALIZER(RECV_WAIT_SIG);
+
+    QACTIVE_PUBLISH(&wait, &me->super);
+    (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
+}
+
+/**
+ * @brief Writing a file's, a URL's or the held image's chunks, each buffer
+ *        handed back after a gap.
  *
  * @param me The AO.
  * @param e  The event.
@@ -8459,7 +8809,7 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
     {
         case Q_ENTRY_SIG: {
             QTimeEvt_armX(&me->idle, APPMGR_CHUNK_TICKS, 0U);
-            if ( me->from_net )
+            if ( me->from_net || me->recv_owed )
             {
                 (void)QTimeEvt_rearm(&me->beat, APPMGR_WAIT_BEAT_TICKS);
             }
@@ -8473,10 +8823,20 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
             break;
         }
         case APP_BEAT_SIG: {
-            /* A download that stops sending makes no report of its own. */
+            /* A download that stops sending makes no report of its own, and
+             * a terminal's host hears nothing between its last byte and the
+             * `>ok` unless it is told. */
             if ( me->from_net )
             {
                 beat_say(me);
+            }
+            else if ( me->recv_owed )
+            {
+                recv_wait_say(me);
+            }
+            else
+            {
+                /* nobody waits on a file's write */
             }
             status = Q_HANDLED();
             break;
@@ -8496,52 +8856,18 @@ static QState AppMgr_flashing(AppMgr * const me, QEvt const * const e)
         }
         case STORAGE_DATA_SIG:
         case NET_STREAM_DATA_SIG: {
-            StorageDataEvt const * const d = Q_EVT_CAST(StorageDataEvt);
-            uint8_t const idx = d->idx;
-            if ( ((QSignal)STORAGE_DATA_SIG == e->sig) && chunk_again(me, d) )
+            status = flashing_chunk(me, Q_EVT_CAST(StorageDataEvt),
+                                    (QSignal)STORAGE_DATA_SIG == e->sig);
+            break;
+        }
+        case APP_STAGE_DATA_SIG: {
+            StorageDataEvt piece;
+
+            status = Q_HANDLED();      /* an ask left over serves nothing */
+            if ( stage_serve(me, &piece) )
             {
-                status = Q_HANDLED();
-                break;
+                status = flashing_chunk(me, &piece, false);
             }
-            if ( !consume_chunk(me, d) )
-            {
-                if ( me->busy_pending )
-                {
-                    /* Nothing was committed: the transfer and its medium are
-                     * let go, the app is copied, and the install starts
-                     * again. Its asker is told now that it is taken. */
-                    keep_pause(me);
-                    me->busy_pending = false;
-                    req_settle(me, APP_REQ_TAKEN);
-                    status = Q_TRAN(&AppMgr_copying);
-                    break;
-                }
-                if ( me->verify_pending )
-                {
-                    status = verify_start(me);
-                    break;
-                }
-                if ( me->keep_pending )
-                {
-                    keep_pause(me);
-                    status = Q_TRAN(&AppMgr_keeping);
-                    break;
-                }
-                status = tidy_state(me);   /* tidying after a commit, else idle */
-                break;
-            }
-            (void)QTimeEvt_rearm(&me->idle, APPMGR_CHUNK_TICKS);
-            /* Remember the buffer rather than returning it now: the gap is
-             * what keeps the GUI alive across the erase. One pacer for however
-             * many buffers are waiting - arming it per buffer is what produced
-             * two "next" requests for one loan. */
-            me->to_return |= (uint8_t)(1U << idx);
-            if ( !me->pacing )
-            {
-                me->pacing = true;
-                QTimeEvt_armX(&me->pacer, chunk_gap(), 0U);
-            }
-            status = Q_HANDLED();
             break;
         }
         case APP_FLASH_CHUNK_SIG: {
@@ -8615,17 +8941,16 @@ static QState verify_fail(AppMgr * const me, const char *why)
 }
 
 /**
- * @brief End the read-through on the decoder's refusal, named for its cause.
+ * @brief Note why the check refused the image read through, and name it.
  *
- * An image at fault, or one the check refused, is the file's; a decoder that
+ * An image at fault, or one the check refused, is the source's; a decoder that
  * could not run (no PSRAM for the inflater) is not, and says so.
  *
- * @param me The AO.
- * @return AppMgr_idle.
+ * @return The log's phrase.
  */
-static QState verify_refused(AppMgr * const me)
+static const char *check_why(void)
 {
-    const char *why = "the file is cut or damaged; nothing was given up";
+    const char *why = "the image is cut or damaged; nothing was given up";
 
     if ( kfw_foreign() )
     {
@@ -8634,13 +8959,24 @@ static QState verify_refused(AppMgr * const me)
     else if ( (!kfw_malformed()) && (!kfw_sink_failed()) )
     {
         appmgr_inst_why(APPMGR_WHY_OTHER);
-        why = "the file could not be read through; nothing was given up";
+        why = "the image could not be read through; nothing was given up";
     }
     else
     {
-        /* The file's own fault: verify_fail() notes it as corrupt. */
+        appmgr_inst_why(APPMGR_WHY_CORRUPT);
     }
-    return verify_fail(me, why);
+    return why;
+}
+
+/**
+ * @brief End the read-through on the decoder's refusal, named for its cause.
+ *
+ * @param me The AO.
+ * @return AppMgr_idle.
+ */
+static QState verify_refused(AppMgr * const me)
+{
+    return verify_fail(me, check_why());
 }
 
 /**
@@ -8658,12 +8994,13 @@ static QState verify_resume(AppMgr * const me)
 }
 
 /**
- * @brief Read the file through once, then start the install again.
+ * @brief Read the file or the download through once, then start the install again.
  *
  * The chunks are the install's own, one buffer at a time, paced like
  * AppMgr_flashing's; they go through the decoder into kdrv_image_check's sink
- * and are written nowhere. A .kfw container is judged as the image it
- * carries, and its digest is compared before the file is called whole: the
+ * and are written nowhere, but a download's are also kept whole in `stage`,
+ * which the install then reads. A .kfw container is judged as the image it
+ * carries, and its digest is compared before the source is called whole: the
  * install's own pass places the image, and so evicts, at the header.
  */
 static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
@@ -8701,15 +9038,27 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
             status = verify_fail(me, "the medium stopped sending");
             break;
         }
-        case STORAGE_OPEN_RSP_SIG: {
+        case STORAGE_OPEN_RSP_SIG:
+        case NET_STREAM_OPEN_RSP_SIG: {
             StorageOpenRspEvt const * const rsp = Q_EVT_CAST(StorageOpenRspEvt);
 
             if ( (uint8_t)KODE_OK != rsp->status )
             {
-                status = verify_fail(me, "the file could not be read through; "
+                me->net_held = false;            /* nothing was opened */
+                status = verify_fail(me, "the image could not be read through; "
                                          "nothing was given up");
                 break;
             }
+            if ( me->from_net && (0U < rsp->size) && !stage_room(me, rsp->size) )
+            {
+                /* Not the image's fault: there is nowhere to hold it whole. */
+                appmgr_inst_why(APPMGR_WHY_OTHER);
+                status = verify_fail(me, "no room in PSRAM to hold the image "
+                                         "whole; nothing was given up");
+                break;
+            }
+            me->stage_len  = 0U;
+            me->stage_said = rsp->size;
             if ( verify_begin(me, rsp->size) != KODE_OK )
             {
                 /* Another owner holds the one decoder: not the file's fault. */
@@ -8724,7 +9073,8 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
-        case STORAGE_DATA_SIG: {
+        case STORAGE_DATA_SIG:
+        case NET_STREAM_DATA_SIG: {
             StorageDataEvt const * const d = Q_EVT_CAST(StorageDataEvt);
 
             if ( !me->verify_opened )
@@ -8736,17 +9086,33 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
                  * before the open's answer. It is nobody's: AO_Storage's close
                  * takes every buffer back, and a NEXT would only start a read
                  * on the reader that is opened next. */
-                KLOG_D(TAG, "a chunk of the first reader, before the file was opened again");
+                KLOG_D(TAG, "a chunk of the first reader, before the source was opened again");
                 status = Q_HANDLED();
                 break;
             }
             if ( (uint8_t)KODE_OK != d->status )
             {
-                status = verify_fail(me, "read from storage failed");
+                const char *why = "read from storage failed";
+
+                if ( me->from_net )
+                {
+                    appmgr_inst_why(APPMGR_WHY_CUT);
+                    why = "the download stopped; nothing was given up";
+                }
+                status = verify_fail(me, why);
                 break;
             }
             if ( d->eof )
             {
+                if ( me->from_net && (me->stage_len < me->stage_said) )
+                {
+                    /* The check judges the image, not what trails it: the
+                     * write from the copy would take it as whole. */
+                    appmgr_inst_why(APPMGR_WHY_CUT);
+                    status = verify_fail(me, "the download ended before its "
+                                             "length; nothing was given up");
+                    break;
+                }
                 if ( kfw_end() != KODE_OK )
                 {
                     status = verify_refused(me);
@@ -8759,14 +9125,26 @@ static QState AppMgr_verifying(AppMgr * const me, QEvt const * const e)
                 kfw_appdata_take(&ad);
                 kfw_appdata_release(&ad);
                 KLOG_I(TAG, "'%s' reads through whole", me->file);
+                if ( me->from_net )
+                {
+                    KLOG_I(TAG, "%lu bytes held in memory for the install",
+                           (unsigned long)me->stage_len);
+                }
                 status = verify_resume(me);
                 break;
             }
             const uint8_t * const buf = medium_buf(me, d->idx);
             if ( NULL == buf )
             {
-                status = verify_fail(me, "storage handed back a buffer that "
+                status = verify_fail(me, "the medium handed back a buffer that "
                                          "does not exist");
+                break;
+            }
+            if ( me->from_net && !stage_put(me, buf, (uint32_t)d->len) )
+            {
+                appmgr_inst_why(APPMGR_WHY_OTHER);
+                status = verify_fail(me, "no room in PSRAM to hold the image "
+                                         "whole; nothing was given up");
                 break;
             }
             if ( kfw_feed(buf, d->len) != KODE_OK )
@@ -8989,6 +9367,105 @@ static bool launch_waits(AppMgr * const me)
 }
 
 /**
+ * @brief Put the chunk staged in `chunk` into the held image and the check.
+ *
+ * @param me The AO, in AppMgr_receiving, staging.
+ * @return KODE_OK, or an error that stops the holding (the wire still drains).
+ */
+static kode_status_t recv_stage_feed(AppMgr * const me)
+{
+    if ( !stage_put(me, me->chunk, me->recv_fill) )
+    {
+        appmgr_inst_why(APPMGR_WHY_OTHER);
+        KLOG_E(TAG, "install: no room in PSRAM to hold the image whole; "
+                    "draining the rest of the transfer");
+        return KODE_ERROR;
+    }
+    if ( kfw_feed(me->chunk, me->recv_fill) != KODE_OK )
+    {
+        KLOG_E(TAG, "install: %s (at %u/%u bytes); draining the rest of the "
+                    "transfer", check_why(),
+               (unsigned)me->recv_wire, (unsigned)me->recv_size);
+        return KODE_ERROR;
+    }
+    return KODE_OK;
+}
+
+/**
+ * @brief Hold a terminal's wire in PSRAM from its first chunk: its plan evicts.
+ *
+ * appmgr_place() stopped at the header, before the sink opened, so nothing
+ * was written or given up. The region's session is let go, and the first
+ * chunk, which carries the header, goes into `stage` and into the check;
+ * every later chunk follows it, and the image is written once the wire has
+ * ended and the check has passed (recv_held()). A header past the first chunk
+ * would leave bytes neither held nor checked: the install ends instead.
+ *
+ * @param me The AO, in AppMgr_receiving, the first chunk staged in `chunk`.
+ * @return KODE_OK when the wire is held; an error stops the writing.
+ */
+static kode_status_t recv_stage(AppMgr * const me)
+{
+    me->verify_pending = false;
+    xfer_abort(me);
+    me->writing = false;
+    if ( me->recv_wire != me->recv_fill )
+    {
+        appmgr_inst_why(APPMGR_WHY_OTHER);
+        KLOG_E(TAG, "install: the image's header came after its first chunk; "
+                    "draining the rest of the transfer");
+        return KODE_ERROR;
+    }
+    if ( !stage_room(me, me->recv_size) )
+    {
+        appmgr_inst_why(APPMGR_WHY_OTHER);
+        KLOG_E(TAG, "install: no room in PSRAM to hold the image whole; "
+                    "draining the rest of the transfer");
+        return KODE_ERROR;
+    }
+    if ( verify_begin(me, me->recv_size) != KODE_OK )
+    {
+        appmgr_inst_why(APPMGR_WHY_OTHER);
+        KLOG_E(TAG, "install: the decoder is busy; draining the rest of the "
+                    "transfer");
+        return KODE_ERROR;
+    }
+    me->staging   = true;
+    me->stage_len = 0U;
+    KLOG_I(TAG, "the image is held in memory and read through before this "
+                "install gives anything up");
+    return recv_stage_feed(me);
+}
+
+/**
+ * @brief Take the chunk staged in `chunk`: into the region, or into the held
+ *        image and the check.
+ *
+ * @param me The AO, in AppMgr_receiving.
+ * @return KODE_OK, or an error that stops the writing (the wire still drains).
+ */
+static kode_status_t recv_feed(AppMgr * const me)
+{
+    if ( me->staging )
+    {
+        return recv_stage_feed(me);
+    }
+    kode_status_t const st = xfer_feed(me, me->chunk, me->recv_fill);
+    if ( (KODE_OK != st) && me->verify_pending )
+    {
+        return recv_stage(me);   /* the header's plan evicts */
+    }
+    if ( KODE_OK != st )
+    {
+        xfer_why();
+        KLOG_E(TAG, "install: write failed at %u/%u bytes; "
+                    "draining the rest of the transfer",
+               (unsigned)me->recv_wire, (unsigned)me->recv_size);
+    }
+    return st;
+}
+
+/**
  * @brief Close an install: verify or abort the write session, publish the
  *        outcome, and say what to do next.
  *
@@ -9005,7 +9482,7 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
      * publishes the ready and its 0 %, so only an install the glass has
      * already seen start owes it a failure. A stream held back for a copy
      * said its 0 % while it waited. */
-    bool announced = me->writing;
+    bool announced = me->writing || me->staging;
 
     if ( (NULL != me->bk) && me->bk->held_said )
     {
@@ -9033,6 +9510,11 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
             xfer_abort(me);
             me->writing = false;
         }
+    }
+    if ( me->staging )
+    {
+        kfw_abort_owned(me);    /* the check's session; nothing was given up */
+        me->staging = false;
     }
 
     if ( ok && me->os_target )
@@ -9135,11 +9617,45 @@ static QState recv_close(AppMgr * const me, bool ok, bool stalled)
 }
 
 /**
+ * @brief The held wire has ended and its CRC holds: close the check, then
+ *        write the image from memory.
+ *
+ * The write's own pass places the image, and so evicts, at its header; the
+ * console's `>ok` or `>err` comes at its end (recv_owed).
+ *
+ * @param me The AO, in AppMgr_receiving, staging.
+ * @return AppMgr_flashing; recv_close()'s state when the check refuses it.
+ */
+static QState recv_held(AppMgr * const me)
+{
+    kfw_appdata_t ad;
+
+    if ( kfw_end() != KODE_OK )
+    {
+        KLOG_E(TAG, "install failed: %s", check_why());
+        return recv_close(me, false, false);
+    }
+    /* The block is the write's to take, on its own pass. */
+    kfw_appdata_take(&ad);
+    kfw_appdata_release(&ad);
+    me->staging     = false;
+    me->verify_done = true;
+    me->recv_owed   = true;
+    me->from_stage  = true;
+    (void)QTimeEvt_disarm(&me->idle);
+    KLOG_I(TAG, "the image reads through whole (%u bytes); writing it from memory",
+           (unsigned)me->stage_len);
+    return transfer_start(me, me->stage_len, (uint8_t)KDRV_MEDIUM_COUNT);
+}
+
+/**
  * @brief Receiving an image the console streams in (`install src="terminal"`).
  *
  * RECV_DATA_SIG comes from the console reader task, one KODE_RECV_CHUNK at a
  * time. Each is CRC'd and written; after a failed write the rest is still
- * drained, because the host sends @c me->recv_size bytes whatever happens.
+ * drained, because the host sends @c me->recv_size bytes whatever happens. An
+ * image whose plan evicts is held in PSRAM and checked instead, and written
+ * once the wire has ended (recv_stage(), recv_held()).
  */
 static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
 {
@@ -9216,7 +9732,10 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                 status = recv_close(me, false, false);
                 break;
             }
-            if ( !plan_commit(me, &dir, &plan) )
+            /* A plan that evicts commits nothing here: the decoder's header
+             * stops it (verify_defer()), and the wire is held whole in
+             * memory from its first chunk (recv_stage()). */
+            if ( (0U == plan.evict_count) && !plan_commit(me, &dir, &plan) )
             {
                 KLOG_E(TAG, "install failed: cannot update the directory");
                 appmgr_inst_why(APPMGR_WHY_WRITE);
@@ -9281,14 +9800,9 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                     continue;              /* chunk still filling */
                 }
                 bool const whole = ((uint32_t)KODE_RECV_CHUNK == me->recv_fill);
-                if ( me->recv_ok
-                    && (xfer_feed(me, me->chunk, me->recv_fill) != KODE_OK) )
+                if ( me->recv_ok && (recv_feed(me) != KODE_OK) )
                 {
-                    me->recv_ok = false;
-                    xfer_why();
-                    KLOG_E(TAG, "install: write failed at %u/%u bytes; "
-                                "draining the rest of the transfer",
-                           (unsigned)me->recv_wire, (unsigned)me->recv_size);
+                    me->recv_ok = false;   /* recv_feed() said why */
                 }
                 /* A failed write stops `written`, and the reports with it. */
                 progress_report(me);
@@ -9316,6 +9830,11 @@ static QState AppMgr_receiving(AppMgr * const me, QEvt const * const e)
                 KLOG_E(TAG, "install failed: CRC mismatch (got 0x%08lx, "
                             "wanted 0x%08lx)",
                        (unsigned long)me->recv_crc, (unsigned long)me->recv_want);
+            }
+            if ( me->staging && me->recv_ok && crc_ok )
+            {
+                status = recv_held(me);
+                break;
             }
             status = recv_close(me, me->recv_ok && crc_ok, false);
             break;

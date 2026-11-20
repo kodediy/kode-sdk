@@ -109,11 +109,14 @@ enum KodeSignals {
                                  *   Bare and static, as the endings beside it. */
     RECV_WAIT_SIG,              /**< The receive protocol: AO_AppMgr holds the
                                  *   stream back while an app the image would
-                                 *   evict is copied to the card; the ready
-                                 *   comes after. Said when the wait begins
+                                 *   evict is copied to the card, the ready
+                                 *   coming after; or, the wire ended, writes
+                                 *   the image it held in PSRAM, the done
+                                 *   coming after. Said when the wait begins
                                  *   and every second of it: AO_Console
-                                 *   answers `>|wait` and gives the command
-                                 *   its time again. Bare and static.         */
+                                 *   answers `>|wait`, and before the ready
+                                 *   gives the command its time again. Bare
+                                 *   and static.                              */
     RECV_STALL_SIG,             /**< The receive protocol: the host stopped
                                  *   sending and never came back - kcli
                                  *   error 6.                                 */
@@ -648,7 +651,13 @@ enum KodeSignals {
                                  *   install a fetch announced, has gone by -
                                  *   report the write's percent again, so the
                                  *   glass and the LED stay up.               */
-    FLASH_REQ_SIG,              /**< AO_AppMgr: one source-to-sink transfer
+    APP_STAGE_DATA_SIG,         /**< AO_AppMgr private: serve the next piece
+                                 *   of the image it holds in PSRAM, as a
+                                 *   medium serves a chunk. Static and bare:
+                                 *   the piece is chosen when the event is
+                                 *   taken, so one left over from an install
+                                 *   that ended serves nothing.               */
+    FLASH_REQ_SIG,             /**< AO_AppMgr: one source-to-sink transfer
                                  *   (FlashReqEvt). The only way to ask for
                                  *   an image to be written.                 */
     APP_REQ_RSP_SIG,            /**< To the asker: whether AO_AppMgr took an
