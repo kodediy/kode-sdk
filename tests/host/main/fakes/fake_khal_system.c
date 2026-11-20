@@ -57,6 +57,10 @@ static unsigned s_psram_grants;
  * unless a case says so. */
 static bool s_stack_in_psram;
 
+/* How many tasks khal_task_list() says the scheduler runs: none unless a
+ * case says so, which reads as a build that cannot ask. */
+static size_t s_tasks;
+
 /* What khal_heap_alloc_failures() answers: the refusals a board would have
  * counted, which a host with gigabytes to give never produces. */
 static uint32_t s_alloc_failures;
@@ -101,6 +105,7 @@ void fake_system_reset(void)
     s_psram_refusals       = 0U;
     s_psram_grants         = 0U;
     s_stack_in_psram       = false;
+    s_tasks                = 0U;
     s_alloc_failures       = 0U;
     s_internal_low         = HEAP_LOW_DEFAULT;
     s_psram_free           = PSRAM_FREE_DEFAULT;
@@ -315,15 +320,28 @@ void khal_keep_init(void)
     /* The host has no PSRAM to keep. */
 }
 
+void fake_task_list_set(size_t n)
+{
+    s_tasks = n;
+}
+
 size_t khal_task_list(khal_task_info_t *out, size_t max, size_t *total)
 {
-    (void)out;
-    (void)max;
+    size_t kept = 0U;
+
     if ( NULL != total )
     {
-        *total = 0U;
+        *total = s_tasks;
     }
-    return 0U;
+    while ( (NULL != out) && (kept < max) && (kept < s_tasks) )
+    {
+        (void)snprintf(out[kept].name, sizeof(out[kept].name),
+                       FAKE_TASK_NAME_FMT, (unsigned)kept);
+        out[kept].prio       = (uint8_t)(kept % FAKE_TASK_PRIOS);
+        out[kept].stack_free = FAKE_TASK_STACK_FREE + (uint32_t)kept;
+        ++kept;
+    }
+    return kept;
 }
 
 const char *khal_task_name(void)

@@ -87,6 +87,9 @@ void khal_heap_watch(void);
 uint32_t khal_heap_alloc_failures(void);
 
 #define KHAL_TASK_NAME_LEN  16U   /**< Bytes of a task name, NUL included. */
+#define KHAL_TASK_LIST_SPARE 4U   /**< Entries a task snapshot keeps beyond the tasks counted before
+                                   *   it, for tasks started in between: with less room than the
+                                   *   tasks running, the scheduler fills none. */
 
 /** @brief One live task, as the scheduler knows it. */
 typedef struct {
@@ -97,11 +100,19 @@ typedef struct {
 
 /**
  * @brief Snapshot the tasks the scheduler runs.
+ *
+ * The snapshot is taken in PSRAM, room for the tasks running plus
+ * KHAL_TASK_LIST_SPARE, and freed before this returns. It measures every
+ * task's stack with interrupts off on the calling core, so it is for a
+ * listing someone asked for, not for a loop.
+ *
  * @param out   Filled with at most @p max entries, in no particular order.
+ *              NULL with @p max 0 asks for @p total alone, to size @p out.
  * @param max   Room in @p out.
  * @param total If not NULL, receives how many tasks the scheduler runs;
  *              0 when the scheduler was not built to be asked.
- * @return How many entries were written to @p out.
+ * @return How many entries were written to @p out; 0 also when PSRAM could
+ *         not hold the snapshot.
  */
 size_t khal_task_list(khal_task_info_t *out, size_t max, size_t *total);
 

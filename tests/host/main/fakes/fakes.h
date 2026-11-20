@@ -210,6 +210,18 @@ jmp_buf *fake_system_arm_restart(void);
  *         takes it back to 0. */
 void fake_heap_set_alloc_failures(uint32_t n);
 
+#define FAKE_TASK_NAME_FMT   "task%02u" /**< Task i's name in khal_task_list()'s snapshot. */
+#define FAKE_TASK_PRIOS      25U        /**< Task i runs at i modulo this. */
+#define FAKE_TASK_STACK_FREE 1000U      /**< Task i's stack_free is this plus i. */
+
+/**
+ * @brief Say how many tasks the scheduler runs. khal_task_list() reports
+ *        @p n and fills as many of them as its caller has room for;
+ *        fake_system_reset() takes it back to 0, a build that cannot ask.
+ * @param n Tasks running.
+ */
+void fake_task_list_set(size_t n);
+
 /** @brief Set what khal_heap_internal_low() answers, in bytes;
  *         fake_system_reset() takes it back to a healthy 96 KB. */
 void fake_heap_set_internal_low(size_t bytes);

@@ -103,8 +103,8 @@ size_t khal_heap_internal_low(void)
 /** @brief How many refusals print a line; every one is counted. */
 #define SYS_HEAP_WATCH_LINES 4U
 
-/** @brief Tasks one khal_task_list() snapshot holds; more and it holds none. */
-#define SYS_TASKS_MAX 32U
+/** @brief Alignment of khal_task_list()'s snapshot in PSRAM: its entries hold pointers and words. */
+#define SYS_TASK_LIST_ALIGN 8U
 
 /** @brief Refusals since khal_heap_watch(). Written from any context. */
 static uint32_t s_alloc_failures;
@@ -161,21 +161,28 @@ size_t khal_task_list(khal_task_info_t *out, size_t max, size_t *total)
         *total = 0U;
     }
 #if CONFIG_FREERTOS_USE_TRACE_FACILITY
+    UBaseType_t const count = uxTaskGetNumberOfTasks();
+
+    if ( NULL != total )
+    {
+        *total = (size_t)count;
+    }
     if ( (NULL == out) || (0U == max) )
     {
         return 0U;
     }
 
-    /* On the stack, not the heap. A too-small array gets no snapshot, so
-     * total comes from the scheduler apart. */
-    TaskStatus_t status[SYS_TASKS_MAX];
-
-    if ( NULL != total )
+    /* In PSRAM and sized from the count, because the scheduler fills nothing
+     * when it has less room than the tasks running. */
+    UBaseType_t const room = count + (UBaseType_t)KHAL_TASK_LIST_SPARE;
+    /* cppcheck-suppress misra-c2012-11.5 ; the allocator returns void *; the block is the snapshot */
+    TaskStatus_t *const status = khal_alloc_psram(SYS_TASK_LIST_ALIGN,
+                                                  (size_t)room * sizeof(TaskStatus_t));
+    if ( NULL == status )
     {
-        *total = (size_t)uxTaskGetNumberOfTasks();
+        return 0U;
     }
-    UBaseType_t const n = uxTaskGetSystemState(status, (UBaseType_t)SYS_TASKS_MAX,
-                                               NULL);
+    UBaseType_t const n = uxTaskGetSystemState(status, room, NULL);
     size_t kept = 0U;
     for ( UBaseType_t i = 0U; (i < n) && (kept < max); ++i )
     {
@@ -189,6 +196,7 @@ size_t khal_task_list(khal_task_info_t *out, size_t max, size_t *total)
         out[kept].stack_free = (uint32_t)status[i].usStackHighWaterMark;
         ++kept;
     }
+    khal_free(status);
     return kept;
 #else
     (void)out;
