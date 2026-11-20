@@ -5545,7 +5545,7 @@ typedef struct {
  * @c ok false means there was no session at all - no network, or the name did
  * not resolve - and every other field is zero. A session where nothing
  * answered is still ok=true with rx=0: "the host is not there" and "we could
- * not ask" are different answers.
+ * not ask" are different answers. @c busy says the third: not asked yet.
  */
 typedef struct {
     QEvt     super;
@@ -5556,6 +5556,8 @@ typedef struct {
     uint16_t avg_ms;
     uint16_t max_ms;
     bool     ok;
+    bool     busy;      /**< Refused, ok false, because AO_Net's worker was
+                         *   running another job: ask again.                */
 } NetPingEndEvt;
 
 /** @brief A URL to fetch (NET_HTTP_REQ_SIG). */
@@ -5596,6 +5598,9 @@ typedef struct {
     uint16_t status;
     uint8_t  rc;              /**< kode_status_t                            */
     bool     truncated;
+    bool     busy;            /**< Refused, rc KODE_DENIED, because AO_Net's
+                               *   worker was running another job: ask
+                               *   again.                                   */
 } NetHttpDoneEvt;
 
 /** @brief A datagram to send (NET_UDP_REQ_SIG). */
@@ -5612,6 +5617,9 @@ typedef struct {
     QEvt     super;
     uint16_t sent;
     uint8_t  rc;        /**< kode_status_t                                  */
+    bool     busy;      /**< Refused, rc KODE_DENIED, because AO_Net's worker
+                         *   was running another job: ask again. Always
+                         *   false in NET_UDP_RSP_SIG.                      */
 } NetUdpDoneEvt;
 
 /** @brief What a ping session added up to: kode_sys_ping_stats_t, field for field. */

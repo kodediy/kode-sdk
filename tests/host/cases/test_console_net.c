@@ -1055,3 +1055,98 @@ TEST_CASE("net_info says how many MQTT messages were dropped for want of room",
     TEST_ASSERT_TRUE(replied(" mqtt=down rx_dropped=7"));
     TEST_ASSERT_TRUE(replied(">ok"));
 }
+
+/* ---- net_ping, http_get, udp_send: busy is not a failure ---------------- */
+
+/** @brief The three verbs AO_Net's worker runs, in the order of net_answer(). */
+#define NET_JOB_VERBS  3U
+
+/**
+ * @brief Hand the console the end of verb @p i of NET_JOB_VERBS: refused for
+ *        a job in flight when @p busy, else failed.
+ */
+static void net_answer(unsigned i, bool busy)
+{
+    if ( 0U == i )
+    {
+        NetPingEndEvt p;
+
+        (void)memset(&p, 0, sizeof(p));
+        p.super = (QEvt)QEVT_INITIALIZER(NET_PING_END_SIG);
+        p.ok    = false;
+        p.busy  = busy;
+        QASM_DISPATCH(AO_Console, &p.super, 0U);
+    }
+    else if ( 1U == i )
+    {
+        NetHttpDoneEvt h;
+
+        (void)memset(&h, 0, sizeof(h));
+        h.super = (QEvt)QEVT_INITIALIZER(NET_HTTP_DONE_SIG);
+        h.rc    = (uint8_t)KODE_DENIED;
+        h.busy  = busy;
+        QASM_DISPATCH(AO_Console, &h.super, 0U);
+    }
+    else
+    {
+        NetUdpDoneEvt u;
+
+        (void)memset(&u, 0, sizeof(u));
+        u.super = (QEvt)QEVT_INITIALIZER(NET_UDP_DONE_SIG);
+        u.rc    = (uint8_t)KODE_DENIED;
+        u.busy  = busy;
+        QASM_DISPATCH(AO_Console, &u.super, 0U);
+    }
+}
+
+TEST_CASE("net_ping, http_get and udp_send refused for a job in flight answer "
+          "busy, not a failure", "[console_net]")
+{
+    static const char *const LINES[NET_JOB_VERBS] = {
+        "net_ping host=\"192.168.0.1\"",
+        "http_get url=\"http://example.invalid/\"",
+        "udp_send host=\"192.168.0.1\" port=9 data=\"hi\"",
+    };
+
+    console_up();
+    for ( unsigned i = 0U; NET_JOB_VERBS > i; ++i )
+    {
+        fake_klog_reset();
+        type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, LINES[i]);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, drain_queue(AO_Net), LINES[i]);
+        net_answer(i, true);
+
+        TEST_ASSERT_TRUE_MESSAGE(replied(">err code=4 msg=busy"), LINES[i]);
+        TEST_ASSERT_FALSE_MESSAGE(replied(">err code=5"), LINES[i]);
+        TEST_ASSERT_FALSE_MESSAGE(replied(">ok"), LINES[i]);
+    }
+    assert_console_free();
+}
+
+TEST_CASE("net_ping, http_get and udp_send that failed still answer a failure",
+          "[console_net]")
+{
+    static const char *const LINES[NET_JOB_VERBS] = {
+        "net_ping host=\"192.168.0.1\"",
+        "http_get url=\"http://example.invalid/\"",
+        "udp_send host=\"192.168.0.1\" port=9 data=\"hi\"",
+    };
+    static const char *const ERRS[NET_JOB_VERBS] = {
+        ">err code=5 msg=net_ping",
+        ">err code=5 msg=http_get",
+        ">err code=5 msg=udp_send",
+    };
+
+    console_up();
+    for ( unsigned i = 0U; NET_JOB_VERBS > i; ++i )
+    {
+        fake_klog_reset();
+        type_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, LINES[i]);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, drain_queue(AO_Net), LINES[i]);
+        net_answer(i, false);
+
+        TEST_ASSERT_TRUE_MESSAGE(replied(ERRS[i]), LINES[i]);
+        TEST_ASSERT_FALSE_MESSAGE(replied("msg=busy"), LINES[i]);
+    }
+    assert_console_free();
+}
