@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file test_console_ps.c
- * @brief `ps` and `test component=mem`: the internal pool, from the wire.
+ * @brief `ps`, `tasks` and `test component=mem`: the internal pool and the
+ *        scheduler, from the wire.
  */
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +21,7 @@
 #include "kaos.h"
 #include "kaos_wire.h"
 #include "kcli_proto.h"
+#include "khal_system.h"
 #include "kqp.h"
 #include "kqp_worker.h"
 #include "qf_support.h"
@@ -352,4 +354,102 @@ TEST_CASE("ps lists the Active Objects that started and none that did not",
     TEST_ASSERT_TRUE(replied(console_row));
     TEST_ASSERT_FALSE(replied(" ao=Radio "));
     TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+/* ---- tasks --------------------------------------------------------------- */
+
+/** @brief The tasks kodeOS ran when `tasks` listed none: more than one slice. */
+#define TASKS_RUNNING  52U
+
+/** @brief How many lines hold @p needle. */
+static unsigned replied_times(const char *needle)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char * const l = fake_klog_line(i);
+        if ( (NULL != l) && (strstr(l, needle) != NULL) )
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/** @brief Write task @p i's record as the console prints it. */
+static void task_record(char *buf, size_t size, unsigned i)
+{
+    char name[KHAL_TASK_NAME_LEN];
+
+    (void)snprintf(name, sizeof(name), FAKE_TASK_NAME_FMT, i);
+    (void)snprintf(buf, size, ">|task=\"%s\" prio=%u stack_free=%u", name,
+                   i % FAKE_TASK_PRIOS, FAKE_TASK_STACK_FREE + i);
+}
+
+TEST_CASE("tasks lists every task of a board running more than a slice, then the count",
+          "[console_ps]")
+{
+    char record[64];
+
+    console_up();
+    fake_psram_reset();
+    fake_task_list_set(TASKS_RUNNING);
+
+    type_line("tasks");
+    /* Paced: the first step prints one slice and leaves the rest. */
+    task_record(record, sizeof(record), 0U);
+    TEST_ASSERT_TRUE(replied(record));
+    task_record(record, sizeof(record), TASKS_RUNNING - 1U);
+    TEST_ASSERT_FALSE(replied(record));
+    TEST_ASSERT_FALSE(replied(">ok"));
+
+    for ( unsigned i = 0U; PS_TICKS > i; ++i )
+    {
+        (void)qf_support_tick(AO_Console, 1U);
+    }
+
+    for ( unsigned i = 0U; TASKS_RUNNING > i; ++i )
+    {
+        task_record(record, sizeof(record), i);
+        TEST_ASSERT_EQUAL_UINT(1U, replied_times(record));
+    }
+    int const last  = replied_at(record);
+    int const count = replied_at(">|tasks=52 shown=52");
+    int const ok    = replied_at(">ok");
+    TEST_ASSERT_TRUE(0 <= last);
+    TEST_ASSERT_TRUE(last < count);
+    TEST_ASSERT_TRUE(count < ok);
+    /* One snapshot, held for the listing and given back at its end. */
+    TEST_ASSERT_EQUAL_UINT(1U, fake_psram_alloc_count());
+    TEST_ASSERT_EQUAL_UINT(1U, fake_psram_free_count());
+}
+
+TEST_CASE("tasks says how many run when PSRAM cannot hold the snapshot",
+          "[console_ps]")
+{
+    console_up();
+    fake_task_list_set(TASKS_RUNNING);
+    fake_psram_refuse(1U);
+
+    type_line("tasks");
+    for ( unsigned i = 0U; PS_TICKS > i; ++i )
+    {
+        (void)qf_support_tick(AO_Console, 1U);
+    }
+
+    TEST_ASSERT_FALSE(replied(">|task="));
+    TEST_ASSERT_TRUE(replied(">|tasks=52 shown=0"));
+    TEST_ASSERT_TRUE(replied(">ok"));
+}
+
+TEST_CASE("tasks on a build that cannot ask the scheduler is refused",
+          "[console_ps]")
+{
+    console_up();
+
+    type_line("tasks");
+
+    TEST_ASSERT_TRUE(replied(">err code=5 msg=tasks"));
+    TEST_ASSERT_FALSE(replied(">|tasks="));
 }

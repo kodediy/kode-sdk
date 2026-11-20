@@ -228,6 +228,8 @@ typedef enum {
                          *   the functions.                                */
     KCLI_PS,        /**< ps: emitted in slices, closed by this AO. About
                      *   fifty records, more than the large pool holds.   */
+    KCLI_TASKS,     /**< tasks: one snapshot of the scheduler, its records
+                     *   in slices as ps's, closed by this AO.            */
     KCLI_I2C_SCAN,  /**< i2c_scan: a few addresses probed per step, closed by
                      *   this AO after the last one.                      */
     KCLI_FS_LIST_STAT, /**< ls, phase one: STAT first, so a missing
@@ -456,6 +458,10 @@ typedef struct {
     uint16_t help_idx;      /**< Next command `help` has still to print.    */
     uint16_t help_line;     /**< `help`: that command's next line, 0 its
                              *   record, then its keys' members.            */
+    khal_task_info_t *tasks; /**< KCLI_TASKS: the snapshot, in PSRAM, freed
+                             *   when the command ends; NULL otherwise.     */
+    uint16_t tasks_n;       /**< KCLI_TASKS: entries in @c tasks.           */
+    uint16_t tasks_total;   /**< KCLI_TASKS: tasks the scheduler ran.       */
     uint16_t scan_next;     /**< KCLI_I2C_SCAN: the next address to probe.  */
     uint16_t scan_found;    /**< KCLI_I2C_SCAN: the addresses that answered. */
 
@@ -736,6 +742,18 @@ void console_extend(uint32_t ms)
     (void)QTimeEvt_rearm(&l_console.tmo, KQP_TICKS_PER_MS(ms));
 }
 
+/**
+ * @brief Free `tasks`'s snapshot. Called on both ways a command ends: its
+ *        terminator and the watchdog.
+ */
+static void tasks_release(Console *me)
+{
+    khal_free(me->tasks);
+    me->tasks       = NULL;
+    me->tasks_n     = 0U;
+    me->tasks_total = 0U;
+}
+
 /** @brief Close the in-flight command: terminator sent, console free again. */
 void console_end(void)
 {
@@ -746,6 +764,7 @@ void console_end(void)
      * own case checks the in-flight kind as well; this stops a tick that is
      * already on the way from arriving at all. */
     (void)QTimeEvt_disarm(&me->pacer);
+    tasks_release(me);
     me->inflight = (uint8_t)KCLI_IDLE;
 }
 
@@ -5180,20 +5199,59 @@ static bool help_line(const char *verb, const karg_spec_t *args,
 }
 
 /**
+ * @brief Emit one slice of `tasks`, and say whether that was the last.
+ *
+ * One record per task in the snapshot, then the count's record.
+ *
+ * @param me The console; @c me->help_idx is where the last slice stopped.
+ * @return true when there is nothing left to print.
+ */
+static bool tasks_slice(Console *me)
+{
+    char           word[CONSOLE_QUOTED_MAX(KHAL_TASK_NAME_LEN)];
+    uint16_t const total = (uint16_t)(me->tasks_n + 1U);
+    uint16_t       end   = (uint16_t)(me->help_idx + KCLI_SLICE);
+
+    if ( end > total )
+    {
+        end = total;
+    }
+    for ( uint16_t i = me->help_idx; i < end; ++i )
+    {
+        if ( i < me->tasks_n )
+        {
+            khal_task_info_t const * const t = &me->tasks[i];
+            console_reply(">|task=%s prio=%u stack_free=%lu",
+                  console_quote(word, sizeof(word), t->name),
+                  (unsigned)t->prio, (unsigned long)t->stack_free);
+        }
+        else
+        {
+            /* Last, and always: a snapshot PSRAM could not hold shows none,
+             * and this record tells that from a board running none. */
+            console_reply(">|tasks=%u shown=%u", (unsigned)me->tasks_total,
+                          (unsigned)me->tasks_n);
+        }
+    }
+    me->help_idx = end;
+    return (end >= total);
+}
+
+/**
  * @brief tasks: every thread the scheduler is running, not just ours.
  *
- * Separate from `ps`, which is paced; this fits one burst. It shows what `ps`
- * cannot: the tasks of ESP-IDF and the vendor stacks under kdrv (SDIO
- * transport, RPC, NimBLE host, lwIP), with their own priorities.
+ * It shows what `ps` cannot: the tasks of ESP-IDF and the vendor stacks under
+ * kdrv (SDIO transport, RPC, NimBLE host, lwIP), with their own priorities.
+ * One snapshot, taken here into PSRAM with room for the scheduler's count;
+ * its records go out in slices as `ps`'s do, because kodeOS runs about fifty
+ * tasks, more records than the large pool holds in one step.
  */
 static void h_tasks(Console *me, const kcmd_t *c, const karg_val_t *v)
 {
-    (void)me; (void)c; (void)v;
-    khal_task_info_t info[28];
+    (void)v;
     size_t total = 0U;
-    size_t const shown = khal_task_list(info, sizeof(info) / sizeof(info[0]),
-                                        &total);
 
+    (void)khal_task_list(NULL, 0U, &total);
     if ( 0U == total )
     {
         /* The scheduler was not built to be asked (FREERTOS_USE_TRACE_
@@ -5201,18 +5259,26 @@ static void h_tasks(Console *me, const kcmd_t *c, const karg_val_t *v)
         console_reply_err(KCLI_ERR_REJECT, c->verb);
         return;
     }
-    char word[CONSOLE_QUOTED_MAX(24U)];
-    for ( size_t i = 0U; i < shown; ++i )
+    size_t const room = total + KHAL_TASK_LIST_SPARE;
+    /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+    me->tasks = (khal_task_info_t *)khal_alloc_psram(sizeof(uint32_t),
+                                                     room * sizeof(khal_task_info_t));
+    if ( NULL != me->tasks )
     {
-        console_reply(">|task=%s prio=%u stack_free=%lu",
-              console_quote(word, sizeof(word), info[i].name),
-              (unsigned)info[i].prio,
-              (unsigned long)info[i].stack_free);
+        me->tasks_n = (uint16_t)khal_task_list(me->tasks, room, &total);
     }
-    /* Last, and always: a board running more tasks than one snapshot holds
-     * shows none, and this record tells that from a board running none. */
-    console_reply(">|tasks=%u shown=%u", (unsigned)total, (unsigned)shown);
-    console_reply(">ok");
+    me->tasks_total = (uint16_t)total;
+    me->help_idx    = 0U;
+    cmd_begin(me, KCLI_TASKS, c->verb);
+    if ( tasks_slice(me) )
+    {
+        console_reply(">ok");
+        console_end();
+    }
+    else
+    {
+        QTimeEvt_armX(&me->pacer, KCLI_SLICE_GAP_TICKS, 0U);
+    }
 }
 
 /**
@@ -8954,18 +9020,27 @@ static QState console_own(Console * const me, QEvt const * const e)
                     QTimeEvt_armX(&me->pacer, KCLI_SLICE_GAP_TICKS, 0U);
                 }
             }
-            else if ( (uint8_t)KCLI_PS == me->inflight )
+            else if ( ((uint8_t)KCLI_PS == me->inflight)
+                     || ((uint8_t)KCLI_TASKS == me->inflight) )
             {
-                /* Exactly KCLI_HELP's shape over a different listing: wait
-                 * out a congested port, keep the watchdog measuring progress
-                 * rather than total time, and close on the last slice. */
+                /* KCLI_HELP's shape over ps's listing and tasks's snapshot:
+                 * wait out a congested port, keep the watchdog measuring
+                 * progress rather than total time, and close on the last
+                 * slice. */
+                bool done = false;
                 if ( console_congested() )
                 {
-                    (void)QTimeEvt_rearm(&me->tmo,
-                                  KQP_TICKS_PER_MS(KCLI_CMD_TIMEOUT_MS));
-                    QTimeEvt_armX(&me->pacer, KCLI_SLICE_GAP_TICKS, 0U);
+                    /* Not a slice yet. */
                 }
-                else if ( ps_slice(me) )
+                else if ( (uint8_t)KCLI_TASKS == me->inflight )
+                {
+                    done = tasks_slice(me);
+                }
+                else
+                {
+                    done = ps_slice(me);
+                }
+                if ( done )
                 {
                     console_reply(">ok");
                     console_end();
@@ -9064,6 +9139,7 @@ static QState console_own(Console * const me, QEvt const * const e)
                  * to know what it is holding. A capture abandoned frozen
                  * would mirror this frame for every capture after it. */
                 payload_release(me);
+                tasks_release(me);
                 me->inflight = (uint8_t)KCLI_IDLE;
             }
             status = Q_HANDLED();
