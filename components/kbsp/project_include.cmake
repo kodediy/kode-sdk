@@ -29,7 +29,12 @@ set(KBSP_APPS_SUBTYPE "0x40")
 # (KAPPS_PENDING_INTENT_OFF in kapps_fmt.h).
 set(KBSP_MAILBOX_IMAGE_MAX "0x5FF000")
 
-if(CONFIG_KODEOS_BOOT_ROLE_APP)
+# kode-app-template's first configure runs a throwaway pass (KBSP_FETCH_PASS)
+# whose only job is to make the component manager fetch the SDK. It has no
+# board settings yet, so its partition table is ESP-IDF's default, with no apps
+# region: checking it would stop that pass with a CMake Error the reader sees
+# in red on a build that then succeeds. The real configure that follows checks.
+if(CONFIG_KODEOS_BOOT_ROLE_APP AND NOT KBSP_FETCH_PASS)
     # ESP-IDF's partition_table component defines the command this replaces; a
     # definition made before it would be the one replaced.
     if(NOT COMMAND partition_table_add_check_size_target)
@@ -68,7 +73,8 @@ if(CONFIG_KODEOS_BOOT_ROLE_APP)
 endif()
 
 function(kbsp_flash_to_mailbox)
-    if(NOT CONFIG_KODEOS_BOOT_ROLE_APP)
+    # Not in the template's fetch pass either: its default table has no mailbox.
+    if(NOT CONFIG_KODEOS_BOOT_ROLE_APP OR KBSP_FETCH_PASS)
         return()
     endif()
 
