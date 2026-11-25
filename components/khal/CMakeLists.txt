@@ -66,17 +66,21 @@ idf_component_register(
 )
 
 # esp-hosted's link teardown releases its own SDMMC slot only, not the card's, and the
-# card and the link change the shared controller one at a time (khal_sdmmc_esp.c).
+# card and the link change the shared controller one at a time, and a card command
+# refreshes the link's slot only once esp-hosted has brought the C5 up on it
+# (khal_sdmmc_esp.c).
 if(CONFIG_ESP_HOSTED_ENABLED)
     target_link_libraries(${COMPONENT_LIB} INTERFACE
         "-Wl,--wrap=sdmmc_host_deinit"
         "-Wl,--wrap=sdmmc_host_init"
         "-Wl,--wrap=sdmmc_host_init_slot"
         "-Wl,--wrap=sdmmc_host_deinit_slot"
+        "-Wl,--wrap=sdmmc_card_init"
         "-Wl,--undefined=__wrap_sdmmc_host_deinit"
         "-Wl,--undefined=__wrap_sdmmc_host_init"
         "-Wl,--undefined=__wrap_sdmmc_host_init_slot"
-        "-Wl,--undefined=__wrap_sdmmc_host_deinit_slot")
+        "-Wl,--undefined=__wrap_sdmmc_host_deinit_slot"
+        "-Wl,--undefined=__wrap_sdmmc_card_init")
 endif()
 
 # A warm boot takes the 32 kHz crystal's calibration from the last one (khal_system_esp.c).
