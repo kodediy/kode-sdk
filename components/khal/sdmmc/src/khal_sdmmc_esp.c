@@ -44,6 +44,7 @@ static SemaphoreHandle_t    s_ctlr_lock;     /**< One controller change at a tim
 #if CONFIG_ESP_HOSTED_ENABLED
 static bool s_hosted = true;
 static bool s_link_slot;   /**< The link's slot is on the controller: it is there for the card's slot to join. */
+static bool s_link_clock;  /**< esp-hosted brought the C5 up on the link's slot, which gave the slot its clock. */
 static bool s_link_heard;  /**< The C5 answered the last refresh of the link's slot, or none ran yet. */
 #else
 static bool s_hosted;
@@ -142,6 +143,7 @@ esp_err_t __real_sdmmc_host_init(void);
 esp_err_t __real_sdmmc_host_init_slot(int slot,
                                       const sdmmc_slot_config_t *slot_config);
 esp_err_t __real_sdmmc_host_deinit_slot(int slot);
+esp_err_t __real_sdmmc_card_init(const sdmmc_host_t *config, sdmmc_card_t *card);
 
 /**
  * @brief sdmmc_host_init(), under the controller's lock.
@@ -174,6 +176,7 @@ esp_err_t __wrap_sdmmc_host_init_slot(int slot,
     if ( (ESP_OK == err) && (SD_LINK_SLOT == slot) )
     {
         s_link_slot  = true;
+        s_link_clock = false;
         s_link_heard = true;
     }
     ctlr_unlock(taken);
@@ -193,9 +196,35 @@ esp_err_t __wrap_sdmmc_host_deinit_slot(int slot)
 
     if ( (ESP_OK == err) && (SD_LINK_SLOT == slot) )
     {
-        s_link_slot = false;
+        s_link_slot  = false;
+        s_link_clock = false;
     }
     ctlr_unlock(taken);
+    return err;
+}
+
+/**
+ * @brief sdmmc_card_init(), noting when it brings the C5 up on the link's slot.
+ *
+ * Until then the link's slot has no clock of its own: ESP-IDF runs it at the
+ * 400 kHz it probes at. The card's own bring-up passes straight through.
+ *
+ * @param config The host of the slot to bring up.
+ * @param card   Where the description of what answered goes.
+ * @return What sdmmc_card_init() said.
+ */
+esp_err_t __wrap_sdmmc_card_init(const sdmmc_host_t *config, sdmmc_card_t *card);
+esp_err_t __wrap_sdmmc_card_init(const sdmmc_host_t *config, sdmmc_card_t *card)
+{
+    esp_err_t const err = __real_sdmmc_card_init(config, card);
+
+    if ( (ESP_OK == err) && (SD_LINK_SLOT == config->slot) )
+    {
+        bool const taken = ctlr_lock();
+
+        s_link_clock = true;
+        ctlr_unlock(taken);
+    }
     return err;
 }
 
@@ -228,12 +257,20 @@ esp_err_t __wrap_sdmmc_host_deinit(void)
  * link's slot, under the controller's lock, programs its clock again and runs
  * it. A read the C5 does not answer ends the refreshes until the link's slot is
  * created again: a C5 that is gone must not slow every card command.
+ *
+ * The refresh waits for esp-hosted to bring the C5 up on the slot. Before that
+ * the slot runs at 400 kHz, and a C5 running for an app's sound with no link
+ * still answers. Every refresh would then move the shared clock from the
+ * card's 40 MHz to 400 kHz, and the card's next command would move it back.
+ * ESP-IDF takes a reference on the 160 MHz PLL at each move and never gives it
+ * back, and once its 16-bit count wraps, the next release (an I2S
+ * reconfiguration) gates that clock off under the card, the I2S and the camera.
  */
 static void link_slot_refresh(void)
 {
     bool const taken = ctlr_lock();
 
-    if ( s_link_slot && s_link_heard )
+    if ( s_link_slot && s_link_clock && s_link_heard )
     {
         sdmmc_command_t cmd = {
             .opcode     = SD_IO_RW_DIRECT,
