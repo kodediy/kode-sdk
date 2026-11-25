@@ -14022,6 +14022,119 @@ TEST_CASE("a link lost under an update's teardown and owed behind its end leaves
                                      "see the child's line above");
 }
 
+/* ---- The C5's release against the oldest this firmware works with -------- */
+
+/** @brief The C5's fit as the link's state says it now. */
+static int c5_fit_now(void)
+{
+    ao_spy_drain();
+    dispatch(RADIO_STATE_REQ_SIG);
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)RADIO_STATE_SIG == e->sig )
+        {
+            return (int)((const RadioStateEvt *)e)->c5_fit;
+        }
+    }
+    TEST_FAIL_MESSAGE("no link state");
+    return -1;
+}
+
+/**
+ * @brief Bring the link up to a slave whose descriptor says @p version.
+ * @param version The image's version; NULL keeps the fake's own, a kode_c5
+ *                that stamped esp-hosted's version.
+ */
+static void up_to_release(const char *version)
+{
+    radio_fresh();
+    if ( NULL != version )
+    {
+        fake_hosted_set_app_strings(version, "v6.1", "Nov 20 2026", "10:00:00");
+    }
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    /* The worker takes the snapshot inside the bring-up; the fake has none. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+}
+
+TEST_CASE("a kode_c5 older than the minimum reads old in the link's state, "
+          "and the link-up says so", "[radio_ao]")
+{
+    up_to_release("0.0.9");
+
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_OLD, c5_fit_now());
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_OLD, (int)radio_c5_fit());
+    TEST_ASSERT_TRUE(logged("the C5's kode_c5 is older than " KDRV_C5_RELEASE_MIN
+                            ", the oldest this firmware works with"));
+}
+
+TEST_CASE("a kode_c5 at the minimum or newer reads yes, and nothing is said",
+          "[radio_ao]")
+{
+    up_to_release(KDRV_C5_RELEASE_MIN);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_YES, c5_fit_now());
+    TEST_ASSERT_FALSE(logged("kode_c5 is older"));
+
+    up_to_release("9999.0.0");
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_YES, c5_fit_now());
+    TEST_ASSERT_FALSE(logged("kode_c5 is older"));
+}
+
+/* Before its own releases, kode_c5 stamped esp-hosted's version: such an
+ * image counts as the oldest release it could be. */
+TEST_CASE("a kode_c5 with no release of its own counts as the one before "
+          "releases", "[radio_ao]")
+{
+    int32_t order = 0;
+    int     want  = (int)KRADIO_C5_FIT_YES;
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_release_cmp(KDRV_C5_RELEASE_UNSTAMPED,
+                                                       KDRV_C5_RELEASE_MIN, &order));
+    if ( 0 > order )
+    {
+        want = (int)KRADIO_C5_FIT_OLD;
+    }
+
+    up_to_release(NULL);
+
+    TEST_ASSERT_EQUAL_INT(want, c5_fit_now());
+}
+
+TEST_CASE("a stock slave and a version that is not a release say nothing "
+          "either way", "[radio_ao]")
+{
+    radio_fresh();
+    fake_hosted_set_project("network_adapter");
+    fake_hosted_set_app_strings("0.0.1", "v6.1", "Nov 20 2026", "10:00:00");
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_UNKNOWN, c5_fit_now());
+    TEST_ASSERT_FALSE(logged("kode_c5 is older"));
+
+    up_to_release("0.0.9-dev");
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_UNKNOWN, c5_fit_now());
+    TEST_ASSERT_FALSE(logged("kode_c5 is older"));
+}
+
+/* The answer is the link's: a snapshot left from a link that is down now
+ * says nothing about the C5 that runs. */
+TEST_CASE("with the link down the C5's fit is unknown", "[radio_ao]")
+{
+    radio_fresh();
+    fake_hosted_set_app_strings("0.0.9", "v6.1", "Nov 20 2026", "10:00:00");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_UNKNOWN, c5_fit_now());
+
+    kdrv_c5_forget();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_UNKNOWN, (int)radio_c5_fit());
+}
+
 /* The next file to run the AO cannot finish a job this one holds. */
 TEST_CASE("AO_Radio is left off for the next file", "[radio_ao]")
 {

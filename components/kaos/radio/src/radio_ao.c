@@ -3018,6 +3018,11 @@ static void radio_publish(Radio * const me, kradio_link_t link)
         e->fw_patch  = e->fw_known ? fw.patch : 0U;
         e->sd_hosted = (KRADIO_UP == link);
         e->gave_up   = me->relink_dead;
+        e->c5_fit    = (uint8_t)KRADIO_C5_FIT_UNKNOWN;
+        if ( KRADIO_UP == link )
+        {
+            e->c5_fit = (uint8_t)radio_c5_fit();
+        }
         QACTIVE_PUBLISH(&e->super, &me->super);
     }
 }
@@ -10156,6 +10161,36 @@ kode_status_t radio_c5_release(char *out, size_t len)
     return KODE_OK;
 }
 
+kradio_c5_fit_t radio_c5_fit(void)
+{
+    char            release[KDRV_C5_VERSION_MAX];
+    const char     *have  = KDRV_C5_RELEASE_UNSTAMPED;
+    int32_t         order = 0;
+    kradio_c5_fit_t fit   = KRADIO_C5_FIT_UNKNOWN;
+
+    /* The project name alone tells a kode_c5, and the snapshot that holds it
+     * goes when the link does. */
+    if ( 1L != c5_num(KDRV_C5_PROJECT_KODE) )
+    {
+        return KRADIO_C5_FIT_UNKNOWN;
+    }
+    /* A kode_c5 with no release of its own is one from before them. */
+    if ( radio_c5_release(release, sizeof(release)) == KODE_OK )
+    {
+        have = release;
+    }
+    /* A version that is not a release says nothing either way. */
+    if ( kdrv_c5_release_cmp(have, KDRV_C5_RELEASE_MIN, &order) == KODE_OK )
+    {
+        fit = KRADIO_C5_FIT_YES;
+        if ( 0 > order )
+        {
+            fit = KRADIO_C5_FIT_OLD;
+        }
+    }
+    return fit;
+}
+
 void ble_app_subscribe(QActive const *who)
 {
     QActive_subscribe(who, BLE_APP_WRITE_SIG);
@@ -13119,6 +13154,11 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
              * remount had run. */
             me->relink_dead = false;
             radio_publish(me, KRADIO_UP);
+            if ( KRADIO_C5_FIT_OLD == radio_c5_fit() )
+            {
+                KLOG_W(TAG, "the C5's kode_c5 is older than %s, the oldest this "
+                            "firmware works with", KDRV_C5_RELEASE_MIN);
+            }
             radio_name_board();
             radio_svc_link(me);
             /* Reconcile the link to the desired state, one service at a time,

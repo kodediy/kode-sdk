@@ -2156,6 +2156,16 @@ typedef enum {
                        *   RADIO_UP_REQ_SIG retries from scratch.            */
 } kradio_link_t;
 
+/** @brief How the C5's kode_c5 release meets KDRV_C5_RELEASE_MIN
+ *         (RadioStateEvt.c5_fit, radio_c5_fit()). */
+typedef enum {
+    KRADIO_C5_FIT_UNKNOWN = 0, /**< No link up, a slave that is not kode_c5,
+                                *   or a version that is not a release.    */
+    KRADIO_C5_FIT_YES,         /**< The minimum or a newer release.         */
+    KRADIO_C5_FIT_OLD,         /**< Older than the minimum: the C5 needs a
+                                *   newer kode_c5 for this firmware.        */
+} kradio_c5_fit_t;
+
 /**
  * @brief Ask AO_Radio to bring the C5 link up. Outcome: RADIO_STATE_SIG.
  *
@@ -2933,6 +2943,21 @@ void ble_pair_subscribe(QActive const *who);
  *         @p len cannot hold the whole release.
  */
 kode_status_t radio_c5_release(char *out, size_t len);
+
+/**
+ * @brief Whether the C5's kode_c5 release is one this firmware works with.
+ *
+ * Reads the same snapshot as radio_c5_release(), and nothing blocks. The
+ * release is compared with KDRV_C5_RELEASE_MIN; a kode_c5 from before its own
+ * releases counts as KDRV_C5_RELEASE_UNSTAMPED. RadioStateEvt carries the same
+ * answer while the link is up, and `info`'s `>|fw` record prints it. Beside
+ * AO_Radio's start, so the call links AO_Radio (tools/check_starts.sh).
+ *
+ * @return KRADIO_C5_FIT_YES or KRADIO_C5_FIT_OLD while the link is up to a
+ *         kode_c5; KRADIO_C5_FIT_UNKNOWN with no link up, for a slave that
+ *         is not kode_c5, and for a version that is not a release.
+ */
+kradio_c5_fit_t radio_c5_fit(void);
 
 /**
  * @brief Send AO_Radio one input report of the HID service, for its host.

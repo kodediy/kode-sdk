@@ -327,6 +327,88 @@ kode_status_t kdrv_c5_mac(uint8_t out[6])
     return KODE_OK;
 }
 
+/* ---- The release contract -------------------------------------------------- */
+
+#define C5_RELEASE_BASE  10U  /**< The numbers of a release are written in decimal. */
+
+/**
+ * @brief Read the numbers of a release.
+ * @param s   The text, "major.minor.patch".
+ * @param out Its numbers, major first.
+ * @return true when @p s is exactly a release, as kdrv_c5_release_cmp() reads one.
+ */
+static bool release_read(const char *s, uint32_t out[KDRV_C5_RELEASE_GROUPS])
+{
+    bool     ok = (NULL != s);
+    size_t   i  = 0U;
+    uint32_t g  = 0U;
+
+    while ( ok && (KDRV_C5_RELEASE_GROUPS > g) )
+    {
+        uint32_t n      = 0U;
+        uint32_t digits = 0U;
+
+        /* A number: its digits, no more of them than a release's number has. */
+        while ( ok && (s[i] >= '0') && (s[i] <= '9') )
+        {
+            int32_t const d = (int32_t)s[i] - (int32_t)'0';
+            n = (n * C5_RELEASE_BASE) + (uint32_t)d;
+            digits++;
+            i++;
+            ok = (KDRV_C5_RELEASE_DIGITS >= digits);
+        }
+        ok = ok && (0U != digits);
+        out[g] = n;
+        g++;
+        /* A dot between two numbers, and none after the last. */
+        if ( ok && (KDRV_C5_RELEASE_GROUPS > g) )
+        {
+            ok = ('.' == s[i]);
+            i++;
+        }
+    }
+    return ok && ('\0' == s[i]);
+}
+
+kode_status_t kdrv_c5_release_cmp(const char *a, const char *b, int32_t *order)
+{
+    uint32_t na[KDRV_C5_RELEASE_GROUPS];
+    uint32_t nb[KDRV_C5_RELEASE_GROUPS];
+    bool     ok = (NULL != order);
+
+    if ( ok )
+    {
+        ok = release_read(a, na);
+    }
+    if ( ok )
+    {
+        ok = release_read(b, nb);
+    }
+    if ( !ok )
+    {
+        return KODE_DENIED;
+    }
+    /* The first number that differs decides. */
+    int32_t o = 0;
+    for ( uint32_t g = 0U; (0 == o) && (KDRV_C5_RELEASE_GROUPS > g); g++ )
+    {
+        if ( na[g] < nb[g] )
+        {
+            o = -1;
+        }
+        else if ( na[g] > nb[g] )
+        {
+            o = 1;
+        }
+        else
+        {
+            /* the same so far */
+        }
+    }
+    *order = o;
+    return KODE_OK;
+}
+
 /* ---- The dump -------------------------------------------------------------- */
 
 #define C5_DUMP_LINE 160U

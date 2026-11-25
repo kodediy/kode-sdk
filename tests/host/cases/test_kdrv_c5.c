@@ -412,3 +412,59 @@ TEST_CASE("the dump marks the rows a refresh could not fill", "[kdrv_c5]")
     TEST_ASSERT_TRUE(logged("project_kode=?"));
     TEST_ASSERT_TRUE(logged("chip_id=23"));
 }
+
+/* ---- The release contract ------------------------------------------------- */
+
+/** @brief The order kdrv_c5_release_cmp() gives @p a against @p b, or 9 when
+ *         it refuses them. */
+static int32_t release_order(const char *a, const char *b)
+{
+    int32_t order = 9;
+
+    if ( kdrv_c5_release_cmp(a, b, &order) != KODE_OK )
+    {
+        return 9;
+    }
+    return order;
+}
+
+TEST_CASE("two releases compare number by number, as numbers", "[kdrv_c5]")
+{
+    TEST_ASSERT_EQUAL_INT32(0, release_order("0.1.3", "0.1.3"));
+    TEST_ASSERT_EQUAL_INT32(-1, release_order("0.1.2", "0.1.3"));
+    TEST_ASSERT_EQUAL_INT32(1, release_order("0.1.3", "0.1.2"));
+    TEST_ASSERT_EQUAL_INT32(-1, release_order("0.9.9", "1.0.0"));
+    TEST_ASSERT_EQUAL_INT32(1, release_order("0.2.0", "0.1.9"));
+    TEST_ASSERT_EQUAL_INT32(1, release_order("0.1.10", "0.1.9"));
+    TEST_ASSERT_EQUAL_INT32(0, release_order("9999.9999.9999", "9999.9999.9999"));
+    TEST_ASSERT_EQUAL_INT32(0, release_order("00.01.03", "0.1.3"));
+}
+
+TEST_CASE("a version that is not three numbers joined by dots is refused, "
+          "and the order is left alone", "[kdrv_c5]")
+{
+    static const char *const not_releases[] = {
+        "", "0", "0.1", "0.1.", "0.1.3.4", ".1.3", "0..3", "0.1.3-dev",
+        "v0.1.3", " 0.1.3", "0.1.3 ", "a.b.c", "0.1.12345", "2.12.x",
+    };
+    int32_t order = 7;
+
+    for ( size_t i = 0U; (sizeof(not_releases) / sizeof(not_releases[0])) > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+            kdrv_c5_release_cmp(not_releases[i], "0.1.0", &order), not_releases[i]);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED,
+            kdrv_c5_release_cmp("0.1.0", not_releases[i], &order), not_releases[i]);
+    }
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_c5_release_cmp(NULL, "0.1.0", &order));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_c5_release_cmp("0.1.0", NULL, &order));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_c5_release_cmp("0.1.0", "0.1.0", NULL));
+    TEST_ASSERT_EQUAL_INT32(7, order);
+}
+
+TEST_CASE("the minimum and what a kode_c5 with no release counts as are "
+          "releases", "[kdrv_c5]")
+{
+    TEST_ASSERT_NOT_EQUAL(9, release_order(KDRV_C5_RELEASE_MIN, "0.0.0"));
+    TEST_ASSERT_NOT_EQUAL(9, release_order(KDRV_C5_RELEASE_UNSTAMPED, "0.0.0"));
+}

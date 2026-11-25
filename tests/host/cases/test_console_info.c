@@ -861,3 +861,95 @@ TEST_CASE("boot_info says ? for an app_end that is no class", "[console_info]")
 
     boot_mailbox_drain();
 }
+
+/* ---- The oldest kode_c5 this firmware works with ------------------------- */
+
+/** @brief The fw record's tail for a C5 whose fit reads @p fit. */
+#define FW_FIT(fit)  "c5_min=\"" KDRV_C5_RELEASE_MIN "\" c5_fit=" fit
+
+TEST_CASE("info's fw record gives the oldest kode_c5 this firmware works with, "
+          "and whether the C5's meets it", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+
+    c5_release(KDRV_C5_RELEASE_MIN);
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=\"" KDRV_C5_RELEASE_MIN "\" " FW_FIT("yes")));
+
+    fake_klog_reset();
+    c5_release("0.0.9");
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=\"0.0.9\" " FW_FIT("old")));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    kdrv_c5_forget();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("info's fw record says c5_fit=- where the C5's release says "
+          "nothing either way", "[console_info]")
+{
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+
+    /* No link has been up. */
+    kdrv_c5_forget();
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=- " FW_FIT("-")));
+
+    /* A stock slave. */
+    fake_klog_reset();
+    fake_hosted_reset();
+    fake_hosted_set_project("network_adapter");
+    fake_hosted_set_app_strings("0.0.1", "v6.1", "Nov 17 2026", "10:00:00");
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=- " FW_FIT("-")));
+
+    /* A kode_c5 whose version is not a release. */
+    fake_klog_reset();
+    c5_release("0.1.3-dev");
+    type_line("info");
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=\"0.1.3-dev\" " FW_FIT("-")));
+    TEST_ASSERT_TRUE(replied(">ok"));
+
+    fake_hosted_reset();
+    kdrv_c5_forget();
+    Mockkdrv_slot_Destroy();
+}
+
+/* A kode_c5 from before its own releases has none to print, and counts as
+ * the oldest release it could be. */
+TEST_CASE("info's fw record judges a kode_c5 with no release of its own as "
+          "the one before releases", "[console_info]")
+{
+    int32_t     order = 0;
+    const char *want  = FW_FIT("yes");
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_release_cmp(KDRV_C5_RELEASE_UNSTAMPED,
+                                                       KDRV_C5_RELEASE_MIN, &order));
+    if ( 0 > order )
+    {
+        want = FW_FIT("old");
+    }
+    console_up();
+    Mockkdrv_slot_Init();
+    kdrv_slot_info_IgnoreAndReturn(KODE_DENIED);
+    kdrv_slot_coredump_IgnoreAndReturn(KODE_DENIED);
+    /* The fake's own slave: kode_c5, descriptor and link both at 2.12.9. */
+    fake_hosted_reset();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_c5_refresh());
+
+    type_line("info");
+
+    TEST_ASSERT_TRUE(replied(">|fw kodeos=- c5=- "));
+    TEST_ASSERT_TRUE(replied(want));
+
+    kdrv_c5_forget();
+    Mockkdrv_slot_Destroy();
+}

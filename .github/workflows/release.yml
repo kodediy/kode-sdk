@@ -51,7 +51,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      # The tag's own line opens the notes, then the pull requests merged since the last release.
+      # The tag's own line opens the notes, then the two kode_c5 releases -
+      # the one the tree carries and the oldest the SDK works with
+      # (KDRV_C5_RELEASE_MIN) - then the pull requests merged since the last release.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,6 +73,16 @@ jobs:
           line="${line#"$TAG"}"
           line="${line#" - "}"
           notes="$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="$TAG" --jq .body)"
+          c5_sha="$(gh api "repos/$REPO/contents/c5?ref=$TAG" --jq .sha)"
+          c5_tag="$(gh api "repos/kodediy/kode_slave_c5/tags?per_page=100" \
+            --jq "[.[] | select(.commit.sha == \"$c5_sha\") | .name][0] // \"\"")"
+          c5_min="$(gh api "repos/$REPO/contents/components/kdrv/radio/include/kdrv_c5.h?ref=$TAG" \
+            --jq .content | base64 -d | sed -n 's/^#define KDRV_C5_RELEASE_MIN *"\([0-9.]*\)".*/\1/p')"
+          c5_line="kode_c5: carries ${c5_tag:-${c5_sha:0:7}}"
+          if [ -n "$c5_min" ]; then
+            c5_line="$c5_line, works with $c5_min or later"
+          fi
+          notes="$(printf '%s.\n\n%s' "$c5_line" "$notes")"
           if [ -n "$line" ]; then
             notes="$(printf '%s\n\n%s' "$line" "$notes")"
           fi
