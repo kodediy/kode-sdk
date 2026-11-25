@@ -4740,6 +4740,8 @@ typedef struct {
     bool     sd_hosted;  /**< The card mounts through esp-hosted's controller. */
     bool     gave_up;    /**< The link is down, someone wants it, and no more
                           *   tries are coming until somebody asks.           */
+    uint8_t  c5_fit;     /**< kradio_c5_fit_t: whether the C5's kode_c5 is one
+                          *   this firmware works with; UNKNOWN unless up.    */
 } RadioStateEvt;
 
 /** @brief RADIO_PARK_REQ_SIG: a jump is about to restart the board. */

@@ -24,6 +24,24 @@ extern "C" {
 #define KDRV_C5_VERSION_MAX   32U /**< Bytes of the image's version, with its
                                     *   NUL, as the descriptor holds it.     */
 
+/* ---- The release contract -------------------------------------------------
+ * A firmware built on this SDK works with a kode_c5 release from
+ * KDRV_C5_RELEASE_MIN on. The release that first needs something a newer C5
+ * brings raises it, and each release of the SDK states it beside the kode_c5
+ * release it carries. */
+
+/** @brief The oldest kode_c5 release this firmware works with. */
+#define KDRV_C5_RELEASE_MIN        "0.1.0"
+
+/** @brief The release a kode_c5 from before its own releases counts as. Those
+ *         images stamped esp-hosted's version instead, so one of them could
+ *         be any release up to 0.1.2: it counts as the oldest, and meets the
+ *         minimum only while the minimum is that. */
+#define KDRV_C5_RELEASE_UNSTAMPED  "0.1.0"
+
+#define KDRV_C5_RELEASE_GROUPS  3U  /**< Numbers in a release: major, minor, patch. */
+#define KDRV_C5_RELEASE_DIGITS  4U  /**< The most digits one number of a release has. */
+
 /** @brief esp_chip_model_t's value for an ESP32-C5. Spelled here so the
  *         table's contract does not depend on an ESP-IDF header; the .c
  *         asserts it against the real enum. */
@@ -160,6 +178,23 @@ kode_status_t kdrv_c5_elf_sha(uint8_t out[32]);
 
 /** @brief The station MAC, six bytes. KODE_DENIED before a refresh. */
 kode_status_t kdrv_c5_mac(uint8_t out[6]);
+
+/**
+ * @brief Compare two kode_c5 releases.
+ *
+ * Pure: it reads neither the snapshot nor the link. A release is exactly
+ * three numbers of one to KDRV_C5_RELEASE_DIGITS digits joined by dots,
+ * "0.1.3", with nothing before or after; the numbers compare as numbers, so
+ * 0.1.10 is newer than 0.1.9.
+ *
+ * @param a     A release.
+ * @param b     Another one.
+ * @param order Set to -1, 0 or 1 as @p a is older than, the same as or newer
+ *              than @p b.
+ * @return KODE_OK; KODE_DENIED when either is not a release or a pointer is
+ *         NULL, and @p order is left as it was.
+ */
+kode_status_t kdrv_c5_release_cmp(const char *a, const char *b, int32_t *order);
 
 /* ---- The worker's half ---------------------------------------------------- */
 

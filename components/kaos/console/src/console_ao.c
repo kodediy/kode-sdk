@@ -101,6 +101,7 @@ KAOS_WEAK bool appmgr_recv_request(uint8_t dst, uint32_t size, uint32_t crc32,
 KAOS_WEAK bool c5_flash_request(uint8_t src_kind, const char *src);
 KAOS_WEAK bool c5_recv_request(uint32_t size, uint32_t crc32, uint8_t src);
 KAOS_WEAK kode_status_t radio_c5_release(char *out, size_t len);
+KAOS_WEAK kradio_c5_fit_t radio_c5_fit(void);
 KAOS_WEAK const uint8_t *display_capture_buf(void);
 KAOS_WEAK void display_capture_release(void);
 KAOS_WEAK void display_capture_request(QActive *who);
@@ -4108,7 +4109,9 @@ static void h_board_rev(Console *me, const kcmd_t *c, const karg_val_t *v)
  * `-` with no link up now, for a slave that is not kode_c5, for a kode_c5
  * from before its own releases, or in an image without AO_Radio. Never the
  * version the link negotiates: that one is esp-hosted's, and the `c5` verb
- * gives it.
+ * gives it. `c5_min` is the oldest kode_c5 this firmware works with, and
+ * `c5_fit` whether the C5's meets it: `yes`, `old`, or `-` where radio_c5_fit()
+ * cannot say.
  *
  * @param kodeos The kodeOS release h_info() chose; empty prints `-`.
  */
@@ -4117,6 +4120,8 @@ static void info_fw(const char *kodeos)
     char c5[KDRV_C5_VERSION_MAX];
     char qk[CONSOLE_QUOTED_MAX(KDRV_SLOT_VERSION_MAX)];
     char qc[CONSOLE_QUOTED_MAX(sizeof(c5))];
+    char qm[CONSOLE_QUOTED_MAX(sizeof(KDRV_C5_RELEASE_MIN))];
+    const char *fit = "-";
 
     c5[0] = '\0';
     if ( kaos_linked(&kaos_radio_start) )
@@ -4125,10 +4130,24 @@ static void info_fw(const char *kodeos)
         {
             c5[0] = '\0';
         }
+        switch ( radio_c5_fit() )
+        {
+            case KRADIO_C5_FIT_YES:
+                fit = "yes";
+                break;
+            case KRADIO_C5_FIT_OLD:
+                fit = "old";
+                break;
+            default:
+                /* KRADIO_C5_FIT_UNKNOWN: the dash */
+                break;
+        }
     }
-    console_reply(">|fw kodeos=%s c5=%s",
+    console_reply(">|fw kodeos=%s c5=%s c5_min=%s c5_fit=%s",
                   console_kv_text(qk, sizeof(qk), kodeos),
-                  console_kv_text(qc, sizeof(qc), c5));
+                  console_kv_text(qc, sizeof(qc), c5),
+                  console_kv_text(qm, sizeof(qm), KDRV_C5_RELEASE_MIN),
+                  fit);
 }
 
 /**
