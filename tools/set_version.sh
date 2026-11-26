@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Moves the SDK to one version for a release: every component's own
-# `version: "X"`, every kodediy/ dependency's `"==X"` in the manifests, and
-# the tag the examples and the README pin (`version: vX`). tools/check_example_pins.sh checks that
+# `version: "X"`, every kodediy/ dependency's `"==X"` in the manifests, the
+# tag the examples and the README pin (`version: vX`), and the Arduino
+# library's `version=X`. tools/check_example_pins.sh checks that
 # they agree; the release workflow checks that they equal the tag.
 #
 #   usage: tools/set_version.sh <X.Y.Z>
@@ -17,11 +18,13 @@ if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 2
 fi
 
-for f in components/*/idf_component.yml examples/*/main/idf_component.yml README.md; do
+for f in components/*/idf_component.yml examples/*/main/idf_component.yml README.md \
+         arduino/libraries/KodeDot/library.properties; do
     sed -i.bak -E \
         -e "s/^version: \"[0-9.]+\"/version: \"$v\"/" \
         -e "/kodediy\/[a-z_]+:/ s/\"==[0-9.]+\"/\"==$v\"/" \
         -e "s/^( +version: )v[0-9.]+$/\1v$v/" \
+        -e "s/^version=[0-9.]+$/version=$v/" \
         "$f"
     rm -f "$f.bak"
 done

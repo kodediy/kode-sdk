@@ -6,15 +6,16 @@
 # A release is one version for every component: each manifest says it
 # (`version: "X"`) and names its siblings at it exactly (`version: "==X"`).
 # An example and the README pin the release's tag on GitHub (`version: vX`
-# under `git:`). An example is compiled against the release its
-# main/idf_component.yml pins, not against the tree it sits in, so its
-# sources may only use what that release has. tools/set_version.sh moves them
-# all; this makes a missed one something CI asks for rather than something a
-# release remembers.
+# under `git:`), and the Arduino library says it (`version=X`). An example is
+# compiled against the release its main/idf_component.yml pins, not against
+# the tree it sits in, so its sources may only use what that release has.
+# tools/set_version.sh moves them all; this makes a missed one something CI
+# asks for rather than something a release remembers.
 #
 # Two rules:
-#   1. Every one says the same version - the manifests, every example and the
-#      README's pin, which is what someone copies into a project of their own.
+#   1. Every one says the same version - the manifests, every example, the
+#      README's pin, which is what someone copies into a project of their own,
+#      and the Arduino library.
 #   2. That version is not older than the newest v* tag. A release commit
 #      bumps it before its tag exists, so newer is allowed; older is the
 #      release that forgot.
@@ -29,17 +30,19 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 # Every component and every example that is an ESP-IDF project, found rather
-# than listed, so a new one is checked the day it lands. The Arduino sketch
-# has no pin.
-FILES=( components/*/idf_component.yml examples/*/main/idf_component.yml README.md )
+# than listed, so a new one is checked the day it lands, and the Arduino
+# library. The Arduino sketch in examples/ has no pin.
+FILES=( components/*/idf_component.yml examples/*/main/idf_component.yml README.md
+        arduino/libraries/KodeDot/library.properties )
 
 pins=""
 for f in "${FILES[@]}"; do
-    # A component's own `version: "X"`, every kodediy/ dependency's `"==X"`
-    # and a git pin's tag, `version: vX`. The registry's other pins
-    # (esp-hosted, LVGL) are not ours.
+    # A component's own `version: "X"`, every kodediy/ dependency's `"==X"`,
+    # a git pin's tag, `version: vX`, and the library's `version=X`. The
+    # registry's other pins (esp-hosted, LVGL) are not ours.
     v=$( { grep -Eo '^version: "[0-9.]+"' "$f"
            grep -Eo '^ +version: v[0-9.]+$' "$f"
+           grep -Eo '^version=[0-9.]+$' "$f"
            grep -E 'kodediy/[a-z_]+:' "$f" | grep -Eo '"==[0-9.]+"'; } \
          | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | sort -u)
     if [ -z "$v" ]; then
