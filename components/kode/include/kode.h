@@ -439,8 +439,10 @@ bool kode_led_toggle(void);
 /*
  * Paths: "sd" or "flash", then nothing or "/" and the rest: "sd/log.txt",
  * "flash/data/a.csv". Any case for the volume; no leading "/", no empty, "."
- * or ".." part. A bad path fails and kode_error() names it. A file call waits
- * for another task's file call to finish.
+ * or ".." part, no name FAT does not take (a control character or one of
+ * " * : < > ? | \ in it, or only dots and spaces). A bad path fails at once
+ * and kode_error() names it. A file call waits for another task's file call
+ * to finish.
  */
 
 #define KODE_FILE_PATH_MAX 91U      /**< Bytes of a path, NUL included. */
@@ -668,7 +670,7 @@ bool kode_file_create_folder(const char *path);
  * Blocks. A volume itself is refused.
  *
  * @param path     "sd/..." or "flash/...".
- * @param new_name One name: not empty, not "." or "..", no '/'.
+ * @param new_name One name: not empty, not "." or "..", no '/', one FAT takes.
  * @return true when renamed; false otherwise, with kode_error() saying why.
  */
 bool kode_file_rename(const char *path, const char *new_name);
