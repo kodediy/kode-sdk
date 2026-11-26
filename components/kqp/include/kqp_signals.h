@@ -1058,9 +1058,10 @@ enum KodeSignals {
                                  *   operator did not press the button a step
                                  *   asked for in time, or did not let it go
                                  *   within KODE_BUTTONS_TEST_RELEASE_MS.     */
-    BUTTONS_HOLD_TMO_SIG,       /**< AO_Buttons private one-shot QTimeEvt: the
-                                 *   top or the bottom button has been down
-                                 *   for KODE_BUTTON_HOLD_MS.                */
+    BUTTONS_HOLD_TMO_SIG,       /**< AO_Buttons private one-shot QTimeEvt: one
+                                 *   of the two hold clocks, one per round
+                                 *   button, ran out (the clock at zero says
+                                 *   which).                                 */
     BUTTONS_ROTATE_SIG,         /**< AO_Buttons: turn the pad by a number of
                                  *   quarter turns (ButtonsRotateEvt), from
                                  *   buttons_rotation_request().              */
@@ -3380,11 +3381,12 @@ typedef struct {
  * BUTTON_HOLD_SIG is published once per press, KODE_BUTTON_HOLD_MS after the
  * debounce confirmed it and only if the button is still down at that moment.
  * The bottom button, held on, publishes BUTTON_HOME_HOLD_SIG once more,
- * KODE_HOME_HOLD_MS after the same confirmation. The release that follows
- * arrives as the usual ButtonEvt. The console's `btn id=top|bot state=hold`
- * publishes the same events on request, with no press before them and no
- * release after: a host reproducing a thumb sends the press, the hold and
- * the release. */
+ * KODE_HOME_HOLD_MS after the same confirmation. Each button is timed on its
+ * own: both may be held at once, and the other button's press or release
+ * never moves a button's count. The release that follows arrives as the usual
+ * ButtonEvt. The console's `btn id=top|bot state=hold` publishes the same
+ * events on request, with no press before them and no release after: a host
+ * reproducing a thumb sends the press, the hold and the release. */
 typedef struct {
     QEvt    super;
     uint8_t id;        /**< kdrv_button_t: KDRV_BTN_TOP or KDRV_BTN_BOT. */
