@@ -179,8 +179,9 @@ size_t kdrv_ir_rx_take(kdrv_ir_symbol_t *out, size_t cap);
  * peripheral has a capture in flight and will not take a second job over it.
  * The owner arms after kdrv_ir_rx_take(), not on a timer.
  *
- * @return KODE_OK when the receiver is listening, KODE_DENIED before
- *         kdrv_ir_init(), KODE_ERROR when the peripheral refused.
+ * @return KODE_OK once the request is sent, without waiting for the C5's
+ *         answer; KODE_ERROR while a capture is in flight; KODE_DENIED before
+ *         kdrv_ir_init() or when the request could not be sent.
  */
 kode_status_t kdrv_ir_rx_arm(void);
 

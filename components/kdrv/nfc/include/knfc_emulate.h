@@ -40,7 +40,7 @@ extern "C" {
  *
  * Two ways to fill it, and the driver reads @c uid_len to tell them apart:
  *
- * - **Clone an identity.** @c uid_len is 4, 7 or 10 and @c atqa is coherent
+ * - **Clone an identity.** @c uid_len is 4 or 7 and @c atqa is coherent
  *   with it (the two size bits of SENS_RES match the UID length): the card is
  *   presented verbatim - same UID, same ATQA, same SAK - which is what a UID
  *   reader (an access control, a Flipper) expects. A SAK of 0x08 makes a
@@ -62,7 +62,7 @@ extern "C" {
 typedef struct {
     uint8_t  uid[KNFC_UID_MAX];   /**< NFCID1 to clone; ignored when @c
                                    *   uid_len is 0.                        */
-    uint8_t  uid_len;             /**< 4, 7 or 10 to clone; 0 to synthesise. */
+    uint8_t  uid_len;             /**< 4 or 7 to clone; 0 to synthesise.     */
     uint16_t atqa;                /**< SENS_RES to clone; 0 to derive.       */
     uint8_t  sak;                 /**< SEL_RES to clone.                     */
     bool     uri;                 /**< @c ndef is a URI rather than text.    */

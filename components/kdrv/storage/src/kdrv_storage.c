@@ -310,6 +310,17 @@ static bool vpath_is_canonical(const char *vpath)
     return true;
 }
 
+bool kdrv_storage_path_valid(const char *vpath)
+{
+    bool ok = false;
+
+    if ( NULL != vpath )
+    {
+        ok = vpath_is_canonical(vpath);
+    }
+    return ok;
+}
+
 /**
  * @brief Map a virtual path onto the volume it names.
  *

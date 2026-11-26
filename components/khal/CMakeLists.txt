@@ -17,6 +17,7 @@ idf_component_register(
         "i2c/src/khal_i2c_esp.c"
         "identity/src/khal_identity_esp.c"
         "keep/src/khal_keep_esp.c"
+        "keep/src/khal_keep_fit.c"
         "nvs/src/khal_nvs_esp.c"
         "power/src/khal_power_esp.c"
         "pwm/src/khal_pwm.c"

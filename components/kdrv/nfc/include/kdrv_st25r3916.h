@@ -253,8 +253,9 @@ kode_status_t kdrv_st25r3916_listen_end(knfc_field_t *out);
  *
  * @param card What to present. Copied here; the pointer need not outlive the
  *             call.
- * @return KODE_OK with emulation running; KODE_DENIED with no chip fitted or
- *         while a field or listen window holds the reader; KODE_ERROR when
+ * @return KODE_OK with emulation running; KODE_DENIED with no chip fitted,
+ *         for a @c uid_len that is not 0, 4 or 7, or while a field or listen
+ *         window holds the reader; KODE_ERROR when
  *         RFAL refused listen mode or the worker would not start;
  *         KODE_NO_RESOURCES when the card's message does not fit the image.
  */
