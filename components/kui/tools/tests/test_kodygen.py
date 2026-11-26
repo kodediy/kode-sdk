@@ -253,7 +253,7 @@ class PackTests(unittest.TestCase):
 class RoleTests(unittest.TestCase):
     """The pack block's roles, each held to its own canvas."""
 
-    ENTRIES = {"scn": {"w": 410, "h": 334, "anchor": 0}, "band": {"w": 410, "h": 160, "anchor": 36},
+    ENTRIES = {"scn": {"w": 410, "h": 334, "anchor": 0}, "band": {"w": 410, "h": 160, "anchor": 0},
                "launcher": {"w": 410, "h": 369, "anchor": 0}}
 
     def pack(self, **roles):
