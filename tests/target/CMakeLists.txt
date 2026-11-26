@@ -24,9 +24,16 @@ set(SDKCONFIG_DEFAULTS
 # (sdkconfig.<variant> beside this file). target-build.yml uses it for the
 # configurations Kconfig offers and nobody builds day to day - which are the
 # ones that stop linking without anyone noticing.
+#
+# The variant `arduino` then reads the SDK's own lines for Arduino's core
+# (arduino/sdkconfig.sdk), so they are written once.
 if(NOT "$ENV{KODE_TARGET_VARIANT}" STREQUAL "")
     list(APPEND SDKCONFIG_DEFAULTS
          "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.$ENV{KODE_TARGET_VARIANT}")
+endif()
+if("$ENV{KODE_TARGET_VARIANT}" STREQUAL "arduino")
+    list(APPEND SDKCONFIG_DEFAULTS
+         "${CMAKE_CURRENT_LIST_DIR}/../../arduino/sdkconfig.sdk")
 endif()
 
 # A configuration that exists keeps its values over the fragments, and main/
