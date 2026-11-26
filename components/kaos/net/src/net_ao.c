@@ -360,6 +360,11 @@ typedef enum {
     SJ_CLOSE       /**< The close of a stream's kept connection.            */
 /* cppcheck-suppress misra-c2012-2.3 ; the type names the values of a uint8_t field, which keeps AO_Net's struct small */
 } shot_job_t;
+
+/* kdrv_net carries the largest JPEG of the glass in one PUT: a capture over
+ * KDRV_NET_PUT_MAX would be refused by the driver, in every build. */
+_Static_assert(KDRV_NET_PUT_MAX >= KSHOT_JPEG_CAP,
+               "a PUT must carry the largest capture");
 #endif /* CONFIG_KODEOS_SHOT_HTTP */
 
 #if CONFIG_KODEOS_DUMP_HTTP

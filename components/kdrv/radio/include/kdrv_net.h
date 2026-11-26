@@ -59,13 +59,14 @@ extern "C" {
  *  read job is this plus a margin. */
 #define KDRV_NET_STREAM_READ_MAX_MS  20000U
 #if CONFIG_KODEOS_DUMP_HTTP
-/** Body bytes one HTTP_PUT job can send: a core dump whole (AO_Net asserts it
- *  holds KDRV_COREDUMP_MAX), and so a JPEG of the glass. */
-/* cppcheck-suppress misra-c2012-2.5 ; read by kdrv_net.c and AO_Net's assert alone, no twin */
+/** Body bytes one HTTP_PUT job can send: a core dump whole and a JPEG of the
+ *  glass (AO_Net asserts it holds KDRV_COREDUMP_MAX and KSHOT_JPEG_CAP). */
+/* cppcheck-suppress misra-c2012-2.5 ; read by kdrv_net.c and by AO_Net's asserts against KDRV_COREDUMP_MAX and KSHOT_JPEG_CAP */
 #define KDRV_NET_PUT_MAX      (128U * 1024U)
 #else
-/** Body bytes one HTTP_PUT job can send: a JPEG of the glass. */
-/* cppcheck-suppress misra-c2012-2.5 ; read by kdrv_net.c alone, no twin */
+/** Body bytes one HTTP_PUT job can send: a JPEG of the glass (AO_Net asserts
+ *  it holds KSHOT_JPEG_CAP, which kaos.h owns and this header cannot see). */
+/* cppcheck-suppress misra-c2012-2.5 ; read by kdrv_net.c and by AO_Net's assert against KSHOT_JPEG_CAP */
 #define KDRV_NET_PUT_MAX      (64U * 1024U)
 #endif
 /** A PUT's URL, terminator included: the Kode channel's upload link carries a
