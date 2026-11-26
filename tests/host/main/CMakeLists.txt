@@ -542,6 +542,12 @@ set_source_files_properties(
     "${CMAKE_CURRENT_LIST_DIR}/../cases/test_net_ao.c"
     PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_CHANNEL=1;CONFIG_KODEOS_CHANNEL_RENEW_S=120;CONFIG_KODEOS_SHOT_HTTP=1;CONFIG_KODEOS_DUMP_HTTP=1")
 
+# kdump_name(), which AO_Net's cases call, lives in the channel's pure logic
+# and compiles only with the core dump's upload.
+set_source_files_properties(
+    "${SDK_DIR}/components/kaos/net/src/net_channel.c"
+    PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_DUMP_HTTP=1")
+
 # `screenshot dst=http` is the console's half of the upload and is scoped the
 # same way: on the board the option implies the channel and the mirror, which
 # are on or off for the whole project here, so the console and its case file

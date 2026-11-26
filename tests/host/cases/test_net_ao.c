@@ -763,12 +763,16 @@ static bool                 s_no_shots;
 static unsigned             s_nresult;   /**< kdrv_net_http_result() calls. */
 static unsigned             s_nforget;   /**< kdrv_net_http_forget() calls. */
 /* An upload: what kdrv_net_http_put_prepare() was handed, and whether the
- * display's buffer had been given back when the PUT job went out. */
+ * display's buffer had been given back when the PUT job went out. A body
+ * handed in place (a core dump's) is kept up to PUT_BODY_KEEP bytes. */
+#define PUT_BODY_KEEP  4096U
 static struct {
-    char   url[KDRV_NET_PUT_URL_MAX];
-    size_t len;
-    char   type[32];
-    char   bearer[KDRV_MQTT_TOKEN_MAX];
+    char    url[KDRV_NET_PUT_URL_MAX];
+    size_t  len;
+    char    type[32];
+    char    bearer[KDRV_MQTT_TOKEN_MAX];
+    bool    has_body;
+    uint8_t body[PUT_BODY_KEEP];
 } s_put;
 static unsigned             s_nput;
 static kode_status_t        s_put_rc;
@@ -809,7 +813,18 @@ static kode_status_t stub_put_prepare(const char *url, const uint8_t *body,
                                       const char *bearer, int n)
 {
     (void)n;
-    (void)body;   /* display_shot_buf(): nothing is lent in this binary */
+    /* A shot's body is display_shot_buf(): nothing is lent in this binary. */
+    s_put.has_body = (NULL != body);
+    if ( NULL != body )
+    {
+        size_t keep = len;
+
+        if ( PUT_BODY_KEEP < keep )
+        {
+            keep = PUT_BODY_KEEP;
+        }
+        (void)memcpy(s_put.body, body, keep);
+    }
     (void)snprintf(s_put.url, sizeof(s_put.url), "%s", url);
     s_put.len = len;
     (void)snprintf(s_put.type, sizeof(s_put.type), "%s", content_type);
@@ -8159,6 +8174,488 @@ TEST_CASE("test_the_state_says_whether_the_session_names_the_link: dumps is "
     TEST_ASSERT_FALSE(chan_now().dumps);
 
     net_done();
+}
+
+/** @brief The ELF SHA the dump carries in these cases. */
+#define DUMP_SHA      "1a2b3c4d5"
+
+/** @brief Its image's CRC32. */
+#define DUMP_CRC      0x0000BEEFU
+
+/** @brief The name the dump goes under: the SHA, a dash, the CRC in hex. */
+#define DUMP_NAME     "1a2b3c4d5-0000beef"
+
+/** @brief Bytes of the dump these cases read out of flash. */
+#define DUMP_LEN      PUT_BODY_KEEP
+
+/** @brief Byte i of the dump is i modulo this: a prime, so no run repeats. */
+#define DUMP_FILL_MOD 251U
+
+/** @brief What flash holds, as the kdrv_slot stubs below say it. */
+static struct {
+    kode_status_t status;    /**< kdrv_slot_coredump()'s answer.            */
+    bool          present;   /**< A dump is there.                          */
+    bool          kodeos;    /**< It is a kodeOS image's.                   */
+    kode_status_t read_rc;   /**< kdrv_slot_coredump_read()'s answer.       */
+    kode_status_t erase_rc;  /**< kdrv_slot_coredump_erase()'s answer.      */
+    unsigned      asks;      /**< kdrv_slot_coredump() calls.               */
+    unsigned      reads;     /**< kdrv_slot_coredump_read() calls.          */
+    unsigned      erases;    /**< kdrv_slot_coredump_erase() calls.         */
+} s_dump;
+
+static kode_status_t stub_coredump(kdrv_coredump_t *out, int n)
+{
+    (void)n;
+    s_dump.asks++;
+    (void)memset(out, 0, sizeof(*out));
+    out->present = s_dump.present;
+    out->kodeos  = s_dump.kodeos;
+    out->mine    = s_dump.kodeos;
+    if ( s_dump.present )
+    {
+        (void)snprintf(out->sha, sizeof(out->sha), "%s", DUMP_SHA);
+    }
+    return s_dump.status;
+}
+
+static kode_status_t stub_coredump_read(uint8_t *buf, size_t cap, size_t *len,
+                                        uint32_t *crc, int n)
+{
+    (void)n;
+    s_dump.reads++;
+    TEST_ASSERT_NOT_NULL(buf);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(KDRV_COREDUMP_MAX, cap,
+                                   "the buffer does not hold any dump");
+    if ( KODE_OK == s_dump.read_rc )
+    {
+        for ( size_t i = 0U; DUMP_LEN > i; i++ )
+        {
+            buf[i] = (uint8_t)(i % DUMP_FILL_MOD);
+        }
+        *len = DUMP_LEN;
+        *crc = DUMP_CRC;
+    }
+    return s_dump.read_rc;
+}
+
+static kode_status_t stub_coredump_erase(int n)
+{
+    (void)n;
+    s_dump.erases++;
+    return s_dump.erase_rc;
+}
+
+/** @brief A channel AO_Net can join with a `dumps` link, and a kodeOS dump in flash. */
+static void dump_fresh(void)
+{
+    shot_fresh();
+    s_dumps_link = DUMP_LINK;
+    (void)memset(&s_dump, 0, sizeof(s_dump));
+    s_dump.status   = KODE_OK;
+    s_dump.present  = true;
+    s_dump.kodeos   = true;
+    s_dump.read_rc  = KODE_OK;
+    s_dump.erase_rc = KODE_OK;
+    kdrv_slot_coredump_Stub(&stub_coredump);
+    kdrv_slot_coredump_read_Stub(&stub_coredump_read);
+    kdrv_slot_coredump_erase_Stub(&stub_coredump_erase);
+    ao_spy_drain();
+}
+
+/** @brief Take the stubs back, then the AO down, for the files after this one. */
+static void dump_done(void)
+{
+    net_done();
+    kdrv_slot_coredump_Stub(NULL);
+    kdrv_slot_coredump_read_Stub(NULL);
+    kdrv_slot_coredump_erase_Stub(NULL);
+}
+
+/** @brief Ask for the dump to be sent, through the front door, answered to the spy. */
+static void dump_ask(void)
+{
+    net_dump_request(ao_spy());
+    (void)net_settle();
+}
+
+/**
+ * @brief How many dump answers reached the spy since the last look.
+ *
+ * @param[out] out The last one.
+ * @return The count; everything else waiting is dropped.
+ */
+static unsigned dump_answers(NetDumpRspEvt *out)
+{
+    const QEvt *e;
+    unsigned    n = 0U;
+
+    (void)memset(out, 0, sizeof(*out));
+    while ( (e = ao_spy_take()) != NULL )
+    {
+        if ( (QSignal)NET_DUMP_RSP_SIG == e->sig )
+        {
+            *out = *(const NetDumpRspEvt *)e;
+            n++;
+        }
+    }
+    ao_spy_drain();
+    return n;
+}
+
+/** @brief Whether the body kdrv_net was handed is the dump the stub read. */
+static bool put_holds_the_dump(void)
+{
+    bool same = s_put.has_body && (DUMP_LEN == s_put.len);
+
+    for ( size_t i = 0U; same && (DUMP_LEN > i); i++ )
+    {
+        same = ((uint8_t)(i % DUMP_FILL_MOD) == s_put.body[i]);
+    }
+    return same;
+}
+
+/** @brief A joined channel with a dumps link, nothing in any mailbox, the log empty. */
+static void dump_up(void)
+{
+    dump_fresh();
+    drive_to_up();
+    ao_spy_drain();
+    display_drain();
+    fake_klog_reset();
+}
+
+/** @brief Ask for the dump and check the PUT went to the worker. */
+static void dump_to_put(void)
+{
+    unsigned jobs = s_nreq;
+
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(jobs + 1U, s_nreq, "the PUT did not go out");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_NET_JOB_HTTP_PUT, last_job());
+}
+
+TEST_CASE("test_the_name_is_the_sha_and_the_crc: the SHA, a dash, the CRC in "
+          "eight hex digits", "[net_ao][dump]")
+{
+    char name[KDUMP_NAME_MAX + 1U];
+
+    TEST_ASSERT_EQUAL_UINT(strlen(DUMP_NAME), KDUMP_NAME_MAX);
+    TEST_ASSERT_TRUE(kdump_name(name, sizeof(name), DUMP_SHA, DUMP_CRC));
+    TEST_ASSERT_EQUAL_STRING(DUMP_NAME, name);
+    TEST_ASSERT_TRUE(kdump_name(name, sizeof(name), "0", 0xFFFFFFFFU));
+    TEST_ASSERT_EQUAL_STRING("0-ffffffff", name);
+
+    /* One byte short of the name and its terminator. */
+    TEST_ASSERT_FALSE(kdump_name(name, KDUMP_NAME_MAX, DUMP_SHA, DUMP_CRC));
+
+    /* Nothing to name it after, or not a lowercase hex digest. */
+    TEST_ASSERT_FALSE(kdump_name(name, sizeof(name), NULL, DUMP_CRC));
+    TEST_ASSERT_FALSE(kdump_name(name, sizeof(name), "", DUMP_CRC));
+    TEST_ASSERT_FALSE(kdump_name(name, sizeof(name), "1A2B3C4D5", DUMP_CRC));
+    TEST_ASSERT_FALSE(kdump_name(name, sizeof(name), "1a2b/../x", DUMP_CRC));
+    TEST_ASSERT_FALSE(kdump_name(NULL, sizeof(name), DUMP_SHA, DUMP_CRC));
+}
+
+TEST_CASE("test_a_request_with_the_channel_down_answers_channel: nothing is "
+          "read or sent", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+
+    dump_fresh();
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_CHANNEL, r.result);
+    TEST_ASSERT_EQUAL_UINT16(0U, r.http);
+
+    /* Up, then gone again. */
+    drive_to_up();
+    go_offline();
+    ao_spy_drain();
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_CHANNEL, r.result);
+
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.reads);
+    TEST_ASSERT_EQUAL_UINT(0U, s_nput);
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.erases);
+    dump_done();
+}
+
+TEST_CASE("test_a_request_with_no_dumps_link_answers_channel: a session that "
+          "names none has nowhere to send it", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+
+    dump_fresh();
+    s_dumps_link = NULL;
+    drive_to_up();
+    ao_spy_drain();
+
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_CHANNEL, r.result);
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.reads);
+    TEST_ASSERT_EQUAL_UINT(0U, s_nput);
+    dump_done();
+}
+
+TEST_CASE("test_a_request_with_no_kodeos_dump_answers_none: none, another "
+          "image's, or a build with no core dump", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+    unsigned      jobs;
+
+    dump_up();
+    jobs = s_nreq;
+
+    s_dump.present = false;
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_NONE, r.result);
+    TEST_ASSERT_TRUE(logged("dump: none to send"));
+
+    /* A sketch's, or another kodeOS build's. */
+    s_dump.present = true;
+    s_dump.kodeos  = false;
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_NONE, r.result);
+
+    /* Built with no core dump: kdrv_slot refuses. */
+    s_dump.kodeos = true;
+    s_dump.status = KODE_DENIED;
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_NONE, r.result);
+
+    TEST_ASSERT_EQUAL_UINT(3U, s_dump.asks);
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.reads);
+    TEST_ASSERT_EQUAL_UINT(0U, s_nput);
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.erases);
+    TEST_ASSERT_EQUAL_UINT(jobs, s_nreq);
+    dump_done();
+}
+
+TEST_CASE("test_a_dump_that_cannot_be_read_answers_none: and its buffer goes "
+          "back", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+    unsigned      taken;
+    unsigned      freed;
+
+    dump_up();
+    s_dump.read_rc = KODE_IO_ERROR;
+    taken = fake_psram_alloc_count();
+    freed = fake_psram_free_count();
+
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_NONE, r.result);
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump.reads);
+    TEST_ASSERT_EQUAL_UINT(0U, s_nput);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(fake_psram_alloc_count() - taken,
+                                   fake_psram_free_count() - freed,
+                                   "the dump's buffer was kept");
+
+    /* No PSRAM for the buffer: busy, and nothing read. */
+    s_dump.read_rc = KODE_OK;
+    fake_psram_refuse(1U);
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_BUSY, r.result);
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump.reads);
+    TEST_ASSERT_EQUAL_UINT(0U, s_nput);
+    dump_done();
+}
+
+TEST_CASE("test_the_dump_goes_to_the_link_under_its_name: the bytes read, as "
+          "octets, with the session's token", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+    char          jwt[400];
+    unsigned      taken;
+    unsigned      freed;
+
+    dump_up();
+    taken = fake_psram_alloc_count();
+    freed = fake_psram_free_count();
+
+    dump_to_put();
+    TEST_ASSERT_EQUAL_UINT(1U, s_nput);
+    TEST_ASSERT_EQUAL_STRING(DUMP_LINK DUMP_NAME, s_put.url);
+    TEST_ASSERT_EQUAL_STRING("application/octet-stream", s_put.type);
+    (void)memset(jwt, 'x', 379U);
+    jwt[379] = '\0';
+    TEST_ASSERT_EQUAL_STRING(jwt, s_put.bearer);
+    TEST_ASSERT_EQUAL_UINT(DUMP_LEN, s_put.len);
+    TEST_ASSERT_TRUE_MESSAGE(put_holds_the_dump(), "the body is not the dump read");
+    TEST_ASSERT_FALSE(req_at(s_nreq - 1U)->keep);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(fake_psram_alloc_count() - taken,
+                                   fake_psram_free_count() - freed,
+                                   "the dump's buffer outlived the copy kdrv_net took");
+    TEST_ASSERT_EQUAL_UINT(0U, dump_answers(&r));
+
+    /* Said in the log by its size alone: no path, no name, no token. */
+    TEST_ASSERT_TRUE(logged("dump: sending 4096 bytes"));
+    TEST_ASSERT_FALSE(logged(DUMP_NAME));
+    TEST_ASSERT_FALSE(logged("/dumps/"));
+    TEST_ASSERT_FALSE(logged("xxxxxxxxxxxxxxxx"));
+
+    http_reply(201U, "");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    dump_done();
+}
+
+TEST_CASE("test_a_201_erases_the_dump_and_answers_ok: and an erase that fails "
+          "still answers ok", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+
+    dump_up();
+    dump_to_put();
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.erases);
+
+    s_nforget = 0U;
+    http_reply(201U, "{\"ok\":true}");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_OK, r.result);
+    TEST_ASSERT_EQUAL_UINT16(201U, r.http);
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump.erases);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_nforget, "the answer was left in the driver");
+    TEST_ASSERT_TRUE(logged("dump: sent"));
+
+    /* Stored, but the erase fails: the service has it, so OK, said in a WARN. */
+    s_dump.erase_rc = KODE_IO_ERROR;
+    dump_to_put();
+    http_reply(201U, "");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_OK, r.result);
+    TEST_ASSERT_EQUAL_UINT(2U, s_dump.erases);
+    TEST_ASSERT_TRUE(logged("could not be erased"));
+
+    /* Any other 2xx is not stored. */
+    s_dump.erase_rc = KODE_OK;
+    dump_to_put();
+    http_reply(200U, "");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_REFUSED, r.result);
+    TEST_ASSERT_EQUAL_UINT16(200U, r.http);
+    TEST_ASSERT_EQUAL_UINT(2U, s_dump.erases);
+    dump_done();
+}
+
+TEST_CASE("test_another_status_keeps_the_dump_and_answers_refused: with the "
+          "status", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+
+    dump_up();
+    dump_to_put();
+    http_reply(500U, "{\"error\":\"internal\"}");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_REFUSED, r.result);
+    TEST_ASSERT_EQUAL_UINT16(500U, r.http);
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.erases);
+    TEST_ASSERT_TRUE(logged("dump: refused, http 500"));
+
+    /* The worker is free again: the next request goes out. */
+    dump_to_put();
+    http_reply(201U, "");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_OK, r.result);
+    dump_done();
+}
+
+TEST_CASE("test_no_answer_keeps_the_dump: a failed job, and one that outlasts "
+          "its guard", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+
+    dump_up();
+    dump_to_put();
+    s_nforget = 0U;
+    job_done_http(KODE_TIMEOUT);
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_NO_ANSWER, r.result);
+    TEST_ASSERT_EQUAL_UINT16(0U, r.http);
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.erases);
+    TEST_ASSERT_EQUAL_UINT(1U, s_nforget);
+    TEST_ASSERT_TRUE(logged("dump: no answer"));
+
+    /* The guard fires first: answered then, and the late end only wipes. */
+    dump_to_put();
+    secs(GUARD_STEPS(KODE_NET_GUARD_MS) / 100U + 1U);
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_NO_ANSWER, r.result);
+    s_nresult = 0U;
+    s_nforget = 0U;
+    http_reply(201U, "");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nresult, "the late answer was read");
+    TEST_ASSERT_EQUAL_UINT(1U, s_nforget);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, dump_answers(&r), "answered twice");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_dump.erases, "erased on a late 201");
+    dump_done();
+}
+
+TEST_CASE("test_a_request_while_an_upload_runs_answers_busy: a dump, a "
+          "capture, a stream or another job", "[net_ao][dump]")
+{
+    NetDumpRspEvt     r;
+    NetShotRspEvt     sr;
+    DisplayShotReqEvt q;
+    unsigned          jobs;
+
+    dump_up();
+
+    /* A dump in flight: a second dump and a capture are both busy. */
+    dump_to_put();
+    jobs = s_nreq;
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_BUSY, r.result);
+    shot_ask(SHOT_TOKEN);
+    TEST_ASSERT_EQUAL_UINT(1U, shot_answers(&sr));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KSHOT_R_BUSY, sr.result);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)display_take(NULL, 0U),
+                                  "the capture asked the display");
+    TEST_ASSERT_EQUAL_UINT(jobs, s_nreq);
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump.reads);
+    http_reply(201U, "");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_OK, r.result);
+
+    /* A capture at the display. */
+    shot_ask(SHOT_TOKEN);
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SHOT_REQ_SIG, (int)display_take(&q, sizeof(q)));
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_BUSY, r.result);
+    display_answer(KODE_OK, 500U);
+    display_drain();
+    http_reply(201U, "{\"ok\":true,\"id\":\"s\",\"seq\":1}");
+    TEST_ASSERT_EQUAL_UINT(1U, shot_answers(&sr));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KSHOT_R_OK, sr.result);
+
+    /* Somebody else's job with the worker. */
+    net_http_get_request("http://example.invalid/");
+    (void)net_settle();
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_BUSY, r.result);
+    http_reply(200U, "fine");
+    ao_spy_drain();
+
+    /* A stream under way. */
+    stream_ask(1U, 300U);
+    ao_spy_drain();
+    display_drain();
+    dump_ask();
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_BUSY, r.result);
+
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump.reads);
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump.erases);
+    dump_done();
 }
 
 /* ---- kode_sys's requests: answered to the asking AO ---------------------------

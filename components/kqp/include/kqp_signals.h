@@ -2007,6 +2007,13 @@ enum KodeSignals {
                                  *   running stream of uploads
                                  *   (NetShotStopEvt).                        */
 
+    NET_DUMP_REQ_SIG,           /**< AO_Net (direct post, from
+                                 *   net_dump_request()): send the core dump
+                                 *   of a kodeOS fault to the Kode channel's
+                                 *   `dumps` link (NetDumpReqEvt).            */
+    NET_DUMP_RSP_SIG,           /**< To the requester: how the fault report
+                                 *   ended (NetDumpRspEvt).                   */
+
     FUNCTION_ANS_SIG,           /**< Posted to AO_Console by the owner of a
                                  *   function that answers (FunctionAnsEvt):
                                  *   one record of the answer, or its end.    */
@@ -6197,6 +6204,19 @@ typedef struct {
     uint8_t  fps;               /**< A stream's frames a second.            */
     uint16_t secs;              /**< A stream's length in seconds.          */
 } NetShotRspEvt;
+
+/** @brief Send the core dump to the Kode channel's `dumps` link (NET_DUMP_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    QActive *who;      /**< Where the answer (NET_DUMP_RSP_SIG) goes.       */
+} NetDumpReqEvt;
+
+/** @brief How a fault report ended (NET_DUMP_RSP_SIG). */
+typedef struct {
+    QEvt     super;
+    uint8_t  result;   /**< kdump_result_t.                                 */
+    uint16_t http;     /**< The service's status; 0 when none came.         */
+} NetDumpRspEvt;
 
 /**
  * @brief All six buttons, right now (BTN_STATE_SIG).

@@ -787,10 +787,12 @@ TEST_CASE("the host of a URL is cut before its path", "[kdrv_net]")
 
 TEST_CASE("put_prepare refuses what it cannot carry", "[kdrv_net]")
 {
+    static uint8_t whole[KDRV_NET_PUT_MAX];   /* a core dump at its largest */
     char     longurl[KDRV_NET_PUT_URL_MAX + 2U];
     uint8_t  b = 0x55U;
 
     TEST_ASSERT_EQUAL_UINT(260U, KDRV_NET_PUT_URL_MAX);
+    TEST_ASSERT_EQUAL_UINT(128U * 1024U, KDRV_NET_PUT_MAX);
 
     (void)memset(longurl, 'a', sizeof(longurl));
     (void)memcpy(longurl, "https://", 8U);
@@ -825,6 +827,11 @@ TEST_CASE("put_prepare refuses what it cannot carry", "[kdrv_net]")
         kdrv_net_http_put_prepare(longurl, &b, 1U, PUT_TYPE, PUT_BEARER));
     TEST_ASSERT_EQUAL_INT(KODE_OK,
         kdrv_net_http_put_prepare(PUT_URL, &b, 1U, PUT_TYPE, PUT_BEARER));
+
+    /* KDRV_NET_PUT_MAX bytes exactly: the largest body is carried whole. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_put_prepare(PUT_URL, whole, KDRV_NET_PUT_MAX, PUT_TYPE,
+                                  PUT_BEARER));
 }
 
 TEST_CASE("the bearer is wiped by the job, so a PUT with none is refused",

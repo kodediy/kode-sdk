@@ -3418,6 +3418,57 @@ void net_shot_request(QActive *who, const char *token, uint8_t fps,
  */
 void net_shot_stop_request(QActive *who);
 
+#if CONFIG_KODEOS_DUMP_HTTP
+/* ---- Fault reports, over the Kode channel's session ----------------------
+ * The connect answer may name an HTTPS prefix, `dumps`. AO_Net PUTs the core
+ * dump of a kodeOS fault to `dumps` + kdump_name() with the channel's JWT and
+ * erases it once the service has stored it (CONFIG_KODEOS_DUMP_HTTP).
+ */
+#define KDUMP_CRC_HEX   8U   /**< Hex digits of the image's CRC32 in a dump's name. */
+
+/** @brief Characters of a dump's name, without its terminator: the SHA, a
+ *         dash, the CRC. */
+#define KDUMP_NAME_MAX  (KDRV_COREDUMP_SHA_HEX + 1U + KDUMP_CRC_HEX)
+
+/** @brief How a fault report ended (NetDumpRspEvt.result). */
+typedef enum {
+    KDUMP_R_OK = 0,      /**< The service took it (201); the dump is erased. */
+    KDUMP_R_REFUSED,     /**< Any other answer; `http` says which. The dump
+                          *   stays.                                         */
+    KDUMP_R_NO_ANSWER,   /**< TLS, socket or timeout. The dump stays.        */
+    KDUMP_R_BUSY,        /**< The worker or another upload holds the network,
+                          *   or there is no memory for the dump.            */
+    KDUMP_R_CHANNEL,     /**< The channel is down or names no `dumps` link.  */
+    KDUMP_R_NONE         /**< No dump of a kodeOS image is in flash, or it
+                          *   cannot be read.                                */
+} kdump_result_t;
+
+/**
+ * @brief The name a core dump is uploaded under: `<sha>-<crc>`.
+ *
+ * @param out Receives the name and a terminator.
+ * @param cap Bytes @p out holds; KDUMP_NAME_MAX + 1 fits any dump.
+ * @param sha The image's SHA prefix: 1 to KDRV_COREDUMP_SHA_HEX characters of
+ *            `[0-9a-f]`.
+ * @param crc The dump's CRC32, written as eight lowercase hex digits.
+ * @return true when @p out holds the name; false for a NULL or empty @p sha,
+ *         a byte outside `[0-9a-f]`, or too little room.
+ */
+bool kdump_name(char *out, size_t cap, const char *sha, uint32_t crc);
+
+/**
+ * @brief Ask AO_Net to send the core dump of a kodeOS fault to the Kode
+ *        channel's `dumps` link.
+ *
+ * Answered with one NET_DUMP_RSP_SIG (NetDumpRspEvt) to @p who. A 201 erases
+ * the dump; anything else leaves it in flash. A full pool drops the request
+ * with an error line.
+ *
+ * @param who The AO the answer goes to.
+ */
+void net_dump_request(QActive *who);
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
+
 /* ---- AO_Storage: owner of the microSD and the internal FAT --------------
  * The only code in kodeOS that opens a file. Listing is published on the bus
  * (STORAGE_ENTRY_SIG then STORAGE_LIST_END_SIG) so each subscriber ends up

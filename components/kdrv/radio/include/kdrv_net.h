@@ -57,9 +57,10 @@ extern "C" {
  *  rounds together, waiting for bytes that do not come. AO_Net's guard on the
  *  read job is this plus a margin. */
 #define KDRV_NET_STREAM_READ_MAX_MS  20000U
-/** Body bytes one HTTP_PUT job can send: a JPEG of the glass. */
-/* cppcheck-suppress misra-c2012-2.5 ; read by kdrv_net.c alone, no twin */
-#define KDRV_NET_PUT_MAX      (64U * 1024U)
+/** Body bytes one HTTP_PUT job can send: a JPEG of the glass, or a core dump
+ *  whole (AO_Net asserts it holds KDRV_COREDUMP_MAX). */
+/* cppcheck-suppress misra-c2012-2.5 ; read by kdrv_net.c and AO_Net's assert alone, no twin */
+#define KDRV_NET_PUT_MAX      (128U * 1024U)
 /** A PUT's URL, terminator included: the Kode channel's upload link carries a
  *  token in its path, so it does not fit the console-sized KDRV_NET_URL_MAX.
  *  It holds the longest link the api may name (128) and the longest token
