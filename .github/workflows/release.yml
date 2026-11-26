@@ -1,10 +1,10 @@
 name: release
 
-# A pushed v* tag gets its GitHub release and its components on the ESP-IDF
-# component registry, after the commit it names has passed both test
-# workflows again and is on main. Every app pins the SDK at this version, so
-# a tag on an untested commit, or on a side branch, would be what the next
-# app builds against.
+# A pushed v* tag gets its GitHub release, the Kode Dot's Arduino package
+# attached to it and its components on the ESP-IDF component registry, after
+# the commit it names has passed both test workflows again and is on main.
+# Every app pins the SDK at this version, so a tag on an untested commit, or
+# on a side branch, would be what the next app builds against.
 on:
   push:
     tags: ['v*']
@@ -54,6 +54,7 @@ jobs:
       # The tag's own line opens the notes, then the two kode_c5 releases -
       # the one the tree carries and the oldest the SDK works with
       # (KDRV_C5_RELEASE_MIN) - then the pull requests merged since the last release.
+      # Not latest yet: arduino-attach marks it once its package is attached.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -88,7 +89,45 @@ jobs:
           fi
           printf '%s\n' "$notes" > notes.md
           gh release create "$TAG" --repo "$REPO" --verify-tag --title "kode-sdk $TAG" \
-            --notes-file notes.md --latest
+            --notes-file notes.md --latest=false
+
+  # The Arduino package at the tag's version, made and proved by arduino.yml.
+  arduino-package:
+    needs: [gate-tests, gate-build]
+    uses: ./.github/workflows/arduino.yml
+    with:
+      tag: ${{ github.ref_name }}
+
+  # The package's three files on the release, which then becomes latest. A
+  # person's Arduino IDE reads releases/latest/download/package_kode_index.json,
+  # so latest is always a release with its index: set here, after the upload,
+  # not at creation, and a release whose package fails stays published and not
+  # latest while the address keeps serving the index before it. The index goes
+  # up after the archives it names. --clobber replaces only a file of the same
+  # name, which is this release's own from a run before. Re-running an older
+  # tag's release marks that older release latest again.
+  arduino-attach:
+    needs: [arduino-package, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: arduino-package
+          path: package
+
+      - name: Attach the package to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" --repo "$REPO" --clobber package/*.zip
+          gh release upload "$TAG" --repo "$REPO" --clobber package/package_kode_index.json
+          gh release edit "$TAG" --repo "$REPO" --latest
 
   # Every component goes to the ESP-IDF component registry as kodediy/<name>,
   # at the version its manifest says, which must be the tag's. Lowest layer
