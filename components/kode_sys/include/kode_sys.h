@@ -374,6 +374,17 @@ kode_status_t kode_sys_wifi_disconnect(void);
  */
 bool kode_sys_wifi_left(void);
 
+/**
+ * @brief Whether the C5 is known to remember no network: a join with a NULL
+ *        name has nothing to try. Never waits.
+ * @note Naming it links AO_Radio, as the commands do.
+ * @return true once the radio has read an empty list of remembered networks on
+ *         the link that is up; false when it remembers one, while that list is
+ *         not read yet or a network is being saved, and without
+ *         CONFIG_KODEOS_WIFI.
+ */
+bool kode_sys_wifi_none_remembered(void);
+
 /* ---- Bluetooth: to AO_Radio; DENIED without CONFIG_KODEOS_BLE ----
  * The board's advert carries the console's service and is never changed; an
  * app's name and maker data ride in the scan response, together at most
@@ -681,9 +692,9 @@ typedef ExpPowerDoneEvt kode_sys_exp_power_done_t;
  * a request is carried out, never
  * said done because the rail looked as asked; whoever needs a state asks for
  * it. The rail follows once the C5 can
- * carry the request out: a Wi-Fi sweep delays it by about 40 s and up to
- * 90 s, and an autojoin round by that sweep and up to 20 s for each
- * remembered network that will not have the board (kode.h's
+ * carry the request out: a Wi-Fi sweep delays it by up to its ceiling,
+ * KDRV_WIFI_SCAN_TIMEOUT_MS, and an autojoin round by that sweep and up to
+ * 20 s for each remembered network that will not have the board (kode.h's
  * KODE_PIN_POWER_MS is the bound). With no C5 link, "on" resets the C5 for
  * about 10 ms to release the pin: the speaker amplifier is off meanwhile and
  * during its boot. "Off" brings the link up, as an asked Wi-Fi scan does: no
@@ -1632,8 +1643,8 @@ kode_status_t kode_sys_udp_send(QActive *me, const char *host, uint16_t port, co
 
 /* ---- Wi-Fi, AO_Radio: one kind, a scan ----
  * The sweep the console's `wifi_scan` runs, over every channel of both bands
- * (about 38 s). With no link AO_Radio brings it up first, as a join does,
- * and switches no service on. The networks are a listing: AO_Radio posts one
+ * (KDRV_WIFI_SCAN_TIMEOUT_MS at most). With no link AO_Radio brings it up
+ * first, as a join does, and switches no service on. The networks are a listing: AO_Radio posts one
  * WIFI_SCAN_ENTRY_SIG per network to @p me while its queue keeps
  * KODE_SYS_LIST_FREE_SLOTS free - the queue rule above, with AO_Radio
  * (KODE_PRIO_RADIO) in AO_Storage's place - then the answer. The newest
@@ -1655,7 +1666,8 @@ kode_status_t kode_sys_udp_send(QActive *me, const char *host, uint16_t port, co
  * CONFIG_KODEOS_WIFI the request is refused at once with KODE_DENIED.
  */
 
-/** @brief The most networks one sweep keeps: the strongest, the rest dropped. */
+/** @brief The most networks one sweep keeps: the strongest access points,
+ *         hidden ones included, the rest dropped. */
 #define KODE_SYS_WIFI_SCAN_MAX  24U
 
 /** @brief One network a sweep found, as the standard layer hands it on. */
@@ -1766,7 +1778,7 @@ kode_status_t kode_sys_wifi_frames(QActive *me, bool on, uint8_t channel);
  * CONFIG_KODEOS_BLE the request is refused at once with KODE_DENIED.
  */
 
-#define KODE_SYS_BLE_SCAN_MAX     24U     /**< The most devices one listen keeps.       */
+#define KODE_SYS_BLE_SCAN_MAX     24U     /**< The most devices one listen keeps: the first heard. */
 #define KODE_SYS_BLE_SCAN_MS_MIN  500U    /**< The shortest listen, ms.                 */
 #define KODE_SYS_BLE_SCAN_MS_MAX  30000U  /**< The longest listen, ms.                  */
 #define KODE_SYS_BLE_ADDR_MAX     18U     /**< Bytes of an address as text, NUL included. */

@@ -720,7 +720,7 @@ typedef bool (*kode_sys_wifi_ap_cb)(const kode_sys_wifi_ap_t *ap, void *ctx);
  * an abandoned scan's answer still lands there, and the next call waits that
  * answer out (at most @p ms) before it lends the storage again.
  *
- * @note Blocks for the sweep, about 38 s; never from an AO.
+ * @note Blocks for the sweep, @p ms at most; never from an AO.
  * @param cb   Offered each network the sweep kept, in the driver's order.
  * @param ctx  Handed to @p cb.
  * @param ms   How long to wait for the end.

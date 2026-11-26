@@ -1434,6 +1434,9 @@ static void scan_request_wait(ScanWaiter *wait, uint32_t gen, uint8_t kind, uint
 #endif /* RADIO_ASKS */
 
 #if CONFIG_KODEOS_WIFI
+_Static_assert(KODE_C5_TEST_SCAN_MS == KDRV_WIFI_SCAN_TIMEOUT_MS,
+               "the c5 row's wait for the sweep is the driver's ceiling");
+
 kode_status_t wifi_scan_ask(QActive *who)
 {
     return scan_ask(who, (uint8_t)KQP_SCAN_WIFI, (QSignal)WIFI_SCAN_RSP_SIG, 0U);
@@ -1537,6 +1540,26 @@ bool wifi_leave_done(void)
 {
     /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
     return __atomic_load_n(&s_wifi_off, __ATOMIC_ACQUIRE);
+}
+
+/** @brief The vault's last listing on this link keeps no network, for wifi_none_remembered(). */
+static bool s_wifi_none;
+
+/**
+ * @brief Publish to wifi_none_remembered()'s readers what the vault is known to keep.
+ * @param none true once a listing on this link says it keeps no network; false
+ *             when it keeps one, or nothing is known on this link yet.
+ */
+static void wifi_none_note(bool none)
+{
+    /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
+    __atomic_store_n(&s_wifi_none, none, __ATOMIC_RELEASE);
+}
+
+bool wifi_none_remembered(void)
+{
+    /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
+    return __atomic_load_n(&s_wifi_none, __ATOMIC_ACQUIRE);
 }
 
 /** @brief The request to start Wi-Fi, one static event for the door and AO_Radio's own ask. */
@@ -2325,6 +2348,7 @@ static void radio_svc_link(Radio * const me)
     /* The names the vault keeps, before an autojoin round needs them. */
     me->vlist_ok      = false;
     me->vlist_publish = false;
+    wifi_none_note(false);
     (void)radio_vault_send(me, KODE_VAULT_LIST, (uint8_t)VOP_LIST, NULL, 0U);
 #endif
 }
@@ -2862,6 +2886,7 @@ static bool radio_wipe_answer(Radio * const me, KodeSvcEvt const * const e)
     {
         me->vlist.count = 0U;   /* the names went with the networks */
         me->vlist_ok    = true;
+        wifi_none_note(true);
     }
 #endif
     radio_wipe_step(me, (uint8_t)(me->wipe_step + 1U));
@@ -4203,6 +4228,11 @@ static void radio_vault_remember(Radio * const me)
         KLOG_W(TAG, "the C5's vault could not be reached; '%s' is not saved",
                me->ssid);
     }
+    else
+    {
+        /* Not known empty while it saves: the LIST after the answer says. */
+        wifi_none_note(false);
+    }
     (void)memset(&c, 0, sizeof(c));
     (void)memset(me->pass, 0, sizeof(me->pass));
 }
@@ -4231,6 +4261,7 @@ static void radio_vault_answer(Radio * const me, KodeSvcEvt const * const e)
                 me->vlist.ssid[i][sizeof(me->vlist.ssid[i]) - 1U] = '\0';
             }
             me->vlist_ok = true;
+            wifi_none_note(0U == me->vlist.count);
         }
         if ( me->vlist_publish )
         {
@@ -10240,6 +10271,7 @@ void Radio_ctor(void)
 #if CONFIG_KODEOS_WIFI
     (void)memset(&me->vlist, 0, sizeof(me->vlist));
     me->vlist_ok      = false;
+    wifi_none_note(false);
     me->nets_none_said = false;
     me->vlist_publish = false;
     me->remember      = false;
@@ -11689,6 +11721,10 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
         case Q_ENTRY_SIG: {
 #if CONFIG_KODE_LOWPOWER
             radio_lp_link_gone(me);
+#endif
+#if CONFIG_KODEOS_WIFI
+            /* The vault is listed again on the next link. */
+            wifi_none_note(false);
 #endif
             /* The link went away under a park: nobody is left to answer it,
              * and AO_Boot is waiting for the answer. */
@@ -13912,8 +13948,9 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             if ( me->busy )
             {
                 /* The Wi-Fi page sweeps most of the time it is open, and a
-                 * sweep is about 38 s: behind a whole one the join waited as
-                 * long. A scan somebody asked for ends for the join, which
+                 * sweep runs up to KDRV_WIFI_SCAN_TIMEOUT_MS: behind a whole
+                 * one the join waited as long. A scan somebody asked for ends
+                 * for the join, which
                  * goes out when the step on the air ends, a few seconds at
                  * most; the sweep's end withdraws the cut
                  * (RADIO_OUT_WIFI_SCAN_DONE). A Bluetooth listen is not
@@ -14085,8 +14122,8 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             {
                 me->nets_none_said = false;
                 /* The hints first: one channel per network the Dot was last
-                 * on, against a sweep of 35 s. A round with none, or none
-                 * heard, sweeps. */
+                 * on, against a sweep of every channel. A round with none, or
+                 * none heard, sweeps. */
                 me->hint_at = 0U;
                 me->hint_on = auto_hint_next(me);
                 if ( me->hint_on || radio_submit(me, KDRV_RADIO_JOB_WIFI_SCAN) )

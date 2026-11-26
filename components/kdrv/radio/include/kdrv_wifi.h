@@ -20,10 +20,11 @@ extern "C" {
  *
  * This bounds what is REMEMBERED, not what is reported. A listing goes out
  * through the hand-over ring below as the sweep finds it, so a room with
- * forty networks lists forty; the table is what autojoin and the production
- * row read afterwards, and for both of those the strongest twenty-four are
- * the whole question. It must also stay under 32, because AO_Radio's
- * autojoin holds one bit per slot in a uint32_t. */
+ * forty networks lists forty; the table is what autojoin, the production
+ * row and a task's blocking scan (kode_wifi_scan()) read afterwards, and for
+ * all three the strongest twenty-four are the whole question. It must also
+ * stay under 32, because AO_Radio's autojoin holds one bit per slot in a
+ * uint32_t. */
 #define KDRV_WIFI_SCAN_MAX   24U
 
 /** @brief How many networks can wait to be handed over.
@@ -38,11 +39,13 @@ extern "C" {
 
 /** @brief The whole sweep's budget, checked between steps.
  *
- * Measured at 20.6 s for the seven steps on this board (36.7 s at the 200-500
- * ms dwell it used to have) - the same as asking
- * the coprocessor for one sweep, since the dwell per channel is what costs
- * and the steps only add a round trip each. This is the ceiling on a sweep
- * that has stopped making progress, not a deadline anybody should meet. */
+ * What a sweep costs is the dwell on each channel the country opens, the same
+ * as asking the coprocessor for one sweep; the steps only add a round trip
+ * each. This is the ceiling on a sweep that has stopped making progress, not
+ * a deadline anybody should meet: a sweep ends well inside it. The waits on
+ * a sweep above the driver are built on this and
+ * KDRV_WIFI_SCAN_STEP_TIMEOUT_MS, and a _Static_assert holds each to them
+ * where both are in sight. */
 #define KDRV_WIFI_SCAN_TIMEOUT_MS  90000U
 
 /** @brief How long one step gets to answer with its SCAN_DONE.

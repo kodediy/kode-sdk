@@ -20,6 +20,12 @@ _Static_assert(KODE_WIFI_SSID_MAX == KODE_SYS_WIFI_SSID_MAX,
                "kode.h's network name and kode_sys.h's have drifted apart");
 _Static_assert(sizeof(kode_wifi_network_t) == sizeof(kode_sys_wifi_ap_t),
                "a scanned network and kode_sys's have drifted apart");
+_Static_assert(KODE_WIFI_SCAN_MAX == KODE_SYS_WIFI_SCAN_MAX,
+               "kode.h's scan limit is the table kode_sys hands over");
+_Static_assert((KDRV_WIFI_SCAN_TIMEOUT_MS == 90000U) && (KDRV_WIFI_SCAN_STEP_TIMEOUT_MS == 12000U),
+               "the text of KODE_WIFI_SCAN_MS says a 90 s ceiling and a step's 12 s");
+_Static_assert(KODE_WIFI_SCAN_MS > (KDRV_WIFI_SCAN_TIMEOUT_MS + KDRV_WIFI_SCAN_STEP_TIMEOUT_MS),
+               "the call outwaits a sweep at its ceiling and its last step");
 
 /** @brief How long a request waits for AO_Radio's queue to have room, in ms. */
 #define WIFI_DOOR_MS 2000U
@@ -83,6 +89,12 @@ static void wifi_fail(kode_status_t rc)
         kode_err_set("Wi-Fi did not take the request");
         break;
     }
+}
+
+/** @brief Keep why a join with no name cannot be made as the task's error. */
+static void wifi_none_fail(void)
+{
+    kode_err_set("no network remembered: join one by name first");
 }
 
 /**
@@ -177,7 +189,8 @@ typedef enum {
     WIFI_WAITING = 0,  /**< Not there yet.                          */
     WIFI_JOINED,       /**< An address on the asked network.        */
     WIFI_REFUSED,      /**< The network was tried, then given up.   */
-    WIFI_UNAVAILABLE   /**< The facade has no Wi-Fi to ask.         */
+    WIFI_UNAVAILABLE,  /**< The facade has no Wi-Fi to ask.         */
+    WIFI_NONE          /**< No name, and none is remembered.        */
 } wifi_outcome_t;
 
 /** @brief The watch over one join. */
@@ -207,7 +220,12 @@ static bool wifi_watch_attempt(void *ctx)
     }
     else if ( NULL == w->ssid )
     {
-        /* the radio tries its remembered networks in turn: only the bound decides */
+        /* the radio tries its remembered networks in turn: the bound decides,
+         * unless no join is under way and the radio remembers none */
+        if ( (KODE_SYS_WIFI_STATE_CONNECTING != st.state) && kode_sys_wifi_none_remembered() )
+        {
+            w->outcome = WIFI_NONE;
+        }
     }
     else if ( KODE_SYS_WIFI_STATE_CONNECTING == st.state )
     {
@@ -251,6 +269,9 @@ static bool wifi_wait_for_ip(const char *ssid, uint8_t state)
     case WIFI_REFUSED:
         kode_err_set("could not join '%s': wrong password or out of range", ssid);
         break;
+    case WIFI_NONE:
+        wifi_none_fail();
+        break;
     default:
         if ( NULL != ssid )
         {
@@ -285,15 +306,21 @@ static bool wifi_join(const char *ssid, const char *password)
             wifi_fail(rc);
             ok = false;
         }
-        else if ( !wifi_is_on(&st, ssid) )
+        else if ( wifi_is_on(&st, ssid) )
+        {
+            /* already there */
+        }
+        else if ( (NULL == ssid) && (KODE_SYS_WIFI_STATE_CONNECTING != st.state)
+                  && kode_sys_wifi_none_remembered() )
+        {
+            wifi_none_fail();
+            ok = false;
+        }
+        else
         {
             wifi_post_t p = { ssid, password, false, KODE_ERROR };
 
             ok = wifi_post(&p) && wifi_wait_for_ip(ssid, st.state);
-        }
-        else
-        {
-            /* already there */
         }
     }
     return ok;

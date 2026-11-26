@@ -688,7 +688,7 @@ static void scan_step_config(uint16_t step, uint8_t first, uint8_t n24,
 {
     (void)memset(cfg, 0, sizeof(*cfg));
     /* Active, a beacon interval and a half at most: 200-500 ms measured the
-     * same networks by name in 36.7 s that this does in 20.6 s, and a sweep
+     * same networks by name in 1.8 times the time this takes, and a sweep
      * takes the C5 off its network's channel. channel stays 0, which is what
      * lets the bitmap apply at all. */
     cfg->show_hidden          = true;
