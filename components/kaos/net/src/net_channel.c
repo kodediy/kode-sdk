@@ -444,11 +444,13 @@ bool kchan_parse_connect(const char *json, size_t len, const char *own,
             {
                 (void)memset(out->shots, 0, sizeof(out->shots));
             }
+#if CONFIG_KODEOS_DUMP_HTTP
             if ( !kchan_json_str(json, len, "dumps", out->dumps, sizeof(out->dumps))
                 || !kchan_upload_valid(out->dumps) )
             {
                 (void)memset(out->dumps, 0, sizeof(out->dumps));
             }
+#endif
         }
         if ( !ok )
         {

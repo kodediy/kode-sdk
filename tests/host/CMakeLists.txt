@@ -32,6 +32,11 @@ idf_build_set_property(COMPILE_OPTIONS
 # after it failed with "CMock has run out of memory". Defined for the whole
 # build, so cmock.c and every generated mock agree on the size.
 idf_build_set_property(COMPILE_DEFINITIONS "CMOCK_MEM_SIZE=131072" APPEND)
+# The fault report's option is kaos's Kconfig, not this project's. It decides
+# signals, event types and the channel's session layout, which every file of
+# one binary must agree on, so it is on for the whole build (the SDK's
+# default) rather than for AO_Net's sources alone.
+idf_build_set_property(COMPILE_DEFINITIONS "CONFIG_KODEOS_DUMP_HTTP=1" APPEND)
 # Unity's TEST_PASS() and the fakes' restart leave by longjmp. On macOS
 # longjmp restores the signal mask with sigprocmask(), which there rewrites
 # every thread's mask: the port's suspended task threads then take the tick

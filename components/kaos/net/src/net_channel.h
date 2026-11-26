@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "kdrv_net.h"
+#include "sdkconfig.h"   /* CONFIG_KODEOS_DUMP_HTTP: whether a session keeps `dumps` */
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,9 +43,11 @@ typedef struct {
     char shots[KSHOT_PREFIX_MAX + 1U];    /**< Where screen captures are
                                            *   uploaded (`https://…/`); empty
                                            *   when the api named none.      */
+#if CONFIG_KODEOS_DUMP_HTTP
     char dumps[KSHOT_PREFIX_MAX + 1U];    /**< Where core dumps are uploaded
                                            *   (`https://…/`); empty when the
                                            *   api named none.               */
+#endif
 } kchan_session_t;
 
 /** @brief Whether a failed request is worth repeating. */
@@ -94,9 +97,9 @@ bool kchan_json_u32(const char *json, size_t len, const char *key,
  * All eight fields (`serial`, `brokerUrl`, `username`, `clientId`, `token`,
  * `in`, `out`, `status`) must be present, non-empty and fit. The broker must be
  * `mqtts://`, the serial this unit's when @p own is known, and no topic may hold
- * a wildcard. Anything else is refused whole. `shots` and `dumps` are
- * optional: each is kept when kchan_upload_valid() accepts it, left empty
- * otherwise.
+ * a wildcard. Anything else is refused whole. `shots`, and `dumps` in a
+ * build with CONFIG_KODEOS_DUMP_HTTP, are optional: each is kept when
+ * kchan_upload_valid() accepts it, left empty otherwise.
  *
  * @param json The answer's body, not necessarily NUL-terminated.
  * @param len  Its length.

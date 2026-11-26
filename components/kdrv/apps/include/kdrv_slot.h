@@ -12,6 +12,7 @@
 
 #include "kode_defs.h"
 #include "kdrv_kfw.h"
+#include "sdkconfig.h"   /* CONFIG_KODEOS_DUMP_HTTP: whether the dump is read whole and erased */
 
 #ifdef __cplusplus
 extern "C" {
@@ -225,9 +226,11 @@ kode_status_t kdrv_slot_info(kdrv_slot_id_t id, kdrv_slot_info_t *out);
  * asked about the same way `info` asks about them: present or not, and whose.
  */
 
+#if CONFIG_KODEOS_DUMP_HTTP
 #define KDRV_COREDUMP_MAX     (128U * 1024U) /**< The coredump partition's size
                                               *   (kbsp/partitions.csv): no
                                               *   dump is larger.             */
+#endif
 #define KDRV_COREDUMP_SHA_HEX 9U             /**< Hex digits of the ELF SHA-256
                                               *   a dump carries.             */
 
@@ -298,6 +301,9 @@ kode_status_t kdrv_slot_coredump(kdrv_coredump_t *out);
  */
 kode_status_t kdrv_slot_coredump_reason(char *buf, size_t len);
 
+#if CONFIG_KODEOS_DUMP_HTTP
+/* The fault report's two calls, built with it alone (CONFIG_KODEOS_DUMP_HTTP). */
+
 /**
  * @brief Copy the dump out of flash whole, with its CRC32.
  *
@@ -322,6 +328,7 @@ kode_status_t kdrv_slot_coredump_read(uint8_t *buf, size_t cap, size_t *len, uin
  *         with no core dump.
  */
 kode_status_t kdrv_slot_coredump_erase(void);
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /* ---- Where we are running ------------------------------------------------ */
 

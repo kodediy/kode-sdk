@@ -6,7 +6,7 @@
 #ifndef KQP_CONFIG_H_
 #define KQP_CONFIG_H_
 
-#include "sdkconfig.h"   /* CONFIG_KODE_SCHEDULER, CONFIG_KODE_TEST_DOT: whether KODE_PRIO_USER_HIGH and _LOW exist */
+#include "sdkconfig.h"   /* CONFIG_KODE_SCHEDULER, CONFIG_KODE_TEST_DOT: whether KODE_PRIO_USER_HIGH and _LOW exist; CONFIG_KODEOS_DUMP_HTTP: the fault report's margin */
 
 
 /* ---- Priorities ---------------------------------------------------------
@@ -2017,7 +2017,9 @@ _Static_assert(KQP_FRAMES_POOL_MARGIN < KQP_MEDIUM_POOL_COUNT,
                "a frame leaves some of the medium tier free, and the tier has more than that");
 #define KQP_HEARD_MARGIN        4U    /**< The fewest slots a BLE advertisement leaves free in its asker's queue, which is half of it when that is more: room for its own traffic and the answer to a stop. */
 #define KQP_HEARD_ANSWER_MARGIN 0U    /**< Slots a BLE advertisement stream's answer leaves free: 0 only asks that there be one. */
+#if CONFIG_KODEOS_DUMP_HTTP
 #define KQP_DUMP_ANSWER_MARGIN  0U    /**< Slots a fault report's answer leaves free in its asker's queue: 0 only asks that there be one; an answer with no room is lost, and the asker's own guard ends its wait. */
+#endif
 #define KQP_HEARD_POOL_MARGIN   16U   /**< Blocks a BLE advertisement (the medium tier) leaves free in its tier, for every other AO's events; kqp.c pins the event to its tier. */
 _Static_assert(KQP_HEARD_MARGIN > 0U,
                "an advertisement leaves some of its asker's queue free for the answer to a stop");

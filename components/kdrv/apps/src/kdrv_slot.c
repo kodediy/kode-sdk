@@ -13,7 +13,9 @@
 
 #include <string.h>
 
+#if CONFIG_KODEOS_DUMP_HTTP
 #include "khal_crc32.h"
+#endif
 #include "kode_log.h"
 
 #include "esp_app_desc.h"
@@ -675,6 +677,7 @@ kode_status_t kdrv_slot_coredump_reason(char *buf, size_t len)
 #endif
 }
 
+#if CONFIG_KODEOS_DUMP_HTTP
 kode_status_t kdrv_slot_coredump_read(uint8_t *buf, size_t cap, size_t *len, uint32_t *crc)
 {
     if ( (NULL == buf) || (NULL == len) || (NULL == crc) )
@@ -737,6 +740,7 @@ kode_status_t kdrv_slot_coredump_erase(void)
     return KODE_DENIED;
 #endif
 }
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /* ---- Where we are running ------------------------------------------------ */
 

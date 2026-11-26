@@ -7,7 +7,7 @@
 #define KQP_SIGNALS_H_
 
 #include "qpc.h"
-#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER */
+#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER, CONFIG_KODEOS_DUMP_HTTP */
 #include "kqp_config.h"   /* KODE_CONSOLE_LINE_MAX, KODE_APP_FILE_MAX */
 #include "khal_sync.h"    /* khal_sem_t: the `done` of every blocking request */
 
@@ -2007,12 +2007,14 @@ enum KodeSignals {
                                  *   running stream of uploads
                                  *   (NetShotStopEvt).                        */
 
+#if CONFIG_KODEOS_DUMP_HTTP
     NET_DUMP_REQ_SIG,           /**< AO_Net (direct post, from
                                  *   net_dump_request()): send the core dump
                                  *   of a kodeOS fault to the Kode channel's
                                  *   `dumps` link (NetDumpReqEvt).            */
     NET_DUMP_RSP_SIG,           /**< To the requester: how the fault report
                                  *   ended (NetDumpRspEvt).                   */
+#endif
 
     FUNCTION_ANS_SIG,           /**< Posted to AO_Console by the owner of a
                                  *   function that answers (FunctionAnsEvt):
@@ -6218,6 +6220,7 @@ typedef struct {
     uint16_t secs;              /**< A stream's length in seconds.          */
 } NetShotRspEvt;
 
+#if CONFIG_KODEOS_DUMP_HTTP
 /** @brief Send the core dump to the Kode channel's `dumps` link (NET_DUMP_REQ_SIG). */
 typedef struct {
     QEvt     super;
@@ -6230,6 +6233,7 @@ typedef struct {
     uint8_t  result;   /**< kdump_result_t.                                 */
     uint16_t http;     /**< The service's status; 0 when none came.         */
 } NetDumpRspEvt;
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /**
  * @brief All six buttons, right now (BTN_STATE_SIG).
