@@ -31,7 +31,7 @@
 /* ---- What each widget takes in the screen's body, px ---- */
 
 #define KODE_SCREEN_GAP_H     12U  /**< Between two widgets: the kit's KUI_SPACE_LG.              */
-#define KODE_SCREEN_LINE_H    29U  /**< A text, or a value's unit: one line of the body face.   */
+#define KODE_SCREEN_LINE_H    34U  /**< A text, or a value's unit: one line of the body face.   */
 #define KODE_SCREEN_NUMBER_H  48U  /**< A value's number: one line of the big face.             */
 #define KODE_SCREEN_BUTTON_H  80U  /**< A button: the kit's KUI_PILL_H.                          */
 

@@ -52,14 +52,21 @@ jobs:
       # The checks that need neither ESP-IDF nor a board, first: seconds, and
       # until now run only from KodeOS, which judged an SDK change only once
       # kodeOS bumped to it - a broken MISRA gate was found there 14 minutes
-      # into a run. The kit's tokens against their header; the tests of the
-      # RAM, MISRA and start gates themselves, which stand in for cppcheck and
-      # the board's nm; an app's size checks (the apps region's case skips
-      # here, with no ESP-IDF); and the
+      # into a run. The kit's tokens against their header; the Arduino
+      # library's Dot layer against kode.h, and its generator's tests; the
+      # tests of the RAM, MISRA and start gates themselves, which stand in
+      # for cppcheck and the board's nm; an app's size checks (the apps
+      # region's case skips here, with no ESP-IDF); and the
       # wire twins, which skip here (the C5 is a nested submodule this
       # checkout does not fetch) and run in KodeOS, which fetches it.
       - name: The kit's tokens match their header
         run: python3 components/kui/tools/gen_tokens.py --check
+
+      - name: The Dot layer matches kode.h
+        run: python3 arduino/tools/gen_dot.py --check
+
+      - name: Run the Dot layer generator's tests
+        run: python3 -m unittest discover -s arduino/tools/tests
 
       - name: Run the tools' own tests
         run: |
