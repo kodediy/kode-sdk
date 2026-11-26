@@ -45,13 +45,15 @@
 /* ---- The motion parts' axes -----------------------------------------------
  * The board's x (right), y (top) and z (out of the glass) as one chip axis
  * each: its index in the chip's reading (0 x, 1 y, 2 z) and its sign.
- * Identity until verified on a board.
+ * The QMI8658A's map is measured on a board: the chip sits half a turn
+ * round, its x to the glass's left and its y to the glass's bottom. The
+ * QMC5883P's map is the identity, not measured.
  */
 #define KBSP_IMU_AXIS_X  0U     /**< The QMI8658A axis that is the board's x. */
 #define KBSP_IMU_AXIS_Y  1U     /**< The one that is y.                        */
 #define KBSP_IMU_AXIS_Z  2U     /**< The one that is z.                        */
-#define KBSP_IMU_SIGN_X  1   /**< +1 when it points the board's way, -1 when against. */
-#define KBSP_IMU_SIGN_Y  1   /**< The same, for y.                          */
+#define KBSP_IMU_SIGN_X  (-1)   /**< +1 when it points the board's way, -1 when against. */
+#define KBSP_IMU_SIGN_Y  (-1)   /**< The same, for y.                          */
 #define KBSP_IMU_SIGN_Z  1   /**< The same, for z.                          */
 #define KBSP_MAG_AXIS_X  0U     /**< The QMC5883P axis that is the board's x.  */
 #define KBSP_MAG_AXIS_Y  1U     /**< The one that is y.                        */

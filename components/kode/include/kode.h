@@ -711,6 +711,7 @@ bool kode_file_move(const char *from, const char *to);
 /* ---- IMU and magnetometer ---- */
 
 /* Axes are the parts' own: QMI8658A for accel and gyro, QMC5883P for the field.
+ * The QMI8658A's x points to the glass's left and its y to the glass's bottom.
  * A failed read answers NAN and kode_error() says why. All four block: a read
  * takes its turn behind other tasks' reads, keeps trying for KODE_MOTION_BUSY_MS,
  * and its last try can take 600 ms more. */
