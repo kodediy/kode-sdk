@@ -66,7 +66,9 @@ jobs:
         # Arduino's core on top (arduino/sdkconfig.sdk): everything kode.h
         # offers, low power with BLE and its console among it, and the only
         # one with KHAL_CONSOLE_APP_PORT on, the console's cable port given by
-        # the app (main/arduino_port.c).
+        # the app (main/arduino_port.c). It is also the only one optimised for
+        # size, as the Arduino libraries are built, so a warning GCC raises
+        # only there stops this build as it stops theirs.
         variant: ['', nowifi, noble, minimal, minimal_noradio, minimal_ble, testdot, arduino]
     steps:
       # Without submodules, for the reason host-tests.yml gives: the only one
