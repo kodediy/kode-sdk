@@ -5,6 +5,7 @@
  */
 #include "kode_file.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "kdrv_storage.h"
@@ -34,6 +35,9 @@
 /** @brief The most a volume path grows a typed path: "sd" to "/sdcard". */
 #define KODE_FILE_GROWTH_MAX ((uint32_t)(sizeof(KODE_FILE_SD_ROOT) - sizeof(KODE_FILE_SD_NAME)))
 
+/** @brief What a whole-file write adds to the file's name for the copy it writes first. */
+#define KODE_FILE_TMP_SUFFIX ".tmp"
+
 /** @brief What the error text shows for a path that is NULL. */
 #define KODE_FILE_NULL_SHOWN "(null)"
 
@@ -46,6 +50,15 @@ _Static_assert((KODE_FILE_PATH_MAX + KODE_FILE_GROWTH_MAX) <= KODE_PATH_MAX,
 
 _Static_assert((sizeof(KODE_FILE_FLASH_ROOT) - sizeof(KODE_FILE_FLASH_NAME)) <= KODE_FILE_GROWTH_MAX,
                "a volume path grows a typed path by more than KODE_FILE_GROWTH_MAX");
+
+/* The copy's name, and the ".bak" AO_Storage's replacement gives the old file,
+ * as long, must fit KODE_PATH_MAX after the longest path a write takes. */
+_Static_assert((KODE_FILE_WRITE_PATH_MAX + KODE_FILE_GROWTH_MAX + (sizeof(KODE_FILE_TMP_SUFFIX) - 1U))
+                   <= KODE_PATH_MAX,
+               "a whole-file write's copy outgrows the extended layer's buffer");
+
+_Static_assert(KODE_FILE_WRITE_PATH_MAX <= KODE_FILE_PATH_MAX,
+               "a path a write takes is longer than any path");
 
 _Static_assert(sizeof(KODE_FILE_FLASH_NAME) >= sizeof(KODE_FILE_SD_NAME),
                "the longest volume name typed is no longer \"flash\"");
@@ -254,6 +267,18 @@ bool kode_file_path(const char *user, char *out, uint32_t cap)
     return true;
 }
 
+bool kode_file_write_path(const char *user, char *out, uint32_t cap)
+{
+    bool ok = kode_file_path(user, out, cap);
+
+    if ( ok && ((path_length(user) + 1U) > KODE_FILE_WRITE_PATH_MAX) )
+    {
+        kode_err_set("path '%s' is too long to write", user);
+        ok = false;
+    }
+    return ok;
+}
+
 struct kode_file_state *kode_file_state_ensure(void)
 {
     kode_task_t *const task = kode_task_ensure();
@@ -427,6 +452,12 @@ typedef struct {
     bool           append;  /**< Keep what is there.                */
 } write_try_t;
 
+/** @brief What one rename or replace try carries. */
+typedef struct {
+    const char *from;  /**< The volume path now.   */
+    const char *to;    /**< The volume path after. */
+} pair_try_t;
+
 /** @brief One STAT of a path. */
 static kode_status_t stat_op(void *ctx)
 {
@@ -467,6 +498,16 @@ static kode_status_t write_op(void *ctx)
     const write_try_t *const t = (const write_try_t *)ctx;
 
     return kode_block_file_write_buffer(t->path, t->data, t->len, t->append);
+}
+
+/** @brief One replacement of a file by its copy. */
+/* cppcheck-suppress constParameterCallback ; the signature is the one kode_file_sys() takes */
+static kode_status_t replace_op(void *ctx)
+{
+    /* cppcheck-suppress misra-c2012-11.5 ; the context is the pair_try_t the caller passed */
+    const pair_try_t *const t = (const pair_try_t *)ctx;
+
+    return kode_block_file_replace_path(t->from, t->to);
 }
 
 /**
@@ -1069,11 +1110,89 @@ static bool put_parts(const char *user, const char *vol, const uint8_t *data, ui
     return ok;
 }
 
+static void discard(const char *vol);
+
+/**
+ * @brief Whether a path holds nothing, asked without a word.
+ * @param vol The volume path.
+ * @return true when storage answers that nothing is there; false otherwise.
+ */
+static bool vol_empty(const char *vol)
+{
+    stat_try_t t = { vol, { false, false, 0U } };
+
+    return (kode_file_sys(&stat_op, &t) == KODE_OK) && !t.st.exists;
+}
+
+/**
+ * @brief Write bytes to a copy beside the file, then put the copy on the
+ *        file's name. The caller holds the files lock.
+ *
+ * A failure leaves the file as it was and removes the copy, but for a copy
+ * that could not take the name when the name is left holding nothing: then
+ * the copy stays as `<vol>.tmp`, beside any old file as `<vol>.bak`.
+ *
+ * @param user  The path as typed.
+ * @param vol   The volume path, at most KODE_FILE_WRITE_PATH_MAX bytes typed.
+ * @param data  The bytes.
+ * @param total How many.
+ * @return true when the file holds all of it; false with the error set.
+ */
+static bool put_replace(const char *user, const char *vol, const uint8_t *data, uint32_t total)
+{
+    char                   tmp[KODE_PATH_MAX];
+    kode_sys_file_status_t st;
+    bool                   keep = false;
+    bool                   ok;
+
+    (void)snprintf(tmp, sizeof(tmp), "%s" KODE_FILE_TMP_SUFFIX, vol);
+    ok = put_parts(user, tmp, data, total, false) && vol_stat(user, vol, &st);
+    if ( ok && st.is_dir )
+    {
+        kode_err_set("%s: %s", user, kode_file_why(KODE_IS_DIR));
+        ok = false;
+    }
+    if ( ok )
+    {
+        pair_try_t          t  = { tmp, vol };
+        const kode_status_t rc = kode_file_sys(&replace_op, &t);
+
+        if ( KODE_OK != rc )
+        {
+            keep = vol_empty(vol);
+            if ( keep )
+            {
+                kode_err_set("%s: the name is left empty: the bytes are in .tmp, any old file in .bak",
+                             user);
+            }
+            else
+            {
+                kode_err_set("%s: wrote all of it, then could not put it on the file: %s", user,
+                             kode_file_why(rc));
+            }
+            ok = false;
+        }
+    }
+    if ( !ok && !keep )
+    {
+        discard(tmp);
+    }
+    return ok;
+}
+
 bool kode_file_put_bytes(const char *user, const uint8_t *data, uint32_t len, bool append)
 {
     char vol[KODE_PATH_MAX];
-    bool ok = kode_file_path(user, vol, sizeof(vol));
+    bool ok;
 
+    if ( append )
+    {
+        ok = kode_file_path(user, vol, sizeof(vol));
+    }
+    else
+    {
+        ok = kode_file_write_path(user, vol, sizeof(vol));
+    }
     if ( ok && (NULL == data) )
     {
         kode_err_set("%s: no data to write", user);
@@ -1084,7 +1203,14 @@ bool kode_file_put_bytes(const char *user, const uint8_t *data, uint32_t len, bo
         ok = files_lock_take();
         if ( ok )
         {
-            ok = put_parts(user, vol, data, len, append);
+            if ( append )
+            {
+                ok = put_parts(user, vol, data, len, true);
+            }
+            else
+            {
+                ok = put_replace(user, vol, data, len);
+            }
             files_leave();
         }
         else
@@ -1174,6 +1300,7 @@ typedef struct {
     const char       *path;  /**< The volume path.     */
     uint32_t          skip;  /**< Entries to leave out. */
     kode_file_list_t *list;  /**< Where the entries go. */
+    bool              more;  /**< Out: the folder held more than the page. */
 } list_try_t;
 
 /** @brief What one create-folder or delete try carries. */
@@ -1340,7 +1467,7 @@ static void name_copy(char *out, const char *name)
 }
 
 /** @brief Keep one entry of a listing; stop when the list is full. */
-static bool list_collect(const char *name, bool is_dir, uint32_t size, void *ctx)
+static bool list_collect(const char *name, bool is_dir, uint32_t size, bool name_cut, void *ctx)
 {
     /* cppcheck-suppress misra-c2012-11.5 ; the context is the kode_file_list_t list_op() passed */
     kode_file_list_t *const list = (kode_file_list_t *)ctx;
@@ -1352,6 +1479,7 @@ static bool list_collect(const char *name, bool is_dir, uint32_t size, void *ctx
 
         name_copy(e->name, name);
         e->is_folder = is_dir;
+        e->name_cut  = name_cut;
         e->size      = 0U;
         if ( !is_dir )
         {
@@ -1363,14 +1491,13 @@ static bool list_collect(const char *name, bool is_dir, uint32_t size, void *ctx
 }
 
 /** @brief One listing; a retry starts the list again. */
-/* cppcheck-suppress constParameterCallback ; the signature is the one kode_file_sys() takes */
 static kode_status_t list_op(void *ctx)
 {
     /* cppcheck-suppress misra-c2012-11.5 ; the context is the list_try_t the caller passed */
-    const list_try_t *const t = (const list_try_t *)ctx;
+    list_try_t *const t = (list_try_t *)ctx;
 
     (void)memset(t->list, 0, sizeof(*t->list));
-    return kode_block_file_list_each(t->path, t->skip, &list_collect, t->list);
+    return kode_block_file_list_each(t->path, t->skip, &list_collect, t->list, &t->more);
 }
 
 /**
@@ -1402,23 +1529,18 @@ static bool list_fill(const char *user, uint32_t skip, kode_file_list_t *list)
         }
         else
         {
-            list_try_t          t  = { vol, skip, list };
+            list_try_t          t  = { vol, skip, list, false };
             const kode_status_t rc = kode_file_sys(&list_op, &t);
 
-            /* The STAT above took the sys buffer: NO_RESOURCES here means more entries only. */
-            if ( KODE_NO_RESOURCES == rc )
+            if ( KODE_OK == rc )
             {
-                list->more = true;
+                list->more = t.more;
             }
-            else if ( KODE_OK != rc )
+            else
             {
                 (void)memset(list, 0, sizeof(*list));
                 kode_err_set("%s: %s", user, kode_file_why(rc));
                 ok = false;
-            }
-            else
-            {
-                /* All of it. */
             }
         }
     }
@@ -1599,12 +1721,6 @@ bool kode_file_create_folder(const char *path)
     }
     return ok;
 }
-
-/** @brief What one rename try carries. */
-typedef struct {
-    const char *from;  /**< The volume path now.   */
-    const char *to;    /**< The volume path after. */
-} pair_try_t;
 
 /** @brief One rename inside a volume. */
 /* cppcheck-suppress constParameterCallback ; the signature is the one kode_file_sys() takes */

@@ -36,12 +36,16 @@ typedef enum {
     RADIO_V_ID,          /**< id_cert, ident_csr, ident_cert, ident_lock:
                           *   ID_PART_SIG records until ID_END_SIG.         */
     RADIO_V_WIPE,        /**< c5_wipe: closed by C5_WIPE_RSP_SIG.           */
-    RADIO_V_WIFI,        /**< wifi_up/down/join/leave/info/auto: closed by
+    RADIO_V_WIFI,        /**< wifi_up/down/leave/info/auto: closed by
                           *   WIFI_STATE_SIG. Several hand the watchdog
                           *   over: association plus DHCP outlasts it, and
                           *   AO_Radio answers either way.                  */
+    RADIO_V_WIFI_JOIN,   /**< wifi_join: closed by the WIFI_STATE_SIG that
+                          *   carries its join's generation, and by no
+                          *   other; the watchdog is handed over.           */
     RADIO_V_WIFI_SCAN,   /**< wifi_scan: entries until WIFI_SCAN_END_SIG.   */
     RADIO_V_WIFI_SAVED,  /**< wifi_list: entries until WIFI_SAVED_END_SIG.  */
+    RADIO_V_WIFI_FORGET, /**< wifi_forget: closed by WIFI_FORGET_SIG.       */
     RADIO_V_FRAMES,      /**< wifi_frames: its window, then its record; the
                           *   watchdog is the window's end.                 */
     RADIO_V_BLE,         /**< ble_*: closed by BLE_STATE_SIG.               */
@@ -55,6 +59,12 @@ static radio_verb_kind_t s_radio_kind;
 #if CONFIG_KODEOS_WIFI
 /** @brief Networks `wifi_scan` has printed since it began, or since its listing started again. */
 static uint16_t s_scan_rows;
+
+/** @brief The generation of the join that holds the console (wifi_join_request_gen()). */
+static uint8_t s_join_gen;
+
+/** @brief The network `wifi_forget` asked for: only its answer closes the command. */
+static char s_forget_ssid[KODE_SSID_MAX + 1U];
 #endif
 
 #if CONFIG_KODEOS_WIFI || CONFIG_KODEOS_BLE
@@ -791,8 +801,13 @@ static void h_wifi_scan_stop(const kverb_t *c, const karg_val_t *v)
 }
 
 /** @brief wifi_join ssid="<s>" [pass="<p>"] [remember=on|off]: closed by
- *         WIFI_STATE_SIG. remember=off is the factory's own network, which
- *         must not travel to the customer in the vault. */
+ *         the WIFI_STATE_SIG that ends its own join. remember=off is the
+ *         factory's own network, which must not travel to the customer in
+ *         the vault. A name of more than KODE_SSID_MAX bytes is refused
+ *         `msg=ssid`, a password of 1 to KODE_WIFI_PASS_MIN - 1 or more than
+ *         KODE_PASS_MAX bytes `msg=pass`, both code 3.
+ * @param c The verb's row.
+ * @param v Its arguments: ssid, pass, remember. */
 static void h_wifi_join(const kverb_t *c, const karg_val_t *v)
 {
     const char *pass     = "";
@@ -806,12 +821,28 @@ static void h_wifi_join(const kverb_t *c, const karg_val_t *v)
     {
         remember = v[2].b;
     }
+    /* The grammar refuses an empty string; a longer one than the join event
+     * holds is refused here, never cut. */
+    size_t const ssid_len = strlen(v[0].s);
+    size_t const pass_len = strlen(pass);
+    if ( KODE_SSID_MAX < ssid_len )
+    {
+        console_reply_err(KCLI_ERR_VALUE, "ssid");
+        return;
+    }
+    if ( (0U != pass_len)
+        && ((KODE_WIFI_PASS_MIN > pass_len) || (KODE_PASS_MAX < pass_len)) )
+    {
+        console_reply_err(KCLI_ERR_VALUE, "pass");
+        return;
+    }
     console_begin(c->verb);
-    s_radio_kind = RADIO_V_WIFI;
+    s_radio_kind = RADIO_V_WIFI_JOIN;
+    s_join_gen   = (uint8_t)KQP_SCAN_GEN_NONE;
     console_unwatched();   /* association + DHCP outlast 5 s */
-    /* With the watchdog disarmed, only WIFI_STATE_SIG closes the command,
-     * and a request the pool dropped will never have one. */
-    if ( !wifi_join_request(v[0].s, pass, remember) )
+    /* With the watchdog disarmed, only the join's own end closes the
+     * command, and a request the pool dropped will never have one. */
+    if ( !wifi_join_request_gen(v[0].s, pass, remember, &s_join_gen) )
     {
         console_reply_err(KCLI_ERR_REJECT, c->verb);
         console_end();
@@ -889,17 +920,18 @@ static void h_wifi_list(const kverb_t *c, const karg_val_t *v)
     }
 }
 
-/** @brief wifi_forget ssid="<s>": drop one from the store. Does not disconnect. */
+/**
+ * @brief wifi_forget ssid="<s>": drop one from the store. Does not disconnect.
+ *        Closed by WIFI_FORGET_SIG: `>ok` once the C5's vault forgot it.
+ */
 static void h_wifi_forget(const kverb_t *c, const karg_val_t *v)
 {
-    (void)c;
-    if ( wifi_forget_request(v[0].s) )
+    console_begin(c->verb);
+    s_radio_kind = RADIO_V_WIFI_FORGET;
+    (void)snprintf(s_forget_ssid, sizeof(s_forget_ssid), "%s", v[0].s);
+    if ( !wifi_forget_request(v[0].s) )
     {
-        console_reply(">ok");
-    }
-    else
-    {
-        console_reply_err(KCLI_ERR_BUSY, "busy");
+        radio_v_busy_end();
     }
 }
 
@@ -1996,6 +2028,38 @@ static bool radio_answer(QEvt const *e)
             }
             break;
         }
+        case WIFI_FORGET_SIG: {
+            WifiForgetEvt const * const f = Q_EVT_CAST(WifiForgetEvt);
+            if ( (RADIO_V_WIFI_FORGET == s_radio_kind)
+                && (0 == strcmp(f->ssid, s_forget_ssid)) )
+            {
+                if ( (uint8_t)WIFI_FORGET_RES_DONE == f->result )
+                {
+                    console_reply(">ok");
+                    console_end();
+                }
+                else if ( (uint8_t)WIFI_FORGET_RES_BUSY == f->result )
+                {
+                    radio_v_busy_end();
+                }
+                else if ( (uint8_t)WIFI_FORGET_RES_NO_LINK == f->result )
+                {
+                    console_reply_err(KCLI_ERR_REJECT, "no_link");
+                    console_end();
+                }
+                else
+                {
+                    /* the vault said no, or did not answer: the log says which */
+                    console_reply_err(KCLI_ERR_REJECT, "refused");
+                    console_end();
+                }
+            }
+            else
+            {
+                handled = false;
+            }
+            break;
+        }
 #endif
 #if CONFIG_KODEOS_BLE
         case BLE_SCAN_ENTRY_SIG: {
@@ -2171,7 +2235,13 @@ static bool radio_answer(QEvt const *e)
 #endif
 #if CONFIG_KODEOS_WIFI
         case WIFI_STATE_SIG: {
-            if ( RADIO_V_WIFI == s_radio_kind )
+            if ( (RADIO_V_WIFI_JOIN == s_radio_kind)
+                && (Q_EVT_CAST(WifiStateEvt)->join_gen != s_join_gen) )
+            {
+                /* Where Wi-Fi stands while the join waits or runs, or the end
+                 * of another join: it closes nothing. */
+            }
+            else if ( (RADIO_V_WIFI == s_radio_kind) || (RADIO_V_WIFI_JOIN == s_radio_kind) )
             {
                 WifiStateEvt const * const w = Q_EVT_CAST(WifiStateEvt);
                 static const char *const STATES[] = {
@@ -2194,7 +2264,15 @@ static bool radio_answer(QEvt const *e)
                       console_kv_text(safe, sizeof(safe), w->ssid),
                       console_ip4(ip, sizeof(ip), w->ip4),
                       (int32_t)w->rssi, en);
-                console_reply(">ok");
+                if ( (RADIO_V_WIFI_JOIN == s_radio_kind) && w->join_dropped )
+                {
+                    /* The join never ran: the record is where Wi-Fi stands. */
+                    console_reply_err(KCLI_ERR_REJECT, "dropped");
+                }
+                else
+                {
+                    console_reply(">ok");
+                }
                 console_end();
             }
             else

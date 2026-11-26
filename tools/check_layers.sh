@@ -285,10 +285,11 @@ report "cJSON.h only in kui_pack.c" \
 # so they fail here as they do everywhere above the drivers. The screen calls
 # are kode_screen's, a component of its own that an app names when it draws.
 #
-# khal is admitted by header, three of them and no more: khal_system.h (the
+# khal is admitted by header, four of them and no more: khal_system.h (the
 # calling task's one pointer, and PSRAM for what hangs from it), khal_sync.h
-# (the semaphores and mutexes a blocking call waits on) and khal_once.h (the
-# one-shot the first-use start is elected by). The standard
+# (the semaphores and mutexes a blocking call waits on), khal_once.h (the
+# one-shot the first-use start is elected by) and khal_utf8.h (where a text
+# is cut, which touches no hardware). The standard
 # layer keeps per-task state and blocks, and those are the only seams that do
 # it; the rest of khal (buses, pins, clocks) stays behind kode_sys.
 #
@@ -303,7 +304,7 @@ standard_allowed="$(find components/kode components/kode_sys components/kdefs \
                   | sed 's|.*/||; s|\.|\\.|g' | sort -u | paste -sd'|' -)"
 # sdkconfig.h is the build's own settings, no layer's: kode.h sizes a
 # Bluetooth value by the app's CONFIG_KODE_BLE_APP_VALUE_MAX.
-standard_allowed="${standard_allowed}|khal_system\\.h|khal_sync\\.h|khal_once\\.h|sdkconfig\\.h"
+standard_allowed="${standard_allowed}|khal_system\\.h|khal_sync\\.h|khal_once\\.h|khal_utf8\\.h|sdkconfig\\.h"
 report "components/kode includes only kode_sys and the layers below it" \
   "The standard layer reaches the system through kode_sys.h; the screen is kode_screen's." \
   "$(scan '#include "' "#include \"(${standard_allowed})\"" \

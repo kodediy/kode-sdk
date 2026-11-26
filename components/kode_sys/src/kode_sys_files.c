@@ -250,14 +250,15 @@ kode_status_t kode_block_file_space(const char *path, kode_sys_file_space_t *out
 }
 
 kode_status_t kode_block_file_list_each(const char *path, uint32_t skip, kode_sys_file_entry_cb cb,
-                                        void *ctx)
+                                        void *ctx, bool *more)
 {
     kode_sys_file_status_t st;
 
-    if ( (NULL == path) || (NULL == cb) )
+    if ( (NULL == path) || (NULL == cb) || (NULL == more) )
     {
         return KODE_ERROR;
     }
+    *more = false;
     kode_status_t const claimed = fs_enter();
     if ( KODE_OK != claimed )
     {
@@ -296,19 +297,15 @@ kode_status_t kode_block_file_list_each(const char *path, uint32_t skip, kode_sy
     for ( uint32_t i = 0U; i < rows; ++i )
     {
         if ( !cb(s_fs_rows[i].name, s_fs_rows[i].is_dir, s_fs_rows[i].size,
-                ctx) )
+                s_fs_rows[i].name_cut, ctx) )
         {
             break;
         }
     }
 
-    bool const cut = s_fs_wait.cut;
+    /* Every row that fitted was offered; the rest is said, not swallowed. */
+    *more = s_fs_wait.cut;
     fs_release();
-    if ( cut )
-    {
-        /* Every row that fitted was offered; say the rest was cut instead of swallowing it. */
-        return KODE_NO_RESOURCES;
-    }
     return KODE_OK;
 }
 
@@ -363,7 +360,14 @@ kode_status_t kode_block_file_delete(const char *path)
     return rc;
 }
 
-kode_status_t kode_block_file_rename_path(const char *from, const char *to)
+/**
+ * @brief The body of rename and replace: one two-path request whose whole answer is its status.
+ * @param op   storage_pair_op_t.
+ * @param from Absolute, virtual.
+ * @param to   Absolute, virtual.
+ * @return As the calling public function.
+ */
+static kode_status_t fs_pair_op(uint8_t op, const char *from, const char *to)
 {
     if ( (NULL == from) || (NULL == to) )
     {
@@ -376,12 +380,21 @@ kode_status_t kode_block_file_rename_path(const char *from, const char *to)
     }
 
     uint32_t const gen = fs_next_gen();
-    storage_pair_request_wait(&s_fs_wait, gen, (uint8_t)STORAGE_PAIR_MOVE,
-                              from, to);
+    storage_pair_request_wait(&s_fs_wait, gen, op, from, to);
 
     kode_status_t const rc = fs_await(gen);
     fs_release();
     return rc;
+}
+
+kode_status_t kode_block_file_rename_path(const char *from, const char *to)
+{
+    return fs_pair_op((uint8_t)STORAGE_PAIR_MOVE, from, to);
+}
+
+kode_status_t kode_block_file_replace_path(const char *from, const char *to)
+{
+    return fs_pair_op((uint8_t)STORAGE_PAIR_REPLACE, from, to);
 }
 
 kode_status_t kode_block_file_read_part(const char *path, uint32_t offset, void *buf,

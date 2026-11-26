@@ -2359,12 +2359,16 @@ bool wifi_frames_request(QActive *who, bool on, uint8_t channel);
  */
 bool ble_heard_request(QActive *who, bool on);
 
+#define KODE_WIFI_PASS_MIN  8U  /**< Bytes of a Wi-Fi password that is not empty, at least (WPA2 passphrase). */
+
 /**
  * @brief Ask AO_Radio to join @p ssid.
  *
  * Answered with WIFI_STATE_SIG: got-ip, or the refusal. Passwords live in the C5's
  * vault: a saved network asked with an empty @p pass is joined without a password
  * crossing the link; otherwise @p pass is sent once and kept if @p remember.
+ * The join carries no generation (KQP_SCAN_GEN_NONE); wifi_join_request_gen()
+ * gives it one.
  *
  * @param ssid     The network to join.
  * @param pass     Its password; empty for a saved network or an open one.
@@ -2374,6 +2378,30 @@ bool ble_heard_request(QActive *who, bool on);
  *         and then nothing answers.
  */
 bool wifi_join_request(const char *ssid, const char *pass, bool remember);
+
+/**
+ * @brief Ask AO_Radio to join @p ssid, as wifi_join_request(), with a
+ *        generation that tells its answer from every other state.
+ *
+ * Exactly one WIFI_STATE_SIG carries the generation in WifiStateEvt.join_gen:
+ * the one that ends this join. That is its outcome, the refusal, or, with
+ * WifiStateEvt.join_dropped, the news that it never ran (a newer join or the
+ * automatic round took its place, or Wi-Fi switched off, a leave or the
+ * link's end dropped it while it waited). Every state published for another
+ * reason carries KQP_SCAN_GEN_NONE. The generation comes from the count
+ * wifi_scan_request() takes its own from.
+ *
+ * @param ssid     The network to join.
+ * @param pass     Its password; empty for a saved network or an open one.
+ * @param remember Save the network in the vault once it has worked.
+ * @param gen      Out: this request's generation; NULL for none, and then the
+ *                 join carries KQP_SCAN_GEN_NONE, as wifi_join_request()'s.
+ * @return true when the request was posted; false when the event pool was
+ *         dry or AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full,
+ *         and then nothing answers.
+ */
+bool wifi_join_request_gen(const char *ssid, const char *pass, bool remember,
+                           uint8_t *gen);
 
 /**
  * @brief The event wifi_join_request() posts, built for a caller that posts it itself.
@@ -2387,12 +2415,22 @@ QEvt const *wifi_join_evt(const char *ssid, const char *pass, bool remember);
 /**
  * @brief Leave the network. The credentials stay remembered.
  *
- * wifi_forget_request() forgets them.
+ * wifi_forget_request() forgets them. A leave that comes while a join runs or
+ * waits, during the round over the remembered networks or while the link is
+ * down is kept and made as soon as AO_Radio can; from then on nothing joins a
+ * network by itself until somebody asks for one.
  *
  * @return true when the request was posted; false when AO_Radio's queue is
  *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
 bool wifi_leave_request(void);
+
+/**
+ * @brief Whether a leave is made and nobody has asked for a network since,
+ *        as AO_Radio last wrote it. Never waits; false before the first leave.
+ * @return true when the board stays off Wi-Fi networks until somebody asks.
+ */
+bool wifi_leave_done(void);
 
 /**
  * @brief The event wifi_leave_request() posts, for a caller that posts it itself.
@@ -2491,6 +2529,13 @@ bool wifi_list_request(void);
 
 /**
  * @brief Ask AO_Radio to forget @p ssid. Does not disconnect.
+ *
+ * Answered with one published WIFI_FORGET_SIG once the forget has ended: the
+ * C5's vault forgot the network or refused it, no answer came, or the link
+ * went. A vault busy with another request, or no link, is answered at once
+ * and forgets nothing. A forget the vault answered is followed by the saved
+ * networks read again.
+ *
  * @param ssid The network.
  * @return true when the request was posted; false when the pool is dry or
  *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing

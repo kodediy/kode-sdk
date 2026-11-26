@@ -20,6 +20,7 @@
 #include "kode_sys_internal.h"
 #include "khal_sync.h"
 #include "khal_system.h"
+#include "khal_utf8.h"
 #include "kqp.h"
 #include "kaos.h"
 
@@ -38,12 +39,6 @@ KAOS_WEAK void kode_tag_state_free(struct kode_tag_state *s);
 
 /** @brief Bytes of KODE_ELLIPSIS. */
 #define KODE_ELLIPSIS_LEN 3U
-
-/** @brief Mask that isolates the marker bits of a UTF-8 byte. */
-#define UTF8_CONT_MASK 0xC0U
-
-/** @brief What those bits read on a continuation byte (10xxxxxx). */
-#define UTF8_CONT_BITS 0x80U
 
 /** @brief The distance between an ASCII capital and its lower-case letter. */
 #define KODE_ASCII_CASE_GAP ('a' - 'A')
@@ -129,12 +124,8 @@ const char *kode_error(void)
  */
 static void error_cut(char *buf)
 {
-    size_t at = KODE_ERROR_MAX - 1U - KODE_ELLIPSIS_LEN;
+    const size_t at = khal_utf8_fit(buf, KODE_ERROR_MAX - 1U - KODE_ELLIPSIS_LEN);
 
-    while ( (0U < at) && (((uint8_t)buf[at] & UTF8_CONT_MASK) == UTF8_CONT_BITS) )
-    {
-        --at;
-    }
     (void)memcpy(&buf[at], KODE_ELLIPSIS, KODE_ELLIPSIS_LEN);
     buf[at + KODE_ELLIPSIS_LEN] = '\0';
 }

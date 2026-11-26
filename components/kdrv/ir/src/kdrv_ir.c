@@ -17,7 +17,6 @@
 
 #include "kdrv_radio.h"
 #include "khal_sync.h"
-#include "khal_time.h"
 #include "kir_wire.h"
 
 _Static_assert(KDRV_IR_TX_MAX_SYMBOLS <= KIR_MAX_SYMBOLS,
@@ -26,10 +25,12 @@ _Static_assert(KDRV_IR_RX_MAX_SYMBOLS <= KIR_MAX_SYMBOLS,
                "a capture fits this driver's buffer");
 _Static_assert(sizeof(kdrv_ir_symbol_t) == sizeof(kir_symbol_t),
                "the driver's symbol and the wire's are the same four bytes");
+_Static_assert(KDRV_IR_DURATION_MAX_US <= UINT16_MAX, "a duration fits the wire's field");
+_Static_assert(KDRV_IR_FRAME_MAX_MS < KDRV_IR_C5_TX_DONE_MS,
+               "a frame ends before the C5 stops waiting for it");
 
-/** @brief Past the end of a frame, how long a missing KIR_EVT_SENT keeps the
- *         transmitter busy before this driver stops believing it. */
-#define IR_SENT_GRACE_MS  1000U
+/** @brief Microseconds in a millisecond. */
+#define IR_US_PER_MS  1000U
 
 static kdrv_ir_rx_cb_t s_rx_cb;
 static void           *s_rx_ctx;
@@ -42,8 +43,9 @@ static volatile size_t  s_rx_len;
 static volatile bool    s_rx_ready;
 static volatile bool    s_armed;
 
-static volatile bool s_tx_busy;
-static uint32_t      s_tx_deadline_ms;
+/* The C5's word on the transmission in flight: KIR_EVT_SENT's status. */
+static khal_sem_t       s_sent;
+static volatile uint8_t s_sent_status;
 
 /* The one line reading in flight, and the C5's answer to it. */
 static khal_sem_t       s_reply;
@@ -97,12 +99,8 @@ static void ir_on_event(const uint8_t *data, size_t len, void *ctx)
     }
     else if ( ((uint8_t)KIR_EVT_SENT == data[0]) && (sizeof(kir_status_t) <= len) )
     {
-        if ( (uint8_t)KIR_OK != data[2] )
-        {
-            KLOG_W(TAG, "the C5 reports a transmission that failed (status %u)",
-                   (unsigned)data[2]);
-        }
-        s_tx_busy = false;
+        s_sent_status = data[2];
+        khal_sem_signal(s_sent);
     }
     else if ( ((uint8_t)KIR_EVT_ARMED == data[0]) && (sizeof(kir_status_t) <= len) )
     {
@@ -139,9 +137,9 @@ static void ir_on_event(const uint8_t *data, size_t len, void *ctx)
 
 /**
  * @brief The link just came up, so the C5 has just been reset: its receiver
- *        is not armed and nothing is being transmitted, whatever was true
- *        before. Without this a capture "in flight" across a reset would
- *        refuse every later arm, and the board would be deaf for the boot.
+ *        is not armed, whatever was true before. Without this a capture "in
+ *        flight" across a reset would refuse every later arm, and the board
+ *        would be deaf for the boot.
  *
  * @param ctx Unused.
  */
@@ -150,7 +148,6 @@ static void ir_on_link_up(void *ctx)
     (void)ctx;
     s_rx_ready = false;
     s_armed    = false;
-    s_tx_busy  = false;
 }
 
 /**
@@ -221,7 +218,8 @@ kode_status_t kdrv_ir_init(kdrv_ir_rx_cb_t cb, void *ctx)
     s_rx_ctx = ctx;
 
     s_reply = khal_sem_create();
-    if ( NULL == s_reply )
+    s_sent  = khal_sem_create();
+    if ( (NULL == s_reply) || (NULL == s_sent) )
     {
         return KODE_NO_RESOURCES;
     }
@@ -262,28 +260,49 @@ kode_status_t kdrv_ir_rx_present(bool *present)
     return ir_reading((uint8_t)KIR_REQ_PRESENT, present);
 }
 
+/**
+ * @brief Whether a frame is one the C5 sends whole: every mark and space, and
+ *        the time they add up to.
+ *
+ * A zero space counts as KDRV_IR_DURATION_MAX_US, as the C5 sends it.
+ *
+ * @param sym The symbols.
+ * @param n   How many, at most KDRV_IR_TX_MAX_SYMBOLS.
+ * @return true when none is longer than KDRV_IR_DURATION_MAX_US and the frame
+ *         lasts at most KDRV_IR_FRAME_MAX_MS.
+ */
+static bool ir_frame_fits(const kdrv_ir_symbol_t *sym, size_t n)
+{
+    uint32_t us  = 0U;
+    bool     fit = true;
+
+    for ( size_t i = 0U; fit && (i < n); ++i )
+    {
+        uint32_t space = (uint32_t)sym[i].space_us;
+
+        if ( 0U == space )
+        {
+            space = KDRV_IR_DURATION_MAX_US;
+        }
+        fit = ((uint32_t)KDRV_IR_DURATION_MAX_US >= (uint32_t)sym[i].mark_us)
+              && ((uint32_t)KDRV_IR_DURATION_MAX_US >= space);
+        us += (uint32_t)sym[i].mark_us + space;
+    }
+    return fit && ((KDRV_IR_FRAME_MAX_MS * IR_US_PER_MS) >= us);
+}
+
 kode_status_t kdrv_ir_send(const kdrv_ir_symbol_t *sym, size_t n,
                            uint32_t carrier_hz)
 {
     kir_send_t    hdr;
-    uint32_t      frame_us = 0U;
     kode_status_t rc;
 
     if ( (NULL == sym) || (0U == n) || ((size_t)KDRV_IR_TX_MAX_SYMBOLS < n)
-        || (0U == carrier_hz) || !s_init )
+        || ((uint32_t)KDRV_IR_CARRIER_MIN_HZ > carrier_hz)
+        || ((uint32_t)KDRV_IR_CARRIER_MAX_HZ < carrier_hz)
+        || !ir_frame_fits(sym, n) || !s_init )
     {
         return KODE_DENIED;
-    }
-    if ( s_tx_busy )
-    {
-        if ( khal_time_ms() < s_tx_deadline_ms )
-        {
-            return KODE_DENIED;
-        }
-        /* The C5 never said the last one ended. Said, and not believed for
-         * ever: a lost event must not silence the transmitter for the boot. */
-        KLOG_W(TAG, "no end was reported for the last transmission; sending "
-                    "anyway");
     }
 
     hdr.op         = (uint8_t)KIR_REQ_SEND;
@@ -292,24 +311,32 @@ kode_status_t kdrv_ir_send(const kdrv_ir_symbol_t *sym, size_t n,
     hdr.carrier_hz = carrier_hz;
     (void)memcpy(s_req, &hdr, sizeof(hdr));
     (void)memcpy(&s_req[sizeof(hdr)], sym, n * sizeof(kir_symbol_t));
-    for ( size_t i = 0U; i < n; ++i )
-    {
-        frame_us += (uint32_t)sym[i].mark_us + (uint32_t)sym[i].space_us;
-    }
 
-    s_tx_busy        = true;
-    s_tx_deadline_ms = khal_time_ms() + (frame_us / 1000U) + IR_SENT_GRACE_MS;
+    /* A word on a frame whose own wait gave up is drained here, so it cannot
+     * be taken for this frame's. */
+    (void)khal_sem_wait_timeout(s_sent, 0U);
     rc = kdrv_radio_peer_send(KIR_MSG_REQ, s_req,
                               sizeof(hdr) + (n * sizeof(kir_symbol_t)));
     if ( KODE_OK != rc )
     {
-        s_tx_busy = false;
         if ( KODE_DENIED == rc )
         {
             KLOG_W(TAG, "the C5 link is down; the infrared block is behind it "
                         "(radio_up first)");
         }
         return KODE_DENIED;
+    }
+    if ( !khal_sem_wait_timeout(s_sent, KDRV_IR_SENT_MS) )
+    {
+        KLOG_E(TAG, "the C5 did not say within %u ms whether the frame went out",
+               KDRV_IR_SENT_MS);
+        return KODE_TIMEOUT;
+    }
+    if ( (uint8_t)KIR_OK != s_sent_status )
+    {
+        KLOG_W(TAG, "the C5 reports a transmission that failed (status %u)",
+               (unsigned)s_sent_status);
+        return KODE_ERROR;
     }
     return KODE_OK;
 }

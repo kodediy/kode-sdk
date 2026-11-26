@@ -450,6 +450,7 @@ bool kode_led_toggle(void);
  */
 
 #define KODE_FILE_PATH_MAX 91U      /**< Bytes of a path, NUL included. */
+#define KODE_FILE_WRITE_PATH_MAX 87U /**< Bytes of a path a whole-file write takes, NUL included: room for ".tmp". */
 #define KODE_FILE_NAME_MAX 96U      /**< Bytes of one name in a listing, NUL included. */
 #define KODE_FILE_LIST_MAX 24U      /**< Entries one listing carries. */
 #define KODE_FILE_READ_MAX 4194304U /**< Largest file a read returns: 4 MiB. */
@@ -464,9 +465,11 @@ typedef struct {
 
 /** @brief One entry of a listing. */
 typedef struct {
-    char     name[KODE_FILE_NAME_MAX];  /**< Its name, without the folder. */
+    char     name[KODE_FILE_NAME_MAX];  /**< Its name, without the folder; cut when name_cut is set. */
     bool     is_folder;                 /**< A folder rather than a file. */
     uint32_t size;                      /**< Bytes of a file; 0 for a folder. */
+    bool     name_cut;                  /**< The name is longer than name holds and is cut at a whole
+                                         *   UTF-8 character: no call opens the entry by it. */
 } kode_file_entry_t;
 
 /** @brief What a listing carries. */
@@ -527,7 +530,15 @@ bool kode_file_read_at(const char *path, uint32_t offset, void *buf, uint32_t ca
  * @brief Create a file with @p text, or replace what it held.
  *
  * Blocks. "" empties the file. The folder must already exist. The text goes
- * in parts: a failure after the first leaves the file cut, not as it was.
+ * to a copy beside the file, its name with ".tmp" added, which takes the
+ * file's place once all of it is written. A failure leaves the file as it
+ * was and removes the copy, but for one case: the copy cannot take the name
+ * and no file is left on it, the old one included. Then the copy stays, any
+ * old file is its name with ".bak" added, and kode_error() says so. The
+ * volume holds the old file and the copy together until then, so it
+ * needs room for both. A path takes at most KODE_FILE_WRITE_PATH_MAX bytes. A
+ * reset during the write can leave the copy, or the old file as ".bak" and
+ * nothing on the name. The next write of the path that succeeds removes both.
  *
  * @param path "sd/..." or "flash/...".
  * @param text The text to write.
@@ -539,7 +550,8 @@ bool kode_file_write(const char *path, const char *text);
 /**
  * @brief Add @p text at the end of a file, creating it if it is not there.
  *
- * Blocks.
+ * Blocks. The text goes onto the file itself, in parts: a failure after the
+ * first leaves what the parts before it added.
  *
  * @param path "sd/..." or "flash/...".
  * @param text The text to add.
@@ -551,10 +563,12 @@ bool kode_file_append(const char *path, const char *text);
  * @brief Create a file with @p len bytes, or replace what it held.
  *
  * Blocks. A 0 inside @p data is written like any byte. The folder must
- * already exist. @p len is any size the volume can hold; the bytes go in
- * parts, so a failure after the first leaves the file cut, not as it was. A
- * @p len of 0 with a @p data that is not NULL empties the file. An Active
- * Object writes with kode_sys_file_write().
+ * already exist. @p len is any size the volume can hold beside the file it
+ * replaces: as kode_file_write(), the bytes go to a copy that takes the
+ * file's place once all of them are written, and a failure leaves what
+ * kode_file_write()'s leaves. A @p len of 0 with a @p data that is not NULL
+ * empties the file.
+ * An Active Object writes with kode_sys_file_write(), which writes in place.
  *
  * @param path "sd/..." or "flash/...".
  * @param data The bytes. NULL is refused, whatever @p len is.
@@ -619,6 +633,8 @@ bool kode_file_exists(const char *path);
  * @brief List one folder: its own entries, one level.
  *
  * Blocks. KODE_FILE_LIST_MAX entries at most; `more` says there were others.
+ * A name longer than KODE_FILE_NAME_MAX holds is listed cut, with `name_cut`
+ * set; such an entry cannot be opened by that name.
  *
  * @param folder "sd", "flash" or "sd/...", "flash/..." naming a folder.
  * @return The listing, valid until this task's next kode_file_list() or
@@ -1061,9 +1077,10 @@ bool kode_audio_record_stop(void);
  * @brief Write the recording to a WAV file.
  *
  * Blocks. The recording stays in PSRAM until the next kode_audio_record_start(),
- * so it can be saved again.
+ * so it can be saved again. The file is written as kode_file_write_bytes()
+ * writes one, and a failure leaves what kode_file_write()'s leaves.
  *
- * @param path As for kode_audio_record_file().
+ * @param path As for kode_audio_record_file(), at most KODE_FILE_WRITE_PATH_MAX bytes.
  * @return true when the file is written; false with kode_error() saying why.
  */
 bool kode_audio_record_save(const char *path);
@@ -1096,7 +1113,15 @@ bool kode_wifi_is_connected(void);
 
 /**
  * @brief Leave the network; its password stays remembered.
- * @return true when the board has no address any more; false with kode_error() saying why.
+ *
+ * A join under way, the board's own search for a remembered network and its
+ * retries end too, and the board joins nothing by itself until a
+ * kode_wifi_connect() or Settings asks. Returns at once when the board is off
+ * already and nothing has asked for a network since the last leave.
+ *
+ * @return true when the board has no address and nothing is about to give it
+ *         one; false with kode_error() saying why, after KODE_WIFI_LEAVE_MS at
+ *         most: a leave the radio has not made by then is still made.
  */
 bool kode_wifi_disconnect(void);
 
@@ -2276,6 +2301,10 @@ bool kode_uart_end(void);
 #define KODE_IR_PROTOCOL_MAX 8U     /**< Bytes of a protocol name, NUL included.       */
 #define KODE_IR_RAW_MAX      512U   /**< Durations in one raw frame: 256 marks and spaces. */
 #define KODE_IR_BUSY_MS      5000U  /**< How long a call waits for the infrared path.  */
+#define KODE_IR_CARRIER_MIN_HZ  20000U   /**< The lowest carrier a raw send takes, Hz: below every remote's.      */
+#define KODE_IR_CARRIER_MAX_HZ  500000U  /**< The highest carrier a raw send takes, Hz: above every remote's.     */
+#define KODE_IR_DURATION_MAX_US 32767U   /**< The longest mark or space a raw send takes, us: the C5's RMT's.     */
+#define KODE_IR_FRAME_MAX_MS    1500U    /**< The longest frame a raw send takes, ms, a final or zero space counted as KODE_IR_DURATION_MAX_US. */
 
 /** @brief One frame that was heard and read as a protocol. */
 typedef struct {
@@ -2293,7 +2322,7 @@ typedef struct {
 } kode_ir_raw_t;
 
 /**
- * @brief Send a frame of a protocol the board encodes, and wait until it is on its way.
+ * @brief Send a frame of a protocol the board encodes, and wait until it went out.
  *
  * Blocks. Only "nec" (any case) is encoded. For anything else encode the frame
  * yourself and use kode_ir_send_raw().
@@ -2338,15 +2367,19 @@ kode_ir_code_t kode_ir_last(void);
 const kode_ir_raw_t *kode_ir_receive_raw(uint32_t ms);
 
 /**
- * @brief Send a frame as the lengths of its marks and spaces, and wait until it is on its way.
+ * @brief Send a frame as the lengths of its marks and spaces, and wait until it went out.
  *
- * Blocks. The durations alternate mark, space, mark first; an odd count ends
- * on a mark.
+ * Blocks until the radio says the frame went out. The durations alternate
+ * mark, space, mark first; an odd count ends on a mark.
  *
- * @param us         Microseconds, mark first.
+ * @param us         Microseconds, mark first; 0 to KODE_IR_DURATION_MAX_US each, and
+ *                   KODE_IR_FRAME_MAX_MS at most in all: a zero space, and the one after
+ *                   an odd count's last mark, count as KODE_IR_DURATION_MAX_US.
  * @param n          1 to KODE_IR_RAW_MAX.
- * @param carrier_hz The carrier, above 0; 38000 for most remotes.
- * @return true when the frame went out; false with kode_error() saying why.
+ * @param carrier_hz KODE_IR_CARRIER_MIN_HZ to KODE_IR_CARRIER_MAX_HZ; 38000 for most remotes.
+ * @return true when the frame went out; false with kode_error() saying why,
+ *         also when a carrier, a duration or the frame's length is out of range
+ *         (nothing is sent).
  */
 bool kode_ir_send_raw(const uint16_t *us, uint32_t n, uint32_t carrier_hz);
 
@@ -2362,7 +2395,9 @@ bool kode_ir_send_raw(const uint16_t *us, uint32_t n, uint32_t carrier_hz);
  * Blocks only for its turn. Until kode_ir_capture_stop(), reads fail at once
  * and sends still work.
  *
- * @param path "sd/..." or "flash/..." the capture is written to by the stop; the folder must exist.
+ * @param path "sd/..." or "flash/..." the capture is written to by the stop, as
+ *             kode_file_write() writes; the folder must exist. A path over
+ *             KODE_FILE_WRITE_PATH_MAX bytes is refused here.
  * @return true when the capture runs; false with kode_error() saying why.
  */
 bool kode_ir_capture_start(const char *path);
@@ -2382,6 +2417,7 @@ bool kode_ir_capture_stop(void);
  * @brief Send every signal of a capture file in order, KODE_IR_FILE_GAP_MS apart.
  *
  * Blocks. The whole file is read first: if any line is wrong nothing is sent.
+ * A raw signal longer than KODE_IR_FRAME_MAX_MS is not sent, and the send ends there.
  *
  * @param path "sd/..." or "flash/...".
  * @return true when all went out; false with kode_error() saying why.

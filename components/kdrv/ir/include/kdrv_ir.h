@@ -19,6 +19,23 @@ extern "C" {
 /** @brief The only carrier this board's own receiver can hear, in Hz. */
 #define KDRV_IR_CARRIER_HZ      38000U
 
+/** @brief The lowest carrier a frame is sent on, in Hz: below every remote's,
+ *         and well above the 611 Hz the C5's RMT reaches at its 80 MHz clock. */
+#define KDRV_IR_CARRIER_MIN_HZ  20000U
+
+/** @brief The highest carrier a frame is sent on, in Hz: above the 455 kHz of
+ *         the fastest remotes, and far below the RMT's own limit. */
+#define KDRV_IR_CARRIER_MAX_HZ  500000U
+
+/** @brief The longest mark or space a frame carries, in microseconds: the 15-bit
+ *         duration of the C5's RMT symbol at one tick a microsecond. */
+#define KDRV_IR_DURATION_MAX_US  32767U
+
+/** @brief The longest frame a send takes, in milliseconds, a zero space counted
+ *         as KDRV_IR_DURATION_MAX_US: well under the C5's own wait for a
+ *         frame to end (KDRV_IR_C5_TX_DONE_MS), which kdrv_ir.c asserts. */
+#define KDRV_IR_FRAME_MAX_MS     1500U
+
 /** @brief Most symbols one transmission may carry. */
 #define KDRV_IR_TX_MAX_SYMBOLS    256U
 
@@ -36,9 +53,17 @@ extern "C" {
  *         request was accepted. */
 #define KDRV_IR_REPLY_MS         500U
 
-/** @brief The longest one call of this driver can legitimately take: a line
- *         reading's request and then its reply wait. */
-#define KDRV_IR_CALL_MAX_MS     (KDRV_IR_RPC_WAIT_MS + KDRV_IR_REPLY_MS)
+/** @brief How long the C5 waits for a frame to end before it answers that it
+ *         failed: IR_TX_DONE_MS in its firmware's main/kode_ir.c. */
+#define KDRV_IR_C5_TX_DONE_MS   2000U
+
+/** @brief How long a send then waits for the C5's word on its frame, after its
+ *         request was accepted. */
+#define KDRV_IR_SENT_MS         (KDRV_IR_C5_TX_DONE_MS + KDRV_IR_REPLY_MS)
+
+/** @brief The longest one call of this driver can legitimately take: a send's
+ *         request and then its wait for the C5's word. */
+#define KDRV_IR_CALL_MAX_MS     (KDRV_IR_RPC_WAIT_MS + KDRV_IR_SENT_MS)
 
 /** @brief One mark (carrier on) and the space after it, in microseconds. */
 typedef struct {
@@ -128,30 +153,33 @@ kode_status_t kdrv_ir_rx_idle(bool *high);
 kode_status_t kdrv_ir_rx_present(bool *present);
 
 /**
- * @brief Transmit @p n symbols with a carrier at @p carrier_hz.
+ * @brief Transmit @p n symbols with a carrier at @p carrier_hz, and wait for
+ *        the C5 to say whether the frame went out.
  *
- * Returns as soon as the request is on the link: the C5's RMT drives the
- * emitters and the C5 reports the end as an event. Never blocks for the frame.
+ * BLOCKS: the request goes over the link, the C5's RMT drives the emitters
+ * and waits for the frame to end, and the C5's word on it (KIR_EVT_SENT)
+ * ends the call - up to KDRV_IR_SENT_MS after the request was accepted. A
+ * caller on an Active Object's step makes it from a worker. One task at a
+ * time may call this: the C5's transmitter holds one frame at a time.
  *
- * The symbols travel in one request to the C5, and its transmitter holds one
- * frame at a time, so only one transmission may be in
- * flight: a second call before the first completes is refused rather than
- * allowed to overwrite it.
- * The busy flag is checked and then set, with no lock: one task at a time may call this.
- *
- * No duration reaches the wire as zero: the RMT reads a zero duration as its
- * own end marker rather than as a zero-length pulse. A zero space - which is
- * how a codec says the frame ends here - is sent as the longest the peripheral
- * can express, which is also the gap a receiver needs to see the frame end; a
- * zero mark, which means nothing, becomes one microsecond. Anything longer
- * than one RMT duration field holds is clamped to it.
+ * A carrier outside KDRV_IR_CARRIER_MIN_HZ..KDRV_IR_CARRIER_MAX_HZ, a mark
+ * or a space longer than KDRV_IR_DURATION_MAX_US, or a frame longer than
+ * KDRV_IR_FRAME_MAX_MS, is refused before anything goes out: none reaches the
+ * wire to be changed by the C5 or outlast its wait. A zero duration
+ * still does, and the C5 reads it the way a codec means it: a zero space,
+ * which ends the frame, is sent as the longest space the RMT holds, the gap a
+ * receiver needs to see the frame end; a zero mark becomes one microsecond.
  *
  * @param sym        The symbols, mark first.
  * @param n          How many, at most KDRV_IR_TX_MAX_SYMBOLS.
- * @param carrier_hz Carrier frequency; 38000 for everything this board's own
- *                   receiver can hear.
- * @return KODE_OK when queued, KODE_DENIED for a bad argument, for a
- *         transmission still in flight, or before kdrv_ir_init().
+ * @param carrier_hz Carrier frequency, KDRV_IR_CARRIER_MIN_HZ to
+ *                   KDRV_IR_CARRIER_MAX_HZ; 38000 for everything this board's
+ *                   own receiver can hear.
+ * @return KODE_OK when the C5 says the frame went out; KODE_DENIED for a bad
+ *         argument, before kdrv_ir_init(), or when the request could not be
+ *         sent (the link is down); KODE_ERROR when the C5 says the frame
+ *         failed or was malformed; KODE_TIMEOUT when the C5 said nothing in
+ *         KDRV_IR_SENT_MS.
  */
 kode_status_t kdrv_ir_send(const kdrv_ir_symbol_t *sym, size_t n,
                            uint32_t carrier_hz);

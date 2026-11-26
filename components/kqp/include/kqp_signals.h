@@ -260,6 +260,9 @@ enum KodeSignals {
     WIFI_SAVED_END_SIG,         /**< AO_Radio: that was the last remembered
                                  *   one (WifiScanEndEvt, same shape - a
                                  *   count and whether it worked).           */
+    WIFI_FORGET_SIG,            /**< AO_Radio: the answer to one
+                                 *   WIFI_FORGET_REQ_SIG (WifiForgetEvt): the
+                                 *   vault's own, or the refusal.            */
     BLE_STATE_SIG,              /**< AO_Radio: what the BLE half is doing
                                  *   (BleStateEvt). Published on every
                                  *   change - a phone connecting is news
@@ -1757,7 +1760,8 @@ enum KodeSignals {
                                  *   networks (names only).                  */
     WIFI_FORGET_REQ_SIG,        /**< AO_Radio: remove WifiJoinEvt.ssid from
                                  *   the store. The password field is unused
-                                 *   and must be left empty.                 */
+                                 *   and must be left empty. Answered with
+                                 *   one WIFI_FORGET_SIG.                    */
     WIFI_START_REQ_SIG,         /**< AO_Radio: enable the WiFi service - set
                                  *   the stored flag, bring the link up if it
                                  *   is down, autojoin as always.            */
@@ -2739,6 +2743,11 @@ typedef struct {
                           *   across pages and across both media: a
                           *   subscriber stores entry `pos` at index `pos`,
                           *   and 0 begins a new listing.                 */
+    bool     name_cut;  /**< The name is longer than `name` holds and is
+                          *   cut at a whole UTF-8 character: no path opens
+                          *   the entry by it. Only the path-based walk
+                          *   cuts; the medium-based one leaves such a name
+                          *   out and sets this false.                     */
 } StorageEntryEvt;
 
 /** @brief What to do to a medium (STORAGE_CMD_SIG). */
@@ -4952,6 +4961,10 @@ typedef struct {
     char ssid[33];   /**< 32 bytes plus the terminator (802.11).            */
     char pass[65];   /**< 64 plus the terminator (WPA2 PSK as a passphrase). */
     bool remember;   /**< Save it in the C5's vault once it has worked.     */
+    uint8_t gen;     /**< The request's generation, from
+                      *   wifi_join_request_gen(); KQP_SCAN_GEN_NONE for
+                      *   none. The state that ends the join carries it
+                      *   (WifiStateEvt.join_gen).                        */
 } WifiJoinEvt;
 
 /** @brief What WIFI_FAST_REQ_SIG carries: the wish, a static event each. */
@@ -5559,6 +5572,27 @@ typedef struct {
     char ssid[33];
 } WifiSavedEvt;
 
+/** @brief What became of a request to forget a network (WifiForgetEvt.result). */
+/* cppcheck-suppress misra-c2012-2.4 ; the type names the values of a uint8_t field, which keeps the event its size */
+typedef enum {
+    WIFI_FORGET_RES_DONE = 0,  /**< The C5's vault forgot it.                */
+    WIFI_FORGET_RES_BUSY,      /**< The vault was busy with another request:
+                                *   nothing is forgotten; ask again.         */
+    WIFI_FORGET_RES_NO_LINK,   /**< No link to the C5, or it went before the
+                                *   vault answered.                          */
+    WIFI_FORGET_RES_REFUSED    /**< The vault said no, the request could not
+                                *   be sent, or no answer came; the log says
+                                *   which.                                   */
+/* cppcheck-suppress misra-c2012-2.3 ; the type names the values of a uint8_t field, which keeps the event its size */
+} WifiForgetResult;
+
+/** @brief What became of a request to forget a network (WIFI_FORGET_SIG). */
+typedef struct {
+    QEvt    super;
+    char    ssid[33];   /**< The network asked for.                          */
+    uint8_t result;     /**< WifiForgetResult as a plain integer.            */
+} WifiForgetEvt;
+
 /**
  * @brief Where the connection stands (WIFI_STATE_SIG).
  *
@@ -5582,6 +5616,14 @@ typedef struct {
     bool     reconnecting; /**< Off the network, and AO_Radio is working on
                          *   getting back on one, waiting between tries or
                          *   until the board wakes included.                 */
+    uint8_t  join_gen;  /**< The generation of the join this state ends
+                         *   (WifiJoinEvt.gen), carried by that one state
+                         *   alone; KQP_SCAN_GEN_NONE in every state
+                         *   published for another reason.                   */
+    bool     join_dropped; /**< With @c join_gen: true when that join never
+                         *   ran. A newer join or the automatic round took
+                         *   its place, or Wi-Fi switched off, a leave or the
+                         *   link's end dropped it while it waited.          */
 } WifiStateEvt;
 
 /* ---- AO_Net -------------------------------------------------------------
@@ -7215,7 +7257,7 @@ typedef struct {
  * @brief One entry of a listing, written straight into a blocked task's own
  *        storage rather than published as a StorageEntryEvt.
  *
- * The three fields StorageEntryEvt carries that a caller of the facade
+ * The fields StorageEntryEvt carries that a caller of the facade
  * actually asked about, minus the QEvt only an Active Object can receive and
  * minus `from_sd`, which a caller that named the directory itself already
  * knows. See StorageWaiter for why a second shape exists at all.
@@ -7224,6 +7266,7 @@ typedef struct {
     char     name[KODE_STORAGE_NAME_MAX];
     bool     is_dir;
     uint32_t size;
+    bool     name_cut;  /**< As StorageEntryEvt.name_cut. */
 } StorageRow;
 
 /**

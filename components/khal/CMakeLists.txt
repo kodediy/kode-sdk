@@ -29,6 +29,7 @@ idf_component_register(
         "temp/src/khal_temp_esp.c"
         "time/src/khal_time_esp.c"
         "time/src/khal_time_zone.c"
+        "utf8/src/khal_utf8.c"
         "worker/src/khal_worker_esp.c"
         "zlib/src/khal_zlib_esp.c"
     INCLUDE_DIRS
@@ -48,6 +49,7 @@ idf_component_register(
         "system/include"
         "temp/include"
         "time/include"
+        "utf8/include"
         "worker/include"
         "zlib/include"
     REQUIRES kdefs klog kbsp
