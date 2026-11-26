@@ -378,23 +378,33 @@ kode_status_t kdrv_storage_open(const char *name, uint32_t *size,
  * somewhere else.
  *
  * @param path Absolute, normalised, virtual: "/sdcard/..." or "/storage/...".
- * @param size Out: the file's size in bytes. Required.
+ * @param size Out: the file's size in bytes, any up to FAT32's 4 GiB - 1.
+ *             Required.
  * @return KODE_OK; KODE_DENIED for a bad path, a file already open for
  *         READING, or a file that is there and zero length; KODE_ERROR when
- *         the file is not there or its volume will not mount.
+ *         the file is not there, cannot be sized, or its volume will not
+ *         mount.
  */
 kode_status_t kdrv_storage_open_path(const char *path, uint32_t *size);
 
 /**
  * @brief Read the next chunk of the open file.
- * @param[out] got  Bytes actually read; 0 means end of file.
+ *
+ * Reads until @p max bytes, the end of the file, or a failure.
+ *
+ * @param buf       Where the bytes go: @p max bytes of room.
+ * @param max       The most bytes to read.
+ * @param[out] got  Bytes read: fewer than @p max only at the end of the file,
+ *                  0 there; 0 on failure.
+ * @return KODE_OK; KODE_DENIED with no file open or a NULL argument;
+ *         KODE_ERROR when a read fails, even after some bytes arrived.
  */
 kode_status_t kdrv_storage_read(void *buf, size_t max, size_t *got);
 
 /**
  * @brief Move the reader kdrv_storage_open_path() opened.
- * @param offset Byte the next read starts at; past the end is legal and the
- *               next read gets 0 bytes.
+ * @param offset Byte the next read starts at, any up to 4 GiB - 1; past the
+ *               end is legal and the next read gets 0 bytes.
  * @return KODE_OK; KODE_ERROR with no reader open or when the seek fails.
  */
 kode_status_t kdrv_storage_seek(uint32_t offset);

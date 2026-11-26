@@ -213,6 +213,198 @@ TEST_CASE("reading past the end reports no bytes rather than an error",
     kdrv_storage_close();
 }
 
+#define READ_BODY       "0123456789"  /**< A file of ten bytes for the reads below. */
+#define READ_PIECE      3U            /**< The most one read() of the volume gives. */
+#define READ_CHUNK      8U            /**< A chunk shorter than the file. */
+#define READ_CUT        4U            /**< The bytes a read gives before its failure. */
+
+/* The board's FAT may hand a chunk over in more than one read(): a short
+ * count is the end of the file and nothing else. */
+TEST_CASE("a chunk is read whole from pieces, and the end of the file reads short",
+          "[kdrv_storage]")
+{
+    uint32_t size = 0U;
+    char     buf[READ_CHUNK];
+    size_t   got  = 99U;
+
+    storage_fresh();
+    put_file(fake_media_sd_dir(), "ten.bin", READ_BODY);
+    fake_storage_libc_read_pieces(READ_PIECE);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_open_path("/sdcard/ten.bin", &size));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_read(buf, sizeof(buf), &got));
+    TEST_ASSERT_EQUAL_UINT(READ_CHUNK, got);
+    TEST_ASSERT_EQUAL_MEMORY(READ_BODY, buf, READ_CHUNK);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_read(buf, sizeof(buf), &got));
+    TEST_ASSERT_EQUAL_UINT(strlen(READ_BODY) - READ_CHUNK, got);
+    TEST_ASSERT_EQUAL_MEMORY(&READ_BODY[READ_CHUNK], buf, got);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_read(buf, sizeof(buf), &got));
+    TEST_ASSERT_EQUAL_UINT(0U, got);
+    kdrv_storage_close();
+}
+
+/* After a disk error the board's FAT gives the bytes it copied, with errno
+ * set, and -1 only from the next call: a short count is not the end. */
+TEST_CASE("a read that fails partway through a chunk is an error", "[kdrv_storage]")
+{
+    uint32_t size = 0U;
+    char     buf[16];
+    size_t   got  = 99U;
+
+    storage_fresh();
+    put_file(fake_media_sd_dir(), "ten.bin", READ_BODY);
+    fake_storage_libc_read_cut(READ_CUT);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_open_path("/sdcard/ten.bin", &size));
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_storage_read(buf, sizeof(buf), &got));
+    TEST_ASSERT_EQUAL_UINT(0U, got);
+    kdrv_storage_close();
+}
+
+/* A caller reads KODE_DENIED with no size as an empty file. */
+TEST_CASE("a file that cannot be sized is an error, not an empty file", "[kdrv_storage]")
+{
+    uint32_t size = 0U;
+
+    storage_fresh();
+    put_file(fake_media_sd_dir(), "ten.bin", READ_BODY);
+    fake_storage_libc_fstat_fails(true);
+
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_storage_open_path("/sdcard/ten.bin", &size));
+
+    /* The descriptor it opened was closed: the next open is not refused. */
+    fake_storage_libc_fstat_fails(false);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_open_path("/sdcard/ten.bin", &size));
+    kdrv_storage_close();
+}
+
+/* ---- Files of 2 GiB and more ----------------------------------------------
+ * The board's off_t is 32 bits and signed, so a size or a position from 2 GiB
+ * on is negative there. The C library under the driver is narrowed to answer
+ * that way (fake_storage_libc.c); the file on the host stays a few bytes.
+ */
+
+#define TWO_GIB         0x80000000UL  /**< The first size a 32-bit off_t holds as negative. */
+#define FAT32_FILE_MAX  0xFFFFFFFFUL  /**< 4 GiB - 1, the largest file FAT32 holds. */
+
+/** @brief The sizes and offsets on both sides of 2 GiB, and FAT32's last. */
+static const uint32_t BIG_POINTS[] = {
+    (uint32_t)(TWO_GIB - 1UL),
+    (uint32_t)TWO_GIB,
+    (uint32_t)(TWO_GIB + 1UL),
+    (uint32_t)FAT32_FILE_MAX,
+};
+
+TEST_CASE("a file of 2 GiB or more opens with its whole size", "[kdrv_storage]")
+{
+    for ( size_t i = 0U; (sizeof(BIG_POINTS) / sizeof(BIG_POINTS[0])) > i; ++i )
+    {
+        uint32_t size = 0U;
+
+        storage_fresh();
+        put_file(fake_media_sd_dir(), "big.bin", "marker");
+        fake_storage_libc_narrow(BIG_POINTS[i]);
+
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_open_path("/sdcard/big.bin", &size));
+        TEST_ASSERT_EQUAL_UINT32(BIG_POINTS[i], size);
+        kdrv_storage_close();
+    }
+}
+
+TEST_CASE("the reader moves to an offset on either side of 2 GiB", "[kdrv_storage]")
+{
+    for ( size_t i = 0U; (sizeof(BIG_POINTS) / sizeof(BIG_POINTS[0])) > i; ++i )
+    {
+        uint32_t size = 0U;
+        char     buf[8];
+        size_t   got  = 99U;
+
+        storage_fresh();
+        put_file(fake_media_sd_dir(), "big.bin", "marker");
+        fake_storage_libc_narrow((uint32_t)FAT32_FILE_MAX);
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_open_path("/sdcard/big.bin", &size));
+
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_seek(BIG_POINTS[i]));
+        TEST_ASSERT_EQUAL_UINT32(1U, fake_storage_libc_seeks());
+        TEST_ASSERT_EQUAL_UINT32(BIG_POINTS[i], fake_storage_libc_seek_asked());
+        TEST_ASSERT_EQUAL_INT(SEEK_SET, fake_storage_libc_seek_whence());
+
+        /* The host's file ends long before: the read there is the end. */
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_read(buf, sizeof(buf), &got));
+        TEST_ASSERT_EQUAL_UINT(0U, got);
+        kdrv_storage_close();
+    }
+}
+
+/* 4 GiB - 1 comes back from a 32-bit lseek() as -1, the failure value: what
+ * tells the two apart is errno. */
+TEST_CASE("a seek the volume refuses fails on either side of 2 GiB", "[kdrv_storage]")
+{
+    for ( size_t i = 0U; (sizeof(BIG_POINTS) / sizeof(BIG_POINTS[0])) > i; ++i )
+    {
+        uint32_t size = 0U;
+
+        storage_fresh();
+        put_file(fake_media_sd_dir(), "big.bin", "marker");
+        fake_storage_libc_narrow((uint32_t)FAT32_FILE_MAX);
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_open_path("/sdcard/big.bin", &size));
+
+        fake_storage_libc_seek_fails(true);
+        TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_storage_seek(BIG_POINTS[i]));
+        kdrv_storage_close();
+    }
+}
+
+TEST_CASE("a seek and a read with no file open are refused", "[kdrv_storage]")
+{
+    char   buf[4];
+    size_t got = 0U;
+
+    storage_fresh();
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_storage_seek((uint32_t)TWO_GIB));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_storage_read(buf, sizeof(buf), &got));
+    TEST_ASSERT_EQUAL_UINT32(0U, fake_storage_libc_seeks());
+}
+
+/**
+ * @brief Keep the size a listing gives its one file.
+ * @param name   The entry's name.
+ * @param is_dir Whether it is a folder.
+ * @param size   Its size.
+ * @param ctx    The uint32_t that keeps the size.
+ * @return true, to go on.
+ */
+static bool keep_size(const char *name, bool is_dir, uint32_t size, void *ctx)
+{
+    (void)name;
+    (void)is_dir;
+    *(uint32_t *)ctx = size;
+    return true;
+}
+
+TEST_CASE("a listing and a stat give a size of 2 GiB or more whole", "[kdrv_storage]")
+{
+    for ( size_t i = 0U; (sizeof(BIG_POINTS) / sizeof(BIG_POINTS[0])) > i; ++i )
+    {
+        kdrv_stat_t st     = { 0 };
+        uint32_t    listed = 0U;
+
+        storage_fresh();
+        put_file(fake_media_sd_dir(), "big.bin", "marker");
+        fake_storage_libc_narrow(BIG_POINTS[i]);
+
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_stat("/sdcard/big.bin", &st));
+        TEST_ASSERT_TRUE(st.exists);
+        TEST_ASSERT_FALSE(st.is_dir);
+        TEST_ASSERT_EQUAL_UINT32(BIG_POINTS[i], st.size);
+
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_list_path("/sdcard", &keep_size, &listed));
+        TEST_ASSERT_EQUAL_UINT32(BIG_POINTS[i], listed);
+    }
+}
+
 /* ---- Writing ------------------------------------------------------------- */
 
 /* kodeOS writes to the internal partition first on purpose: one failed write

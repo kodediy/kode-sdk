@@ -3391,6 +3391,32 @@ TEST_CASE("an empty file moves across the volumes", "[kode_file]")
     file_no_settle();
 }
 
+/** @brief 4 GiB - 1, the largest file FAT32 holds. */
+#define TEST_FAT32_FILE_MAX 0xFFFFFFFFU
+
+/** @brief What the host's file of a case said to be 4 GiB - 1 holds. */
+#define TEST_FAT32_REAL "marker"
+
+/* A window asks for one byte past the end, and past 4 GiB - 1 is 2^32: the
+ * walk asks a whole window, not one of no bytes, the host's few bytes come
+ * back, and the move reports the file changed. */
+TEST_CASE("a move of a file of 4 GiB - 1 reads it in whole windows", "[kode_file]")
+{
+    uint32_t live;
+
+    file_fresh();
+    fake_media_set_sd_present(true);
+    fake_media_put_sd_path("huge.bin", TEST_FAT32_REAL, strlen(TEST_FAT32_REAL));
+    fake_storage_libc_narrow(TEST_FAT32_FILE_MAX);
+    live = psram_live();
+    TEST_ASSERT_FALSE(kode_file_move("sd/huge.bin", "flash/huge.bin"));
+    TEST_ASSERT_EQUAL_STRING("sd/huge.bin: changed while it was moved", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(strlen(TEST_FAT32_REAL), host_size(fake_media_sd_dir(), "huge.bin"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, host_size(fake_media_fs_dir(), "huge.bin"));
+    TEST_ASSERT_EQUAL_UINT32(live, psram_live());
+    file_no_settle();
+}
+
 TEST_CASE("a move into a missing folder fails and leaves the source alone", "[kode_file]")
 {
     file_fresh();

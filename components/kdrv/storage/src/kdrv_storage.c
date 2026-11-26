@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -26,10 +27,18 @@
  * handle for both until copying existed, and copying is exactly the pair: a
  * reader and a writer at the same instant. AO_Storage is the only caller and
  * it is one thread, so what these two are is a copy loop rather than a race -
- * nothing here is any more concurrent than it was with one. */
-static FILE *s_read;    /**< kdrv_storage_open_path()   */
-static FILE *s_write;   /**< kdrv_storage_create_path() */
-static bool  s_read_fs; /**< s_read is a file of the internal volume. */
+ * nothing here is any more concurrent than it was with one.
+ *
+ * The reader is a descriptor, not a stream. On the board off_t and long are
+ * 32 bits and signed, and the C library's fseek() fails every position from
+ * 2 GiB on; lseek() hands the offset to FatFs, whose file pointer and file
+ * size are unsigned 32-bit, so a FAT32 file reads whole, up to 4 GiB - 1. */
+#define KDRV_STORAGE_NO_FD         (-1)        /**< s_read holds no file. */
+#define KDRV_STORAGE_LSEEK_FAILED  ((off_t)-1) /**< lseek()'s failure; also 4 GiB - 1 in a 32-bit off_t. */
+
+static int   s_read = KDRV_STORAGE_NO_FD; /**< kdrv_storage_open_path()   */
+static FILE *s_write;                     /**< kdrv_storage_create_path() */
+static bool  s_read_fs;                   /**< s_read is a file of the internal volume. */
 
 /* Whether the two above are one copy rather than two unrelated files. See
  * the Copying section at the end of this file; it lives up here because
@@ -917,7 +926,7 @@ static bool real_on_fs(const char *real)
 
 kode_status_t kdrv_storage_open_path(const char *path, uint32_t *size)
 {
-    if ( (NULL == path) || (NULL == size) || (NULL != s_read) )
+    if ( (NULL == path) || (NULL == size) || (KDRV_STORAGE_NO_FD != s_read) )
     {
         return KODE_DENIED;
     }
@@ -929,30 +938,37 @@ kode_status_t kdrv_storage_open_path(const char *path, uint32_t *size)
         return rc;
     }
 
-    FILE *f = fopen(real, "rb");
-    if ( NULL == f )
+    int const fd = open(real, O_RDONLY);
+    if ( 0 > fd )
     {
         return KODE_ERROR;
     }
 
-    (void)fseek(f, 0, SEEK_END);
-    long const len = ftell(f);
-    (void)fseek(f, 0, SEEK_SET);
-    if ( 0 >= len )
+    /* FatFs's size is unsigned 32-bit and st_size a 32-bit off_t, so from
+     * 2 GiB on it arrives negative; read back unsigned it is the size. */
+    struct stat st;
+    if ( fstat(fd, &st) != 0 )
+    {
+        (void)close(fd);
+        KLOG_E(TAG, "'%s' has no size", path);
+        return KODE_ERROR;
+    }
+    uint32_t const len = (uint32_t)st.st_size;
+    if ( 0U == len )
     {
         /* KODE_DENIED, not KODE_ERROR: the file IS here, it is just not
          * usable. Telling the operator it was not found would send them
          * looking for a file they are staring at - and this is exactly what
          * a counterfeit card leaves behind, so it is a field condition
          * rather than a corner. */
-        (void)fclose(f);
+        (void)close(fd);
         KLOG_E(TAG, "'%s' is empty", path);
         return KODE_DENIED;
     }
 
-    s_read    = f;
+    s_read    = fd;
     s_read_fs = real_on_fs(real);
-    *size     = (uint32_t)len;
+    *size     = len;
     return KODE_OK;
 }
 
@@ -1010,27 +1026,48 @@ kode_status_t kdrv_storage_open(const char *name, uint32_t *size,
 
 kode_status_t kdrv_storage_read(void *buf, size_t max, size_t *got)
 {
-    if ( (NULL == s_read) || (NULL == buf) || (NULL == got) )
+    if ( (KDRV_STORAGE_NO_FD == s_read) || (NULL == buf) || (NULL == got) )
     {
         return KODE_DENIED;
     }
-    size_t const n = fread(buf, 1U, max, s_read);
-    if ( (n < max) && (ferror(s_read) != 0) )
+    /* read() stops short on a failure that came after some bytes, and
+     * answers -1 only on the next call: read until the chunk is full, the
+     * file ends (0) or a call fails, so a short count is the end alone. */
+    /* cppcheck-suppress misra-c2012-11.5 ; the caller's buffer holds bytes */
+    uint8_t *const bytes = (uint8_t *)buf;
+    size_t         done  = 0U;
+    bool           ended = false;
+
+    while ( (done < max) && !ended )
     {
-        *got = 0U;
-        return KODE_ERROR;
+        ssize_t const n = read(s_read, &bytes[done], max - done);
+        if ( 0 > n )
+        {
+            *got = 0U;
+            return KODE_ERROR;
+        }
+        ended = (0 == n);
+        done += (size_t)n;
     }
-    *got = n;
+    *got = done;
     return KODE_OK;
 }
 
 kode_status_t kdrv_storage_seek(uint32_t offset)
 {
-    if ( NULL == s_read )
+    if ( KDRV_STORAGE_NO_FD == s_read )
     {
         return KODE_ERROR;
     }
-    if ( fseek(s_read, (long)offset, SEEK_SET) != 0 )
+
+    /* From 2 GiB on the offset goes down as a negative 32-bit off_t (GCC
+     * converts modulo 2^32) and FatFs takes it back as the unsigned offset.
+     * lseek() answers the position the same way, so it is read back
+     * unsigned: 4 GiB - 1 comes back as the failure value, and only errno
+     * tells the two apart. */
+    errno = 0;
+    off_t const at = lseek(s_read, (off_t)offset, SEEK_SET);
+    if ( ((uint32_t)at != offset) || ((KDRV_STORAGE_LSEEK_FAILED == at) && (0 != errno)) )
     {
         return KODE_ERROR;
     }
@@ -1042,7 +1079,7 @@ static char s_write_path[KDRV_REAL_PATH_MAX];
 
 bool kdrv_storage_fs_files_open(void)
 {
-    return ((NULL != s_read) && s_read_fs)
+    return ((KDRV_STORAGE_NO_FD != s_read) && s_read_fs)
         || ((NULL != s_write) && real_on_fs(s_write_path));
 }
 
@@ -1210,14 +1247,14 @@ kode_status_t kdrv_storage_close(void)
 {
     kode_status_t rc = KODE_OK;
 
-    if ( NULL != s_read )
+    if ( KDRV_STORAGE_NO_FD != s_read )
     {
-        /* A reader's close is the only fclose() in this file whose answer is
+        /* A reader's close is the only close in this file whose answer is
          * genuinely worth nothing: there is no buffer of ours waiting to
          * reach the medium, so the worst it can report is an error the read
          * calls already returned. */
-        (void)fclose(s_read);
-        s_read    = NULL;
+        (void)close(s_read);
+        s_read    = KDRV_STORAGE_NO_FD;
         s_read_fs = false;
     }
 

@@ -437,6 +437,48 @@ bool fake_fs_raw_open(void);
 /** @brief How many raw writes of the internal partition began since the last reset. */
 unsigned fake_fs_raw_begins(void);
 
+/* ---- The C library under kdrv_storage ------------------------------------
+ * fstat(), stat(), lseek() and read() in kdrv_storage.c reach the host's own
+ * through fake_storage_libc.c. Narrowed, they answer as the board does, whose
+ * off_t is 32 bits and signed. fake_media_reset() calls the reset below for you.
+ */
+
+/** @brief Pass every call through untouched, and forget the seeks. */
+void fake_storage_libc_reset(void);
+
+/**
+ * @brief Answer as the board's 32-bit off_t would from now on.
+ * @param size What fstat() and stat() say every regular file holds, read
+ *             back into a 32-bit off_t; lseek()'s answer is narrowed the same.
+ */
+void fake_storage_libc_narrow(uint32_t size);
+
+/** @brief Make fstat() fail with EIO, or work again. */
+void fake_storage_libc_fstat_fails(bool fails);
+
+/** @brief Make lseek() fail with EIO, -1 and nothing moved, or work again. */
+void fake_storage_libc_seek_fails(bool fails);
+
+/** @brief Make each read() give at most @p most bytes; 0 is no limit. */
+void fake_storage_libc_read_pieces(size_t most);
+
+/**
+ * @brief Make read() give at most @p most bytes once, then fail with EIO.
+ *
+ * The board's FAT after a disk error partway through a read: the bytes it
+ * copied, errno set, and -1 from the next call on.
+ */
+void fake_storage_libc_read_cut(size_t most);
+
+/** @brief The offset the last lseek() was asked for, its low 32 bits. */
+uint32_t fake_storage_libc_seek_asked(void);
+
+/** @brief The whence the last lseek() was asked with; -1 before any. */
+int fake_storage_libc_seek_whence(void);
+
+/** @brief How many lseek() calls since the last reset. */
+uint32_t fake_storage_libc_seeks(void);
+
 /* ---- The SDMMC seam under kdrv_sd ----------------------------------------
  * kdrv_sd.c is compiled for real, so a case arranges the CARD rather than the
  * driver: what it says it is, how many data lines it will come up on, and
