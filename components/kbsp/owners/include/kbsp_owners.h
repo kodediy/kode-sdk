@@ -33,7 +33,7 @@ typedef enum {
     KBSP_RES_JPEG,        /**< The P4's JPEG codec                           */
     KBSP_RES_PPA,         /**< The P4's pixel accelerator                    */
     KBSP_RES_IR,          /**< The infrared emitters and receiver, on the C5 */
-    KBSP_RES_NFC,         /**< ST25R3916B, its IRQ (GPIO29) and the SPI2 bus */
+    KBSP_RES_NFC,         /**< ST25R3916B, its IRQ (GPIO29) and its SPI host */
     KBSP_RES_AUDIO,       /**< ES8311 @0x18, mic, amp, speaker and the I2S   */
     KBSP_RES_IMU,         /**< QMI8658A @0x6A and QMC5883P @0x2C             */
     KBSP_RES_HAPTIC,      /**< AW86233 @0x5A on the antenna PCB              */

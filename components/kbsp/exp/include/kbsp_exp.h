@@ -42,8 +42,13 @@ typedef struct {
     uint8_t        id;   /**< What IDF takes: I2C_NUM_x, SPIx_HOST or UART_NUM_x. */
 } kbsp_exp_ctrl_t;
 
+#ifdef CONFIG_KBSP_APP_LOW_BUSES
+#define KBSP_EXP_I2C_ID      0U  /**< I2C_NUM_0; I2C1 is the board bus.          */
+#define KBSP_EXP_SPI_ID      1U  /**< SPI2_HOST; SPI1 is the flash, SPI3 the NFC reader. */
+#else
 #define KBSP_EXP_I2C_ID      1U  /**< I2C_NUM_1; I2C0 is the board bus.          */
 #define KBSP_EXP_SPI_ID      2U  /**< SPI3_HOST; SPI1 is the flash, SPI2 the NFC reader. */
+#endif
 #define KBSP_EXP_UART_LAST   4U  /**< UART_NUM_4, the chip's last HP UART.       */
 #ifdef CONFIG_ESP_CONSOLE_UART
 #define KBSP_EXP_UART_FIRST  1U  /**< UART0 is the console's in this build.      */
@@ -52,8 +57,8 @@ typedef struct {
 #endif
 
 /**
- * @brief How many controllers an app may take: I2C1, SPI3 and UART0..4, less
- *        UART0 while the console is a UART. The LP controllers reach only the
+ * @brief How many controllers an app may take: one I2C, one SPI and UART0..4,
+ *        less UART0 while the console is a UART. The LP controllers reach only the
  *        LP pins and are not offered; kbsp_board.h names the rest, kodeOS's.
  */
 #define KBSP_EXP_CTRL_ONE_EACH  2U  /**< The one I2C and the one SPI. */

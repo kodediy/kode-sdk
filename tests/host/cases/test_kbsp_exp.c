@@ -65,12 +65,12 @@ TEST_CASE("the header is a resource with a name", "[kbsp_exp]")
 
 /* ---- The controllers ------------------------------------------------------- */
 
-TEST_CASE("the app's controllers are I2C1, SPI3 and the five UARTs",
+TEST_CASE("the app's controllers are the header's I2C, its SPI host and the five UARTs",
           "[kbsp_exp]")
 {
     static const kbsp_exp_ctrl_t want[] = {
-        { KBSP_EXP_I2C,  1U },
-        { KBSP_EXP_SPI,  2U },   /* SPI3_HOST */
+        { KBSP_EXP_I2C,  (uint8_t)KBSP_EXP_I2C_ID },
+        { KBSP_EXP_SPI,  (uint8_t)KBSP_EXP_SPI_ID },
 #ifndef CONFIG_ESP_CONSOLE_UART
         { KBSP_EXP_UART, 0U },
 #endif

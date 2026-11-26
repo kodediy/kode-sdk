@@ -6,6 +6,8 @@
 #ifndef KBSP_BOARD_H_
 #define KBSP_BOARD_H_
 
+#include "sdkconfig.h"
+
 /** @brief The product's name, as the boot banner prints it. */
 #define KBSP_PRODUCT_NAME       "Kode Dot"
 
@@ -64,15 +66,21 @@
  * numbers are IDF's (I2C_NUM_x, SPIx_HOST, ADC_UNIT_x), which for SPI and
  * the ADC are one less than the chip's names: SPI2 is SPI2_HOST, 1. Every
  * driver takes its number from here beside a _Static_assert; kbsp_exp.h
- * lists the ones an app may take for J3.
+ * lists the ones an app may take for J3. CONFIG_KBSP_APP_LOW_BUSES gives the
+ * app I2C0 and SPI2 and keeps I2C1 and SPI3 for the board.
  *
  * The chip has one continuous ADC engine (DMA) for both units, and the RFID
  * driver uses it: it opens the engine for each read window and closes it
  * after. An app that held it would make every RFID read fail, so J3's analog
  * positions are read one sample at a time, through khal_exp.
  */
+#ifdef CONFIG_KBSP_APP_LOW_BUSES
+#define KBSP_I2C_BOARD          1U    /**< I2C1: the board bus (khal_i2c); the app takes I2C0. */
+#define KBSP_SPI_NFC            2U    /**< SPI3_HOST: the ST25R3916B (AO_Nfc); the app takes SPI2. */
+#else
 #define KBSP_I2C_BOARD          0U    /**< I2C0: the board bus (khal_i2c).      */
 #define KBSP_SPI_NFC            1U    /**< SPI2_HOST: the ST25R3916B (AO_Nfc).  */
+#endif
 #define KBSP_I2S_CODEC          0U    /**< I2S0: the ES8311 (AO_Audio).         */
 #define KBSP_ADC_EXP            0U    /**< ADC_UNIT_1: J3's analog positions (khal_exp). */
 #define KBSP_ADC_RFID           1U    /**< ADC_UNIT_2: the RFID demodulated line. */

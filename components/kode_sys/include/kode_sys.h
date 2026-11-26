@@ -2585,8 +2585,10 @@ kode_status_t kode_sys_exp_return(const char *tag);
 /**
  * @brief Take an I2C, SPI or UART controller for a module on J3, recorded under @p tag.
  *
- * An app may take I2C1, SPI3 and UART0..4 (UART0 only while the console is not
- * a UART); the lowest free one is answered, in IDF's numbering (SPI3 is 2).
+ * An app may take the I2C and the SPI host kbsp_exp.h offers (I2C1 and SPI3,
+ * or I2C0 and SPI2 with CONFIG_KBSP_APP_LOW_BUSES) and UART0..4 (UART0 only
+ * while the console is not a UART); the lowest free one is answered, in IDF's
+ * numbering (SPI3 is 2).
  * Books only: install IDF's driver yourself. Call it from one task.
  * @param bus KODE_SYS_EXP_I2C, KODE_SYS_EXP_SPI or KODE_SYS_EXP_UART.
  * @param tag The tag given to kode_sys_exp_lend(); a string that outlives the loan.
