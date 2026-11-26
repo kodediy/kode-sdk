@@ -47,6 +47,7 @@
  * to the next register; with the increment off both readings agree - every
  * byte of the burst is FIFO_DATA. */
 #define QMI_CTRL1_FIFO    0x18U
+#define QMI_CTRL1_SENSOR_DISABLE 0x01U /**< sensorDisable: clock off too, Power-Down */
 #define QMI_CTRL2_8G_ODR3 0x23U  /* aFS = 010 (+-8 g), aODR = 0011 (896.8 Hz)      */
 #define QMI_CTRL3_512_ODR3 0x53U /* gFS = 101 (+-512 dps), gODR = 0011 (896.8 Hz)  */
 #define QMI_CTRL5_NO_LPF  0x00U
@@ -145,6 +146,68 @@ static bool write_checked(uint8_t reg, uint8_t val)
     return true;
 }
 
+/**
+ * @brief Start or stop the part's clock: CTRL1's sensorDisable, set or
+ *        cleared on what the register holds, the rest of it kept.
+ *
+ * @param stop         true to stop it (Power-Down), false to start it.
+ * @param[out] started true when the clock was stopped and is now started.
+ *                     May be NULL.
+ * @return true when CTRL1 holds the new value.
+ */
+static bool clock_set(bool stop, bool *started)
+{
+    uint8_t ctrl1 = 0U;
+    bool    was_stopped;
+
+    if ( khal_i2c_read_reg(s_dev, QMI_REG_CTRL1, &ctrl1, 1U) != KODE_OK )
+    {
+        return false;
+    }
+    was_stopped = ((ctrl1 & QMI_CTRL1_SENSOR_DISABLE) != 0U);
+    if ( stop )
+    {
+        ctrl1 = (uint8_t)(ctrl1 | QMI_CTRL1_SENSOR_DISABLE);
+    }
+    else
+    {
+        ctrl1 = (uint8_t)(ctrl1 & (uint8_t)~QMI_CTRL1_SENSOR_DISABLE);
+    }
+    if ( !write_checked(QMI_REG_CTRL1, ctrl1) )
+    {
+        return false;
+    }
+    if ( NULL != started )
+    {
+        *started = was_stopped && !stop;
+    }
+    return true;
+}
+
+/**
+ * @brief Start the clock if it is stopped, then enable both sensors.
+ *
+ * The datasheet enables a sensor only from a running clock, and a start
+ * takes KDRV_QMI8658_CLOCK_MS; it is waited out here, only when the clock
+ * was stopped. The delay yields the thread, as cmd_done_wait()'s does.
+ *
+ * @return true when the clock runs and CTRL7 holds both enables.
+ */
+static bool sensors_on(void)
+{
+    bool started = false;
+
+    if ( !clock_set(false, &started) )
+    {
+        return false;
+    }
+    if ( started )
+    {
+        khal_delay_ms(KDRV_QMI8658_CLOCK_MS);
+    }
+    return write_checked(QMI_REG_CTRL7, QMI_CTRL7_A_G_EN);
+}
+
 kode_status_t kdrv_qmi8658_park(void)
 {
     /* One quiet probe first: a part that is not fitted is a fact here, said
@@ -202,10 +265,13 @@ kode_status_t kdrv_qmi8658_create(kdrv_qmi8658_id_t *id)
         return KODE_ERROR;
     }
 
-    /* Sensors off while the scales and rates change, and left off: the part
-     * rests until its owner has somebody to convert for. */
+    /* Sensors off while the scales and rates change, and left off with the
+     * clock stopped: the part rests in Power-Down until its owner has
+     * somebody to convert for. The registers answer and keep their values
+     * there. */
     if ( (khal_i2c_write_reg(s_dev, QMI_REG_CTRL7, QMI_CTRL7_OFF) != KODE_OK)
-        || !write_checked(QMI_REG_CTRL1, QMI_CTRL1_SETUP)
+        || !write_checked(QMI_REG_CTRL1,
+                          (uint8_t)(QMI_CTRL1_SETUP | QMI_CTRL1_SENSOR_DISABLE))
         || !write_checked(QMI_REG_CTRL2, QMI_CTRL2_8G_ODR3)
         || !write_checked(QMI_REG_CTRL3, QMI_CTRL3_512_ODR3)
         || !write_checked(QMI_REG_CTRL5, QMI_CTRL5_NO_LPF)
@@ -226,19 +292,24 @@ kode_status_t kdrv_qmi8658_create(kdrv_qmi8658_id_t *id)
 
 kode_status_t kdrv_qmi8658_standby(bool on)
 {
-    uint8_t ctrl7 = QMI_CTRL7_A_G_EN;
+    bool ok;
 
     if ( !s_up )
     {
         return KODE_DENIED;
     }
+    /* The sensors stop before the clock, and the clock starts before them. */
     if ( on )
     {
-        ctrl7 = QMI_CTRL7_OFF;
+        ok = write_checked(QMI_REG_CTRL7, QMI_CTRL7_OFF) && clock_set(true, NULL);
     }
-    if ( !write_checked(QMI_REG_CTRL7, ctrl7) )
+    else
     {
-        KLOG_E(TAG, "the part would not take its sensor enables");
+        ok = sensors_on();
+    }
+    if ( !ok )
+    {
+        KLOG_E(TAG, "the part would not take its sensor enables or its clock");
         return KODE_IO_ERROR;
     }
     return KODE_OK;
@@ -280,6 +351,20 @@ static void st_reg(kdrv_qmi8658_sensor_t which, uint8_t *reg, uint8_t *rest)
         *reg  = QMI_REG_CTRL3;
         *rest = QMI_CTRL3_512_ODR3;
     }
+}
+
+kode_status_t kdrv_qmi8658_st_prepare(void)
+{
+    if ( !s_up )
+    {
+        return KODE_DENIED;
+    }
+    if ( !write_checked(QMI_REG_CTRL7, QMI_CTRL7_OFF) || !clock_set(false, NULL) )
+    {
+        KLOG_E(TAG, "the part would not stop its sensors and start its clock");
+        return KODE_IO_ERROR;
+    }
+    return KODE_OK;
 }
 
 kode_status_t kdrv_qmi8658_st_begin(kdrv_qmi8658_sensor_t which)
@@ -403,7 +488,7 @@ kode_status_t kdrv_qmi8658_st_end(void)
     if ( (khal_i2c_write_reg(s_dev, QMI_REG_CTRL7, QMI_CTRL7_OFF) != KODE_OK)
         || !write_checked(QMI_REG_CTRL2, QMI_CTRL2_8G_ODR3)
         || !write_checked(QMI_REG_CTRL3, QMI_CTRL3_512_ODR3)
-        || !write_checked(QMI_REG_CTRL7, QMI_CTRL7_A_G_EN) )
+        || !sensors_on() )
     {
         KLOG_E(TAG, "the part would not take its configuration back after "
                     "the self-test");

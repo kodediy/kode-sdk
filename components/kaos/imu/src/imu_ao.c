@@ -84,9 +84,13 @@
  *         self-test in three asked right behind a window never finished;
  *         at 300 ms none did. */
 #define SETTLE_MS       300U
-/** @brief What the row gives a part it has just put to rest before it
- *         triggers a self-test on it. */
+/** @brief What the row gives a part between stopping its sensors and
+ *         starting its clock and triggering a self-test on it: the sensors'
+ *         stop and the clock's start, KDRV_QMI8658_CLOCK_MS, run out inside
+ *         it. */
 #define ROW_REST_MS     150U
+_Static_assert(ROW_REST_MS >= KDRV_QMI8658_CLOCK_MS,
+               "the row's rest must cover the IMU clock's start");
 /** @brief From sensors-on to a gyroscope sample that means something: the
  *         datasheet's 150 ms + 3/ODR, with margin. What a read that woke
  *         the part waits; shorter than SETTLE_MS because a read asks the
@@ -2308,26 +2312,30 @@ static QState Imu_up(Imu * const me, QEvt const * const e)
                  * than expected. */
                 test_refused(me, "imu");
             }
-            else if ( !me->imu.awake )
-            {
-                /* Resting, the part is where a self-test starts from: both
-                 * sensors disabled, and nothing turning on. Waking it first
-                 * would put the trigger at the very end of the gyroscope's
-                 * turn-on, which is the one place the part has been seen
-                 * to ignore it. The row's own end leaves the part running. */
-                imu_row(me);
-            }
             else
             {
-                /* Awake, the part is put to rest first and given
-                 * ROW_REST_MS to get there: a self-test triggered in the
-                 * same breath as the write that disables the sensors is
-                 * one the part sometimes never acts on, however long the
-                 * gyroscope had been running before it. */
-                if ( kdrv_qmi8658_standby(true) == KODE_OK )
+                /* Awake or resting, one path: both sensors disabled and the
+                 * clock started (resting, standby has stopped it), then
+                 * ROW_REST_MS for both to settle before the trigger. A
+                 * self-test triggered in the same breath as the write that
+                 * disables the sensors is one the part sometimes never acts
+                 * on, however long the gyroscope had been running before
+                 * it; the clock's start is the same kind of moment. Not
+                 * woken first: that would put the trigger at the very end
+                 * of the gyroscope's turn-on, the one place the part has
+                 * been seen to ignore it. A part fitted since boot is found
+                 * here, so that it too is made ready. The row's own end
+                 * leaves the part running. */
+                if ( !me->imu_up )
                 {
-                    me->imu.awake = false;
+                    me->imu_up = (kdrv_qmi8658_create(NULL) == KODE_OK);
                 }
+                if ( kdrv_qmi8658_st_prepare() == KODE_IO_ERROR )
+                {
+                    KLOG_W(TAG, "the IMU would not start its clock for the "
+                                "self-test");
+                }
+                me->imu.awake = false;
                 settle_hold(me, PENDING_ROW, NULL, ROW_REST_MS);
             }
             status = Q_HANDLED();

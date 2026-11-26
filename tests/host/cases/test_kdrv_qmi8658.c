@@ -11,6 +11,7 @@
 
 #include "kbsp.h"
 #include "kdrv_qmi8658.h"
+#include "khal_time.h"
 
 #define REG_WHO_AM_I   0x00U
 #define REG_CTRL1      0x02U
@@ -156,8 +157,9 @@ void test_qmi8658_bring_up(void)
                                             * part is born at rest            */
     /* Auto-increment on, LITTLE-endian (the reset value is big), INT1 driven -
      * on DVT that pin is the expander's P5 and has no pull-up - and INT2
-     * driven too, for the self-test flag that is said to mirror it. */
-    expect_w8_checked(REG_CTRL1, 0x58U);
+     * driven too, for the self-test flag that is said to mirror it. And
+     * sensorDisable set: at rest the clock is off as well (Power-Down). */
+    expect_w8_checked(REG_CTRL1, 0x59U);
     expect_scales_and_enable();
     expect_w8_checked(REG_CTRL5, 0x00U);
     /* CTRL8 bit 7 = 1: "use STATUSINT.bit7 as CTRL9 handshake" (Table 22).
@@ -196,15 +198,102 @@ TEST_CASE("qmi8658: leaving standby enables both sensors, entering it "
     Mockkhal_i2c_Init();
     test_qmi8658_bring_up();
 
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_checked(REG_CTRL1, 0x58U);
     expect_w8_checked(REG_CTRL7, 0x03U);   /* aEN | gEN */
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(false));
     expect_w8_checked(REG_CTRL7, 0x00U);
+    expect_r8(REG_CTRL1, 0x58U);
+    expect_w8_checked(REG_CTRL1, 0x59U);
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(true));
 
     /* A part that does not hold the write is said, not believed. */
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_checked(REG_CTRL1, 0x58U);
     expect_w8(REG_CTRL7, 0x03U);
     expect_r8(REG_CTRL7, 0x00U);
     TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_standby(false));
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
+/* Table 31's Power-Down is CTRL1 sensorDisable = 1 with both enables clear;
+ * the enables clear alone is Power-On Default, where the part's clock still
+ * runs. The writes go in that order both ways: the sensors stop before the
+ * clock, and the clock starts before the sensors. */
+TEST_CASE("qmi8658: standby stops the clock after the sensors and starts it "
+          "before them", "[kdrv_qmi8658]")
+{
+    uint32_t t0;
+
+    Mockkhal_i2c_Init();
+    test_qmi8658_bring_up();
+
+    expect_w8_checked(REG_CTRL7, 0x00U);
+    expect_r8(REG_CTRL1, 0x58U);
+    expect_w8_checked(REG_CTRL1, 0x59U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(true));
+
+    /* The enables only once the clock has had its start: a sensor is
+     * enabled from a running clock (Figure 16). */
+    t0 = khal_time_ms();
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_checked(REG_CTRL1, 0x58U);
+    expect_w8_checked(REG_CTRL7, 0x03U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(false));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(KDRV_QMI8658_CLOCK_MS, khal_time_ms() - t0,
+                                     "the enables did not wait for the "
+                                     "clock's start");
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("qmi8658: a write standby fails is an I/O error the next call "
+          "recovers from", "[kdrv_qmi8658]")
+{
+    Mockkhal_i2c_Init();
+    test_qmi8658_bring_up();
+
+    /* Entering: the enables refused, and CTRL1 is not touched. */
+    expect_w8_fail(REG_CTRL7, 0x00U);
+    TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_standby(true));
+    /* Entering: CTRL1 refused after the enables went off. */
+    expect_w8_checked(REG_CTRL7, 0x00U);
+    expect_r8(REG_CTRL1, 0x58U);
+    expect_w8_fail(REG_CTRL1, 0x59U);
+    TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_standby(true));
+    /* Entering again finishes the job. */
+    expect_w8_checked(REG_CTRL7, 0x00U);
+    expect_r8(REG_CTRL1, 0x58U);
+    expect_w8_checked(REG_CTRL1, 0x59U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(true));
+
+    /* Leaving: CTRL1 refused, and no enable is written onto a stopped
+     * clock. */
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_fail(REG_CTRL1, 0x58U);
+    TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_standby(false));
+    /* Leaving: CTRL1 not readable. */
+    khal_i2c_read_reg_ExpectAndReturn(NULL, REG_CTRL1, NULL, 1U, KODE_IO_ERROR);
+    khal_i2c_read_reg_IgnoreArg_dev();
+    khal_i2c_read_reg_IgnoreArg_buf();
+    TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_standby(false));
+    /* Leaving: the clock started, the enables refused. */
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_checked(REG_CTRL1, 0x58U);
+    expect_w8_fail(REG_CTRL7, 0x03U);
+    TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_standby(false));
+    /* Leaving again reads where the part is and finishes the job, with no
+     * wait for a clock that already runs. */
+    {
+        uint32_t const t0 = khal_time_ms();
+
+        expect_r8(REG_CTRL1, 0x58U);
+        expect_w8_checked(REG_CTRL1, 0x58U);
+        expect_w8_checked(REG_CTRL7, 0x03U);
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(false));
+        TEST_ASSERT_EQUAL_UINT32(0U, khal_time_ms() - t0);
+    }
     Mockkhal_i2c_Verify();
     Mockkhal_i2c_Destroy();
 }
@@ -304,6 +393,40 @@ TEST_CASE("qmi8658: the gyroscope's self-test uses CTRL3 and sixteenths of a dps
     Mockkhal_i2c_Destroy();
 }
 
+/* A self-test runs on the part's clock, and the row starts one from rest,
+ * where standby has stopped it. st_prepare() starts the clock, and the
+ * trigger comes a whole clock start later, from st_begin(), which leaves
+ * the clock alone. */
+TEST_CASE("qmi8658: preparing a self-test stops the sensors and starts the "
+          "clock, and the trigger leaves the clock alone", "[kdrv_qmi8658]")
+{
+    uint32_t t0;
+
+    Mockkhal_i2c_Init();
+    test_qmi8658_bring_up();
+
+    t0 = khal_time_ms();
+    expect_w8_checked(REG_CTRL7, 0x00U);
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_checked(REG_CTRL1, 0x58U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_st_prepare());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, khal_time_ms() - t0,
+                                     "preparing blocked: the clock's start is "
+                                     "the caller's to wait out");
+
+    expect_w8(REG_CTRL7, 0x00U);
+    expect_w8(REG_CTRL2, 0xA3U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_st_begin(KDRV_QMI8658_XL));
+
+    /* A clock that would not start is an I/O error. */
+    expect_w8_checked(REG_CTRL7, 0x00U);
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_fail(REG_CTRL1, 0x58U);
+    TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_st_prepare());
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
 TEST_CASE("qmi8658: the verdict is the datasheet's 200 mg and 300 dps, per axis",
           "[kdrv_qmi8658]")
 {
@@ -321,6 +444,27 @@ TEST_CASE("qmi8658: the verdict is the datasheet's 200 mg and 300 dps, per axis"
     TEST_ASSERT_FALSE(kdrv_qmi8658_st_judge(KDRV_QMI8658_XL, NULL));
 }
 
+/* Whatever the row managed before it: a part whose clock never started is
+ * left running all the same, the clock started and waited for first. */
+TEST_CASE("qmi8658: leaving self-test starts a stopped clock and waits for it "
+          "before the enables", "[kdrv_qmi8658]")
+{
+    uint32_t t0;
+
+    Mockkhal_i2c_Init();
+    test_qmi8658_bring_up();
+    t0 = khal_time_ms();
+    expect_w8(REG_CTRL7, 0x00U);
+    expect_scales_and_enable();
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_checked(REG_CTRL1, 0x58U);
+    expect_w8_checked(REG_CTRL7, 0x03U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_st_end());
+    TEST_ASSERT_EQUAL_UINT32(KDRV_QMI8658_CLOCK_MS, khal_time_ms() - t0);
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
 TEST_CASE("qmi8658: leaving self-test rewrites the scales and turns both on",
           "[kdrv_qmi8658]")
 {
@@ -328,6 +472,8 @@ TEST_CASE("qmi8658: leaving self-test rewrites the scales and turns both on",
     test_qmi8658_bring_up();
     expect_w8(REG_CTRL7, 0x00U);
     expect_scales_and_enable();
+    expect_r8(REG_CTRL1, 0x58U);
+    expect_w8_checked(REG_CTRL1, 0x58U);
     expect_w8_checked(REG_CTRL7, 0x03U);
     TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_st_end());
 
@@ -635,6 +781,51 @@ TEST_CASE("qmi8658: re-arming between two windows puts back the FIFO mode and th
     expect_w8_fail(REG_CTRL1, 0x58U);
     TEST_ASSERT_EQUAL_INT(KODE_IO_ERROR, kdrv_qmi8658_fifo_rearm());
 
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
+TEST_CASE("qmi8658: standby moves sensorDisable alone and keeps the rest of "
+          "CTRL1", "[kdrv_qmi8658]")
+{
+    size_t        samples = 0U;
+    uint8_t const cnt[2]  = { 0x03U, 0x00U };   /* 3 words: one sample */
+
+    Mockkhal_i2c_Init();
+    test_qmi8658_bring_up();
+
+    /* CTRL1 as a FIFO drain leaves it, auto-increment off: the bit is set and
+     * cleared on that value, which is not the one bring-up writes. */
+    expect_w8_checked(REG_CTRL7, 0x00U);
+    expect_r8(REG_CTRL1, 0x18U);
+    expect_w8_checked(REG_CTRL1, 0x19U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(true));
+    expect_r8(REG_CTRL1, 0x19U);
+    expect_w8_checked(REG_CTRL1, 0x18U);
+    expect_w8_checked(REG_CTRL7, 0x03U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(false));
+
+    /* A whole window, then a rest: the window leaves CTRL1 at the running
+     * value, bit clear, and the rest sets the bit on that. */
+    arm_window();
+    expect_read(REG_FIFO_CNT, cnt, sizeof(cnt));
+    expect_ctrl9(0x05U);
+    expect_w8_checked(REG_CTRL1, 0x18U);
+    expect_head();
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_fifo_open(&samples));
+    disarm_window();
+    expect_w8_checked(REG_CTRL7, 0x00U);
+    expect_r8(REG_CTRL1, 0x58U);
+    expect_w8_checked(REG_CTRL1, 0x59U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(true));
+
+    /* A further create() leaves CTRL1 alone, and a wake after it clears the
+     * bit the rest set. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_create(NULL));
+    expect_r8(REG_CTRL1, 0x59U);
+    expect_w8_checked(REG_CTRL1, 0x58U);
+    expect_w8_checked(REG_CTRL7, 0x03U);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_qmi8658_standby(false));
     Mockkhal_i2c_Verify();
     Mockkhal_i2c_Destroy();
 }
