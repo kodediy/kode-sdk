@@ -8657,6 +8657,96 @@ static bool warned(const char *needle)
     return found;
 }
 
+/** @brief How the channel leaves while the dump is with the worker. */
+typedef enum {
+    DUMP_LEAVE_CHAN_OFF = 0,   /**< `config key="chan" value=off`.          */
+    DUMP_LEAVE_SESSION_DROP    /**< The broker drops the session.            */
+} dump_leave_t;
+
+/** @brief What a dump whose channel left mid-PUT came to, read before judging. */
+typedef struct {
+    unsigned answers_at_leave;   /**< Answers when the channel left.            */
+    unsigned answers_at_end;     /**< Answers when the PUT ended.               */
+    uint8_t  result;             /**< The last answer's result.                 */
+    unsigned erases;             /**< kdrv_slot_coredump_erase() calls.         */
+    unsigned forgets;            /**< kdrv_net_http_forget() calls at the end.  */
+    bool     worker_free;        /**< No job with the worker once the stop ran. */
+    unsigned answers_later;      /**< Answers once the guard's time had passed. */
+} dump_leave_seen_t;
+
+/**
+ * @brief Send the dump, make the channel leave while the PUT is with the
+ *        worker, end the PUT with a 201, and read what followed.
+ *
+ * Everything is read and AO_Net taken down before the caller judges: a red
+ * case leaves nothing armed for the next one.
+ */
+static dump_leave_seen_t dump_leave_mid_put(dump_leave_t how)
+{
+    dump_leave_seen_t seen;
+    NetDumpRspEvt     r;
+
+    (void)memset(&seen, 0, sizeof(seen));
+    dump_up();
+    dump_to_put();
+    if ( DUMP_LEAVE_CHAN_OFF == how )
+    {
+        (void)config_ask(AO_Net, &(config_ask_t){ .key = KSET_KEY_CHAN, .set = true, .b = false });
+    }
+    else
+    {
+        mqtt_link(KDRV_NET_MQTT_DISCONNECTED);
+    }
+    (void)net_settle();
+    seen.answers_at_leave = dump_answers(&r);
+
+    s_nforget = 0U;
+    http_reply(201U, "");
+    seen.answers_at_end = dump_answers(&r);
+    seen.result         = r.result;
+    seen.erases         = s_dump.erases;
+    seen.forgets        = s_nforget;
+    /* A stop the leave owed waits for the worker; it runs now. */
+    if ( (NULL != s_held) && ((int)KDRV_NET_JOB_MQTT_STOP == s_ran_job) )
+    {
+        job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    }
+    seen.worker_free = (NULL == s_held);
+    secs(GUARD_STEPS(KODE_NET_GUARD_MS) / 100U + 1U);
+    seen.answers_later = dump_answers(&r);
+    dump_done();
+    return seen;
+}
+
+/** @brief Judge one leave: erased once, answered OK once, AO_Net idle. */
+static void dump_leave_judge(const dump_leave_seen_t *seen)
+{
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen->answers_at_leave,
+                                   "the leave answered a dump the worker still sends");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen->answers_at_end, "the 201 was not answered once");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_OK, seen->result);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen->erases, "a 201 left the dump");
+    TEST_ASSERT_EQUAL_UINT(1U, seen->forgets);
+    TEST_ASSERT_TRUE_MESSAGE(seen->worker_free, "the worker still holds a job");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen->answers_later, "answered twice");
+}
+
+TEST_CASE("test_a_dump_whose_channel_is_switched_off_mid_put_is_erased_on_a_201: "
+          "answered once, and AO_Net idle", "[net_ao][dump]")
+{
+    dump_leave_seen_t const seen = dump_leave_mid_put(DUMP_LEAVE_CHAN_OFF);
+
+    dump_leave_judge(&seen);
+}
+
+TEST_CASE("test_a_dump_whose_session_drops_mid_put_is_erased_on_a_201: "
+          "answered once, and AO_Net idle", "[net_ao][dump]")
+{
+    dump_leave_seen_t const seen = dump_leave_mid_put(DUMP_LEAVE_SESSION_DROP);
+
+    dump_leave_judge(&seen);
+}
+
 /** @brief Filler the asker's queue is stuffed with; its signal nobody here reads. */
 static const QEvt s_dump_filler = QEVT_INITIALIZER(IMU_TEST_REQ_SIG);
 
