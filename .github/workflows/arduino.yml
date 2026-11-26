@@ -209,6 +209,8 @@ jobs:
         run: |
           set -euo pipefail
           if docker image inspect espressif/idf:v6.1 > /dev/null 2>&1; then
+            # The build's container, stopped, still holds the image.
+            docker container prune --force > /dev/null
             docker image rm espressif/idf:v6.1
           fi
           sudo rm -rf "$GITHUB_WORKSPACE/build_arduino_libs/lib-builder/build"
