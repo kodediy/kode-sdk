@@ -3460,13 +3460,15 @@ bool kdump_name(char *out, size_t cap, const char *sha, uint32_t crc);
  * @brief Ask AO_Net to send the core dump of a kodeOS fault to the Kode
  *        channel's `dumps` link.
  *
- * Answered with one NET_DUMP_RSP_SIG (NetDumpRspEvt) to @p who. A 201 erases
- * the dump; anything else leaves it in flash. A full pool drops the request
- * with an error line.
+ * A 201 erases the dump; anything else leaves it in flash. Never asserts.
  *
  * @param who The AO the answer goes to.
+ * @return true when the request is in AO_Net's queue: one NET_DUMP_RSP_SIG
+ *         (NetDumpRspEvt) comes to @p who. false when nothing was asked and
+ *         no answer will come: @p who is NULL, the event pool has no block,
+ *         or AO_Net's queue is within KQP_NET_CMD_MARGIN of full.
  */
-void net_dump_request(QActive *who);
+bool net_dump_request(QActive *who);
 #endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /* ---- AO_Storage: owner of the microSD and the internal FAT --------------

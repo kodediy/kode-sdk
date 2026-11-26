@@ -990,19 +990,22 @@ void net_shot_stop_request(QActive *who)
 
 #if CONFIG_KODEOS_DUMP_HTTP
 /* cppcheck-suppress misra-c2012-8.7 ; kaos.h's interface: the interface asks for the fault report */
-void net_dump_request(QActive *who)
+bool net_dump_request(QActive *who)
 {
-    NetDumpReqEvt *e = Q_NEW_X(NetDumpReqEvt, 0U, NET_DUMP_REQ_SIG);
+    NetDumpReqEvt *e      = NULL;
+    bool           posted = false;
 
+    if ( NULL != who )
+    {
+        e = Q_NEW_X(NetDumpReqEvt, 0U, NET_DUMP_REQ_SIG);
+    }
     if ( NULL != e )
     {
         e->who = who;
-        QACTIVE_POST(AO_Net, &e->super, NULL);
+        /* QActive_post_ recycles the event itself when it refuses. */
+        posted = QACTIVE_POST_X(AO_Net, &e->super, KQP_NET_CMD_MARGIN, NULL);
     }
-    else
-    {
-        KLOG_E(TAG, "out of events; a fault report request was dropped");
-    }
+    return posted;
 }
 #endif
 

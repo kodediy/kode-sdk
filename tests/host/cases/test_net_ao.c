@@ -8274,7 +8274,7 @@ static void dump_done(void)
 /** @brief Ask for the dump to be sent, through the front door, answered to the spy. */
 static void dump_ask(void)
 {
-    net_dump_request(ao_spy());
+    TEST_ASSERT_TRUE(net_dump_request(ao_spy()));
     (void)net_settle();
 }
 
@@ -8655,6 +8655,110 @@ TEST_CASE("test_a_request_while_an_upload_runs_answers_busy: a dump, a "
 
     TEST_ASSERT_EQUAL_UINT(1U, s_dump.reads);
     TEST_ASSERT_EQUAL_UINT(1U, s_dump.erases);
+    dump_done();
+}
+
+/* ---- The door: it says whether it could ask --------------------------------
+ * net_dump_request() answers true only when the request is in AO_Net's queue,
+ * and then one answer comes. Nobody to answer, no event block, or a queue
+ * within KQP_NET_CMD_MARGIN of full: false, nothing asked, nothing answers,
+ * and no event is lost from its pool.
+ */
+
+TEST_CASE("test_a_request_that_is_posted_says_so: true, and the answer comes",
+          "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+    UBaseType_t   waiting;
+
+    dump_up();
+    waiting = uxQueueMessagesWaiting(AO_Net->eQueue);
+    TEST_ASSERT_TRUE(net_dump_request(ao_spy()));
+    TEST_ASSERT_EQUAL_UINT(waiting + 1U, uxQueueMessagesWaiting(AO_Net->eQueue));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(1U, s_nput);
+    http_reply(201U, "");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_OK, r.result);
+    dump_done();
+}
+
+TEST_CASE("test_a_request_with_nobody_to_answer_is_refused: false, and nothing "
+          "is posted", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+
+    dump_up();
+    net_queue_flush();
+    uint32_t const before = pools_free();
+
+    TEST_ASSERT_FALSE(net_dump_request(NULL));
+    TEST_ASSERT_EQUAL_UINT(0U, uxQueueMessagesWaiting(AO_Net->eQueue));
+    TEST_ASSERT_EQUAL_UINT32(before, pools_free());
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.asks);
+    TEST_ASSERT_EQUAL_UINT(0U, s_nput);
+    TEST_ASSERT_EQUAL_UINT(0U, dump_answers(&r));
+    dump_done();
+}
+
+TEST_CASE("test_a_request_with_no_room_in_the_queue_is_refused: false, no "
+          "assert, no answer later, the event back in its pool", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+
+    dump_up();
+    net_queue_flush();
+    net_queue_fill_to(KQP_NET_CMD_MARGIN);
+    uint32_t const before = pools_free();
+
+    TEST_ASSERT_FALSE(net_dump_request(ao_spy()));
+    TEST_ASSERT_EQUAL_UINT(KQP_NET_CMD_MARGIN, uxQueueSpacesAvailable(AO_Net->eQueue));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(before, pools_free(),
+                                     "a refused request was not recycled");
+    net_queue_flush();
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(0U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.asks);
+
+    /* One slot above the margin: that one is taken, the next is not. */
+    net_queue_fill_to(KQP_NET_CMD_MARGIN + 1U);
+    TEST_ASSERT_TRUE(net_dump_request(ao_spy()));
+    TEST_ASSERT_FALSE(net_dump_request(ao_spy()));
+    TEST_ASSERT_EQUAL_UINT32(before - 1U, pools_free());
+    net_queue_flush();
+    TEST_ASSERT_EQUAL_UINT32(before, pools_free());
+    dump_done();
+}
+
+TEST_CASE("test_a_request_with_no_event_block_is_refused: false when the pool "
+          "is dry, and nothing is posted", "[net_ao][dump]")
+{
+    static const QEvt *held[DOOR_DRY_MAX];
+    uint32_t           n = 0U;
+
+    dump_up();
+    net_queue_flush();
+    while ( DOOR_DRY_MAX > n )
+    {
+        NetDumpReqEvt *const fresh = Q_NEW_X(NetDumpReqEvt, 0U, NET_DUMP_REQ_SIG);
+
+        if ( NULL == fresh )
+        {
+            break;
+        }
+        held[n] = &fresh->super;
+        ++n;
+    }
+    TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(DOOR_DRY_MAX, n, "the pool never ran dry");
+
+    TEST_ASSERT_FALSE(net_dump_request(ao_spy()));
+    TEST_ASSERT_EQUAL_UINT(0U, uxQueueMessagesWaiting(AO_Net->eQueue));
+
+    for ( uint32_t i = 0U; i < n; ++i )
+    {
+        QF_gc(held[i]);
+    }
     dump_done();
 }
 
