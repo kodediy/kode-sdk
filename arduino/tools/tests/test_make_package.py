@@ -359,5 +359,46 @@ class LibsArchive(unittest.TestCase):
             self.assertIn("flags/", said)
 
 
+class Relocatable(unittest.TestCase):
+    """The libraries' flags as the builder's export leaves them in its output folder."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tree = Path(self.tmp.name).resolve() / "lib-builder"
+        self.libs = self.tree / "out" / "tools" / "esp32-arduino-libs" / "esp32p4"
+        (self.libs / "flags").mkdir(parents=True)
+        (self.libs / "sdkconfig").write_text(f'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="{self.tree}/partitions.csv"\n')
+        for name in ("c_flags", "cpp_flags", "S_flags", "ld_flags"):
+            (self.libs / "flags" / name).write_text("-mabi=ilp32f -specs=picolibc.specs -ffunction-sections")
+        (self.libs / "flags" / "includes").write_text("-iwithprefixbefore esp_libc/platform_include")
+        self.out = Path(self.tmp.name) / "out"
+        self.out.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_libraries_with_the_toolchains_spec_file_are_packed(self):
+        path = make_package.libs_archive(self.libs, VERSION, self.out)
+        with zipfile.ZipFile(path) as made:
+            self.assertEqual(made.read("kodedot-libs/flags/c_flags"),
+                             b"-mabi=ilp32f -specs=picolibc.specs -ffunction-sections")
+
+    def test_a_spec_file_by_its_path_is_refused_naming_the_file(self):
+        specs = "/app/kodediy/kode-sdk/build_arduino_libs/lib-builder/build/specs/picolibc.specs"
+        (self.libs / "flags" / "cpp_flags").write_text(f'-mabi=ilp32f "-specs={specs}" -fno-rtti')
+        said = refusal(lambda: make_package.libs_archive(self.libs, VERSION, self.out))
+        self.assertIn("flags/cpp_flags", said)
+        self.assertIn(specs, said)
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_a_path_of_the_build_tree_is_refused_naming_it(self):
+        config = f"{self.tree}/build/config"
+        (self.libs / "flags" / "includes").write_text(f"-iwithprefixbefore esp_libc/platform_include -I{config}")
+        said = refusal(lambda: make_package.libs_archive(self.libs, VERSION, self.out))
+        self.assertIn("flags/includes", said)
+        self.assertIn(str(self.tree), said)
+        self.assertEqual(list(self.out.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()
