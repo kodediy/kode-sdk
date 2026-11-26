@@ -915,9 +915,9 @@
       "scale": 1,
       "dx": 0,
       "dy": 0,
-      "anchor": 36,
+      "anchor": 0,
       "recolour": {},
-      "help": "Kody rises on the right of the band and an X shows: the fault notice. Stops on its anchor"
+      "help": "Kody rises on the right of the band, an X shows and he leaves; its first and last frames are empty: the fault notice"
     }
   ],
   "pack": {
