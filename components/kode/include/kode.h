@@ -2632,6 +2632,9 @@ bool kode_display_sleep(bool sleep);
  * waits for the listeners, and a newer point takes its place: a drag never
  * fills the queue, and the other events still arrive.
  *
+ * Linking the touch panel links the display too, which brings the panel up at
+ * boot: the touch controller shares the panel's supply and reset line.
+ *
  * Nothing is asked of the touch panel until the first touch listener, wait or
  * kode_touch_read(); the points start then. With a screen on the glass a finger
  * gives both the screen's tap (kode_widget_was_pressed()) and these

@@ -151,6 +151,11 @@ void display_state_request(void)
     QACTIVE_POST(AO_Display, &req, (void *)0);
 }
 
+void display_state_subscribe(QActive const *who)
+{
+    QActive_subscribe(who, DISPLAY_STATE_SIG);
+}
+
 #if CONFIG_KODE_LOWPOWER
 void display_minute_request(void)
 {

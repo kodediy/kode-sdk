@@ -1449,6 +1449,18 @@ void kaos_display_register(void);
  */
 void display_state_request(void);
 
+/**
+ * @brief Subscribe @p who to DISPLAY_STATE_SIG, AO_Display's report of the panel.
+ *
+ * A bare subscription names nobody: this call is what links AO_Display into
+ * an app whose AO needs the panel up, so that kode_init() starts it and its
+ * bring-up publishes the state. It posts nothing, so an initial transition
+ * that runs before AO_Display's start may call it.
+ *
+ * @param who The listening Active Object.
+ */
+void display_state_subscribe(QActive const *who);
+
 #if CONFIG_KODE_LOWPOWER
 /**
  * @brief Ask AO_Display to light the glass for the minute's glyphs, then let it
