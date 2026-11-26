@@ -2482,15 +2482,13 @@ static bool chan_serving(const Net * const me)
  */
 static bool upload_in_hand(const Net * const me)
 {
-    bool held = false;
-
-#if CONFIG_KODEOS_SHOT_HTTP
-    held = held || ((uint8_t)KSHOT_ONE == me->smode);
+#if CONFIG_KODEOS_SHOT_HTTP && CONFIG_KODEOS_DUMP_HTTP
+    return ((uint8_t)KSHOT_ONE == me->smode) || (NULL != me->dwho);
+#elif CONFIG_KODEOS_SHOT_HTTP
+    return (uint8_t)KSHOT_ONE == me->smode;
+#else
+    return NULL != me->dwho;
 #endif
-#if CONFIG_KODEOS_DUMP_HTTP
-    held = held || (NULL != me->dwho);
-#endif
-    return held;
 }
 
 /**
@@ -5298,12 +5296,12 @@ static bool dump_ready(const Net * const me)
  */
 static bool dump_busy(const Net * const me)
 {
-    bool busy = me->busy || upload_in_hand(me);
-
 #if CONFIG_KODEOS_SHOT_HTTP
-    busy = busy || ((uint8_t)KSHOT_IDLE != me->smode) || me->sclose;
+    return me->busy || upload_in_hand(me) || ((uint8_t)KSHOT_IDLE != me->smode)
+           || me->sclose;
+#else
+    return me->busy || upload_in_hand(me);
 #endif
-    return busy;
 }
 
 /** @brief The word the log says for @p result. */
