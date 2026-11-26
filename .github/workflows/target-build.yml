@@ -52,11 +52,20 @@ jobs:
         # image that proves an app links only what it uses. `minimal_noradio`
         # is the same with KODEOS_RADIO=n and KODEOS_CONSOLE=n: the build
         # that compiles kdrv_c5_hold.c, and the one with no command line.
+        # `minimal_ble` is `minimal` with KODEOS_RADIO=y and KODEOS_BLE=y and
+        # no console: Bluetooth without the BLE console, its pairing or the
+        # passkey, the build in which kdrv_ble.h declares no pairing type.
         # `nowifi` is also the build without the mirror (KODEOS_MIRROR=n),
         # the only one with the display linked, the console on and no stream.
         # `testdot` is the full build with AO_TestDot on: the only one that
         # compiles the E5 final test, the OV5640 and the station's chips.
-        variant: ['', nowifi, minimal, minimal_noradio, testdot]
+        # `noble` is an app with Wi-Fi and low power and without BLE: the
+        # only one with KODE_LOWPOWER on.
+        # `arduino` is an app (sdkconfig.arduino) with the SDK's lines for
+        # Arduino's core on top (arduino/sdkconfig.sdk): the only one with
+        # KHAL_CONSOLE_APP_PORT on, the console's cable port given by the app
+        # (main/arduino_port.c).
+        variant: ['', nowifi, noble, minimal, minimal_noradio, minimal_ble, testdot, arduino]
     steps:
       # Without submodules, for the reason host-tests.yml gives: the only one
       # is the C5's firmware, a project for another chip that nothing here
@@ -90,6 +99,9 @@ jobs:
               ../../tools/check_starts.sh build --absent "$absent" || exit 1
             elif [ "${{ matrix.variant }}" = "minimal_noradio" ]; then
               ../../tools/check_ram.sh build/kode_target.elf ram_budget.minimal_noradio.txt || exit 1
+              ../../tools/check_starts.sh build --absent "$absent,AO_Console,AO_Autotest" || exit 1
+            elif [ "${{ matrix.variant }}" = "minimal_ble" ]; then
+              ../../tools/check_ram.sh build/kode_target.elf ram_budget.minimal_ble.txt || exit 1
               ../../tools/check_starts.sh build --absent "$absent,AO_Console,AO_Autotest" || exit 1
             elif [ "${{ matrix.variant }}" = "testdot" ]; then
               cat ram_budget.testdot.txt ram_budget.txt > build/ram_budget.testdot

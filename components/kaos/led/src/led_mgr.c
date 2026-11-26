@@ -41,10 +41,14 @@ typedef struct {
     bool        test_wait_live;    /**< An arming is outstanding.            */
     uint32_t    test_wait_stale;   /**< Expiries queued for a colour that was
                                     *   already answered.                    */
+    bool        bus_ok;            /**< The last write to the chip landed: the
+                                    *   edge its warning is said on.          */
 #if CONFIG_KODE_LOWPOWER
     uint8_t     lp_who;            /**< The id lowpower_join() gave.          */
     bool        rested;            /**< The board's rest has the LED dark and
                                     *   the heartbeat down.                   */
+    bool        relight;           /**< The rest put out a LED a request had
+                                    *   lit: AWAKE lights it again.           */
 #endif
 } LedMgr;
 
@@ -67,9 +71,11 @@ void LedMgr_ctor(void)
     QTimeEvt_ctorX(&me->test_wait, &me->super, LED_TEST_WAIT_SIG, 0U);
     me->test_wait_live  = false;
     me->test_wait_stale = 0U;
+    me->bus_ok          = true;
 #if CONFIG_KODE_LOWPOWER
     me->lp_who          = KODE_LOWPOWER_WHO_NONE;
     me->rested          = false;
+    me->relight         = false;
 #endif
 }
 
@@ -116,6 +122,55 @@ void led_test_request(void)
 {
     static const QEvt req = QEVT_INITIALIZER(LED_TEST_REQ_SIG);
     QACTIVE_POST(AO_LedMgr, &req, (void *)0);
+}
+
+/* ---- Writes to the chip ---------------------------------------------------- */
+
+/**
+ * @brief Say once when the LED stops taking writes, and once when it takes
+ *        them again.
+ *
+ * The heartbeat writes twice a period: a line per failed write would bury the
+ * console this is trying to warn.
+ *
+ * @param me The AO.
+ * @param st What the kdrv_led call answered.
+ */
+static void led_note_bus(LedMgr * const me, kode_status_t st)
+{
+    bool const ok = (KODE_OK == st);
+
+    if ( ok != me->bus_ok )
+    {
+        me->bus_ok = ok;
+        if ( ok )
+        {
+            KLOG_N(TAG, "the LED takes writes again");
+        }
+        else
+        {
+            KLOG_W(TAG, "the LED did not take a write (status %d); it shows "
+                        "what it showed before", (int)st);
+        }
+    }
+}
+
+/**
+ * @brief The end of a request that decides what the LED shows: set, toggle,
+ *        colour, the heartbeat stopped or the `led` row ended.
+ *
+ * One answered during a rest stands: AWAKE puts back nothing of its own over
+ * it.
+ *
+ * @param me The AO.
+ * @param st What the kdrv_led call answered.
+ */
+static void led_asked(LedMgr * const me, kode_status_t st)
+{
+    led_note_bus(me, st);
+#if CONFIG_KODE_LOWPOWER
+    me->relight = false;
+#endif
 }
 
 /* ---- The `led` row --------------------------------------------------------
@@ -231,9 +286,9 @@ static void wait_stop(LedMgr * const me)
  */
 static void colour_ask(LedMgr * const me)
 {
-    (void)kdrv_led_rgb(TEST_RGB[me->colour][0],
-                       TEST_RGB[me->colour][1],
-                       TEST_RGB[me->colour][2]);
+    led_note_bus(me, kdrv_led_rgb(TEST_RGB[me->colour][0],
+                              TEST_RGB[me->colour][1],
+                              TEST_RGB[me->colour][2]));
     KLOG_N(TAG, "test led: step %u of %u - is the LED %s? TOP = yes, BOT = no",
            (unsigned)(me->colour + 1U), (unsigned)LED_COLOUR_COUNT,
            colour_name(me->colour));
@@ -299,7 +354,7 @@ static QState LedMgr_testing(LedMgr * const me, QEvt const * const e)
         case Q_EXIT_SIG: {
             wait_stop(me);
             QActive_unsubscribe(&me->super, BUTTON_EVT_SIG);
-            (void)kdrv_led_set(false);
+            led_asked(me, kdrv_led_set(false));
             if ( me->heartbeat_enabled )
             {
                 /* What was last asked for, at the period last asked for. The blink
@@ -442,20 +497,30 @@ static QState LedMgr_testing(LedMgr * const me, QEvt const * const e)
 /**
  * @brief LOWPOWER_ROUND_SIG: the LED dark and the heartbeat down; answer once.
  *
+ * A LED this puts out is noted for AWAKE, in any round of the rest: one lit
+ * by a request since an earlier round is owed too, and a round that finds the
+ * LED already dark leaves what is owed as it is.
+ *
  * @param me The AO.
  * @param r  The round.
  */
 static void led_round(LedMgr * const me, const LowPowerRoundEvt * const r)
 {
     (void)QTimeEvt_disarm(&me->heartbeat);
-    (void)kdrv_led_set(false);
+    if ( kdrv_led_is_on() )
+    {
+        me->relight = true;
+    }
+    led_note_bus(me, kdrv_led_set(false));
     me->rested = true;
     lowpower_ready(me->lp_who, r->round, false, NULL);
 }
 
 /**
- * @brief LOWPOWER_STATE_SIG: on AWAKE, the heartbeat back if it is wanted.
+ * @brief LOWPOWER_STATE_SIG: on AWAKE, the heartbeat back if it is wanted,
+ *        else the LED lit again if the rest put it out.
  *
+ * The heartbeat owns the LED while it is wanted, so it alone comes back.
  * Idempotent: the timer is disarmed before it is armed, so a repeated AWAKE
  * (an abandoned round publishes one) cannot arm it twice, and one that finds
  * the LED never rested does nothing.
@@ -473,6 +538,15 @@ static void led_state(LedMgr * const me, const LowPowerStateEvt * const s)
             (void)QTimeEvt_disarm(&me->heartbeat);
             QTimeEvt_armX(&me->heartbeat, me->blink_ticks, me->blink_ticks);
         }
+        else if ( me->relight )
+        {
+            led_note_bus(me, kdrv_led_set(true));   /* the last colour that landed */
+        }
+        else
+        {
+            /* dark before the rest: dark after it */
+        }
+        me->relight = false;
     }
 }
 #endif /* CONFIG_KODE_LOWPOWER */
@@ -489,7 +563,7 @@ static QState LedMgr_initial(LedMgr * const me, void const * const par)
     (void)par;
     KLOG_D(TAG, "FSM start: initial -> active");
     kaos_claim(KBSP_RES_LED, me, "AO_LedMgr");
-    kdrv_led_init(); /* LED starts OFF; heartbeat stays disarmed until asked for */
+    led_note_bus(me, kdrv_led_init()); /* LED starts OFF; heartbeat stays disarmed until asked for */
 
     QActive_subscribe(&me->super, LED_SET_SIG);
     QActive_subscribe(&me->super, LED_TOGGLE_SIG);
@@ -527,23 +601,23 @@ static QState LedMgr_active(LedMgr * const me, QEvt const * const e)
             /* A beat queued before the rest must not light the LED after it. */
             if ( !me->rested )
             {
-                (void)kdrv_led_toggle();
+                led_note_bus(me, kdrv_led_toggle());
             }
 #else
-            (void)kdrv_led_toggle();
+            led_note_bus(me, kdrv_led_toggle());
 #endif
             status = Q_HANDLED();
             break;
         }
         case LED_SET_SIG: {
             KLOG_D(TAG, "evt LED_SET on=%d", (int)Q_EVT_CAST(LedEvt)->on);
-            (void)kdrv_led_set(Q_EVT_CAST(LedEvt)->on);
+            led_asked(me, kdrv_led_set(Q_EVT_CAST(LedEvt)->on));
             status = Q_HANDLED();
             break;
         }
         case LED_TOGGLE_SIG: {
             KLOG_D(TAG, "evt LED_TOGGLE");
-            (void)kdrv_led_toggle();
+            led_asked(me, kdrv_led_toggle());
             status = Q_HANDLED();
             break;
         }
@@ -551,7 +625,7 @@ static QState LedMgr_active(LedMgr * const me, QEvt const * const e)
             LedRgbEvt const * const rgb = Q_EVT_CAST(LedRgbEvt);
             KLOG_D(TAG, "evt LED_RGB %u,%u,%u",
                    (unsigned)rgb->r, (unsigned)rgb->g, (unsigned)rgb->b);
-            (void)kdrv_led_rgb(rgb->r, rgb->g, rgb->b);
+            led_asked(me, kdrv_led_rgb(rgb->r, rgb->g, rgb->b));
             status = Q_HANDLED();
             break;
         }
@@ -591,7 +665,7 @@ static QState LedMgr_active(LedMgr * const me, QEvt const * const e)
             else
             {
                 (void)QTimeEvt_disarm(&me->heartbeat);
-                (void)kdrv_led_set(false);
+                led_asked(me, kdrv_led_set(false));
                 KLOG_I(TAG, "heartbeat disabled");
             }
             status = Q_HANDLED();

@@ -36,7 +36,7 @@ _Static_assert((KNFC_EMU_RAW_MAX + KNFC_TLV_WRAP_BYTES)
  */
 typedef struct {
     uint8_t  nfcid[KNFC_UID_MAX];        /**< The presented NFCID1.          */
-    uint8_t  nfcid_len;                  /**< 4, 7 or 10.                    */
+    uint8_t  nfcid_len;                  /**< 4 or 7.                        */
     uint8_t  sens_res[2];                /**< SENS_RES, LSB first.           */
     uint8_t  sak;                        /**< SEL_RES.                       */
     uint8_t  t2t[KNFC_EMU_T2T_BYTES];    /**< The Type-2 image.              */
@@ -46,7 +46,7 @@ typedef struct {
 /**
  * @brief Build the presented identity and Type-2 image from @p card.
  *
- * A coherent identity (@c uid_len 4/7/10 with an @c atqa whose size bits
+ * A coherent identity (@c uid_len 4 or 7 with an @c atqa whose size bits
  * match) is presented verbatim. Otherwise a 7-byte Type-2 tag is synthesised:
  * an NXP-style UID (0x04 first, never the 0x88 cascade tag), SENS_RES 0x0044,
  * SEL_RES 0x00, and the caller's message - or a default Text record when it is
@@ -56,7 +56,7 @@ typedef struct {
  * @param card What to present.
  * @param out  Out: the identity and image. Written only on KODE_OK.
  * @return KODE_OK; KODE_DENIED for a NULL argument or a @c uid_len that is not
- *         0, 4, 7 or 10; KODE_NO_RESOURCES when the message does not fit the
+ *         0, 4 or 7; KODE_NO_RESOURCES when the message does not fit the
  *         NDEF area.
  */
 kode_status_t knfc_emu_image_build(const knfc_emu_card_t *card,

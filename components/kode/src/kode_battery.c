@@ -7,13 +7,17 @@
  */
 #include "kode.h"
 
+#include <inttypes.h>
+
 #include "kdrv_bq25896.h"
 #include "khal_once.h"
 #include "khal_sync.h"
 #include "kode_battery.h"
 #include "kode_entry.h"
+#include "kode_standard_ao.h"
 #include "kode_sys.h"
 #include "kode_sys_internal.h"
+#include "kode_task.h"
 
 _Static_assert(KODE_CHARGE_CURRENT_MIN_MA == KODE_SYS_CHARGE_LIMIT_MIN_MA,
                "the smallest charge limit is the system's");
@@ -27,6 +31,27 @@ _Static_assert(KODE_CHARGE_CURRENT_MAX_MA == KODE_SYS_CHARGE_LIMIT_MAX_MA,
 
 /** @brief The text kode_error() gives when the build has no AO_LowPower to switch the board off. */
 #define POWER_OFF_NOT_BUILT "the board cannot switch off: low power is not built (CONFIG_KODE_LOWPOWER)"
+
+/** @brief The text kode_error() gives when USB keeps the boost from starting. */
+#define BOOST_TEXT_CABLE "the boost cannot start while USB is plugged in"
+
+/** @brief The text kode_error() gives when the battery has not been read. */
+#define BATTERY_TEXT_UNREAD "the battery has not been read yet"
+
+/** @brief The text kode_error() gives when the cell's temperature or the pack keeps the boost from starting. */
+#define BOOST_TEXT_TEMP "the boost did not start: the cell is under -10 C or over 55 C, or no pack is fitted"
+
+/** @brief The text kode_error() gives for the boost's fault. */
+#define BOOST_TEXT_FAULT "the boost did not start: an overload or an over-voltage on J3's 5 V, or the cell too low"
+
+/** @brief The text kode_error() gives when the charger reports nothing and the boost is not running. */
+#define BOOST_TEXT_PIN "the boost did not start: the charger's OTG pin is low"
+
+/** @brief The text kode_error() gives when the charger did not start the boost, for no reason it reports. */
+#define BOOST_TEXT_NOT_ON "the charger did not start the boost"
+
+/** @brief The text kode_error() gives when the board refuses the boost because it switches off. */
+#define BOOST_TEXT_OFF "the board is switching off"
 
 /** @brief The lock every public battery call holds; made on the first call. */
 static khal_mutex_t s_battery_lock;
@@ -101,7 +126,7 @@ static bool battery_get(kode_sys_battery_t *out)
     }
     else
     {
-        kode_err_set("the battery has not been read yet");
+        kode_err_set(BATTERY_TEXT_UNREAD);
     }
     return ok;
 }
@@ -353,7 +378,7 @@ static bool boost_may_start(void)
 
     if ( ok && r.vbus )
     {
-        kode_err_set("the boost cannot start while USB is plugged in");
+        kode_err_set(BOOST_TEXT_CABLE);
         ok = false;
     }
     else if ( ok && (KODE_SYS_BOOST_MIN_MV > r.vbat_mv) )
@@ -369,28 +394,125 @@ static bool boost_may_start(void)
     return ok;
 }
 
+/**
+ * @brief Keep why AO_Power's answer is not the boost on as the task's error.
+ * @param rc  The answer's code, or KODE_TIMEOUT for none.
+ * @param why Its POWER_BOOST_WHY_*.
+ */
+static void boost_fail(kode_status_t rc, uint8_t why)
+{
+    switch ( why )
+    {
+    case POWER_BOOST_WHY_CABLE:
+        kode_err_set(BOOST_TEXT_CABLE);
+        break;
+    case POWER_BOOST_WHY_UNREAD:
+        kode_err_set(BATTERY_TEXT_UNREAD);
+        break;
+    case POWER_BOOST_WHY_CELL:
+        kode_err_set("the cell is under the %u mV the boost needs", (unsigned)KODE_SYS_BOOST_MIN_MV);
+        break;
+    case POWER_BOOST_WHY_TEMP:
+        kode_err_set(BOOST_TEXT_TEMP);
+        break;
+    case POWER_BOOST_WHY_FAULT:
+        kode_err_set(BOOST_TEXT_FAULT);
+        break;
+    case POWER_BOOST_WHY_PIN:
+        kode_err_set(BOOST_TEXT_PIN);
+        break;
+    case POWER_BOOST_WHY_OFF:
+        kode_err_set(BOOST_TEXT_OFF);
+        break;
+    default:
+        if ( KODE_NO_RESOURCES == rc )
+        {
+            kode_err_set("the power manager is busy");
+        }
+        else if ( KODE_TIMEOUT == rc )
+        {
+            kode_err_set("the power manager did not answer within %" PRIu32 " ms",
+                         (uint32_t)KODE_PIN_POWER_5V_MS);
+        }
+        else
+        {
+            kode_err_set(BOOST_TEXT_NOT_ON);
+        }
+        break;
+    }
+}
+
+/**
+ * @brief The boost on, under the battery lock: arm the wait, ask, wait for AO_Power's answer.
+ * @return true when AO_Power says the boost runs; false with the error set.
+ */
+static bool boost_start(void)
+{
+    kode_task_t *const t  = kode_task_ensure();
+    bool               ok = false;
+
+    if ( (NULL != t) && (NULL == t->wait_sem) )
+    {
+        t->wait_sem = khal_sem_create();
+    }
+    if ( (NULL == t) || (NULL == t->wait_sem) )
+    {
+        kode_err_set("no memory for waiting");
+    }
+    else
+    {
+        uint8_t why = POWER_BOOST_WHY_NONE;
+
+        /* A token left by an event that arrived just as an earlier
+         * kode_event_wait() on this task gave up: the semaphore is shared. */
+        (void)khal_sem_wait_timeout(t->wait_sem, 0U);
+        /* Armed before the ask, so an answer that comes at once is not missed. */
+        kode_standard_ao_boost_expect(t->wait_sem);
+        if ( !power_ask(POWER_ASK_BOOST, 1U) )
+        {
+            (void)kode_standard_ao_boost_await(0U, &why);   /* power_ask() said why */
+        }
+        else
+        {
+            const kode_status_t rc = kode_standard_ao_boost_await(KODE_PIN_POWER_5V_MS, &why);
+
+            ok = KODE_OK == rc;
+            if ( !ok )
+            {
+                boost_fail(rc, why);
+            }
+        }
+    }
+    return ok;
+}
+
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 bool kode_pin_power_5v(bool on)
 {
-    bool taken = false;
+    bool ok = false;
 
     if ( battery_enter("kode_pin_power_5v") )
     {
         if ( !on )
         {
-            taken = power_ask(POWER_ASK_BOOST, 0U);
+            /* Needs no reading, no layer and no answer: the stop is posted. */
+            ok = power_ask(POWER_ASK_BOOST, 0U);
         }
-        else if ( boost_may_start() )
-        {
-            taken = power_ask(POWER_ASK_BOOST, 1U);
-        }
-        else
+        else if ( !boost_may_start() )
         {
             /* boost_may_start() said why */
         }
+        else if ( !kode_standard_ao_ensure() )
+        {
+            /* kode_standard_ao_ensure() said why: its Active Object hears the answer */
+        }
+        else
+        {
+            ok = boost_start();
+        }
         battery_leave();
     }
-    return taken;
+    return ok;
 }
 
 bool kode_battery_low_edge(bool *low, const kode_sys_battery_t *r)

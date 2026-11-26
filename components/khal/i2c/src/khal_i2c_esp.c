@@ -121,7 +121,8 @@ kode_status_t khal_i2c_init(void)
         esp_err_t const err = i2c_new_master_bus(&cfg, &s_bus);
         if ( ESP_OK == err )
         {
-            KLOG_D(TAG, "I2C0 up (SDA=%u SCL=%u @%luHz)",
+            KLOG_D(TAG, "I2C%u up (SDA=%u SCL=%u @%luHz)",
+                   (unsigned)KBSP_I2C_BOARD,
                    (unsigned)KBSP_PIN_I2C_SDA, (unsigned)KBSP_PIN_I2C_SCL,
                    (unsigned long)KBSP_I2C_FREQ_HZ);
         }

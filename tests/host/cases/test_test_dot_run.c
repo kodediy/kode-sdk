@@ -446,6 +446,55 @@ TEST_CASE("test_pass_needs_a_finished_run", "[test_dot_run]")
     td_down();
 }
 
+/** @brief A step of the SHIP reset and the answer the station reads when it stops there. */
+typedef struct {
+    uint8_t     step;  /**< kboot_reset_step_t.      */
+    const char *ans;   /**< The verb's failed answer. */
+} td_reset_case_t;
+
+/* Every step names itself, whatever its place in kboot_reset_step_t. */
+TEST_CASE("test_a_reset_that_stops_names_its_step", "[test_dot_run]")
+{
+    static const td_reset_case_t CASES[] = {
+        { (uint8_t)KBOOT_RESET_STEP_FIND,    ">err code=4 msg=reset_find"    },
+        { (uint8_t)KBOOT_RESET_STEP_LINK,    ">err code=4 msg=reset_link"    },
+        { (uint8_t)KBOOT_RESET_STEP_INSTALL, ">err code=4 msg=reset_install" },
+        { (uint8_t)KBOOT_RESET_STEP_WIPE,    ">err code=4 msg=reset_wipe"    },
+        { (uint8_t)KBOOT_RESET_STEP_APPS,    ">err code=4 msg=reset_apps"    },
+        { (uint8_t)KBOOT_RESET_STEP_FILES,   ">err code=4 msg=reset_files"   },
+        { (uint8_t)KBOOT_RESET_STEP_NVS,     ">err code=4 msg=reset_nvs"     },
+        { (uint8_t)KBOOT_RESET_STEP_REQUEST, ">err code=4 msg=reset_request" },
+        { (uint8_t)KBOOT_RESET_STEP_DONE,    ">err code=4 msg=reset_done"    },
+    };
+    TestDotReqEvt r;
+    FactoryResetRspEvt d;
+
+    for ( unsigned i = 0U; (sizeof(CASES) / sizeof(CASES[0])) > i; i++ )
+    {
+        run_to_camera();
+        TEST_ASSERT_TRUE(drive_until(">ok"));
+        run_finish();
+        (void)memset(&r, 0, sizeof(r));
+        r.verb   = (uint8_t)TEST_DOT_VERB_RESULT;
+        r.a.pass = true;
+        td_verb(&r);
+        TEST_ASSERT_EQUAL_UINT(1U, td_posted(AO_Boot, FACTORY_RESET_REQ_SIG));
+        td_take();
+        td_clear();
+
+        (void)memset(&d, 0, sizeof(d));
+        d.super  = (QEvt)QEVT_INITIALIZER(FACTORY_RESET_RSP_SIG);
+        d.step   = CASES[i].step;
+        d.status = (uint8_t)KODE_ERROR;
+        td_dispatch(&d.super);
+        td_take();
+        TEST_ASSERT_TRUE_MESSAGE(td_said("screen 0x07 x"), "FAIL on the glass");
+        td_take();   /* the answer follows the screen shown */
+        TEST_ASSERT_TRUE_MESSAGE(td_said(CASES[i].ans), CASES[i].ans);
+        td_down();
+    }
+}
+
 TEST_CASE("test_second_pass_is_busy", "[test_dot_run]")
 {
     TestDotReqEvt r;

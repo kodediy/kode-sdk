@@ -1,0 +1,11 @@
+# The SDK in a firmware Arduino's core builds: an app whose Serial owns the
+# USB-Serial/JTAG, so the console writes through the app's port.
+
+# The console. (kaos)
+CONFIG_KODEOS_CONSOLE=y
+# On the cable port the app provides. (khal)
+CONFIG_KHAL_CONSOLE_APP_PORT=y
+# The NFC reader, which an app's defaults leave off: Arduino's libraries carry it. (kaos)
+CONFIG_KODEOS_NFC=y
+# I2C0 and SPI2 are the app's, the ones Wire and SPI open; the board keeps I2C1 and SPI3. (kbsp)
+CONFIG_KBSP_APP_LOW_BUSES=y

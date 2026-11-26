@@ -878,7 +878,6 @@ TEST_CASE("a UID profile presents a coherent clone: ATQA and SAK follow the leng
     world_fresh();
     profile_add("door", "uid", "04:A2:3B:91");
     profile_add("tag7", "uid", "04-a2-3b-91-5c-6d-7e");
-    profile_add("tag10", "uid", "04A23B915C6D7E8F9011");
 
     TEST_ASSERT_TRUE_MESSAGE(kode_nfc_emulate_start("door"), kode_error());
     TEST_ASSERT_EQUAL_STRING("", kode_error());
@@ -898,12 +897,19 @@ TEST_CASE("a UID profile presents a coherent clone: ATQA and SAK follow the leng
     TEST_ASSERT_EQUAL_HEX8(0x7EU, s_card.uid[6]);
     TEST_ASSERT_EQUAL_HEX16(0x0044U, s_card.atqa);
     TEST_ASSERT_EQUAL_HEX8(0x00U, s_card.sak);
+    world_end();
+}
 
-    TEST_ASSERT_TRUE_MESSAGE(kode_nfc_emulate_start("tag10"), kode_error());
-    TEST_ASSERT_EQUAL_UINT8(10U, s_card.uid_len);
-    TEST_ASSERT_EQUAL_HEX8(0x11U, s_card.uid[9]);
-    TEST_ASSERT_EQUAL_HEX16(0x0084U, s_card.atqa);
-    TEST_ASSERT_EQUAL_HEX8(0x00U, s_card.sak);
+TEST_CASE("a 10-byte UID profile is refused: the reader presents 4 or 7 bytes", "[kode_nfc_standard]")
+{
+    world_fresh();
+    TEST_ASSERT_FALSE(kode_nfc_add_profile("tag10", "uid", "04A23B915C6D7E8F9011"));
+    TEST_ASSERT_EQUAL_STRING("a UID to present is 4 or 7 bytes of hex, such as 04:A2:3B:91", kode_error());
+    TEST_ASSERT_FALSE(kode_nfc_emulate_start("tag10"));
+    TEST_ASSERT_FALSE(kode_sys_nfc_is_emulating());
+
+    TEST_ASSERT_TRUE_MESSAGE(kode_nfc_add_profile("tag4", "uid", "04:A2:3B:91"), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_nfc_add_profile("tag7", "uid", "04:A2:3B:91:5C:6D:7E"), kode_error());
     world_end();
 }
 
@@ -1067,13 +1073,13 @@ TEST_CASE("a profile with a bad name, type or data is refused", "[kode_nfc_stand
     TEST_ASSERT_FALSE(kode_nfc_add_profile("x", "text", data));
     TEST_ASSERT_EQUAL_STRING("97 bytes is too long (96 at most)", kode_error());
     TEST_ASSERT_FALSE(kode_nfc_add_profile("x", "uid", "04:A2:3B"));
-    TEST_ASSERT_EQUAL_STRING("a UID is 4, 7 or 10 bytes of hex, such as 04:A2:3B:91", kode_error());
+    TEST_ASSERT_EQUAL_STRING("a UID to present is 4 or 7 bytes of hex, such as 04:A2:3B:91", kode_error());
     TEST_ASSERT_FALSE(kode_nfc_add_profile("x", "uid", "04:A2:3B:91:5C"));
-    TEST_ASSERT_EQUAL_STRING("a UID is 4, 7 or 10 bytes of hex, such as 04:A2:3B:91", kode_error());
+    TEST_ASSERT_EQUAL_STRING("a UID to present is 4 or 7 bytes of hex, such as 04:A2:3B:91", kode_error());
     TEST_ASSERT_FALSE(kode_nfc_add_profile("x", "uid", "zz:A2:3B:91"));
-    TEST_ASSERT_EQUAL_STRING("a UID is 4, 7 or 10 bytes of hex, such as 04:A2:3B:91", kode_error());
+    TEST_ASSERT_EQUAL_STRING("a UID to present is 4 or 7 bytes of hex, such as 04:A2:3B:91", kode_error());
     TEST_ASSERT_FALSE(kode_nfc_add_profile("x", "uid", "04:A2:3B:9"));
-    TEST_ASSERT_EQUAL_STRING("a UID is 4, 7 or 10 bytes of hex, such as 04:A2:3B:91", kode_error());
+    TEST_ASSERT_EQUAL_STRING("a UID to present is 4 or 7 bytes of hex, such as 04:A2:3B:91", kode_error());
     /* None of them was added. */
     TEST_ASSERT_FALSE(kode_nfc_emulate_start("x"));
     world_end();

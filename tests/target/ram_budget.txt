@@ -1,5 +1,6 @@
-# The budget of internal RAM for this project, the full build and `nowifi`
-# (the minimal app's is ram_budget.minimal.txt), read by tools/check_ram.sh:
+# The budget of internal RAM for this project, the full build, `nowifi` and
+# `noble` (the minimal app's is ram_budget.minimal.txt), read by
+# tools/check_ram.sh:
 #
 #   ../../tools/check_ram.sh build/kode_target.elf ram_budget.txt
 #
@@ -17,6 +18,8 @@
 # 368520: AO_Scheduler (its 3 KB stack, queue and state), the larger event
 # pool and the channel's held lines took the full variant from 359632 to
 # 364152; the ceiling moved by the same 4520 bytes.
+# `noble` takes the most, 364192: with low power on, power management and the
+# tickless idle put about 14 KB more code in IRAM than the full variant has.
 static_max 368520
 
 # Every data symbol of 2048 bytes or more in internal RAM, with the source
@@ -49,6 +52,7 @@ ir_stack               ir_ao.c              3072
 haptic_stack           haptic_ao.c          3072
 buttons_stack          buttons_ao.c         3072
 audio_stack            audio_ao.c           3072
+lowpower_stack         lowpower_ao.c        3072
 scheduler_stack        scheduler_ao.c       3072
 
 # The AO supervisor's stack (CONFIG_KQP_AO_WATCH). Internal because it has to

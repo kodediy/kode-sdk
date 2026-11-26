@@ -63,8 +63,8 @@ typedef enum {
 /** @brief The roles outside the face. */
 typedef enum {
     KUI_PACK_ROLE_EMPTY = 0,  /**< The launcher with no apps: 410 x 369. */
-    KUI_PACK_ROLE_WRITING,    /**< The Opening card while an image writes: 410 x 160. */
-    KUI_PACK_ROLE_GOODBYE,    /**< The wave before a run: 410 x 160. */
+    KUI_PACK_ROLE_WRITING,    /**< Named by the format, played by no screen: 410 x 160. */
+    KUI_PACK_ROLE_GOODBYE,    /**< Named by the format, played by no screen: 410 x 160. */
     KUI_PACK_ROLE_LOADING,    /**< The loading screen: 264 x 264. */
     KUI_PACK_ROLE_FAULT,      /**< The fault notice's band: 410 x 160. */
     KUI_PACK_ROLE_COUNT

@@ -113,7 +113,7 @@ const char *kode_error(void)
 {
     const kode_task_t *const task = kode_task_get();
 
-    if ( NULL == task )
+    if ( (NULL == task) || !task->failed )
     {
         return s_no_error;
     }
@@ -149,6 +149,7 @@ void kode_err_set(const char *fmt, ...)
     }
     char *const buf = task->error;
 
+    task->failed = true;
     /* cppcheck-suppress misra-c2012-17.1 ; the list is handed straight to vsnprintf() */
     va_list ap;
     /* cppcheck-suppress misra-c2012-17.1 ; the same list */
@@ -193,7 +194,8 @@ bool kode_enter(const char *name)
 
     if ( NULL != task )
     {
-        task->error[0] = '\0';
+        /* The text stays: the call may be reading it as an argument. */
+        task->failed = false;
     }
     return true;
 }

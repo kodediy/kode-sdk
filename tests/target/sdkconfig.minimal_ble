@@ -1,0 +1,9 @@
+# The minimal app (main/minimal.c) with Bluetooth and no console: an app's own
+# defaults, the role, the channel and the scheduler back to an app's, then
+# the radio and BLE on. The BLE console, its pairing and the passkey stay off,
+# as an app gets them: the build in which kdrv_ble.h declares no pairing type.
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+CONFIG_KODEOS_CHANNEL=n
+CONFIG_KODE_SCHEDULER=n
+CONFIG_KODEOS_RADIO=y
+CONFIG_KODEOS_BLE=y

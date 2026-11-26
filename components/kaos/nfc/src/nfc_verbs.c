@@ -38,7 +38,6 @@ _Static_assert((uint32_t)NFC_V_READ_MS_DEF_N == KODE_NFC_TEST_FIELD_MS,
                "nfc_read's default window is the row's");
 #define NFC_V_UID_SINGLE     4U    /**< A single-size UID, in bytes. */
 #define NFC_V_UID_DOUBLE     7U    /**< A double-size UID. */
-#define NFC_V_UID_TRIPLE     10U   /**< A triple-size UID. */
 #define NFC_V_ATQA_BYTES     2U    /**< ATQA, most-significant byte first. */
 #define NFC_V_SAK_BYTES      1U    /**< SAK. */
 #define NFC_V_BYTE_BITS      8U    /**< Bits in a byte. */
@@ -189,10 +188,9 @@ static void h_nfc_emulate(const kverb_t *c, const karg_val_t *v)
     if ( v[0].present )
     {
         uint8_t n = console_hex_bytes(v[0].s, s_nfc_emu.uid, KNFC_UID_MAX);
-        if ( (NFC_V_UID_SINGLE != n) && (NFC_V_UID_DOUBLE != n)
-            && (NFC_V_UID_TRIPLE != n) )
+        if ( (NFC_V_UID_SINGLE != n) && (NFC_V_UID_DOUBLE != n) )
         {
-            console_reply(">err code=2 msg=\"uid= must be 4, 7 or 10 hex bytes\"");
+            console_reply(">err code=2 msg=\"uid= must be 4 or 7 hex bytes\"");
             return;
         }
         s_nfc_emu.uid_len = n;

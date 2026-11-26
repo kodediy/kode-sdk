@@ -33,7 +33,8 @@ typedef struct {
  * the events lock, and the task reads them after. */
 /** @brief The standard layer's per-task state. */
 typedef struct kode_task {
-    char               error[KODE_ERROR_MAX];   /**< Text of the last failure; "" if none.      */
+    char               error[KODE_ERROR_MAX];   /**< Text of the last failure, kept until the next one. */
+    bool               failed;                  /**< The last kode.h call failed: @c error says why. */
     khal_sem_t         wait_sem;                /**< Signalled when the awaited event arrives;
                                                  *   created on the first wait.                */
     bool               waiting;                 /**< On the list of waiting tasks.              */

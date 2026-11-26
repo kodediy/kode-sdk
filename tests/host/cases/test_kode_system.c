@@ -463,6 +463,18 @@ TEST_CASE("kode_print with a NULL format prints nothing and says why", "[kode_sy
     TEST_ASSERT_EQUAL_STRING("format is NULL", kode_error());
 }
 
+TEST_CASE("kode_print prints the reason the call before it left", "[kode_system]")
+{
+    system_is_up();
+
+    kode_print(NULL);
+    kode_print("why: %s", kode_error());
+
+    TEST_ASSERT_EQUAL_UINT(1U, fake_klog_count());
+    TEST_ASSERT_EQUAL_STRING("!N 0 app why: format is NULL\n", fake_klog_last());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+}
+
 /* ---- kode_random(): within the range, every number reached ---------------- */
 
 /** @brief Draws a case takes from a small range. */

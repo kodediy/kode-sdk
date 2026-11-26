@@ -155,6 +155,9 @@ _Static_assert((ES_DRAIN_BLOCKS * ES_BLOCK_BYTES) > ES_DMA_RING_BYTES,
  * KODE_AUDIO_TEST_FRESH_MS is this in milliseconds.
  */
 #define ES_FRESH_RX_BLOCKS 36U
+/** @brief Blocks the first recording after an open reads and throws away:
+ *         the settle, then the microphone's start-up step. */
+#define ES_FRESH_REC_BLOCKS (ES_SETTLE_BLOCKS + ES_FRESH_RX_BLOCKS)
 /** @brief Blocks emitted after the window, so a block of slip cannot truncate
  *         the tone the detector was measuring. */
 #define ES_TAIL_BLOCKS      4U
@@ -187,6 +190,8 @@ static bool s_present;            /**< The chip answered and identified.    */
 static bool s_open;               /**< The device is open.                  */
 static bool s_fresh;              /**< Opened and nothing emitted since: the
                                    *   amplifier is still starting.          */
+static bool s_rx_fresh;           /**< Opened and nothing read past the
+                                   *   microphone's start-up step since.     */
 static bool s_hold_mute;          /**< The driver is holding the DAC muted
                                    *   because the analog is not up. Its own,
                                    *   never the caller's out_mute.          */
@@ -461,7 +466,7 @@ kode_status_t kdrv_es8311_park(void)
 kode_status_t kdrv_es8311_init(void)
 {
     audio_codec_i2c_cfg_t i2c = {
-        .port = 0U,
+        .port = (uint8_t)KBSP_I2C_BOARD,
         /* The component's I2C layer shifts this right by one, so it wants the
          * eight-bit form. kbsp keeps the seven-bit one, like every other
          * address on the bus. Unshifted, it addresses 0x0C, where nothing answers. */
@@ -1005,6 +1010,7 @@ static kode_status_t do_open(void)
     }
     s_open = true;
     s_fresh = true;
+    s_rx_fresh = true;
     /* Muted before anything else the open applies. The amplifier is live
      * throughout and the analog blocks have just come up, so this is the
      * earliest the converter can be silenced - and the first job to write
@@ -1059,6 +1065,7 @@ static kode_status_t do_close(void)
         mclk_idle();
         s_open = false;
         s_fresh = false;
+        s_rx_fresh = false;
     }
     return KODE_OK;
 }
@@ -1240,6 +1247,9 @@ static kode_status_t do_window(bool emit, uint8_t bin, int16_t amp)
     ktone_reset(&s_det);
     (void)memset(&s_result, 0, sizeof(s_result));
     s_result.bin = bin;
+    /* Whichever way it settled, a window reads past the start-up step, so a
+     * recording after it has nothing to throw away. */
+    s_rx_fresh = false;
 
     for ( b = 0U; b < blocks; ++b )
     {
@@ -1430,11 +1440,44 @@ static kode_status_t do_play(const kdrv_es8311_req_t *req)
 }
 
 /**
+ * @brief Read and throw away the microphone's start-up step, once per open.
+ *
+ * The step is the input coming up, not anything the microphone heard. The
+ * blocks are read rather than waited out, so the first block kept is the one
+ * after them. An early end stops the reading and leaves the step owed to the
+ * next recording.
+ *
+ * @return KODE_OK, or KODE_IO_ERROR when the bus refused.
+ */
+static kode_status_t skip_fresh_rx(void)
+{
+    uint32_t b = 0U;
+
+    if ( !s_rx_fresh )
+    {
+        return KODE_OK;
+    }
+    while ( (ES_FRESH_REC_BLOCKS > b) && !s_record_end )
+    {
+        if ( block_exchange() != KODE_OK )
+        {
+            return KODE_IO_ERROR;
+        }
+        ++b;
+    }
+    if ( ES_FRESH_REC_BLOCKS == b )
+    {
+        s_rx_fresh = false;
+    }
+    return KODE_OK;
+}
+
+/**
  * @brief Read up to @p req->frames mono frames into @p req->buf.
  *
- * The first blocks are kept, not discarded: unlike a window, a recording is
- * whatever the microphone heard and trimming its start would be a decision
- * this layer has no business making.
+ * The first recording after an open throws the microphone's start-up step
+ * away first (skip_fresh_rx()); those blocks are not counted in
+ * @p req->frames. A later recording on the same open keeps every block.
  *
  * @param req The job.
  * @return KODE_OK, KODE_DENIED when closed or @c buf is NULL, KODE_IO_ERROR.
@@ -1453,6 +1496,10 @@ static kode_status_t do_record(const kdrv_es8311_req_t *req)
     }
     (void)memset(&s_result, 0, sizeof(s_result));
     tx_silence();
+    if ( skip_fresh_rx() != KODE_OK )
+    {
+        return KODE_IO_ERROR;
+    }
 
     while ( (done < req->frames) && !s_record_end )
     {

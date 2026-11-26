@@ -340,10 +340,12 @@ menu "kodeOS active objects"
         bool "AO_Nfc (the ST25R3916B reader)"
         default y if KODEOS_BOOT_ROLE_OS
         help
-            The owner of the ST25R3916B on SPI2: read, write and emulate through
-            kode_nfc_*(). An app that calls none leaves AO_Nfc out and the core
-            parks the chip. Off, the chip and SPI2 are the app's, and a call to
-            kode_nfc_*() fails to link.
+            The owner of the ST25R3916B and its SPI host (KBSP_SPI_NFC): read,
+            write and emulate through kode_nfc_*(). An app that calls none
+            leaves AO_Nfc out and the core parks the chip. Off, the core
+            neither starts nor parks the reader: an app may drive it with a
+            driver of its own on that host, which kode_sys_exp_ctrl() never
+            offers for J3, and a call to kode_nfc_*() fails to link.
 
             On in kodeOS, off in an app.
 

@@ -436,6 +436,26 @@ TEST_CASE("a widget of an older screen is no such widget", "[kode_screen]")
     TEST_ASSERT_EQUAL_STRING("y", s_last.text);
 }
 
+TEST_CASE("a text shows the reason the call before it left", "[kode_screen]")
+{
+    screen_case();
+
+    TEST_ASSERT_TRUE(kode_screen_new("Why"));
+    const kode_widget_t p = kode_screen_add_text("line");
+    TEST_ASSERT_TRUE(seen_wait(2U));
+
+    TEST_ASSERT_FALSE(kode_widget_set_text(0U, "x"));
+    TEST_ASSERT_TRUE(kode_widget_set_text(p, "failed: %s", kode_error()));
+    TEST_ASSERT_TRUE(seen_wait(1U));
+    TEST_ASSERT_EQUAL_STRING("failed: no such widget", s_last.text);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+
+    TEST_ASSERT_FALSE(kode_widget_set_text(0U, "x"));
+    TEST_ASSERT_NOT_EQUAL_UINT32(0U, kode_screen_add_text(kode_error()));
+    TEST_ASSERT_TRUE(seen_wait(1U));
+    TEST_ASSERT_EQUAL_STRING("no such widget", s_last.text);
+}
+
 TEST_CASE("a screen holds KODE_WIDGETS_MAX widgets and refuses the next", "[kode_screen]")
 {
     screen_case();

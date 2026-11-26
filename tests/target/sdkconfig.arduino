@@ -1,0 +1,5 @@
+# The Arduino build (arduino/sdkconfig.sdk, read after this file) on an app's
+# own defaults, so the lines of sdkconfig.defaults that are not an app's go
+# back - the role and the scheduler.
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+CONFIG_KODE_SCHEDULER=n

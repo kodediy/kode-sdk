@@ -40,7 +40,8 @@ extern "C" {
  * @brief Why this task's last kode.h call failed.
  *
  * A failed call sets it, a successful one clears it. Valid until the task's
- * next kode.h call.
+ * next kode.h call, which may take it as an argument:
+ * `kode_print("no file: %s", kode_error())` prints the reason.
  *
  * kode.h is for tasks: a call from an ISR or an Active Object is refused, and this says why.
  *
@@ -199,6 +200,10 @@ kode_buttons_t kode_button_read_all(void);
  * its length in bytes.
  * Also battery_low: the value is the level, in percent, as it fell below
  * KODE_BATTERY_LOW_PCT.
+ * Also pin_power_5v_cut: the board stopped the 5 V kode_pin_power_5v() put on
+ * J3. The source says why: "cell" (the cell under 3.3 V), "fault" (the boost's
+ * fault) or "off" (the board switching off); the value is the cell's voltage
+ * in mV, 0 when unread. Never sent for the app's own kode_pin_power_5v(false).
  * ir_received: source "NEC", value the command, text the address "0x0004"; "unknown" for any other frame.
  * A listener or a waiter for it arms the receiver, once the C5 link is up.
  * nfc_tag: source the card, text the UID; also on the app's own NFC reads, with or without kode_nfc_scan_start().
@@ -438,8 +443,10 @@ bool kode_led_toggle(void);
 /*
  * Paths: "sd" or "flash", then nothing or "/" and the rest: "sd/log.txt",
  * "flash/data/a.csv". Any case for the volume; no leading "/", no empty, "."
- * or ".." part. A bad path fails and kode_error() names it. A file call waits
- * for another task's file call to finish.
+ * or ".." part, no name FAT does not take (a control character or one of
+ * " * : < > ? | \ in it, or only dots and spaces). A bad path fails at once
+ * and kode_error() names it. A file call waits for another task's file call
+ * to finish.
  */
 
 #define KODE_FILE_PATH_MAX 91U      /**< Bytes of a path, NUL included. */
@@ -667,7 +674,7 @@ bool kode_file_create_folder(const char *path);
  * Blocks. A volume itself is refused.
  *
  * @param path     "sd/..." or "flash/...".
- * @param new_name One name: not empty, not "." or "..", no '/'.
+ * @param new_name One name: not empty, not "." or "..", no '/', one FAT takes.
  * @return true when renamed; false otherwise, with kode_error() saying why.
  */
 bool kode_file_rename(const char *path, const char *new_name);
@@ -967,7 +974,7 @@ bool kode_audio_stream_close(void);
  * a loop each play in full. Refused at once while a sound plays in the
  * background or a recording runs.
  *
- * @param hz KODE_AUDIO_TONE_HZ_MIN to KODE_AUDIO_TONE_HZ_MAX; the board snaps it to a nearby frequency.
+ * @param hz KODE_AUDIO_TONE_HZ_MIN to KODE_AUDIO_TONE_HZ_MAX; the tone plays at this frequency.
  * @param ms 1 to KODE_AUDIO_TONE_MAX_MS.
  * @return true when it was heard or kode_audio_play_stop() ended it; false with kode_error() saying why.
  */
@@ -1871,12 +1878,12 @@ typedef struct {
  * nothing that takes time until a wake: finish file and network work first,
  * and wait for the wake with kode_event_wait() or a button, not by asking the
  * board for things. Whatever @p wake says, these always wake it: every
- * button, a USB cable (seen within a minute), a console line, an MQTT
- * message, and the battery at the level where the board protects it. And a
- * processor left asleep for the user's `off_after` time switches the board
- * off, as a board asleep does. A wake ends only the CPU part: the other parts
- * stay away, and calling kode_rest() again lets the processor sleep again.
- * What the rest saves is not a measured figure.
+ * button, a USB cable (looked for every KODE_LOWPOWER_CABLE_LOOK_MS, 2 s), a
+ * console line, an MQTT message, and the battery at the level where the
+ * board protects it. And a processor left asleep for the user's `off_after`
+ * time switches the board off, as a board asleep does. A wake ends only the
+ * CPU part: the other parts stay away, and calling kode_rest() again lets
+ * the processor sleep again. What the rest saves is not a measured figure.
  *
  * Needs CONFIG_KODE_LOWPOWER: without it the call is refused and says so.
  *
@@ -1969,6 +1976,7 @@ const char *kode_setting_get(const char *key);
 /* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
 #define KODE_PIN_SETTLE_MS  30U     /**< From a pin's edge to the read of its level, ms (pin_<n>_changed). */
 #define KODE_PIN_POWER_MS   300000U /**< How long kode_pin_power_3v3() waits for J3's supply to switch, ms: a sweep at its 90 s ceiling, an autojoin round's joins and room. */
+#define KODE_PIN_POWER_5V_MS 1000U  /**< How long kode_pin_power_5v() waits for the power manager's answer, ms: the boost's start and room. */
 
 /**
  * @brief Make @p pin an output and drive it high or low.
@@ -2036,15 +2044,34 @@ bool kode_pin_write_pwm(uint8_t pin, uint32_t hz, uint8_t duty_pct);
 bool kode_pin_power_3v3(bool on);
 
 /**
- * @brief Put 5 V from the cell on J3, up to 0.5 A, or take it off. Not stored.
+ * @brief Put 5 V from the cell on J3, up to 0.5 A, and wait until the power
+ *        manager says they are on; or ask for them off. Not stored.
  *
- * Switching it on is refused while USB is plugged in and while the cell is
- * under the voltage the pack needs; the power manager also stops it on a low
- * cell or a fault. Switching it off is always taken.
+ * Switching it on is refused while USB is plugged in, while the cell is
+ * under the 3.6 V the boost needs and while the board is switching off
+ * (until it is awake again), and fails when the charger's boost does not
+ * start: a boost fault (an overload or an over-voltage on the 5 V, or the
+ * cell too low), the cell under -10 C or over 55 C or no pack fitted, USB
+ * plugged in meanwhile, or the charger's OTG pin low. Switching it off is
+ * always asked: it needs no reading, waits for no answer and starts no
+ * Active Object. Once on, the 5 V stay on while the board is asleep, and the
+ * power manager stops them by itself, sending pin_power_5v_cut (see the
+ * events): when the cell falls under 3.3 V, on the boost's fault, and before
+ * the board switches off. Asleep it looks once a minute. A boot always
+ * starts with the 5 V off. The call returns within milliseconds, and waits
+ * up to KODE_BATTERY_WAIT_MS for the first battery reading and for room and,
+ * switching on, up to KODE_PIN_POWER_5V_MS for the answer. The first call
+ * that switches on starts the standard layer's Active Object, as the first
+ * event call does (level 3, KODE_PRIO_USER_GUI), and fails while an Active
+ * Object of the app's own holds that level.
  * @param on true to switch it on.
- * @return true when the power manager took the request; false with
- *         kode_error() saying why. Waits up to KODE_BATTERY_WAIT_MS for the
- *         first battery reading and for room.
+ * @return On: true when the power manager says the 5 V are on; false with
+ *         kode_error() saying why: "the boost cannot start while USB is
+ *         plugged in", the cell under the boost's floor, "the board is
+ *         switching off", "the boost did not start: " and the charger's
+ *         reason, "the power manager is busy", "the power manager did not
+ *         answer within 1000 ms", or the level taken. Off: true when the
+ *         power manager took the request; false with kode_error() saying why.
  */
 bool kode_pin_power_5v(bool on);
 
@@ -2465,7 +2492,7 @@ bool kode_nfc_emulate_stop(void);
  *
  * @param name KODE_NFC_PROFILE_NAME_MAX - 1 bytes at most; any case.
  * @param type "text" or "uri": a tag a phone reads; "uid": a card clone for an access reader.
- * @param data The text or link, 1 to KODE_NFC_TEXT_MAX - 1 bytes; or for "uid" the ID as 4, 7 or 10 hex bytes, "04:A2:3B:91".
+ * @param data The text or link, 1 to KODE_NFC_TEXT_MAX - 1 bytes; or for "uid" the ID as 4 or 7 hex bytes, "04:A2:3B:91".
  * @return true when added; false with kode_error() saying why.
  */
 bool kode_nfc_add_profile(const char *name, const char *type, const char *data);

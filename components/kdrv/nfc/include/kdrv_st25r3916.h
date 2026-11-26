@@ -44,10 +44,11 @@ extern "C" {
 /**
  * @brief Bring the reader up: SPI, the interrupt line, and RFAL.
  *
- * Opens SPI2 at 1 MHz in mode 1 with CS driven by hand - RFAL chains several
- * transfers under one CS, so the peripheral cannot own it - attaches the
- * interrupt through khal_gpio, and calls rfalNfcInitialize(), which is what
- * reads IC_IDENTITY and refuses a chip that is not an ST25R3916B.
+ * Opens the reader's SPI host (KBSP_SPI_NFC) at 1 MHz in mode 1 with CS
+ * driven by hand - RFAL chains several transfers under one CS, so the
+ * peripheral cannot own it - attaches the interrupt through khal_gpio, and
+ * calls rfalNfcInitialize(), which is what reads IC_IDENTITY and refuses a
+ * chip that is not an ST25R3916B.
  *
  * Energises nothing. The field stays down until somebody asks for it.
  *
@@ -63,10 +64,11 @@ bool kdrv_st25r3916_present(void);
 /**
  * @brief Power the reader down, for a board with no owner for it.
  *
- * No RFAL: SPI2 is opened for two raw transfers - IC_IDENTITY, then the Set
- * Default command, which leaves the chip as a power-on does (power-down, the
- * oscillator and the field off) - and left open, the reader's alone. For
- * kaos_park_nfc() alone; never with AO_Nfc running.
+ * No RFAL: the reader's SPI host is opened for two raw transfers -
+ * IC_IDENTITY, then the Set Default command, which leaves the chip as a
+ * power-on does (power-down, the oscillator and the field off) - and left
+ * open, the reader's alone. For kaos_park_nfc() alone; never with AO_Nfc
+ * running.
  *
  * @return KODE_OK with the chip powered down; KODE_ERROR when no ST25R3916
  *         answered or the bus refused.
@@ -251,8 +253,9 @@ kode_status_t kdrv_st25r3916_listen_end(knfc_field_t *out);
  *
  * @param card What to present. Copied here; the pointer need not outlive the
  *             call.
- * @return KODE_OK with emulation running; KODE_DENIED with no chip fitted or
- *         while a field or listen window holds the reader; KODE_ERROR when
+ * @return KODE_OK with emulation running; KODE_DENIED with no chip fitted,
+ *         for a @c uid_len that is not 0, 4 or 7, or while a field or listen
+ *         window holds the reader; KODE_ERROR when
  *         RFAL refused listen mode or the worker would not start;
  *         KODE_NO_RESOURCES when the card's message does not fit the image.
  */

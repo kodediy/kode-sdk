@@ -38,7 +38,7 @@ menu "klog"
         prompt "Level the console starts at"
         default KLOG_DEFAULT_LEVEL_INFO
         help
-            The global level until `log_level tag="*"` stores another one on
+            The global level until `config key="log"` stores another one on
             the board. It cannot be more verbose than the ceiling above.
 
         config KLOG_DEFAULT_LEVEL_DEBUG

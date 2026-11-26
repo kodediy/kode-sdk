@@ -614,8 +614,10 @@ kode_status_t kode_sys_rest_end(void);
  * @brief 5 V on the expansion header from the battery, or not.
  * @note 0.5 A, not persisted.
  *
- * Refused while USB is present and while the cell is under the pack's floor;
- * AO_Power stops it on a low cell or a boost fault.
+ * Refused while USB is present, while the cell is under the pack's floor
+ * and from a round for OFF until the board is awake; AO_Power stops it on a
+ * low cell, a boost fault and the round for OFF, and says so with
+ * POWER_BOOST_CUT_SIG.
  * @param on true to switch it on.
  * @return As the commands' rule above.
  */
@@ -696,11 +698,11 @@ kode_status_t kode_sys_exp_power(bool on);
 /* ---- Going home: to AO_Boot ---- */
 
 /**
- * @brief Ask AO_Boot to reset the board.
+ * @brief Ask AO_Boot to reset the board into kodeOS.
  * @note AO_Boot leaves the network, parks the C5 and resets within
- *       KODE_LEAVE_BUDGET_MS; the caller runs on until then. It writes no
- *       boot request, so the reset lands in kodeOS after a launcher start and
- *       in this app again after a mailbox install (README, The boot model).
+ *       KODE_LEAVE_BUDGET_MS; the caller runs on until then. The reset lands
+ *       in kodeOS: an app that came through the mailbox, which every other
+ *       software reset starts again, has its boot request retired first.
  *       kode.h's kode_exit() is this call, asked again until taken, and that
  *       wait.
  * @return As the commands' rule above.
@@ -1120,9 +1122,9 @@ kode_status_t kode_sys_mag_cal_clear(QActive *me);
 typedef NfcTag kode_sys_nfc_tag_t;
 
 /**
- * @brief The card to present: @c uid, @c uid_len, @c atqa and @c sak to clone
- *        (zero to synthesise), and @c ndef with @c uri, or @c raw_len bytes of
- *        a ready-made @c raw message.
+ * @brief The card to present: @c uid, @c uid_len (4 or 7), @c atqa and @c sak
+ *        to clone (zero to synthesise), and @c ndef with @c uri, or @c raw_len
+ *        bytes of a ready-made @c raw message.
  */
 typedef NfcCard kode_sys_nfc_card_t;
 
@@ -1183,7 +1185,7 @@ kode_status_t kode_sys_nfc_ndef_write_text(QActive *me, const char *text, uint32
  * @param me   The asking AO; NFC_EMU_RSP_SIG answers it once the window is armed
  *             or refused: KODE_ERROR with no reader fitted (not KODE_IO_ERROR)
  *             or a driver that will not emulate, KODE_DENIED while the reader
- *             is held. Every other NFC request is KODE_DENIED meanwhile, and
+ *             is held or for a @c uid_len that is not 0, 4 or 7. Every other NFC request is KODE_DENIED meanwhile, and
  *             only @p me may stop the card.
  * @param card What to present; copied.
  * @return As the requests' rules above.
@@ -2588,8 +2590,10 @@ kode_status_t kode_sys_exp_return(const char *tag);
 /**
  * @brief Take an I2C, SPI or UART controller for a module on J3, recorded under @p tag.
  *
- * An app may take I2C1, SPI3 and UART0..4 (UART0 only while the console is not
- * a UART); the lowest free one is answered, in IDF's numbering (SPI3 is 2).
+ * An app may take the I2C and the SPI host kbsp_exp.h offers (I2C1 and SPI3,
+ * or I2C0 and SPI2 with CONFIG_KBSP_APP_LOW_BUSES) and UART0..4 (UART0 only
+ * while the console is not a UART); the lowest free one is answered, in IDF's
+ * numbering (SPI3 is 2).
  * Books only: install IDF's driver yourself. Call it from one task.
  * @param bus KODE_SYS_EXP_I2C, KODE_SYS_EXP_SPI or KODE_SYS_EXP_UART.
  * @param tag The tag given to kode_sys_exp_lend(); a string that outlives the loan.

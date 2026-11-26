@@ -1773,12 +1773,12 @@ TEST_CASE("an adopted app's sticky run names it once the bootloader retired it",
     Mockkdrv_slot_Destroy();
 }
 
-/* ---- Leaving, without writing anything ------------------------------------- */
+/* ---- Leaving: only ever towards kodeOS ------------------------------------- */
 
-/* The whole safety property of the app model in one case: an app asking to
- * come home resets and touches no flash at all. Any write here - otadata, a
- * boot request, a slot - would mean an app could change what boots next, and
- * the model rests on it being unable to. */
+/* The safety property of the app model: an app asking to come home resets
+ * and writes neither otadata nor a slot, and no boot request of its own - an
+ * app cannot choose what boots next. With no sticky run standing it touches
+ * no flash at all. */
 TEST_CASE("exiting to the OS resets and writes nothing", "[boot_ao]")
 {
     static const QEvt e = QEVT_INITIALIZER(BOOT_EXIT_REQ_SIG);
@@ -1795,6 +1795,81 @@ TEST_CASE("exiting to the OS resets and writes nothing", "[boot_ao]")
     }
 
     TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+    TEST_ASSERT_FALSE(kdrv_apps_req_present());
+    TEST_ASSERT_EQUAL_UINT(0U, log_lines_with("the sticky boot request"));
+    mailboxes_drain();
+
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+/**
+ * @brief Leave the request the bootloader keeps while a mailbox install runs.
+ *
+ * Written after the boot: kodeOS's own initial transition clears a request
+ * it finds standing.
+ */
+static void app_request_armed(void)
+{
+    app_request_write(NAMED_APP_OFFSET, KAPPS_REQ_STATE_ALWAYS);
+    app_request_advance(KAPPS_REQ_STATE_ARMED);
+}
+
+/* The one write on the way home. The bootloader keeps a sticky run across a
+ * software reset, which the exit is; retired first, the reset lands in
+ * kodeOS, and kodeOS reads which app it comes back from. It can only send the
+ * board home. */
+TEST_CASE("exiting to the OS retires the sticky run that launched the app",
+          "[boot_ao]")
+{
+    static const QEvt e = QEVT_INITIALIZER(BOOT_EXIT_REQ_SIG);
+    uint32_t          off = 0U;
+
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    app_request_armed();
+
+    if ( setjmp(*fake_system_arm_restart()) == 0 )
+    {
+        dispatch_through_leave(&e);
+        TEST_FAIL_MESSAGE("the board should have reset");
+    }
+
+    TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_req_tried(&off),
+        "the reset would start the app again");
+    TEST_ASSERT_EQUAL_HEX32(NAMED_APP_OFFSET, off);
+    TEST_ASSERT_EQUAL_UINT(1U, log_lines_with("the sticky boot request is retired"));
+    kdrv_apps_req_clear();
+    mailboxes_drain();
+
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+/* An app the launcher started runs on a request the bootloader retired at
+ * the jump: there is nothing to retire, and nothing is written. */
+TEST_CASE("exiting to the OS leaves a retired request as it stands", "[boot_ao]")
+{
+    static const QEvt e = QEVT_INITIALIZER(BOOT_EXIT_REQ_SIG);
+    uint32_t          off = 0U;
+
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    app_request_write(OTHER_APP_OFFSET, KAPPS_REQ_STATE_NEW);
+    app_request_advance(KAPPS_REQ_STATE_TRIED);
+
+    if ( setjmp(*fake_system_arm_restart()) == 0 )
+    {
+        dispatch_through_leave(&e);
+        TEST_FAIL_MESSAGE("the board should have reset");
+    }
+
+    TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+    TEST_ASSERT_TRUE(kdrv_apps_req_tried(&off));
+    TEST_ASSERT_EQUAL_HEX32(OTHER_APP_OFFSET, off);
+    TEST_ASSERT_EQUAL_UINT(0U, log_lines_with("the sticky boot request"));
+    kdrv_apps_req_clear();
     mailboxes_drain();
 
     Mockkdrv_slot_Verify();
@@ -2142,6 +2217,62 @@ TEST_CASE("HOME now parks for the OS", "[boot_ao]")
 
     finish_leave();
     TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+/* The held bottom button is a way home asked on purpose too, by either of its
+ * endings: the app says it is ready, or the grace runs out on a hung one. */
+TEST_CASE("HOME now retires the sticky run that launched the app", "[boot_ao]")
+{
+    static const QEvt now_evt = QEVT_INITIALIZER(BOOT_HOME_NOW_SIG);
+    uint32_t          off = 0U;
+
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    app_request_armed();
+
+    hold_bot();
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_req_armed(&off),
+        "the hold alone decides nothing: the app may still ask for a moment");
+    QASM_DISPATCH(AO_Boot, &now_evt, 0U);
+    answer_log_flushed();
+    answer_net_left();
+    finish_leave();
+
+    TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+    TEST_ASSERT_TRUE(kdrv_apps_req_tried(&off));
+    TEST_ASSERT_EQUAL_HEX32(NAMED_APP_OFFSET, off);
+    kdrv_apps_req_clear();
+
+    Mockkdrv_slot_Verify();
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("a held bottom button retires the sticky run when the grace ends",
+          "[boot_ao]")
+{
+    uint32_t off = 0U;
+
+    Mockkdrv_slot_Init();
+    boot_fresh();
+    app_request_armed();
+
+    hold_bot();
+    (void)qf_support_tick(AO_Boot, QF_SUPPORT_STEPS(KODE_SYS_HOME_GRACE_MS) - 1U);
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_apps_req_armed(&off),
+        "one tick short of the grace nothing is written");
+
+    (void)qf_support_tick(AO_Boot, 1U);
+    answer_log_flushed();
+    answer_net_left();
+    finish_leave();
+
+    TEST_ASSERT_EQUAL_UINT(1U, fake_system_restarts());
+    TEST_ASSERT_TRUE(kdrv_apps_req_tried(&off));
+    TEST_ASSERT_EQUAL_HEX32(NAMED_APP_OFFSET, off);
+    kdrv_apps_req_clear();
+
     Mockkdrv_slot_Verify();
     Mockkdrv_slot_Destroy();
 }

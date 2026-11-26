@@ -1,7 +1,14 @@
+# The console's writes to a cable port the app provides, with that option alone.
+set(khal_console_app_src "")
+if(CONFIG_KHAL_CONSOLE_APP_PORT)
+    set(khal_console_app_src "console/src/khal_console_app.c")
+endif()
+
 # khal: what several drivers share; one folder per module, include/ and src/.
 idf_component_register(
     SRCS
         "clk/src/khal_clk_esp.c"
+        ${khal_console_app_src}
         "console/src/khal_console_esp.c"
         "crc32/src/khal_crc32_esp.c"
         "exp/src/khal_exp.c"
@@ -10,6 +17,7 @@ idf_component_register(
         "i2c/src/khal_i2c_esp.c"
         "identity/src/khal_identity_esp.c"
         "keep/src/khal_keep_esp.c"
+        "keep/src/khal_keep_fit.c"
         "nvs/src/khal_nvs_esp.c"
         "power/src/khal_power_esp.c"
         "pwm/src/khal_pwm.c"

@@ -868,6 +868,13 @@ bool fake_console_resting(void);
 /** @brief Set the frame count khal_console_frame() reads next; fake_console_reset() makes it 0. */
 void fake_console_set_frame(uint32_t frame);
 
+/** @brief Make khal_console_frame() and khal_console_pad() answer KODE_DENIED, as for a port that
+ *         is the app's; fake_console_reset() lets them answer again. */
+void fake_console_deny_port(bool deny);
+
+/** @brief How many times khal_console_pad() was called since fake_console_reset(), a denied call included. */
+uint32_t fake_console_pad_calls(void);
+
 /** @brief Whether the cable port's pad is on the bus, as khal_console_pad() left it. */
 bool fake_console_pad_on(void);
 

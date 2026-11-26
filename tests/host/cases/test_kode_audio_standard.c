@@ -64,6 +64,10 @@
 #define TEST_SHORT_TONE_MS 100U        /**< A tone of one chunk, ms.                                   */
 #define TEST_LONG_TONE_MS 1000U        /**< A tone a stop can end, ms.                                 */
 #define TEST_TONES 3U                  /**< Tones a loop plays back to back.                           */
+#define TEST_CYCLE_MS 500U             /**< A tone whose cycles a case counts, ms.                     */
+#define TEST_MS_PER_S 1000U            /**< Milliseconds in a second.                                  */
+#define TEST_CYCLE_SLACK 1U            /**< Cycles a count may miss at the ends of a tone: 2 Hz at 500 ms. */
+#define TEST_PEAK_SLACK 1              /**< LSB a tone's peak may round by.                            */
 #define TEST_LIST_BYTES 7U             /**< Payload of the LIST chunk, pad byte not counted.           */
 #define TEST_BIG_LIST_BYTES 40000U     /**< Bytes of a LIST chunk longer than the first read window.   */
 #define TEST_MEET_TICKS 5U             /**< Ticks the writer waits for the player to meet its lock.    */
@@ -1047,7 +1051,7 @@ static bool cap_is_tone(uint32_t at, uint16_t hz, uint32_t from, uint32_t n)
         {
             m = TEST_CHUNK_FRAMES;
         }
-        same = (ktone_fill(ktone_bin_nearest(hz), from + i, TEST_TONE_AMP_Q15, want, m) == KODE_OK)
+        same = (ktone_fill_hz(hz, from + i, TEST_TONE_AMP_Q15, want, m) == KODE_OK)
                && (memcmp(&s_cap[at + i], want, m * sizeof(int16_t)) == 0);
     }
     return same;
@@ -1093,6 +1097,56 @@ TEST_CASE("the longest tone and the edges of the range are accepted", "[kode_aud
     s_cap_off = true;
     TEST_ASSERT_TRUE_MESSAGE(kode_audio_tone(TEST_TONE_HZ, KODE_AUDIO_TONE_MAX_MS), kode_error());
     TEST_ASSERT_EQUAL_UINT32(KODE_AUDIO_TONE_MAX_MS * TEST_FRAMES_PER_MS, s_seen);
+    audio_done();
+}
+
+/** @brief Upward zero crossings in the capture from @p at, @p n frames: the cycles of a tone. */
+static uint32_t cap_cycles(uint32_t at, uint32_t n)
+{
+    uint32_t up = 0U;
+
+    for ( uint32_t i = at + 1U; i < (at + n); ++i )
+    {
+        if ( (s_cap[i - 1U] < 0) && (s_cap[i] >= 0) )
+        {
+            up++;
+        }
+    }
+    return up;
+}
+
+/** @brief The largest sample in the capture from @p at, @p n frames. */
+static int16_t cap_peak(uint32_t at, uint32_t n)
+{
+    int16_t peak = 0;
+
+    for ( uint32_t i = at; i < (at + n); ++i )
+    {
+        if ( s_cap[i] > peak )
+        {
+            peak = s_cap[i];
+        }
+    }
+    return peak;
+}
+
+TEST_CASE("a tone plays the frequency asked for, at the layer's peak and length", "[kode_audio_standard]")
+{
+    /* 440 Hz is under the detector's lowest bin and 3400 Hz over its highest:
+     * a tone snapped to a bin reads 1020 and 1957 Hz here. */
+    static const uint16_t hz[] = { 440U, 1000U, KODE_AUDIO_TONE_HZ_MAX };
+    const uint32_t frames = TEST_CYCLE_MS * TEST_FRAMES_PER_MS;
+
+    audio_fresh();
+    for ( uint32_t i = 0U; i < (uint32_t)(sizeof(hz) / sizeof(hz[0])); ++i )
+    {
+        s_cap_n = 0U;
+        TEST_ASSERT_TRUE_MESSAGE(kode_audio_tone(hz[i], TEST_CYCLE_MS), kode_error());
+        TEST_ASSERT_EQUAL_UINT32(frames, s_cap_n);
+        TEST_ASSERT_UINT32_WITHIN_MESSAGE(TEST_CYCLE_SLACK, ((uint32_t)hz[i] * TEST_CYCLE_MS) / TEST_MS_PER_S,
+                                          cap_cycles(0U, frames), "the tone has the frequency asked for");
+        TEST_ASSERT_INT_WITHIN(TEST_PEAK_SLACK, TEST_TONE_AMP_Q15, cap_peak(0U, frames));
+    }
     audio_done();
 }
 

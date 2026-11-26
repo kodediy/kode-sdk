@@ -17,17 +17,27 @@
 
 #define TAG "kaos.buttons"
 
+/** @brief The buttons that hold: the two round ones, each on a clock of its own. */
+#define BUTTONS_HOLD_COUNT 2U
+
+/* Which button each clock times: Buttons' hold, hold_on and hold_home are
+ * indexed by the button's place here. */
+static const kdrv_button_t HOLD_IDS[BUTTONS_HOLD_COUNT] = {
+    KDRV_BTN_TOP, KDRV_BTN_BOT,
+};
+
 typedef struct {
     QActive  super;
     QTimeEvt settle;       /**< One-shot: the confirming sample is due.      */
     QTimeEvt test_tmo;     /**< One-shot: the guided test's step deadline.   */
-    QTimeEvt hold;         /**< One-shot: the top or the bottom button has
+    QTimeEvt hold[BUTTONS_HOLD_COUNT];  /**< One-shot per HOLD_IDS button,
+                            *   all on BUTTONS_HOLD_TMO_SIG: the button has
                             *   been down for KODE_BUTTON_HOLD_MS, or the
                             *   bottom one for KODE_HOME_HOLD_MS.           */
-    uint8_t  hold_id;      /**< kdrv_button_t the hold timer is running for;
-                            *   KDRV_BTN_COUNT when it is not running.      */
-    bool     hold_home;    /**< The hold timer is on its second count: the
-                            *   bottom button's, up to KODE_HOME_HOLD_MS.   */
+    bool     hold_on[BUTTONS_HOLD_COUNT];   /**< That clock is timing a press. */
+    bool     hold_home[BUTTONS_HOLD_COUNT]; /**< That clock is on its second
+                            *   count: the bottom button's, up to
+                            *   KODE_HOME_HOLD_MS.                           */
     uint8_t  stable;       /**< What the world currently believes.            */
     uint8_t  candidate;    /**< The sample before last, waiting to be confirmed. */
     uint8_t  exp_levels;   /**< The expander's byte as last published.        */
@@ -396,9 +406,12 @@ void Buttons_ctor(void)
     QActive_ctor(&me->super, Q_STATE_CAST(&Buttons_initial));
     QTimeEvt_ctorX(&me->settle, &me->super, BUTTONS_SETTLE_SIG, 0U);
     QTimeEvt_ctorX(&me->test_tmo, &me->super, BUTTONS_TEST_TMO_SIG, 0U);
-    QTimeEvt_ctorX(&me->hold, &me->super, BUTTONS_HOLD_TMO_SIG, 0U);
-    me->hold_id      = (uint8_t)KDRV_BTN_COUNT;
-    me->hold_home    = false;
+    for ( uint8_t s = 0U; BUTTONS_HOLD_COUNT > s; ++s )
+    {
+        QTimeEvt_ctorX(&me->hold[s], &me->super, BUTTONS_HOLD_TMO_SIG, 0U);
+        me->hold_on[s]   = false;
+        me->hold_home[s] = false;
+    }
     me->stable       = 0U;
     me->candidate    = 0U;
     me->exp_levels   = 0xFFU;   /* every pin at rest until the owner says otherwise */
@@ -781,22 +794,37 @@ static QState Buttons_initial(Buttons * const me, void const * const par)
 static const char *const SAMPLE_EXPANDER = "the expander's byte";
 static const char *const SAMPLE_GPIO35   = "GPIO35's edge";
 
-/** @brief Is this one of the two buttons that can be held? */
-static bool holdable(kdrv_button_t b)
+/**
+ * @brief The clock that times button @p b.
+ *
+ * @param b A button.
+ * @return Its index in HOLD_IDS; BUTTONS_HOLD_COUNT for a button that never holds.
+ */
+static uint8_t hold_slot(kdrv_button_t b)
 {
-    return (KDRV_BTN_TOP == b) || (KDRV_BTN_BOT == b);
+    uint8_t slot = BUTTONS_HOLD_COUNT;
+
+    for ( uint8_t s = 0U; BUTTONS_HOLD_COUNT > s; ++s )
+    {
+        if ( HOLD_IDS[s] == b )
+        {
+            slot = s;
+        }
+    }
+    return slot;
 }
 
 /**
- * @brief Stop the hold clock, on whichever of its two counts it is.
+ * @brief Stop one button's hold clock, on whichever of its two counts it is.
  *
- * @param me The AO.
+ * @param me   The AO.
+ * @param slot The clock: an index in HOLD_IDS.
  */
-static void hold_stop(Buttons * const me)
+static void hold_stop(Buttons * const me, uint8_t slot)
 {
-    (void)QTimeEvt_disarm(&me->hold);
-    me->hold_id   = (uint8_t)KDRV_BTN_COUNT;
-    me->hold_home = false;
+    (void)QTimeEvt_disarm(&me->hold[slot]);
+    me->hold_on[slot]   = false;
+    me->hold_home[slot] = false;
 }
 
 /**
@@ -842,30 +870,24 @@ static void hold_publish_home(Buttons * const me)
 }
 
 /**
- * @brief The hold clock ran out: publish the hold it counted, if the button is
- *        still down.
+ * @brief One button's hold clock ran out: publish the hold it counted, if the
+ *        button is still down.
  *
  * The first count ends in BUTTON_HOLD_SIG, and for the bottom button the same
  * clock counts on to KODE_HOME_HOLD_MS from the press and ends in
- * BUTTON_HOME_HOLD_SIG. An expiry that arrives while the clock is counting is
- * left over from an earlier press, read after that press's release and a new
- * press: it is ignored, so the new press is timed whole. One that arrives
- * after a release finds no button timed, or the button up.
+ * BUTTON_HOME_HOLD_SIG.
  *
- * @param me The AO.
+ * @param me   The AO.
+ * @param slot The clock: an index in HOLD_IDS.
  */
-static void hold_expired(Buttons * const me)
+static void hold_ran_out(Buttons * const me, uint8_t slot)
 {
-    uint8_t const id     = me->hold_id;
-    bool    const second = me->hold_home;
+    uint8_t const id     = (uint8_t)HOLD_IDS[slot];
+    bool    const second = me->hold_home[slot];
 
-    if ( QTimeEvt_getCtr(&me->hold) != 0U )
-    {
-        return;
-    }
-    me->hold_id   = (uint8_t)KDRV_BTN_COUNT;
-    me->hold_home = false;
-    if ( ((uint8_t)KDRV_BTN_COUNT <= id) || ((me->stable & (uint8_t)(1U << id)) == 0U) )
+    me->hold_on[slot]   = false;
+    me->hold_home[slot] = false;
+    if ( (me->stable & (uint8_t)(1U << id)) == 0U )
     {
         return;
     }
@@ -880,20 +902,44 @@ static void hold_expired(Buttons * const me)
         {
             /* Counted on whether or not the pool had a block for the hold
              * above: home does not depend on it. */
-            me->hold_id   = id;
-            me->hold_home = true;
-            QTimeEvt_armX(&me->hold,
+            me->hold_on[slot]   = true;
+            me->hold_home[slot] = true;
+            QTimeEvt_armX(&me->hold[slot],
                           KQP_TICKS_PER_MS(KODE_HOME_HOLD_MS - KODE_BUTTON_HOLD_MS), 0U);
         }
     }
 }
 
 /**
- * @brief Start or stop the hold clock for a confirmed edge.
+ * @brief A hold clock's expiry arrived: serve every clock that has run out.
  *
- * One clock: a press of the top or bottom button (re)arms it, and the release
- * of the timed button disarms it; the pad never holds. Nothing is armed during
- * the guided test: a hold answered by AO_Boot would reset the line's board.
+ * The clocks share BUTTONS_HOLD_TMO_SIG, so the expiry does not say whose it
+ * is; a clock timing a press whose count is at zero is one that ran out. A
+ * clock still counting is not served: an expiry left over from an earlier
+ * press, read after that press's release and a new press, leaves the new
+ * press timed whole. A clock that is not timing serves nothing, so an expiry
+ * read after a release, or after another expiry served its clock, is ignored.
+ *
+ * @param me The AO.
+ */
+static void hold_expired(Buttons * const me)
+{
+    for ( uint8_t s = 0U; BUTTONS_HOLD_COUNT > s; ++s )
+    {
+        if ( me->hold_on[s] && (QTimeEvt_getCtr(&me->hold[s]) == 0U) )
+        {
+            hold_ran_out(me, s);
+        }
+    }
+}
+
+/**
+ * @brief Start or stop a button's hold clock for a confirmed edge.
+ *
+ * Each round button has its own clock: its press (re)arms it and its release
+ * disarms it, and the other button's edges never touch it; the pad never
+ * holds. Nothing is armed during the guided test: a hold answered by AO_Boot
+ * would reset the line's board.
  *
  * @param me      The AO.
  * @param b       The button whose edge was just confirmed.
@@ -901,23 +947,25 @@ static void hold_expired(Buttons * const me)
  */
 static void hold_track(Buttons * const me, kdrv_button_t b, bool pressed)
 {
-    if ( !holdable(b) )
+    uint8_t const slot = hold_slot(b);
+
+    if ( BUTTONS_HOLD_COUNT <= slot )
     {
         return;
     }
     if ( pressed && !me->test_on )
     {
-        hold_stop(me);
-        me->hold_id = (uint8_t)b;
-        QTimeEvt_armX(&me->hold, KQP_TICKS_PER_MS(KODE_BUTTON_HOLD_MS), 0U);
+        hold_stop(me, slot);
+        me->hold_on[slot] = true;
+        QTimeEvt_armX(&me->hold[slot], KQP_TICKS_PER_MS(KODE_BUTTON_HOLD_MS), 0U);
     }
-    else if ( !pressed && ((uint8_t)b == me->hold_id) )
+    else if ( !pressed )
     {
-        hold_stop(me);
+        hold_stop(me, slot);
     }
     else
     {
-        /* A release of a button that was not being timed. */
+        /* A press during the guided test: not timed. */
     }
 }
 
@@ -1229,7 +1277,10 @@ static QState Buttons_watching(Buttons * const me, QEvt const * const e)
             }
             /* A hold armed a tick before the run started must not fire into
              * it, on either count: the prompts ask for presses, not holds. */
-            hold_stop(me);
+            for ( uint8_t s = 0U; BUTTONS_HOLD_COUNT > s; ++s )
+            {
+                hold_stop(me, s);
+            }
             test_start(me, origin);
             status = Q_HANDLED();
             break;

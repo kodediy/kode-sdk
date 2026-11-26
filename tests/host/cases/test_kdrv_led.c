@@ -266,3 +266,87 @@ TEST_CASE("a failed write is reported and stops the rest", "[kdrv_led]")
     Mockkhal_i2c_Verify();
     Mockkhal_i2c_Destroy();
 }
+
+/* ---- A bus that can be taken away ------------------------------------------ */
+
+/** @brief Every write fails while set. */
+static bool s_bus_down;
+
+/** @brief The last enable mask the chip took: which dies are lit. */
+static uint8_t s_led_en;
+
+static kode_status_t bus_write(khal_i2c_dev_t dev, uint8_t reg, uint8_t val, int ncalls)
+{
+    kode_status_t st = KODE_OK;
+
+    (void)dev; (void)ncalls;
+    if ( s_bus_down )
+    {
+        st = KODE_ERROR;
+    }
+    else if ( REG_LED_EN == reg )
+    {
+        s_led_en = val;
+    }
+    else
+    {
+        /* a current or the enable control: nothing to keep */
+    }
+    return st;
+}
+
+/** @brief Start from a dark LED on a bus that answers. */
+static void bus_up(void)
+{
+    Mockkhal_i2c_Init();
+    khal_i2c_write_reg_StubWithCallback(&bus_write);
+    s_bus_down = false;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_led_set(false));
+    TEST_ASSERT_EQUAL_HEX8(0x00U, s_led_en);
+}
+
+/* A toggle reads what the LED is. A write the chip never took must not be
+ * read as done, or the toggle after it goes the wrong way and a blink loses
+ * a phase. */
+TEST_CASE("a write that did not land leaves the LED as it was, and the next "
+          "toggle goes the right way", "[kdrv_led]")
+{
+    bus_up();
+
+    s_bus_down = true;
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_led_toggle());   /* on: lost */
+    TEST_ASSERT_FALSE(kdrv_led_is_on());
+    s_bus_down = false;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_led_toggle());      /* on */
+    TEST_ASSERT_TRUE(kdrv_led_is_on());
+    TEST_ASSERT_NOT_EQUAL(0x00U, s_led_en);
+
+    s_bus_down = true;
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_led_set(false)); /* off: lost */
+    TEST_ASSERT_TRUE(kdrv_led_is_on());
+    s_bus_down = false;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_led_toggle());      /* off */
+    TEST_ASSERT_FALSE(kdrv_led_is_on());
+    TEST_ASSERT_EQUAL_HEX8(0x00U, s_led_en);
+
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
+
+/* The colour a later "on" brings back is one the chip showed, not one it
+ * was asked for and never took. */
+TEST_CASE("a colour that did not land is not the one an on brings back", "[kdrv_led]")
+{
+    bus_up();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_led_rgb(0U, 0U, 255U));   /* blue: OUT2 */
+    s_bus_down = true;
+    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_led_rgb(255U, 0U, 0U));
+    s_bus_down = false;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_led_set(false));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_led_set(true));
+    TEST_ASSERT_EQUAL_HEX8(0x04U, s_led_en);
+
+    Mockkhal_i2c_Verify();
+    Mockkhal_i2c_Destroy();
+}
