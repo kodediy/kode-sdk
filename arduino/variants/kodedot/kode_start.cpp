@@ -10,7 +10,7 @@
 #include "khal_console.h"
 #include "kode_init.h"
 
-#define KODE_SERIAL_LOOK_MS 1U /**< How long a console write sleeps between two looks for room in Serial. */
+#define KODE_SERIAL_LOOK_MS 1U /**< How long a console write sleeps after a look at Serial that took nothing. */
 
 /**
  * @brief Arduino's start-up hook, run at the end of initArduino() on the main task: the SDK is up before setup().
@@ -37,10 +37,12 @@ extern "C" size_t khal_console_app_write(const char *buf, size_t len, uint32_t w
     size_t taken = 0U;
     int32_t room = 0;
     size_t fits = 0U;
+    size_t took = 0U;
     bool more = (NULL != buf) && (0U != len) && Serial.isConnected();
 
     while ( more )
     {
+        took = 0U;
         room = Serial.availableForWrite();
         if ( 0 < room )
         {
@@ -49,20 +51,21 @@ extern "C" size_t khal_console_app_write(const char *buf, size_t len, uint32_t w
             {
                 fits = len - taken;
             }
-            taken += Serial.write(reinterpret_cast<const uint8_t *>(&buf[taken]), fits);
+            took = Serial.write(reinterpret_cast<const uint8_t *>(&buf[taken]), fits);
+            taken += took;
         }
         if ( (len <= taken) || !Serial.isConnected()
              || (wait_ms <= (static_cast<uint32_t>(millis()) - start)) )
         {
             more = false;
         }
-        else if ( 0 >= room )
+        else if ( 0U == took )
         {
             delay(KODE_SERIAL_LOOK_MS);
         }
         else
         {
-            /* Room was there and taken: look again at once. */
+            /* Something was taken: look again at once. */
         }
     }
     return taken;
