@@ -146,6 +146,29 @@ uint32_t boot_app_offset(void)
     return s_app_off;
 }
 
+/**
+ * @brief Whether the supply, not the image, reset the chip.
+ *
+ * @param reason What the chip says reset it: a KDRV_RESET_ value, or any other number.
+ * @return true for KDRV_RESET_BROWNOUT and KDRV_RESET_PWR_GLITCH; false otherwise.
+ */
+static bool boot_supply_dipped(int reason)
+{
+    bool dipped;
+
+    switch ( reason )
+    {
+    case KDRV_RESET_BROWNOUT:
+    case KDRV_RESET_PWR_GLITCH:
+        dipped = true;
+        break;
+    default:
+        dipped = false;
+        break;
+    }
+    return dipped;
+}
+
 kboot_app_end_t boot_app_end_of(kboot_reason_t r, int reason)
 {
     kboot_app_end_t end;
@@ -156,26 +179,27 @@ kboot_app_end_t boot_app_end_of(kboot_reason_t r, int reason)
     }
     else
     {
-        switch ( reason )
+        /* An app's fault is the same reset as a fault of kodeOS's own. */
+        switch ( boot_os_end_of(reason, false) )
         {
-        case KDRV_RESET_PANIC:
-        case KDRV_RESET_CPU_LOCKUP:
+        case KBOOT_OS_END_PANIC:
             end = KBOOT_APP_END_PANIC;
             break;
-        case KDRV_RESET_INT_WDT:
-        case KDRV_RESET_TASK_WDT:
-        case KDRV_RESET_WDT:
+        case KBOOT_OS_END_WATCHDOG:
             end = KBOOT_APP_END_WATCHDOG;
             break;
-        case KDRV_RESET_BROWNOUT:
-        case KDRV_RESET_PWR_GLITCH:
-            end = KBOOT_APP_END_BROWNOUT;
-            break;
         default:
-            /* Every way of leaving (a power-on, a USB reset, a software
-             * restart) and every unnamed reason, any number included: an
-             * unknown reason must never read as a crash. */
-            end = KBOOT_APP_END_CLEAN;
+            if ( boot_supply_dipped(reason) )
+            {
+                end = KBOOT_APP_END_BROWNOUT;
+            }
+            else
+            {
+                /* Every way of leaving (a power-on, a USB reset, a software
+                 * restart) and every unnamed reason, any number included: an
+                 * unknown reason must never read as a crash. */
+                end = KBOOT_APP_END_CLEAN;
+            }
             break;
         }
     }
@@ -241,8 +265,7 @@ uint32_t boot_crashes_next(uint32_t crashes, int reason, bool after_app)
             ++next;
         }
     }
-    else if ( ((int)KDRV_RESET_BROWNOUT == reason)
-              || ((int)KDRV_RESET_PWR_GLITCH == reason) )
+    else if ( boot_supply_dipped(reason) )
     {
         /* The cell's doing, not the image's: neither one more nor a way of
          * leaving. */
