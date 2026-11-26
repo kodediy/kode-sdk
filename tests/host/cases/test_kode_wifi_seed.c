@@ -47,6 +47,8 @@ bool seed_ao_screen_post(QEvt const *e);
 #define kode_standard_ao_pin_arm       seed_ao_pin_arm
 #define kode_standard_ao_power_expect seed_ao_power_expect
 #define kode_standard_ao_power_await  seed_ao_power_await
+#define kode_standard_ao_boost_expect seed_ao_boost_expect
+#define kode_standard_ao_boost_await  seed_ao_boost_await
 #define kode_standard_ao_subscribe     seed_ao_subscribe
 #define AO_KodeStandard                AO_Seed
 #undef CONFIG_KODEOS_BOOT_ROLE_OS
@@ -60,6 +62,8 @@ bool seed_ao_screen_post(QEvt const *e);
 #undef kode_standard_ao_pin_arm
 #undef kode_standard_ao_power_expect
 #undef kode_standard_ao_power_await
+#undef kode_standard_ao_boost_expect
+#undef kode_standard_ao_boost_await
 #undef kode_standard_ao_subscribe
 #undef AO_KodeStandard
 

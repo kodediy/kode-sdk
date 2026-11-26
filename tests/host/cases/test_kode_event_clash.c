@@ -25,6 +25,8 @@
 #define kode_standard_ao_pin_arm       kode_standard_ao_pin_arm_clash
 #define kode_standard_ao_power_expect kode_standard_ao_power_expect_clash
 #define kode_standard_ao_power_await  kode_standard_ao_power_await_clash
+#define kode_standard_ao_boost_expect kode_standard_ao_boost_expect_clash
+#define kode_standard_ao_boost_await  kode_standard_ao_boost_await_clash
 #define kode_standard_ao_subscribe     kode_standard_ao_subscribe_clash
 #define AO_KodeStandard AO_KodeStandard_clash
 #include "kode_standard_ao.c"
@@ -34,6 +36,8 @@
 #undef kode_standard_ao_pin_arm
 #undef kode_standard_ao_power_expect
 #undef kode_standard_ao_power_await
+#undef kode_standard_ao_boost_expect
+#undef kode_standard_ao_boost_await
 #undef kode_standard_ao_subscribe
 #undef kode_standard_ao_screen_attach
 #undef kode_standard_ao_ensure

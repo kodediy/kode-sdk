@@ -558,9 +558,15 @@ enum KodeSignals {
                                  *   mode. Over when a cable comes or the level
                                  *   climbs KODE_POWER_CRITICAL_REARM_PCT above
                                  *   the mark. kscreen shows its notice for it
-                                 *   (kscreen_critical()). Last of the published
-                                 *   signals, so the ones before it keep their
-                                 *   numbers.                                */
+                                 *   (kscreen_critical()).                   */
+    POWER_BOOST_CUT_SIG,        /**< AO_Power: the board stopped a boost that
+                                 *   was asked for (PowerBoostCutEvt): the
+                                 *   cell under the boost's floor, a boost
+                                 *   fault, or the round for OFF. Not said for
+                                 *   a boost its asker stopped, nor for one
+                                 *   that did not start (POWER_CTRL_SIG says
+                                 *   that). Last of the published signals, so
+                                 *   the ones before it keep their numbers. */
     /* Published signals end here: QF sizes subscriber lists by it; a publish above asserts. */
     MAX_PUB_SIG,
 
@@ -4587,6 +4593,20 @@ typedef struct {
 #define POWER_CTRL_ICHG    2U   /**< value mA, 64..the cell's. Answer: kept.  */
 #define POWER_CTRL_RESET   3U   /**< value ignored. Answer: 0.                */
 
+/* Why a boost is not running: a PowerCtrlEvt's @c why for POWER_CTRL_BOOST,
+ * and a PowerBoostCutEvt's. */
+#define POWER_BOOST_WHY_NONE   0U  /**< Nothing to say: as asked, or the rc alone says it. */
+#define POWER_BOOST_WHY_CABLE  1U  /**< USB is present, or arrived during the start. */
+#define POWER_BOOST_WHY_UNREAD 2U  /**< No battery reading yet.                    */
+#define POWER_BOOST_WHY_CELL   3U  /**< The cell is under the boost's floor.       */
+#define POWER_BOOST_WHY_TEMP   4U  /**< TS outside the boost's window: no pack, or
+                                    *   the cell under -10 or over 55 C.          */
+#define POWER_BOOST_WHY_FAULT  5U  /**< BOOST_FAULT: an overload or an over-voltage
+                                    *   on the 5 V, or the cell too low.          */
+#define POWER_BOOST_WHY_PIN    6U  /**< No fault and no boost: the OTG pin is low. */
+#define POWER_BOOST_WHY_OFF    7U  /**< The board switches off: a round for OFF
+                                    *   was asked and the board is not awake. */
+
 /**
  * @brief One owner-level operation on the PMIC (POWER_CTRL_REQ_SIG).
  *
@@ -4623,8 +4643,21 @@ typedef struct {
     QEvt     super;
     uint8_t  op;
     uint8_t  rc;        /**< kode_status_t                             */
+    uint8_t  why;       /**< POWER_CTRL_BOOST not as asked: a
+                         *   POWER_BOOST_WHY_*; POWER_BOOST_WHY_NONE
+                         *   for every other op.                       */
     int32_t  value;
 } PowerCtrlEvt;
+
+/**
+ * @brief The board stopped a boost that was asked for (POWER_BOOST_CUT_SIG).
+ *
+ * One static event per cause, so a dry pool never loses one.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t why;        /**< POWER_BOOST_WHY_CELL, _FAULT or _OFF.     */
+} PowerBoostCutEvt;
 
 /** @brief A touch sample from AO_Touch (TOUCH_EVT_SIG).
  *

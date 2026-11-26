@@ -115,6 +115,9 @@ typedef struct {
 #if CONFIG_KODE_LOWPOWER
     uint8_t  lp_who;       /**< The id lowpower_join() gave.                */
     bool     rested;       /**< The ADC was left idle for the board's sleep. */
+    uint8_t  lp_target;    /**< The last round's target, KODE_LP_AWAKE once
+                            *   the board is awake: no boost starts while
+                            *   it is KODE_LP_OFF.                         */
 #endif
     QTimeEvt ship;         /**< The countdown after the cable leaves.      */
     QActive *ship_who;     /**< Who power_ship_on_unplug_request() named.  */
@@ -153,6 +156,7 @@ QActive * const AO_Power = &l_power.super;
 static QState Power_initial(Power * const me, void const * const par);
 static QState Power_polling(Power * const me, QEvt const * const e);
 static QState Power_waiting(Power * const me, QEvt const * const e);
+static void boost_cut(Power * const me, uint8_t why);
 
 /* ---- Requests ------------------------------------------------------------ */
 
@@ -359,6 +363,7 @@ void Power_ctor(void)
 #if CONFIG_KODE_LOWPOWER
     me->lp_who        = KODE_LOWPOWER_WHO_NONE;
     me->rested        = false;
+    me->lp_target     = (uint8_t)KODE_LP_AWAKE;
 #endif
 }
 
@@ -875,7 +880,12 @@ static void power_critical_watch(Power * const me, const reading_t *r, uint8_t s
     }
 }
 
-/** @brief One complete reading, published; false when the PMIC did not answer. */
+/**
+ * @brief One complete reading, published; false when the PMIC did not answer.
+ *
+ * A cell under the cut on battery counts towards ship mode whether the boost
+ * runs or not; boost_guard() is what stops the boost.
+ */
 static bool power_read(Power * const me, reading_t *r, uint8_t *soc)
 {
     if ( !me->pmic || !read_pmic(r) )
@@ -883,7 +893,7 @@ static bool power_read(Power * const me, reading_t *r, uint8_t *soc)
         return false;
     }
     read_gauge(me, r);
-    if ( (!r->vbus) && (!r->boost) && ((uint16_t)GAUGE_MIN_MV < r->vbat_mv) && (POWER_CUT_MV > r->vbat_mv) )
+    if ( (!r->vbus) && ((uint16_t)GAUGE_MIN_MV < r->vbat_mv) && (POWER_CUT_MV > r->vbat_mv) )
     {
         me->low_reads = (uint8_t)(me->low_reads + 1U);
         if ( POWER_CUT_READS <= me->low_reads )
@@ -1722,17 +1732,33 @@ static void plug_look(Power * const me)
 
 /* ---- Control requests ---------------------------------------------------- */
 
-/** @brief Publish the answer to one control request. Bounded, never asserts. */
-static void ctrl_answer(Power * const me, uint8_t op, kode_status_t rc, int32_t value)
+/**
+ * @brief Publish the answer to one control request, with why a boost is not
+ *        as asked. Bounded, never asserts.
+ * @param me    The AO.
+ * @param op    The request's POWER_CTRL_*.
+ * @param rc    Its outcome.
+ * @param value What the chip holds.
+ * @param why   A POWER_BOOST_WHY_*; POWER_BOOST_WHY_NONE for every other op.
+ */
+static void ctrl_answer_why(Power * const me, uint8_t op, kode_status_t rc, int32_t value,
+                            uint8_t why)
 {
     PowerCtrlEvt *ev = Q_NEW_X(PowerCtrlEvt, 0U, POWER_CTRL_SIG);
     if ( NULL != ev )
     {
         ev->op    = op;
         ev->rc    = (uint8_t)rc;
+        ev->why   = why;
         ev->value = value;
         QACTIVE_PUBLISH(&ev->super, &me->super);
     }
+}
+
+/** @brief Publish the answer to one control request. Bounded, never asserts. */
+static void ctrl_answer(Power * const me, uint8_t op, kode_status_t rc, int32_t value)
+{
+    ctrl_answer_why(me, op, rc, value, POWER_BOOST_WHY_NONE);
 }
 
 /**
@@ -1924,39 +1950,71 @@ static void boost_disarm(Power * const me)
 }
 
 /**
- * @brief Whether a boost may start now, and why not.
- *
- * Refused while USB is present (an armed bit would start the boost when the
- * cable leaves) and while the cell is unread or under the pack's floor.
+ * @brief Whether a round for OFF was asked and the board is not awake again.
  *
  * @param me The AO.
- * @return KODE_OK; KODE_DENIED for a cable or a cell; KODE_ERROR when the
- *         charger did not answer.
+ * @return true while no boost may start.
  */
-static kode_status_t boost_refusal(Power const * const me)
+static bool boost_off_ahead(Power const * const me)
+{
+    bool ahead = false;
+
+#if CONFIG_KODE_LOWPOWER
+    ahead = ((uint8_t)KODE_LP_OFF == me->lp_target);
+#else
+    (void)me;
+#endif
+    return ahead;
+}
+
+/**
+ * @brief Whether a boost may start now, and why not.
+ *
+ * Refused while the board switches off (boost_off_ahead()), while USB is
+ * present (an armed bit would start the boost when the cable leaves) and
+ * while the cell is unread or under the pack's floor.
+ *
+ * @param me  The AO.
+ * @param why Receives a POWER_BOOST_WHY_*: NONE unless the board switching
+ *            off, a cable or a cell refused it.
+ * @return KODE_OK; KODE_DENIED for the board switching off, a cable or a
+ *         cell; KODE_ERROR when the charger did not answer.
+ */
+static kode_status_t boost_refusal(Power const * const me, uint8_t *why)
 {
     int32_t       pg = 0;
     kode_status_t rc = KODE_OK;
 
-    if ( kdrv_bq25896_get(KDRV_BQ_PG_STAT, &pg) != KODE_OK )
+    *why = POWER_BOOST_WHY_NONE;
+    /* cppcheck-suppress knownConditionTrueFalse ; constant in a build without low power */
+    if ( boost_off_ahead(me) )
+    {
+        KLOG_W(TAG, "boost refused: the board switches off");
+        *why = POWER_BOOST_WHY_OFF;
+        rc   = KODE_DENIED;
+    }
+    else if ( kdrv_bq25896_get(KDRV_BQ_PG_STAT, &pg) != KODE_OK )
     {
         rc = KODE_ERROR;
     }
     else if ( 0 != pg )
     {
         KLOG_W(TAG, "boost refused: USB present, the OTG pin is held low by hardware");
-        rc = KODE_DENIED;
+        *why = POWER_BOOST_WHY_CABLE;
+        rc   = KODE_DENIED;
     }
     else if ( 0U == me->vbat_mv )
     {
         KLOG_W(TAG, "boost refused: no battery reading yet");
-        rc = KODE_DENIED;
+        *why = POWER_BOOST_WHY_UNREAD;
+        rc   = KODE_DENIED;
     }
     else if ( KBSP_CELL_BOOST_MIN_MV > me->vbat_mv )
     {
         KLOG_W(TAG, "boost refused: cell at %u mV, under the %u mV floor",
                (unsigned)me->vbat_mv, (unsigned)KBSP_CELL_BOOST_MIN_MV);
-        rc = KODE_DENIED;
+        *why = POWER_BOOST_WHY_CELL;
+        rc   = KODE_DENIED;
     }
     else
     {
@@ -2005,11 +2063,12 @@ static void boost_lim_restore(Power * const me)
  */
 static void boost_test(Power * const me, PowerBoostTestReqEvt const * const r)
 {
-    kode_status_t rc = KODE_OK;
+    kode_status_t rc  = KODE_OK;
+    uint8_t       why = POWER_BOOST_WHY_NONE;
 
     if ( r->on )
     {
-        rc = boost_refusal(me);
+        rc = boost_refusal(me, &why);
         if ( KODE_OK == rc )
         {
             rc = kdrv_bq25896_set(KDRV_BQ_BOOST_LIM, (int32_t)KODE_TEST_DOT_BOOST_LIM_CODE);
@@ -2112,10 +2171,10 @@ static void boost_test_answer(Power * const me, const reading_t *r)
 /**
  * @brief `boost state=on|off`: refuse what cannot work, write the bit, wait.
  *
- * On is refused without a write while USB is present, because an armed bit
- * starts the boost the instant the cable leaves and nobody asked for that,
- * and while the cell is under the pack's floor. Both are the owner's to
- * know; the chip would have taken the write.
+ * On is refused without a write while the board switches off, while USB is
+ * present, because an armed bit starts the boost the instant the cable
+ * leaves and nobody asked for that, and while the cell is under the pack's
+ * floor. All are the owner's to know; the chip would have taken the write.
  */
 static QState ctrl_boost(Power * const me, bool on)
 {
@@ -2123,11 +2182,12 @@ static QState ctrl_boost(Power * const me, bool on)
 
     if ( on )
     {
-        kode_status_t const why = boost_refusal(me);
+        uint8_t             why = POWER_BOOST_WHY_NONE;
+        kode_status_t const rc  = boost_refusal(me, &why);
 
-        if ( KODE_OK != why )
+        if ( KODE_OK != rc )
         {
-            ctrl_answer(me, POWER_CTRL_BOOST, why, 0);
+            ctrl_answer_why(me, POWER_CTRL_BOOST, rc, 0, why);
             return Q_HANDLED();
         }
         bit = 1;
@@ -2159,6 +2219,45 @@ static QState ctrl_reset(Power * const me)
 }
 
 /**
+ * @brief Stop a boost the board decided against, and say so on the bus once
+ *        the chip took it.
+ *
+ * POWER_BOOST_CUT_SIG goes out only for a boost that was wanted and whose
+ * stop landed: a failed write keeps the wish, and the next look tries again
+ * and says it then.
+ *
+ * @param me  The AO.
+ * @param why POWER_BOOST_WHY_CELL, _FAULT or _OFF.
+ */
+static void boost_cut(Power * const me, uint8_t why)
+{
+    static const PowerBoostCutEvt cut_cell  = { QEVT_INITIALIZER(POWER_BOOST_CUT_SIG),
+                                                POWER_BOOST_WHY_CELL };
+    static const PowerBoostCutEvt cut_fault = { QEVT_INITIALIZER(POWER_BOOST_CUT_SIG),
+                                                POWER_BOOST_WHY_FAULT };
+    static const PowerBoostCutEvt cut_off   = { QEVT_INITIALIZER(POWER_BOOST_CUT_SIG),
+                                                POWER_BOOST_WHY_OFF };
+    bool const was = me->boost_wanted;
+
+    boost_disarm(me);
+    if ( was && !me->boost_wanted )
+    {
+        if ( POWER_BOOST_WHY_FAULT == why )
+        {
+            QACTIVE_PUBLISH(&cut_fault.super, &me->super);
+        }
+        else if ( POWER_BOOST_WHY_OFF == why )
+        {
+            QACTIVE_PUBLISH(&cut_off.super, &me->super);
+        }
+        else
+        {
+            QACTIVE_PUBLISH(&cut_cell.super, &me->super);
+        }
+    }
+}
+
+/**
  * @brief After a reading, while a boost is wanted: the two reasons to stop it.
  *
  * Under the pack's floor the cell is what is protected; on a latched
@@ -2176,13 +2275,13 @@ static void boost_guard(Power * const me, const reading_t *r)
     {
         KLOG_W(TAG, "boost off: cell at %u mV, under the %u mV floor",
                (unsigned)r->vbat_mv, (unsigned)KBSP_CELL_BOOST_STOP_MV);
-        boost_disarm(me);
+        boost_cut(me, POWER_BOOST_WHY_CELL);
     }
     else if ( r->boost_fault )
     {
         KLOG_W(TAG, "boost off: BOOST_FAULT (overload or over-voltage on the "
                     "5 V rail, or the cell too low)");
-        boost_disarm(me);
+        boost_cut(me, POWER_BOOST_WHY_FAULT);
     }
     else
     {
@@ -2236,11 +2335,15 @@ static void charge_guard(Power * const me, const reading_t *r)
  *
  * The OTG pin has no register, so the last line is by elimination: everything
  * the chip can report is clear, so it is the pin.
+ *
+ * @param me The AO.
+ * @return The cause: POWER_BOOST_WHY_CABLE, _TEMP, _FAULT or _PIN.
  */
-static void boost_explain(Power * const me)
+static uint8_t boost_explain(Power * const me)
 {
     kdrv_bq25896_faults_t live;
-    int32_t               pg = 0;
+    int32_t               pg  = 0;
+    uint8_t               why = POWER_BOOST_WHY_PIN;
 
     live.ntc   = 0U;
     live.boost = false;
@@ -2249,16 +2352,19 @@ static void boost_explain(Power * const me)
     if ( 0 != pg )
     {
         KLOG_W(TAG, "boost did not start: USB arrived meanwhile");
+        why = POWER_BOOST_WHY_CABLE;
     }
     else if ( 0U != live.ntc )
     {
         KLOG_W(TAG, "boost did not start: TS outside the boost window (no pack, "
                     "or the cell under -10 or over 55 C)");
+        why = POWER_BOOST_WHY_TEMP;
     }
     else if ( live.boost )
     {
         KLOG_W(TAG, "boost did not start: boost fault (overload, over-voltage "
                     "or the cell too low)");
+        why = POWER_BOOST_WHY_FAULT;
     }
     else
     {
@@ -2266,6 +2372,7 @@ static void boost_explain(Power * const me)
                     "is low - measure TP33");
     }
     boost_disarm(me);
+    return why;
 }
 
 /** @brief The boost's wait is over: is the chip doing what was asked? */
@@ -2273,6 +2380,7 @@ static void boost_settled(Power * const me)
 {
     int32_t stat = 0;
     int32_t is   = 0;
+    uint8_t why  = POWER_BOOST_WHY_NONE;
 
     if ( kdrv_bq25896_get(KDRV_BQ_VBUS_STAT, &stat) != KODE_OK )
     {
@@ -2300,7 +2408,7 @@ static void boost_settled(Power * const me)
     }
     if ( asked )
     {
-        boost_explain(me);
+        why = boost_explain(me);
     }
     else
     {
@@ -2310,7 +2418,7 @@ static void boost_settled(Power * const me)
          * stop is exactly what must not be left unwatched. */
         boost_disarm(me);
     }
-    ctrl_answer(me, POWER_CTRL_BOOST, KODE_ERROR, is);
+    ctrl_answer_why(me, POWER_CTRL_BOOST, KODE_ERROR, is, why);
 }
 
 /**
@@ -2538,13 +2646,29 @@ static const char *power_rest_refusal(Power const * const me)
 /**
  * @brief LOWPOWER_ROUND_SIG: the ADC back to one-shot, and answer once.
  *
+ * A round for OFF stops a wanted boost whatever else keeps the chips busy:
+ * deep sleep stops every poll and every look, an order goes off without the
+ * owners still busy, and the charger would boost the cell flat. A stop that
+ * does not land answers busy, and the next round tries again. From a round
+ * for OFF until the board is awake, no boost starts.
+ *
  * @param me The AO.
  * @param r  The round.
  */
 static void power_round(Power * const me, const LowPowerRoundEvt * const r)
 {
-    const char *const why = power_rest_refusal(me);
+    const char *why = power_rest_refusal(me);
 
+    me->lp_target = r->target;
+    if ( ((uint8_t)KODE_LP_OFF == r->target) && me->boost_wanted )
+    {
+        KLOG_N(TAG, "boost off: the board switches off");
+        boost_cut(me, POWER_BOOST_WHY_OFF);
+        if ( (NULL == why) && me->boost_wanted )
+        {
+            why = "boost";
+        }
+    }
     if ( NULL != why )
     {
         lowpower_ready(me->lp_who, r->round, true, why);
@@ -2569,15 +2693,21 @@ static void power_round(Power * const me, const LowPowerRoundEvt * const r)
 }
 
 /**
- * @brief LOWPOWER_STATE_SIG: on AWAKE, start the conversion the first poll reads.
+ * @brief LOWPOWER_STATE_SIG: on AWAKE, let a boost start again, and start the
+ *        conversion the first poll reads.
  *
- * Idempotent: it acts only on an AO that rested, once.
+ * AWAKE is what every way back says: the wake, a round abandoned, a cable.
+ * The conversion is started only by an AO that rested, once.
  *
  * @param me The AO.
  * @param s  The change.
  */
 static void power_state(Power * const me, const LowPowerStateEvt * const s)
 {
+    if ( (uint8_t)KODE_LP_AWAKE == s->state )
+    {
+        me->lp_target = (uint8_t)KODE_LP_AWAKE;
+    }
     if ( ((uint8_t)KODE_LP_AWAKE == s->state) && me->rested )
     {
         me->rested = false;
@@ -2893,10 +3023,14 @@ static QState Power_polling(Power * const me, QEvt const * const e)
             uint8_t   soc = 0U;
             /* The minute's look while the board sleeps: the poll that keeps
              * the clock stops with the tick, so the keep happens here, and
-             * the reading is published for the cable. Nothing is logged and
-             * no chip is dumped, or every minute asleep would print a page. */
+             * the reading is published for the cable and watched by the
+             * boost's guard. No chip is dumped, and only a stop is logged, or
+             * every minute asleep would print a page. */
             (void)kdrv_clocks_wall_keep(false);
-            (void)power_read(me, &r, &soc);
+            if ( power_read(me, &r, &soc) )
+            {
+                boost_guard(me, &r);
+            }
             status = Q_HANDLED();
             break;
         }
@@ -3018,7 +3152,9 @@ static QState Power_waiting(Power * const me, QEvt const * const e)
         }
 #if CONFIG_KODE_LOWPOWER
         case LOWPOWER_ROUND_SIG: {
-            /* The chip is settling after a boost or a reset. */
+            /* The chip is settling after a boost or a reset; a busy owner
+             * is asked again, and the round after the settle stops a boost. */
+            me->lp_target = Q_EVT_CAST(LowPowerRoundEvt)->target;
             lowpower_ready(me->lp_who, Q_EVT_CAST(LowPowerRoundEvt)->round,
                            true, "power control");
             status = Q_HANDLED();
