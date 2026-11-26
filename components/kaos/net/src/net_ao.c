@@ -5444,7 +5444,8 @@ static kdump_result_t dump_prepare(Net * const me, uint8_t *buf,
  *
  * Only a dump of a kodeOS image leaves the board: none, a sketch's, another
  * build's or one that cannot be read answers KDUMP_R_NONE. The PSRAM it is
- * read into goes back as soon as kdrv_net has its copy.
+ * read into is wiped and goes back as soon as kdrv_net has its copy; a PUT
+ * that cannot be handed to the worker has kdrv_net's copy wiped too.
  *
  * @param me  The AO.
  * @param who Who asked.
@@ -5475,6 +5476,7 @@ static void dump_send(Net * const me, QActive *who)
         else
         {
             result = dump_prepare(me, buf, info.sha, &len);
+            (void)memset(buf, 0, KDRV_COREDUMP_MAX);   /* no copy goes back to the heap */
             khal_free(buf);
         }
     }
@@ -5484,6 +5486,7 @@ static void dump_send(Net * const me, QActive *who)
         req.keep = false;   /* one dump: the connection closes with the job */
         if ( !net_submit(me, &req) )
         {
+            kdrv_net_http_forget();   /* no job runs to wipe kdrv_net's copy */
             result = KDUMP_R_BUSY;
         }
     }

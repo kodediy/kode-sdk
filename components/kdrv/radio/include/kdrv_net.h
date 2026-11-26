@@ -464,10 +464,12 @@ void kdrv_net_http_result(kdrv_net_http_result_t *out);
 uint32_t kdrv_net_http_body(uint32_t off, uint8_t *dst, uint32_t cap);
 
 /**
- * @brief Wipe the kept body of the last HTTP job, once its reader has it.
+ * @brief Wipe the kept body of the last HTTP job, once its reader has it,
+ *        and a PUT prepared whose job never ran.
  *
- * A body can carry a token; it does not wait in the driver for the next job.
- * A running job writes the body itself, so this is not safe while one runs.
+ * A body can carry a token, and a PUT's body a core dump; neither waits in the
+ * driver for the next job. A running job writes the body itself and reads the
+ * PUT's, so this is not safe while one runs.
  * Called by AO_Net only while no job is in flight, because it knows when its
  * worker is idle.
  */
@@ -500,12 +502,15 @@ kode_status_t kdrv_net_http_post_body(const char *json, size_t len);
  * @brief Store everything the next HTTP_PUT job sends.
  *
  * Like the POST body, none of it travels in the job. All five are copied into
- * buffers this driver owns (PSRAM, taken on the first call, never freed) and
- * stay until the next call replaces them - except the bearer, which the job
- * wipes once it is done, so every PUT needs its own call. The PUT sends the
- * body as is, with `Content-Type: <content_type>` and `Authorization: Bearer
- * <bearer>`, follows no redirect, and never logs @p url's path (the host
- * alone, see kdrv_net_url_host()). The answer lands where GET's does.
+ * buffers this driver owns (PSRAM, taken on the first call, never freed).
+ * The job wipes the body, the URL and the bearer once it is done, whatever it
+ * came to, and kdrv_net_http_forget() wipes them when no job ran: every PUT
+ * needs its own call, and no copy of a body (a core dump among them) waits in
+ * PSRAM. The content type stays until the next call replaces it. The PUT
+ * sends the body as is, with `Content-Type: <content_type>` and
+ * `Authorization: Bearer <bearer>`, follows no redirect, and never logs
+ * @p url's path (the host alone, see kdrv_net_url_host()). The answer lands
+ * where GET's does.
  *
  * The driver keeps no record of a job running: the caller (AO_Net) calls this
  * only while its worker is idle, because the buffers could be the ones a job
