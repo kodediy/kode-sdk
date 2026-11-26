@@ -14,9 +14,9 @@ menu "Kode Dot"
         config KODEOS_BOOT_ROLE_APP
             bool "A user app, running from the apps region"
             help
-                AO_Boot never writes otadata. A reset returns to kodeOS, even
-                a crash on the first line, unless the app was installed
-                through the mailbox: that one starts again.
+                AO_Boot never writes otadata. A reset returns to kodeOS, a
+                crash included; an app installed through the mailbox starts
+                again until it leaves (kode_exit(), the held bottom button).
 
         config KODEOS_BOOT_ROLE_OS
             bool "kodeOS itself, running from factory"

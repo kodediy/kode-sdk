@@ -1081,19 +1081,20 @@ kode_status_t kdrv_apps_req_set(uint32_t offset, uint32_t size, uint32_t state)
 }
 
 /**
- * @brief Read the standing boot request.
+ * @brief Read the boot request standing in a region.
  *
- * @param req Where the record goes.
- * @return true when the region is open and the record carries the request
+ * @param part The `apps` partition, or NULL.
+ * @param req  Where the record goes.
+ * @return true when @p part is a partition and the record carries the request
  *         magic and a good CRC; the state is not judged here.
  */
-static bool req_read(kapps_req_t *req)
+static bool req_read_from(const esp_partition_t *part, kapps_req_t *req)
 {
-    if ( NULL == s_part )
+    if ( NULL == part )
     {
         return false;
     }
-    if ( esp_partition_read(s_part, KAPPS_REQ_OFF, req, sizeof(*req)) != ESP_OK )
+    if ( esp_partition_read(part, KAPPS_REQ_OFF, req, sizeof(*req)) != ESP_OK )
     {
         return false;
     }
@@ -1104,6 +1105,18 @@ static bool req_read(kapps_req_t *req)
     uint32_t const crc = esp_rom_crc32_le(UINT32_MAX, (const uint8_t *)req,
                                           offsetof(kapps_req_t, crc));
     return crc == req->crc;
+}
+
+/**
+ * @brief Read the standing boot request.
+ *
+ * @param req Where the record goes.
+ * @return true when the region is open and the record carries the request
+ *         magic and a good CRC; the state is not judged here.
+ */
+static bool req_read(kapps_req_t *req)
+{
+    return req_read_from(s_part, req);
 }
 
 /**
@@ -1135,6 +1148,39 @@ bool kdrv_apps_req_tried(uint32_t *offset)
 bool kdrv_apps_req_armed(uint32_t *offset)
 {
     return req_in_state(KAPPS_REQ_STATE_ARMED, offset);
+}
+
+kode_status_t kdrv_apps_req_retire(void)
+{
+    /* An app never runs kdrv_apps_init(): the lookup is made here. */
+    const esp_partition_t *part = s_part;
+    kapps_req_t            req;
+
+    if ( NULL == part )
+    {
+        part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                        (esp_partition_subtype_t)KAPPS_PART_SUBTYPE,
+                                        "apps");
+    }
+    if ( NULL == part )
+    {
+        return KODE_ERROR;
+    }
+    if ( !req_read_from(part, &req) || (KAPPS_REQ_STATE_ARMED != req.state) )
+    {
+        return KODE_DENIED;
+    }
+
+    /* TRIED is ARMED with bits cleared: a write over the word, no erase. */
+    uint32_t const  tried = KAPPS_REQ_STATE_TRIED;
+    esp_err_t const err   = esp_partition_write(part, KAPPS_REQ_OFF + KAPPS_REQ_STATE_AT,
+                                                &tried, sizeof(tried));
+    if ( ESP_OK != err )
+    {
+        KLOG_E(TAG, "req retire failed (%s)", esp_err_to_name(err));
+        return KODE_ERROR;
+    }
+    return KODE_OK;
 }
 
 bool kdrv_apps_req_present(void)

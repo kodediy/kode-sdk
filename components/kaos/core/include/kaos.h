@@ -4822,8 +4822,8 @@ void boot_info_request(void);
  * @brief The request that has AO_Boot reset the board (BOOT_EXIT_REQ_SIG); it
  *        does not touch otadata.
  *
- * How an app goes home (kode_sys_exit_to_os()): the app never confirmed its
- * PENDING_VERIFY slot, so the next boot is kodeOS.
+ * How an app goes home (kode_sys_exit_to_os()): AO_Boot retires a sticky boot
+ * request first (a mailbox install's), so the next boot is kodeOS.
  * @return A static event; never NULL.
  */
 QEvt const *boot_exit_evt(void);

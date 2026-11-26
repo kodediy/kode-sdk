@@ -542,6 +542,75 @@ TEST_CASE("an ARMED request reports its offset, and no other state does",
     kdrv_apps_req_clear();
 }
 
+/* An app on its way home does what the bootloader does when it retires a
+ * sticky run: the state word is written over, so kodeOS reads "back from an
+ * app" with the same offset and the next reset no longer starts the app. */
+TEST_CASE("an ARMED request is retired to TRIED, with its offset",
+          "[apps_region]")
+{
+    const esp_partition_t * const p = region();
+    uint32_t                      off = 0U;
+    static const uint32_t         armed = KAPPS_REQ_STATE_ARMED;
+
+    apps_ready();
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_apps_req_set(KAPPS_DATA_OFF + KAPPS_ALIGN, 0x8000U,
+                          KAPPS_REQ_STATE_ALWAYS));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+        esp_partition_write(p, KAPPS_REQ_OFF + offsetof(kapps_req_t, state),
+                            &armed, sizeof(armed)));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_apps_req_retire());
+    TEST_ASSERT_FALSE(kdrv_apps_req_armed(&off));
+    TEST_ASSERT_TRUE(kdrv_apps_req_tried(&off));
+    TEST_ASSERT_EQUAL_HEX32(KAPPS_DATA_OFF + KAPPS_ALIGN, off);
+
+    /* Retired once: there is nothing left to retire. */
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_apps_req_retire());
+    TEST_ASSERT_TRUE(kdrv_apps_req_tried(&off));
+
+    kdrv_apps_req_clear();
+}
+
+/* Only a launched sticky run is retired. A request nobody launched yet (NEW,
+ * ALWAYS) still has to be launched, and erased flash or a TRIED record has
+ * nothing to retire: none of them is written. */
+TEST_CASE("a request that is not ARMED is left as it stands", "[apps_region]")
+{
+    const esp_partition_t * const p = region();
+    kapps_req_t                   req;
+    static const uint32_t         tried = KAPPS_REQ_STATE_TRIED;
+
+    apps_ready();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kdrv_apps_req_retire(),
+                                  "erased flash is no request");
+    TEST_ASSERT_FALSE(kdrv_apps_req_present());
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_apps_req_set(KAPPS_DATA_OFF, 0x8000U, KAPPS_REQ_STATE_NEW));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kdrv_apps_req_retire(), "NEW");
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+        esp_partition_read(p, KAPPS_REQ_OFF, &req, sizeof(req)));
+    TEST_ASSERT_EQUAL_HEX32(KAPPS_REQ_STATE_NEW, req.state);
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_apps_req_set(KAPPS_DATA_OFF, 0x8000U, KAPPS_REQ_STATE_ALWAYS));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kdrv_apps_req_retire(), "ALWAYS");
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+        esp_partition_read(p, KAPPS_REQ_OFF, &req, sizeof(req)));
+    TEST_ASSERT_EQUAL_HEX32(KAPPS_REQ_STATE_ALWAYS, req.state);
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+        esp_partition_write(p, KAPPS_REQ_OFF + offsetof(kapps_req_t, state),
+                            &tried, sizeof(tried)));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KODE_DENIED, kdrv_apps_req_retire(), "TRIED");
+    TEST_ASSERT_TRUE(kdrv_apps_req_tried(NULL));
+
+    kdrv_apps_req_clear();
+}
+
 /* Only two words exist. A caller passing TRIED would be writing "already
  * retired" and a caller passing EMPTY would be writing erased flash with a
  * magic in front of it; both are refused before the sector is touched. */

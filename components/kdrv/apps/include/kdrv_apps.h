@@ -267,6 +267,20 @@ bool kdrv_apps_req_tried(uint32_t *offset);
 bool kdrv_apps_req_armed(uint32_t *offset);
 
 /**
+ * @brief Retire a sticky run that stands launched (state=ARMED), as the
+ *        bootloader does: the next reset boots kodeOS.
+ *
+ * For the app that request launched, on its way home. It finds the region by
+ * itself, so it needs no kdrv_apps_init() and reads no directory. The state
+ * word is written over; nothing is erased.
+ *
+ * @return KODE_OK when the request reads TRIED now; KODE_DENIED when no valid
+ *         request stands in ARMED, and nothing is written; KODE_ERROR when
+ *         there is no `apps` partition or the write fails.
+ */
+kode_status_t kdrv_apps_req_retire(void);
+
+/**
  * @brief Is any boot request record standing (not erased)?
  *
  * True when a valid record exists whose state is not EMPTY - NEW, ALWAYS,

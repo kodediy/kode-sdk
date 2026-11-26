@@ -608,7 +608,7 @@ static kboot_other_t boot_other_of(kdrv_slot_state_t st, bool newer, bool rescue
 /**
  * @brief Claim otadata, restore the clock and the zone; as kodeOS, learn why it booted.
  *
- * In an app it never writes otadata, so any reset returns to kodeOS.
+ * In an app it never writes otadata.
  *
  * @param me  AO_Boot.
  * @param par Unused.
@@ -652,11 +652,11 @@ static QState Boot_initial(Boot * const me, void const * const par)
     zone_load(me);
 
 #if !CONFIG_KODEOS_BOOT_ROLE_OS
-    /* An app in the slot must NEVER touch otadata: the bootloader left this
-     * slot PENDING_VERIFY and nothing confirms it, so the next boot is kodeOS
-     * whatever this firmware does, a crash on its first line included. */
-    KLOG_N(TAG, "running as an app; otadata is left alone, so any reset "
-                "returns to kodeOS");
+    /* An app must NEVER touch otadata, which is kodeOS's alone. Where a reset
+     * lands is the boot request's business: kodeOS after a launcher start;
+     * this app again after a mailbox install, until it leaves on purpose
+     * (leave_home()). */
+    KLOG_N(TAG, "running as an app; otadata is left alone");
     return Q_TRAN(&Boot_active);
 #else
 #if CONFIG_KODE_LOWPOWER
@@ -894,6 +894,36 @@ static void leave_begin(Boot * const me, kdrv_radio_note_t kind)
     {
         leave_net_step(me);
     }
+}
+
+/**
+ * @brief Start the leave that ends in kodeOS because somebody asked for it.
+ *
+ * An app that came through the mailbox runs on a sticky request, which the
+ * bootloader keeps across a software reset; retired here, the reset lands in
+ * kodeOS, as it does for an app the launcher started. kodeOS has none
+ * standing: it clears what it finds at boot.
+ *
+ * @param me AO_Boot.
+ */
+static void leave_home(Boot * const me)
+{
+    kode_status_t const rc = kdrv_apps_req_retire();
+
+    if ( KODE_OK == rc )
+    {
+        KLOG_I(TAG, "the sticky boot request is retired; the reset lands in kodeOS");
+    }
+    else if ( KODE_ERROR == rc )
+    {
+        KLOG_W(TAG, "the sticky boot request could not be retired; the reset "
+                    "may start this app again");
+    }
+    else
+    {
+        /* None stands in ARMED: the bootloader retired the launcher's. */
+    }
+    leave_begin(me, KDRV_RADIO_NOTE_OS);
 }
 
 #if CONFIG_KODEOS_BOOT_ROLE_OS
@@ -1746,9 +1776,9 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
         }
 #endif
         case BOOT_EXIT_REQ_SIG: {
-            /* A plain reset. Nothing is written: see the initial transition. */
+            /* A reset on purpose: otadata is not written, a sticky run is retired. */
             KLOG_N(TAG, "resetting");
-            leave_begin(me, KDRV_RADIO_NOTE_OS);
+            leave_home(me);
             status = Q_TRAN(&Boot_leaving);
             break;
         }
@@ -1768,9 +1798,9 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
                 static const QEvt home = QEVT_INITIALIZER(HOME_SIG);
                 QACTIVE_PUBLISH(&home, &me->super);
 #if CONFIG_KODEOS_HOME_HOLD
-                /* Home is a plain reset (an app's slot is never confirmed),
-                 * and reaches a hung app too: AO_Buttons outranks it. A
-                 * second hold inside the grace must not re-arm the timer. */
+                /* Home is a reset on purpose (leave_home()), and reaches a
+                 * hung app too: AO_Buttons outranks it. A second hold inside
+                 * the grace must not re-arm the timer. */
                 if ( QTimeEvt_getCtr(&me->home) == 0U )
                 {
                     KLOG_N(TAG, "bottom button held: going home to kodeOS");
@@ -1800,7 +1830,7 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
              * not outlive the decision it was counting down to. */
             QTimeEvt_disarm(&me->home);
             KLOG_N(TAG, "the app is ready; going home to kodeOS");
-            leave_begin(me, KDRV_RADIO_NOTE_OS);
+            leave_home(me);
             status = Q_TRAN(&Boot_leaving);
             break;
         }
@@ -1825,7 +1855,7 @@ static QState Boot_active(Boot * const me, QEvt const * const e)
                 }
                 /* The bounded leave: it ends KODE_LEAVE_BUDGET_MS after this
                  * expiry at the latest, so a hung app is still reset. */
-                leave_begin(me, KDRV_RADIO_NOTE_OS);
+                leave_home(me);
                 status = Q_TRAN(&Boot_leaving);
                 break;
             }

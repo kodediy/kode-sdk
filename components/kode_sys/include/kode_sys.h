@@ -696,11 +696,11 @@ kode_status_t kode_sys_exp_power(bool on);
 /* ---- Going home: to AO_Boot ---- */
 
 /**
- * @brief Ask AO_Boot to reset the board.
+ * @brief Ask AO_Boot to reset the board into kodeOS.
  * @note AO_Boot leaves the network, parks the C5 and resets within
- *       KODE_LEAVE_BUDGET_MS; the caller runs on until then. It writes no
- *       boot request, so the reset lands in kodeOS after a launcher start and
- *       in this app again after a mailbox install (README, The boot model).
+ *       KODE_LEAVE_BUDGET_MS; the caller runs on until then. The reset lands
+ *       in kodeOS: an app that came through the mailbox, which every other
+ *       software reset starts again, has its boot request retired first.
  *       kode.h's kode_exit() is this call, asked again until taken, and that
  *       wait.
  * @return As the commands' rule above.
