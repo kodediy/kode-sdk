@@ -10218,7 +10218,8 @@ void ble_app_subscribe(QActive const *who)
 #define RADIO_BLE_DEFAULT   false
 #endif
 
-#if defined(CONFIG_KODEOS_WIFI) || !defined(CONFIG_KODEOS_BLE_AT_BOOT)
+#if defined(CONFIG_KODEOS_WIFI) \
+    || (defined(CONFIG_KODEOS_BLE) && !defined(CONFIG_KODEOS_BLE_AT_BOOT))
 /**
  * @brief Whether a service is wanted at boot: its stored flag, or the
  *        build's default when the store has never held one.
@@ -10243,7 +10244,7 @@ static bool radio_want(const char *key, bool dflt)
     }
     return want;
 }
-#endif /* CONFIG_KODEOS_WIFI || !CONFIG_KODEOS_BLE_AT_BOOT */
+#endif /* CONFIG_KODEOS_WIFI || (CONFIG_KODEOS_BLE && !CONFIG_KODEOS_BLE_AT_BOOT) */
 
 #if defined(CONFIG_KODEOS_C5_HOLD)
 /**
@@ -11362,7 +11363,11 @@ static QState Radio_initial(Radio * const me, void const * const par)
      * not a reason to bring the link up for a service that is not here. */
     me->wifi_want = false;
 #endif
-#if defined(CONFIG_KODEOS_BLE_AT_BOOT)
+#if !CONFIG_KODEOS_BLE
+    /* Built without BLE: a `ble=1` another firmware left in the store is
+     * not a reason to bring the link up for a service that is not here. */
+    me->ble_want  = false;
+#elif defined(CONFIG_KODEOS_BLE_AT_BOOT)
     /* The store is not consulted: this firmware is on the air from boot. */
     me->ble_want  = true;
 #else
