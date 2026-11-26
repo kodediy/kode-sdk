@@ -4859,7 +4859,7 @@ typedef enum {
  * @brief The word for a step of the factory reset, as the console prints it.
  *
  * @param step A kboot_reset_step_t.
- * @return "find", "install", "apps", "files", "link", "wipe", "nvs",
+ * @return "find", "link", "install", "wipe", "apps", "files", "nvs",
  *         "request" or "done"; "?" for a value that is none of them. Never
  *         NULL.
  */
