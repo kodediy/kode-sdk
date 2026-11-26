@@ -1872,12 +1872,12 @@ typedef struct {
  * nothing that takes time until a wake: finish file and network work first,
  * and wait for the wake with kode_event_wait() or a button, not by asking the
  * board for things. Whatever @p wake says, these always wake it: every
- * button, a USB cable (seen within a minute), a console line, an MQTT
- * message, and the battery at the level where the board protects it. And a
- * processor left asleep for the user's `off_after` time switches the board
- * off, as a board asleep does. A wake ends only the CPU part: the other parts
- * stay away, and calling kode_rest() again lets the processor sleep again.
- * What the rest saves is not a measured figure.
+ * button, a USB cable (looked for every KODE_LOWPOWER_CABLE_LOOK_MS, 2 s), a
+ * console line, an MQTT message, and the battery at the level where the
+ * board protects it. And a processor left asleep for the user's `off_after`
+ * time switches the board off, as a board asleep does. A wake ends only the
+ * CPU part: the other parts stay away, and calling kode_rest() again lets
+ * the processor sleep again. What the rest saves is not a measured figure.
  *
  * Needs CONFIG_KODE_LOWPOWER: without it the call is refused and says so.
  *

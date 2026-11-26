@@ -5487,7 +5487,8 @@ void sched_system_up(void);
 /**
  * @brief Set an entry of the console: a name, a time, a line to run.
  *
- * Stored. @p when "off" removes the entry, or switches `mqtt` off (whose @p cmd
+ * Stored in kodeOS; in an app the entry lives in RAM until the next reset.
+ * @p when "off" removes the entry, or switches `mqtt` off (whose @p cmd
  * must be NULL or empty). Answered with the entry, then the end; the end alone
  * when it is gone. Safe from any task.
  *
