@@ -970,7 +970,7 @@ bool kode_audio_stream_close(void);
  * a loop each play in full. Refused at once while a sound plays in the
  * background or a recording runs.
  *
- * @param hz KODE_AUDIO_TONE_HZ_MIN to KODE_AUDIO_TONE_HZ_MAX; the board snaps it to a nearby frequency.
+ * @param hz KODE_AUDIO_TONE_HZ_MIN to KODE_AUDIO_TONE_HZ_MAX; the tone plays at this frequency.
  * @param ms 1 to KODE_AUDIO_TONE_MAX_MS.
  * @return true when it was heard or kode_audio_play_stop() ended it; false with kode_error() saying why.
  */
