@@ -52,6 +52,10 @@ extern bool     g_psram;       /**< khal_alloc_psram() and khal_sem_create() han
                                 *   out: off, as the pad's cases were written, until a case
                                 *   that needs the stream's ring turns it on.            */
 extern uint32_t g_time_ms;     /**< What khal_time_ms() answers.                     */
+/** @brief Blocks esp_codec_dev_read() has handed out since fake_reset(). Every
+ *         sample of a block reads the number of blocks before it, so a case can
+ *         tell which read a kept frame came from. */
+extern uint32_t g_reads;
 /** @brief Called by khal_sem_wait_timeout(), when set: what happens while a writer waits. */
 extern void (*g_sem_wait_hook)(void);
 
