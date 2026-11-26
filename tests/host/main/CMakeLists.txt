@@ -16,6 +16,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/khal/exp/src/khal_exp.c"
     "${SDK_DIR}/components/khal/console/src/khal_console_app.c"
     "${SDK_DIR}/components/khal/identity/src/khal_identity_esp.c"
+    "${SDK_DIR}/components/khal/keep/src/khal_keep_fit.c"
     "${SDK_DIR}/components/kdrv/compose/src/kdrv_compose_check.c"
     # kscreen's arithmetic for a composed picture: no LVGL in it.
     "${SDK_DIR}/components/kscreen/src/kscreen_geom.c"
@@ -312,6 +313,8 @@ idf_component_register(
                  ${khal_includes}
                  # khal_console_app.h is private to the console module
                  "${SDK_DIR}/components/khal/console/src"
+                 # khal_keep_fit.h is private to the keep module
+                 "${SDK_DIR}/components/khal/keep/src"
                  "${SDK_DIR}/components/kdefs/include"
                  "${SDK_DIR}/components/klog/include"
                  "${SDK_DIR}/components/kbsp/board/include"
