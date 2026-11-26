@@ -1,22 +1,33 @@
 name: arduino
 
-# The Arduino libraries' configuration against an SDK app's. The libraries
-# freeze the SDK's sdkconfig, and they are configured from the library
-# builder's defaults, kbsp's sdkconfig.board and arduino/'s own files; a new
-# ESP-IDF, a new builder or a Kconfig of ours that moves a default changes
-# them unseen. So both projects are configured - the target build's variant
-# `arduino`, an SDK app with the SDK's lines for Arduino's core, and the
-# builder's, by arduino/tools/build_libs.sh --configure-only - and
-# arduino/tools/check_config.py fails on any option that differs and is not in
-# arduino/sdkconfig.keep. Nothing is built: the libraries take a quarter of an
-# hour, and the configuration is where they drift.
+# Two jobs: the Arduino libraries' configuration against an SDK app's, and
+# the Kode Dot's Arduino package itself.
 #
-# Only for a pull request that touches what decides the configuration: the
-# arduino/ folder, the board file, a Kconfig, the target build's defaults
-# that the variant reads, or this file. Also a component's manifest, which
-# decides the components both projects take and so the Kconfigs they read,
-# and the target build's CMakeLists.txt, which decides the files the variant
-# reads. Another workflow may call it.
+# config: the libraries freeze the SDK's sdkconfig, and they are configured
+# from the library builder's defaults, kbsp's sdkconfig.board and arduino/'s
+# own files; a new ESP-IDF, a new builder or a Kconfig of ours that moves a
+# default changes them unseen. So both projects are configured - the target
+# build's variant `arduino`, an SDK app with the SDK's lines for Arduino's
+# core, and the builder's, by arduino/tools/build_libs.sh --configure-only -
+# and arduino/tools/check_config.py fails on any option that differs and is
+# not in arduino/sdkconfig.keep. Nothing is built: the configuration is where
+# the libraries drift.
+#
+# package: the libraries built, the two archives and the index made by
+# arduino/tools/make_package.py, and the package proved by installing it from
+# its own index and compiling the library's examples against it. The three
+# files are the artifact `arduino-package`, which release.yml attaches to the
+# release whose tag it passes.
+#
+# On a pull request each job runs only for what decides it, and the paths
+# below are the two lists together; the job `changes` tells them apart.
+# config: the arduino/ folder, the board file, a Kconfig, the target build's
+# defaults that the variant reads and its CMakeLists.txt, which decides the
+# files the variant reads, a component's manifest, which decides the
+# components both projects take and so the Kconfigs they read, or this file.
+# package: the two scripts that make it, the pins it is built from, this file
+# and release.yml, which publishes it; a pull request that touches them is the
+# package's rehearsal. workflow_dispatch rehearses it on any branch.
 on:
   pull_request:
     paths:
@@ -27,7 +38,14 @@ on:
       - 'tests/target/CMakeLists.txt'
       - 'components/*/idf_component.yml'
       - '.github/workflows/arduino.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
   workflow_call:
+    inputs:
+      # The release's tag. Empty for a rehearsal.
+      tag:
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -37,7 +55,47 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which jobs a pull request runs: the lists of the comment above, as
+  # patterns over the files the pull request changes. Any other event runs
+  # both. The merge commit's first parent is the base, so the diff is the pull
+  # request's own.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      config: ${{ steps.paths.outputs.config }}
+      package: ${{ steps.paths.outputs.package }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 2
+
+      - name: The jobs this change runs
+        id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+          CONFIG_PATHS: '^(arduino/.*|components/kbsp/sdkconfig\.board|(.*/)?Kconfig|tests/target/sdkconfig\.[^/]*|tests/target/CMakeLists\.txt|components/[^/]+/idf_component\.yml|\.github/workflows/arduino\.yml)$'
+          PACKAGE_PATHS: '^(arduino/tools/build_libs\.sh|arduino/tools/make_package\.py|arduino/pins\.env|\.github/workflows/(arduino|release)\.yml)$'
+        run: |
+          set -euo pipefail
+          config=true
+          package=true
+          if [ "pull_request" = "$EVENT" ]; then
+            files="$(git diff --name-only HEAD^1 HEAD)"
+            if ! grep -qE "$CONFIG_PATHS" <<< "$files"; then
+              config=false
+            fi
+            if ! grep -qE "$PACKAGE_PATHS" <<< "$files"; then
+              package=false
+            fi
+          fi
+          echo "config=$config" >> "$GITHUB_OUTPUT"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+
   config:
+    needs: changes
+    if: needs.changes.outputs.config == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -55,3 +113,194 @@ jobs:
             KODE_TARGET_VARIANT=arduino idf.py -C tests/target -B tests/target/build_arduino reconfigure || exit 1
             arduino/tools/build_libs.sh --configure-only build_arduino_libs || exit 1
             python3 arduino/tools/check_config.py tests/target/build_arduino/sdkconfig build_arduino_libs/lib-builder/sdkconfig arduino/sdkconfig.keep
+
+  # The package's version is the SDK's, and its archives are served from the
+  # release of the tag v<version>, the only address the index can name before
+  # they are there. The library build is most of the job's time.
+  package:
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      # Without submodules, for the reason host-tests.yml gives.
+      - uses: actions/checkout@v7
+
+      # First, and cheap: a release whose tag is not the SDK's version is
+      # refused before the libraries are built for it.
+      - name: The package's version and address
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version: *"\([^"]*\)"$/\1/p' components/kode/idf_component.yml)"
+          if [ -z "$version" ]; then
+            echo "::error::components/kode/idf_component.yml names no version" >&2
+            exit 1
+          fi
+          if [ -n "$TAG" ] && [ "v$version" != "$TAG" ]; then
+            echo "::error::the tag $TAG is not the SDK's version $version (components/kode/idf_component.yml)" >&2
+            exit 1
+          fi
+          {
+            echo "VERSION=$version"
+            echo "BASE_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/v$version/"
+          } >> "$GITHUB_ENV"
+          # The disk before the library build.
+          df -h /
+
+      - name: Build the libraries
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v6.1
+          target: esp32p4
+          path: .
+          # The builder's export script reads its list of builds with jq,
+          # which the ESP-IDF image does not carry.
+          command: |
+            apt-get update -qq && apt-get install -y -qq jq > /dev/null || exit 1
+            arduino/tools/build_libs.sh build_arduino_libs
+
+      # The index published last, whose platforms and tools stay listed: the
+      # latest release's when it is another version's and carries one, which
+      # release.yml makes the rule by marking a release latest only once its
+      # index is attached. Otherwise the first release of another version with
+      # an index, in the order the API lists them. No release with an index:
+      # this package is the first.
+      - name: Fetch the index published last
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The disk after the library build.
+          df -h /
+          has_index="select(.tag_name != \"v$VERSION\") | select(any(.assets[]; .name == \"package_kode_index.json\")) | .tag_name"
+          last="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq "$has_index" 2>/dev/null || true)"
+          if [ -z "$last" ]; then
+            tags="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.draft == false and .prerelease == false) | $has_index")"
+            last="$(printf '%s\n' "$tags" | head -n 1)"
+          fi
+          if [ -z "$last" ]; then
+            echo "::notice::no release carries package_kode_index.json: this package is the first"
+            exit 0
+          fi
+          gh release download "$last" --repo "$GITHUB_REPOSITORY" --pattern package_kode_index.json --dir previous
+          echo "::notice::the package adds $VERSION to the index of $last"
+          echo "file=previous/package_kode_index.json" >> "$GITHUB_OUTPUT"
+
+      - name: Make the package
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.file }}
+        run: |
+          set -euo pipefail
+          previous=()
+          if [ -n "$PREVIOUS" ]; then
+            previous=(--previous-index "$PREVIOUS")
+          fi
+          python3 arduino/tools/make_package.py \
+            --libs build_arduino_libs/lib-builder/out/tools/esp32-arduino-libs/esp32p4 \
+            --out package --base-url "$BASE_URL" "${previous[@]}"
+
+      # Room for the compiler arduino-cli installs: the ESP-IDF image and the
+      # builder's build folder (root's, written in the container) are done
+      # with once the package is made. The libraries' output folder stays.
+      - name: Free the disk
+        run: |
+          set -euo pipefail
+          if docker image inspect espressif/idf:v6.1 > /dev/null 2>&1; then
+            # The build's container, stopped, still holds the image.
+            docker container prune --force > /dev/null
+            docker image rm espressif/idf:v6.1
+          fi
+          sudo rm -rf "$GITHUB_WORKSPACE/build_arduino_libs/lib-builder/build"
+          # The disk before the install.
+          df -h /
+
+      # arduino-cli from its release archive, checked against the SHA-256
+      # Arduino publishes for it. Its folders are empty ones of this run's,
+      # so nothing but the package's own index is installed from.
+      - name: Install arduino-cli
+        env:
+          ARDUINO_CLI: 1.5.1
+          ARDUINO_CLI_SHA256: 28a8e119c498a25607821c36cb2dc49e8463941b261a0d99091baa7bc692dd2b
+        run: |
+          set -euo pipefail
+          cli="$RUNNER_TEMP/arduino-cli"
+          mkdir -p "$cli"
+          curl -fsSL -o "$cli/arduino-cli.tar.gz" \
+            "https://github.com/arduino/arduino-cli/releases/download/v$ARDUINO_CLI/arduino-cli_${ARDUINO_CLI}_Linux_64bit.tar.gz"
+          echo "$ARDUINO_CLI_SHA256  $cli/arduino-cli.tar.gz" | sha256sum -c -
+          tar -xzf "$cli/arduino-cli.tar.gz" -C "$cli" arduino-cli
+          echo "$cli" >> "$GITHUB_PATH"
+          {
+            echo "ARDUINO_DIRECTORIES_DATA=$RUNNER_TEMP/arduino/data"
+            echo "ARDUINO_DIRECTORIES_DOWNLOADS=$RUNNER_TEMP/arduino/downloads"
+            echo "ARDUINO_DIRECTORIES_USER=$RUNNER_TEMP/arduino/user"
+          } >> "$GITHUB_ENV"
+
+      # The same two archives and the index with this release's address
+      # swapped for a local server's: what is installed is exactly the bytes
+      # the release gets, checksums included, while the release's own address
+      # serves nothing yet. arduino-cli also fetches Arduino's own index and
+      # tools (its builtin ones, and dfu-util, which the platform names), as a
+      # person's IDE does.
+      - name: Install the package from its index
+        env:
+          LOCAL_URL: http://127.0.0.1:8765/
+        run: |
+          set -euo pipefail
+          mkdir served
+          ln "package/kode-esp32-$VERSION.zip" "package/kodedot-libs-$VERSION.zip" served/
+          python3 -c 'import sys; open(sys.argv[2], "w").write(open(sys.argv[1]).read().replace(sys.argv[3], sys.argv[4]))' \
+            package/package_kode_index.json served/package_kode_index.json "$BASE_URL" "$LOCAL_URL"
+          if grep -qF "$BASE_URL" served/package_kode_index.json; then
+            echo "::error::the local index still names $BASE_URL" >&2
+            exit 1
+          fi
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory served > "$RUNNER_TEMP/server.log" 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          curl -fsS --retry 10 --retry-connrefused --retry-delay 1 -o /dev/null "${LOCAL_URL}package_kode_index.json"
+          export ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS="${LOCAL_URL}package_kode_index.json"
+          arduino-cli core update-index
+          arduino-cli core install "kode:esp32@$VERSION"
+          arduino-cli core list
+
+      # The library's examples as installed, and a sketch that calls every
+      # method of the Dot layer once, so every call links against the
+      # libraries. Each sketch is built even after one fails.
+      - name: Build the examples against the package
+        run: |
+          set -euo pipefail
+          examples="$ARDUINO_DIRECTORIES_DATA/packages/kode/hardware/esp32/$VERSION/libraries/KodeDot/examples"
+          mkdir -p "$RUNNER_TEMP/sketches/AllCalls"
+          python3 arduino/tools/gen_dot.py --all-calls "$RUNNER_TEMP/sketches/AllCalls/AllCalls.ino"
+          failed=""
+          for sketch in "$examples/Blink" "$examples/TagReader" "$examples/HeaderUart" "$examples/SerialLog" "$RUNNER_TEMP/sketches/AllCalls"; do
+            name="$(basename "$sketch")"
+            echo "::group::$name"
+            if ! arduino-cli compile --fqbn kode:esp32:kodedot --warnings all \
+                --build-path "$RUNNER_TEMP/build/$name" "$sketch"; then
+              failed="$failed $name"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::these do not build against the package:$failed" >&2
+            exit 1
+          fi
+
+      # The archives are compressed already. A rehearsal's package is kept 3
+      # days, a release's for the repository's default (0).
+      - name: Keep the package
+        uses: actions/upload-artifact@v7
+        with:
+          name: arduino-package
+          path: |
+            package/kode-esp32-${{ env.VERSION }}.zip
+            package/kodedot-libs-${{ env.VERSION }}.zip
+            package/package_kode_index.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: ${{ inputs.tag == '' && 3 || 0 }}

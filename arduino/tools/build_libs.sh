@@ -23,25 +23,43 @@
 #      arduino/sdkconfig.sdk, arduino/sdkconfig.builder, sdkconfig.paths.
 #   6. Builds the builder's `idf-libs` target, then `copy-bootloader`: the
 #      core's build recipe asks for that file.
+#   7. Makes the libraries relocatable. ESP-IDF compiles and links with a
+#      copy of the toolchain's picolibc.specs in its build folder, and the
+#      export names that copy by its absolute path in four flags files; the
+#      step names the toolchain's own file instead, which differs only by the
+#      --gc-sections that ld_flags passes anyway. It then stops the run when
+#      the text the platform reads at compile or link time names a path of
+#      this machine: flags/ any absolute path, the linker scripts outside
+#      their comments and the headers the work folder, the SDK or ESP-IDF.
+#      sdkconfig and sdkconfig.h, which name the partition table by its path,
+#      are the configuration and are not read for it.
 #
 # Steps 2 to 4 each stop the run when the file they edit has changed so that
 # the edit no longer applies.
 #
 #   usage:  arduino/tools/build_libs.sh [--configure-only] WORK_DIR
+#           arduino/tools/build_libs.sh --relocate DIR
 #           --configure-only stops after step 5, leaving
 #           WORK_DIR/lib-builder/sdkconfig
+#           --relocate runs step 7 alone on libraries built already, DIR
+#           being the folder that holds flags/
 #   output: WORK_DIR/lib-builder/out/tools/esp32-arduino-libs/esp32p4
 #   exit:   0 the libraries (or the configuration) are there, 1 a step failed
 #
 # Needs ESP-IDF exported at the version pins.env names
 # (. ~/.espressif/v6.1/esp-idf/export.sh), git, perl, and on macOS the GNU
 # tools the builder's scripts call by name: gsed, gawk and grealpath.
+# --relocate needs perl alone.
 set -euo pipefail
 
-usage="usage: arduino/tools/build_libs.sh [--configure-only] WORK_DIR"
+usage="usage: arduino/tools/build_libs.sh [--configure-only] WORK_DIR | --relocate DIR"
 configure_only=0
+relocate_only=0
 if [ "${1:-}" = "--configure-only" ]; then
     configure_only=1
+    shift
+elif [ "${1:-}" = "--relocate" ]; then
+    relocate_only=1
     shift
 fi
 if [ "$#" -ne 1 ] || [ -z "$1" ]; then
@@ -58,6 +76,44 @@ fail() {
     echo "build_libs: $*" >&2
     exit 1
 }
+
+# 7. The libraries in $1 made relocatable, then checked against the roots
+# that follow it, ESP-IDF's two folders added when they are exported.
+relocate() {
+    local libs="$1"
+    shift
+    local roots file
+    if [ ! -d "$libs/flags" ]; then
+        fail "$libs has no flags/: is it the ESP32-P4 libraries?"
+    fi
+    for file in c_flags cpp_flags S_flags ld_flags; do
+        if [ ! -f "$libs/flags/$file" ]; then
+            fail "$libs/flags/$file is not there"
+        fi
+        perl -pi -e 's{"?(-specs=)[^"\s]*/(picolibc\.specs)"?}{$1$2}g' "$libs/flags/$file"
+    done
+    # An absolute path starts a word, follows = or , (-specs=, -Wl,), or
+    # follows a one-letter option (-I, -L, -T).
+    if ! perl -ne 'while (m{(?:^|[\s"=,]|(?<![\w-])-[A-Za-z])(/[^\s"]+)}g) { print STDERR "build_libs: $ARGV names $1\n"; $bad = 1 } END { exit $bad }' "$libs"/flags/*; then
+        fail "the flags name a path of this machine: the libraries work on no other"
+    fi
+    roots="$(printf '%s\n' "$@" "${IDF_PATH:-}" "${IDF_TOOLS_PATH:-}")"
+    if ! find "$libs" -type f \( -path "$libs/flags/*" -o -path "$libs/ld/*" -o -path "*/include/*" \) \
+            ! -name sdkconfig.h -print0 \
+        | ROOTS="$roots" xargs -0 perl -0777 -ne 'BEGIN { @roots = grep { length } split /\n/, $ENV{ROOTS} } s{/\*.*?\*/}{}gs; for $root (@roots) { if (index($_, $root) >= 0) { print STDERR "build_libs: $ARGV names $root\n"; $bad = 1 } } END { exit $bad }'; then
+        fail "the libraries name a folder of this machine: they work on no other"
+    fi
+    echo "build_libs: $libs is relocatable"
+}
+
+if [ "$relocate_only" -eq 1 ]; then
+    if [ ! -d "$1" ]; then
+        fail "$1 is not a folder"
+    fi
+    libs="$(cd "$1" && pwd)"
+    relocate "$libs" "$sdk" "$libs"
+    exit 0
+fi
 
 if [ -z "${IDF_PATH:-}" ]; then
     fail "export ESP-IDF $ESP_IDF first"
@@ -188,4 +244,7 @@ fi
 # 6. The build.
 idf.py idf-libs
 idf.py copy-bootloader
+
+# 7. Relocatable.
+relocate "$builder/out/tools/esp32-arduino-libs/$target" "$work" "$sdk"
 echo "build_libs: $builder/out/tools/esp32-arduino-libs/$target"

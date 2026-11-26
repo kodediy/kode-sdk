@@ -18,7 +18,10 @@ libraries' tool). The archive written is read back, and any file under cores/
 or Espressif's libraries/ that is not Espressif's stops the run.
 
 DIR is the ESP32-P4 libraries the library builder made with the SDK inside:
-the folder that holds flags/, include/, lib/ and sdkconfig.
+the folder that holds flags/, include/, lib/ and sdkconfig. Libraries whose
+flags name a spec file by its path, or a path of their own build tree (the
+folder above out/, DIR itself when there is none), work only on the machine
+that built them, and stop the run.
 
 The index lists the platform, the libraries and, copied from Espressif's
 index with every host's address, checksum and size, the tools Espressif's
@@ -73,6 +76,10 @@ UNTOUCHED = ("cores/", "libraries/")
 KODEDOT_LIBRARY = "libraries/KodeDot/"
 # Left out of the libraries' archive, as Espressif's release leaves them out of its own.
 LIBS_SKIPPED = ("dependencies.lock", "pioarduino-build.py")
+# The library builder's output folder; the folder above it is the build tree.
+BUILDER_OUT = "out"
+# A spec file given by a path rather than by the name the toolchain looks up.
+SPECS_BY_PATH = re.compile(r'-?-specs=([^\s"]*/[^\s"]*)')
 JUNK = (".DS_Store", "__pycache__")
 # Our files carry one date, one mode and one system, so the same tree makes the same archive anywhere.
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
@@ -363,10 +370,33 @@ def write_core(source, version, folder, path):
                 add_file(ours, f"{folder}/{under}/{file.relative_to(root).as_posix()}", file)
 
 
+def build_tree(libs):
+    """The folder the libraries were built in: the one above out/, or the libraries themselves."""
+    libs = libs.resolve()
+    for parent in libs.parents:
+        if parent.name == BUILDER_OUT:
+            return parent.parent
+    return libs
+
+
+def relocatable(libs):
+    """Stop the run when a flags file names a spec file by its path or a path of the build tree."""
+    tree = str(build_tree(libs))
+    for file in files_of(libs / "flags"):
+        text = file.read_text(encoding="utf-8")
+        rel = file.relative_to(libs).as_posix()
+        found = SPECS_BY_PATH.search(text)
+        if found is not None:
+            fail(f"{rel} names the spec file {found.group(1)}: the libraries work only where they were built")
+        if tree in text:
+            fail(f"{rel} names {tree}, where the libraries were built: they work nowhere else")
+
+
 def libs_archive(libs, version, out):
     """The libraries under one folder, named as the tool."""
     if not (libs / "flags").is_dir() or not (libs / "sdkconfig").is_file():
         fail(f"{libs} has no flags/ and sdkconfig: is it the ESP32-P4 libraries?")
+    relocatable(libs)
     path = out / f"{LIBS_TOOL}-{version}.zip"
     with zipfile.ZipFile(path, "w") as ours:
         for file in files_of(libs):

@@ -1152,8 +1152,14 @@ static bool put_replace(const char *user, const char *vol, const uint8_t *data, 
     kode_sys_file_status_t st;
     bool                   keep = false;
     bool                   ok;
+    const int32_t          n = snprintf(tmp, sizeof(tmp), "%s" KODE_FILE_TMP_SUFFIX, vol);
 
-    (void)snprintf(tmp, sizeof(tmp), "%s" KODE_FILE_TMP_SUFFIX, vol);
+    /* A cut name is not the file's copy: nothing is written, nothing is discarded. */
+    if ( (0 >= n) || ((uint32_t)n >= sizeof(tmp)) )
+    {
+        path_too_long(user);
+        return false;
+    }
     ok = put_parts(user, tmp, data, total, false) && vol_stat(user, vol, &st);
     if ( ok && st.is_dir )
     {

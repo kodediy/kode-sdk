@@ -7,3 +7,7 @@ CONFIG_KODEOS_CHANNEL=n
 CONFIG_KODE_SCHEDULER=n
 CONFIG_KODE_COMPOSE=n
 CONFIG_FREERTOS_USE_TRACE_FACILITY=n
+# Optimised for size, as the Arduino libraries are built: what GCC warns of
+# depends on the optimisation (-Wformat-truncation sees more at -Os than at
+# ESP-IDF's default -Og), and the libraries' build stops on those warnings.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

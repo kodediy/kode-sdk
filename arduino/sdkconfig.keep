@@ -8,8 +8,6 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME  the same file, kbsp's partitions.csv, by
 CONFIG_PARTITION_TABLE_FILENAME         the same file, derived from the one above
 
 # The compiler. The libraries' flags are the ones every sketch compiles with.
-CONFIG_COMPILER_OPTIMIZATION_SIZE       Arduino's libraries and sketches are built for size (-Os)
-CONFIG_COMPILER_OPTIMIZATION_DEBUG      the other side of the choice above
 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS  sketches and Arduino libraries are not written to build with warnings as errors
 CONFIG_COMPILER_CXX_EXCEPTIONS          Arduino libraries and sketches use C++ exceptions
 
