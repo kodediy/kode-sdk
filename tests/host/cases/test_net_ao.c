@@ -8666,6 +8666,9 @@ typedef enum {
 /** @brief What a dump whose channel left mid-PUT came to, read before judging. */
 typedef struct {
     unsigned answers_at_leave;   /**< Answers when the channel left.            */
+    uint8_t  left_state;         /**< The channel's state once it left, as
+                                  *   AO_Net answers it; 0xFF with no answer. */
+    bool     stopped;            /**< The client's stop the leave owed ran.     */
     unsigned answers_at_end;     /**< Answers when the PUT ended.               */
     uint8_t  result;             /**< The last answer's result.                 */
     unsigned erases;             /**< kdrv_slot_coredump_erase() calls.         */
@@ -8698,7 +8701,30 @@ static dump_leave_seen_t dump_leave_mid_put(dump_leave_t how)
         mqtt_link(KDRV_NET_MQTT_DISCONNECTED);
     }
     (void)net_settle();
-    seen.answers_at_leave = dump_answers(&r);
+    seen.left_state = 0xFFU;
+    {
+        const QEvt *e;
+
+        while ( (e = ao_spy_take()) != NULL )
+        {
+            if ( (QSignal)NET_DUMP_RSP_SIG == e->sig )
+            {
+                seen.answers_at_leave++;
+            }
+            else
+            {
+                /* nothing else is judged here */
+            }
+        }
+        ao_spy_drain();
+    }
+    /* Asked, not overheard: config_ask() passes over what is published
+     * before its answer. */
+    if ( channel_state_request() )
+    {
+        (void)net_settle();
+        seen.left_state = last_chan().state;
+    }
 
     s_nforget = 0U;
     http_reply(201U, "");
@@ -8710,6 +8736,7 @@ static dump_leave_seen_t dump_leave_mid_put(dump_leave_t how)
     if ( (NULL != s_held) && ((int)KDRV_NET_JOB_MQTT_STOP == s_ran_job) )
     {
         job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+        seen.stopped = true;
     }
     seen.worker_free = (NULL == s_held);
     secs(GUARD_STEPS(KODE_NET_GUARD_MS) / 100U + 1U);
@@ -8718,9 +8745,14 @@ static dump_leave_seen_t dump_leave_mid_put(dump_leave_t how)
     return seen;
 }
 
-/** @brief Judge one leave: erased once, answered OK once, AO_Net idle. */
+/**
+ * @brief Judge one leave: the channel left, the dump was erased once and
+ *        answered OK once, and AO_Net is idle.
+ */
 static void dump_leave_judge(const dump_leave_seen_t *seen)
 {
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(0xFFU, seen->left_state, "AO_Net did not say where the channel stands");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE((uint8_t)CHAN_UP, seen->left_state, "the channel never left");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, seen->answers_at_leave,
                                    "the leave answered a dump the worker still sends");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, seen->answers_at_end, "the 201 was not answered once");
@@ -8736,6 +8768,8 @@ TEST_CASE("test_a_dump_whose_channel_is_switched_off_mid_put_is_erased_on_a_201:
 {
     dump_leave_seen_t const seen = dump_leave_mid_put(DUMP_LEAVE_CHAN_OFF);
 
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)CHAN_OFF, seen.left_state, "the switch did not take the channel off");
+    TEST_ASSERT_TRUE_MESSAGE(seen.stopped, "the client's stop never ran");
     dump_leave_judge(&seen);
 }
 
