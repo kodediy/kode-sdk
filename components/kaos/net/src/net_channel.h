@@ -25,7 +25,8 @@ extern "C" {
 /** @brief The longest wait before a retry, in milliseconds (before jitter). */
 #define KCHAN_BACKOFF_MAX_MS   600000U
 
-/** @brief The longest `shots` upload prefix kept, without its terminator. */
+/** @brief The longest upload prefix kept (`shots`, `dumps`), without its
+ *         terminator. */
 #define KSHOT_PREFIX_MAX   128U
 
 /** @brief What the api's connect answer describes: one MQTT session. */
@@ -41,6 +42,9 @@ typedef struct {
     char shots[KSHOT_PREFIX_MAX + 1U];    /**< Where screen captures are
                                            *   uploaded (`https://…/`); empty
                                            *   when the api named none.      */
+    char dumps[KSHOT_PREFIX_MAX + 1U];    /**< Where core dumps are uploaded
+                                           *   (`https://…/`); empty when the
+                                           *   api named none.               */
 } kchan_session_t;
 
 /** @brief Whether a failed request is worth repeating. */
@@ -90,8 +94,9 @@ bool kchan_json_u32(const char *json, size_t len, const char *key,
  * All eight fields (`serial`, `brokerUrl`, `username`, `clientId`, `token`,
  * `in`, `out`, `status`) must be present, non-empty and fit. The broker must be
  * `mqtts://`, the serial this unit's when @p own is known, and no topic may hold
- * a wildcard. Anything else is refused whole. `shots` is optional: kept when
- * kchan_shots_valid() accepts it, left empty otherwise.
+ * a wildcard. Anything else is refused whole. `shots` and `dumps` are
+ * optional: each is kept when kchan_upload_valid() accepts it, left empty
+ * otherwise.
  *
  * @param json The answer's body, not necessarily NUL-terminated.
  * @param len  Its length.
@@ -103,7 +108,7 @@ bool kchan_parse_connect(const char *json, size_t len, const char *own,
                          kchan_session_t *out);
 
 /**
- * @brief Whether a `shots` prefix may be uploaded to.
+ * @brief Whether an upload prefix (`shots`, `dumps`) may be uploaded to.
  *
  * It must be TLS (`https://`) with a host after the scheme (a byte other
  * than `/`), end in `/` so a file name can follow, fit `KSHOT_PREFIX_MAX`
@@ -112,7 +117,7 @@ bool kchan_parse_connect(const char *json, size_t len, const char *own,
  * @param prefix The prefix; NULL is refused.
  * @return true when the prefix is acceptable.
  */
-bool kchan_shots_valid(const char *prefix);
+bool kchan_upload_valid(const char *prefix);
 
 /**
  * @brief Read the challenge answer's nonce.

@@ -42,6 +42,9 @@
 #if !CONFIG_KODEOS_SHOT_HTTP
 #error "test_net_ao.c needs CONFIG_KODEOS_SHOT_HTTP=1 (main/CMakeLists.txt)"
 #endif
+#if !CONFIG_KODEOS_DUMP_HTTP
+#error "test_net_ao.c needs CONFIG_KODEOS_DUMP_HTTP=1 (main/CMakeLists.txt)"
+#endif
 
 static void go_online(void);
 static void go_offline(void);
@@ -962,17 +965,30 @@ static const char *const CHAN_NONCE  = "v1.connect.abc-123";
 /** @brief The link connect_answer() names; SHOT_LINK unless a case changes it. */
 static const char *s_shots_link = SHOT_LINK;
 
-/** @brief What the api answers connect with: a 379-char token, and the
- *         `shots` link unless s_no_shots says otherwise. */
+/** @brief Where the api says this unit's core dumps go. */
+#define DUMP_LINK  "https://api.kode.diy/kodes/KODE0001F00MR1C/dumps/"
+
+/** @brief The `dumps` link connect_answer() names; NULL names none. */
+static const char *s_dumps_link;
+
+/** @brief What the api answers connect with: a 379-char token, the `shots`
+ *         link unless s_no_shots says otherwise, and the `dumps` link when
+ *         s_dumps_link names one. */
 static void connect_answer(char *out, size_t cap)
 {
     char        token[400];
     char        shots[200];
+    char        dumps[200];
 
     (void)snprintf(shots, sizeof(shots), ",\"shots\":\"%s\"", s_shots_link);
     if ( s_no_shots )
     {
         shots[0] = '\0';
+    }
+    dumps[0] = '\0';
+    if ( NULL != s_dumps_link )
+    {
+        (void)snprintf(dumps, sizeof(dumps), ",\"dumps\":\"%s\"", s_dumps_link);
     }
     (void)memset(token, s_token_fill, 379U);
     token[379] = '\0';
@@ -982,8 +998,8 @@ static void connect_answer(char *out, size_t cap)
         "\"clientId\":\"%s\",\"token\":\"%s\",\"expiresAt\":\"2026-10-17T10:52:04.438Z\","
         "\"topics\":{\"in\":\"kode/KODE0001F00MR1C/cmd/in\","
         "\"out\":\"kode/KODE0001F00MR1C/cmd/out\","
-        "\"status\":\"kode/KODE0001F00MR1C/status\"}%s}", CHAN_CLIENT, token,
-        shots);
+        "\"status\":\"kode/KODE0001F00MR1C/status\"}%s%s}", CHAN_CLIENT, token,
+        shots, dumps);
 }
 
 /**
@@ -1210,6 +1226,7 @@ static void chan_fresh(void)
     s_token_fill = 'x';
     s_no_shots = false;
     s_shots_link = SHOT_LINK;
+    s_dumps_link = NULL;
     s_nresult = 0U;
     s_nforget = 0U;
 
@@ -7016,7 +7033,7 @@ TEST_CASE("the longest link and the longest token go out whole", "[net_ao][shot]
     link[KSHOT_PREFIX_MAX]      = '\0';
     (void)memset(token, 'T', KSHOT_TOKEN_MAX);
     token[KSHOT_TOKEN_MAX] = '\0';
-    TEST_ASSERT_TRUE(kchan_shots_valid(link));
+    TEST_ASSERT_TRUE(kchan_upload_valid(link));
     TEST_ASSERT_TRUE(kshot_token_valid(token));
 
     shot_fresh();
@@ -8103,6 +8120,43 @@ TEST_CASE("a stream's PUT that outlasts its guard costs the frame, not the "
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, s_nforget,
         "the late answer was left in the driver");
     TEST_ASSERT_EQUAL_UINT(1U, jobs_of(KDRV_NET_JOB_HTTP_PUT, from));
+
+    net_done();
+}
+
+/* ======================================================================== *
+ * Fault reports
+ *
+ * The core dump a fault of kodeOS left in flash goes to the session's `dumps`
+ * link, named after itself, with the channel's JWT as the bearer, and is
+ * erased once the service says 201. kdrv_slot is a mock here: each case says
+ * what flash holds.
+ * ======================================================================== */
+
+TEST_CASE("test_the_state_says_whether_the_session_names_the_link: dumps is "
+          "set while the channel is up with a dumps link", "[net_ao][dump]")
+{
+    chan_fresh();
+
+    /* Not joined: no link to speak of. */
+    TEST_ASSERT_FALSE(chan_now().dumps);
+
+    /* Up with a session that names none. */
+    drive_to_up();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_UP, chan_now().state);
+    TEST_ASSERT_FALSE(chan_now().dumps);
+    net_done();
+
+    /* Up with a session that names one. */
+    chan_fresh();
+    s_dumps_link = DUMP_LINK;
+    drive_to_up();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_UP, chan_now().state);
+    TEST_ASSERT_TRUE(chan_now().dumps);
+
+    /* The channel goes down: the session it named is not up any more. */
+    go_offline();
+    TEST_ASSERT_FALSE(chan_now().dumps);
 
     net_done();
 }

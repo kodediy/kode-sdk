@@ -323,12 +323,12 @@ static bool chan_topic_plain(const char *t)
 }
 
 /** @brief The scheme an upload prefix must have: TLS. */
-#define CHAN_SHOTS_SCHEME "https://"
+#define CHAN_UPLOAD_SCHEME "https://"
 
 /** @brief The lowest byte an upload prefix may hold (below it: space, controls). */
-#define CHAN_SHOTS_BYTE_MIN 0x21U
+#define CHAN_UPLOAD_BYTE_MIN 0x21U
 
-bool kchan_shots_valid(const char *prefix)
+bool kchan_upload_valid(const char *prefix)
 {
     bool ok = false;
 
@@ -341,17 +341,17 @@ bool kchan_shots_valid(const char *prefix)
         {
             len++;
         }
-        size_t const scheme = sizeof(CHAN_SHOTS_SCHEME) - 1U;
+        size_t const scheme = sizeof(CHAN_UPLOAD_SCHEME) - 1U;
 
         /* A host byte after the scheme: with none, esp_http_client cannot
          * parse the URL and its error line prints it whole, token and all. */
         ok = (len > scheme) && (KSHOT_PREFIX_MAX >= len)
-             && (strncmp(prefix, CHAN_SHOTS_SCHEME, scheme) == 0)
+             && (strncmp(prefix, CHAN_UPLOAD_SCHEME, scheme) == 0)
              && ('/' != prefix[scheme])
              && ('/' == prefix[len - 1U]);
         for ( size_t i = 0U; ok && (i < len); i++ )
         {
-            ok = ((uint8_t)prefix[i] >= CHAN_SHOTS_BYTE_MIN);
+            ok = ((uint8_t)prefix[i] >= CHAN_UPLOAD_BYTE_MIN);
         }
     }
     return ok;
@@ -395,9 +395,14 @@ bool kchan_parse_connect(const char *json, size_t len, const char *own,
         {
             /* Optional: absent, too long or unfit leaves it empty, no uploads. */
             if ( !kchan_json_str(json, len, "shots", out->shots, sizeof(out->shots))
-                || !kchan_shots_valid(out->shots) )
+                || !kchan_upload_valid(out->shots) )
             {
                 (void)memset(out->shots, 0, sizeof(out->shots));
+            }
+            if ( !kchan_json_str(json, len, "dumps", out->dumps, sizeof(out->dumps))
+                || !kchan_upload_valid(out->dumps) )
+            {
+                (void)memset(out->dumps, 0, sizeof(out->dumps));
             }
         }
         if ( !ok )

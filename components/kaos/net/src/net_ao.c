@@ -2595,6 +2595,13 @@ static void chan_publish(const Net * const me)
     e->shot_fps_x10 = 0U;
     e->shot_left_s  = 0U;
 #endif
+    e->dumps = false;
+#if CONFIG_KODEOS_DUMP_HTTP
+    if ( ((uint8_t)CHAN_UP == me->cstate) && (NULL != me->cw) )
+    {
+        e->dumps = ('\0' != me->cw->sess.dumps[0]);
+    }
+#endif
     (void)snprintf(e->why, sizeof(e->why), "%s", me->cwhy);
     e->broker[0] = '\0';
     if ( NULL != me->cw )
@@ -3538,7 +3545,7 @@ static void chan_on_connect(Net * const me, uint8_t job_status)
 #if CONFIG_KODEOS_SHOT_HTTP
         /* The uploads' bearer, kept: the MQTT start wipes the session's. */
         (void)snprintf(me->cw->jwt, sizeof(me->cw->jwt), "%s", me->cw->sess.token);
-        if ( !kchan_shots_valid(me->cw->sess.shots) )
+        if ( !kchan_upload_valid(me->cw->sess.shots) )
         {
             KLOG_W(TAG, "channel: the session names no upload link; "
                         "uploads are refused");
@@ -4353,7 +4360,7 @@ static bool shot_ready(const Net * const me)
 
     if ( (NULL != me->cw) && serving )
     {
-        ready = kchan_shots_valid(me->cw->sess.shots) && ('\0' != me->cw->jwt[0]);
+        ready = kchan_upload_valid(me->cw->sess.shots) && ('\0' != me->cw->jwt[0]);
     }
     return ready;
 }
@@ -7118,6 +7125,7 @@ static void chan_state_answer(const Net * const me)
         cs->shot_left_s  = 0U;
         cs->keep_s       = 0U;
         cs->session      = (uint8_t)CHAN_SESSION_NONE;
+        cs->dumps        = false;
         QACTIVE_PUBLISH(&cs->super, &me->super);
     }
 #endif

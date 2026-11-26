@@ -5803,6 +5803,8 @@ typedef struct {
                          *   otherwise.                                     */
     uint8_t  session;   /**< chan_session_t (kaos.h): what the broker said of
                          *   the session at the last connect.               */
+    bool     dumps;     /**< UP, and the session names a `dumps` link: a core
+                         *   dump can be sent (CONFIG_KODEOS_DUMP_HTTP).    */
 } ChannelStateEvt;
 
 /**
