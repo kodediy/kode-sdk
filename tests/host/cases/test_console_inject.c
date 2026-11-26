@@ -7,6 +7,9 @@
 
 #include "unity.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
 #include "qpc.h"
 
 #include "ao_spy.h"
@@ -130,8 +133,9 @@ TEST_CASE("touch up publishes a released sample at the same place",
     TEST_ASSERT_FALSE(e->pressed);
 }
 
-/* Nothing downstream can tell an injected event from a real one, and a real
- * one carries the time it happened - so an injected one carries the time of
+/* Downstream an injected event reads as a real one (only a remote line's is
+ * marked), and a real one carries the time it happened - so an injected one
+ * carries the time of
  * the command. A subscriber that decides on elapsed time (a double press, a
  * drag) then sees a host's script the way it sees a thumb. */
 TEST_CASE("an injected touch carries the time of the command",
@@ -579,6 +583,171 @@ TEST_CASE("touch is refused while a tap is armed, for the same reason a "
     /* Let the armed tap's own release fire, leaving the console idle. */
     tick(TAP_HOLD_TICKS + 2U);
     (void)ao_spy_take();
+}
+
+/* ---- Who pressed: a remote line's press says so ------------------------------
+ * The verbs are allowed from every source, and a line from the Kode channel or
+ * a cron entry has nobody at the board behind it. Its press and its touch are
+ * marked `remote`, a tap's release too, so a card that needs a person can
+ * refuse them. A line over the cable or BLE has a person at the other end of
+ * the wire: not remote.
+ */
+
+/** @brief Empty an Active Object's queue: what the line's end told it. */
+static void mailbox_empty(QActive *ao)
+{
+    const QEvt *e = NULL;
+
+    qf_support_give_queue(ao);
+    while ( xQueueReceive(ao->eQueue, &e, 0U) == pdTRUE )
+    {
+        QF_gc(e);
+    }
+}
+
+/**
+ * @brief Feed one command line to AO_Console from @p src.
+ *
+ * A NET or SCHED line tells its sender when it ends; those notes are emptied
+ * so the next case starts clean.
+ */
+static void cli_from(uint8_t src, const char *text)
+{
+    ConsoleLineEvt e;
+
+    console_idle();
+    ao_spy_drain();
+    ao_spy_subscribe(TOUCH_EVT_SIG);
+    ao_spy_subscribe(BUTTON_EVT_SIG);
+    (void)memset(&e, 0, sizeof(e));
+    e.super = (QEvt)QEVT_INITIALIZER(CONSOLE_LINE_SIG);
+    e.src   = src;
+    (void)snprintf(e.line, sizeof(e.line), "%s", text);
+    QASM_DISPATCH(AO_Console, &e.super, 0U);
+    mailbox_empty(AO_Net);
+    mailbox_empty(AO_Scheduler);
+    mailbox_empty(AO_LowPower);
+}
+
+/** @brief What one published sample said about who made it. */
+typedef enum {
+    SAID_NOTHING = 0,   /**< No event of the kind came.  */
+    SAID_LOCAL,         /**< It came with remote false.  */
+    SAID_REMOTE         /**< It came with remote true.   */
+} said_t;
+
+/** @brief What a sample with @p remote says. */
+static said_t said_of(bool remote)
+{
+    said_t out = SAID_LOCAL;
+
+    if ( remote )
+    {
+        out = SAID_REMOTE;
+    }
+    return out;
+}
+
+/** @brief Read the next published event's @c remote, if it is of @p sig. */
+static said_t next_said(QSignal sig)
+{
+    const QEvt * const e   = ao_spy_take();
+    said_t             out = SAID_NOTHING;
+
+    if ( (NULL != e) && (sig == e->sig) )
+    {
+        if ( (QSignal)TOUCH_EVT_SIG == sig )
+        {
+            out = said_of(((TouchEvt const *)e)->remote);
+        }
+        else
+        {
+            out = said_of(((ButtonEvt const *)e)->remote);
+        }
+    }
+    return out;
+}
+
+/**
+ * @brief A tap, a touch and a button from @p src, each read for @c remote.
+ *
+ * Every sample is read before any is judged, so a red case still lets the
+ * tap's release go and leaves no gesture armed for the cases after it.
+ *
+ * @param src    KODE_CONSOLE_SRC_*.
+ * @param remote What every sample must say.
+ */
+static void presses_from(uint8_t src, bool remote)
+{
+    said_t const want = said_of(remote);
+    said_t       tap_press;
+    said_t       tap_release;
+    said_t       touch_down;
+    said_t       btn_press;
+    said_t       btn_release;
+
+    cli_from(src, "tap x=205 y=250");
+    tap_press = next_said(TOUCH_EVT_SIG);
+    tick(TAP_HOLD_TICKS + 2U);
+    tap_release = next_said(TOUCH_EVT_SIG);
+    cli_from(src, "touch x=10 y=20 state=down");
+    touch_down = next_said(TOUCH_EVT_SIG);
+    cli_from(src, "touch x=10 y=20 state=up");
+    (void)next_said(TOUCH_EVT_SIG);
+    cli_from(src, "btn id=top state=press");
+    btn_press = next_said(BUTTON_EVT_SIG);
+    cli_from(src, "btn id=top state=release");
+    btn_release = next_said(BUTTON_EVT_SIG);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(want, tap_press, "tap's press");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(want, tap_release, "tap's release");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(want, touch_down, "touch");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(want, btn_press, "btn press");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(want, btn_release, "btn release");
+}
+
+TEST_CASE("a tap, a touch and a btn from the Kode channel say remote, the "
+          "tap's release too", "[console_inject]")
+{
+    presses_from((uint8_t)KODE_CONSOLE_SRC_NET, true);
+}
+
+TEST_CASE("a tap, a touch and a btn from a cron entry say remote, the tap's "
+          "release too", "[console_inject]")
+{
+    presses_from((uint8_t)KODE_CONSOLE_SRC_SCHED, true);
+}
+
+TEST_CASE("a tap, a touch and a btn over the cable or BLE are not remote",
+          "[console_inject]")
+{
+    /* A remote press first, so a block the pool hands back still says true
+     * unless the console writes the field. */
+    presses_from((uint8_t)KODE_CONSOLE_SRC_NET, true);
+    presses_from((uint8_t)KODE_CONSOLE_SRC_SERIAL, false);
+    presses_from((uint8_t)KODE_CONSOLE_SRC_NET, true);
+    presses_from((uint8_t)KODE_CONSOLE_SRC_BLE, false);
+}
+
+TEST_CASE("a swipe from the Kode channel says remote in every sample",
+          "[console_inject]")
+{
+    unsigned n      = 0U;
+    unsigned remote = 0U;
+
+    /* Run to its end before anything is judged: nothing stays armed. */
+    cli_from((uint8_t)KODE_CONSOLE_SRC_NET, "swipe x0=10 y0=10 x1=50 y1=10 ms=30");
+    tick(10U);
+    for ( said_t s = next_said(TOUCH_EVT_SIG); SAID_NOTHING != s; s = next_said(TOUCH_EVT_SIG) )
+    {
+        ++n;
+        if ( SAID_REMOTE == s )
+        {
+            ++remote;
+        }
+    }
+    TEST_ASSERT_GREATER_THAN_UINT_MESSAGE(2U, n, "the swipe's press, moves and release never came");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(n, remote, "a swipe sample did not say remote");
 }
 
 /* ---- swipe: a finger replayed at the touch sensor's rate -------------------

@@ -1953,17 +1953,19 @@ uint32_t buttons_presses(uint8_t id);
 /**
  * @brief Publish one button change as though AO_Buttons had confirmed it.
  *
- * The console's `btn`: indistinguishable downstream, and buttons_down() follows it.
- * Stamped with the call's time; safe from any task. It starts no hold clock and
- * feeds no double-press detector: a script publishes hold or double itself
- * (`btn ... state=hold|double`).
+ * The console's `btn`: downstream it reads as a thumb's, but for ButtonEvt's
+ * `remote`, and buttons_down() follows it. Stamped with the call's time; safe
+ * from any task. It starts no hold clock and feeds no double-press detector: a
+ * script publishes hold or double itself (`btn ... state=hold|double`).
  *
  * @param id      A kdrv_button_t.
  * @param pressed The new state.
+ * @param remote  What the event's `remote` says: true when a console line
+ *                from the Kode channel or a scheduled entry asked for it.
  * @return false for an id out of range or a dry event pool (nothing
  *         published, nothing recorded); true once published.
  */
-bool buttons_inject(uint8_t id, bool pressed);
+bool buttons_inject(uint8_t id, bool pressed, bool remote);
 
 /**
  * @brief Turn the pad with the glass, by @p quarter_turns.

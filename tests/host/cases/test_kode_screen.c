@@ -527,7 +527,7 @@ TEST_CASE("a queue full of screen requests still takes what is published", "[kod
     /* What a publish does to a subscriber: a post with no margin, which
      * asserts on a full queue. Posted, not published, so no other subscriber
      * in this binary hears it; one static touch, so no pool is involved. */
-    static const TouchEvt touch = { QEVT_INITIALIZER(TOUCH_EVT_SIG), 0, 0, false, 0U, false };
+    static const TouchEvt touch = { QEVT_INITIALIZER(TOUCH_EVT_SIG), 0, 0, false, 0U, false, false };
 
     for ( uint32_t i = 0U; KODE_SCREEN_POST_MARGIN > i; i++ )
     {
@@ -574,7 +574,7 @@ TEST_CASE("two thousand changes in a loop never assert", "[kode_screen]")
 /** @brief Deliver a click on the button at @p place through the table's event(). */
 static void click(uint32_t place)
 {
-    TouchEvt t = { QEVT_INITIALIZER(TOUCH_EVT_SIG), 0, 0, false, 0U, false };
+    TouchEvt t = { QEVT_INITIALIZER(TOUCH_EVT_SIG), 0, 0, false, 0U, false, false };
 
     t.x = (int16_t)place;
     TEST_ASSERT_TRUE(kode_screen_ops.event(&t.super));

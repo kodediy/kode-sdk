@@ -129,6 +129,7 @@ static void publish_button(kdrv_button_t id, bool pressed)
     e->id      = (uint8_t)id;
     e->pressed = pressed;
     e->t_ms    = 0U;
+    e->remote  = false;
     QACTIVE_PUBLISH(&e->super, (void *)0);
 }
 

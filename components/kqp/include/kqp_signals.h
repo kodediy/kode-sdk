@@ -3371,7 +3371,9 @@ typedef struct {
  * Published on change only, already debounced, so a subscriber never has to
  * know that a tactile switch bounces. The event says when as well as what: a
  * subscriber that decides on elapsed time (a double press) cannot stamp the
- * event itself, because it may be dispatched late. */
+ * event itself, because it may be dispatched late. It also says whether a
+ * person at the board could have made it: a press a remote console line
+ * injected is marked, so a subscriber can refuse it what needs a person. */
 typedef struct {
     QEvt     super;
     uint8_t  id;        /**< kdrv_button_t */
@@ -3379,6 +3381,11 @@ typedef struct {
     uint32_t t_ms;      /**< khal_time_ms() when the edge was confirmed. It
                          *   wraps at about 49 days, so an interval is an
                          *   unsigned subtraction of two stamps. */
+    bool     remote;    /**< true when a console line from the Kode channel
+                         *   or a scheduled entry (KODE_CONSOLE_SRC_NET,
+                         *   KODE_CONSOLE_SRC_SCHED) injected it; false for a
+                         *   button on the board, or one injected over the
+                         *   cable, the dock or BLE. */
 } ButtonEvt;
 
 /** @brief The top or the bottom button is being held (BUTTON_HOLD_SIG,
@@ -4634,7 +4641,8 @@ typedef struct {
 /** @brief A touch sample from AO_Touch (TOUCH_EVT_SIG).
  *
  * It carries the time it was read, for the same reason ButtonEvt does: a
- * subscriber that measures a drag cannot stamp a sample it was handed late. */
+ * subscriber that measures a drag cannot stamp a sample it was handed late.
+ * Like ButtonEvt it says whether a remote console line injected it. */
 typedef struct {
     QEvt     super;
     int16_t  x;
@@ -4647,6 +4655,11 @@ typedef struct {
                          *   stayed still past KODE_TOUCH_STILL_MS and stopped
                          *   counting as a finger (a drop of water, a cloth).
                          *   Nothing was tapped and nobody is there. */
+    bool     remote;    /**< true when a console line from the Kode channel
+                         *   or a scheduled entry (KODE_CONSOLE_SRC_NET,
+                         *   KODE_CONSOLE_SRC_SCHED) injected it, its release
+                         *   included; false for a finger on the glass, or a
+                         *   sample injected over the cable, the dock or BLE. */
 } TouchEvt;
 
 /**

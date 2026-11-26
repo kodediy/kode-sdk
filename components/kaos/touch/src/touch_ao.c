@@ -157,6 +157,7 @@ void touch_test_inject(int16_t x, int16_t y, bool pressed)
         j->pressed = pressed;
         j->t_ms    = khal_time_ms();
         j->stale   = false;
+        j->remote  = false;   /* the judge's copy, read by AO_Touch alone */
         /* A refused post gives the event back to its pool. */
         (void)QACTIVE_POST_X(AO_Touch, &j->super, 1U, NULL);
     }
@@ -358,6 +359,7 @@ static bool touch_publish(int16_t x, int16_t y, bool pressed, bool stale)
     ev->pressed = pressed;
     ev->t_ms    = khal_time_ms();
     ev->stale   = stale;
+    ev->remote  = false;   /* a finger on the glass */
     QACTIVE_PUBLISH(&ev->super, AO_Touch);
     return true;
 }

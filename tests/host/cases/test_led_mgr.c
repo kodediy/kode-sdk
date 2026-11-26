@@ -249,7 +249,8 @@ TEST_CASE("AWAKE leaves a LED that never blinked alone, and a round after it res
 TEST_CASE("the led row refuses the round, and rests once it is over", "[led_mgr][lowpower]")
 {
     ButtonEvt no = { .super = QEVT_INITIALIZER(BUTTON_EVT_SIG),
-                     .id = (uint8_t)KDRV_BTN_BOT, .pressed = true, .t_ms = 0U };
+                     .id = (uint8_t)KDRV_BTN_BOT, .pressed = true, .t_ms = 0U,
+                     .remote = false };
 
     rest_up();
     led_test_request();

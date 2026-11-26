@@ -513,6 +513,43 @@ TEST_CASE("test_old_tcal_blob_is_ignored", "[touch_ao]")
     mock_down();
 }
 
+/**
+ * @brief Hand the small pool back a TouchEvt block that says remote.
+ *
+ * The pool gives the last block back first, so the next sample taken is
+ * this one: unless AO_Touch writes the field, it still says true.
+ */
+static void pool_dirty_touch(void)
+{
+    TouchEvt * const e = Q_NEW_X(TouchEvt, 0U, TOUCH_EVT_SIG);
+
+    TEST_ASSERT_NOT_NULL(e);
+    e->remote = true;
+    QF_gc(&e->super);
+}
+
+TEST_CASE("a finger on the glass is not remote, nor its lift", "[touch_ao]")
+{
+    touch_sampling();
+
+    pool_dirty_touch();
+    sample(true, 100, 100);
+    const TouchEvt *e = published();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_TRUE(e->pressed);
+    TEST_ASSERT_FALSE_MESSAGE(e->remote, "a finger's press says remote");
+    ao_spy_drain();
+
+    pool_dirty_touch();
+    sample(false, 100, 100);
+    e = published();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_FALSE(e->pressed);
+    TEST_ASSERT_FALSE_MESSAGE(e->remote, "a finger's lift says remote");
+    ao_spy_drain();
+    mock_down();
+}
+
 /* ---- Waiting for the interrupt ------------------------------------------- */
 
 /* The whole point of the interrupt: an armed AO reads nothing. Most of the

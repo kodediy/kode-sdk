@@ -522,6 +522,9 @@ typedef struct {
                              *   owed is its own.                          */
     bool        inj_stalled;/**< A sample has retried at least once; gates
                              *   the KLOG_W to once per stall.             */
+    bool        inj_remote; /**< The gesture in flight came from a remote
+                             *   line (src_remote()): the samples it still
+                             *   owes say so, as its press did.            */
     kcli_swipe_t swipe;     /**< KCLI_INJ_SWIPE: the plan.                 */
 #ifdef CONFIG_KODEOS_BLE
     bool        heard_stop; /**< AO_Radio took a stop for a BLE advertisement
@@ -2701,9 +2704,22 @@ _Static_assert(Q_DIM(A_BTN_STATES) == A_BTN_N_STATES,
 
 /* ---- Handlers: the injected finger ---------------------------------------
  * These publish the SAME events AO_Touch and AO_Buttons publish; no device is
- * touched, so no claim is needed. Nothing marks a sample as injected, on
- * purpose: do not add a flag a subscriber could start to depend on.
+ * touched, so no claim is needed. The verbs run from every source. One field
+ * says who pressed: `remote` is true when the line came from the Kode channel
+ * or a cron entry, where nobody need be at the board, and false over the
+ * cable, the dock or BLE, as for a thumb. Nothing else marks an injection.
  */
+
+/**
+ * @brief Whether a line from @p src has nobody at the board behind it.
+ * @param src KODE_CONSOLE_SRC_*.
+ * @return true for the Kode channel and a scheduled entry.
+ */
+static bool src_remote(uint8_t src)
+{
+    return ((uint8_t)KODE_CONSOLE_SRC_NET == src)
+           || ((uint8_t)KODE_CONSOLE_SRC_SCHED == src);
+}
 
 /**
  * @brief Publish one touch sample, as AO_Touch would.
@@ -2712,9 +2728,11 @@ _Static_assert(Q_DIM(A_BTN_STATES) == A_BTN_N_STATES,
  * @param y       Where the finger is.
  * @param pressed Whether it is down.
  * @param t_ms    The stamp the sample carries.
+ * @param remote  A remote line injected it (src_remote()).
  * @return false when the pool had no block: nothing was published.
  */
-static bool touch_publish(int16_t x, int16_t y, bool pressed, uint32_t t_ms)
+static bool touch_publish(int16_t x, int16_t y, bool pressed, uint32_t t_ms,
+                          bool remote)
 {
     TouchEvt *e = Q_NEW_X(TouchEvt, 0U, TOUCH_EVT_SIG);
 
@@ -2726,6 +2744,8 @@ static bool touch_publish(int16_t x, int16_t y, bool pressed, uint32_t t_ms)
     e->y       = y;
     e->pressed = pressed;
     e->t_ms    = t_ms;
+    e->stale   = false;
+    e->remote  = remote;
     QACTIVE_PUBLISH(&e->super, &l_console.super);
     return true;
 }
@@ -2746,7 +2766,8 @@ static void h_touch(Console *me, const kcmd_t *c, const karg_val_t *v)
     /* "move" is a sample with the finger still down: index 1 is "up" and
      * it is the only one of the three that is not pressed. */
     bool const sent = touch_publish((int16_t)v[0].u, (int16_t)v[1].u,
-                                    (1U != v[2].u), khal_time_ms());
+                                    (1U != v[2].u), khal_time_ms(),
+                                    src_remote(me->src));
     /* down/up only: logging every "move" would flood the log. */
     if ( sent && (2U != v[2].u) )
     {
@@ -2780,7 +2801,7 @@ static void h_touch(Console *me, const kcmd_t *c, const karg_val_t *v)
 static bool inj_send(Console *me, int16_t x, int16_t y, bool pressed,
                      uint32_t t_ms)
 {
-    bool const sent = touch_publish(x, y, pressed, t_ms);
+    bool const sent = touch_publish(x, y, pressed, t_ms, me->inj_remote);
 
     if ( sent )
     {
@@ -2840,8 +2861,10 @@ static void h_tap(Console *me, const kcmd_t *c, const karg_val_t *v)
         console_reply_err(KCLI_ERR_BUSY, "busy");
         return;
     }
+    bool const remote = src_remote(me->src);
+
     if ( !touch_publish((int16_t)v[0].u, (int16_t)v[1].u, true,
-                       khal_time_ms()) )
+                       khal_time_ms(), remote) )
     {
         console_reply_posted(c->verb, false);
         return;
@@ -2850,10 +2873,12 @@ static void h_tap(Console *me, const kcmd_t *c, const karg_val_t *v)
 
     /* The release cannot go out in this same step: LVGL reads the last
      * sample once per pass, so a press and a release in one
-     * run-to-completion is a press nobody ever saw. */
+     * run-to-completion is a press nobody ever saw. It goes out from the
+     * timer, when the line is long gone, so the source is kept with it. */
     me->inj_x       = (int16_t)v[0].u;
     me->inj_y       = (int16_t)v[1].u;
     me->inj_stalled = false;
+    me->inj_remote  = remote;
     me->inj         = KCLI_INJ_TAP;
     QTimeEvt_armX(&me->inj_tmo, KQP_TICKS_PER_MS(KCLI_TAP_HOLD_MS), 0U);
     console_reply_posted(c->verb, true);
@@ -2962,9 +2987,10 @@ static void h_swipe(Console *me, const kcmd_t *c, const karg_val_t *v)
     {
         hold = v[5].u;
     }
-    uint32_t const t0 = khal_time_ms();
+    uint32_t const t0     = khal_time_ms();
+    bool const     remote = src_remote(me->src);
 
-    if ( !touch_publish(x0, y0, true, t0) )
+    if ( !touch_publish(x0, y0, true, t0, remote) )
     {
         console_reply_posted(c->verb, false);
         return;
@@ -2983,6 +3009,7 @@ static void h_swipe(Console *me, const kcmd_t *c, const karg_val_t *v)
     me->inj_x       = x1;
     me->inj_y       = y1;
     me->inj_stalled = false;
+    me->inj_remote  = remote;
     me->inj         = KCLI_INJ_SWIPE;
     QTimeEvt_armX(&me->inj_tmo, KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS),
                   KQP_TICKS_PER_MS(KODE_TOUCH_POLL_MS));
@@ -2994,7 +3021,8 @@ static void h_swipe(Console *me, const kcmd_t *c, const karg_val_t *v)
  *        AO_Buttons would have said it.
  *
  * A press or a release goes through buttons_inject(), so a polling app sees
- * it too. A hold or a double is published here: an injected press never
+ * it too, marked remote when the line came from the Kode channel or a cron
+ * entry. A hold or a double is published here: an injected press never
  * starts AO_Buttons' hold clock or double detector, and neither changes a
  * button's state. The bottom button's hold publishes BUTTON_HOLD_SIG and then
  * BUTTON_HOME_HOLD_SIG, as a thumb that holds it to go home does. Only the top
@@ -3051,7 +3079,7 @@ static void h_btn(Console *me, const kcmd_t *c, const karg_val_t *v)
     }
     else
     {
-        ok = buttons_inject(id, A_BTN_PRESS == v[1].u);
+        ok = buttons_inject(id, A_BTN_PRESS == v[1].u, src_remote(me->src));
     }
     if ( ok )
     {
