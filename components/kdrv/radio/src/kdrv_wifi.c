@@ -1250,6 +1250,16 @@ kode_status_t kdrv_wifi_await(const char *ssid, uint32_t timeout_ms)
          * asks for a refresh, and a `wifi_info` right after a join was
          * reporting no signal at all for a board demonstrably on a network. */
         (void)kdrv_wifi_rssi();
+        if ( '\0' == name[0] )
+        {
+            /* An adopted station: the SSID was never ours to know, and the
+             * station says what it holds. */
+            wifi_ap_record_t ap;
+            if ( esp_wifi_sta_get_ap_info(&ap) == ESP_OK )
+            {
+                ssid_set((const char *)ap.ssid);
+            }
+        }
     }
     else
     {
@@ -1279,7 +1289,7 @@ kode_status_t kdrv_wifi_await(const char *ssid, uint32_t timeout_ms)
 }
 
 /* cppcheck-suppress misra-c2012-8.7 ; called by the kdrv_radio worker, which is a file this check does not join to this one */
-kode_status_t kdrv_wifi_adopt(uint32_t timeout_ms)
+kode_status_t kdrv_wifi_adopt(void)
 {
     kode_status_t rc;
 
@@ -1314,24 +1324,14 @@ kode_status_t kdrv_wifi_adopt(uint32_t timeout_ms)
     ssid_set(NULL);
 
     /* A C5 that is still associated skips the real connect and replays its
-     * STA_CONNECTED, which is what starts DHCP on the netif made above. */
+     * STA_CONNECTED, which is what starts DHCP on the netif made above. The
+     * lease is kdrv_wifi_await()'s, with no name. */
     if ( esp_wifi_connect() != ESP_OK )
     {
         KLOG_W(TAG, "adopt: the remote stack refused the connect");
         return KODE_ERROR;
     }
-
-    rc = kdrv_wifi_await("", timeout_ms);
-    if ( KODE_OK == rc )
-    {
-        /* The SSID was never ours to know; the station says what it holds. */
-        wifi_ap_record_t ap;
-        if ( esp_wifi_sta_get_ap_info(&ap) == ESP_OK )
-        {
-            ssid_set((const char *)ap.ssid);
-        }
-    }
-    return rc;
+    return KODE_OK;
 }
 
 kode_status_t kdrv_wifi_connect(const char *ssid, const char *pass,

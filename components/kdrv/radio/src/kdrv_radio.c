@@ -956,7 +956,7 @@ static bool radio_run_wifi(const kdrv_radio_req_t *req, kode_status_t *rc)
             *rc = radio_answer(kdrv_wifi_await(req->ssid, KDRV_RADIO_JOIN_MS));
             break;
         case KDRV_RADIO_JOB_WIFI_ADOPT:
-            *rc = radio_answer(kdrv_wifi_adopt(KDRV_RADIO_JOIN_MS));
+            *rc = radio_answer(kdrv_wifi_adopt());
             break;
         case KDRV_RADIO_JOB_WIFI_LEAVE:
             *rc = radio_answer(kdrv_wifi_disconnect());

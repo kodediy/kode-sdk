@@ -416,6 +416,7 @@ static void finish_whatever_runs(void)
         case KDRV_RADIO_JOB_WIFI_RSSI:  finish(KDRV_RADIO_JOB_WIFI_RSSI, KODE_OK); break;
         case KDRV_RADIO_JOB_WIFI_PS:    finish(KDRV_RADIO_JOB_WIFI_PS, KODE_OK); break;
         case KDRV_RADIO_JOB_WIFI_ADOPT: finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_ERROR); break;
+        case KDRV_RADIO_JOB_WIFI_AWAIT: finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_ERROR); break;
         case KDRV_RADIO_JOB_C5_INFO:    finish(KDRV_RADIO_JOB_C5_INFO, KODE_ERROR); break;
         case KDRV_RADIO_JOB_C5_ABORT:   finish(KDRV_RADIO_JOB_C5_ABORT, KODE_OK); break;
         case KDRV_RADIO_JOB_C5_BEGIN:   finish(KDRV_RADIO_JOB_C5_BEGIN, KODE_ERROR); break;

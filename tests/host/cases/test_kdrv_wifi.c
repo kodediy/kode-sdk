@@ -288,7 +288,7 @@ TEST_CASE("adopt creates the station netif before it starts the Wi-Fi",
     kdrv_wifi_forget();
     adopt_arm(C5_GIVES_IP);
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_adopt(50U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_adopt());
 
     /* The order is the point: a netif made after the start never hears
      * STA_START, and one made with the stack stopped and started around it
@@ -331,13 +331,31 @@ TEST_CASE("adopt creates the station netif before it starts the Wi-Fi",
     adopt_mocks_done();
 }
 
-TEST_CASE("adopt answers OK once the IP arrives", "[kdrv_wifi]")
+TEST_CASE("adopt returns once the connect is asked, before any lease", "[kdrv_wifi]")
+{
+    adopt_mocks_init();
+    kdrv_wifi_forget();
+    adopt_arm(C5_SILENT);
+
+    /* A C5 that has not answered yet: the connect is asked and the lease is
+     * the wait's, a job of its own. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_adopt());
+    TEST_ASSERT_EQUAL_INT((int)CALL_CONNECT, (int)s_trace[s_trace_n - 1U]);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_IDLE, (int)kdrv_wifi_state(NULL));
+    TEST_ASSERT_EQUAL_STRING("", ssid_now());
+
+    Mockesp_wifi_Verify();
+    adopt_mocks_done();
+}
+
+TEST_CASE("the wait after an adopt answers OK once the IP arrives", "[kdrv_wifi]")
 {
     adopt_mocks_init();
     kdrv_wifi_forget();
     adopt_arm(C5_GIVES_IP);
 
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_adopt(50U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_adopt());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_await("", 50U));
 
     uint32_t ip = 0U;
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_GOT_IP, (int)kdrv_wifi_state(&ip));
@@ -349,20 +367,21 @@ TEST_CASE("adopt answers OK once the IP arrives", "[kdrv_wifi]")
     adopt_mocks_done();
 }
 
-TEST_CASE("adopt answers DENIED on a disconnect", "[kdrv_wifi]")
+TEST_CASE("the wait after an adopt answers DENIED on a disconnect", "[kdrv_wifi]")
 {
     adopt_mocks_init();
     kdrv_wifi_forget();
     adopt_arm(C5_DISCONNECTS);
     esp_wifi_disconnect_IgnoreAndReturn(ESP_OK);
 
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_adopt(50U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_adopt());
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_wifi_await("", 50U));
     TEST_ASSERT_EQUAL_STRING("", ssid_now());
 
     adopt_mocks_done();
 }
 
-TEST_CASE("adopt answers TIMEOUT when nothing arrives", "[kdrv_wifi]")
+TEST_CASE("the wait after an adopt answers TIMEOUT when nothing arrives", "[kdrv_wifi]")
 {
     adopt_mocks_init();
     kdrv_wifi_forget();
@@ -371,7 +390,8 @@ TEST_CASE("adopt answers TIMEOUT when nothing arrives", "[kdrv_wifi]")
 
     /* A deadline of 0 ms, as the vault cases use: what is under test is the
      * answer to an empty wait, not the host scheduler. */
-    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kdrv_wifi_adopt(0U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_adopt());
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kdrv_wifi_await("", 0U));
     TEST_ASSERT_EQUAL_INT((int)KDRV_WIFI_IDLE, (int)kdrv_wifi_state(NULL));
 
     adopt_mocks_done();
@@ -383,7 +403,8 @@ TEST_CASE("a join after a failed adopt still works", "[kdrv_wifi]")
     kdrv_wifi_forget();
     adopt_arm(C5_SILENT);
     esp_wifi_disconnect_IgnoreAndReturn(ESP_OK);
-    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kdrv_wifi_adopt(0U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_wifi_adopt());
+    TEST_ASSERT_EQUAL_INT(KODE_TIMEOUT, kdrv_wifi_await("", 0U));
 
     /* The failed adopt left the stack up with its netif. The fallback join
      * must reuse both: no second netif, no stop or start around one

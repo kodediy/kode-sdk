@@ -44,7 +44,8 @@ typedef enum {
                                   *   radio held to the band of req.channel,
                                   *   the bits cleared
                                   *   (kdrv_wifi_prepare()).               */
-    KDRV_RADIO_JOB_WIFI_AWAIT,   /**< Wait for that join's lease
+    KDRV_RADIO_JOB_WIFI_AWAIT,   /**< Wait for that join's lease, or with
+                                  *   req.ssid empty an adoption's
                                   *   (kdrv_wifi_await()); ends as
                                   *   a join this side made does, with the
                                   *   status of the wait.                 */
@@ -84,8 +85,8 @@ typedef enum {
     KDRV_RADIO_JOB_WIFI_ADOPT,   /**< Take over the station a parked C5 still
                                   *   holds (kdrv_wifi_adopt()): netif and
                                   *   Wi-Fi up with no stop, no disconnect,
-                                  *   then wait for the lease. Ends as a
-                                  *   join does, with the adopt's status.   */
+                                  *   and the connect asked. A WIFI_AWAIT
+                                  *   with no name waits for the lease.     */
     KDRV_RADIO_JOB_BLE_RSP,      /**< Set the scan response
                                   *   (kdrv_ble_set_scan_rsp()): req.ssid the
                                   *   name, "" for the serial; req.data and
