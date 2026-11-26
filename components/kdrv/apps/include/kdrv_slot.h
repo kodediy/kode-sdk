@@ -225,9 +225,6 @@ kode_status_t kdrv_slot_info(kdrv_slot_id_t id, kdrv_slot_info_t *out);
  * asked about the same way `info` asks about them: present or not, and whose.
  */
 
-#define KDRV_COREDUMP_MAX     (128U * 1024U) /**< The coredump partition's size
-                                              *   (kbsp/partitions.csv): no
-                                              *   dump is larger.             */
 #define KDRV_COREDUMP_SHA_HEX 9U             /**< Hex digits of the ELF SHA-256
                                               *   a dump carries.             */
 
@@ -297,31 +294,6 @@ kode_status_t kdrv_slot_coredump(kdrv_coredump_t *out);
  *         no reason, a NULL or empty @p buf, or a build with no core dump).
  */
 kode_status_t kdrv_slot_coredump_reason(char *buf, size_t len);
-
-/**
- * @brief Copy the dump out of flash whole, with its CRC32.
- *
- * The image is the bytes esp_core_dump_image_get() delimits, read only once
- * esp_core_dump_image_check() has proved its checksum.
- *
- * @param buf Receives the image.
- * @param cap Room in @p buf; KDRV_COREDUMP_MAX holds any dump.
- * @param len Receives the image's length on KODE_OK.
- * @param crc Receives its CRC32 (zlib's, khal_crc32()) on KODE_OK.
- * @return KODE_OK; KODE_DENIED with no dump, a dump whose checksum this build
- *         refuses, a NULL argument or a build with no core dump;
- *         KODE_NO_RESOURCES when the image is larger than @p cap; KODE_ERROR
- *         when the flash cannot be read.
- */
-kode_status_t kdrv_slot_coredump_read(uint8_t *buf, size_t cap, size_t *len, uint32_t *crc);
-
-/**
- * @brief Erase the dump, so flash holds none.
- *
- * @return KODE_OK; KODE_ERROR when the erase fails; KODE_DENIED in a build
- *         with no core dump.
- */
-kode_status_t kdrv_slot_coredump_erase(void);
 
 /* ---- Where we are running ------------------------------------------------ */
 

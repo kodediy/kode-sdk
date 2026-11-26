@@ -954,7 +954,7 @@ TEST_CASE("an id off the end, or nowhere to answer to, is refused rather "
 }
 
 /* ---- The crash the board kept ------------------------------------------------
- * The core dump is mocked, its partition is the board's own on real flash, and
+ * The core dump is mocked, and
  * the three app partitions describe the images a case lays there: the running
  * one is ota_0, holding the image app_desc_stub.c describes.
  */
@@ -973,12 +973,6 @@ static const esp_app_desc_t FACTORY_IMAGE = {
 
 /** @brief What each app partition holds, in kdrv_slot_id_t order; NULL is none. */
 static const esp_app_desc_t *s_images[KDRV_SLOT_ID_COUNT];
-
-/** @brief A dump's length that is no sector's: the image a read case lays. */
-#define DUMP_LEN  1000U
-
-/** @brief The CRC32 (zlib's) of the DUMP_LEN bytes dump_lay() writes. */
-#define DUMP_CRC  0x8902161EU
 
 /** @brief esp_ota_get_partition_description(), answered from s_images by address. */
 static esp_err_t image_of(const esp_partition_t *p, esp_app_desc_t *desc, int calls)
@@ -1035,37 +1029,6 @@ static void expect_dump(const char *sha)
     esp_core_dump_image_check_ExpectAndReturn(ESP_OK);
     esp_core_dump_get_summary_ExpectAnyArgsAndReturn(ESP_OK);
     esp_core_dump_get_summary_ReturnThruPtr_summary(&summary);
-}
-
-/**
- * @brief Write DUMP_LEN bytes of a known pattern at the start of the coredump
- *        partition, and queue the checks that find them there.
- * @param image Receives the bytes written, to compare a read against.
- */
-static void dump_lay(uint8_t *image)
-{
-    static size_t addr;
-    static size_t size;
-    const esp_partition_t * const part =
-        esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
-                                 ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
-
-    TEST_ASSERT_NOT_NULL_MESSAGE(part, "the board's table must be in this project");
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(KDRV_COREDUMP_MAX, part->size,
-        "a buffer of KDRV_COREDUMP_MAX holds any dump the partition can");
-    for ( uint32_t i = 0U; DUMP_LEN > i; ++i )
-    {
-        image[i] = (uint8_t)((i * 31U) + 7U);
-    }
-    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_erase_range(part, 0U, 0x1000U));
-    TEST_ASSERT_EQUAL_INT(ESP_OK, esp_partition_write(part, 0U, image, DUMP_LEN));
-
-    addr = part->address;
-    size = DUMP_LEN;
-    esp_core_dump_image_check_ExpectAndReturn(ESP_OK);
-    esp_core_dump_image_get_ExpectAnyArgsAndReturn(ESP_OK);
-    esp_core_dump_image_get_ReturnThruPtr_out_addr(&addr);
-    esp_core_dump_image_get_ReturnThruPtr_out_size(&size);
 }
 
 TEST_CASE("a dump of the running image is a kodeOS dump", "[kdrv_slot]")
@@ -1135,14 +1098,10 @@ TEST_CASE("a dump of no image in flash is not a kodeOS dump", "[kdrv_slot]")
     dump_done();
 }
 
-/* A sketch's dump, checksummed with CRC32 where this build checks SHA-256.
- * The image is never fetched: the mock refuses esp_core_dump_image_get(). */
+/* A sketch's dump, checksummed with CRC32 where this build checks SHA-256. */
 TEST_CASE("a dump this build cannot check is no kodeOS dump", "[kdrv_slot]")
 {
     kdrv_coredump_t cd;
-    uint8_t         buf[16];
-    size_t          len = 7U;
-    uint32_t        crc = 7U;
 
     dump_fresh();
     esp_core_dump_image_check_ExpectAndReturn(ESP_ERR_INVALID_CRC);
@@ -1151,60 +1110,6 @@ TEST_CASE("a dump this build cannot check is no kodeOS dump", "[kdrv_slot]")
     TEST_ASSERT_FALSE(cd.mine);
     TEST_ASSERT_FALSE(cd.kodeos);
     TEST_ASSERT_EQUAL_STRING("", cd.sha);
-
-    (void)memset(buf, 0xA5, sizeof(buf));
-    esp_core_dump_image_check_ExpectAndReturn(ESP_ERR_INVALID_CRC);
-    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kdrv_slot_coredump_read(buf, sizeof(buf), &len, &crc));
-    TEST_ASSERT_EQUAL_UINT32(7U, (uint32_t)len);
-    TEST_ASSERT_EQUAL_HEX32(7U, crc);
-    TEST_ASSERT_EQUAL_HEX8(0xA5U, buf[0]);
-
-    dump_done();
-}
-
-TEST_CASE("the dump is read whole with its crc", "[kdrv_slot]")
-{
-    static uint8_t image[DUMP_LEN];
-    static uint8_t buf[KDRV_COREDUMP_MAX];
-    size_t         len = 0U;
-    uint32_t       crc = 0U;
-
-    dump_fresh();
-    dump_lay(image);
-
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_coredump_read(buf, sizeof(buf), &len, &crc));
-    TEST_ASSERT_EQUAL_UINT32(DUMP_LEN, (uint32_t)len);
-    TEST_ASSERT_EQUAL_HEX32(DUMP_CRC, crc);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(image, buf, DUMP_LEN);
-
-    dump_done();
-}
-
-TEST_CASE("a dump larger than the room is refused", "[kdrv_slot]")
-{
-    static uint8_t image[DUMP_LEN];
-    static uint8_t buf[DUMP_LEN - 1U];
-    size_t         len = 0U;
-    uint32_t       crc = 0U;
-
-    dump_fresh();
-    dump_lay(image);
-
-    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES,
-                          kdrv_slot_coredump_read(buf, sizeof(buf), &len, &crc));
-
-    dump_done();
-}
-
-TEST_CASE("the dump is erased", "[kdrv_slot]")
-{
-    dump_fresh();
-
-    esp_core_dump_image_erase_ExpectAndReturn(ESP_OK);
-    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_slot_coredump_erase());
-
-    esp_core_dump_image_erase_ExpectAndReturn(ESP_FAIL);
-    TEST_ASSERT_EQUAL_INT(KODE_ERROR, kdrv_slot_coredump_erase());
 
     dump_done();
 }

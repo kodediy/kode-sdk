@@ -13,7 +13,6 @@
 
 #include <string.h>
 
-#include "khal_crc32.h"
 #include "kode_log.h"
 
 #include "esp_app_desc.h"
@@ -668,69 +667,6 @@ kode_status_t kdrv_slot_coredump_reason(char *buf, size_t len)
     {
         buf[0] = '\0';
         return KODE_DENIED;
-    }
-    return KODE_OK;
-#else
-    return KODE_DENIED;
-#endif
-}
-
-kode_status_t kdrv_slot_coredump_read(uint8_t *buf, size_t cap, size_t *len, uint32_t *crc)
-{
-    if ( (NULL == buf) || (NULL == len) || (NULL == crc) )
-    {
-        return KODE_DENIED;
-    }
-
-#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
-    /* The proof kdrv_slot_coredump() asks first: a dump whose checksum this
-     * build refuses is not read. image_get() delimits the image by the length
-     * its own header declares. */
-    size_t addr = 0U;
-    size_t size = 0U;
-
-    if ( (esp_core_dump_image_check() != ESP_OK)
-        || (esp_core_dump_image_get(&addr, &size) != ESP_OK) )
-    {
-        return KODE_DENIED;
-    }
-    if ( size > cap )
-    {
-        return KODE_NO_RESOURCES;
-    }
-
-    const esp_partition_t * const part =
-        esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
-                                 ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
-    esp_err_t err = ESP_ERR_NOT_FOUND;
-
-    if ( (NULL != part) && (addr >= part->address) )
-    {
-        err = esp_partition_read(part, addr - part->address, buf, size);
-    }
-    if ( ESP_OK != err )
-    {
-        KLOG_E(TAG, "the core dump could not be read (%s)", esp_err_to_name(err));
-        return KODE_ERROR;
-    }
-    *len = size;
-    *crc = khal_crc32(KHAL_CRC32_INIT, buf, size);
-    return KODE_OK;
-#else
-    (void)cap;
-    return KODE_DENIED;
-#endif
-}
-
-kode_status_t kdrv_slot_coredump_erase(void)
-{
-#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
-    esp_err_t const err = esp_core_dump_image_erase();
-
-    if ( ESP_OK != err )
-    {
-        KLOG_E(TAG, "the core dump could not be erased (%s)", esp_err_to_name(err));
-        return KODE_ERROR;
     }
     return KODE_OK;
 #else
