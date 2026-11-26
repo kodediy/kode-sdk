@@ -1,0 +1,57 @@
+name: arduino
+
+# The Arduino libraries' configuration against an SDK app's. The libraries
+# freeze the SDK's sdkconfig, and they are configured from the library
+# builder's defaults, kbsp's sdkconfig.board and arduino/'s own files; a new
+# ESP-IDF, a new builder or a Kconfig of ours that moves a default changes
+# them unseen. So both projects are configured - the target build's variant
+# `arduino`, an SDK app with the SDK's lines for Arduino's core, and the
+# builder's, by arduino/tools/build_libs.sh --configure-only - and
+# arduino/tools/check_config.py fails on any option that differs and is not in
+# arduino/sdkconfig.keep. Nothing is built: the libraries take a quarter of an
+# hour, and the configuration is where they drift.
+#
+# Only for a pull request that touches what decides the configuration: the
+# arduino/ folder, the board file, a Kconfig, the target build's defaults
+# that the variant reads, or this file. Also a component's manifest, which
+# decides the components both projects take and so the Kconfigs they read,
+# and the target build's CMakeLists.txt, which decides the files the variant
+# reads. Another workflow may call it.
+on:
+  pull_request:
+    paths:
+      - 'arduino/**'
+      - 'components/kbsp/sdkconfig.board'
+      - '**/Kconfig'
+      - 'tests/target/sdkconfig.*'
+      - 'tests/target/CMakeLists.txt'
+      - 'components/*/idf_component.yml'
+      - '.github/workflows/arduino.yml'
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arduino-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  config:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # Without submodules, for the reason host-tests.yml gives.
+      - uses: actions/checkout@v7
+
+      - name: Configure both projects and compare them
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v6.1
+          target: esp32p4
+          path: .
+          # The builder's clones go in build_arduino_libs/.
+          command: |
+            KODE_TARGET_VARIANT=arduino idf.py -C tests/target -B tests/target/build_arduino reconfigure || exit 1
+            arduino/tools/build_libs.sh --configure-only build_arduino_libs || exit 1
+            python3 arduino/tools/check_config.py tests/target/build_arduino/sdkconfig build_arduino_libs/lib-builder/sdkconfig arduino/sdkconfig.keep

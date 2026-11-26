@@ -1,5 +1,9 @@
 # The Arduino build (arduino/sdkconfig.sdk, read after this file) on an app's
 # own defaults, so the lines of sdkconfig.defaults that are not an app's go
-# back - the role and the scheduler.
+# back - the role, the channel, the scheduler, the pixel accelerator's passes
+# and FreeRTOS's task list.
 CONFIG_KODEOS_BOOT_ROLE_APP=y
+CONFIG_KODEOS_CHANNEL=n
 CONFIG_KODE_SCHEDULER=n
+CONFIG_KODE_COMPOSE=n
+CONFIG_FREERTOS_USE_TRACE_FACILITY=n
