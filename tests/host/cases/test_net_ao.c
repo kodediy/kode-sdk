@@ -43,7 +43,7 @@
 #error "test_net_ao.c needs CONFIG_KODEOS_SHOT_HTTP=1 (main/CMakeLists.txt)"
 #endif
 #if !CONFIG_KODEOS_DUMP_HTTP
-#error "test_net_ao.c needs CONFIG_KODEOS_DUMP_HTTP=1 (main/CMakeLists.txt)"
+#error "test_net_ao.c needs CONFIG_KODEOS_DUMP_HTTP=1 (tests/host/CMakeLists.txt)"
 #endif
 
 static void go_online(void);

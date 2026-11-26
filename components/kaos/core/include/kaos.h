@@ -9,7 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER */
+#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER, CONFIG_KODEOS_DUMP_HTTP */
 #include "kqp.h"
 #include "khal_sync.h"
 #include "kode_log.h"
