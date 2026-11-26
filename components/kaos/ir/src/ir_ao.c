@@ -50,6 +50,9 @@ Q_DEFINE_THIS_MODULE("ir_ao")
  *         driver's call can legitimately take, and a margin. */
 #define IR_JOB_DEADLINE_MS  (KDRV_IR_CALL_MAX_MS + KODE_IR_JOB_MARGIN_MS)
 
+_Static_assert(KODE_IR_TEST_SENT_MS == KDRV_IR_SENT_MS,
+               "the IR row's budget holds each attempt's wait for the C5's word");
+
 /** @brief Size of the capture buffer, in bytes. */
 #define IR_SYM_BYTES     (KDRV_IR_RX_MAX_SYMBOLS * sizeof(kdrv_ir_symbol_t))
 
@@ -137,7 +140,8 @@ typedef struct {
     bool             row;       /**< A send: one attempt of the production row. */
     uint16_t         addr;      /**< A send: the NEC address, for the log.      */
     uint16_t         cmd;       /**< A send: the NEC command, for the log.      */
-    uint32_t         window_ms; /**< A send: the echo window it opens.          */
+    uint32_t         window_ms; /**< A send: its frame and the tail, the window
+                                 *   of a send the C5 said nothing of.        */
     bool             raw;       /**< A send: a raw frame, answered below.       */
     uint32_t        *raw_rc;    /**< A raw send: where its status goes.         */
     khal_sem_t       raw_done;  /**< A raw send: posted once it is answered.    */
@@ -1084,7 +1088,7 @@ static void heard(Ir * const me)
     me->last.nec     = nec;
     me->last.at_ms   = khal_time_ms();
 
-    /* Before the echo window, which is a tenth of the row's
+    /* Before the echo window, which is shorter than the row's
      * KODE_IR_TEST_ECHO_MS: a late echo would be published as a remote.
      * While a row runs, everything heard is the row's. */
     if ( test_capture(me, nec, addr, cmd) )
@@ -1127,11 +1131,18 @@ static void heard(Ir * const me)
 /**
  * @brief How long @p n symbols take on the wire, in milliseconds, rounded up.
  *
- * Understates the transmitter's time by about 33 ms: kdrv_ir_send() expands the
- * frame's final zero space to 32767 us, when the emitter is dark (the echo
- * window is unaffected) but the driver refuses another send. With that tail a
- * frame of all ones (about 87 ms) misses NEC's 110 ms repeat period: count it
- * before tightening the schedule.
+ * The echo window of a send the C5 said nothing of, with the tail: that frame
+ * may have started as late as the moment the wait gave up.
+ *
+ * Understates the transmitter's time by about 33 ms: the C5 sends the frame's
+ * final zero space as 32767 us, when the emitter is dark (the echo window is
+ * unaffected) but kdrv_ir_send() is still waiting for the C5's word. With that
+ * tail a frame of all ones (about 87 ms) misses NEC's 110 ms repeat period:
+ * count it before tightening the schedule.
+ *
+ * The send returns only once the frame has ended, so its own echo is heard
+ * while the call is out: held as a pending readiness and served by pump()
+ * after send_done() has opened the window.
  *
  * @param sym The symbols.
  * @param n   How many.
@@ -1178,7 +1189,7 @@ static void deafen(Ir * const me, uint32_t ms)
  *
  * Only with no call out: the frame is built in the job's buffer, which the
  * worker may be reading. The echo window opens in send_done(), and only if the
- * frame went out, so a refused send does not mute a real remote.
+ * frame may have gone out, so a refused send does not mute a real remote.
  *
  * @param me   The AO.
  * @param addr The address.
@@ -1466,7 +1477,7 @@ static void test_wait(Ir * const me)
 /**
  * @brief Draw a nonce and hand its frame to the worker.
  *
- * The clock on the echo starts in send_done(), when the frame is on the link.
+ * The clock on the echo starts in send_done(), when the C5 says the frame went out.
  *
  * @param me The AO.
  */
@@ -1495,18 +1506,47 @@ static void test_attempt(Ir * const me)
 }
 
 /**
- * @brief The frame of a send has been put on the link, or has not.
+ * @brief Be deaf to the echo of a send that has returned.
+ *
+ * The C5 answers once the frame has ended and its capture follows that answer
+ * on the same task, so a confirmed frame needs the tail alone. A send the C5
+ * said nothing of may have gone out, as late as now: its frame and the tail.
+ * A refused send or a frame the C5 says failed put nothing out and opens no
+ * window, which would mute a real remote.
+ *
+ * @param me The AO.
+ * @param rc What the driver answered.
+ */
+static void echo_after(Ir * const me, kode_status_t rc)
+{
+    if ( KODE_OK == rc )
+    {
+        deafen(me, KODE_IR_ECHO_TAIL_MS);
+    }
+    else if ( KODE_TIMEOUT == rc )
+    {
+        deafen(me, me->job.window_ms);
+    }
+    else
+    {
+        /* Nothing went out: no echo to be deaf to. */
+    }
+}
+
+/**
+ * @brief The frame of a send went out, as the C5 says, or did not.
  *
  * @param me The AO.
  * @param rc What the driver answered.
  */
 static void send_done(Ir * const me, kode_status_t rc)
 {
+    echo_after(me, rc);
     if ( me->job.raw )
     {
         /* A raw frame: its requester is answered whatever happened, but not
          * on the deadline: on_job_done() gives the call's own status when it
-         * returns. Only a frame that went out has an echo to be deaf to. */
+         * returns. */
         if ( me->job.expired )
         {
             return;
@@ -1514,7 +1554,6 @@ static void send_done(Ir * const me, kode_status_t rc)
         me->job.raw = false;
         if ( KODE_OK == rc )
         {
-            deafen(me, me->job.window_ms);
             KLOG_D(TAG, "sent a raw frame of %u symbols at %lu Hz",
                    (unsigned)me->job.n, (unsigned long)me->job.carrier_hz);
         }
@@ -1539,7 +1578,6 @@ static void send_done(Ir * const me, kode_status_t rc)
         }
         return;
     }
-    deafen(me, me->job.window_ms);
     KLOG_D(TAG, "sent addr=0x%04X cmd=0x%04X", (unsigned)me->job.addr,
            (unsigned)me->job.cmd);
     if ( me->job.row && me->test.running )

@@ -20,10 +20,10 @@
 /** @brief Durations the writer puts on a line. */
 #define IR_FILE_PER_LINE 16U
 
-/** @brief Digits of the longest carrier, 1000000. */
-#define IR_FILE_CARRIER_DIGITS 7U
+/** @brief Digits of the highest carrier, 500000. */
+#define IR_FILE_CARRIER_DIGITS 6U
 
-/** @brief Digits of the longest duration, 65535. */
+/** @brief Digits of the longest duration, 32767. */
 #define IR_FILE_VALUE_DIGITS 5U
 
 /** @brief Characters of "raw " and the newline after the carrier. */
@@ -47,7 +47,9 @@
 _Static_assert(KODE_IR_FILE_SIGNALS_MAX == 32U, "the text of the signal limit says 32");
 _Static_assert(KODE_IR_RAW_MAX == 512U, "the text of the duration limit says 512");
 _Static_assert(KODE_IR_FILE_VALUE_MAX == 65535U, "the text of the value limit says 65535");
-_Static_assert(KODE_IR_FILE_CARRIER_MAX == 1000000U, "the text of the carrier limit says 1000000");
+_Static_assert((KODE_IR_CARRIER_MIN_HZ == 20000U) && (KODE_IR_CARRIER_MAX_HZ == 500000U),
+               "the text of the carrier limit says 20000 to 500000");
+_Static_assert(KODE_IR_DURATION_MAX_US == 32767U, "the text of the duration limit says 32767");
 
 /** @brief Why a line is refused. */
 typedef enum {
@@ -155,11 +157,11 @@ static bool signal_valid(const kode_ir_signal_t *s)
     }
     else
     {
-        ok = (1U <= s->carrier_hz) && (KODE_IR_FILE_CARRIER_MAX >= s->carrier_hz)
+        ok = (KODE_IR_CARRIER_MIN_HZ <= s->carrier_hz) && (KODE_IR_CARRIER_MAX_HZ >= s->carrier_hz)
              && (1U <= s->count) && (KODE_IR_RAW_MAX >= s->count);
         for ( uint32_t i = 0U; ok && (i < s->count); i++ )
         {
-            ok = (1U <= s->us[i]);
+            ok = (1U <= s->us[i]) && (KODE_IR_DURATION_MAX_US >= (uint32_t)s->us[i]);
         }
     }
     return ok;
@@ -404,8 +406,8 @@ static void reader_fail(reader_t *r, uint32_t line, why_t why)
         [WHY_NUMBER]         = "not a number",
         [WHY_NEC_RANGE]      = "out of range (0 to 65535)",
         [WHY_CARRIER_NONE]   = "raw needs a carrier in Hz",
-        [WHY_CARRIER_RANGE]  = "carrier out of range (1 to 1000000)",
-        [WHY_DURATION_RANGE] = "duration out of range (1 to 65535)",
+        [WHY_CARRIER_RANGE]  = "carrier out of range (20000 to 500000)",
+        [WHY_DURATION_RANGE] = "duration out of range (1 to 32767)",
         [WHY_DURATIONS_NONE] = "raw has no durations",
         [WHY_DURATIONS_MANY] = "raw holds at most 512 durations",
         [WHY_SIGNALS_MANY]   = "a file holds at most 32 signals",
@@ -442,7 +444,7 @@ static void durations_read(reader_t *r, cursor_t *c)
     while ( (0U != t.len) && (NULL == r->why) )
     {
         uint32_t    v = 0U;
-        const num_t k = number_read(t, KODE_IR_FILE_VALUE_MAX, &v);
+        const num_t k = number_read(t, KODE_IR_DURATION_MAX_US, &v);
 
         if ( NUM_BAD == k )
         {
@@ -524,13 +526,13 @@ static void raw_read(reader_t *r, cursor_t *c)
     }
     else
     {
-        const num_t k = number_read(t, KODE_IR_FILE_CARRIER_MAX, &carrier);
+        const num_t k = number_read(t, KODE_IR_CARRIER_MAX_HZ, &carrier);
 
         if ( NUM_BAD == k )
         {
             reader_fail(r, r->line, WHY_NUMBER);
         }
-        else if ( (NUM_RANGE == k) || (1U > carrier) )
+        else if ( (NUM_RANGE == k) || (KODE_IR_CARRIER_MIN_HZ > carrier) )
         {
             reader_fail(r, r->line, WHY_CARRIER_RANGE);
         }

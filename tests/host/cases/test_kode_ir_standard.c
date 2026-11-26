@@ -501,8 +501,105 @@ TEST_CASE("a raw send with no durations, too many, no array or no carrier is ref
     TEST_ASSERT_FALSE(kode_ir_send_raw(NULL, 4U, KDRV_IR_CARRIER_HZ));
     TEST_ASSERT_EQUAL_STRING("no durations given", kode_error());
     TEST_ASSERT_FALSE(kode_ir_send_raw(us, 4U, 0U));
-    TEST_ASSERT_EQUAL_STRING("the carrier must be above 0 Hz", kode_error());
+    TEST_ASSERT_EQUAL_STRING("carrier 0 Hz is out of range (20000 to 500000)", kode_error());
     TEST_ASSERT_EQUAL_UINT32(0U, ir_pending());
+}
+
+TEST_CASE("a raw send refuses a carrier outside 20000 to 500000 Hz and sends nothing", "[kode_ir_standard]")
+{
+    static const uint16_t us[] = { 9000U, 4500U, 560U };
+
+    ir_fresh();
+    raw_reset();
+    TEST_ASSERT_FALSE(kode_ir_send_raw(us, 3U, 38U));
+    TEST_ASSERT_EQUAL_STRING("carrier 38 Hz is out of range (20000 to 500000)", kode_error());
+    TEST_ASSERT_FALSE(kode_ir_send_raw(us, 3U, KODE_IR_CARRIER_MIN_HZ - 1U));
+    TEST_ASSERT_EQUAL_STRING("carrier 19999 Hz is out of range (20000 to 500000)", kode_error());
+    TEST_ASSERT_FALSE(kode_ir_send_raw(us, 3U, KODE_IR_CARRIER_MAX_HZ + 1U));
+    TEST_ASSERT_EQUAL_STRING("carrier 500001 Hz is out of range (20000 to 500000)", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, ir_pending());
+}
+
+TEST_CASE("a raw send takes a carrier of 20000, 38000 and 500000 Hz", "[kode_ir_standard]")
+{
+    static const uint32_t hz[] = { 20000U, 38000U, 500000U };
+    static const uint16_t us[] = { 9000U, 4500U, 560U };
+
+    ir_fresh();
+    for ( uint32_t i = 0U; (sizeof(hz) / sizeof(hz[0])) > i; i++ )
+    {
+        raw_reset();
+        fake_sem_wait_hook(&ir_answers_head_raw);
+        TEST_ASSERT_TRUE_MESSAGE(kode_ir_send_raw(us, 3U, hz[i]), kode_error());
+        ir_hook_ok();
+        TEST_ASSERT_EQUAL_UINT32(hz[i], s_raw_seen_hz);
+    }
+}
+
+TEST_CASE("a raw send refuses a duration over 32767 us and takes one of 32767 us", "[kode_ir_standard]")
+{
+    static uint16_t us[] = { 9000U, 4500U, 560U };
+
+    ir_fresh();
+    raw_reset();
+    us[1] = (uint16_t)(KODE_IR_DURATION_MAX_US + 1U);
+    TEST_ASSERT_FALSE(kode_ir_send_raw(us, 3U, KDRV_IR_CARRIER_HZ));
+    TEST_ASSERT_EQUAL_STRING("duration 2 is 32768 us, out of range (0 to 32767)", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, ir_pending());
+
+    us[1] = (uint16_t)KODE_IR_DURATION_MAX_US;
+    fake_sem_wait_hook(&ir_answers_head_raw);
+    TEST_ASSERT_TRUE_MESSAGE(kode_ir_send_raw(us, 3U, KDRV_IR_CARRIER_HZ), kode_error());
+    ir_hook_ok();
+    TEST_ASSERT_EQUAL_UINT16(KODE_IR_DURATION_MAX_US, s_raw_seen[0].space_us);
+}
+
+TEST_CASE("a raw send refuses a frame longer than 1500 ms, says how long it lasts, and takes one of 1500 ms",
+          "[kode_ir_standard]")
+{
+    /* 100 durations of 15 ms: 1500 ms exactly. */
+    static uint16_t us[100U];
+
+    for ( uint32_t i = 0U; 100U > i; i++ )
+    {
+        us[i] = 15000U;
+    }
+    ir_fresh();
+    raw_reset();
+    TEST_ASSERT_EQUAL_UINT32(1500U, KODE_IR_FRAME_MAX_MS);
+    /* An odd count ends on a mark, and its space is sent as 32767 us. */
+    TEST_ASSERT_FALSE(kode_ir_send_raw(us, 99U, KDRV_IR_CARRIER_HZ));
+    TEST_ASSERT_EQUAL_STRING("the frame lasts 1518 ms, longer than 1500 ms", kode_error());
+    us[99] = 15001U;
+    TEST_ASSERT_FALSE(kode_ir_send_raw(us, 100U, KDRV_IR_CARRIER_HZ));
+    TEST_ASSERT_EQUAL_STRING("the frame lasts 1501 ms, longer than 1500 ms", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, ir_pending());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_raw_calls);
+
+    us[99] = 15000U;
+    fake_sem_wait_hook(&ir_answers_head_raw);
+    TEST_ASSERT_TRUE_MESSAGE(kode_ir_send_raw(us, 100U, KDRV_IR_CARRIER_HZ), kode_error());
+    ir_hook_ok();
+    TEST_ASSERT_EQUAL_UINT32(1U, s_raw_calls);
+}
+
+TEST_CASE("a frame the C5 says failed, or says nothing of, is false with its reason", "[kode_ir_standard]")
+{
+    static const uint16_t us[] = { 9000U, 4500U, 560U };
+
+    ir_fresh();
+    raw_reset();
+    s_raw_rc = KODE_ERROR;
+    fake_sem_wait_hook(&ir_answers_head_raw);
+    TEST_ASSERT_FALSE(kode_ir_send_raw(us, 3U, KDRV_IR_CARRIER_HZ));
+    ir_hook_ok();
+    TEST_ASSERT_EQUAL_STRING("the infrared transmitter could not be used", kode_error());
+
+    s_raw_rc = KODE_TIMEOUT;
+    fake_sem_wait_hook(&ir_answers_head_raw);
+    TEST_ASSERT_FALSE(kode_ir_send("nec", 1U, 2U));
+    ir_hook_ok();
+    TEST_ASSERT_EQUAL_STRING("the infrared transmitter did not answer", kode_error());
 }
 
 /* ---- kode_ir_receive ----------------------------------------------------------- */
@@ -1643,6 +1740,20 @@ TEST_CASE("an empty file and a file of comments hold no signal", "[kode_ir_file_
     world_end();
 }
 
+TEST_CASE("a file with a carrier out of range sends nothing and names the line and the range",
+          "[kode_ir_file_send]")
+{
+    world_fresh();
+    file_put("khz.txt", "# kode ir capture v1\n\nnec 1 2\n\nraw 38\n9000 4500 560\n");
+    TEST_ASSERT_FALSE(kode_ir_send_file("flash/khz.txt"));
+    TEST_ASSERT_EQUAL_STRING("flash/khz.txt: line 5: carrier out of range (20000 to 500000)", kode_error());
+    file_put("long.txt", "# kode ir capture v1\n\nraw 38000\n9000 32768 560\n");
+    TEST_ASSERT_FALSE(kode_ir_send_file("flash/long.txt"));
+    TEST_ASSERT_EQUAL_STRING("flash/long.txt: line 4: duration out of range (1 to 32767)", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_raw_calls);
+    world_end();
+}
+
 TEST_CASE("a file that is not there, or a bad path, says what the file calls say", "[kode_ir_file_send]")
 {
     char want[KODE_ERROR_MAX];
@@ -1671,6 +1782,27 @@ TEST_CASE("a send that fails stops the file there and says why", "[kode_ir_file_
     ir_hook_ok();
     TEST_ASSERT_EQUAL_STRING("out of memory", kode_error());
     TEST_ASSERT_EQUAL_UINT32(1U, s_raw_calls);
+    world_end();
+}
+
+TEST_CASE("a raw signal longer than 1500 ms is not sent and ends the file's send there",
+          "[kode_ir_file_send]")
+{
+    char     text[TEST_FILE_BYTES];
+    uint32_t at = 0U;
+
+    world_fresh();
+    at += (uint32_t)snprintf(&text[at], sizeof(text) - at, "# kode ir capture v1\n\nnec 1 2\n\nraw 38000\n");
+    for ( uint32_t i = 0U; 99U > i; i++ )
+    {
+        at += (uint32_t)snprintf(&text[at], sizeof(text) - at, "15000\n");
+    }
+    at += (uint32_t)snprintf(&text[at], sizeof(text) - at, "\nnec 3 4\n");
+    file_put("long.txt", text);
+    TEST_ASSERT_FALSE(kode_ir_send_file("flash/long.txt"));
+    ir_hook_ok();
+    TEST_ASSERT_EQUAL_STRING("the frame lasts 1518 ms, longer than 1500 ms", kode_error());
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1U, s_raw_calls, "the NEC signal before it went, the one after did not");
     world_end();
 }
 

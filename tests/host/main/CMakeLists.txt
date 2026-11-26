@@ -211,6 +211,8 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kdrv/apps/src/kdrv_image_check.c"
     "${SDK_DIR}/components/kdrv/mirror/src/kmirror_proto.c"
     "${SDK_DIR}/components/kdrv/ir/src/knec.c"
+    # Under other names, beside the mock every AO case uses; see below.
+    "${SDK_DIR}/components/kdrv/ir/src/kdrv_ir.c"
     "${SDK_DIR}/components/kdrv/audio/src/kes_fields.c"
     "${SDK_DIR}/components/kdrv/audio/src/kring.c"
     "${SDK_DIR}/components/kdrv/audio/src/ktone.c"
@@ -482,6 +484,15 @@ set_source_files_properties(
 set_source_files_properties(
     "${SDK_DIR}/components/kaos/display/src/display_compose_none.c"
     PROPERTIES COMPILE_DEFINITIONS "display_compose_run=display_compose_run_none")
+
+# The infrared driver is a mock for AO_Ir and the facade, and real for its own
+# case file: compiled under other names, which the case file takes too, over
+# fakes/fake_kdrv_radio.c's peer data.
+set_source_files_properties(
+    "${SDK_DIR}/components/kdrv/ir/src/kdrv_ir.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../cases/test_kdrv_ir.c"
+    PROPERTIES COMPILE_DEFINITIONS
+        "kdrv_ir_init=real_kdrv_ir_init;kdrv_ir_rx_idle=real_kdrv_ir_rx_idle;kdrv_ir_rx_present=real_kdrv_ir_rx_present;kdrv_ir_send=real_kdrv_ir_send;kdrv_ir_rx_take=real_kdrv_ir_rx_take;kdrv_ir_rx_arm=real_kdrv_ir_rx_arm")
 
 # And to kdrv_ble_app.c, the app's own service's rules: the service rides
 # beside the console's, so without the symbol every table would be judged

@@ -2301,6 +2301,10 @@ bool kode_uart_end(void);
 #define KODE_IR_PROTOCOL_MAX 8U     /**< Bytes of a protocol name, NUL included.       */
 #define KODE_IR_RAW_MAX      512U   /**< Durations in one raw frame: 256 marks and spaces. */
 #define KODE_IR_BUSY_MS      5000U  /**< How long a call waits for the infrared path.  */
+#define KODE_IR_CARRIER_MIN_HZ  20000U   /**< The lowest carrier a raw send takes, Hz: below every remote's.      */
+#define KODE_IR_CARRIER_MAX_HZ  500000U  /**< The highest carrier a raw send takes, Hz: above every remote's.     */
+#define KODE_IR_DURATION_MAX_US 32767U   /**< The longest mark or space a raw send takes, us: the C5's RMT's.     */
+#define KODE_IR_FRAME_MAX_MS    1500U    /**< The longest frame a raw send takes, ms, a final or zero space counted as KODE_IR_DURATION_MAX_US. */
 
 /** @brief One frame that was heard and read as a protocol. */
 typedef struct {
@@ -2318,7 +2322,7 @@ typedef struct {
 } kode_ir_raw_t;
 
 /**
- * @brief Send a frame of a protocol the board encodes, and wait until it is on its way.
+ * @brief Send a frame of a protocol the board encodes, and wait until it went out.
  *
  * Blocks. Only "nec" (any case) is encoded. For anything else encode the frame
  * yourself and use kode_ir_send_raw().
@@ -2363,15 +2367,19 @@ kode_ir_code_t kode_ir_last(void);
 const kode_ir_raw_t *kode_ir_receive_raw(uint32_t ms);
 
 /**
- * @brief Send a frame as the lengths of its marks and spaces, and wait until it is on its way.
+ * @brief Send a frame as the lengths of its marks and spaces, and wait until it went out.
  *
- * Blocks. The durations alternate mark, space, mark first; an odd count ends
- * on a mark.
+ * Blocks until the radio says the frame went out. The durations alternate
+ * mark, space, mark first; an odd count ends on a mark.
  *
- * @param us         Microseconds, mark first.
+ * @param us         Microseconds, mark first; 0 to KODE_IR_DURATION_MAX_US each, and
+ *                   KODE_IR_FRAME_MAX_MS at most in all: a zero space, and the one after
+ *                   an odd count's last mark, count as KODE_IR_DURATION_MAX_US.
  * @param n          1 to KODE_IR_RAW_MAX.
- * @param carrier_hz The carrier, above 0; 38000 for most remotes.
- * @return true when the frame went out; false with kode_error() saying why.
+ * @param carrier_hz KODE_IR_CARRIER_MIN_HZ to KODE_IR_CARRIER_MAX_HZ; 38000 for most remotes.
+ * @return true when the frame went out; false with kode_error() saying why,
+ *         also when a carrier, a duration or the frame's length is out of range
+ *         (nothing is sent).
  */
 bool kode_ir_send_raw(const uint16_t *us, uint32_t n, uint32_t carrier_hz);
 
@@ -2409,6 +2417,7 @@ bool kode_ir_capture_stop(void);
  * @brief Send every signal of a capture file in order, KODE_IR_FILE_GAP_MS apart.
  *
  * Blocks. The whole file is read first: if any line is wrong nothing is sent.
+ * A raw signal longer than KODE_IR_FRAME_MAX_MS is not sent, and the send ends there.
  *
  * @param path "sd/..." or "flash/...".
  * @return true when all went out; false with kode_error() saying why.

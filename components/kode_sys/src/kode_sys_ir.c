@@ -20,6 +20,16 @@ _Static_assert(KODE_SYS_IR_RAW_MAX_SYMBOLS == KDRV_IR_TX_MAX_SYMBOLS,
                "a raw frame the facade takes must be one the driver sends");
 _Static_assert(KODE_SYS_IR_RX_MAX_SYMBOLS == KDRV_IR_RX_MAX_SYMBOLS,
                "a capture the facade takes must be one the driver hears");
+_Static_assert((KODE_SYS_IR_CARRIER_MIN_HZ == KDRV_IR_CARRIER_MIN_HZ)
+               && (KODE_SYS_IR_CARRIER_MAX_HZ == KDRV_IR_CARRIER_MAX_HZ),
+               "a carrier the facade takes must be one the driver sends");
+_Static_assert(KODE_SYS_IR_DURATION_MAX_US == KDRV_IR_DURATION_MAX_US,
+               "a duration the facade takes must be one the driver sends");
+_Static_assert(KODE_SYS_IR_FRAME_MAX_MS == KDRV_IR_FRAME_MAX_MS,
+               "a frame the facade takes must be one the driver sends");
+
+/** @brief Microseconds in a millisecond. */
+#define KODE_SYS_IR_US_PER_MS  1000U
 
 /* ---- The answers' payloads against the drivers' types they carry ---- */
 _Static_assert(sizeof(kode_sys_ir_symbol_t) == sizeof(kdrv_ir_symbol_t), "the symbol is the driver's");
@@ -108,6 +118,34 @@ static void ir_release(bool *busy)
     khal_mutex_unlock(s_ir_lock);
 }
 
+/**
+ * @brief Whether a raw frame is one the driver sends: its count, its carrier, every duration
+ *        and the time they add up to, a zero space counted as KODE_SYS_IR_DURATION_MAX_US.
+ * @param sym        The symbols, mark first; may be NULL.
+ * @param n          How many.
+ * @param carrier_hz The carrier.
+ * @return true when the frame may go to AO_Ir.
+ */
+static bool ir_raw_args_ok(const kode_sys_ir_symbol_t *sym, size_t n, uint32_t carrier_hz)
+{
+    uint32_t us = 0U;
+    bool     ok = (NULL != sym) && (0U != n) && (KODE_SYS_IR_RAW_MAX_SYMBOLS >= n)
+                  && (KODE_SYS_IR_CARRIER_MIN_HZ <= carrier_hz) && (KODE_SYS_IR_CARRIER_MAX_HZ >= carrier_hz);
+
+    for ( size_t i = 0U; ok && (i < n); i++ )
+    {
+        uint32_t space = (uint32_t)sym[i].space_us;
+
+        if ( 0U == space )
+        {
+            space = KODE_SYS_IR_DURATION_MAX_US;
+        }
+        ok = (KODE_SYS_IR_DURATION_MAX_US >= (uint32_t)sym[i].mark_us) && (KODE_SYS_IR_DURATION_MAX_US >= space);
+        us += (uint32_t)sym[i].mark_us + space;
+    }
+    return ok && ((KODE_SYS_IR_FRAME_MAX_MS * KODE_SYS_IR_US_PER_MS) >= us);
+}
+
 kode_status_t kode_sys_ir_send_nec(uint16_t addr, uint16_t cmd)
 {
     return kode_sys_cmd_post(AO_Ir, ir_send_evt(addr, cmd), KQP_IR_CMD_MARGIN);
@@ -131,8 +169,7 @@ kode_status_t kode_block_ir_send_raw(const kode_sys_ir_symbol_t *sym, size_t n,
     uint32_t      gen = 0U;
     kode_status_t rc  = KODE_TIMEOUT;
 
-    if ( (NULL == sym) || (0U == n) || (KODE_SYS_IR_RAW_MAX_SYMBOLS < n)
-        || (0U == carrier_hz) )
+    if ( !ir_raw_args_ok(sym, n, carrier_hz) )
     {
         return KODE_DENIED;
     }
@@ -261,7 +298,7 @@ kode_status_t kode_block_ir_last(kdrv_ir_frame_t *out)
 kode_status_t kode_sys_ir_send_raw(QActive *me, const kode_sys_ir_symbol_t *sym, size_t n,
                                    uint32_t carrier_hz)
 {
-    if ( (NULL == sym) || (0U == n) || (KODE_SYS_IR_RAW_MAX_SYMBOLS < n) || (0U == carrier_hz) )
+    if ( !ir_raw_args_ok(sym, n, carrier_hz) )
     {
         return KODE_DENIED;
     }

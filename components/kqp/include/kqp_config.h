@@ -1204,11 +1204,13 @@ _Static_assert((KODE_LEAVE_LOG_MS + KODE_LEAVE_NET_MS + KODE_LEAVE_RADIO_MS)
 /** @brief How long AO_Ir holds a request with no budget of its own - a NEC
  *         frame, the row - for the C5 link: a bring-up's wait for the C5. */
 #define KODE_IR_LINK_WAIT_MS      KODE_C5_TEST_LINK_MS
-/** @brief The row with the link down: its wait for the link, then the row. */
+/** @brief One attempt's wait for the C5's word on its frame: KDRV_IR_SENT_MS,
+ *         which ir_ao.c asserts it is. */
+#define KODE_IR_TEST_SENT_MS     2500U
+/** @brief The row with the link down: its wait for the link, the probe, then
+ *         every attempt's wait for the C5's word and for its echo. */
 #define KODE_IR_TEST_BUDGET_MS    (KODE_IR_LINK_WAIT_MS + KODE_IR_TEST_PROBE_MS \
-                                   + (KODE_IR_TEST_TRIES * KODE_IR_TEST_ECHO_MS))
-_Static_assert(KODE_IR_TEST_BUDGET_MS > (KODE_IR_LINK_WAIT_MS + (KODE_IR_TEST_TRIES * KODE_IR_TEST_ECHO_MS)),
-               "the IR row's budget covers a bring-up of the link and every attempt");
+                                   + (KODE_IR_TEST_TRIES * (KODE_IR_TEST_SENT_MS + KODE_IR_TEST_ECHO_MS)))
 
 /* ---- AO_Ir's calls to the C5 ----------------------------------------------
  * A frame, a line reading and an arm are requests over the link, run by
@@ -1673,22 +1675,19 @@ _Static_assert(KODE_MAG_TEST_WAIT_MS < KODE_MAG_TEST_BUDGET_MS,
 
 /* ---- Echo suppression -----------------------------------------------------
  * The receiver hears the emitter, so every frame this board sends comes back
- * a few milliseconds later. AO_Ir stays deaf for the frame's own duration -
- * which it measures from the symbols it is about to send, 52 ms for a typical
- * NEC frame and 86 ms for one of all ones - plus this tail.
+ * as a capture. A send returns once the C5 says the frame has ended, and AO_Ir
+ * then stays deaf for this tail. A send the C5 said nothing of may have gone
+ * out as late as that moment: AO_Ir stays deaf for the frame's own duration,
+ * measured from its symbols, plus this tail.
  *
- * The tail is not slack. A capture is not delivered when the last mark ends:
- * the receive channel calls a frame over only after the line has been idle
- * for its inter-frame gap, which is 12 ms on this channel (IR_RX_MAX_NS in
- * kdrv_ir.c), and the interrupt's event then has to reach the AO. 30 ms is
- * that 12, plus the 10 ms the QP tick itself is worth, plus room for a step
- * that was preempted. Longer would start eating real frames from a real
- * remote; shorter publishes the board's own keypresses back to the app that
- * pressed them.
+ * The tail is not slack. The C5's receive channel calls a frame over after
+ * 12 ms of idle line, inside the frame's own closing space (32.8 ms, which
+ * the C5 waits out before it says the frame ended), and its capture goes out
+ * on the same task right after that word: one more trip over the link, and
+ * the step that reaches the AO. Longer would start eating real frames from a
+ * real remote; shorter publishes the board's own keypresses back to the app
+ * that pressed them.
  */
-/* The block is on the C5: the capture comes home behind the frame's own
- * closing space (32.8 ms, which the C5 waits out before it reports anything)
- * and two trips over the link. */
 #define KODE_IR_ECHO_TAIL_MS      120U
 
 /**

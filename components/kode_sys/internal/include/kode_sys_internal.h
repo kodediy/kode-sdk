@@ -81,10 +81,15 @@ uint16_t kode_block_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, 
  * @brief Send any infrared frame of @p n {mark_us, space_us} symbols on @p carrier_hz.
  * @note Blocks until AO_Ir answers. One call at a time. AO_Ir copies @p sym as
  *       the call starts, so the caller may reuse it on return.
- * @param sym        The symbols, mark first.
+ * @param sym        The symbols, mark first; none over KODE_SYS_IR_DURATION_MAX_US, and
+ *                   KODE_SYS_IR_FRAME_MAX_MS at most in all, a zero space counted as
+ *                   KODE_SYS_IR_DURATION_MAX_US.
  * @param n          How many, 1..KODE_SYS_IR_RAW_MAX_SYMBOLS.
- * @param carrier_hz The carrier; 38000 for most remotes and for this board's receiver.
- * @return KODE_OK when the frame went to the C5. KODE_DENIED for a bad argument,
+ * @param carrier_hz KODE_SYS_IR_CARRIER_MIN_HZ..KODE_SYS_IR_CARRIER_MAX_HZ; 38000 for most
+ *                   remotes and for this board's receiver.
+ * @return KODE_OK when the C5 says the frame went out. KODE_ERROR when it says the
+ *         frame failed. KODE_DENIED for a bad argument (a count, a carrier, a duration
+ *         or the frame's length out of range),
  *         while another raw send is in flight, while a timed-out one is still
  *         unanswered, or when AO_Ir's queue of held requests is full.
  *         KODE_NO_RESOURCES when the event pool was dry, AO_Ir had no memory

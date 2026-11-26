@@ -852,6 +852,19 @@ kode_status_t kode_sys_nvs_set(const char *key, const char *value);
 /** @brief The most symbols one capture holds. */
 #define KODE_SYS_IR_RX_MAX_SYMBOLS   256U
 
+/** @brief The lowest carrier a raw frame is sent on, Hz: the driver's limit. */
+#define KODE_SYS_IR_CARRIER_MIN_HZ   20000U
+
+/** @brief The highest carrier a raw frame is sent on, Hz: the driver's limit. */
+#define KODE_SYS_IR_CARRIER_MAX_HZ   500000U
+
+/** @brief The longest mark or space of a raw frame, us: the C5's RMT symbol, as the driver says. */
+#define KODE_SYS_IR_DURATION_MAX_US  32767U
+
+/** @brief The longest raw frame, ms, a zero space counted as KODE_SYS_IR_DURATION_MAX_US:
+ *         one the C5 says the end of, as the driver says. */
+#define KODE_SYS_IR_FRAME_MAX_MS     1500U
+
 /** @brief One mark (carrier on) and the space after it: @c mark_us, @c space_us. */
 typedef IrSymbol kode_sys_ir_symbol_t;
 
@@ -877,10 +890,16 @@ typedef IrLastRspEvt kode_sys_ir_last_answer_t;
  *       call has returned after a stall. A frame that waited too long to start
  *       is answered KODE_TIMEOUT, unsent.
  * @param me         The asking AO; IR_SEND_RAW_RSP_SIG answers it.
- * @param sym        Symbols, mark first.
+ * @param sym        Symbols, mark first; no mark or space over KODE_SYS_IR_DURATION_MAX_US,
+ *                   and KODE_SYS_IR_FRAME_MAX_MS at most in all, a zero space counted as
+ *                   KODE_SYS_IR_DURATION_MAX_US.
  * @param n          1 to KODE_SYS_IR_RAW_MAX_SYMBOLS.
- * @param carrier_hz The carrier, not 0; 38000 is what the board's own receiver hears.
- * @return As the requests' rules above.
+ * @param carrier_hz KODE_SYS_IR_CARRIER_MIN_HZ to KODE_SYS_IR_CARRIER_MAX_HZ; 38000 is what
+ *                   the board's own receiver hears.
+ * @return As the requests' rules above; KODE_DENIED for a count, a carrier, a duration or
+ *         the frame's length out of range. The answer's @c rc is KODE_OK once the C5 says
+ *         the frame went out, KODE_ERROR when it says the frame failed, KODE_TIMEOUT when it
+ *         said nothing.
  */
 kode_status_t kode_sys_ir_send_raw(QActive *me, const kode_sys_ir_symbol_t *sym, size_t n,
                                    uint32_t carrier_hz);

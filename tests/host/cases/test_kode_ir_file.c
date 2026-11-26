@@ -17,11 +17,11 @@
 /** @brief Bytes of the text a case builds. */
 #define TEST_TEXT_BYTES 120000U
 
-/** @brief The value of a duration that fills five digits. */
-#define TEST_WIDE_US 65535U
+/** @brief The longest duration, which fills five digits. */
+#define TEST_WIDE_US KODE_IR_DURATION_MAX_US
 
-/** @brief The carrier that fills seven digits. */
-#define TEST_WIDE_HZ 1000000U
+/** @brief The highest carrier, which fills six digits. */
+#define TEST_WIDE_HZ KODE_IR_CARRIER_MAX_HZ
 
 /** @brief The signals a case reads into: one more than a file may carry. */
 static kode_ir_signal_t s_sig[KODE_IR_FILE_SIGNALS_MAX + 1U];
@@ -116,7 +116,7 @@ TEST_CASE("the writer's text reads back as the same signals", "[kode_ir_file]")
     sig[1].us[0] = 9000U; sig[1].us[1] = 4500U; sig[1].us[2] = 560U;
     sig[1].us[3] = 1690U; sig[1].us[4] = TEST_WIDE_US;
     sig[2].raw        = true;
-    sig[2].carrier_hz = 1U;
+    sig[2].carrier_hz = KODE_IR_CARRIER_MIN_HZ;
     sig[2].count      = KODE_IR_RAW_MAX;
     for ( uint32_t i = 0U; KODE_IR_RAW_MAX > i; i++ )
     {
@@ -136,7 +136,7 @@ TEST_CASE("the writer's text reads back as the same signals", "[kode_ir_file]")
     TEST_ASSERT_EQUAL_UINT32(56000U, s_sig[1].carrier_hz);
     TEST_ASSERT_EQUAL_UINT32(5U, s_sig[1].count);
     TEST_ASSERT_EQUAL_UINT16_ARRAY(sig[1].us, s_sig[1].us, 5U);
-    TEST_ASSERT_EQUAL_UINT32(1U, s_sig[2].carrier_hz);
+    TEST_ASSERT_EQUAL_UINT32(KODE_IR_CARRIER_MIN_HZ, s_sig[2].carrier_hz);
     TEST_ASSERT_EQUAL_UINT32(KODE_IR_RAW_MAX, s_sig[2].count);
     TEST_ASSERT_EQUAL_UINT16_ARRAY(sig[2].us, s_sig[2].us, KODE_IR_RAW_MAX);
 }
@@ -182,7 +182,14 @@ TEST_CASE("the writer refuses what the reader would refuse, and a NULL", "[kode_
     sig[0].count      = 1U;
     sig[0].us[0]      = 0U;
     TEST_ASSERT_EQUAL_UINT32(0U, kode_ir_file_format(sig, 1U, s_text, sizeof(s_text)));  /* a zero duration */
+    sig[0].us[0] = (uint16_t)(KODE_IR_DURATION_MAX_US + 1U);
+    TEST_ASSERT_EQUAL_UINT32(0U, kode_ir_file_format(sig, 1U, s_text, sizeof(s_text)));  /* a duration too long */
     sig[0].us[0] = 1U;
+    sig[0].carrier_hz = KODE_IR_CARRIER_MIN_HZ - 1U;
+    TEST_ASSERT_EQUAL_UINT32(0U, kode_ir_file_format(sig, 1U, s_text, sizeof(s_text)));  /* a carrier too low */
+    sig[0].carrier_hz = KODE_IR_CARRIER_MAX_HZ + 1U;
+    TEST_ASSERT_EQUAL_UINT32(0U, kode_ir_file_format(sig, 1U, s_text, sizeof(s_text)));  /* a carrier too high */
+    sig[0].carrier_hz = 38000U;
     TEST_ASSERT_TRUE(kode_ir_file_format(sig, 1U, s_text, sizeof(s_text)) > 0U);
 }
 
@@ -260,14 +267,15 @@ TEST_CASE("an unknown keyword, a short or long nec line and a bad number are ref
 TEST_CASE("a raw block with no carrier, a bad carrier, no durations or a bad duration is refused", "[kode_ir_file]")
 {
     expect_refused("raw\n", 1U, "raw needs a carrier in Hz");
-    expect_refused("raw 0\n", 1U, "carrier out of range (1 to 1000000)");
-    expect_refused("raw 1000001\n", 1U, "carrier out of range (1 to 1000000)");
+    expect_refused("raw 0\n", 1U, "carrier out of range (20000 to 500000)");
+    expect_refused("raw 500001\n", 1U, "carrier out of range (20000 to 500000)");
     expect_refused("raw khz\n", 1U, "not a number");
     /* The block is wrong where it began. */
     expect_refused("nec 1 2\n\nraw 38000\n", 3U, "raw has no durations");
     expect_refused("raw 38000\n\nnec 1 2\n", 1U, "raw has no durations");
-    expect_refused("raw 38000\n100 0 200\n", 2U, "duration out of range (1 to 65535)");
-    expect_refused("raw 38000\n100 65536\n", 2U, "duration out of range (1 to 65535)");
+    expect_refused("raw 38000\n100 0 200\n", 2U, "duration out of range (1 to 32767)");
+    expect_refused("raw 38000\n100 65536\n", 2U, "duration out of range (1 to 32767)");
+    expect_refused("raw 38000\n100 32768\n", 2U, "duration out of range (1 to 32767)");
     expect_refused("raw 38000\n100 abc\n", 2U, "not a number");
 }
 
@@ -373,13 +381,31 @@ TEST_CASE("a raw line of 600 numbers is refused at that line, not overrun", "[ko
 TEST_CASE("a twelve digit duration, carrier, address and command are out of range, not wrapped",
           "[kode_ir_file]")
 {
-    expect_refused("raw 38000 100000000000\n", 1U, "duration out of range (1 to 65535)");
-    expect_refused("raw 38000 4294967297\n", 1U, "duration out of range (1 to 65535)");
-    expect_refused("raw 100000000000\n", 1U, "carrier out of range (1 to 1000000)");
-    expect_refused("raw 4294967297 5\n", 1U, "carrier out of range (1 to 1000000)");
+    expect_refused("raw 38000 100000000000\n", 1U, "duration out of range (1 to 32767)");
+    expect_refused("raw 38000 4294967297\n", 1U, "duration out of range (1 to 32767)");
+    expect_refused("raw 100000000000\n", 1U, "carrier out of range (20000 to 500000)");
+    expect_refused("raw 4294967297 5\n", 1U, "carrier out of range (20000 to 500000)");
     expect_refused("nec 100000000000 1\n", 1U, "out of range (0 to 65535)");
     expect_refused("nec 1 0x100000000001\n", 1U, "out of range (0 to 65535)");
     /* Leading zeros are digits of a small number. */
     expect_signals("nec 1 000000000000000000042\n", 1U);
     TEST_ASSERT_EQUAL_UINT32(42U, s_sig[0].command);
+}
+
+TEST_CASE("a carrier outside 20000 to 500000 Hz is refused at its line, and the limits are read", "[kode_ir_file]")
+{
+    expect_refused("# kode ir capture v1\n\nraw 38\n9000 4500\n", 3U, "carrier out of range (20000 to 500000)");
+    expect_refused("raw 19999 9000\n", 1U, "carrier out of range (20000 to 500000)");
+    expect_refused("raw 500001 9000\n", 1U, "carrier out of range (20000 to 500000)");
+    expect_signals("raw 20000 9000\n\nraw 38000 9000\n\nraw 500000 9000\n", 3U);
+    TEST_ASSERT_EQUAL_UINT32(20000U, s_sig[0].carrier_hz);
+    TEST_ASSERT_EQUAL_UINT32(38000U, s_sig[1].carrier_hz);
+    TEST_ASSERT_EQUAL_UINT32(500000U, s_sig[2].carrier_hz);
+}
+
+TEST_CASE("a duration over 32767 us is refused at its line, and 32767 us is read", "[kode_ir_file]")
+{
+    expect_refused("raw 38000\n9000 4500\n560 32768\n", 3U, "duration out of range (1 to 32767)");
+    expect_signals("raw 38000\n9000 32767\n", 1U);
+    TEST_ASSERT_EQUAL_UINT16(32767U, s_sig[0].us[1]);
 }
