@@ -1152,8 +1152,14 @@ static bool put_replace(const char *user, const char *vol, const uint8_t *data, 
     kode_sys_file_status_t st;
     bool                   keep = false;
     bool                   ok;
+    const int32_t          n = (int32_t)snprintf(tmp, sizeof(tmp), "%s" KODE_FILE_TMP_SUFFIX, vol);
 
-    (void)snprintf(tmp, sizeof(tmp), "%s" KODE_FILE_TMP_SUFFIX, vol);
+    if ( (0 > n) || ((size_t)n >= sizeof(tmp)) )
+    {
+        /* The copy has no name: nothing is written and nothing removed. */
+        kode_err_set("path '%s' is too long to write", user);
+        return false;
+    }
     ok = put_parts(user, tmp, data, total, false) && vol_stat(user, vol, &st);
     if ( ok && st.is_dir )
     {
