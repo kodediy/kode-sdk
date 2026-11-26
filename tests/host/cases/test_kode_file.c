@@ -3840,3 +3840,27 @@ TEST_CASE("a PNG drawn does not free what the task's last byte read returned", "
     TEST_ASSERT_EQUAL_MEMORY(first, kept, sizeof(first));
     png_case_end();
 }
+
+TEST_CASE("a name that is not UTF-8 is refused before the volume is asked", "[kode_file]")
+{
+    unsigned asked;
+
+    /* Latin-1, a character cut short, and an overlong '/'. */
+    expect_refused("sd/caf\xE9.txt", "bad path 'sd/caf\xE9.txt': a name that is not UTF-8");
+    expect_refused("flash/a\xE2\x82", "bad path 'flash/a\xE2\x82': a name that is not UTF-8");
+    expect_refused("flash/\xC0\xAF" "x", "bad path 'flash/\xC0\xAF" "x': a name that is not UTF-8");
+    expect_path("flash/caf\xC3\xA9.txt", "/storage/caf\xC3\xA9.txt");
+
+    file_fresh();
+    asked = fake_fs_mount_calls();
+    TEST_ASSERT_FALSE(kode_file_write("flash/caf\xE9.txt", "x"));
+    TEST_ASSERT_EQUAL_STRING("bad path 'flash/caf\xE9.txt': a name that is not UTF-8", kode_error());
+    TEST_ASSERT_EQUAL_UINT(asked, fake_fs_mount_calls());
+
+    /* A new name is held to the same rule. */
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_write("flash/cafe.txt", "x"), kode_error());
+    TEST_ASSERT_FALSE(kode_file_rename("flash/cafe.txt", "caf\xE9.txt"));
+    TEST_ASSERT_EQUAL_STRING("bad name 'caf\xE9.txt': not UTF-8", kode_error());
+    TEST_ASSERT_EQUAL_STRING("x", kode_file_read("flash/cafe.txt"));
+    file_no_settle();
+}

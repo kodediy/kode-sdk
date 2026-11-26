@@ -155,6 +155,11 @@ CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 # CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 # CONFIG_ESP32P4_REV_MIN_100=y
 
+# ---- Files ------------------------------------------------------------------
+# File names in UTF-8 on the card and on the internal volume: the bytes an app
+# writes are the name a computer reads. (ESP-IDF)
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
 # ---- LVGL -------------------------------------------------------------------
 # LVGL allocates from PSRAM through kui_mem.c, with no fallback. (LVGL)
 CONFIG_LV_USE_CUSTOM_MALLOC=y

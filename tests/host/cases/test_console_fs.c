@@ -915,6 +915,27 @@ TEST_CASE("mkdir whose parent is missing is refused", "[console_fs]")
     TEST_ASSERT_TRUE(replied_line(">err code=5 msg=noparent"));
 }
 
+/* FatFs takes names in UTF-8 and answers a name that is not with
+ * FR_INVALID_NAME, which reads as a failed card. The path is refused before
+ * the volume is asked, the same word as any other bad path. */
+TEST_CASE("mkdir of a name that is not UTF-8 is refused before the volume is asked",
+          "[console_fs]")
+{
+    unsigned asked;
+
+    console_up_once();
+    asked = fake_fs_mount_calls();
+    type_line("mkdir path=\"/storage/caf\xE9\"");
+    settle();
+    TEST_ASSERT_TRUE(replied_line(">err code=3 msg=path"));
+    TEST_ASSERT_EQUAL_UINT(asked, fake_fs_mount_calls());
+
+    fake_klog_reset();
+    type_line("mkdir path=\"/storage/caf\xC3\xA9\"");
+    settle();
+    TEST_ASSERT_TRUE(replied_line(">ok"));
+}
+
 /* fake_sdmmc_fail_file_writes() fails the real mkdir() inside
  * kdrv_storage.c - see its own comment in fake_khal_sdmmc.c - the way a
  * counterfeit card fails the directory-entry write and nothing else: the

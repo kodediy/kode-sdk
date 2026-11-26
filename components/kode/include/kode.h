@@ -445,8 +445,10 @@ bool kode_led_toggle(void);
  * "flash/data/a.csv". Any case for the volume; no leading "/", no empty, "."
  * or ".." part, no name FAT does not take (a control character or one of
  * " * : < > ? | \ in it, or only dots and spaces). A bad path fails at once
- * and kode_error() names it. A file call waits for another task's file call
- * to finish.
+ * and kode_error() names it. Names are UTF-8, in a path and in a listing,
+ * and a path that is not well-formed UTF-8 is a bad path; a computer reads
+ * the same names off the card. A file call waits for another task's file
+ * call to finish.
  */
 
 #define KODE_FILE_PATH_MAX 91U      /**< Bytes of a path, NUL included. */
