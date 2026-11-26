@@ -7522,6 +7522,7 @@ static QState Console_initial(Console * const me, void const * const par)
     QActive_subscribe(&me->super, WIFI_SCAN_AGAIN_SIG);
     QActive_subscribe(&me->super, WIFI_SAVED_ENTRY_SIG);
     QActive_subscribe(&me->super, WIFI_SAVED_END_SIG);
+    QActive_subscribe(&me->super, WIFI_FORGET_SIG);
 #endif
 #if CONFIG_KODEOS_BLE
     QActive_subscribe(&me->super, BLE_STATE_SIG);

@@ -2529,6 +2529,13 @@ bool wifi_list_request(void);
 
 /**
  * @brief Ask AO_Radio to forget @p ssid. Does not disconnect.
+ *
+ * Answered with one published WIFI_FORGET_SIG once the forget has ended: the
+ * C5's vault forgot the network or refused it, no answer came, or the link
+ * went. A vault busy with another request, or no link, is answered at once
+ * and forgets nothing. A forget the vault answered is followed by the saved
+ * networks read again.
+ *
  * @param ssid The network.
  * @return true when the request was posted; false when the pool is dry or
  *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing

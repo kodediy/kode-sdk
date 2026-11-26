@@ -4808,6 +4808,243 @@ TEST_CASE("wifi_list lists what the vault keeps, names only", "[radio][vault]")
     TEST_ASSERT_TRUE(end);
 }
 
+/**
+ * @brief Drain the spy: the saved listing it holds, and the answer to a forget.
+ * @param name   A network to look for in the listing.
+ * @param listed Set when @p name was among the entries.
+ * @param end    Set when the listing's end came.
+ * @param forget Filled with the WIFI_FORGET_SIG that came, if one did.
+ * @return true when a WIFI_FORGET_SIG came.
+ */
+static bool saved_drain(const char *name, bool *listed, bool *end, WifiForgetEvt *forget)
+{
+    bool answered = false;
+
+    *listed = false;
+    *end    = false;
+    while ( ao_spy_count() > 0U )
+    {
+        const QEvt *const e = ao_spy_take();
+        if ( (enum_t)WIFI_SAVED_ENTRY_SIG == e->sig )
+        {
+            if ( 0 == strcmp(name, ((const WifiSavedEvt *)e)->ssid) )
+            {
+                *listed = true;
+            }
+        }
+        else if ( (enum_t)WIFI_SAVED_END_SIG == e->sig )
+        {
+            *end = true;
+        }
+        else if ( (enum_t)WIFI_FORGET_SIG == e->sig )
+        {
+            (void)memcpy(forget, e, sizeof(*forget));
+            answered = true;
+        }
+        else
+        {
+            /* other traffic */
+        }
+        ao_spy_release();
+    }
+    return answered;
+}
+
+/** @brief AO_Radio up, the vault keeping "home" and "work", the spy on the saved listing and the forget. */
+static void forget_ready(void)
+{
+    radio_fresh();
+    go_up();
+    vault_has("home");
+    ao_spy_subscribe(WIFI_SAVED_ENTRY_SIG);
+    ao_spy_subscribe(WIFI_SAVED_END_SIG);
+    ao_spy_subscribe(WIFI_FORGET_SIG);
+    ao_spy_drain();
+}
+
+/** @brief The vault answers the LIST in flight with @p n names from "home", "work". */
+static void vault_lists(uint8_t n)
+{
+    static const char *const NAMES[] = { "home", "work" };
+    size_t const all = sizeof(NAMES) / sizeof(NAMES[0]);
+    kode_vault_list_t l;
+
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_LIST, kode_sent()->op);
+    (void)memset(&l, 0, sizeof(l));
+    l.count = n;
+    for ( uint8_t i = 0U; i < n; ++i )
+    {
+        (void)snprintf(l.ssid[i], sizeof(l.ssid[i]), "%s", NAMES[(all - n) + i]);
+    }
+    kode_answer(KODE_ST_OK, &l, (uint16_t)sizeof(l));
+}
+
+/**
+ * @brief Drain the spy, counting the answers to a forget.
+ * @param last Filled with the last WIFI_FORGET_SIG that came, if one did.
+ * @return How many WIFI_FORGET_SIG came.
+ */
+static unsigned forget_ends(WifiForgetEvt *last)
+{
+    unsigned n = 0U;
+
+    while ( ao_spy_count() > 0U )
+    {
+        const QEvt *const e = ao_spy_take();
+        if ( (enum_t)WIFI_FORGET_SIG == e->sig )
+        {
+            (void)memcpy(last, e, sizeof(*last));
+            ++n;
+        }
+        ao_spy_release();
+    }
+    return n;
+}
+
+/** @brief A forget of "home" the vault takes: in flight, and not answered yet. */
+static void forget_in_flight(void)
+{
+    WifiForgetEvt f;
+
+    forget_ready();
+    TEST_ASSERT_TRUE(wifi_forget_request("home"));
+    pump();
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_FORGET, kode_sent()->op);
+    TEST_ASSERT_EQUAL_STRING("home", (const char *)&kode_sent()[1]);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, forget_ends(&f), "answered before the vault did");
+}
+
+TEST_CASE("a forget the vault is too busy for is answered busy, and the network "
+          "stays listed", "[radio][vault]")
+{
+    WifiForgetEvt f;
+    bool          listed = false;
+    bool          end    = false;
+
+    forget_ready();
+    TEST_ASSERT_TRUE(wifi_list_request());
+    pump();
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_LIST, kode_sent()->op);   /* the vault is busy */
+
+    (void)memset(&f, 0, sizeof(f));
+    TEST_ASSERT_TRUE(wifi_forget_request("home"));
+    pump();
+    TEST_ASSERT_TRUE_MESSAGE(saved_drain("home", &listed, &end, &f), "the forget was not answered");
+    TEST_ASSERT_EQUAL_STRING("home", f.ssid);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)WIFI_FORGET_RES_BUSY, f.result);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_VAULT_LIST, kode_sent()->op, "a FORGET went to a busy vault");
+
+    vault_lists(2U);
+    (void)saved_drain("home", &listed, &end, &f);
+    TEST_ASSERT_TRUE(end);
+    TEST_ASSERT_TRUE_MESSAGE(listed, "the network is gone");
+}
+
+TEST_CASE("a forget the vault answers ok is answered once, then, and the network is "
+          "gone from the list", "[radio][vault]")
+{
+    WifiForgetEvt f;
+    bool          listed = true;
+    bool          end    = false;
+
+    forget_in_flight();
+    kode_answer(KODE_ST_OK, NULL, 0U);
+    TEST_ASSERT_EQUAL_UINT(1U, forget_ends(&f));
+    TEST_ASSERT_EQUAL_STRING("home", f.ssid);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)WIFI_FORGET_RES_DONE, f.result);
+
+    vault_lists(1U);                      /* the names read again after the forget */
+    TEST_ASSERT_TRUE(wifi_list_request());
+    pump();
+    vault_lists(1U);
+    TEST_ASSERT_FALSE_MESSAGE(saved_drain("home", &listed, &end, &f), "the forget was answered twice");
+    TEST_ASSERT_TRUE(end);
+    TEST_ASSERT_FALSE_MESSAGE(listed, "the network is still listed");
+}
+
+TEST_CASE("a forget the vault answers failed is answered once as refused",
+          "[radio][vault]")
+{
+    WifiForgetEvt f;
+
+    forget_in_flight();
+    kode_answer(KODE_ST_NOT_FOUND, NULL, 0U);
+    TEST_ASSERT_EQUAL_UINT(1U, forget_ends(&f));
+    TEST_ASSERT_EQUAL_STRING("home", f.ssid);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)WIFI_FORGET_RES_REFUSED, f.result);
+    vault_lists(2U);
+    TEST_ASSERT_EQUAL_UINT(0U, forget_ends(&f));
+}
+
+TEST_CASE("a forget the vault never answers is answered once as refused",
+          "[radio][vault]")
+{
+    WifiForgetEvt f;
+
+    forget_in_flight();
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    TEST_ASSERT_TRUE(logged("KODE service 1 did not answer"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, forget_ends(&f), "the silence answered nobody");
+    TEST_ASSERT_EQUAL_STRING("home", f.ssid);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)WIFI_FORGET_RES_REFUSED, f.result);
+    kode_answer(KODE_ST_OK, NULL, 0U);    /* late: nobody waits on it */
+    TEST_ASSERT_EQUAL_UINT(0U, forget_ends(&f));
+}
+
+TEST_CASE("a forget whose send the link refuses is answered once as refused",
+          "[radio][vault]")
+{
+    WifiForgetEvt f;
+
+    forget_ready();
+    fake_radio_set_link(false);   /* down under the AO, whose drop it has not heard */
+    TEST_ASSERT_TRUE(wifi_forget_request("home"));
+    pump();
+    TEST_ASSERT_TRUE(logged("the request could not be sent"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, forget_ends(&f), "the refusal answered nobody");
+    TEST_ASSERT_EQUAL_STRING("home", f.ssid);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)WIFI_FORGET_RES_REFUSED, f.result);
+    fake_radio_set_link(true);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    TEST_ASSERT_EQUAL_UINT(0U, forget_ends(&f));
+}
+
+TEST_CASE("a forget whose link goes before the vault answers is answered once as "
+          "no link", "[radio][vault]")
+{
+    WifiForgetEvt f;
+
+    forget_in_flight();
+    storage_drain();
+    finish_lost(KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, forget_ends(&f), "the lost link answered nobody");
+    TEST_ASSERT_EQUAL_STRING("home", f.ssid);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)WIFI_FORGET_RES_NO_LINK, f.result);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    TEST_ASSERT_EQUAL_UINT(0U, forget_ends(&f));
+    radio_fresh();
+}
+
+TEST_CASE("a forget with no link to the C5 is answered as one the vault never saw",
+          "[radio][vault]")
+{
+    WifiForgetEvt f;
+    bool          listed = false;
+    bool          end    = false;
+
+    radio_fresh();
+    ao_spy_subscribe(WIFI_FORGET_SIG);
+    ao_spy_drain();
+    (void)memset(&f, 0, sizeof(f));
+    TEST_ASSERT_TRUE(wifi_forget_request("home"));
+    pump();
+    TEST_ASSERT_TRUE_MESSAGE(saved_drain("home", &listed, &end, &f), "the forget was not answered");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)WIFI_FORGET_RES_NO_LINK, f.result);
+}
+
 /* ---- The unit's identity, held by the C5 ------------------------------------ */
 
 /** @brief The next event the spy holds, which must be @p sig; copied out. */

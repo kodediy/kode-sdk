@@ -589,6 +589,52 @@ static void end_cut(void)
     QASM_DISPATCH(AO_Console, &end.super, 0U);
 }
 
+/** @brief AO_Radio's answer to a forget of @p ssid, dispatched to the console. */
+static void forget_answer(const char *ssid, WifiForgetResult result)
+{
+    WifiForgetEvt f;
+
+    (void)memset(&f, 0, sizeof(f));
+    f.super = (QEvt)QEVT_INITIALIZER(WIFI_FORGET_SIG);
+    (void)snprintf(f.ssid, sizeof(f.ssid), "%s", ssid);
+    f.result = (uint8_t)result;
+    QASM_DISPATCH(AO_Console, &f.super, 0U);
+}
+
+TEST_CASE("wifi_forget answers ok only once the vault forgot it, busy when the vault "
+          "was busy, and only to its own network's answer", "[console_scan]")
+{
+    console_up();
+    type_line("wifi_forget ssid=\"home\"");
+    TEST_ASSERT_TRUE(posted(WIFI_FORGET_REQ_SIG));
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "ok before AO_Radio answered");
+    forget_answer("home", WIFI_FORGET_RES_BUSY);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=4 msg=busy"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    fake_klog_reset();
+    type_line("wifi_forget ssid=\"home\"");
+    TEST_ASSERT_TRUE(posted(WIFI_FORGET_REQ_SIG));
+    forget_answer("work", WIFI_FORGET_RES_DONE);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "closed by another network's answer");
+    forget_answer("home", WIFI_FORGET_RES_DONE);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+    TEST_ASSERT_NULL(line_with(">err"));
+
+    fake_klog_reset();
+    type_line("wifi_forget ssid=\"home\"");
+    TEST_ASSERT_TRUE(posted(WIFI_FORGET_REQ_SIG));
+    forget_answer("home", WIFI_FORGET_RES_NO_LINK);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=no_link"));
+
+    fake_klog_reset();
+    type_line("wifi_forget ssid=\"home\"");
+    TEST_ASSERT_TRUE(posted(WIFI_FORGET_REQ_SIG));
+    forget_answer("home", WIFI_FORGET_RES_REFUSED);
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=refused"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+}
+
 TEST_CASE("wifi_scan_stop posts its request and answers ok", "[console_scan]")
 {
     console_up();

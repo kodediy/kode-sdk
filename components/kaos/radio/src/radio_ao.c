@@ -719,6 +719,9 @@ typedef struct {
                                   *   worker or the vault, until its end is
                                   *   published.                           */
     uint8_t  vault_op;           /**< VOP_*.                               */
+    char     forget_ssid[KODE_SSID_MAX + 1U];  /**< The network the FORGET
+                                  *   in flight is for: one vault request at
+                                  *   a time, so one forget.               */
 
     /* The station's fast mode, asked for by the Kode channel's AO_Net: no
      * power save while commands are arriving. `fast_want` is the wish;
@@ -4117,6 +4120,25 @@ static void wifi_publish_saved(Radio * const me, bool ok)
     }
 }
 
+/**
+ * @brief Say what became of a request to forget @p ssid (WIFI_FORGET_SIG).
+ * @param ssid   The network asked for.
+ * @param result WifiForgetResult.
+ */
+static void wifi_forget_answer(const char *ssid, WifiForgetResult result)
+{
+    WifiForgetEvt *const e = Q_NEW_X(WifiForgetEvt, 0U, WIFI_FORGET_SIG);
+
+    if ( NULL == e )
+    {
+        KLOG_W(TAG, "out of events; the answer to forget '%s' is lost", ssid);
+        return;
+    }
+    (void)snprintf(e->ssid, sizeof(e->ssid), "%s", ssid);
+    e->result = (uint8_t)result;
+    QACTIVE_PUBLISH(&e->super, AO_Radio);
+}
+
 /** @brief Whether the vault keeps a network by this name (its last LIST). */
 static bool vault_knows(Radio const * const me, const char *ssid)
 {
@@ -4233,11 +4255,14 @@ static void radio_vault_answer(Radio * const me, KodeSvcEvt const * const e)
     {
         if ( KODE_ST_OK == e->status )
         {
-            KLOG_N(TAG, "the C5's vault forgot a network");
+            KLOG_N(TAG, "the C5's vault forgot '%s'", me->forget_ssid);
+            wifi_forget_answer(me->forget_ssid, WIFI_FORGET_RES_DONE);
         }
         else
         {
-            KLOG_W(TAG, "that was not one of the remembered networks");
+            KLOG_W(TAG, "the C5's vault did not forget '%s' (status %u)",
+                   me->forget_ssid, (unsigned)e->status);
+            wifi_forget_answer(me->forget_ssid, WIFI_FORGET_RES_REFUSED);
         }
         radio_vault_refresh(me);
     }
@@ -4286,9 +4311,27 @@ static void radio_vault_lost(Radio * const me)
         me->vlist_publish = false;
         wifi_publish_saved(me, false);
     }
+    else if ( (uint8_t)VOP_FORGET == vop )
+    {
+        KLOG_W(TAG, "the C5's vault did not answer; '%s' may not be forgotten",
+               me->forget_ssid);
+        wifi_forget_answer(me->forget_ssid, WIFI_FORGET_RES_REFUSED);
+    }
     else
     {
         /* nothing waits on it */
+    }
+}
+
+/** @brief The link is gone: a forget in flight is answered, no vault being left to answer it. */
+static void radio_vault_gone(Radio * const me)
+{
+    if ( (uint8_t)VOP_FORGET == me->vault_op )
+    {
+        me->vault_op = (uint8_t)VOP_NONE;
+        KLOG_W(TAG, "the link went before the C5's vault answered; '%s' may "
+                    "not be forgotten", me->forget_ssid);
+        wifi_forget_answer(me->forget_ssid, WIFI_FORGET_RES_NO_LINK);
     }
 }
 
@@ -11940,6 +11983,7 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             WifiJoinEvt const * const f = Q_EVT_CAST(WifiJoinEvt);
             KLOG_W(TAG, "the vault is on the C5 and the link is down: "
                         "'%s' is not forgotten", f->ssid);
+            wifi_forget_answer(f->ssid, WIFI_FORGET_RES_NO_LINK);
             status = Q_HANDLED();
             break;
         }
@@ -13457,6 +13501,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             radio_heard_gone(&me->heard);
 #endif
 #if CONFIG_KODEOS_WIFI
+            radio_vault_gone(me);
             /* The C5 boots on the default power save; nothing it held
              * survives the link. */
             me->fast_want = false;
@@ -14089,11 +14134,18 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             kode_vault_ssid_t v;
             (void)memset(&v, 0, sizeof(v));
             (void)snprintf(v.ssid, sizeof(v.ssid), "%s", f->ssid);
-            if ( !radio_vault_send(me, KODE_VAULT_FORGET, (uint8_t)VOP_FORGET,
+            if ( radio_vault_send(me, KODE_VAULT_FORGET, (uint8_t)VOP_FORGET,
                                   &v, sizeof(v)) )
+            {
+                /* Answered by the vault, or by what ends its wait. */
+                (void)snprintf(me->forget_ssid, sizeof(me->forget_ssid), "%s",
+                               f->ssid);
+            }
+            else
             {
                 KLOG_W(TAG, "the C5's vault is busy; '%s' is not forgotten - "
                             "ask again", f->ssid);
+                wifi_forget_answer(f->ssid, WIFI_FORGET_RES_BUSY);
             }
             status = Q_HANDLED();
             break;

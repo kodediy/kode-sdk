@@ -45,6 +45,7 @@ typedef enum {
                           *   other; the watchdog is handed over.           */
     RADIO_V_WIFI_SCAN,   /**< wifi_scan: entries until WIFI_SCAN_END_SIG.   */
     RADIO_V_WIFI_SAVED,  /**< wifi_list: entries until WIFI_SAVED_END_SIG.  */
+    RADIO_V_WIFI_FORGET, /**< wifi_forget: closed by WIFI_FORGET_SIG.       */
     RADIO_V_FRAMES,      /**< wifi_frames: its window, then its record; the
                           *   watchdog is the window's end.                 */
     RADIO_V_BLE,         /**< ble_*: closed by BLE_STATE_SIG.               */
@@ -61,6 +62,9 @@ static uint16_t s_scan_rows;
 
 /** @brief The generation of the join that holds the console (wifi_join_request_gen()). */
 static uint8_t s_join_gen;
+
+/** @brief The network `wifi_forget` asked for: only its answer closes the command. */
+static char s_forget_ssid[KODE_SSID_MAX + 1U];
 #endif
 
 #if CONFIG_KODEOS_WIFI || CONFIG_KODEOS_BLE
@@ -916,17 +920,18 @@ static void h_wifi_list(const kverb_t *c, const karg_val_t *v)
     }
 }
 
-/** @brief wifi_forget ssid="<s>": drop one from the store. Does not disconnect. */
+/**
+ * @brief wifi_forget ssid="<s>": drop one from the store. Does not disconnect.
+ *        Closed by WIFI_FORGET_SIG: `>ok` once the C5's vault forgot it.
+ */
 static void h_wifi_forget(const kverb_t *c, const karg_val_t *v)
 {
-    (void)c;
-    if ( wifi_forget_request(v[0].s) )
+    console_begin(c->verb);
+    s_radio_kind = RADIO_V_WIFI_FORGET;
+    (void)snprintf(s_forget_ssid, sizeof(s_forget_ssid), "%s", v[0].s);
+    if ( !wifi_forget_request(v[0].s) )
     {
-        console_reply(">ok");
-    }
-    else
-    {
-        console_reply_err(KCLI_ERR_BUSY, "busy");
+        radio_v_busy_end();
     }
 }
 
@@ -2016,6 +2021,38 @@ static bool radio_answer(QEvt const *e)
             {
                 console_reply(">ok");
                 console_end();
+            }
+            else
+            {
+                handled = false;
+            }
+            break;
+        }
+        case WIFI_FORGET_SIG: {
+            WifiForgetEvt const * const f = Q_EVT_CAST(WifiForgetEvt);
+            if ( (RADIO_V_WIFI_FORGET == s_radio_kind)
+                && (0 == strcmp(f->ssid, s_forget_ssid)) )
+            {
+                if ( (uint8_t)WIFI_FORGET_RES_DONE == f->result )
+                {
+                    console_reply(">ok");
+                    console_end();
+                }
+                else if ( (uint8_t)WIFI_FORGET_RES_BUSY == f->result )
+                {
+                    radio_v_busy_end();
+                }
+                else if ( (uint8_t)WIFI_FORGET_RES_NO_LINK == f->result )
+                {
+                    console_reply_err(KCLI_ERR_REJECT, "no_link");
+                    console_end();
+                }
+                else
+                {
+                    /* the vault said no, or did not answer: the log says which */
+                    console_reply_err(KCLI_ERR_REJECT, "refused");
+                    console_end();
+                }
             }
             else
             {

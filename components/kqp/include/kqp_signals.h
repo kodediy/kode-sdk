@@ -260,6 +260,9 @@ enum KodeSignals {
     WIFI_SAVED_END_SIG,         /**< AO_Radio: that was the last remembered
                                  *   one (WifiScanEndEvt, same shape - a
                                  *   count and whether it worked).           */
+    WIFI_FORGET_SIG,            /**< AO_Radio: the answer to one
+                                 *   WIFI_FORGET_REQ_SIG (WifiForgetEvt): the
+                                 *   vault's own, or the refusal.            */
     BLE_STATE_SIG,              /**< AO_Radio: what the BLE half is doing
                                  *   (BleStateEvt). Published on every
                                  *   change - a phone connecting is news
@@ -1757,7 +1760,8 @@ enum KodeSignals {
                                  *   networks (names only).                  */
     WIFI_FORGET_REQ_SIG,        /**< AO_Radio: remove WifiJoinEvt.ssid from
                                  *   the store. The password field is unused
-                                 *   and must be left empty.                 */
+                                 *   and must be left empty. Answered with
+                                 *   one WIFI_FORGET_SIG.                    */
     WIFI_START_REQ_SIG,         /**< AO_Radio: enable the WiFi service - set
                                  *   the stored flag, bring the link up if it
                                  *   is down, autojoin as always.            */
@@ -5562,6 +5566,27 @@ typedef struct {
     QEvt super;
     char ssid[33];
 } WifiSavedEvt;
+
+/** @brief What became of a request to forget a network (WifiForgetEvt.result). */
+/* cppcheck-suppress misra-c2012-2.4 ; the type names the values of a uint8_t field, which keeps the event its size */
+typedef enum {
+    WIFI_FORGET_RES_DONE = 0,  /**< The C5's vault forgot it.                */
+    WIFI_FORGET_RES_BUSY,      /**< The vault was busy with another request:
+                                *   nothing is forgotten; ask again.         */
+    WIFI_FORGET_RES_NO_LINK,   /**< No link to the C5, or it went before the
+                                *   vault answered.                          */
+    WIFI_FORGET_RES_REFUSED    /**< The vault said no, the request could not
+                                *   be sent, or no answer came; the log says
+                                *   which.                                   */
+/* cppcheck-suppress misra-c2012-2.3 ; the type names the values of a uint8_t field, which keeps the event its size */
+} WifiForgetResult;
+
+/** @brief What became of a request to forget a network (WIFI_FORGET_SIG). */
+typedef struct {
+    QEvt    super;
+    char    ssid[33];   /**< The network asked for.                          */
+    uint8_t result;     /**< WifiForgetResult as a plain integer.            */
+} WifiForgetEvt;
 
 /**
  * @brief Where the connection stands (WIFI_STATE_SIG).
