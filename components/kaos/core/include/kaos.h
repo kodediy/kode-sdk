@@ -3462,8 +3462,9 @@ bool kdump_name(char *out, size_t cap, const char *sha, uint32_t crc);
  * @brief Ask AO_Net to send the core dump of a kodeOS fault to the Kode
  *        channel's `dumps` link.
  *
- * A 201 erases the dump; anything else leaves it in flash. Never asserts,
- * neither the request nor its answer.
+ * A 201 erases the dump, also one that comes after AO_Net's guard answered;
+ * anything else leaves it in flash. Never asserts, neither the request nor
+ * its answer.
  *
  * @param who The AO the answer goes to.
  * @return true when the request is in AO_Net's queue: one NET_DUMP_RSP_SIG

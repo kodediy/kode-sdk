@@ -8582,19 +8582,65 @@ TEST_CASE("test_no_answer_keeps_the_dump: a failed job, and one that outlasts "
     TEST_ASSERT_EQUAL_UINT(1U, s_nforget);
     TEST_ASSERT_TRUE(logged("dump: no answer"));
 
-    /* The guard fires first: answered then, and the late end only wipes. */
+    /* The guard fires first: answered then. The late end is wiped and
+     * answers nobody; any status but a 201 leaves the dump. */
     dump_to_put();
     secs(GUARD_STEPS(KODE_NET_GUARD_MS) / 100U + 1U);
     TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_NO_ANSWER, r.result);
-    s_nresult = 0U;
     s_nforget = 0U;
-    http_reply(201U, "");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nresult, "the late answer was read");
+    http_reply(500U, "");
     TEST_ASSERT_EQUAL_UINT(1U, s_nforget);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, dump_answers(&r), "answered twice");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_dump.erases, "erased on a late 201");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_dump.erases, "erased on a late 500");
+
+    /* A failed late job is not read either. */
+    dump_to_put();
+    secs(GUARD_STEPS(KODE_NET_GUARD_MS) / 100U + 1U);
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    s_nresult = 0U;
+    job_done_http(KODE_TIMEOUT);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_nresult, "a failed late job was read");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, dump_answers(&r), "answered twice");
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump.erases);
     dump_done();
+}
+
+TEST_CASE("test_a_201_after_the_guard_erases_the_dump: the service has it, so "
+          "a retry would send it twice; nobody is answered again", "[net_ao][dump]")
+{
+    NetDumpRspEvt r;
+    unsigned      guard_answers;
+    uint8_t       guard_result;
+    unsigned      erased_before;
+    unsigned      erased_after;
+    unsigned      forgets;
+    unsigned      late_answers;
+    bool          worker_free;
+
+    /* Read first, judged after AO_Net is down: a red case leaves nothing
+     * armed for the next one. */
+    dump_up();
+    dump_to_put();
+    secs(GUARD_STEPS(KODE_NET_GUARD_MS) / 100U + 1U);
+    guard_answers = dump_answers(&r);
+    guard_result  = r.result;
+    erased_before = s_dump.erases;
+    s_nforget     = 0U;
+    http_reply(201U, "");
+    erased_after  = s_dump.erases;
+    forgets       = s_nforget;
+    late_answers  = dump_answers(&r);
+    worker_free   = (NULL == s_held);
+    dump_done();
+
+    TEST_ASSERT_EQUAL_UINT(1U, guard_answers);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_NO_ANSWER, guard_result);
+    TEST_ASSERT_EQUAL_UINT(0U, erased_before);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, erased_after, "a late 201 left the dump");
+    TEST_ASSERT_EQUAL_UINT(1U, forgets);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, late_answers, "answered twice");
+    TEST_ASSERT_TRUE_MESSAGE(worker_free, "the worker still holds the late job");
 }
 
 /** @brief Whether some WARN line contains @p needle. */

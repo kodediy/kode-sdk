@@ -5527,52 +5527,62 @@ static void dump_on_request(Net * const me, const NetDumpReqEvt *r)
  * Only a 201 erases. Any other status is a refusal and no status line, a TLS
  * or socket failure or a timeout is no answer: both leave the dump in flash.
  * A 201 whose erase fails still answers OK - the service has it - with a
- * WARN. A PUT whose guard already answered is only wiped.
+ * WARN. A PUT whose guard already answered (KDUMP_R_NO_ANSWER) ends here too,
+ * and nobody is answered again: a 201 still erases the dump, because the
+ * service has it and a retry would send it twice; anything else is only
+ * wiped.
  */
 static void dump_on_job(Net * const me, uint8_t job_status)
 {
-    QActive * const        who = me->dwho;
+    QActive * const        who    = me->dwho;
+    uint16_t               status = 0U;
     kdrv_net_http_result_t r;
 
     me->dput = false;
     me->dwho = NULL;
-    if ( NULL == who )
-    {
-        kdrv_net_http_forget();
-        KLOG_I(TAG, "dump: the answer to a report that had ended was dropped");
-    }
-    else if ( (uint8_t)KODE_OK != job_status )
-    {
-        kdrv_net_http_forget();
-        dump_reply(me, who, KDUMP_R_NO_ANSWER, 0U);
-    }
-    else
+    if ( (uint8_t)KODE_OK == job_status )
     {
         (void)memset(&r, 0, sizeof(r));
         kdrv_net_http_result(&r);
-        kdrv_net_http_forget();
-        if ( DUMP_HTTP_STORED == r.status )
+        status = r.status;
+    }
+    kdrv_net_http_forget();
+    if ( DUMP_HTTP_STORED == status )
+    {
+        if ( KODE_OK != kdrv_slot_coredump_erase() )
         {
-            if ( KODE_OK != kdrv_slot_coredump_erase() )
-            {
-                KLOG_W(TAG, "dump: stored, but it could not be erased");
-            }
-            dump_reply(me, who, KDUMP_R_OK, r.status);
+            KLOG_W(TAG, "dump: stored, but it could not be erased");
         }
-        else if ( 0U == r.status )
+    }
+    if ( NULL == who )
+    {
+        if ( DUMP_HTTP_STORED == status )
         {
-            dump_reply(me, who, KDUMP_R_NO_ANSWER, 0U);   /* no status line */
+            KLOG_N(TAG, "dump: stored after its guard had answered; nobody is answered again");
         }
         else
         {
-            dump_reply(me, who, KDUMP_R_REFUSED, r.status);
+            KLOG_I(TAG, "dump: the answer to a report that had ended was dropped");
         }
+    }
+    else if ( DUMP_HTTP_STORED == status )
+    {
+        dump_reply(me, who, KDUMP_R_OK, status);
+    }
+    else if ( 0U == status )
+    {
+        dump_reply(me, who, KDUMP_R_NO_ANSWER, 0U);   /* a failed job, or no status line */
+    }
+    else
+    {
+        dump_reply(me, who, KDUMP_R_REFUSED, status);
     }
 }
 
 /**
  * @brief The PUT with the worker outlived its guard: if it is the dump's,
- *        answer KDUMP_R_NO_ANSWER now. Its late end is only wiped.
+ *        answer KDUMP_R_NO_ANSWER now. Its late end answers nobody
+ *        (dump_on_job()).
  */
 static void dump_put_expired(Net * const me)
 {
@@ -7221,7 +7231,8 @@ static void net_done_net(Net * const me, kdrv_net_job_t type, kode_status_t rc,
         case KDRV_NET_JOB_HTTP_CLOSE: {
             /* Never gated on @p replied: the upload's own record says whether
              * somebody still waits (SJ_LIVE, a dump's asker) and what a
-             * late end owes (SJ_STALE, or a dump answered: wipe it). */
+             * late end owes (SJ_STALE, or a dump answered: no answer, and
+             * an erase on a 201). */
 #if CONFIG_KODEOS_CHANNEL && (CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP)
             upload_on_job(me, (uint8_t)rc);
 #endif
