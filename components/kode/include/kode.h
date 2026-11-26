@@ -2468,7 +2468,7 @@ bool kode_nfc_emulate_stop(void);
  *
  * @param name KODE_NFC_PROFILE_NAME_MAX - 1 bytes at most; any case.
  * @param type "text" or "uri": a tag a phone reads; "uid": a card clone for an access reader.
- * @param data The text or link, 1 to KODE_NFC_TEXT_MAX - 1 bytes; or for "uid" the ID as 4, 7 or 10 hex bytes, "04:A2:3B:91".
+ * @param data The text or link, 1 to KODE_NFC_TEXT_MAX - 1 bytes; or for "uid" the ID as 4 or 7 hex bytes, "04:A2:3B:91".
  * @return true when added; false with kode_error() saying why.
  */
 bool kode_nfc_add_profile(const char *name, const char *type, const char *data);

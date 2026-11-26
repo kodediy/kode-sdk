@@ -49,15 +49,13 @@ _Static_assert(KODE_TAG_ID_MAX >= (3U * KNFC_UID_MAX),
 /** @brief How long the reading rests between two looks at its stop flag, ms. */
 #define KODE_NFC_REST_STEP_MS 100U
 
-/** @brief Bytes of a single, double and triple UID. */
+/** @brief Bytes of a single and a double UID, the two the reader presents. */
 #define KODE_NFC_UID_SINGLE 4U
 #define KODE_NFC_UID_DOUBLE 7U
-#define KODE_NFC_UID_TRIPLE 10U
 
 /** @brief The ATQA a clone presents for each UID length: the two size bits follow the length. */
 #define KODE_NFC_ATQA_SINGLE 0x0004U
 #define KODE_NFC_ATQA_DOUBLE 0x0044U
-#define KODE_NFC_ATQA_TRIPLE 0x0084U
 
 /** @brief The SAK a clone of a 4-byte UID presents: a Mifare Classic 1K. */
 #define KODE_NFC_SAK_SINGLE 0x08U
@@ -757,7 +755,7 @@ static bool card_release(void)
 
 /**
  * @brief The ATQA a clone of a UID of this length presents.
- * @param uid_len 4, 7 or 10.
+ * @param uid_len 4 or 7.
  * @return The ATQA.
  */
 static uint16_t uid_atqa(uint8_t uid_len)
@@ -767,10 +765,6 @@ static uint16_t uid_atqa(uint8_t uid_len)
     if ( KODE_NFC_UID_DOUBLE == uid_len )
     {
         atqa = KODE_NFC_ATQA_DOUBLE;
-    }
-    else if ( KODE_NFC_UID_TRIPLE == uid_len )
-    {
-        atqa = KODE_NFC_ATQA_TRIPLE;
     }
     else
     {
@@ -924,7 +918,7 @@ bool kode_nfc_emulate_stop(void)
  * @brief Read the identity of a UID profile.
  * @param data As typed.
  * @param p    Out: its UID and length; written only on success.
- * @return true when it is 4, 7 or 10 bytes of hex; false with the error set.
+ * @return true when it is 4 or 7 bytes of hex, the lengths the reader presents; false with the error set.
  */
 static bool uid_parse(const char *data, nfc_profile_t *p)
 {
@@ -937,7 +931,7 @@ static bool uid_parse(const char *data, nfc_profile_t *p)
         kode_err_set("no data given");
     }
     else if ( kode_tag_hex_parse(data, uid, KNFC_UID_MAX, &n) &&
-             ((KODE_NFC_UID_SINGLE == n) || (KODE_NFC_UID_DOUBLE == n) || (KODE_NFC_UID_TRIPLE == n)) )
+             ((KODE_NFC_UID_SINGLE == n) || (KODE_NFC_UID_DOUBLE == n)) )
     {
         (void)memcpy(p->uid, uid, n);
         p->uid_len = (uint8_t)n;
@@ -945,7 +939,7 @@ static bool uid_parse(const char *data, nfc_profile_t *p)
     }
     else
     {
-        kode_err_set("a UID is 4, 7 or 10 bytes of hex, such as 04:A2:3B:91");
+        kode_err_set("a UID to present is 4 or 7 bytes of hex, such as 04:A2:3B:91");
     }
     return ok;
 }

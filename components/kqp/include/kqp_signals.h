@@ -4227,7 +4227,7 @@ struct NfcFieldRspEvt {
 /** @brief The card to present: knfc_emu_card_t field for field, for AudioInfo's reason. */
 typedef struct {
     uint8_t  uid[KQP_NFC_UID_MAX];  /**< NFCID1 to clone; ignored when @c uid_len is 0. */
-    uint8_t  uid_len;               /**< 4, 7 or 10 to clone; 0 to synthesise.         */
+    uint8_t  uid_len;               /**< 4 or 7 to clone; 0 to synthesise.             */
     uint16_t atqa;                  /**< SENS_RES to clone; 0 to derive.               */
     uint8_t  sak;                   /**< SEL_RES to clone.                             */
     bool     uri;                   /**< @c ndef is a URI rather than text.            */
