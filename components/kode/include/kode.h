@@ -445,8 +445,10 @@ bool kode_led_toggle(void);
  * "flash/data/a.csv". Any case for the volume; no leading "/", no empty, "."
  * or ".." part, no name FAT does not take (a control character or one of
  * " * : < > ? | \ in it, or only dots and spaces). A bad path fails at once
- * and kode_error() names it. A file call waits for another task's file call
- * to finish.
+ * and kode_error() names it. Names are UTF-8, in a path and in a listing,
+ * and a path that is not well-formed UTF-8 is a bad path; a computer reads
+ * the same names off the card. A file call waits for another task's file
+ * call to finish.
  */
 
 #define KODE_FILE_PATH_MAX 91U      /**< Bytes of a path, NUL included. */
@@ -711,6 +713,7 @@ bool kode_file_move(const char *from, const char *to);
 /* ---- IMU and magnetometer ---- */
 
 /* Axes are the parts' own: QMI8658A for accel and gyro, QMC5883P for the field.
+ * The QMI8658A's x points to the glass's left and its y to the glass's bottom.
  * A failed read answers NAN and kode_error() says why. All four block: a read
  * takes its turn behind other tasks' reads, keeps trying for KODE_MOTION_BUSY_MS,
  * and its last try can take 600 ms more. */
@@ -2630,6 +2633,9 @@ bool kode_display_sleep(bool sleep);
  * second, so the moves are coalesced: at most one touch_moved of a stroke
  * waits for the listeners, and a newer point takes its place: a drag never
  * fills the queue, and the other events still arrive.
+ *
+ * Linking the touch panel links the display too, which brings the panel up at
+ * boot: the touch controller shares the panel's supply and reset line.
  *
  * Nothing is asked of the touch panel until the first touch listener, wait or
  * kode_touch_read(); the points start then. With a screen on the glass a finger

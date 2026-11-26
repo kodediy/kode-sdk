@@ -12,6 +12,7 @@
 #include "khal_once.h"
 #include "khal_sync.h"
 #include "khal_system.h"
+#include "khal_utf8.h"
 #include "kode_entry.h"
 #include "kode_sys.h"
 #include "kode_sys_internal.h"
@@ -113,7 +114,14 @@ static void path_bad_part(const char *user)
 /** @brief Keep @p user in the task's error as a path with a name FAT does not take. */
 static void path_bad_name(const char *user)
 {
-    kode_err_set("bad path '%s': a name FAT does not take", user);
+    if ( khal_utf8_valid(user) )
+    {
+        kode_err_set("bad path '%s': a name FAT does not take", user);
+    }
+    else
+    {
+        kode_err_set("bad path '%s': a name that is not UTF-8", user);
+    }
 }
 
 /** @brief Keep @p user in the task's error as a path too long. */
@@ -1916,7 +1924,14 @@ bool kode_file_rename(const char *path, const char *new_name)
                 (void)memcpy(&dst[keep], new_name, len + 1U);
                 if ( !kdrv_storage_path_valid(dst) )
                 {
-                    kode_err_set("bad name '%s'", new_name);
+                    if ( khal_utf8_valid(new_name) )
+                    {
+                        kode_err_set("bad name '%s'", new_name);
+                    }
+                    else
+                    {
+                        kode_err_set("bad name '%s': not UTF-8", new_name);
+                    }
                 }
                 /* A change of case only names the entry that is there already. */
                 else if ( source_there(path, vol, &st)

@@ -111,6 +111,21 @@ archive dep_haptic kaos \
 archive dep_haptic kode_sys "$SYS_OK"
 check dep_haptic 1 "AO_Haptic (haptic_ao"
 
+# The panel's bring-up powers the touch controller and releases the reset line
+# the two share: an AO_Touch that names nothing of AO_Display fails, and one
+# that subscribes through AO_Display's door passes.
+archive dep_touch kaos \
+    'touch_ao=void *const AO_Touch = 0; void kaos_touch_start(void) {}' \
+    'display_ao=void *const AO_Display = 0; void kaos_display_start(void) {} void display_state_subscribe(void) {}'
+archive dep_touch kode_sys "$SYS_OK"
+check dep_touch 1 "AO_Touch (touch_ao"
+
+archive dep_touch_ok kaos \
+    'touch_ao=void display_state_subscribe(void); void *const AO_Touch = 0; void kaos_touch_start(void) { display_state_subscribe(); }' \
+    'display_ao=void *const AO_Display = 0; void kaos_display_start(void) {} void display_state_subscribe(void) {}'
+archive dep_touch_ok kode_sys "$SYS_OK"
+check dep_touch_ok 0 "starts: 2 Active Objects"
+
 # Only where nm tells a weak reference from a strong one, as GNU nm on ELF
 # does ("w"); Mach-O's prints both as "U", so the case skips there.
 printf '__attribute__((weak)) void probe(void); void f(void) { if (probe) { probe(); } }\n' \
@@ -132,6 +147,12 @@ archive door kaos \
     'touch_door=void touch_subscribe(void) {}'
 archive door kode_sys "$SYS_OK"
 check door 1 "touch_subscribe is in touch_door"
+
+archive door_display kaos \
+    'display_ao=void *const AO_Display = 0; void kaos_display_start(void) {}' \
+    'display_door=void display_state_subscribe(void) {}'
+archive door_display kode_sys "$SYS_OK"
+check door_display 1 "display_state_subscribe is in display_door"
 
 # ---- the image's promises ------------------------------------------------------
 # image <case> <source>: the "image" the promises read; an object is all nm needs.

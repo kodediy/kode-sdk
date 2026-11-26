@@ -290,7 +290,9 @@ static QState Touch_initial(Touch * const me, void const * const par)
 {
     (void)par;
     kaos_claim(KBSP_RES_TOUCH, me, "AO_Touch");
-    QActive_subscribe(&me->super, DISPLAY_STATE_SIG);
+    /* Through AO_Display's door, which links it: the panel's bring-up is what
+     * powers the controller and releases the reset line the two share. */
+    display_state_subscribe(&me->super);
     QActive_subscribe(&me->super, IOEXP_INPUT_SIG);
 #if CONFIG_KODE_LOWPOWER
     me->lp_who = lowpower_join(&me->super, "touch");

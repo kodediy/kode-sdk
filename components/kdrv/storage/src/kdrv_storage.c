@@ -16,6 +16,7 @@
 
 #include "kdrv_sd.h"
 #include "khal_time.h"
+#include "khal_utf8.h"
 #include "kdrv_fs.h"
 #include "kode_log.h"
 
@@ -264,7 +265,9 @@ static bool vpath_char_refused(char c)
  * callers cannot tell from a card that will not answer; refused here, the
  * caller hears that the path is wrong. A name of dots and spaces alone is one
  * of them (FatFs strips trailing dots and spaces, and nothing is left), and
- * that one rule also covers ".", ".." and the empty component.
+ * that one rule also covers ".", ".." and the empty component. A path that is
+ * not well-formed UTF-8 is another: FatFs takes names in UTF-8
+ * (CONFIG_FATFS_API_ENCODING_UTF_8) and refuses one it cannot decode.
  *
  * @param vpath The virtual path. NULL is not accepted; callers check first.
  * @return true when the path may be mapped.
@@ -278,6 +281,10 @@ static bool vpath_is_canonical(const char *vpath)
     if ( '\0' == vpath[1] )
     {
         return true;
+    }
+    if ( !khal_utf8_valid(vpath) )
+    {
+        return false;
     }
 
     size_t const len   = strlen(vpath);

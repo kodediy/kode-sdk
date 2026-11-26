@@ -327,6 +327,28 @@ TEST_CASE("the controller is not touched until the panel says it is up, and a "
     mock_down();
 }
 
+/* AO_Touch starts before AO_Display and subscribes in its initial transition,
+ * through AO_Display's door: the state AO_Display publishes once its own start
+ * has brought the panel up reaches AO_Touch's queue, with no ask of its own. */
+TEST_CASE("the panel's state published after AO_Touch's start reaches it", "[touch_ao]")
+{
+    static DisplayStateEvt s_state;
+
+    touch_up_once();
+    (void)memset(&s_state, 0, sizeof(s_state));
+    s_state.super = (QEvt)QEVT_INITIALIZER(DISPLAY_STATE_SIG);
+    s_state.up    = false;
+    QACTIVE_PUBLISH(&s_state.super, NULL);
+
+    TEST_ASSERT_FALSE_MESSAGE(logged("no panel"), "heard before it was served");
+    serve();
+    TEST_ASSERT_TRUE_MESSAGE(logged("no panel"), "the published state never reached AO_Touch");
+    TEST_ASSERT_EQUAL_UINT(0U, s_reads);
+
+    ao_spy_drain();
+    mock_down();
+}
+
 /* ---- A controller that does not answer at the bring-up -------------------- */
 
 /* These cases run before any other brings the controller up, in this order:
