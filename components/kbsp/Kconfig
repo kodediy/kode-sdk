@@ -1,0 +1,13 @@
+menu "kbsp: the board's controllers"
+
+    config KBSP_APP_LOW_BUSES
+        bool "The app takes I2C0 and SPI2 for the expansion header"
+        help
+            Off, the board bus is I2C0 and the NFC reader is on SPI2, and the
+            app takes I2C1 and SPI3 for the expansion header. On, the pairs
+            swap: the board bus is I2C1, the NFC reader on SPI3, and the app
+            takes I2C0 and SPI2, the ones Arduino's Wire and SPI open.
+
+            If unsure, say N.
+
+endmenu

@@ -461,7 +461,7 @@ kode_status_t kdrv_es8311_park(void)
 kode_status_t kdrv_es8311_init(void)
 {
     audio_codec_i2c_cfg_t i2c = {
-        .port = 0U,
+        .port = (uint8_t)KBSP_I2C_BOARD,
         /* The component's I2C layer shifts this right by one, so it wants the
          * eight-bit form. kbsp keeps the seven-bit one, like every other
          * address on the bus. Unshifted, it addresses 0x0C, where nothing answers. */

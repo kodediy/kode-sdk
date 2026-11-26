@@ -38,9 +38,10 @@
 
 #define TAG "kdrv.nfc"
 
-/** @brief The host these five pins are on (kbsp's KBSP_SPI_NFC, SPI2), and
- *         the reader is alone on it. */
+/** @brief The host these five pins are on (kbsp's KBSP_SPI_NFC), and the
+ *         reader is alone on it. */
 #define KDRV_ST25_SPI_HOST      ((spi_host_device_t)KBSP_SPI_NFC)
+#define KDRV_ST25_SPI_NAME      ((unsigned)KBSP_SPI_NFC + 1U) /**< The number in the host's name, for %u: SPI2_HOST is SPI2. */
 _Static_assert((KBSP_SPI_NFC > (uint32_t)SPI1_HOST)
                && (KBSP_SPI_NFC < (uint32_t)SOC_SPI_PERIPH_NUM),
                "KBSP_SPI_NFC must name a general SPI host, not the flash's");
@@ -374,7 +375,7 @@ static kode_status_t nfc_power_set(knfc_power_state_t want)
 }
 
 /**
- * @brief Open SPI2 with CS as a plain output and the reader as its only device.
+ * @brief Open the reader's SPI host with CS as a plain output and the reader as its only device.
  *
  * @return KODE_OK, or KODE_ERROR when the bus or the device refused.
  */
@@ -406,7 +407,7 @@ static kode_status_t spi_open(void)
                                        SPI_DMA_DISABLED);
     if ( (ESP_OK != err) && (ESP_ERR_INVALID_STATE != err) )
     {
-        KLOG_E(TAG, "SPI2 would not initialise");
+        KLOG_E(TAG, "SPI%u would not initialise", KDRV_ST25_SPI_NAME);
         return KODE_ERROR;
     }
 
@@ -418,7 +419,7 @@ static kode_status_t spi_open(void)
     };
     if ( spi_bus_add_device(KDRV_ST25_SPI_HOST, &dev, &s_spi) != ESP_OK )
     {
-        KLOG_E(TAG, "the reader would not join SPI2");
+        KLOG_E(TAG, "the reader would not join SPI%u", KDRV_ST25_SPI_NAME);
         return KODE_ERROR;
     }
     return KODE_OK;
@@ -562,7 +563,7 @@ kode_status_t kdrv_st25r3916_park(void)
         }
         rfal_port_spi_deselect();
     }
-    /* SPI2 is left as it was opened: the bus is the reader's and nobody
+    /* The host is left as it was opened: the bus is the reader's and nobody
      * else's, and taking the device off it would link the bus's acquire and
      * release into IRAM for one call at boot. */
     return rc;
