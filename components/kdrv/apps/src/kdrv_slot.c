@@ -526,7 +526,7 @@ kode_status_t kdrv_slot_info(kdrv_slot_id_t id, kdrv_slot_info_t *out)
 /* ---- The crash the board kept --------------------------------------------- */
 
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
-_Static_assert(KDRV_COREDUMP_SHA_HEX == CONFIG_APP_RETRIEVE_LEN_ELF_SHA,
+_Static_assert(KDRV_COREDUMP_SHA_HEX == (uint32_t)CONFIG_APP_RETRIEVE_LEN_ELF_SHA,
                "kdrv_coredump_t holds every digit of the ELF SHA-256 a dump carries");
 
 #define SLOT_HEX_PER_BYTE 2U    /**< Hex digits a byte spells.             */
