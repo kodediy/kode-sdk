@@ -832,9 +832,10 @@ void kdrv_net_stream_close(void)
 
 /** The PUT's buffers and the connection a kept PUT leaves open. One block in
  *  PSRAM, taken by the first kdrv_net_http_put_prepare() and never freed: the
- *  body alone is 64 KB, which internal RAM does not have to give. The setter
- *  writes it, the worker reads it, and the setter refuses while the worker is
- *  busy. */
+ *  body alone is KDRV_NET_PUT_MAX bytes, which internal RAM does not have to
+ *  give. The setter writes it and the worker reads it. The setter keeps no
+ *  record of a job and refuses nothing for one: AO_Net calls it only while
+ *  its worker is idle. */
 typedef struct {
     uint8_t body[KDRV_NET_PUT_MAX];
     size_t  len;
