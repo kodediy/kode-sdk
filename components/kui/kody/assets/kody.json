@@ -906,11 +906,23 @@
       "anchor": 0,
       "recolour": {},
       "help": "Kody runs in a hamster wheel: the loading screen. Loops"
+    },
+    {
+      "name": "error_banda",
+      "source": "kody_error_banda.json",
+      "w": 410,
+      "h": 160,
+      "scale": 1,
+      "dx": 0,
+      "dy": 0,
+      "anchor": 36,
+      "recolour": {},
+      "help": "Kody rises on the right of the band and an X shows: the fault notice. Stops on its anchor"
     }
   ],
   "pack": {
     "name": "Kody",
-    "version": "2026.11.05.2",
+    "version": "2026.11.26.1",
     "scenes": [
       {
         "name": "tren",
@@ -1125,6 +1137,7 @@
     "empty": "duda",
     "writing": "portatil",
     "goodbye": "despide",
-    "loading": "cargando"
+    "loading": "cargando",
+    "fault": "error_banda"
   }
 }

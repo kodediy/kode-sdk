@@ -250,6 +250,30 @@ class PackTests(unittest.TestCase):
             self.assertEqual(kodygen.main(["--check"]), 0)
 
 
+class RoleTests(unittest.TestCase):
+    """The pack block's roles, each held to its own canvas."""
+
+    ENTRIES = {"scn": {"w": 410, "h": 334, "anchor": 0}, "band": {"w": 410, "h": 160, "anchor": 36},
+               "launcher": {"w": 410, "h": 369, "anchor": 0}}
+
+    def pack(self, **roles):
+        pack = {"name": "Test", "version": "1", "scenes": [{"name": "s", "wake": "scn", "loop": "scn"}]}
+        pack.update(roles)
+        return pack
+
+    def test_a_fault_role_on_the_band_is_accepted(self):
+        pack = self.pack(fault="band")
+        kodygen.check_pack(pack, self.ENTRIES)
+        written = json.loads(kodygen.pack_json(pack, self.ENTRIES, {"scn": b"s", "band": b"b"}))
+        self.assertEqual(written["fault"], "band.json.z")
+        self.assertIn("band.json.z", written["sha256"])
+
+    def test_a_fault_role_on_another_canvas_is_refused(self):
+        with self.assertRaises(SystemExit) as refused:
+            kodygen.check_pack(self.pack(fault="launcher"), self.ENTRIES)
+        self.assertEqual(str(refused.exception), "kodygen: pack: fault launcher is 410 x 369, not 410 x 160")
+
+
 class ScriptTests(unittest.TestCase):
     """The script as a command, in a kit of its own: the sources are crafted and nothing else is touched."""
 

@@ -21,11 +21,11 @@ static const char *const TRIGGERS[KUI_PACK_TRIGGER_COUNT] = { "look", "hour", "n
 
 /** @brief Each role's canvas, in kui_pack_role_t's order. */
 static const uint16_t ROLE_W[KUI_PACK_ROLE_COUNT] = {
-    KUI_PACK_EMPTY_W, KUI_PACK_CARD_W, KUI_PACK_CARD_W, KUI_PACK_LOADING_SIDE
+    KUI_PACK_EMPTY_W, KUI_PACK_CARD_W, KUI_PACK_CARD_W, KUI_PACK_LOADING_SIDE, KUI_PACK_CARD_W
 };
 /** @brief Each role's canvas height, in kui_pack_role_t's order. */
 static const uint16_t ROLE_H[KUI_PACK_ROLE_COUNT] = {
-    KUI_PACK_EMPTY_H, KUI_PACK_CARD_H, KUI_PACK_CARD_H, KUI_PACK_LOADING_SIDE
+    KUI_PACK_EMPTY_H, KUI_PACK_CARD_H, KUI_PACK_CARD_H, KUI_PACK_LOADING_SIDE, KUI_PACK_CARD_H
 };
 
 /** @brief Largest value of a 16-bit field the manifest or a Lottie gives. */
@@ -575,10 +575,11 @@ static kui_pack_err_t pack_canvas_check(const cJSON *canvas)
 static kui_pack_err_t pack_build(const cJSON *root, kui_pack_t *p)
 {
     static const char *const KNOWN[] = { "format", "name", "version", "canvas", "scenes", "face",
-                                         "empty", "writing", "goodbye", "loading", "sha256" };
+                                         "empty", "writing", "goodbye", "loading", "fault",
+                                         "sha256" };
     /* The roles outside the face, in kui_pack_role_t's order. */
     static const char *const ROLES[KUI_PACK_ROLE_COUNT] = { "empty", "writing", "goodbye",
-                                                            "loading" };
+                                                            "loading", "fault" };
     pack_ctx_t c = { p, 0U, 0U };
     uint32_t fmt = 0U;
     uint32_t n_react = 0U;
