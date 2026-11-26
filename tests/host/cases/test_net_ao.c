@@ -8597,6 +8597,64 @@ TEST_CASE("test_no_answer_keeps_the_dump: a failed job, and one that outlasts "
     dump_done();
 }
 
+/** @brief Whether some WARN line contains @p needle. */
+static bool warned(const char *needle)
+{
+    bool found = false;
+
+    for ( unsigned i = 0U; (fake_klog_count() > i) && !found; ++i )
+    {
+        const char * const l = fake_klog_line(i);
+
+        found = (NULL != l) && (strncmp(l, "!W", 2U) == 0) && (strstr(l, needle) != NULL);
+    }
+    return found;
+}
+
+/** @brief Filler the asker's queue is stuffed with; its signal nobody here reads. */
+static const QEvt s_dump_filler = QEVT_INITIALIZER(IMU_TEST_REQ_SIG);
+
+/**
+ * @brief The body of the no-room case, run in a child: an assert there would
+ *        end the child, not the suite.
+ */
+static void dump_full_asker_body(void *arg)
+{
+    NetDumpRspEvt r;
+
+    (void)arg;
+    TEST_ASSERT_TRUE(net_dump_request(ao_spy_other()));
+    (void)net_settle();
+    TEST_ASSERT_EQUAL_UINT(1U, s_nput);
+    TEST_ASSERT_TRUE_MESSAGE(qf_support_queue_stuff(ao_spy_other(), &s_dump_filler),
+                             "the asker's queue never filled");
+    http_reply(201U, "");
+    TEST_ASSERT_TRUE_MESSAGE(warned("fault report's answer"), "the lost answer was not said");
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump.erases);
+    ao_spy_other_drain();
+
+    /* AO_Net is idle: the next request goes out and is answered. */
+    dump_to_put();
+    http_reply(201U, "");
+    TEST_ASSERT_EQUAL_UINT(1U, dump_answers(&r));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_OK, r.result);
+}
+
+TEST_CASE("test_an_answer_that_finds_no_room_is_lost_with_a_warning: no "
+          "assert, and AO_Net goes back to idle", "[net_ao][dump]")
+{
+    ask_support_child_t ended;
+
+    /* Everything the child did dies with it; the parent takes AO_Net down
+     * before it judges, so a red case leaves no timer armed for the next. */
+    dump_up();
+    ao_spy_other_drain();
+    ended = ask_support_fork_run(&dump_full_asker_body, NULL);
+    ao_spy_other_drain();
+    dump_done();
+    TEST_ASSERT_EQUAL_INT(ASK_CHILD_RETURNED, ended);
+}
+
 TEST_CASE("test_a_request_while_an_upload_runs_answers_busy: a dump, a "
           "capture, a stream or another job", "[net_ao][dump]")
 {

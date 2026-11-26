@@ -5345,7 +5345,11 @@ static const char *dump_word(kdump_result_t result)
  * @brief Answer a fault report request, and say how it ended in one NOTICE.
  *
  * The NOTICE names the outcome and a refusal's status: never the link, the
- * dump's name or the bearer.
+ * dump's name or the bearer. The answer never asserts: with no event block,
+ * or no slot in the asker's queue (KQP_DUMP_ANSWER_MARGIN), it is lost with a
+ * WARN, and the asker's own guard ends its wait. The asker is the interface,
+ * one of the lowest AOs, and an assert here would reset the board and write
+ * a new core dump.
  *
  * @param me     The AO.
  * @param who    Who asked.
@@ -5355,7 +5359,8 @@ static const char *dump_word(kdump_result_t result)
 static void dump_reply(Net * const me, QActive *who, kdump_result_t result,
                        uint16_t http)
 {
-    NetDumpRspEvt * const e = Q_NEW_X(NetDumpRspEvt, 0U, NET_DUMP_RSP_SIG);
+    NetDumpRspEvt * const e      = Q_NEW_X(NetDumpRspEvt, 0U, NET_DUMP_RSP_SIG);
+    bool                  posted = false;
 
     (void)me;   /* the sender is only named when QP traces */
     if ( KDUMP_R_REFUSED == result )
@@ -5366,16 +5371,17 @@ static void dump_reply(Net * const me, QActive *who, kdump_result_t result,
     {
         KLOG_N(TAG, "dump: %s", dump_word(result));
     }
-    if ( NULL == e )
-    {
-        KLOG_E(TAG, "no event blocks for a fault report's answer; whoever asked "
-                    "is still waiting");
-    }
-    else
+    if ( NULL != e )
     {
         e->result = (uint8_t)result;
         e->http   = http;
-        QACTIVE_POST(who, &e->super, &me->super);
+        /* A refused post gives the event back to its pool. */
+        posted = QACTIVE_POST_X(who, &e->super, KQP_DUMP_ANSWER_MARGIN, &me->super);
+    }
+    if ( !posted )
+    {
+        KLOG_W(TAG, "dump: no room for a fault report's answer; the asker's "
+                    "guard ends its wait");
     }
 }
 
