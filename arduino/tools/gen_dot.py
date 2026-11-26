@@ -427,10 +427,7 @@ def all_calls(name):
         "",
         "/** @brief A zero of any type: the argument of every call below. */",
         "template <typename T>",
-        "static T zero(void)",
-        "{",
-        "    return T{};",
-        "}",
+        "static T zero(void);",
         "",
         "static volatile bool s_never = false; /**< Never true, and the compiler cannot know it. */",
         "",
@@ -445,7 +442,15 @@ def all_calls(name):
     for owner in ordered:
         for method in owners.get(owner, []):
             lines += call_lines(owner, method)
+    # zero() is defined below all_calls(): Arduino writes its prototypes above the first function a
+    # sketch defines, and there they would cut a template header from its function.
     lines += [
+        "}",
+        "",
+        "template <typename T>",
+        "static T zero(void)",
+        "{",
+        "    return T{};",
         "}",
         "",
         "void setup(void)",

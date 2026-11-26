@@ -219,6 +219,15 @@ class Generated(unittest.TestCase):
         self.assertTrue(named)
         self.assertEqual(sorted(named - set(ALIAS.findall(text)) - set(gen_dot.HANDLES)), [])
 
+    def test_all_calls_sketch_defines_no_template_before_its_first_function(self):
+        # Arduino writes its prototypes above the first function the sketch defines: a template
+        # header there would be cut from its function. The template is declared above and defined below.
+        lines = gen_dot.all_calls("AllCalls.ino").splitlines()
+        first = lines.index("{") - 1
+        self.assertEqual(lines[first], "static void all_calls(void)")
+        self.assertEqual(lines[:first].count("static T zero(void);"), 1)
+        self.assertEqual(lines[first:].count("static T zero(void)"), 1)
+
     def test_all_calls_sketch_compiles_as_cpp(self):
         compiler = shutil.which("c++")
         if compiler is None:
