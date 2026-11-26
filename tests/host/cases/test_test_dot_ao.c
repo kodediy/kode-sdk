@@ -821,8 +821,8 @@ TEST_CASE("test_radio_records_carry_the_card_and_the_times", "[test_dot_ao]")
     td_down();
 }
 
-/* A discovery sweeps every channel (~36 s on the bench), past the radio
- * check's 33 s: its own bound lets it finish rather than time it out. */
+/* A discovery sweeps every channel, which can run past the radio check's
+ * 33 s: its own bound lets it finish rather than time it out. */
 TEST_CASE("test_a_discovery_of_a_whole_sweep_is_not_a_timeout", "[test_dot_ao]")
 {
     TestDotReqEvt r;

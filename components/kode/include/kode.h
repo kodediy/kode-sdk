@@ -1099,7 +1099,10 @@ bool kode_audio_record_save(const char *path);
  * @brief Join a network and wait until the board has an address.
  *
  * Returns at once when the board already has an address on that network.
- * A network that joined is remembered.
+ * A network that joined is remembered. With no name, it fails at once when the
+ * radio has read that it remembers no network and no join is under way; until
+ * the radio has read its list (its link just coming up), or while a join runs,
+ * it waits as any join does.
  *
  * @param ssid     The network's name, 1 to 32 bytes, case matters; NULL for a
  *                 network the board remembers.
@@ -1130,6 +1133,7 @@ bool kode_wifi_disconnect(void);
 
 #define KODE_WIFI_SCAN_MS  110000U  /**< How long kode_wifi_scan() waits for the sweep: its 90 s ceiling, a step's 12 s and room. */
 #define KODE_WIFI_SSID_MAX 33U      /**< Bytes of a network's name, NUL included. */
+#define KODE_WIFI_SCAN_MAX 24U      /**< The most networks one scan returns: the strongest access points, hidden ones included. */
 
 /** @brief One network kode_wifi_scan() found. */
 typedef struct {
@@ -1140,7 +1144,7 @@ typedef struct {
 } kode_wifi_network_t;
 
 /**
- * @brief Scan the air for networks, both bands, and wait for the sweep (about 38 s).
+ * @brief Scan the air for networks, both bands, and wait for the sweep.
  *
  * Brings the radio's link up first when it is down, and switches Wi-Fi on for
  * nobody; the call can wait for that bring-up plus one sweep. The newest Wi-Fi
@@ -1158,7 +1162,10 @@ typedef struct {
  * task at a time.
  *
  * @param out Where the networks go, the strongest first.
- * @param cap How many @p out holds; the strongest @p cap are kept.
+ * @param cap How many @p out holds. A sweep keeps at most KODE_WIFI_SCAN_MAX,
+ *            the strongest access points, hidden ones included: a network
+ *            on several access points takes several. The strongest @p cap of
+ *            those are written.
  * @return How many were written, 0 when the air is empty; -1 with
  *         kode_error() saying why.
  */
@@ -1179,6 +1186,7 @@ int kode_wifi_scan(kode_wifi_network_t *out, size_t cap);
 #define KODE_BLE_DATA_MIN     2U      /**< The least maker data: its company id.                */
 #define KODE_BLE_SCAN_MS_MIN  500U    /**< The shortest listen, ms.                             */
 #define KODE_BLE_SCAN_MS_MAX  30000U  /**< The longest listen, ms.                              */
+#define KODE_BLE_SCAN_MAX     24U     /**< The most devices one listen returns: the first heard. */
 
 /**
  * @brief Name the board for the phones that look: the name in the scan response.
@@ -1229,7 +1237,10 @@ typedef struct {
  * is over. One task at a time.
  *
  * @param out Where the devices go, the strongest first.
- * @param cap How many @p out holds; the strongest @p cap are kept.
+ * @param cap How many @p out holds. A listen keeps at most KODE_BLE_SCAN_MAX
+ *            devices, the first heard, each at the strongest it was heard; a
+ *            device heard after those is left out. The strongest @p cap of
+ *            those are written.
  * @param ms  How long to listen, KODE_BLE_SCAN_MS_MIN to KODE_BLE_SCAN_MS_MAX.
  * @return How many were written, 0 when nothing was heard; -1 with kode_error()
  *         saying why.
@@ -2050,7 +2061,7 @@ bool kode_pin_write_pwm(uint8_t pin, uint32_t hz, uint8_t duty_pct);
  * milliseconds; with no link, an "off" waits a few seconds for the C5's boot
  * and its link. It waits up to KODE_PIN_POWER_MS while the radio finishes the
  * job it is on, never one asked after it: a Wi-Fi sweep holds the C5 for
- * about 40 s and up to 90 s, and the boot's search for a known network holds
+ * up to 90 s, and the boot's search for a known network holds
  * it for that sweep and then up to 20 s for each remembered network that will
  * not have the board. With no
  * link to the C5, "on" resets the C5 for about 10 ms, and the speaker is off

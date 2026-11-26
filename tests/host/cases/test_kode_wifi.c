@@ -72,14 +72,22 @@ static kode_status_t     s_seam_connect_rc;       /**< What connect answers.    
 static uint32_t          s_seam_joins;            /**< Requests connect has taken.            */
 static uint32_t          s_seam_leaves;           /**< Requests disconnect has taken.         */
 static uint32_t          s_seam_left_from;        /**< The radio says left from this many reads on. */
+static uint32_t          s_seam_none_from;        /**< The vault is known empty from this many reads on. */
 
 /** @brief The radio never says it has left. */
 #define SEAM_NEVER_LEFT UINT32_MAX
+
+/** @brief The vault is never known to be empty. */
+#define SEAM_NEVER_NONE UINT32_MAX
+
+/** @brief What a join with no name says when the vault keeps nothing. */
+#define NONE_TEXT "no network remembered: join one by name first"
 
 static kode_status_t seam_status(kode_sys_wifi_status_t *out);
 static kode_status_t seam_connect(const char *ssid, const char *pass);
 static kode_status_t seam_disconnect(void);
 static bool seam_left(void);
+static bool seam_none(void);
 bool seam_wifi_connect(const char *ssid, const char *password);
 bool seam_wifi_is_connected(void);
 bool seam_wifi_disconnect(void);
@@ -98,6 +106,7 @@ int seam_wifi_scan(kode_wifi_network_t *out, size_t cap);
 #define kode_sys_wifi_connect    seam_connect
 #define kode_sys_wifi_disconnect seam_disconnect
 #define kode_sys_wifi_left       seam_left
+#define kode_sys_wifi_none_remembered seam_none
 #define kode_wifi_connect        seam_wifi_connect
 #define kode_wifi_is_connected   seam_wifi_is_connected
 #define kode_wifi_disconnect     seam_wifi_disconnect
@@ -110,6 +119,7 @@ int seam_wifi_scan(kode_wifi_network_t *out, size_t cap);
 #undef kode_sys_wifi_connect
 #undef kode_sys_wifi_disconnect
 #undef kode_sys_wifi_left
+#undef kode_sys_wifi_none_remembered
 #undef kode_wifi_connect
 #undef kode_wifi_is_connected
 #undef kode_wifi_disconnect
@@ -207,6 +217,11 @@ static bool seam_left(void)
     return s_seam_reads >= s_seam_left_from;
 }
 
+static bool seam_none(void)
+{
+    return s_seam_reads >= s_seam_none_from;
+}
+
 /** @brief Script the states status will report and the answers of the doors. */
 static void seam_script(const seam_step_t *steps, uint32_t n, kode_status_t status_rc,
                         kode_status_t connect_rc)
@@ -222,6 +237,7 @@ static void seam_script(const seam_step_t *steps, uint32_t n, kode_status_t stat
     s_seam_joins      = 0U;
     s_seam_leaves     = 0U;
     s_seam_left_from  = SEAM_NEVER_LEFT;
+    s_seam_none_from  = SEAM_NEVER_NONE;
 }
 
 /* ---- The world: AO_Radio's queue and the real driver --------------------------- */
@@ -709,6 +725,87 @@ TEST_CASE("remembered networks that all refuse are judged by the bound alone", "
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_WIFI_CONNECT_MS, kode_sys_time_ms());
 }
 
+TEST_CASE("a join with no name and a vault known to keep nothing fails at once and posts nothing",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = { { KDRV_WIFI_IDLE, "" } };
+
+    fresh();
+    seam_script(script, 1U, KODE_OK, KODE_OK);
+    s_seam_none_from = 0U;
+
+    TEST_ASSERT_FALSE(seam_wifi_connect(NULL, NULL));
+    TEST_ASSERT_EQUAL_STRING(NONE_TEXT, kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_seam_joins);
+    TEST_ASSERT_EQUAL_UINT32(0U, kode_sys_time_ms());
+}
+
+TEST_CASE("a join with no name waits for a vault not heard from, and fails once it is known empty",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = { { KDRV_WIFI_IDLE, "" } };
+
+    fresh();
+    seam_script(script, 1U, KODE_OK, KODE_OK);
+    s_seam_none_from = 3U;
+
+    TEST_ASSERT_FALSE(seam_wifi_connect(NULL, NULL));
+    TEST_ASSERT_EQUAL_STRING(NONE_TEXT, kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_joins);
+    TEST_ASSERT_GREATER_THAN_UINT32(0U, kode_sys_time_ms());
+    TEST_ASSERT_LESS_THAN_UINT32(KODE_WIFI_CONNECT_MS, kode_sys_time_ms());
+}
+
+TEST_CASE("a join with no name and a vault not heard from takes the network the radio joins",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = {
+        { KDRV_WIFI_IDLE, "" }, { KDRV_WIFI_IDLE, "" }, { KDRV_WIFI_GOT_IP, "home" },
+    };
+
+    fresh();
+    seam_script(script, 3U, KODE_OK, KODE_OK);
+
+    TEST_ASSERT_TRUE(seam_wifi_connect(NULL, NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_joins);
+}
+
+TEST_CASE("a join with no name while another join is connecting waits for its address, empty vault or not",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = {
+        { KDRV_WIFI_CONNECTING, "X" }, { KDRV_WIFI_CONNECTING, "X" }, { KDRV_WIFI_GOT_IP, "X" },
+    };
+
+    fresh();
+    seam_script(script, 3U, KODE_OK, KODE_OK);
+    s_seam_none_from = 0U;
+
+    TEST_ASSERT_TRUE(seam_wifi_connect(NULL, NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_joins);
+}
+
+TEST_CASE("an empty vault refuses no join by name, and no board already on a network",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = {
+        { KDRV_WIFI_IDLE, "" }, { KDRV_WIFI_CONNECTING, "net" }, { KDRV_WIFI_GOT_IP, "net" },
+    };
+
+    fresh();
+    seam_script(script, 3U, KODE_OK, KODE_OK);
+    s_seam_none_from = 0U;
+    TEST_ASSERT_TRUE(seam_wifi_connect("net", "pw"));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_joins);
+
+    TEST_ASSERT_TRUE(seam_wifi_connect(NULL, NULL));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_joins);
+}
+
 TEST_CASE("a firmware without Wi-Fi says so from every call", "[kode_wifi]")
 {
     static const seam_step_t script[] = { { KDRV_WIFI_IDLE, "" } };
@@ -839,6 +936,79 @@ TEST_CASE("scan that fails says why and returns -1", "[kode_wifi]")
     seam_scan_script(rssi, 2U, KODE_OK);
     TEST_ASSERT_EQUAL_INT(2, seam_wifi_scan(out, 4U));
     TEST_ASSERT_EQUAL_STRING("", kode_error());
+}
+
+/* ---- scan: the real call, at the table's size ------------------------------------- */
+
+/** @brief Networks the air holds in the case: more than the table keeps. */
+#define AIR_MORE (KODE_WIFI_SCAN_MAX + 6U)
+
+/** @brief What the answering hook could not do, if anything; read once the call returned. */
+static const char *s_air_fault;
+
+/**
+ * @brief AO_Radio, inside the task's wait: it copies the driver's table into
+ *        the waiter, at most the waiter's rows, from a sweep that heard AIR_MORE.
+ */
+static void air_answers_more(void)
+{
+    const QEvt *e = NULL;
+
+    if ( xQueueReceive(AO_Radio->eQueue, &e, 0U) != pdTRUE )
+    {
+        s_air_fault = "nothing was posted to AO_Radio";
+        return;
+    }
+    if ( (QSignal)RADIO_SCAN_ASK_SIG != e->sig )
+    {
+        s_air_fault = "AO_Radio was posted something other than a scan";
+        QF_gc(e);
+        return;
+    }
+
+    const ScanAskEvt *const a    = (const ScanAskEvt *)(const void *)e;
+    ScanWaiter *const       w    = a->wait;
+    kdrv_wifi_ap_t *const   rows = (kdrv_wifi_ap_t *)w->rows;
+    uint8_t                 got  = 0U;
+
+    for ( uint32_t i = 0U; (i < AIR_MORE) && (w->cap > got); ++i )
+    {
+        (void)memset(&rows[got], 0, sizeof(rows[got]));
+        (void)snprintf(rows[got].ssid, sizeof(rows[got].ssid), "air-%" PRIu32, i);
+        rows[got].rssi    = (int8_t)(-30 - (int32_t)i);
+        rows[got].channel = 1U;
+        ++got;
+    }
+    w->rc   = (uint8_t)KODE_OK;
+    w->got  = got;
+    w->rest = false;
+    __atomic_store_n(&w->ack, a->gen, __ATOMIC_RELEASE);
+    khal_sem_signal(w->done);
+    QF_gc(e);
+}
+
+TEST_CASE("scan with room for more than the table keeps returns KODE_WIFI_SCAN_MAX networks",
+          "[kode_wifi]")
+{
+    kode_wifi_network_t out[AIR_MORE];
+
+    fresh();
+    s_air_fault = NULL;
+    fake_sem_wait_hook(&air_answers_more);
+
+    TEST_ASSERT_EQUAL_INT((int)KODE_WIFI_SCAN_MAX, kode_wifi_scan(out, AIR_MORE));
+    TEST_ASSERT_NULL_MESSAGE(s_air_fault, s_air_fault);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_STRING("air-0", out[0].ssid);
+    TEST_ASSERT_EQUAL_INT8(-30, out[0].rssi);
+    TEST_ASSERT_EQUAL_UINT(0U, uxQueueMessagesWaiting(AO_Radio->eQueue));
+}
+
+TEST_CASE("kode.h's scan limits are the system's and the driver's", "[kode_wifi]")
+{
+    TEST_ASSERT_EQUAL_UINT32(KODE_SYS_WIFI_SCAN_MAX, KODE_WIFI_SCAN_MAX);
+    TEST_ASSERT_EQUAL_UINT32(KDRV_WIFI_SCAN_MAX, KODE_WIFI_SCAN_MAX);
+    TEST_ASSERT_EQUAL_UINT32(KODE_SYS_BLE_SCAN_MAX, KODE_BLE_SCAN_MAX);
 }
 
 /* ---- Two tasks, one Wi-Fi ---------------------------------------------------------- */

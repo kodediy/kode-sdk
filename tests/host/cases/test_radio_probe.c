@@ -762,7 +762,7 @@ TEST_CASE("discover spends no budget on its sweep: the find after it still runs"
     unsigned const dbg = run_real_sweep();
     TEST_ASSERT_EQUAL_INT(KODE_OK, s_sweep_rc);
     TEST_ASSERT_EQUAL_UINT(7U, dbg);
-    fake_time_advance_ms(PAST_BUDGET_MS);          /* the sweep took its ~36 s */
+    fake_time_advance_ms(PAST_BUDGET_MS);          /* the sweep took past the budget */
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_OK);
 
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_BLE_FIND, running_job(),

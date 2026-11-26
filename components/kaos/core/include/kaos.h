@@ -2445,6 +2445,19 @@ bool wifi_leave_request(void);
 bool wifi_leave_done(void);
 
 /**
+ * @brief Whether the C5's vault is known to keep no network, as AO_Radio last
+ *        wrote it. Never waits.
+ *
+ * True once the vault's listing on the link that is up says it keeps none:
+ * an autojoin round then has nothing to try and starts nothing. False when it
+ * keeps one, and while nothing is known: before the link's first listing,
+ * with the link down, and from a join's REMEMBER to the listing after it.
+ *
+ * @return true when no remembered network can be joined.
+ */
+bool wifi_none_remembered(void);
+
+/**
  * @brief The event wifi_leave_request() posts, for a caller that posts it itself.
  * @return A static event; never NULL.
  */

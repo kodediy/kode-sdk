@@ -54,6 +54,11 @@ bool kode_sys_wifi_left(void)
     return wifi_leave_done();
 }
 
+bool kode_sys_wifi_none_remembered(void)
+{
+    return wifi_none_remembered();
+}
+
 #else  /* !CONFIG_KODEOS_WIFI - the surface still links, and refuses */
 
 kode_status_t kode_sys_wifi_connect(const char *ssid, const char *pass)
@@ -68,6 +73,11 @@ kode_status_t kode_sys_wifi_disconnect(void)
 }
 
 bool kode_sys_wifi_left(void)
+{
+    return false;
+}
+
+bool kode_sys_wifi_none_remembered(void)
 {
     return false;
 }

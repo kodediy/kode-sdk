@@ -520,7 +520,7 @@ TEST_CASE("a join that arrives while a job is in flight is made when the job end
 }
 
 /* The Wi-Fi page asks for a sweep every few seconds it is open, and a sweep
- * is about 38 s: a join waiting behind a whole one is what made joining from
+ * runs for many seconds: a join waiting behind a whole one is what made joining from
  * the page slow. The join cuts it; here the cut is in before the fake worker
  * starts the sweep, so not one step runs. The sweep's end withdraws the cut:
  * the next sweep runs whole. */
@@ -4462,6 +4462,37 @@ TEST_CASE("a join that worked is saved in the vault, password and all, once", "[
     }
 }
 
+TEST_CASE("a join that worked is no longer told empty once its REMEMBER is sent", "[radio][vault]")
+{
+    kode_vault_list_t l;
+
+    radio_fresh();
+    go_up();
+    (void)memset(&l, 0, sizeof(l));
+    kode_answer(KODE_ST_OK, &l, (uint16_t)sizeof(l));
+    TEST_ASSERT_TRUE(wifi_none_remembered());
+
+    wifi_join_request("home", "secret99", true);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_JOIN, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_REMEMBER, kode_sent()->op);
+    TEST_ASSERT_FALSE_MESSAGE(wifi_none_remembered(), "the vault was told empty while it saves a network");
+
+    kode_answer(KODE_ST_OK, NULL, 0U);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_LIST, kode_sent()->op);
+    l.count = 1U;
+    (void)snprintf(l.ssid[0], sizeof(l.ssid[0]), "%s", "home");
+    kode_answer(KODE_ST_OK, &l, (uint16_t)sizeof(l));
+    TEST_ASSERT_FALSE(wifi_none_remembered());
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    while ( job_held() )
+    {
+        finish_whatever_runs();
+    }
+}
+
 TEST_CASE("a join asked not to be remembered leaves the vault alone", "[radio][vault]")
 {
     radio_fresh();
@@ -4806,6 +4837,44 @@ TEST_CASE("wifi_list lists what the vault keeps, names only", "[radio][vault]")
     }
     TEST_ASSERT_EQUAL_UINT(2U, entries);
     TEST_ASSERT_TRUE(end);
+}
+
+TEST_CASE("a vault known to keep nothing is told, and a vault not heard from on this link is not",
+          "[radio][vault]")
+{
+    kode_vault_list_t l;
+
+    radio_fresh();
+    go_up();
+    TEST_ASSERT_FALSE_MESSAGE(wifi_none_remembered(), "a LIST still in flight was told empty");
+
+    (void)memset(&l, 0, sizeof(l));
+    kode_answer(KODE_ST_OK, &l, (uint16_t)sizeof(l));
+    TEST_ASSERT_TRUE_MESSAGE(wifi_none_remembered(), "an empty LIST was not told");
+
+    /* A LIST the vault refuses changes nothing: its last answer stands. */
+    wifi_list_request();
+    pump();
+    kode_answer(KODE_ST_REFUSED, NULL, 0U);
+    TEST_ASSERT_TRUE(wifi_none_remembered());
+
+    wifi_list_request();
+    pump();
+    l.count = 1U;
+    (void)snprintf(l.ssid[0], sizeof(l.ssid[0]), "%s", "home");
+    kode_answer(KODE_ST_OK, &l, (uint16_t)sizeof(l));
+    TEST_ASSERT_FALSE_MESSAGE(wifi_none_remembered(), "a network the vault keeps was missed");
+
+    wifi_list_request();
+    pump();
+    (void)memset(&l, 0, sizeof(l));
+    kode_answer(KODE_ST_OK, &l, (uint16_t)sizeof(l));
+    TEST_ASSERT_TRUE(wifi_none_remembered());
+
+    /* With the link down the vault is heard from again on the next one. */
+    radio_fresh();
+    TEST_ASSERT_FALSE_MESSAGE(wifi_none_remembered(), "an empty vault outlived its link");
+    ao_spy_drain();
 }
 
 /**

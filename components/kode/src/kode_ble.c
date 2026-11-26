@@ -23,6 +23,7 @@ _Static_assert(KODE_BLE_SCAN_RSP_MAX == KODE_SYS_BLE_SCAN_RSP_MAX, "the scan res
 _Static_assert(KODE_BLE_DATA_MIN == KODE_SYS_BLE_DATA_MIN, "the least data is the system's");
 _Static_assert(KODE_BLE_SCAN_MS_MIN == KODE_SYS_BLE_SCAN_MS_MIN, "the shortest listen is the system's");
 _Static_assert(KODE_BLE_SCAN_MS_MAX == KODE_SYS_BLE_SCAN_MS_MAX, "the longest listen is the system's");
+_Static_assert(KODE_BLE_SCAN_MAX == KODE_SYS_BLE_SCAN_MAX, "the devices a listen keeps are the system's");
 _Static_assert(sizeof(kode_ble_device_t) == sizeof(kode_sys_ble_device_t),
                "a device heard and kode_sys's have drifted apart");
 _Static_assert(KODE_BLE_CHARACTERISTICS_MAX == KODE_SYS_BLE_CHARS_MAX, "the characteristics are the system's");

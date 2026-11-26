@@ -249,7 +249,7 @@
 #define KODE_TEST_DOT_POOL_MARGIN   8U      /**< Blocks a record leaves free in its pool, for everybody else's events. */
 #define KODE_TEST_DOT_WORKER_STACK  16384U  /**< The worker's stack, in PSRAM: the analysis and the JPEG encoder run on it. */
 #define KODE_TEST_DOT_WORKER_DEPTH  2U      /**< Jobs the worker holds besides the one running. */
-#define KODE_TEST_DOT_RAIL_MS       45000U  /**< The longest the wake waits for J3's rail: a Wi-Fi sweep can hold the C5 ~40 s. */
+#define KODE_TEST_DOT_RAIL_MS       45000U  /**< The longest the wake waits for J3's rail, which waits for a Wi-Fi sweep that holds the C5. */
 #define KODE_TEST_DOT_PROBE_MS      2000U   /**< The camera's probe on J3: it answers in well under a second when it is there. */
 #define KODE_TEST_DOT_CHECK_MARGIN_MS 3000U /**< What the fixture check adds to the rail and the probe: the station's I2C and the posts. */
 /** @brief The longest the fixture check takes: the rail, the probe and the margin. */
@@ -270,7 +270,7 @@
 #define KODE_TEST_DOT_RADIO_MS      (KODE_RADIO_PROBE_MS + KODE_TEST_DOT_RADIO_QUEUE_MS)
 /** @brief A whole Wi-Fi sweep at its bound: KDRV_WIFI_SCAN_TIMEOUT_MS, checked
  *         between steps, plus the last step's KDRV_WIFI_SCAN_STEP_TIMEOUT_MS
- *         (test_dot_ao.c asserts both). One sweep measures ~36 s. */
+ *         (test_dot_ao.c asserts both). */
 #define KODE_TEST_DOT_SWEEP_MS      102000U
 #define KODE_TEST_DOT_DISCOVER_MARGIN_MS 5000U /**< What the discovery's bound adds to its parts: the posts and the card's RPCs. */
 /**
@@ -639,9 +639,9 @@ _Static_assert(KODE_PRIO_STANDARD_READER > KODE_PRIO_USER_GUI, "the background r
  *         advertiser at a 100 ms interval several times. */
 #define KODE_BLE_SCAN_MIN_MS    500U
 
-/** @brief The longest: under the radio worker's longest job, a dual-band
- *         Wi-Fi sweep of about 38 s, so a scan never holds the link longer
- *         than one already does. */
+/** @brief The longest: under the bound of the radio worker's longest job, a
+ *         dual-band Wi-Fi sweep (KDRV_WIFI_SCAN_TIMEOUT_MS), so a scan never
+ *         holds the link longer than one may. */
 #define KODE_BLE_SCAN_MAX_MS    30000U
 
 /** @brief After AO_Radio tells of a pairing refused with no code, how long it
@@ -1154,7 +1154,7 @@ _Static_assert((KODE_LEAVE_LOG_MS + KODE_LEAVE_NET_MS + KODE_LEAVE_RADIO_MS)
  * kqp cannot include kdrv, so the figure is repeated under its own name and
  * kdrv_radio.c names this one back), the snapshot (a handful of RPCs), the
  * WiFi scan (kdrv_wifi sweeps the air in seven steps under a whole-sweep
- * budget of KDRV_WIFI_SCAN_TIMEOUT_MS; 38 s measured on this board), and the
+ * budget of KDRV_WIFI_SCAN_TIMEOUT_MS), and the
  * BLE step (the controller's handshake, then KODE_BLE_SCAN_MS of listening).
  * Plus the five seconds every row gets. Long, and honestly so: a row that
  * could be timed out underneath a scan that is still running would report
