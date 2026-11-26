@@ -21,4 +21,13 @@ menu "khal: console ports"
             How long a write waits for the dock's host to read before it drops
             the rest, so a port nobody reads never slows the console.
 
+    config KHAL_CONSOLE_APP_PORT
+        bool "The app provides the console's cable port"
+        help
+            The console installs no driver on the USB-Serial/JTAG and writes
+            to it through khal_console_app_write(), which the app defines: for
+            an app whose own driver owns the port, as Arduino's Serial does.
+
+            If unsure, say N.
+
 endmenu

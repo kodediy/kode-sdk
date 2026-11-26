@@ -12,7 +12,9 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
-#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#if defined(CONFIG_KHAL_CONSOLE_APP_PORT)
+#include "khal_console_app.h"
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_select.h"
 #include "driver/usb_serial_jtag_vfs.h"
@@ -36,8 +38,13 @@
 #include "soc/usb_wrap_struct.h"
 #endif
 
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) && !defined(CONFIG_KHAL_CONSOLE_APP_PORT)
 #define CONSOLE_TX_BUF      2048U   /**< Driver TX ring, bytes: sixteen cable chunks. */
+#endif
+#if (defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || defined(CONFIG_ESP_CONSOLE_UART)) \
+    && !defined(CONFIG_KHAL_CONSOLE_APP_PORT)
 #define CONSOLE_RX_BUF      8192U   /**< Driver RX ring, bytes: ~16 ms of a payload at line rate. */
+#endif
 #define READER_STACK        4096U   /**< Reader task stack, bytes. */
 #define READER_TIMEOUT_MS   50U     /**< Longest wait before the reader looks for a raw-mode request. */
 #define READER_DRAIN_CHUNK  64U     /**< Bytes read per pass when discarding input before raw mode. */
@@ -306,7 +313,7 @@ kode_status_t khal_console_dock_take(void)
 #endif /* CONFIG_KHAL_CONSOLE_DOCK */
 
 /* ---- The cable's input (USB-Serial/JTAG) ---------------------------------- */
-#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) && !defined(CONFIG_KHAL_CONSOLE_APP_PORT)
 
 #define CABLE_RX_HEADROOM 1024U   /**< Bytes the driver's RX ring keeps free: with less, the cable takes no more packets and the host waits. */
 
@@ -367,10 +374,10 @@ static void cable_rx_resume(void)
         usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
     }
 }
-#endif /* CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG */
+#endif /* CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && !CONFIG_KHAL_CONSOLE_APP_PORT */
 
 /* ---- The cable's output (USB-Serial/JTAG) --------------------------------- */
-#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) && !defined(CONFIG_KHAL_CONSOLE_APP_PORT)
 
 #define CABLE_TX_CHUNK   128U   /**< Bytes per driver call, line endings included. */
 #define CABLE_BYTE_MAX   2U     /**< Most one byte becomes on the wire: a newline and its '\r'. */
@@ -462,11 +469,14 @@ static void cable_write(const char *buf, size_t len)
         cable_put(chunk, fill);
     }
 }
-#endif /* CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG */
+#endif /* CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && !CONFIG_KHAL_CONSOLE_APP_PORT */
 
 void khal_console_init(void)
 {
-#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#if defined(CONFIG_KHAL_CONSOLE_APP_PORT)
+    /* The port's driver is the app's: no driver of ours on it. */
+    khal_console_app_init();
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
     usb_serial_jtag_driver_config_t cfg = {
         .rx_buffer_size = CONSOLE_RX_BUF,
         .tx_buffer_size = CONSOLE_TX_BUF,
@@ -501,7 +511,14 @@ void khal_console_init(void)
  */
 static int32_t cable_read_ticks(void *buf, size_t want, TickType_t ticks)
 {
-#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#if defined(CONFIG_KHAL_CONSOLE_APP_PORT)
+    /* The port's input is the app's: the wait passes and nothing arrives, so
+     * the reader never spins. */
+    (void)buf;
+    (void)want;
+    vTaskDelay(ticks);
+    return 0;
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
     int32_t const n = (int32_t)usb_serial_jtag_read_bytes(buf, (uint32_t)want, ticks);
 
     /* After a timeout too: an unmask IDF's TX interrupt undid is redone here. */
@@ -632,7 +649,9 @@ int32_t khal_console_read_raw(void *buf, size_t want, uint32_t timeout_ms)
 
 void khal_console_write(const char *buf, size_t len)
 {
-#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#if defined(CONFIG_KHAL_CONSOLE_APP_PORT)
+    khal_console_app_put(buf, len);
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
     /* Under stdout's lock, after what it holds: an app's own printf and this
      * still come out whole and in order. */
     flockfile(stdout);
@@ -658,7 +677,9 @@ void khal_console_write(const char *buf, size_t len)
 
 uint32_t khal_console_tx_dropped(void)
 {
-#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#if defined(CONFIG_KHAL_CONSOLE_APP_PORT)
+    return khal_console_app_dropped();
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
     return s_tx_dropped;
 #else
     return 0U;
@@ -762,7 +783,7 @@ kode_status_t khal_console_frame(uint32_t *frame)
 {
     kode_status_t rc = KODE_DENIED;
 
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) && !defined(CONFIG_KHAL_CONSOLE_APP_PORT)
     if ( NULL != frame )
     {
         *frame = USB_SERIAL_JTAG.fram_num.serial_jtag_sof_frame_index;
@@ -778,7 +799,7 @@ kode_status_t khal_console_pad(bool on)
 {
     kode_status_t rc = KODE_DENIED;
 
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) && !defined(CONFIG_KHAL_CONSOLE_APP_PORT)
     usb_serial_jtag_ll_phy_enable_pad(on);
     rc = KODE_OK;
 #else

@@ -35,7 +35,12 @@ extern "C" {
 _Static_assert(KHAL_CONSOLE_FRAME_WAIT_MS < KHAL_CONSOLE_FRAME_SPAN_MS,
                "a wait shorter than the count's span: a frame in it always moves the count");
 
-/** @brief Install the transport's driver, input verbatim. Call once. */
+/**
+ * @brief Install the transport's driver, input verbatim. Call once.
+ *
+ * With CONFIG_KHAL_CONSOLE_APP_PORT the cable port's driver is the app's:
+ * this calls khal_console_app_init() instead.
+ */
 void khal_console_init(void);
 
 /**
@@ -63,8 +68,8 @@ void khal_console_rest(bool rest);
  * a port the host suspended gets none either.
  *
  * @param frame Receives the count, which wraps every KHAL_CONSOLE_FRAME_SPAN_MS.
- * @return KODE_OK; KODE_DENIED for a NULL @p frame, or a console with no cable
- *         port (a UART).
+ * @return KODE_OK; KODE_DENIED for a NULL @p frame, a console with no cable
+ *         port (a UART), or a cable port the app provides.
  */
 kode_status_t khal_console_frame(uint32_t *frame);
 
@@ -76,7 +81,8 @@ kode_status_t khal_console_frame(uint32_t *frame);
  * back by itself, so this is for a P4 held awake.
  *
  * @param on true to put the pad on the bus, false to take it off.
- * @return KODE_OK; KODE_DENIED for a console with no cable port (a UART).
+ * @return KODE_OK; KODE_DENIED for a console with no cable port (a UART), or a
+ *         cable port the app provides.
  */
 kode_status_t khal_console_pad(bool on);
 
@@ -118,6 +124,10 @@ int32_t khal_console_read_raw(void *buf, size_t want, uint32_t timeout_ms);
 
 /**
  * @brief Write bytes to the console, on every port it has.
+ *
+ * With CONFIG_KHAL_CONSOLE_APP_PORT the cable's share is one call to
+ * khal_console_app_write().
+ *
  * @param buf The bytes.
  * @param len How many.
  */
@@ -133,7 +143,8 @@ void khal_console_write(const char *buf, size_t len);
  * port resets the board, so on the cable this counts from the session's start.
  *
  * @return Bytes dropped since boot. Only ever grows; always 0 on a console
- *         with no cable port (a UART).
+ *         with no cable port (a UART). For a cable port the app provides, the
+ *         bytes khal_console_app_write() did not take.
  */
 uint32_t khal_console_tx_dropped(void);
 
@@ -158,6 +169,37 @@ kode_status_t khal_console_dock_release(void);
  *         cable console intact.
  */
 kode_status_t khal_console_dock_take(void);
+
+/* ---- The cable port the app provides (CONFIG_KHAL_CONSOLE_APP_PORT) ---- */
+
+/**
+ * @brief Bring the app's port up. Called once, from khal_console_init().
+ *
+ * The app defines it when CONFIG_KHAL_CONSOLE_APP_PORT is on, and the console
+ * then installs no driver on the USB-Serial/JTAG: the port's driver is the
+ * app's. The console reads nothing from that port, khal_console_frame() and
+ * khal_console_pad() answer KODE_DENIED, and khal_console_tx_dropped() counts
+ * what khal_console_app_write() did not take. The dock, when built, stays the
+ * console's. Only khal calls the two functions, and it comes after the app's
+ * component in the link: defined beside app_main they arrive with that object,
+ * but in an object nothing else pulls in they are undefined at link, so an
+ * ESP-IDF app that keeps them there registers its component with WHOLE_ARCHIVE.
+ */
+void khal_console_app_init(void);
+
+/**
+ * @brief Write to the app's port.
+ *
+ * The app defines it when CONFIG_KHAL_CONSOLE_APP_PORT is on. Each console
+ * write is one call, with no line endings turned. After a call that took less
+ * than @p len, the next ones get a @p wait_ms of 0 until one takes all.
+ *
+ * @param buf     The bytes.
+ * @param len     How many.
+ * @param wait_ms The longest this call may wait for room.
+ * @return Bytes taken, 0 to @p len; @p len or more is the whole write.
+ */
+size_t khal_console_app_write(const char *buf, size_t len, uint32_t wait_ms);
 
 #ifdef __cplusplus
 }

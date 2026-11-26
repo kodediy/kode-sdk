@@ -61,7 +61,11 @@ jobs:
         # compiles the E5 final test, the OV5640 and the station's chips.
         # `noble` is an app with Wi-Fi and low power and without BLE: the
         # only one with KODE_LOWPOWER on.
-        variant: ['', nowifi, noble, minimal, minimal_noradio, minimal_ble, testdot]
+        # `arduino` is an app (sdkconfig.arduino) with the SDK's lines for
+        # Arduino's core on top (arduino/sdkconfig.sdk): the only one with
+        # KHAL_CONSOLE_APP_PORT on, the console's cable port given by the app
+        # (main/arduino_port.c).
+        variant: ['', nowifi, noble, minimal, minimal_noradio, minimal_ble, testdot, arduino]
     steps:
       # Without submodules, for the reason host-tests.yml gives: the only one
       # is the C5's firmware, a project for another chip that nothing here

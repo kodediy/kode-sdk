@@ -39,6 +39,8 @@ static uint32_t s_frame;
 static bool     s_pad_on = true;
 static unsigned s_pad_offs;
 static unsigned s_pad_ons;
+static uint32_t s_pad_calls;     /* Every khal_console_pad() call, a denied one included. */
+static bool     s_port_denied;   /* The frame and the pad answer KODE_DENIED, as for a port that is the app's. */
 
 /* What khal_console_tx_dropped() answers. */
 static uint32_t s_tx_dropped;
@@ -69,6 +71,8 @@ void fake_console_reset(void)
     s_pad_on        = true;
     s_pad_offs      = 0U;
     s_pad_ons       = 0U;
+    s_pad_calls     = 0U;
+    s_port_denied   = false;
     s_tx_dropped    = 0U;
 }
 
@@ -155,7 +159,7 @@ void khal_console_rest(bool rest)
 
 kode_status_t khal_console_frame(uint32_t *frame)
 {
-    if ( NULL == frame )
+    if ( (NULL == frame) || s_port_denied )
     {
         return KODE_DENIED;
     }
@@ -165,6 +169,11 @@ kode_status_t khal_console_frame(uint32_t *frame)
 
 kode_status_t khal_console_pad(bool on)
 {
+    ++s_pad_calls;
+    if ( s_port_denied )
+    {
+        return KODE_DENIED;
+    }
     if ( on )
     {
         ++s_pad_ons;
@@ -180,6 +189,16 @@ kode_status_t khal_console_pad(bool on)
 void fake_console_set_frame(uint32_t frame)
 {
     s_frame = frame;
+}
+
+void fake_console_deny_port(bool deny)
+{
+    s_port_denied = deny;
+}
+
+uint32_t fake_console_pad_calls(void)
+{
+    return s_pad_calls;
 }
 
 uint32_t khal_console_tx_dropped(void)

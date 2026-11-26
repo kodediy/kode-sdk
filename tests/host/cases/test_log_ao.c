@@ -1512,6 +1512,22 @@ TEST_CASE("a bounce request while one runs does nothing, and one after it bounce
     log_settle();
 }
 
+/* A port whose driver is the app's has no frame count and no pad to give:
+ * the request is answered at once and nothing is armed. */
+TEST_CASE("a cable port the console does not drive is never bounced, and that is said", "[log_ao]")
+{
+    log_fresh();
+    qf_support_margin_queue(AO_Log);
+    fake_console_deny_port(true);
+
+    bounce_ask();
+    log_wait_ms(KHAL_CONSOLE_FRAME_WAIT_MS + KHAL_CONSOLE_OFF_BUS_MS);
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, fake_console_pad_calls(), "AO_Log asked a port the app drives for its pad");
+    TEST_ASSERT_TRUE_MESSAGE(captured_has("none to show the host"), "the refusal was not said");
+    log_settle();
+}
+
 /* The request leaves AO_Log's queue the room a request leaves: lines and
  * bytes keep theirs, and a queue without it refuses the request, never asserts. */
 TEST_CASE("a bounce request is refused within AO_Log's queue margin and posted above it",
