@@ -714,6 +714,9 @@ typedef struct {
     bool     nets_none_said;     /**< "no networks remembered" was said and the vault has none still. */
     bool     vlist_publish;      /**< The LIST in flight answers wifi_list. */
     bool     remember;           /**< Save the join in flight once it works. */
+    uint8_t  join_gen;           /**< The generation of the join with the
+                                  *   worker or the vault, until its end is
+                                  *   published.                           */
     uint8_t  vault_op;           /**< VOP_*.                               */
 
     /* The station's fast mode, asked for by the Kode channel's AO_Net: no
@@ -734,6 +737,7 @@ typedef struct {
      * it: the latest replaces the one kept, a leave or a stop drops it. */
     uint8_t  wifi_owed;          /**< WOWED_*.                             */
     bool     owed_remember;      /**< The kept join saves its network.     */
+    uint8_t  owed_gen;           /**< The kept join's generation.          */
     char     owed_ssid[KODE_SSID_MAX + 1U];
     char     owed_pass[KODE_PASS_MAX + 1U];
 #endif
@@ -1234,10 +1238,11 @@ static void radio_heard_stream_cancel(Radio * const me);
 static bool scan_alive(Radio const * const me, uint8_t kind);
 
 /**
- * @brief Take the next generation for a listing request.
+ * @brief Take the next generation for a listing request or a join.
  *
- * One count for both radios, taken by whoever asks, on its own thread: a
- * listener tells its listing's end from an older one's by it.
+ * One count for both radios and the joins, taken by whoever asks, on its own
+ * thread: a listener tells its listing's end from an older one's by it, and
+ * an asker its join's end from every other state.
  *
  * @return The generation, never KQP_SCAN_GEN_NONE.
  */
@@ -1435,10 +1440,16 @@ void wifi_scan_request_wait(ScanWaiter *wait, uint32_t gen)
     scan_request_wait(wait, gen, (uint8_t)KQP_SCAN_WIFI, 0U);
 }
 
-QEvt const *wifi_join_evt(const char *ssid, const char *pass, bool remember)
+/**
+ * @brief Build a join's event, with no generation.
+ * @param ssid     The network; NULL for none.
+ * @param pass     Its password; NULL or empty for a saved or an open network.
+ * @param remember Save the network in the vault once it has worked.
+ * @return The event, or NULL when the pool is dry.
+ */
+static WifiJoinEvt *wifi_join_new(const char *ssid, const char *pass, bool remember)
 {
-    WifiJoinEvt *e   = Q_NEW_X(WifiJoinEvt, 0U, WIFI_JOIN_REQ_SIG);
-    QEvt const  *evt = NULL;
+    WifiJoinEvt *e = Q_NEW_X(WifiJoinEvt, 0U, WIFI_JOIN_REQ_SIG);
 
     if ( NULL != e )
     {
@@ -1453,22 +1464,45 @@ QEvt const *wifi_join_evt(const char *ssid, const char *pass, bool remember)
             (void)snprintf(e->pass, sizeof(e->pass), "%s", pass);
         }
         e->remember = remember;
-        evt         = &e->super;
+        e->gen      = (uint8_t)KQP_SCAN_GEN_NONE;
+    }
+    return e;
+}
+
+QEvt const *wifi_join_evt(const char *ssid, const char *pass, bool remember)
+{
+    WifiJoinEvt *e   = wifi_join_new(ssid, pass, remember);
+    QEvt const  *evt = NULL;
+
+    if ( NULL != e )
+    {
+        evt = &e->super;
     }
     return evt;
 }
 
-bool wifi_join_request(const char *ssid, const char *pass, bool remember)
+bool wifi_join_request_gen(const char *ssid, const char *pass, bool remember,
+                           uint8_t *gen)
 {
-    QEvt const *e = wifi_join_evt(ssid, pass, remember);
+    WifiJoinEvt *e = wifi_join_new(ssid, pass, remember);
 
     if ( NULL == e )
     {
         KLOG_E(TAG, "out of events; Wi-Fi join request dropped");
         return false;
     }
+    if ( NULL != gen )
+    {
+        e->gen = scan_gen_next();
+        *gen   = e->gen;
+    }
     /* QActive_post_ recycles the event itself when it refuses. */
-    return QACTIVE_POST_X(AO_Radio, e, KQP_RADIO_POST_MARGIN, NULL);
+    return QACTIVE_POST_X(AO_Radio, &e->super, KQP_RADIO_POST_MARGIN, NULL);
+}
+
+bool wifi_join_request(const char *ssid, const char *pass, bool remember)
+{
+    return wifi_join_request_gen(ssid, pass, remember, NULL);
 }
 
 QEvt const *wifi_leave_evt(void)
@@ -3539,8 +3573,15 @@ static bool wifi_join_out(Radio const * const me)
     return out;
 }
 
-/** @brief Publish where the connection stands, from the driver's own view. */
-static void wifi_publish_state(Radio * const me)
+/**
+ * @brief Publish where the connection stands, from the driver's own view, as
+ *        the end of the join @p gen names.
+ * @param me      The AO.
+ * @param gen     The generation of the join this state ends;
+ *                KQP_SCAN_GEN_NONE for a state that ends none.
+ * @param dropped That join never ran.
+ */
+static void wifi_publish_end(Radio * const me, uint8_t gen, bool dropped)
 {
     WifiStateEvt *e = Q_NEW_X(WifiStateEvt, 0U, WIFI_STATE_SIG);
     if ( NULL != e )
@@ -3554,7 +3595,46 @@ static void wifi_publish_state(Radio * const me)
         e->fail    = (uint8_t)kdrv_wifi_fail_last();
         e->joining = wifi_join_out(me);
         e->reconnecting = me->retry_on;
+        e->join_gen     = gen;
+        e->join_dropped = dropped && ((uint8_t)KQP_SCAN_GEN_NONE != gen);
         QACTIVE_PUBLISH(&e->super, &me->super);
+    }
+}
+
+/** @brief Publish where the connection stands, the end of no join. */
+static void wifi_publish_state(Radio * const me)
+{
+    wifi_publish_end(me, (uint8_t)KQP_SCAN_GEN_NONE, false);
+}
+
+/**
+ * @brief Publish the end of the join with the worker or the vault: its
+ *        outcome, carrying its generation once.
+ * @param me The AO.
+ */
+static void wifi_join_answer(Radio * const me)
+{
+    uint8_t const gen = me->join_gen;
+
+    me->join_gen = (uint8_t)KQP_SCAN_GEN_NONE;
+    wifi_publish_end(me, gen, false);
+}
+
+/**
+ * @brief Answer a Wi-Fi request turned away with where the connection stands;
+ *        a join turned away is told it never ran.
+ * @param me The AO.
+ * @param e  The request.
+ */
+static void wifi_publish_refusal(Radio * const me, QEvt const * const e)
+{
+    if ( (QSignal)WIFI_JOIN_REQ_SIG == e->sig )
+    {
+        wifi_publish_end(me, Q_EVT_CAST(WifiJoinEvt)->gen, true);
+    }
+    else
+    {
+        wifi_publish_state(me);
     }
 }
 
@@ -4154,14 +4234,14 @@ static void radio_vault_answer(Radio * const me, KodeSvcEvt const * const e)
             (void)snprintf(req.ssid, sizeof(req.ssid), "%s", me->ssid);
             if ( !radio_submit_req(me, &req) )
             {
-                wifi_publish_state(me);
+                wifi_join_answer(me);
             }
         }
         else
         {
             KLOG_W(TAG, "the C5's vault would not join '%s' (status %u)",
                    me->ssid, (unsigned)e->status);
-            wifi_publish_state(me);
+            wifi_join_answer(me);
         }
     }
     else
@@ -4179,7 +4259,7 @@ static void radio_vault_lost(Radio * const me)
     if ( (uint8_t)VOP_JOIN == vop )
     {
         me->busy = false;
-        wifi_publish_state(me);
+        wifi_join_answer(me);
     }
     else if ( ((uint8_t)VOP_LIST == vop) && me->vlist_publish )
     {
@@ -7066,15 +7146,45 @@ static void c5_test_link_failed(Radio * const me, kode_status_t status)
 
 #if CONFIG_KODEOS_WIFI
 /**
+ * @brief Forget the Wi-Fi request that waits for the radio, and wipe its password.
+ * @param me The AO.
+ * @return The generation of the join that waited; KQP_SCAN_GEN_NONE for none.
+ */
+static uint8_t wifi_owed_forget(Radio * const me)
+{
+    uint8_t const gen = me->owed_gen;
+
+    me->wifi_owed     = (uint8_t)WOWED_NONE;
+    me->owed_remember = false;
+    me->owed_gen      = (uint8_t)KQP_SCAN_GEN_NONE;
+    me->owed_ssid[0]  = '\0';
+    (void)memset(me->owed_pass, 0, sizeof(me->owed_pass));
+    return gen;
+}
+
+/**
+ * @brief Tell the asker of a join that waited that it never runs.
+ * @param me  The AO.
+ * @param gen The join's generation; KQP_SCAN_GEN_NONE tells nobody.
+ */
+static void wifi_owed_dropped(Radio * const me, uint8_t gen)
+{
+    if ( (uint8_t)KQP_SCAN_GEN_NONE != gen )
+    {
+        wifi_publish_end(me, gen, true);
+    }
+}
+
+/**
  * @brief Drop the Wi-Fi request that waits for the radio, and wipe its password.
+ *
+ * A join dropped here never runs, and its asker is told.
+ *
  * @param me The AO.
  */
 static void wifi_owed_clear(Radio * const me)
 {
-    me->wifi_owed     = (uint8_t)WOWED_NONE;
-    me->owed_remember = false;
-    me->owed_ssid[0]  = '\0';
-    (void)memset(me->owed_pass, 0, sizeof(me->owed_pass));
+    wifi_owed_dropped(me, wifi_owed_forget(me));
 }
 
 /**
@@ -7084,7 +7194,8 @@ static void wifi_owed_clear(Radio * const me)
  */
 static void wifi_owe(Radio * const me, QEvt const * const e)
 {
-    wifi_owed_clear(me);
+    uint8_t const replaced = wifi_owed_forget(me);
+
     me->wifi_left = false;   /* somebody wants a network again */
     if ( (QSignal)WIFI_JOIN_REQ_SIG == e->sig )
     {
@@ -7092,6 +7203,7 @@ static void wifi_owe(Radio * const me, QEvt const * const e)
 
         me->wifi_owed     = (uint8_t)WOWED_JOIN;
         me->owed_remember = j->remember;
+        me->owed_gen      = j->gen;
         (void)snprintf(me->owed_ssid, sizeof(me->owed_ssid), "%s", j->ssid);
         (void)snprintf(me->owed_pass, sizeof(me->owed_pass), "%s", j->pass);
     }
@@ -7099,6 +7211,7 @@ static void wifi_owe(Radio * const me, QEvt const * const e)
     {
         me->wifi_owed = (uint8_t)WOWED_AUTO;
     }
+    wifi_owed_dropped(me, replaced);
 }
 
 /**
@@ -7123,9 +7236,10 @@ static bool wifi_owed_replay(Radio * const me)
         if ( NULL != j )
         {
             j->remember = me->owed_remember;
+            j->gen      = me->owed_gen;
             (void)snprintf(j->ssid, sizeof(j->ssid), "%s", me->owed_ssid);
             (void)snprintf(j->pass, sizeof(j->pass), "%s", me->owed_pass);
-            wifi_owed_clear(me);
+            (void)wifi_owed_forget(me);   /* it goes on, in the event */
             QACTIVE_POST(&me->super, &j->super, &me->super);
             posted = true;
         }
@@ -9997,6 +10111,8 @@ void Radio_ctor(void)
     me->nets_none_said = false;
     me->vlist_publish = false;
     me->remember      = false;
+    me->join_gen      = (uint8_t)KQP_SCAN_GEN_NONE;
+    me->owed_gen      = (uint8_t)KQP_SCAN_GEN_NONE;
     me->vault_op      = (uint8_t)VOP_NONE;
     me->fast_want     = false;
     me->ps_fast       = false;
@@ -11613,7 +11729,7 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
                 wifi_owed_clear(me);
             }
             KLOG_W(TAG, "no link to the C5; `radio_up` first");
-            wifi_publish_state(me);
+            wifi_publish_refusal(me, e);
             status = Q_HANDLED();
             break;
         }
@@ -12426,9 +12542,10 @@ static QState Radio_failed(Radio * const me, QEvt const * const e)
             radio_exp_no_link(me);
             /* And in the services' own voices: `wifi_up` and `ble_up` close on
              * WIFI_STATE_SIG and BLE_STATE_SIG with their watchdog disarmed,
-             * and without these the console waits until the board is reset. */
+             * and without these the console waits until the board is reset.
+             * A join the link took with it ends here. */
 #if CONFIG_KODEOS_WIFI
-            wifi_publish_state(me);
+            wifi_join_answer(me);
 #endif
 #if CONFIG_KODEOS_BLE
             ble_publish_state(me);
@@ -12880,7 +12997,7 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             }
             (void)memset(me->pass, 0, sizeof(me->pass));
             me->remember = false;
-            wifi_publish_state(me);
+            wifi_join_answer(me);
             status = Q_HANDLED();
             break;
         }
@@ -12895,7 +13012,7 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             }
             else
             {
-                wifi_publish_state(me);
+                wifi_join_answer(me);
             }
             status = Q_HANDLED();
             break;
@@ -13670,6 +13787,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 (void)snprintf(me->ssid, sizeof(me->ssid), "%s", j->ssid);
                 me->autojoin  = false;
                 me->wifi_left = false;
+                me->join_gen  = j->gen;
                 /* A network asked for by name is kept through a pass. */
                 me->quiet_left = me->quiet;
                 if ( by_vault )
@@ -13694,7 +13812,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 if ( !radio_submit_req(me, &req) )
                 {
                     (void)memset(me->pass, 0, sizeof(me->pass));
-                    wifi_publish_state(me);
+                    wifi_join_answer(me);
                 }
                 else
                 {
@@ -15467,7 +15585,7 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
                 wifi_owed_clear(me);
             }
             radio_say_busy("the request", RADIO_BUSY_NO);
-            wifi_publish_state(me);
+            wifi_publish_refusal(me, e);
             status = Q_HANDLED();
             break;
         }

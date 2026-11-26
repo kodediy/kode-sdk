@@ -675,6 +675,394 @@ TEST_CASE("a join's state says it is still out until it has ended, and why it "
     wifi_owed_cleanup();
 }
 
+/* ---- The state that ends a join, by its generation ------------------------------ */
+
+/**
+ * @brief Read the spy to its end: how many Wi-Fi states end the join @p gen.
+ * @param gen The join's generation.
+ * @param out The last of them, when there is one; NULL when not wanted.
+ * @return How many states carried @p gen.
+ */
+static unsigned join_ends(uint8_t gen, WifiStateEvt *out)
+{
+    unsigned n = 0U;
+
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( ((QSignal)WIFI_STATE_SIG == e->sig)
+            && (((const WifiStateEvt *)e)->join_gen == gen) )
+        {
+            if ( NULL != out )
+            {
+                *out = *(const WifiStateEvt *)e;
+            }
+            ++n;
+        }
+    }
+    return n;
+}
+
+/**
+ * @brief Ask for a join that carries a generation, and run what it sets going.
+ * @param ssid The network.
+ * @param pass Its password; "" for a saved one.
+ * @return The join's generation.
+ */
+static uint8_t join_gen_ask(const char *ssid, const char *pass)
+{
+    uint8_t gen = (uint8_t)KQP_SCAN_GEN_NONE;
+
+    TEST_ASSERT_TRUE(wifi_join_request_gen(ssid, pass, false, &gen));
+    TEST_ASSERT_NOT_EQUAL((int)KQP_SCAN_GEN_NONE, (int)gen);
+    pump();
+    return gen;
+}
+
+/** @brief Up, with a sweep in the worker for a join to wait behind. */
+static void up_with_a_sweep(void)
+{
+    radio_fresh();
+    go_up();
+    (void)wifi_scan_request(NULL);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    ao_spy_drain();
+}
+
+/* The Wi-Fi page asks for the strength every couple of seconds; with the
+ * radio busy AO_Radio answers it with where Wi-Fi stands. That state, and
+ * every other before the join's end, carries no generation. */
+TEST_CASE("a join that waits is answered once, by its own end, and the states "
+          "before it carry no generation", "[radio_ao][join_gen]")
+{
+    WifiStateEvt                  w;
+    wifi_event_sta_disconnected_t ev;
+
+    up_with_a_sweep();
+    /* On a network already, as after a join that worked. */
+    fake_wifi_events_deliver(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                             &(ip_event_got_ip_t){ 0 });
+    ao_spy_drain();
+
+    uint8_t const gen = join_gen_ask("net", "wrong-pass");
+    dispatch(WIFI_RSSI_REQ_SIG);
+    pump();
+    TEST_ASSERT_TRUE_MESSAGE(wifi_state_last(&w), "the busy refresh published nothing");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_SCAN_GEN_NONE, w.join_gen);
+    TEST_ASSERT_TRUE(w.joining);
+    TEST_ASSERT_EQUAL_UINT((unsigned)KDRV_WIFI_GOT_IP, (unsigned)w.state);
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_TRUE(joining("net"));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, join_ends(gen, NULL), "a state ended the join before it had");
+
+    (void)memset(&ev, 0, sizeof(ev));
+    ev.reason = (uint16_t)WIFI_REASON_AUTH_FAIL;
+    fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &ev);
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_DENIED);
+
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    TEST_ASSERT_FALSE(w.joining);
+    TEST_ASSERT_EQUAL_UINT((unsigned)KDRV_WIFI_DISCONNECTED, (unsigned)w.state);
+    TEST_ASSERT_EQUAL_UINT((unsigned)KDRV_WIFI_FAIL_PASSWORD, (unsigned)w.fail);
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join that gets on is answered once, with its generation",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    go_up();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_TRUE(joining("net"));
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    wifi_owed_cleanup();
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+}
+
+TEST_CASE("a join of a saved network is answered once, at the end of the C5's join",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    go_up();
+    vault_has("home");
+    uint8_t const gen = join_gen_ask("home", "");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_PREPARE, running_job());
+    vault_joins("home");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, join_ends(gen, NULL), "a step of the join answered it");
+
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join of a saved network the vault refuses, or never answers, is "
+          "answered once", "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    go_up();
+    vault_has("home");
+
+    uint8_t gen = join_gen_ask("home", "");
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_JOIN,
+                            ((const kode_hdr_t *)fake_peer_last_sent(NULL))->op);
+    kode_answer(KODE_ST_NOT_FOUND, NULL, 0U);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+
+    gen = join_gen_ask("home", "");
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT8(KODE_VAULT_JOIN,
+                            ((const kode_hdr_t *)fake_peer_last_sent(NULL))->op);
+    tick(QF_SUPPORT_STEPS(3000U) + 2U);
+    pump();
+    TEST_ASSERT_TRUE(logged("KODE service 1 did not answer"));
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+
+    gen = join_gen_ask("home", "");
+    finish(KDRV_RADIO_JOB_WIFI_PREPARE, KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, join_ends(gen, &w), "a readying that failed was not the answer");
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join the worker will not take is answered once, at once",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    go_up();
+    fake_khal_worker_refuse_for(RADIO_WORKER, true);
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    fake_khal_worker_refuse_for(RADIO_WORKER, false);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join whose job outlives its guard is answered once, and its late "
+          "return answers nobody", "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    go_up();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_TRUE(joining("net"));
+
+    tick(QF_SUPPORT_STEPS(KODE_RADIO_GUARD_MS) + 4U);
+    TEST_ASSERT_TRUE(logged("did not answer job"));
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join the link is lost under is answered once", "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    go_up();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_TRUE(joining("net"));
+
+    finish_lost(KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    wifi_owed_cleanup();
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+}
+
+TEST_CASE("a join that waits when the link is lost is answered once, dropped",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    up_with_a_sweep();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+
+    finish_lost(KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+    wifi_owed_cleanup();
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+}
+
+TEST_CASE("a join that waits is answered once, dropped, by wifi_down and by "
+          "wifi_leave", "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    up_with_a_sweep();
+    uint8_t gen = join_gen_ask("net", "pw12345678");
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+
+    gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_FALSE_MESSAGE(joining("net"), "a dropped join ran");
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join that waits is answered once, dropped, when a newer join takes "
+          "its place, and the newer one by its own end", "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    up_with_a_sweep();
+    uint8_t const first  = join_gen_ask("first", "pw-first-1");
+    uint8_t const second = join_gen_ask("second", "pw-second");
+    TEST_ASSERT_NOT_EQUAL((int)first, (int)second);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(first, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+    TEST_ASSERT_TRUE_MESSAGE(w.joining, "the newer join is still out");
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_TRUE(joining("second"));
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(second, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join that waits is answered once, dropped, when a join with no "
+          "generation takes its place", "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    up_with_a_sweep();
+    uint8_t const first = join_gen_ask("first", "pw-first-1");
+    TEST_ASSERT_TRUE(wifi_join_request("second", "pw-second", false));   /* no generation */
+    pump();
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(first, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+    TEST_ASSERT_TRUE_MESSAGE(w.joining, "the newer join is still out");
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_TRUE(joining("second"));
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(first, NULL));
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join that waits is answered once, dropped, when the automatic round "
+          "takes its place, and the round's own state carries no generation",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    up_with_a_sweep();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_TRUE(wifi_auto_request());
+    pump();
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_FALSE_MESSAGE(joining("net"), "a dropped join ran");
+    wifi_owed_cleanup();
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+}
+
+TEST_CASE("a join with the link off is answered once, dropped, when the worker "
+          "will not take the connect", "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    fake_khal_worker_refuse_for(RADIO_WORKER, true);
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    fake_khal_worker_refuse_for(RADIO_WORKER, false);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+}
+
+TEST_CASE("a join with the link off that brings it up is answered by its own end",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_TRUE(joining("net"));
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join asked while the link comes down is answered once, dropped",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    go_up();
+    dispatch(RADIO_DOWN_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+}
+
+/* A join with no generation, as the facade and kodeOS's own screens ask for
+ * it, runs as it always did, and its end carries none. */
+TEST_CASE("a join with no generation runs, and its end carries none",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    go_up();
+    TEST_ASSERT_EQUAL_INT((int)KODE_OK, (int)kode_sys_wifi_connect("net", "pw12345678"));
+    pump();
+    TEST_ASSERT_TRUE(joining("net"));
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    TEST_ASSERT_TRUE(wifi_state_last(&w));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_SCAN_GEN_NONE, w.join_gen);
+    TEST_ASSERT_FALSE(w.join_dropped);
+
+    TEST_ASSERT_TRUE(wifi_join_request("other", "pw12345678", false));
+    pump();
+    TEST_ASSERT_TRUE(joining("other"));
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_ERROR);
+    TEST_ASSERT_TRUE(wifi_state_last(&w));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KQP_SCAN_GEN_NONE, w.join_gen);
+    wifi_owed_cleanup();
+}
+
 TEST_CASE("an autojoin that arrives with the link off brings the link up and runs",
           "[radio_ao][owed]")
 {
@@ -3339,6 +3727,68 @@ TEST_CASE("install dst=c5 while a job holds the channel waits, and pushes the "
     TEST_ASSERT_EQUAL_UINT(1U, ready);
     TEST_ASSERT_EQUAL_UINT(0U, fail);
     inst_complete();
+    inst_restart();
+}
+
+/* An update ends with the link off, so a join owed behind it never runs, and
+ * one asked during it is turned away. Each asker is told, once. */
+TEST_CASE("a join owed behind a C5 update, or asked during it, is answered once, dropped",
+          "[radio_ao][join_gen]")
+{
+    WifiStateEvt w;
+    unsigned     done = 0U;
+    unsigned     owed = 0U;
+    unsigned     late = 0U;
+
+    radio_fresh();
+    go_up();
+    recv_spy();
+
+    dispatch(WIFI_SCAN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    inst_deliver();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_C5_BEGIN, running_job(),
+                                  "the update goes first");
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+
+    uint8_t const during = join_gen_ask("other", "pw12345678");
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(during, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+
+    inst_push_to_end();   /* the update ends the link */
+    (void)memset(&w, 0, sizeof(w));
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)RECV_DONE_SIG == e->sig )
+        {
+            done += 1U;
+        }
+        else if ( ((QSignal)WIFI_STATE_SIG == e->sig)
+                 && (((const WifiStateEvt *)e)->join_gen == gen) )
+        {
+            w     = *(const WifiStateEvt *)e;
+            owed += 1U;
+        }
+        else if ( ((QSignal)WIFI_STATE_SIG == e->sig)
+                 && (((const WifiStateEvt *)e)->join_gen == during) )
+        {
+            late += 1U;
+        }
+        else
+        {
+            /* not this case's */
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT(1U, done);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, owed, "the join that will not run left its asker waiting");
+    TEST_ASSERT_TRUE(w.join_dropped);
+    TEST_ASSERT_EQUAL_UINT(0U, late);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+
+    dispatch(WIFI_STOP_REQ_SIG);
+    pump();
     inst_restart();
 }
 

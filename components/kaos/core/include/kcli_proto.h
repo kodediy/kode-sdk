@@ -100,8 +100,14 @@ typedef enum {
                            *   last channel, by `wifi_scan_stop` or by a
                            *   job that needed the radio - the networks
                            *   before it were heard, the rest of the air
-                           *   was not swept. ls's listing: cut, when it
-                           *   stopped before the folder's end - a page
+                           *   was not swept. wifi_join: dropped, behind the
+                           *   `>|wifi=` record of where Wi-Fi stands, when
+                           *   its join never ran - a newer join or the
+                           *   automatic round took its place, or Wi-Fi
+                           *   switched off, a leave or the link's end
+                           *   dropped it while it waited. ls's listing:
+                           *   cut, when it stopped before the folder's
+                           *   end - a page
                            *   AO_Storage could not list or be asked for,
                            *   one that brought nothing, or a folder past
                            *   what a page's 16-bit skip counts; the

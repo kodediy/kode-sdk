@@ -18,6 +18,7 @@
 #include "kaos.h"
 #include "kcli_proto.h"
 #include "kdrv_ble.h"
+#include "kdrv_wifi.h"
 #include "kqp.h"
 #include "qf_support.h"
 #include "owners_support.h"
@@ -130,6 +131,45 @@ static bool posted(enum_t sig)
         QF_gc(e);
     }
     return hit;
+}
+
+/**
+ * @brief The generation of the join the console posted to AO_Radio; empties
+ *        the queue.
+ * @return It, or KQP_SCAN_GEN_NONE when no join was posted.
+ */
+static uint8_t posted_join_gen(void)
+{
+    const QEvt *e   = NULL;
+    uint8_t     gen = (uint8_t)KQP_SCAN_GEN_NONE;
+
+    while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)WIFI_JOIN_REQ_SIG == e->sig )
+        {
+            gen = ((const WifiJoinEvt *)(const void *)e)->gen;
+        }
+        QF_gc(e);
+    }
+    return gen;
+}
+
+/**
+ * @brief Publish to the console a Wi-Fi state, the way AO_Radio does.
+ * @param state   kdrv_wifi_state_t.
+ * @param gen     The join it ends; KQP_SCAN_GEN_NONE for none.
+ * @param dropped That join never ran.
+ */
+static void wifi_state_to_console(uint8_t state, uint8_t gen, bool dropped)
+{
+    WifiStateEvt st;
+
+    (void)memset(&st, 0, sizeof(st));
+    st.super        = (QEvt)QEVT_INITIALIZER(WIFI_STATE_SIG);
+    st.state        = state;
+    st.join_gen     = gen;
+    st.join_dropped = dropped;
+    QASM_DISPATCH(AO_Console, &st.super, 0U);
 }
 
 /** @brief Close a listing the way AO_Radio does. */
@@ -836,7 +876,7 @@ TEST_CASE("a second wifi_scan ends the first, stopped, and holds the console its
 TEST_CASE("wifi_join ends the wifi_scan in flight, stopped, and is asked for",
           "[console_scan][newest]")
 {
-    WifiStateEvt st;
+    uint8_t gen;
 
     console_up();
     type_line("wifi_scan");
@@ -846,16 +886,15 @@ TEST_CASE("wifi_join ends the wifi_scan in flight, stopped, and is asked for",
     type_line("wifi_join ssid=\"net\" pass=\"pw12345678\"");
     TEST_ASSERT_NULL(line_with(">err code=4 msg=busy"));
     TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
-    TEST_ASSERT_TRUE_MESSAGE(posted(WIFI_JOIN_REQ_SIG), "the join was not asked for");
+    gen = posted_join_gen();
+    TEST_ASSERT_NOT_EQUAL_MESSAGE((int)KQP_SCAN_GEN_NONE, (int)gen, "the join was not asked for");
 
     /* The cut sweep's end is not the join's answer; the state is. */
     fake_klog_reset();
     end_cut();
     TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "the scan's end closed the join");
-    (void)memset(&st, 0, sizeof(st));
-    st.super = (QEvt)QEVT_INITIALIZER(WIFI_STATE_SIG);
-    QASM_DISPATCH(AO_Console, &st.super, 0U);
-    (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
+    wifi_state_to_console((uint8_t)KDRV_WIFI_IDLE, gen, false);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
 }
 
 TEST_CASE("a second ble_scan ends the first, stopped, and its own length is posted",
@@ -901,11 +940,12 @@ TEST_CASE("a scan of one radio ends no scan of the other: the line is answered b
 TEST_CASE("a radio line ends no command but a scan: behind a join it is answered busy",
           "[console_scan][newest]")
 {
-    WifiStateEvt st;
+    uint8_t gen;
 
     console_up();
     type_line("wifi_join ssid=\"net\" pass=\"pw12345678\"");
-    TEST_ASSERT_TRUE(posted(WIFI_JOIN_REQ_SIG));
+    gen = posted_join_gen();
+    TEST_ASSERT_NOT_EQUAL((int)KQP_SCAN_GEN_NONE, (int)gen);
     fake_klog_reset();
 
     type_line("wifi_scan");
@@ -913,10 +953,64 @@ TEST_CASE("a radio line ends no command but a scan: behind a join it is answered
     TEST_ASSERT_NULL(line_with("msg=stopped"));
     TEST_ASSERT_FALSE(posted(WIFI_SCAN_REQ_SIG));
 
-    (void)memset(&st, 0, sizeof(st));
-    st.super = (QEvt)QEVT_INITIALIZER(WIFI_STATE_SIG);
-    QASM_DISPATCH(AO_Console, &st.super, 0U);
-    (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
+    wifi_state_to_console((uint8_t)KDRV_WIFI_IDLE, gen, false);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+/* While a join waits for the radio, AO_Radio still says where Wi-Fi stands:
+ * a refresh of the strength the Wi-Fi page asks for, the automatic round
+ * asked again. Those states, and the end of somebody else's join, are not
+ * this join's answer. */
+TEST_CASE("wifi_join is answered by its own join's end, never by another state",
+          "[console_scan][join_gen]")
+{
+    uint8_t gen;
+
+    console_up();
+    type_line("wifi_join ssid=\"net\" pass=\"wrong-pass\"");
+    gen = posted_join_gen();
+    fake_klog_reset();
+
+    wifi_state_to_console((uint8_t)KDRV_WIFI_GOT_IP, (uint8_t)KQP_SCAN_GEN_NONE, false);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "the state from before the join answered it");
+    TEST_ASSERT_NULL(line_with(">|wifi="));
+
+    TEST_ASSERT_NOT_EQUAL((int)KQP_SCAN_GEN_NONE, (int)gen);
+    wifi_state_to_console((uint8_t)KDRV_WIFI_GOT_IP, (uint8_t)(gen + 1U), false);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">ok"), "another join's end answered it");
+    wifi_state_to_console((uint8_t)KDRV_WIFI_GOT_IP, (uint8_t)(gen + 1U), true);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), "another join's drop answered it");
+
+    wifi_state_to_console((uint8_t)KDRV_WIFI_DISCONNECTED, gen, false);
+    TEST_ASSERT_NOT_NULL(line_with(">|wifi=disconnected"));
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+
+    fake_klog_reset();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE_MESSAGE(posted(WIFI_SCAN_REQ_SIG), "the console was not free");
+    end_listing(WIFI_SCAN_END_SIG);
+}
+
+TEST_CASE("a wifi_join whose join never ran says where Wi-Fi stands, then dropped",
+          "[console_scan][join_gen]")
+{
+    uint8_t gen;
+
+    console_up();
+    type_line("wifi_join ssid=\"net\" pass=\"pw12345678\"");
+    gen = posted_join_gen();
+    TEST_ASSERT_NOT_EQUAL((int)KQP_SCAN_GEN_NONE, (int)gen);
+    fake_klog_reset();
+
+    wifi_state_to_console((uint8_t)KDRV_WIFI_IDLE, gen, true);
+    TEST_ASSERT_NOT_NULL(line_with(">|wifi=idle"));
+    TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=dropped"));
+    TEST_ASSERT_NULL(line_with(">ok"));
+
+    fake_klog_reset();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE_MESSAGE(posted(WIFI_SCAN_REQ_SIG), "the console was not free");
+    end_listing(WIFI_SCAN_END_SIG);
 }
 
 /* A line takes a scan's place only from the port that asked for the scan:
@@ -1213,7 +1307,7 @@ static unsigned net_ends(void)
 TEST_CASE("a channel line behind the channel's scan ends under its own sequence, and the scan under its own",
           "[console_scan][newest]")
 {
-    WifiStateEvt st;
+    uint8_t gen;
 
     console_up();
     (void)net_ends();
@@ -1236,15 +1330,13 @@ TEST_CASE("a channel line behind the channel's scan ends under its own sequence,
     s_line_seq = 33U;
     type_line_from((uint8_t)KODE_CONSOLE_SRC_NET, "wifi_join ssid=\"net\"");
     TEST_ASSERT_NOT_NULL(line_with(">err code=5 msg=stopped"));
-    TEST_ASSERT_TRUE(posted(WIFI_JOIN_REQ_SIG));
+    gen = posted_join_gen();
+    TEST_ASSERT_NOT_EQUAL((int)KQP_SCAN_GEN_NONE, (int)gen);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, net_ends(), "the scan's line was not ended, or the join's was");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(31U, s_done_seq, "the scan ended as the line that took its place");
 
     /* The join's answer ends the join's line. */
-    (void)memset(&st, 0, sizeof(st));
-    st.super = (QEvt)QEVT_INITIALIZER(WIFI_STATE_SIG);
-    QASM_DISPATCH(AO_Console, &st.super, 0U);
-    (void)qf_support_tick(AO_Console, CMD_TIMEOUT_TICKS + 1U);
+    wifi_state_to_console((uint8_t)KDRV_WIFI_IDLE, gen, false);
     TEST_ASSERT_EQUAL_UINT(1U, net_ends());
     TEST_ASSERT_EQUAL_UINT8(33U, s_done_seq);
     s_line_seq = 0U;

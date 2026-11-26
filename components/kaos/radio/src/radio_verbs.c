@@ -36,10 +36,13 @@ typedef enum {
     RADIO_V_ID,          /**< id_cert, ident_csr, ident_cert, ident_lock:
                           *   ID_PART_SIG records until ID_END_SIG.         */
     RADIO_V_WIPE,        /**< c5_wipe: closed by C5_WIPE_RSP_SIG.           */
-    RADIO_V_WIFI,        /**< wifi_up/down/join/leave/info/auto: closed by
+    RADIO_V_WIFI,        /**< wifi_up/down/leave/info/auto: closed by
                           *   WIFI_STATE_SIG. Several hand the watchdog
                           *   over: association plus DHCP outlasts it, and
                           *   AO_Radio answers either way.                  */
+    RADIO_V_WIFI_JOIN,   /**< wifi_join: closed by the WIFI_STATE_SIG that
+                          *   carries its join's generation, and by no
+                          *   other; the watchdog is handed over.           */
     RADIO_V_WIFI_SCAN,   /**< wifi_scan: entries until WIFI_SCAN_END_SIG.   */
     RADIO_V_WIFI_SAVED,  /**< wifi_list: entries until WIFI_SAVED_END_SIG.  */
     RADIO_V_FRAMES,      /**< wifi_frames: its window, then its record; the
@@ -55,6 +58,9 @@ static radio_verb_kind_t s_radio_kind;
 #if CONFIG_KODEOS_WIFI
 /** @brief Networks `wifi_scan` has printed since it began, or since its listing started again. */
 static uint16_t s_scan_rows;
+
+/** @brief The generation of the join that holds the console (wifi_join_request_gen()). */
+static uint8_t s_join_gen;
 #endif
 
 #if CONFIG_KODEOS_WIFI || CONFIG_KODEOS_BLE
@@ -791,8 +797,9 @@ static void h_wifi_scan_stop(const kverb_t *c, const karg_val_t *v)
 }
 
 /** @brief wifi_join ssid="<s>" [pass="<p>"] [remember=on|off]: closed by
- *         WIFI_STATE_SIG. remember=off is the factory's own network, which
- *         must not travel to the customer in the vault. */
+ *         the WIFI_STATE_SIG that ends its own join. remember=off is the
+ *         factory's own network, which must not travel to the customer in
+ *         the vault. */
 static void h_wifi_join(const kverb_t *c, const karg_val_t *v)
 {
     const char *pass     = "";
@@ -807,11 +814,12 @@ static void h_wifi_join(const kverb_t *c, const karg_val_t *v)
         remember = v[2].b;
     }
     console_begin(c->verb);
-    s_radio_kind = RADIO_V_WIFI;
+    s_radio_kind = RADIO_V_WIFI_JOIN;
+    s_join_gen   = (uint8_t)KQP_SCAN_GEN_NONE;
     console_unwatched();   /* association + DHCP outlast 5 s */
-    /* With the watchdog disarmed, only WIFI_STATE_SIG closes the command,
-     * and a request the pool dropped will never have one. */
-    if ( !wifi_join_request(v[0].s, pass, remember) )
+    /* With the watchdog disarmed, only the join's own end closes the
+     * command, and a request the pool dropped will never have one. */
+    if ( !wifi_join_request_gen(v[0].s, pass, remember, &s_join_gen) )
     {
         console_reply_err(KCLI_ERR_REJECT, c->verb);
         console_end();
@@ -2171,7 +2179,13 @@ static bool radio_answer(QEvt const *e)
 #endif
 #if CONFIG_KODEOS_WIFI
         case WIFI_STATE_SIG: {
-            if ( RADIO_V_WIFI == s_radio_kind )
+            if ( (RADIO_V_WIFI_JOIN == s_radio_kind)
+                && (Q_EVT_CAST(WifiStateEvt)->join_gen != s_join_gen) )
+            {
+                /* Where Wi-Fi stands while the join waits or runs, or the end
+                 * of another join: it closes nothing. */
+            }
+            else if ( (RADIO_V_WIFI == s_radio_kind) || (RADIO_V_WIFI_JOIN == s_radio_kind) )
             {
                 WifiStateEvt const * const w = Q_EVT_CAST(WifiStateEvt);
                 static const char *const STATES[] = {
@@ -2194,7 +2208,15 @@ static bool radio_answer(QEvt const *e)
                       console_kv_text(safe, sizeof(safe), w->ssid),
                       console_ip4(ip, sizeof(ip), w->ip4),
                       (int32_t)w->rssi, en);
-                console_reply(">ok");
+                if ( (RADIO_V_WIFI_JOIN == s_radio_kind) && w->join_dropped )
+                {
+                    /* The join never ran: the record is where Wi-Fi stands. */
+                    console_reply_err(KCLI_ERR_REJECT, "dropped");
+                }
+                else
+                {
+                    console_reply(">ok");
+                }
                 console_end();
             }
             else

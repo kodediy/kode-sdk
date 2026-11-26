@@ -2365,6 +2365,8 @@ bool ble_heard_request(QActive *who, bool on);
  * Answered with WIFI_STATE_SIG: got-ip, or the refusal. Passwords live in the C5's
  * vault: a saved network asked with an empty @p pass is joined without a password
  * crossing the link; otherwise @p pass is sent once and kept if @p remember.
+ * The join carries no generation (KQP_SCAN_GEN_NONE); wifi_join_request_gen()
+ * gives it one.
  *
  * @param ssid     The network to join.
  * @param pass     Its password; empty for a saved network or an open one.
@@ -2374,6 +2376,30 @@ bool ble_heard_request(QActive *who, bool on);
  *         and then nothing answers.
  */
 bool wifi_join_request(const char *ssid, const char *pass, bool remember);
+
+/**
+ * @brief Ask AO_Radio to join @p ssid, as wifi_join_request(), with a
+ *        generation that tells its answer from every other state.
+ *
+ * Exactly one WIFI_STATE_SIG carries the generation in WifiStateEvt.join_gen:
+ * the one that ends this join. That is its outcome, the refusal, or, with
+ * WifiStateEvt.join_dropped, the news that it never ran (a newer join or the
+ * automatic round took its place, or Wi-Fi switched off, a leave or the
+ * link's end dropped it while it waited). Every state published for another
+ * reason carries KQP_SCAN_GEN_NONE. The generation comes from the count
+ * wifi_scan_request() takes its own from.
+ *
+ * @param ssid     The network to join.
+ * @param pass     Its password; empty for a saved network or an open one.
+ * @param remember Save the network in the vault once it has worked.
+ * @param gen      Out: this request's generation; NULL for none, and then the
+ *                 join carries KQP_SCAN_GEN_NONE, as wifi_join_request()'s.
+ * @return true when the request was posted; false when the event pool was
+ *         dry or AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full,
+ *         and then nothing answers.
+ */
+bool wifi_join_request_gen(const char *ssid, const char *pass, bool remember,
+                           uint8_t *gen);
 
 /**
  * @brief The event wifi_join_request() posts, built for a caller that posts it itself.

@@ -4952,6 +4952,10 @@ typedef struct {
     char ssid[33];   /**< 32 bytes plus the terminator (802.11).            */
     char pass[65];   /**< 64 plus the terminator (WPA2 PSK as a passphrase). */
     bool remember;   /**< Save it in the C5's vault once it has worked.     */
+    uint8_t gen;     /**< The request's generation, from
+                      *   wifi_join_request_gen(); KQP_SCAN_GEN_NONE for
+                      *   none. The state that ends the join carries it
+                      *   (WifiStateEvt.join_gen).                        */
 } WifiJoinEvt;
 
 /** @brief What WIFI_FAST_REQ_SIG carries: the wish, a static event each. */
@@ -5582,6 +5586,14 @@ typedef struct {
     bool     reconnecting; /**< Off the network, and AO_Radio is working on
                          *   getting back on one, waiting between tries or
                          *   until the board wakes included.                 */
+    uint8_t  join_gen;  /**< The generation of the join this state ends
+                         *   (WifiJoinEvt.gen), carried by that one state
+                         *   alone; KQP_SCAN_GEN_NONE in every state
+                         *   published for another reason.                   */
+    bool     join_dropped; /**< With @c join_gen: true when that join never
+                         *   ran. A newer join or the automatic round took
+                         *   its place, or Wi-Fi switched off, a leave or the
+                         *   link's end dropped it while it waited.          */
 } WifiStateEvt;
 
 /* ---- AO_Net -------------------------------------------------------------
