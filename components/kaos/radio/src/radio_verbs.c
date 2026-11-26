@@ -799,7 +799,11 @@ static void h_wifi_scan_stop(const kverb_t *c, const karg_val_t *v)
 /** @brief wifi_join ssid="<s>" [pass="<p>"] [remember=on|off]: closed by
  *         the WIFI_STATE_SIG that ends its own join. remember=off is the
  *         factory's own network, which must not travel to the customer in
- *         the vault. */
+ *         the vault. A name of more than KODE_SSID_MAX bytes is refused
+ *         `msg=ssid`, a password of 1 to KODE_WIFI_PASS_MIN - 1 or more than
+ *         KODE_PASS_MAX bytes `msg=pass`, both code 3.
+ * @param c The verb's row.
+ * @param v Its arguments: ssid, pass, remember. */
 static void h_wifi_join(const kverb_t *c, const karg_val_t *v)
 {
     const char *pass     = "";
@@ -812,6 +816,21 @@ static void h_wifi_join(const kverb_t *c, const karg_val_t *v)
     if ( v[2].present )
     {
         remember = v[2].b;
+    }
+    /* The grammar refuses an empty string; a longer one than the join event
+     * holds is refused here, never cut. */
+    size_t const ssid_len = strlen(v[0].s);
+    size_t const pass_len = strlen(pass);
+    if ( KODE_SSID_MAX < ssid_len )
+    {
+        console_reply_err(KCLI_ERR_VALUE, "ssid");
+        return;
+    }
+    if ( (0U != pass_len)
+        && ((KODE_WIFI_PASS_MIN > pass_len) || (KODE_PASS_MAX < pass_len)) )
+    {
+        console_reply_err(KCLI_ERR_VALUE, "pass");
+        return;
     }
     console_begin(c->verb);
     s_radio_kind = RADIO_V_WIFI_JOIN;

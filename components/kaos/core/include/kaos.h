@@ -2359,6 +2359,8 @@ bool wifi_frames_request(QActive *who, bool on, uint8_t channel);
  */
 bool ble_heard_request(QActive *who, bool on);
 
+#define KODE_WIFI_PASS_MIN  8U  /**< Bytes of a Wi-Fi password that is not empty, at least (WPA2 passphrase). */
+
 /**
  * @brief Ask AO_Radio to join @p ssid.
  *

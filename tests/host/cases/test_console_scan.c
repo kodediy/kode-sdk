@@ -1013,6 +1013,105 @@ TEST_CASE("a wifi_join whose join never ran says where Wi-Fi stands, then droppe
     end_listing(WIFI_SCAN_END_SIG);
 }
 
+/**
+ * @brief The join the console posted to AO_Radio, copied; empties the queue.
+ * @param out Where it goes.
+ * @return Whether a join was posted.
+ */
+static bool posted_join(WifiJoinEvt *out)
+{
+    const QEvt *e   = NULL;
+    bool        hit = false;
+
+    while ( xQueueReceive(AO_Radio->eQueue, &e, 0U) == pdTRUE )
+    {
+        if ( (QSignal)WIFI_JOIN_REQ_SIG == e->sig )
+        {
+            (void)memcpy(out, e, sizeof(*out));
+            hit = true;
+        }
+        QF_gc(e);
+    }
+    return hit;
+}
+
+/**
+ * @brief Type a wifi_join, see it posted with @p ssid and @p pass whole, and
+ *        close it with its own end.
+ * @param line The line typed.
+ * @param ssid The name the join must carry.
+ * @param pass The password the join must carry.
+ */
+static void join_taken(const char *line, const char *ssid, const char *pass)
+{
+    WifiJoinEvt j;
+
+    fake_klog_reset();
+    type_line(line);
+    TEST_ASSERT_NULL_MESSAGE(line_with(">err"), line);
+    TEST_ASSERT_TRUE_MESSAGE(posted_join(&j), line);
+    TEST_ASSERT_EQUAL_STRING(ssid, j.ssid);
+    TEST_ASSERT_EQUAL_STRING(pass, j.pass);
+    wifi_state_to_console((uint8_t)KDRV_WIFI_GOT_IP, j.gen, false);
+    TEST_ASSERT_NOT_NULL(line_with(">ok"));
+}
+
+/**
+ * @brief Type a wifi_join and see it refused with @p err, nothing posted.
+ * @param line The line typed.
+ * @param err  The refusal expected.
+ */
+static void join_refused(const char *line, const char *err)
+{
+    fake_klog_reset();
+    type_line(line);
+    TEST_ASSERT_NOT_NULL_MESSAGE(line_with(err), line);
+    TEST_ASSERT_FALSE_MESSAGE(posted(WIFI_JOIN_REQ_SIG), line);
+}
+
+#define NAME_32  "abcdefghijklmnopqrstuvwxyz012345"   /**< A name of the most bytes.     */
+#define PASS_64  NAME_32 NAME_32                        /**< A password of the most bytes. */
+
+/* The join event holds 32 bytes of name and 64 of password: a longer one
+ * would reach the radio cut, and a password of 1 to 7 bytes is no WPA2 key. */
+TEST_CASE("wifi_join refuses a name of none or over 32 bytes and a password of 1 to 7 or over 64",
+          "[console_scan][join_len]")
+{
+    console_up();
+
+    join_refused("wifi_join ssid=\"\"", ">err code=3 msg=ssid");
+    join_refused("wifi_join ssid=\"" NAME_32 "x\"", ">err code=3 msg=ssid");
+    join_refused("wifi_join ssid=\"net\" pass=\"1\"", ">err code=3 msg=pass");
+    join_refused("wifi_join ssid=\"net\" pass=\"1234567\"", ">err code=3 msg=pass");
+    join_refused("wifi_join ssid=\"net\" pass=\"" PASS_64 "x\"", ">err code=3 msg=pass");
+
+    /* Refused before anything was asked: the console is free. */
+    fake_klog_reset();
+    type_line("wifi_scan");
+    TEST_ASSERT_TRUE_MESSAGE(posted(WIFI_SCAN_REQ_SIG), "the console was not free");
+    end_listing(WIFI_SCAN_END_SIG);
+}
+
+TEST_CASE("wifi_join takes a 32-byte name and a password of 8, 64 or none, whole",
+          "[console_scan][join_len]")
+{
+    console_up();
+
+    join_taken("wifi_join ssid=\"" NAME_32 "\"", NAME_32, "");
+    join_taken("wifi_join ssid=\"net\" pass=\"12345678\"", "net", "12345678");
+    join_taken("wifi_join ssid=\"net\" pass=\"" PASS_64 "\"", "net", PASS_64);
+}
+
+/* UTF-8 is bytes to the grammar: a quoted name of them reaches the radio as
+ * typed, an escaped quote included. */
+TEST_CASE("a quoted non-ASCII name reaches the join whole",
+          "[console_scan][join_len]")
+{
+    console_up();
+
+    join_taken("wifi_join ssid=\"Caf\xC3\xA9 \\\"\xC3\xB1\\\"\"", "Caf\xC3\xA9 \"\xC3\xB1\"", "");
+}
+
 /* A line takes a scan's place only from the port that asked for the scan:
  * the Kode channel's and the scheduler's wait their turn behind the cable's
  * command, and another port's is answered busy. */
