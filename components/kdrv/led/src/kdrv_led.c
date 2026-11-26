@@ -247,21 +247,26 @@ static kode_status_t led_drive(uint8_t r, uint8_t g, uint8_t b)
 
 kode_status_t kdrv_led_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
-    kode_status_t const st = kdrv_led_init();
+    kode_status_t st = kdrv_led_init();
     if ( KODE_OK != st )
     {
         return st;
     }
-    /* (0,0,0) means "off", not "black is the new colour": keep the last real
-     * colour so a later kdrv_led_set(true) restores it. */
-    if ( (r | g | b) != 0U )
+    /* Kept only once the chip took it: a toggle reads s_on, and a write that
+     * did not land leaves the LED as it was. (0,0,0) means "off", not "black
+     * is the new colour": the last real colour stays for kdrv_led_set(true). */
+    st = led_drive(r, g, b);
+    if ( KODE_OK == st )
     {
-        s_r = r;
-        s_g = g;
-        s_b = b;
+        if ( (r | g | b) != 0U )
+        {
+            s_r = r;
+            s_g = g;
+            s_b = b;
+        }
+        s_on = ((r | g | b) != 0U);
     }
-    s_on = ((r | g | b) != 0U);
-    return led_drive(r, g, b);
+    return st;
 }
 
 kode_status_t kdrv_led_set(bool on)
@@ -280,4 +285,9 @@ kode_status_t kdrv_led_set(bool on)
 kode_status_t kdrv_led_toggle(void)
 {
     return kdrv_led_set(!s_on);
+}
+
+bool kdrv_led_is_on(void)
+{
+    return s_on;
 }

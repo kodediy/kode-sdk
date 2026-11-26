@@ -3,6 +3,8 @@
  * @file test_led_mgr.c
  * @brief AO_LedMgr's state machine, driven by hand over a mocked bus.
  */
+#include <string.h>
+
 #include "unity.h"
 
 #include "qpc.h"
@@ -161,11 +163,31 @@ TEST_CASE("disabling the heartbeat darkens the LED", "[led_mgr]")
 /** @brief Register writes the chip has seen, whatever they were. */
 static unsigned s_led_writes;
 
+/** @brief Every write fails while set. */
+static bool s_bus_down;
+
+/** @brief The last enable mask the chip took: which dies are lit. */
+static uint8_t s_led_en;
+
 static kode_status_t count_write(khal_i2c_dev_t dev, uint8_t reg, uint8_t val, int ncalls)
 {
-    (void)dev; (void)reg; (void)val; (void)ncalls;
+    kode_status_t st = KODE_OK;
+
+    (void)dev; (void)ncalls;
     s_led_writes += 1U;
-    return KODE_OK;
+    if ( s_bus_down )
+    {
+        st = KODE_ERROR;
+    }
+    else if ( REG_LED_EN == reg )
+    {
+        s_led_en = val;
+    }
+    else
+    {
+        /* a current or the enable control: counted, nothing to keep */
+    }
+    return st;
 }
 
 /** @brief Start from a bus that counts, and an AO that has a queue to tick into. */
@@ -176,6 +198,7 @@ static void rest_up(void)
     qf_support_give_queue(AO_LedMgr);
     khal_i2c_write_reg_StubWithCallback(&count_write);
     s_led_writes = 0U;
+    s_bus_down   = false;
 }
 
 static void rest_down(void)
@@ -292,5 +315,152 @@ TEST_CASE("STATE(DARK) leaves a rested LED alone; AWAKE still brings it back",
                                           "the heartbeat did not come back on AWAKE");
     heartbeat(false);
     (void)qf_support_tick(AO_LedMgr, 2U);
+    rest_down();
+}
+
+/** @brief Ask for a colour, as kode_led_set_rgb() does. */
+static void colour(uint8_t r, uint8_t g, uint8_t b)
+{
+    LedRgbEvt e = { .super = QEVT_INITIALIZER(LED_RGB_SIG), .r = r, .g = g, .b = b };
+
+    QASM_DISPATCH(AO_LedMgr, &e.super, 0U);
+}
+
+/** @brief Ask for the LED on or off, as kode_led_off() does. */
+static void led_set(bool on)
+{
+    LedEvt e = { .super = QEVT_INITIALIZER(LED_SET_SIG), .on = on };
+
+    QASM_DISPATCH(AO_LedMgr, &e.super, 0U);
+}
+
+/** @brief Lines of AO_LedMgr's at one level, "!W" or "!N". */
+static unsigned ledmgr_lines(const char *level)
+{
+    unsigned n = 0U;
+
+    for ( unsigned i = 0U; fake_klog_count() > i; ++i )
+    {
+        const char *l = fake_klog_line(i);
+
+        if ( (NULL != l) && (0 == strncmp(l, level, 2U))
+             && (NULL != strstr(l, "kaos.ledmgr")) )
+        {
+            n += 1U;
+        }
+    }
+    return n;
+}
+
+/* A write the chip did not take is said, once while the bus stays away and
+ * once when it comes back: a line per write would bury the console a blink
+ * writes to twice a second. */
+TEST_CASE("a write the LED did not take is warned of once, and its return said once",
+          "[led_mgr]")
+{
+    rest_up();
+    led_set(false);
+    fake_klog_reset();
+
+    s_bus_down = true;
+    colour(255U, 0U, 0U);
+    colour(0U, 255U, 0U);
+    led_set(false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ledmgr_lines("!W"), "the failed writes were not warned of once");
+
+    s_bus_down = false;
+    colour(255U, 0U, 0U);
+    colour(0U, 255U, 0U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ledmgr_lines("!W"), "a write that landed was warned of");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ledmgr_lines("!N"), "the return was not said once");
+
+    led_set(false);
+    rest_down();
+}
+
+/* An app that uses the LED as a notice (red: a message unread) keeps it
+ * across a rest: dark while the board rests, its colour again on AWAKE. */
+TEST_CASE("the colour an app set is back when the board wakes", "[led_mgr][lowpower]")
+{
+    rest_up();
+    heartbeat(false);
+    colour(0U, 0U, 255U);                       /* blue: OUT2 */
+    TEST_ASSERT_EQUAL_HEX8(0x04U, s_led_en);
+
+    lp_round(AO_LedMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_led_en, "the LED was lit through the rest");
+
+    lp_awake(AO_LedMgr);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x04U, s_led_en, "the app's colour did not come back");
+
+    /* A second AWAKE (an abandoned round publishes one) writes nothing more. */
+    s_led_writes = 0U;
+    lp_awake(AO_LedMgr);
+    TEST_ASSERT_EQUAL_UINT(0U, s_led_writes);
+
+    led_set(false);
+    rest_down();
+}
+
+/* What the app asked for last is what comes back, and "off" is an answer. */
+TEST_CASE("an LED the app left off stays off after a rest", "[led_mgr][lowpower]")
+{
+    rest_up();
+    heartbeat(false);
+    colour(0U, 0U, 255U);
+    led_set(false);
+
+    lp_round(AO_LedMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    s_led_writes = 0U;
+
+    lp_awake(AO_LedMgr);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_led_writes, "the wake wrote a LED the app left off");
+    TEST_ASSERT_EQUAL_HEX8(0x00U, s_led_en);
+    rest_down();
+}
+
+/* A request answered while the board rests decides what the LED shows, and
+ * the wake puts back nothing of its own over it. */
+TEST_CASE("an off asked for during the rest is not undone by the wake", "[led_mgr][lowpower]")
+{
+    rest_up();
+    heartbeat(false);
+    colour(0U, 0U, 255U);
+
+    lp_round(AO_LedMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    led_set(false);
+    s_led_writes = 0U;
+
+    lp_awake(AO_LedMgr);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_led_writes, "the wake lit a LED switched off in the rest");
+    TEST_ASSERT_EQUAL_HEX8(0x00U, s_led_en);
+    rest_down();
+}
+
+/* A colour asked for while the board rests, then a second round of the same
+ * rest (OFF from ASLEEP, given up): the second round puts out a LED the first
+ * never saw lit, and the wake still brings it back. */
+TEST_CASE("a colour set during the rest is back after a second round and the wake",
+          "[led_mgr][lowpower]")
+{
+    rest_up();
+    heartbeat(false);
+
+    lp_round(AO_LedMgr, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    colour(0U, 0U, 255U);                       /* blue, during the rest */
+    TEST_ASSERT_EQUAL_HEX8(0x04U, s_led_en);
+
+    lp_round(AO_LedMgr, KODE_LP_OFF);
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_led_en, "the second round left the LED lit");
+
+    lp_awake(AO_LedMgr);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x04U, s_led_en, "the colour set during the rest did not come back");
+
+    led_set(false);
     rest_down();
 }
