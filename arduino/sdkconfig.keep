@@ -1,0 +1,33 @@
+# The options in which the Arduino libraries differ from an SDK app, each
+# because Arduino's core or its libraries need their own value. One option a
+# line, then its reason. arduino/tools/check_config.py fails on a difference
+# not listed here, and on a line here that no longer differs.
+
+# The partition table, the same file named from each project's folder.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME  the same file, kbsp's partitions.csv, by its path from the builder's project
+CONFIG_PARTITION_TABLE_FILENAME         the same file, derived from the one above
+
+# The compiler. The libraries' flags are the ones every sketch compiles with.
+CONFIG_COMPILER_OPTIMIZATION_SIZE       Arduino's libraries and sketches are built for size (-Os)
+CONFIG_COMPILER_OPTIMIZATION_DEBUG      the other side of the choice above
+CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS  sketches and Arduino libraries are not written to build with warnings as errors
+CONFIG_COMPILER_CXX_EXCEPTIONS          Arduino libraries and sketches use C++ exceptions
+
+# The tasks.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1  loop() runs on CPU1 and may never yield, which would starve that core's idle task
+CONFIG_ESP_TIMER_TASK_STACK_SIZE        Ticker and the core's timers run the sketch's callbacks on the esp_timer task; it costs about 4.6 KB more internal RAM than ESP-IDF's default
+CONFIG_FREERTOS_ENABLE_BACKWARD_COMPATIBILITY  Arduino libraries written for older ESP-IDFs use FreeRTOS's old names
+CONFIG_FREERTOS_USE_TRACE_FACILITY      the core's task list (freertos_stats.cpp) asks the scheduler for every task; the console's `tasks` answers with it
+
+# ESP-IDF's log. initArduino() sets every tag to the default level.
+CONFIG_LOG_DEFAULT_LEVEL                ESP-IDF's log at errors only, so Serial carries the sketch's output
+CONFIG_LOG_DEFAULT_LEVEL_ERROR          the choice that sets the level above
+CONFIG_LOG_DEFAULT_LEVEL_INFO           the other side of the choice above
+
+# The network libraries.
+CONFIG_LWIP_SO_RCVBUF                   Arduino's core selects it in its own Kconfig (ENABLE_ARDUINO_DEPENDS)
+CONFIG_LWIP_IP_FORWARD                  WiFi.AP.enableNAPT() needs lwIP's forwarding
+CONFIG_LWIP_PPP_SUPPORT                 the PPP library builds only with lwIP's PPP
+CONFIG_LWIP_IPV6_AUTOCONFIG             WiFi.enableIPv6() takes the global address from the router
+CONFIG_LWIP_SNTP_MAX_SERVERS            configTime() sets three SNTP servers
+CONFIG_MBEDTLS_PSK_MODES                NetworkClientSecure::setPreSharedKey() needs TLS's pre-shared keys

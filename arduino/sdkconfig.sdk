@@ -1,11 +1,27 @@
-# The SDK in a firmware Arduino's core builds: an app whose Serial owns the
-# USB-Serial/JTAG, so the console writes through the app's port.
+# The SDK in a firmware Arduino's core builds: an app with everything kode.h
+# offers, whose Serial owns the USB-Serial/JTAG, so the console writes through
+# the app's port.
 
 # The console. (kaos)
 CONFIG_KODEOS_CONSOLE=y
 # On the cable port the app provides. (khal)
 CONFIG_KHAL_CONSOLE_APP_PORT=y
+# The ESP32-C5 link, Wi-Fi, the network calls and MQTT. (kaos)
+CONFIG_KODEOS_RADIO=y
+CONFIG_KODEOS_WIFI=y
+CONFIG_KODEOS_NET=y
+CONFIG_KODEOS_MQTT=y
+# The Bluetooth host, which the board file leaves off. (ESP-IDF)
+CONFIG_BT_ENABLED=y
+# Bluetooth LE, with the console over it, paired with a code. (kaos)
+CONFIG_KODEOS_BLE=y
+CONFIG_KODEOS_BLE_CONSOLE=y
 # The NFC reader, which an app's defaults leave off: Arduino's libraries carry it. (kaos)
 CONFIG_KODEOS_NFC=y
+# Low power, resting only when the sketch asks: no idle count. (kdefs)
+CONFIG_KODE_LOWPOWER=y
+CONFIG_KODE_LOWPOWER_IDLE=n
+# The log starts at warnings. (klog)
+CONFIG_KLOG_DEFAULT_LEVEL_WARN=y
 # I2C0 and SPI2 are the app's, the ones Wire and SPI open; the board keeps I2C1 and SPI3. (kbsp)
 CONFIG_KBSP_APP_LOW_BUSES=y
