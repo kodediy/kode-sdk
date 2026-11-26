@@ -161,7 +161,15 @@ TEST_CASE("dots inside a name are no part of their own", "[kode_file]")
 {
     expect_path("sd/.hidden", "/sdcard/.hidden");
     expect_path("sd/a..b", "/sdcard/a..b");
-    expect_path("sd/...", "/sdcard/...");
+}
+
+TEST_CASE("a name FAT does not take is refused", "[kode_file]")
+{
+    expect_refused("sd/log 12:30.csv", "bad path 'sd/log 12:30.csv': a name FAT does not take");
+    expect_refused("flash/what?.txt", "bad path 'flash/what?.txt': a name FAT does not take");
+    expect_refused("flash/a*b.txt", "bad path 'flash/a*b.txt': a name FAT does not take");
+    expect_refused("sd/...", "bad path 'sd/...': a name FAT does not take");
+    expect_refused("sd/. ./x", "bad path 'sd/. ./x': a name FAT does not take");
 }
 
 TEST_CASE("a path of KODE_FILE_PATH_MAX characters is too long", "[kode_file]")
@@ -1455,6 +1463,57 @@ TEST_CASE("a write held past the bound fails saying storage is busy", "[kode_fil
     /* Let the abandoned request land, so the next case finds a clean facade. */
     file_will_settle();
     TEST_ASSERT_TRUE(kode_file_write("flash/b.txt", "abc"));
+    file_no_settle();
+}
+
+/* ---- A name FAT does not take ---- */
+
+/** @brief The error text of a path with a name FAT does not take. */
+#define TEST_BAD_FAT_PATH(p) "bad path '" p "': a name FAT does not take"
+
+/** @brief Expect a call that @p failed at once, its error @p want. */
+static void expect_bad_at_once(bool failed, const char *want)
+{
+    TEST_ASSERT_TRUE(failed);
+    TEST_ASSERT_EQUAL_STRING(want, kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, kode_sys_time_ms());
+}
+
+TEST_CASE("a write to a name with a colon fails at once as a bad path", "[kode_file]")
+{
+    file_fresh();
+    expect_bad_at_once(!kode_file_write("sd/log 12:30.txt", "abc"),
+                       TEST_BAD_FAT_PATH("sd/log 12:30.txt"));
+    file_no_settle();
+}
+
+TEST_CASE("an exists on a name with a question mark fails at once as a bad path", "[kode_file]")
+{
+    file_fresh();
+    expect_bad_at_once(!kode_file_exists("flash/what?.txt"), TEST_BAD_FAT_PATH("flash/what?.txt"));
+    file_no_settle();
+}
+
+TEST_CASE("a read of a name with an asterisk fails at once as a bad path", "[kode_file]")
+{
+    file_fresh();
+    expect_bad_at_once('\0' == kode_file_read("flash/a*b.txt")[0], TEST_BAD_FAT_PATH("flash/a*b.txt"));
+    file_no_settle();
+}
+
+TEST_CASE("a folder named only with dots fails at once as a bad path", "[kode_file]")
+{
+    file_fresh();
+    expect_bad_at_once(!kode_file_create_folder("flash/..."), TEST_BAD_FAT_PATH("flash/..."));
+    file_no_settle();
+}
+
+TEST_CASE("a rename to a name with a colon fails at once as a bad name", "[kode_file]")
+{
+    file_fresh();
+    TEST_ASSERT_TRUE(host_pattern("a.txt", 0U, 1U, "wb"));
+    expect_bad_at_once(!kode_file_rename("flash/a.txt", "b:c.txt"), "bad name 'b:c.txt'");
+    TEST_ASSERT_EQUAL_UINT32(1U, host_size(fake_media_fs_dir(), "a.txt"));
     file_no_settle();
 }
 

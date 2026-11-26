@@ -158,6 +158,9 @@ void kode_log_set_color(bool enable);
  */
 void kode_log_reply(const char *line);
 
+/** @brief The reply a console port sends for a line longer than it holds, instead of running it. */
+#define KODE_LOG_REPLY_LINE_TOO_LONG  ">err code=3 msg=line_too_long"
+
 /**
  * @brief Put one response line on the wire, tagged with the port of the
  *        command it answers.

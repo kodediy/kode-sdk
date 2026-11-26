@@ -907,7 +907,7 @@ static void handle_byte(Log * const me, uint8_t c)
             /* A line cut in half must not run: refuse it. kode_log_reply(), not
              * khal_console_write(), so the reply keeps its place behind the
              * replies already queued. */
-            kode_log_reply(">err code=3 msg=line_too_long");
+            kode_log_reply(KODE_LOG_REPLY_LINE_TOO_LONG);
             me->overflow = false;
             me->len      = 0U;
         }

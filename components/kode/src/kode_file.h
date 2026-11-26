@@ -21,8 +21,9 @@ struct kode_file_state;
  * @param out  Receives the volume path.
  * @param cap  Bytes of @p out, NUL included.
  * @return true on success; false with the task's error set for a NULL or empty
- *         path, a leading "/", another volume, an empty, "." or ".." part, or
- *         a path too long for KODE_FILE_PATH_MAX or @p cap.
+ *         path, a leading "/", another volume, an empty, "." or ".." part, a
+ *         name FAT does not take, or a path too long for KODE_FILE_PATH_MAX or
+ *         @p cap.
  */
 bool kode_file_path(const char *user, char *out, uint32_t cap);
 

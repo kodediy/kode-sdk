@@ -1764,13 +1764,10 @@ kode_status_t kdrv_st25r3916_emulate_start(const knfc_emu_card_t *card)
     {
         s_emu_conf.nfcidLen = RFAL_LM_NFCID_LEN_04;
     }
-    else if ( 7U == img.nfcid_len )
-    {
-        s_emu_conf.nfcidLen = RFAL_LM_NFCID_LEN_07;
-    }
     else
     {
-        s_emu_conf.nfcidLen = RFAL_LM_NFCID_LEN_10;
+        /* The image presents 4 or 7 bytes. */
+        s_emu_conf.nfcidLen = RFAL_LM_NFCID_LEN_07;
     }
     (void)memcpy(s_emu_conf.nfcid, img.nfcid, img.nfcid_len);
     s_emu_conf.SENS_RES[0] = img.sens_res[0];

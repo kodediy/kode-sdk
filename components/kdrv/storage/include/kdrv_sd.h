@@ -211,9 +211,8 @@ typedef enum {
  * slot quiet until a card mounts.
  *
  * @return The mount point, or NULL when there is no card. On failure the
- *         reason is logged, including the one that is nearly always right:
- *         the card's supply is the ESP32-C5's to switch; kdrv_sd_why() keeps
- *         it.
+ *         reason is logged and kdrv_sd_why() keeps it. The card's supply is
+ *         SD_PWR, the P4's GPIO22, and this driver switches it.
  */
 const char *kdrv_sd_mount(void);
 

@@ -1120,9 +1120,9 @@ kode_status_t kode_sys_mag_cal_clear(QActive *me);
 typedef NfcTag kode_sys_nfc_tag_t;
 
 /**
- * @brief The card to present: @c uid, @c uid_len, @c atqa and @c sak to clone
- *        (zero to synthesise), and @c ndef with @c uri, or @c raw_len bytes of
- *        a ready-made @c raw message.
+ * @brief The card to present: @c uid, @c uid_len (4 or 7), @c atqa and @c sak
+ *        to clone (zero to synthesise), and @c ndef with @c uri, or @c raw_len
+ *        bytes of a ready-made @c raw message.
  */
 typedef NfcCard kode_sys_nfc_card_t;
 
@@ -1183,7 +1183,7 @@ kode_status_t kode_sys_nfc_ndef_write_text(QActive *me, const char *text, uint32
  * @param me   The asking AO; NFC_EMU_RSP_SIG answers it once the window is armed
  *             or refused: KODE_ERROR with no reader fitted (not KODE_IO_ERROR)
  *             or a driver that will not emulate, KODE_DENIED while the reader
- *             is held. Every other NFC request is KODE_DENIED meanwhile, and
+ *             is held or for a @c uid_len that is not 0, 4 or 7. Every other NFC request is KODE_DENIED meanwhile, and
  *             only @p me may stop the card.
  * @param card What to present; copied.
  * @return As the requests' rules above.

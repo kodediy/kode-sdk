@@ -7,6 +7,7 @@
 
 #include <string.h>
 
+#include "kdrv_storage.h"
 #include "khal_once.h"
 #include "khal_sync.h"
 #include "khal_system.h"
@@ -94,6 +95,12 @@ static void path_bad(const char *user)
 static void path_bad_part(const char *user)
 {
     kode_err_set("bad path '%s': no empty, '.' or '..' part", user);
+}
+
+/** @brief Keep @p user in the task's error as a path with a name FAT does not take. */
+static void path_bad_name(const char *user)
+{
+    kode_err_set("bad path '%s': a name FAT does not take", user);
 }
 
 /** @brief Keep @p user in the task's error as a path too long. */
@@ -239,6 +246,11 @@ bool kode_file_path(const char *user, char *out, uint32_t cap)
     (void)memcpy(out, root, root_len);
     (void)memcpy(&out[root_len], &user[vol], rest_len);
     out[root_len + rest_len] = '\0';
+    if ( !kdrv_storage_path_valid(out) )
+    {
+        path_bad_name(user);
+        return false;
+    }
     return true;
 }
 
@@ -1786,11 +1798,19 @@ bool kode_file_rename(const char *path, const char *new_name)
             {
                 (void)memcpy(dst, vol, keep);
                 (void)memcpy(&dst[keep], new_name, len + 1U);
+                if ( !kdrv_storage_path_valid(dst) )
+                {
+                    kode_err_set("bad name '%s'", new_name);
+                }
                 /* A change of case only names the entry that is there already. */
-                if ( source_there(path, vol, &st)
+                else if ( source_there(path, vol, &st)
                     && (names_match_ci(&vol[keep], new_name) || target_free(new_name, dst)) )
                 {
                     ok = rename_same(path, vol, dst);
+                }
+                else
+                {
+                    /* the check that failed said why */
                 }
             }
         }

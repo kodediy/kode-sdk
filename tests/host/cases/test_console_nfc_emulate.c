@@ -186,6 +186,27 @@ TEST_CASE("nfc_emulate reads a quoted uid, atqa and sak as hex",
     TEST_ASSERT_TRUE(replied(">ok reads=0"));
 }
 
+TEST_CASE("nfc_emulate refuses a 10-byte uid, before asking AO_Nfc",
+          "[console_nfc_emulate]")
+{
+    NfcEmuReqEvt q;
+
+    console_up();
+    type_line("nfc_emulate uid=\"04A23B915C6D7E8F9011\"");
+    TEST_ASSERT_TRUE(replied(">err code=2 msg=\"uid= must be 4 or 7 hex bytes\""));
+    TEST_ASSERT_FALSE_MESSAGE(posted_emu(&q), "a 10-byte uid reached AO_Nfc");
+
+    fake_klog_reset();
+    type_line("nfc_emulate uid=\"04A23B915C6D7E\"");
+    TEST_ASSERT_TRUE_MESSAGE(posted_emu(&q), "a 7-byte uid did not reach AO_Nfc");
+    const knfc_emu_card_t * const card = (const knfc_emu_card_t *)q.card;
+    TEST_ASSERT_NOT_NULL(card);
+    TEST_ASSERT_EQUAL_UINT8(7U, card->uid_len);
+
+    answer_emu(KODE_OK, 0U);
+    TEST_ASSERT_TRUE(replied(">ok reads=0"));
+}
+
 /* ---- The other form ------------------------------------------------------- */
 
 TEST_CASE("nfc_emulate refuses a string typed bare, before asking AO_Nfc",

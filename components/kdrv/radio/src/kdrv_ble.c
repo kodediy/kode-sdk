@@ -882,9 +882,10 @@ static bool s_raw_on;
  * The line editor's rules minus the editing: a client on this port is a
  * machine, and echo, prompt and backspace are what a terminal needs. CR or LF
  * ends a line; an empty line is ignored; a line that runs past the buffer is
- * dropped WHOLE and said so, because a command silently cut down and then
- * executed is a lie about what was asked - and this port has no echo for
- * anyone to watch stop.
+ * refused WHOLE with the cable's reply, because a command silently cut down
+ * and then executed is a lie about what was asked - and this port has no echo
+ * for anyone to watch stop. The reply goes through kode_log_reply(), behind the
+ * replies already queued, and reaches the central like any other line.
  *
  * @param data Bytes as they arrived. One write may carry a partial line, a
  *             whole one, or several.
@@ -899,8 +900,7 @@ static void console_feed(const uint8_t *data, uint16_t len)
         {
             if ( s_line_over )
             {
-                KLOG_W(TAG, "console line over %u bytes, dropped",
-                       (unsigned)(BLE_LINE_MAX - 1U));
+                kode_log_reply(KODE_LOG_REPLY_LINE_TOO_LONG);
             }
             else if ( (0U < s_line_len) && (NULL != s_rx_cb) )
             {

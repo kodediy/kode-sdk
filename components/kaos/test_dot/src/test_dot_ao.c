@@ -403,9 +403,6 @@ static const char *const GRID_ROWS[] = { "pmic", "gauge", "ioexp", "clocks", "im
                                          "audio", "sd", "nfc", "rfid", "ir" };
 /** @brief The row states' words, by AUTOTEST_ROW_*. */
 static const char *const ROW_WORD[AUTOTEST_ROW_STATES] = { "running", "pass", "fail", "timeout", "skipped" };
-/** @brief The reset's steps' words, by kboot_reset_step_t. */
-static const char *const RESET_WORD[] = { "reset_find", "reset_install", "reset_apps", "reset_link",
-                                          "reset_wipe", "reset_nvs", "reset_request", "reset_done" };
 /** @brief The loop's reasons, by kdrv_dock_loop_why_t. */
 static const char *const LOOP_WHY[] = { "-", "no_echo", "corrupt", "uart_busy" };
 
@@ -2297,8 +2294,7 @@ static void on_reset(TestDot *me, FactoryResetRspEvt const *e)
     {
         me->res      = (uint8_t)RES_FAILED;
         me->res_code = TD_ERR_BUSY;
-        (void)snprintf(me->res_why, sizeof(me->res_why), "%s",
-                       td_word(RESET_WORD, sizeof(RESET_WORD) / sizeof(RESET_WORD[0]), e->step));
+        (void)snprintf(me->res_why, sizeof(me->res_why), "reset_%s", boot_reset_step_name(e->step));
         result_show(me, TEST_DOT_ST_FAILED);
     }
 }

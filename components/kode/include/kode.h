@@ -439,8 +439,10 @@ bool kode_led_toggle(void);
 /*
  * Paths: "sd" or "flash", then nothing or "/" and the rest: "sd/log.txt",
  * "flash/data/a.csv". Any case for the volume; no leading "/", no empty, "."
- * or ".." part. A bad path fails and kode_error() names it. A file call waits
- * for another task's file call to finish.
+ * or ".." part, no name FAT does not take (a control character or one of
+ * " * : < > ? | \ in it, or only dots and spaces). A bad path fails at once
+ * and kode_error() names it. A file call waits for another task's file call
+ * to finish.
  */
 
 #define KODE_FILE_PATH_MAX 91U      /**< Bytes of a path, NUL included. */
@@ -668,7 +670,7 @@ bool kode_file_create_folder(const char *path);
  * Blocks. A volume itself is refused.
  *
  * @param path     "sd/..." or "flash/...".
- * @param new_name One name: not empty, not "." or "..", no '/'.
+ * @param new_name One name: not empty, not "." or "..", no '/', one FAT takes.
  * @return true when renamed; false otherwise, with kode_error() saying why.
  */
 bool kode_file_rename(const char *path, const char *new_name);
@@ -1872,12 +1874,12 @@ typedef struct {
  * nothing that takes time until a wake: finish file and network work first,
  * and wait for the wake with kode_event_wait() or a button, not by asking the
  * board for things. Whatever @p wake says, these always wake it: every
- * button, a USB cable (seen within a minute), a console line, an MQTT
- * message, and the battery at the level where the board protects it. And a
- * processor left asleep for the user's `off_after` time switches the board
- * off, as a board asleep does. A wake ends only the CPU part: the other parts
- * stay away, and calling kode_rest() again lets the processor sleep again.
- * What the rest saves is not a measured figure.
+ * button, a USB cable (looked for every KODE_LOWPOWER_CABLE_LOOK_MS, 2 s), a
+ * console line, an MQTT message, and the battery at the level where the
+ * board protects it. And a processor left asleep for the user's `off_after`
+ * time switches the board off, as a board asleep does. A wake ends only the
+ * CPU part: the other parts stay away, and calling kode_rest() again lets
+ * the processor sleep again. What the rest saves is not a measured figure.
  *
  * Needs CONFIG_KODE_LOWPOWER: without it the call is refused and says so.
  *
@@ -2466,7 +2468,7 @@ bool kode_nfc_emulate_stop(void);
  *
  * @param name KODE_NFC_PROFILE_NAME_MAX - 1 bytes at most; any case.
  * @param type "text" or "uri": a tag a phone reads; "uid": a card clone for an access reader.
- * @param data The text or link, 1 to KODE_NFC_TEXT_MAX - 1 bytes; or for "uid" the ID as 4, 7 or 10 hex bytes, "04:A2:3B:91".
+ * @param data The text or link, 1 to KODE_NFC_TEXT_MAX - 1 bytes; or for "uid" the ID as 4 or 7 hex bytes, "04:A2:3B:91".
  * @return true when added; false with kode_error() saying why.
  */
 bool kode_nfc_add_profile(const char *name, const char *type, const char *data);

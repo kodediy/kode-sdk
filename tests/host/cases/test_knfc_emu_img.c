@@ -192,7 +192,19 @@ TEST_CASE("a bad UID length is refused", "[knfc_emu_img]")
     knfc_emu_image_t img;
 
     (void)memset(&card, 0, sizeof(card));
-    card.uid_len = 5U;   /* not 0, 4, 7 or 10 */
+    card.uid_len = 5U;   /* not 0, 4 or 7 */
+
+    TEST_ASSERT_EQUAL(KODE_DENIED, knfc_emu_image_build(&card, &img));
+}
+
+TEST_CASE("a coherent 10-byte card is refused: the reader presents 4 or 7 bytes", "[knfc_emu_img]")
+{
+    knfc_emu_card_t  card;
+    knfc_emu_image_t img;
+
+    (void)memset(&card, 0, sizeof(card));
+    card.uid_len = 10U;
+    card.atqa    = 0x0084U;   /* size bits 10: 10-byte UID */
 
     TEST_ASSERT_EQUAL(KODE_DENIED, knfc_emu_image_build(&card, &img));
 }

@@ -17,8 +17,6 @@
 #define KNFC_EMU_SIZE_4   0x00U
 /** @brief SENS_RES size bits: 7-byte (double) UID. */
 #define KNFC_EMU_SIZE_7   0x40U
-/** @brief SENS_RES size bits: 10-byte (triple) UID. */
-#define KNFC_EMU_SIZE_10  0x80U
 
 /**
  * @brief Whether @p card names an identity coherent enough to present verbatim.
@@ -43,10 +41,6 @@ static bool card_is_exact(const knfc_emu_card_t *card)
     {
         want = KNFC_EMU_SIZE_7;
     }
-    else if ( 10U == card->uid_len )
-    {
-        want = KNFC_EMU_SIZE_10;
-    }
     else
     {
         return false;
@@ -62,7 +56,7 @@ static bool card_is_exact(const knfc_emu_card_t *card)
  * @brief The 7-byte UID the Type-2 image carries, whatever was cloned.
  *
  * The image is what a phone reads with a plain Type-2 READ, and a Type-2 tag
- * has a 7-byte UID, so a cloned 4-byte or 10-byte identity still gets a 7-byte
+ * has a 7-byte UID, so a cloned 4-byte identity still gets a 7-byte
  * image UID that embeds it. A first byte of 0x88 is replaced: it is the
  * cascade tag and never a real UID byte.
  *
@@ -129,7 +123,7 @@ kode_status_t knfc_emu_image_build(const knfc_emu_card_t *card,
         return KODE_DENIED;
     }
     if ( (0U != card->uid_len) && (4U != card->uid_len)
-        && (7U != card->uid_len) && (10U != card->uid_len) )
+        && (7U != card->uid_len) )
     {
         return KODE_DENIED;
     }

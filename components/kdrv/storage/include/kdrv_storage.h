@@ -134,6 +134,17 @@ kode_status_t kdrv_storage_stat(const char *path, kdrv_stat_t *out);
  */
 kdrv_medium_t kdrv_storage_medium_of(const char *vpath);
 
+/**
+ * @brief Whether @p vpath has the shape every path function here takes.
+ *
+ * The same check that refuses a malformed path with KODE_DENIED, for a caller
+ * that tells a bad path from a busy volume before it asks.
+ *
+ * @param vpath Absolute virtual path; NULL is malformed.
+ * @return true when @p vpath is not malformed in the sense above.
+ */
+bool kdrv_storage_path_valid(const char *vpath);
+
 /* ---- Listing -------------------------------------------------------------
  * A callback rather than a returned table: the caller is an Active Object
  * scanning on its own thread, and handing it a table would mean someone else
