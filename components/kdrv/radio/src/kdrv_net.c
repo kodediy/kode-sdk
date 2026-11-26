@@ -832,9 +832,11 @@ void kdrv_net_stream_close(void)
 
 /** The PUT's buffers and the connection a kept PUT leaves open. One block in
  *  PSRAM, taken by the first kdrv_net_http_put_prepare() and never freed: the
- *  body alone is 64 KB, which internal RAM does not have to give. The setter
- *  writes it, the worker reads it, and the setter refuses while the worker is
- *  busy. */
+ *  body alone is KDRV_NET_PUT_MAX bytes, which internal RAM does not have to
+ *  give. The setter writes it and the worker reads it; the job wipes the
+ *  bytes it used when it ends, and kdrv_net_http_forget() those of a PUT
+ *  whose job never ran (put_wipe()). The setter keeps no record of a job and
+ *  refuses nothing for one: AO_Net calls it only while its worker is idle. */
 typedef struct {
     uint8_t body[KDRV_NET_PUT_MAX];
     size_t  len;
@@ -847,6 +849,28 @@ typedef struct {
 } net_put_t;
 
 static net_put_t *s_put;
+
+/** Wipe what a PUT was prepared with but the kept URL: the body's bytes that
+ *  were used and its length, the URL (the token is in its path) and the
+ *  bearer. The body can be a core dump, which no console can read. Only the
+ *  bytes used are written, so a stream of captures pays for its frame alone. */
+static void put_wipe(void)
+{
+    if ( NULL != s_put )
+    {
+        size_t used = sizeof(s_put->body);
+
+        if ( s_put->len < used )
+        {
+            used = s_put->len;
+        }
+        (void)memset(s_put->body, 0, used);
+        s_put->len = 0U;
+        (void)memset(s_put->url, 0, sizeof(s_put->url));
+        (void)memset(s_put->auth, 0, sizeof(s_put->auth));
+    }
+}
+
 /** The connection the last kept PUT left open, or NULL. */
 static esp_http_client_handle_t s_kept;
 
@@ -2374,6 +2398,7 @@ void kdrv_net_http_result(kdrv_net_http_result_t *out)
 
 void kdrv_net_http_forget(void)
 {
+    put_wipe();   /* a PUT prepared whose job never ran */
     if ( NULL == s_net )
     {
         return;
@@ -2468,12 +2493,11 @@ static kode_status_t net_do_http_post(const kdrv_net_req_t *req)
 
 /** The HTTP_PUT job. A PUT with nothing prepared - or whose bearer the last
  *  job already wiped - is refused here, with the result table cleared so a
- *  stale answer is not read as its own. The bearer and the URL (the token is
- *  in its path) are wiped as soon as the job is over, whatever it came to; a
- *  kept handle's own copy of the URL, kept_url, goes with the handle. The
- *  body stays: it is the glass, which any local console can read anyway.
- *  ESP-IDF's HTTP client is held at INFO for the exchange, because at DEBUG
- *  it logs the headers whole. */
+ *  stale answer is not read as its own. The body, the bearer and the URL (the
+ *  token is in its path) are wiped as soon as the job is over, whatever it
+ *  came to (put_wipe()): the body can be a core dump. A kept handle's own copy
+ *  of the URL, kept_url, goes with the handle. ESP-IDF's HTTP client is held
+ *  at INFO for the exchange, because at DEBUG it logs the headers whole. */
 static kode_status_t net_do_http_put(const kdrv_net_req_t *req)
 {
     kode_status_t rc = KODE_ERROR;
@@ -2481,9 +2505,9 @@ static kode_status_t net_do_http_put(const kdrv_net_req_t *req)
 
     if ( NULL == r )
     {
-        return KODE_NO_RESOURCES;
+        rc = KODE_NO_RESOURCES;
     }
-    if ( (NULL == s_put) || (0U == s_put->len) || ('\0' == s_put->auth[0]) )
+    else if ( (NULL == s_put) || (0U == s_put->len) || ('\0' == s_put->auth[0]) )
     {
         (void)memset(&r->http, 0, sizeof(r->http));
         r->http.content_length = -1;
@@ -2505,11 +2529,7 @@ static kode_status_t net_do_http_put(const kdrv_net_req_t *req)
             NET_HTTP_TIMEOUT_MS);
         net_quiet_give();
     }
-    if ( NULL != s_put )
-    {
-        (void)memset(s_put->auth, 0, sizeof(s_put->auth));
-        (void)memset(s_put->url, 0, sizeof(s_put->url));
-    }
+    put_wipe();
     return rc;
 }
 

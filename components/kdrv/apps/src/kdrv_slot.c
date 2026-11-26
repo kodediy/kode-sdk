@@ -13,6 +13,9 @@
 
 #include <string.h>
 
+#if CONFIG_KODEOS_DUMP_HTTP
+#include "khal_crc32.h"
+#endif
 #include "kode_log.h"
 
 #include "esp_app_desc.h"
@@ -44,6 +47,13 @@ _Static_assert(KSLOT_SEQ_STRIDE == SPI_FLASH_SEC_SIZE,
 #define SLOT_ERASE_HDR (64U * 1024U)  /* enough to kill an image header */
 
 static esp_ota_handle_t s_ota;
+
+/** @brief The partition table's subtype of each kdrv_slot_id_t. */
+static const esp_partition_subtype_t SLOT_SUBTYPES[KDRV_SLOT_ID_COUNT] = {
+    ESP_PARTITION_SUBTYPE_APP_FACTORY,
+    ESP_PARTITION_SUBTYPE_APP_OTA_0,
+    ESP_PARTITION_SUBTYPE_APP_OTA_1,
+};
 
 /**
  * @brief The slot this driver writes is whichever kodeOS slot is NOT running: the OTA ping-pong.
@@ -478,18 +488,12 @@ bool kdrv_slot_newer(void)
 
 kode_status_t kdrv_slot_info(kdrv_slot_id_t id, kdrv_slot_info_t *out)
 {
-    static const esp_partition_subtype_t SUBTYPES[KDRV_SLOT_ID_COUNT] = {
-        ESP_PARTITION_SUBTYPE_APP_FACTORY,
-        ESP_PARTITION_SUBTYPE_APP_OTA_0,
-        ESP_PARTITION_SUBTYPE_APP_OTA_1,
-    };
-
     if ( (NULL == out) || ((unsigned)id >= (unsigned)KDRV_SLOT_ID_COUNT) )
     {
         return KODE_DENIED;
     }
     const esp_partition_t *p =
-        esp_partition_find_first(ESP_PARTITION_TYPE_APP, SUBTYPES[id], NULL);
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, SLOT_SUBTYPES[id], NULL);
     if ( NULL == p )
     {
         return KODE_DENIED;
@@ -522,6 +526,70 @@ kode_status_t kdrv_slot_info(kdrv_slot_id_t id, kdrv_slot_info_t *out)
 }
 
 /* ---- The crash the board kept --------------------------------------------- */
+
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+_Static_assert(KDRV_COREDUMP_SHA_HEX == (uint32_t)CONFIG_APP_RETRIEVE_LEN_ELF_SHA,
+               "kdrv_coredump_t holds every digit of the ELF SHA-256 a dump carries");
+
+#define SLOT_HEX_PER_BYTE 2U    /**< Hex digits a byte spells.             */
+#define SLOT_NIBBLE_BITS  4U    /**< Bits one hex digit spells.            */
+#define SLOT_NIBBLE_MASK  0x0FU /**< A byte's low hex digit.               */
+
+/**
+ * @brief Whether a dump's SHA is the head of an image's ELF SHA-256.
+ *
+ * @param sha    KDRV_COREDUMP_SHA_HEX lowercase hex digits, as the dump
+ *               carries them (esp_app_get_elf_sha256()'s spelling).
+ * @param digest The image's ELF SHA-256, raw, as its description holds it.
+ * @return true when all KDRV_COREDUMP_SHA_HEX digits match.
+ */
+static bool coredump_sha_is(const char *sha, const uint8_t *digest)
+{
+    static const char HEX[] = "0123456789abcdef";
+    bool              same  = true;
+
+    for ( uint32_t i = 0U; (KDRV_COREDUMP_SHA_HEX > i) && same; ++i )
+    {
+        uint8_t const byte = digest[i / SLOT_HEX_PER_BYTE];
+        uint8_t       nibble;
+
+        if ( 0U == (i % SLOT_HEX_PER_BYTE) )
+        {
+            nibble = (uint8_t)(byte >> SLOT_NIBBLE_BITS);
+        }
+        else
+        {
+            nibble = (uint8_t)(byte & SLOT_NIBBLE_MASK);
+        }
+        same = (HEX[nibble] == sha[i]);
+    }
+    return same;
+}
+
+/**
+ * @brief Whether a dump's SHA names the image of one of the three app
+ *        partitions - factory, ota_0 or ota_1 - whichever of them runs.
+ *
+ * @param sha The dump's SHA, as kdrv_coredump_t holds it.
+ * @return true when one partition's description carries that SHA.
+ */
+static bool coredump_is_kodeos(const char *sha)
+{
+    bool found = false;
+
+    for ( uint32_t id = 0U; ((uint32_t)KDRV_SLOT_ID_COUNT > id) && !found; ++id )
+    {
+        const esp_partition_t * const p =
+            esp_partition_find_first(ESP_PARTITION_TYPE_APP, SLOT_SUBTYPES[id], NULL);
+        esp_app_desc_t desc;
+
+        found = (NULL != p)
+                && (esp_ota_get_partition_description(p, &desc) == ESP_OK)
+                && coredump_sha_is(sha, desc.app_elf_sha256);
+    }
+    return found;
+}
+#endif /* CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH */
 
 kode_status_t kdrv_slot_coredump(kdrv_coredump_t *out)
 {
@@ -570,6 +638,10 @@ kode_status_t kdrv_slot_coredump(kdrv_coredump_t *out)
     char running[sizeof(summary.app_elf_sha256)];
     (void)esp_app_get_elf_sha256(running, sizeof(running));
     out->mine = (memcmp(summary.app_elf_sha256, running, sizeof(running)) == 0);
+
+    (void)snprintf(out->sha, sizeof(out->sha), "%.*s", (int)KDRV_COREDUMP_SHA_HEX,
+                   (const char *)summary.app_elf_sha256);
+    out->kodeos = coredump_is_kodeos(out->sha);
     return KODE_OK;
 #else
     /* Apps built from the SDK do not turn this on: whether a firmware keeps
@@ -604,6 +676,71 @@ kode_status_t kdrv_slot_coredump_reason(char *buf, size_t len)
     return KODE_DENIED;
 #endif
 }
+
+#if CONFIG_KODEOS_DUMP_HTTP
+kode_status_t kdrv_slot_coredump_read(uint8_t *buf, size_t cap, size_t *len, uint32_t *crc)
+{
+    if ( (NULL == buf) || (NULL == len) || (NULL == crc) )
+    {
+        return KODE_DENIED;
+    }
+
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    /* The proof kdrv_slot_coredump() asks first: a dump whose checksum this
+     * build refuses is not read. image_get() delimits the image by the length
+     * its own header declares. */
+    size_t addr = 0U;
+    size_t size = 0U;
+
+    if ( (esp_core_dump_image_check() != ESP_OK)
+        || (esp_core_dump_image_get(&addr, &size) != ESP_OK) )
+    {
+        return KODE_DENIED;
+    }
+    if ( size > cap )
+    {
+        return KODE_NO_RESOURCES;
+    }
+
+    const esp_partition_t * const part =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                 ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+
+    if ( (NULL != part) && (addr >= part->address) )
+    {
+        err = esp_partition_read(part, addr - part->address, buf, size);
+    }
+    if ( ESP_OK != err )
+    {
+        KLOG_E(TAG, "the core dump could not be read (%s)", esp_err_to_name(err));
+        return KODE_ERROR;
+    }
+    *len = size;
+    *crc = khal_crc32(KHAL_CRC32_INIT, buf, size);
+    return KODE_OK;
+#else
+    (void)cap;
+    return KODE_DENIED;
+#endif
+}
+
+kode_status_t kdrv_slot_coredump_erase(void)
+{
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    esp_err_t const err = esp_core_dump_image_erase();
+
+    if ( ESP_OK != err )
+    {
+        KLOG_E(TAG, "the core dump could not be erased (%s)", esp_err_to_name(err));
+        return KODE_ERROR;
+    }
+    return KODE_OK;
+#else
+    return KODE_DENIED;
+#endif
+}
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /* ---- Where we are running ------------------------------------------------ */
 

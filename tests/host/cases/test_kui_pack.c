@@ -72,6 +72,28 @@ TEST_CASE("without face the first scene is the default", "[kui_pack]")
     kui_pack_free(&p);
 }
 
+TEST_CASE("a pack names its fault role", "[kui_pack]")
+{
+    kui_pack_t p;
+    TEST_ASSERT_EQUAL_INT(KUI_PACK_OK, parse(
+        "{\"format\":1,\"scenes\":[{\"name\":\"a\",\"wake\":\"w.json\",\"loop\":\"l.json\"}],"
+        "\"fault\":\"x.json.z\"}", &p));
+    TEST_ASSERT_EQUAL_UINT16(3, p.n_files);
+    TEST_ASSERT_EQUAL_UINT16(kui_pack_file_find(&p, "x.json.z"), p.role[KUI_PACK_ROLE_FAULT]);
+    TEST_ASSERT_EQUAL_STRING("x.json.z", p.files[p.role[KUI_PACK_ROLE_FAULT]].name);
+    kui_pack_free(&p);
+}
+
+TEST_CASE("a pack with no fault role is whole", "[kui_pack]")
+{
+    kui_pack_t p;
+    TEST_ASSERT_EQUAL_INT(KUI_PACK_OK, parse(
+        "{\"format\":1,\"scenes\":[{\"name\":\"a\",\"wake\":\"w.json\",\"loop\":\"l.json\"}]}", &p));
+    TEST_ASSERT_EQUAL_UINT16(2, p.n_files);
+    TEST_ASSERT_EQUAL_UINT16(KUI_PACK_NONE, p.role[KUI_PACK_ROLE_FAULT]);
+    kui_pack_free(&p);
+}
+
 TEST_CASE("unknown keys are ignored at every level", "[kui_pack]")
 {
     kui_pack_t p;
@@ -348,6 +370,20 @@ TEST_CASE("canvas, frames, rate and anchor are refused with their words", "[kui_
     TEST_ASSERT_EQUAL_INT(KUI_PACK_E_FPS, check(LOTTIE(410, 334, 0, 90, 61, ""), 0U, &a));
     TEST_ASSERT_EQUAL_INT(KUI_PACK_E_FPS, check(LOTTIE(410, 334, 0, 90, 29.97, ""), 0U, &a));
     TEST_ASSERT_EQUAL_INT(KUI_PACK_E_JSON, check("{\"w\":410,", 0U, &a));
+}
+
+TEST_CASE("the fault role plays on the card's band", "[kui_pack]")
+{
+    static const char BAND[] = LOTTIE(410, 160, 0, 72, 30, "");
+    static const char LAUNCHER[] = LOTTIE(410, 369, 0, 72, 30, "");
+    uint16_t w = 0U, h = 0U;
+    kui_pack_anim_t a;
+    kui_pack_role_canvas(KUI_PACK_ROLE_FAULT, &w, &h);
+    TEST_ASSERT_EQUAL_UINT16(410, w);
+    TEST_ASSERT_EQUAL_UINT16(160, h);
+    TEST_ASSERT_EQUAL_INT(KUI_PACK_OK, kui_pack_check_anim(BAND, strlen(BAND), w, h, 0U, &a));
+    TEST_ASSERT_EQUAL_INT(KUI_PACK_E_CANVAS,
+        kui_pack_check_anim(LAUNCHER, strlen(LAUNCHER), w, h, 0U, &a));
 }
 
 TEST_CASE("precomps: a chain within the bound passes, deeper or circular is refused", "[kui_pack]")

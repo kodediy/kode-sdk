@@ -106,6 +106,8 @@ QActive * const AO_Boot = &l_boot.super;
 
 static kboot_reason_t  s_reason  = KBOOT_COLD;
 static kboot_app_end_t s_app_end = KBOOT_APP_END_NONE;
+static kboot_os_end_t  s_os_end  = KBOOT_OS_END_NONE;
+static bool            s_os_dump = false;
 static uint32_t        s_app_off = KODE_APP_OFFSET_NONE;
 
 static QState Boot_initial(Boot * const me, void const * const par);
@@ -129,9 +131,42 @@ kboot_app_end_t boot_app_end(void)
     return s_app_end;
 }
 
+kboot_os_end_t boot_os_end(void)
+{
+    return s_os_end;
+}
+
+bool boot_os_dump(void)
+{
+    return s_os_dump;
+}
+
 uint32_t boot_app_offset(void)
 {
     return s_app_off;
+}
+
+/**
+ * @brief Whether the supply, not the image, reset the chip.
+ *
+ * @param reason What the chip says reset it: a KDRV_RESET_ value, or any other number.
+ * @return true for KDRV_RESET_BROWNOUT and KDRV_RESET_PWR_GLITCH; false otherwise.
+ */
+static bool boot_supply_dipped(int reason)
+{
+    bool dipped;
+
+    switch ( reason )
+    {
+    case KDRV_RESET_BROWNOUT:
+    case KDRV_RESET_PWR_GLITCH:
+        dipped = true;
+        break;
+    default:
+        dipped = false;
+        break;
+    }
+    return dipped;
 }
 
 kboot_app_end_t boot_app_end_of(kboot_reason_t r, int reason)
@@ -144,55 +179,100 @@ kboot_app_end_t boot_app_end_of(kboot_reason_t r, int reason)
     }
     else
     {
-        switch ( reason )
+        /* An app's fault is the same reset as a fault of kodeOS's own. */
+        switch ( boot_os_end_of(reason, false) )
         {
-        case KDRV_RESET_PANIC:
-        case KDRV_RESET_CPU_LOCKUP:
+        case KBOOT_OS_END_PANIC:
             end = KBOOT_APP_END_PANIC;
             break;
-        case KDRV_RESET_INT_WDT:
-        case KDRV_RESET_TASK_WDT:
-        case KDRV_RESET_WDT:
+        case KBOOT_OS_END_WATCHDOG:
             end = KBOOT_APP_END_WATCHDOG;
             break;
-        case KDRV_RESET_BROWNOUT:
-        case KDRV_RESET_PWR_GLITCH:
-            end = KBOOT_APP_END_BROWNOUT;
-            break;
         default:
-            /* Every way of leaving (a power-on, a USB reset, a software
-             * restart) and every unnamed reason, any number included: an
-             * unknown reason must never read as a crash. */
-            end = KBOOT_APP_END_CLEAN;
+            if ( boot_supply_dipped(reason) )
+            {
+                end = KBOOT_APP_END_BROWNOUT;
+            }
+            else
+            {
+                /* Every way of leaving (a power-on, a USB reset, a software
+                 * restart) and every unnamed reason, any number included: an
+                 * unknown reason must never read as a crash. */
+                end = KBOOT_APP_END_CLEAN;
+            }
             break;
         }
     }
     return end;
 }
 
+kboot_os_end_t boot_os_end_of(int reason, bool after_app)
+{
+    kboot_os_end_t end = KBOOT_OS_END_NONE;
+
+    if ( !after_app )
+    {
+        switch ( reason )
+        {
+        case KDRV_RESET_PANIC:
+        case KDRV_RESET_CPU_LOCKUP:
+            end = KBOOT_OS_END_PANIC;
+            break;
+        case KDRV_RESET_INT_WDT:
+        case KDRV_RESET_TASK_WDT:
+        case KDRV_RESET_WDT:
+            end = KBOOT_OS_END_WATCHDOG;
+            break;
+        default:
+            /* Every other reason, any number included: an unknown reason
+             * must never read as a fault. */
+            break;
+        }
+    }
+    return end;
+}
+
+bool boot_dump_explains(int reason)
+{
+    bool explains;
+
+    switch ( reason )
+    {
+    case KDRV_RESET_PANIC:
+    case KDRV_RESET_INT_WDT:
+    case KDRV_RESET_TASK_WDT:
+        explains = true;
+        break;
+    default:
+        explains = false;
+        break;
+    }
+    return explains;
+}
+
 uint32_t boot_crashes_next(uint32_t crashes, int reason, bool after_app)
 {
     uint32_t next = crashes;
 
-    if ( !after_app )
+    if ( after_app )
     {
-        switch ( boot_app_end_of(KBOOT_FROM_APP, reason) )
+        /* The app's reason: kodeOS did nothing to count or to forget. */
+    }
+    else if ( KBOOT_OS_END_NONE != boot_os_end_of(reason, false) )
+    {
+        if ( KODE_BOOT_CRASHES_MAX > next )
         {
-        case KBOOT_APP_END_PANIC:
-        case KBOOT_APP_END_WATCHDOG:
-            if ( KODE_BOOT_CRASHES_MAX > next )
-            {
-                ++next;
-            }
-            break;
-        case KBOOT_APP_END_BROWNOUT:
-            /* The cell's doing, not the image's: neither one more nor a way of
-             * leaving. */
-            break;
-        default:
-            next = 0U;
-            break;
+            ++next;
         }
+    }
+    else if ( boot_supply_dipped(reason) )
+    {
+        /* The cell's doing, not the image's: neither one more nor a way of
+         * leaving. */
+    }
+    else
+    {
+        next = 0U;
     }
     return next;
 }
@@ -217,6 +297,28 @@ const char *boot_app_end_name(kboot_app_end_t e)
         break;
     case KBOOT_APP_END_BROWNOUT:
         name = "brownout";
+        break;
+    default:
+        name = "?";
+        break;
+    }
+    return name;
+}
+
+const char *boot_os_end_name(kboot_os_end_t e)
+{
+    const char *name;
+
+    switch ( e )
+    {
+    case KBOOT_OS_END_NONE:
+        name = "none";
+        break;
+    case KBOOT_OS_END_PANIC:
+        name = "panic";
+        break;
+    case KBOOT_OS_END_WATCHDOG:
+        name = "watchdog";
         break;
     default:
         name = "?";
@@ -571,6 +673,34 @@ static void boot_crashes_count(bool after_app)
 }
 
 /**
+ * @brief Learn how kodeOS ended before this boot, and whether its dump waits.
+ *
+ * Whichever slot ran before: the reset reason alone says. The coredump
+ * partition is read only on a fault whose reset a dump explains.
+ *
+ * @param after_app An app ran before this boot.
+ */
+static void boot_os_end_learn(bool after_app)
+{
+    int const       reason = kdrv_reset_reason();
+    kdrv_coredump_t dump;
+
+    s_os_end  = boot_os_end_of(reason, after_app);
+    s_os_dump = false;
+    if ( KBOOT_OS_END_NONE != s_os_end )
+    {
+        KLOG_N(TAG, "how kodeOS ended before this boot: %s",
+               boot_os_end_name(s_os_end));
+        if ( boot_dump_explains(reason) )
+        {
+            (void)memset(&dump, 0, sizeof(dump));
+            s_os_dump = (kdrv_slot_coredump(&dump) == KODE_OK)
+                        && dump.present && dump.kodeos;
+        }
+    }
+}
+
+/**
  * @brief What became of the kodeOS slot that is not running, from otadata.
  *
  * @param st      What the bootloader recorded about that slot.
@@ -734,12 +864,15 @@ static QState Boot_initial(Boot * const me, void const * const par)
     }
 
     /* 3. How the app before this boot ended, from the reason as it finally
-     *    stands: a boot turned UNEXPECTED above is not back from an app. */
+     *    stands: a boot turned UNEXPECTED above is not back from an app. How
+     *    kodeOS ended goes by who ran before this boot, an UNEXPECTED boot
+     *    included. */
     s_app_end = boot_app_end_of(s_reason, kdrv_reset_reason());
     if ( KBOOT_APP_END_NONE != s_app_end )
     {
         KLOG_N(TAG, "how the user app ended: %s", boot_app_end_name(s_app_end));
     }
+    boot_os_end_learn(after_app);
 
     /* 4. The crashes in a row, with who ran before this boot known. A slot that
      *    has crashed too often does not get past here. Confirming waits for the

@@ -51,7 +51,7 @@ static void pad_up(void)
     system_is_up();
     for ( uint8_t id = 0U; TEST_BUTTONS > id; id++ )
     {
-        (void)buttons_inject(id, false);
+        (void)buttons_inject(id, false, false);
     }
     ao_spy_drain();
 }
@@ -59,8 +59,8 @@ static void pad_up(void)
 /** @brief Press and release button @p id once. */
 static void tap(kdrv_button_t id)
 {
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)id, true));
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)id, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)id, true, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)id, false, false));
     ao_spy_drain();
 }
 
@@ -87,14 +87,14 @@ TEST_CASE("is_pressed reads the mask", "[kode_button]")
     pad_up();
     TEST_ASSERT_FALSE(kode_button_is_pressed("top"));
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     ao_spy_drain();
     TEST_ASSERT_TRUE(kode_button_is_pressed("top"));
     TEST_ASSERT_FALSE(kode_button_is_pressed("up"));
     TEST_ASSERT_FALSE(kode_button_is_pressed("bottom"));
     TEST_ASSERT_EQUAL_STRING("", kode_error());
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     ao_spy_drain();
     TEST_ASSERT_FALSE(kode_button_is_pressed("top"));
 }
@@ -102,7 +102,7 @@ TEST_CASE("is_pressed reads the mask", "[kode_button]")
 TEST_CASE("names are case-insensitive", "[kode_button]")
 {
     pad_up();
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, true, false));
     ao_spy_drain();
 
     TEST_ASSERT_TRUE(kode_button_is_pressed("left"));
@@ -110,7 +110,7 @@ TEST_CASE("names are case-insensitive", "[kode_button]")
     TEST_ASSERT_TRUE(kode_button_is_pressed("Left"));
     TEST_ASSERT_EQUAL_STRING("", kode_error());
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, false, false));
     ao_spy_drain();
 }
 
@@ -212,9 +212,9 @@ TEST_CASE("read_all matches the mask", "[kode_button]")
     kode_buttons_t none = kode_button_read_all();
     TEST_ASSERT_FALSE(none.up || none.down || none.left || none.right || none.top || none.bottom);
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, true));
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_RIGHT, true));
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_BOT, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, true, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_RIGHT, true, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_BOT, true, false));
     ao_spy_drain();
 
     kode_buttons_t some = kode_button_read_all();
@@ -228,7 +228,7 @@ TEST_CASE("read_all matches the mask", "[kode_button]")
 
     for ( uint8_t id = 0U; TEST_BUTTONS > id; id++ )
     {
-        (void)buttons_inject(id, false);
+        (void)buttons_inject(id, false, false);
     }
     ao_spy_drain();
 }

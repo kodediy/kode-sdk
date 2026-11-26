@@ -6,7 +6,6 @@
 #ifndef KODE_BANNER_H_
 #define KODE_BANNER_H_
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -22,17 +21,10 @@ extern "C" {
 char const *kode_reset_words(int32_t reason);
 
 /**
- * @brief Whether the core dump's reason can explain this reset (a panic or one of the two watchdogs).
- * @param reason One of the KDRV_RESET_ values.
- * @return true when the dump may speak for this reset.
- */
-bool kode_banner_dump_explains(int32_t reason);
-
-/**
  * @brief Compose the banner's reset line, "reset ...".
  *
  * The dump's panic reason replaces the words only where the dump explains the
- * reset. After a return from an app the line names the app and the dump is
+ * reset (boot_dump_explains()). After a return from an app the line names the app and the dump is
  * ignored: apps keep none.
  * @param out         Receives the line, NUL-terminated (cut to fit).
  * @param len         Room in @p out; 0 writes nothing.

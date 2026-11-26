@@ -5,10 +5,10 @@
  */
 #include "kode_banner.h"
 
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
+#include "kaos.h"
 #include "kbsp_board.h"
 #include "kdrv_slot.h"
 
@@ -51,13 +51,6 @@ char const *kode_reset_words(int32_t reason)
     return words[0].words;
 }
 
-bool kode_banner_dump_explains(int32_t reason)
-{
-    return ((int32_t)KDRV_RESET_PANIC == reason)
-        || ((int32_t)KDRV_RESET_INT_WDT == reason)
-        || ((int32_t)KDRV_RESET_TASK_WDT == reason);
-}
-
 size_t kode_banner_reset_line(char *out, size_t len, int32_t reason,
                               char const *dump_reason, char const *app_name)
 {
@@ -67,7 +60,7 @@ size_t kode_banner_reset_line(char *out, size_t len, int32_t reason,
     }
 
     char const *why = kode_reset_words(reason);
-    if ( (NULL == app_name) && kode_banner_dump_explains(reason)
+    if ( (NULL == app_name) && boot_dump_explains((int)reason)
         && (NULL != dump_reason) && ('\0' != dump_reason[0]) )
     {
         why = dump_reason;

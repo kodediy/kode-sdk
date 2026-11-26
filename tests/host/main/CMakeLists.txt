@@ -542,7 +542,8 @@ set_source_files_properties(
 # every symbol here is spelled out: a channel that compiles out leaves the
 # cases around it green and asserting about nothing. The screen upload rides
 # on the channel and is scoped the same way (it also needs KODEOS_MIRROR,
-# which is on for the whole project above).
+# which is on for the whole project above). The core dump's upload rides on
+# it too; its option is on for the whole build (tests/host/CMakeLists.txt).
 set_source_files_properties(
     "${SDK_DIR}/components/kaos/net/src/net_ao.c"
     "${CMAKE_CURRENT_LIST_DIR}/../cases/test_net_ao.c"

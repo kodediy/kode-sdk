@@ -1,7 +1,7 @@
 {
   "format": 1,
   "name": "Kody",
-  "version": "2026.11.05.2",
+  "version": "2026.11.26.1",
   "scenes": [
     {
       "name": "tren",
@@ -227,6 +227,7 @@
   "writing": "portatil.json.z",
   "goodbye": "despide.json.z",
   "loading": "cargando.json.z",
+  "fault": "error_banda.json.z",
   "sha256": {
     "despierta_tren.json.z": "34897f8a821ecf0e154598387896062fd9e314284a97aac343cd4442f8957d42",
     "escena_tren.json.z": "595ef99999ddbacd27d46aeec31a956e42028b45abefd31d099074719bc6c40e",
@@ -296,6 +297,7 @@
     "duda.json.z": "9084f7241802557b770f92b550ab6780ba1191c6b7340818ce7c8ef9167de953",
     "portatil.json.z": "9359bfee033029fb0437186a2c69efc292b1f9c8ea2df5dd7341efac6634d3f1",
     "despide.json.z": "7f5b11d1a0058d7eeaf7b090faa28829d8d5638946861882e922bdbac7f64fc8",
-    "cargando.json.z": "3919d406dec022ce4fb51e685dfa2b3d312fd77b66b1a0ffbc73a77b94441760"
+    "cargando.json.z": "3919d406dec022ce4fb51e685dfa2b3d312fd77b66b1a0ffbc73a77b94441760",
+    "error_banda.json.z": "5dfd2dc2efa5fe81e800887655578dcb7decdfa765d734a513d28f138ee31e39"
   }
 }

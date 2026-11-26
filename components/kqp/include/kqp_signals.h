@@ -7,7 +7,7 @@
 #define KQP_SIGNALS_H_
 
 #include "qpc.h"
-#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER */
+#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER, CONFIG_KODEOS_DUMP_HTTP */
 #include "kqp_config.h"   /* KODE_CONSOLE_LINE_MAX, KODE_APP_FILE_MAX */
 #include "khal_sync.h"    /* khal_sem_t: the `done` of every blocking request */
 
@@ -2014,6 +2014,15 @@ enum KodeSignals {
                                  *   running stream of uploads
                                  *   (NetShotStopEvt).                        */
 
+#if CONFIG_KODEOS_DUMP_HTTP
+    NET_DUMP_REQ_SIG,           /**< AO_Net (direct post, from
+                                 *   net_dump_request()): send the core dump
+                                 *   of a kodeOS fault to the Kode channel's
+                                 *   `dumps` link (NetDumpReqEvt).            */
+    NET_DUMP_RSP_SIG,           /**< To the requester: how the fault report
+                                 *   ended (NetDumpRspEvt).                   */
+#endif
+
     FUNCTION_ANS_SIG,           /**< Posted to AO_Console by the owner of a
                                  *   function that answers (FunctionAnsEvt):
                                  *   one record of the answer, or its end.    */
@@ -3371,7 +3380,8 @@ typedef struct {
  * Published on change only, already debounced, so a subscriber never has to
  * know that a tactile switch bounces. The event says when as well as what: a
  * subscriber that decides on elapsed time (a double press) cannot stamp the
- * event itself, because it may be dispatched late. */
+ * event itself, because it may be dispatched late. It also says whether a
+ * console line from the Kode channel or a cron entry injected the press. */
 typedef struct {
     QEvt     super;
     uint8_t  id;        /**< kdrv_button_t */
@@ -3379,6 +3389,11 @@ typedef struct {
     uint32_t t_ms;      /**< khal_time_ms() when the edge was confirmed. It
                          *   wraps at about 49 days, so an interval is an
                          *   unsigned subtraction of two stamps. */
+    bool     remote;    /**< true when a console line from the Kode channel
+                         *   or a scheduled entry (KODE_CONSOLE_SRC_NET,
+                         *   KODE_CONSOLE_SRC_SCHED) injected it; false for a
+                         *   button on the board, or one injected over the
+                         *   cable, the dock or BLE. */
 } ButtonEvt;
 
 /** @brief The top or the bottom button is being held (BUTTON_HOLD_SIG,
@@ -4662,7 +4677,9 @@ typedef struct {
 /** @brief A touch sample from AO_Touch (TOUCH_EVT_SIG).
  *
  * It carries the time it was read, for the same reason ButtonEvt does: a
- * subscriber that measures a drag cannot stamp a sample it was handed late. */
+ * subscriber that measures a drag cannot stamp a sample it was handed late.
+ * Like ButtonEvt it says whether a console line from the Kode channel or a
+ * cron entry injected it. */
 typedef struct {
     QEvt     super;
     int16_t  x;
@@ -4675,6 +4692,11 @@ typedef struct {
                          *   stayed still past KODE_TOUCH_STILL_MS and stopped
                          *   counting as a finger (a drop of water, a cloth).
                          *   Nothing was tapped and nobody is there. */
+    bool     remote;    /**< true when a console line from the Kode channel
+                         *   or a scheduled entry (KODE_CONSOLE_SRC_NET,
+                         *   KODE_CONSOLE_SRC_SCHED) injected it, its release
+                         *   included; false for a finger on the glass, or a
+                         *   sample injected over the cable, the dock or BLE. */
 } TouchEvt;
 
 /**
@@ -5838,6 +5860,8 @@ typedef struct {
                          *   otherwise.                                     */
     uint8_t  session;   /**< chan_session_t (kaos.h): what the broker said of
                          *   the session at the last connect.               */
+    bool     dumps;     /**< UP, and the session names a `dumps` link: a core
+                         *   dump can be sent (CONFIG_KODEOS_DUMP_HTTP).    */
 } ChannelStateEvt;
 
 /**
@@ -6230,6 +6254,21 @@ typedef struct {
     uint8_t  fps;               /**< A stream's frames a second.            */
     uint16_t secs;              /**< A stream's length in seconds.          */
 } NetShotRspEvt;
+
+#if CONFIG_KODEOS_DUMP_HTTP
+/** @brief Send the core dump to the Kode channel's `dumps` link (NET_DUMP_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    QActive *who;      /**< Where the answer (NET_DUMP_RSP_SIG) goes.       */
+} NetDumpReqEvt;
+
+/** @brief How a fault report ended (NET_DUMP_RSP_SIG). */
+typedef struct {
+    QEvt     super;
+    uint8_t  result;   /**< kdump_result_t.                                 */
+    uint16_t http;     /**< The service's status; 0 when none came.         */
+} NetDumpRspEvt;
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /**
  * @brief All six buttons, right now (BTN_STATE_SIG).

@@ -307,6 +307,51 @@ bool kshot_token_valid(const char *token)
     return ok;
 }
 
+#if CONFIG_KODEOS_DUMP_HTTP
+/** @brief What stands between the SHA and the CRC in a dump's name. */
+#define KDUMP_NAME_SEP   '-'
+
+/** @brief Bits one hex digit carries. */
+#define KDUMP_HEX_BITS   4U
+
+/** @brief The lowest hex digit of a word. */
+#define KDUMP_HEX_MASK   0xFU
+
+bool kdump_name(char *out, size_t cap, const char *sha, uint32_t crc)
+{
+    static const char digits[] = "0123456789abcdef";
+    bool              ok       = (NULL != out) && (NULL != sha);
+    size_t            len      = 0U;
+
+    /* Stop at the terminator, a byte outside the set, or one byte past the
+     * longest SHA prefix. */
+    while ( ok && (KDRV_COREDUMP_SHA_HEX >= len) && ('\0' != sha[len]) )
+    {
+        char const c = sha[len];
+
+        ok = (('0' <= c) && ('9' >= c)) || (('a' <= c) && ('f' >= c));
+        len++;
+    }
+    ok = ok && (0U < len) && (KDRV_COREDUMP_SHA_HEX >= len)
+         && ((len + 1U + KDUMP_CRC_HEX) < cap);
+    if ( ok )
+    {
+        size_t pos = len;
+
+        (void)memcpy(out, sha, len);
+        out[pos] = KDUMP_NAME_SEP;
+        pos++;
+        for ( uint32_t d = KDUMP_CRC_HEX; 0U < d; d-- )
+        {
+            out[pos] = digits[(crc >> ((d - 1U) * KDUMP_HEX_BITS)) & KDUMP_HEX_MASK];
+            pos++;
+        }
+        out[pos] = '\0';
+    }
+    return ok;
+}
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
+
 /** @brief Whether @p s is not empty. */
 static bool chan_filled(const char *s)
 {
@@ -323,12 +368,12 @@ static bool chan_topic_plain(const char *t)
 }
 
 /** @brief The scheme an upload prefix must have: TLS. */
-#define CHAN_SHOTS_SCHEME "https://"
+#define CHAN_UPLOAD_SCHEME "https://"
 
 /** @brief The lowest byte an upload prefix may hold (below it: space, controls). */
-#define CHAN_SHOTS_BYTE_MIN 0x21U
+#define CHAN_UPLOAD_BYTE_MIN 0x21U
 
-bool kchan_shots_valid(const char *prefix)
+bool kchan_upload_valid(const char *prefix)
 {
     bool ok = false;
 
@@ -341,17 +386,17 @@ bool kchan_shots_valid(const char *prefix)
         {
             len++;
         }
-        size_t const scheme = sizeof(CHAN_SHOTS_SCHEME) - 1U;
+        size_t const scheme = sizeof(CHAN_UPLOAD_SCHEME) - 1U;
 
         /* A host byte after the scheme: with none, esp_http_client cannot
          * parse the URL and its error line prints it whole, token and all. */
         ok = (len > scheme) && (KSHOT_PREFIX_MAX >= len)
-             && (strncmp(prefix, CHAN_SHOTS_SCHEME, scheme) == 0)
+             && (strncmp(prefix, CHAN_UPLOAD_SCHEME, scheme) == 0)
              && ('/' != prefix[scheme])
              && ('/' == prefix[len - 1U]);
         for ( size_t i = 0U; ok && (i < len); i++ )
         {
-            ok = ((uint8_t)prefix[i] >= CHAN_SHOTS_BYTE_MIN);
+            ok = ((uint8_t)prefix[i] >= CHAN_UPLOAD_BYTE_MIN);
         }
     }
     return ok;
@@ -395,10 +440,17 @@ bool kchan_parse_connect(const char *json, size_t len, const char *own,
         {
             /* Optional: absent, too long or unfit leaves it empty, no uploads. */
             if ( !kchan_json_str(json, len, "shots", out->shots, sizeof(out->shots))
-                || !kchan_shots_valid(out->shots) )
+                || !kchan_upload_valid(out->shots) )
             {
                 (void)memset(out->shots, 0, sizeof(out->shots));
             }
+#if CONFIG_KODEOS_DUMP_HTTP
+            if ( !kchan_json_str(json, len, "dumps", out->dumps, sizeof(out->dumps))
+                || !kchan_upload_valid(out->dumps) )
+            {
+                (void)memset(out->dumps, 0, sizeof(out->dumps));
+            }
+#endif
         }
         if ( !ok )
         {

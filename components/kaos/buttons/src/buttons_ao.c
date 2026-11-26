@@ -344,7 +344,7 @@ uint32_t buttons_presses(uint8_t id)
     return __atomic_load_n(&s_presses[id], __ATOMIC_RELAXED);
 }
 
-bool buttons_inject(uint8_t id, bool pressed)
+bool buttons_inject(uint8_t id, bool pressed, bool remote)
 {
     if ( (uint8_t)KDRV_BTN_COUNT <= id )
     {
@@ -363,6 +363,7 @@ bool buttons_inject(uint8_t id, bool pressed)
             j->id      = id;         /* the board's own button, before the pad's turn */
             j->pressed = pressed;
             j->t_ms    = khal_time_ms();
+            j->remote  = false;      /* the judge's copy, read by AO_Buttons alone */
             /* A refused post gives the event back to its pool: the row then
              * hears nothing of this press, as of one nobody made. */
             (void)QACTIVE_POST_X(AO_Buttons, &j->super, 1U, NULL);
@@ -378,6 +379,7 @@ bool buttons_inject(uint8_t id, bool pressed)
     e->id      = published;
     e->pressed = pressed;
     e->t_ms    = khal_time_ms();
+    e->remote  = remote;
     QACTIVE_PUBLISH(&e->super, AO_Buttons);
     if ( !pressed && ((uint8_t)KDRV_BTN_TOP > published)
         && ((buttons_down() & BUTTONS_PAD_MASK) == 0U) )
@@ -1038,6 +1040,7 @@ static void publish_change(Buttons * const me, kdrv_button_t b, bool pressed,
         ev->id      = published;
         ev->pressed = pressed;
         ev->t_ms    = t_ms;
+        ev->remote  = false;     /* a button on the board */
         QACTIVE_PUBLISH(&ev->super, &me->super);
     }
     /* After this release has gone out under the turn its press had. */

@@ -481,6 +481,7 @@ TEST_CASE("touch_subscribe() makes its caller hear AO_Touch's reports",
     touch_subscribe(spy);
     touch.super   = (QEvt)QEVT_INITIALIZER(TOUCH_EVT_SIG);
     touch.pressed = true;
+    touch.remote  = false;
     QACTIVE_PUBLISH(&touch.super, NULL);
 
     TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
