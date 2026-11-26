@@ -1,0 +1,20 @@
+# Low power in an app with the radio, Wi-Fi and the network on and BLE off,
+# which is where an app's defaults leave BLE. The only variant with
+# KODE_LOWPOWER on: AO_LowPower and each owner's rest are compiled for the
+# chip here, and AO_Radio's rest without the BLE driver's header.
+CONFIG_KODEOS_RADIO=y
+CONFIG_KODEOS_WIFI=y
+CONFIG_KODEOS_NET=y
+CONFIG_KODEOS_BLE=n
+CONFIG_KODE_LOWPOWER=y
+
+# In the app's role, with the lines of sdkconfig.defaults that are not an
+# app's gone back, as in `minimal`.
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+CONFIG_KODEOS_CHANNEL=n
+CONFIG_KODE_SCHEDULER=n
+# An app starts with the least, so what main.c links is said, as in `nowifi`.
+CONFIG_KODEOS_CONSOLE=y
+CONFIG_KODEOS_APPMGR=y
+CONFIG_KODEOS_SCREENSHOT=y
+CONFIG_KODEOS_NFC=y

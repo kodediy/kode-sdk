@@ -10716,7 +10716,9 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
 {
     kdrv_radio_req_t req;
     bool             ok;
+#if CONFIG_KODEOS_BLE
     bool             calms = false;
+#endif
 
     (void)memset(&req, 0, sizeof(req));
     req.type = KDRV_RADIO_JOB_SLEEP;
@@ -10739,15 +10741,13 @@ static bool radio_lp_submit(Radio * const me, bool start, uint8_t job)
     {
         me->lp_job = (uint8_t)RADIO_LPJ_NONE;
     }
-    else if ( calms )
+#if CONFIG_KODEOS_BLE
+    if ( ok && calms )
     {
         me->ble_adv_itvl   = (uint16_t)KDRV_BLE_ITVL_SLOW;
         me->ble_adv_pulsed = false;
     }
-    else
-    {
-        /* the advert on the air, if any, is not the one the rest changes */
-    }
+#endif
     return ok;
 }
 

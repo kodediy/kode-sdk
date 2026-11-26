@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 
 # The target build: this tree's components compiled for the chip, with every
-# optional Active Object but AO_TestDot switched on (the `testdot` variant,
-# sdkconfig.testdot, turns it on). It is not an example - examples/ is
+# optional Active Object but AO_TestDot and AO_LowPower switched on (the
+# `testdot` variant, sdkconfig.testdot, turns the first on, and `noble` the
+# second). It is not an example - examples/ is
 # where those live - and it has no behaviour worth running. It exists so that
 # a change which stops the SDK compiling on the ESP-IDF kodeOS ships with is
 # found by CI (.github/workflows/target-build.yml), not by the next person who
