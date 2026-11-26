@@ -14,6 +14,7 @@ idf_component_register(
          "app_desc_stub.c"
          ${CASE_SOURCES}
          "${SDK_DIR}/components/kdrv/apps/src/kdrv_slot.c"
+         "${SDK_DIR}/components/khal/crc32/src/khal_crc32_esp.c"
     INCLUDE_DIRS "."
                  "${SDK_DIR}/components/kdrv/audio/include"
                  "${SDK_DIR}/components/kdrv/buttons/include"
