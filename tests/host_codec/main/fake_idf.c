@@ -49,6 +49,7 @@ uint32_t     g_viol_pad;
 uint32_t     g_viol_ctrl;
 bool         g_psram;
 uint32_t     g_time_ms;
+uint32_t     g_reads;
 
 static uint8_t s_tx_obj;                 /**< The address is the transmit handle. */
 static uint8_t s_rx_obj;                 /**< The address is the receive handle.  */
@@ -85,6 +86,7 @@ void fake_reset(void)
     g_fail_vol_curve = false;
     g_viol_pad     = 0U;
     g_viol_ctrl    = 0U;
+    g_reads        = 0U;
     (void)memset(&s_pins, 0, sizeof(s_pins));
 }
 
@@ -307,8 +309,14 @@ int esp_codec_dev_write(esp_codec_dev_handle_t dev, void *data, int len)
 
 int esp_codec_dev_read(esp_codec_dev_handle_t dev, void *data, int len)
 {
+    int16_t *const samples = (int16_t *)data;
+
     (void)dev;
-    (void)memset(data, 0, (size_t)len);
+    for ( size_t i = 0U; ((size_t)len / sizeof(int16_t)) > i; ++i )
+    {
+        samples[i] = (int16_t)g_reads;
+    }
+    ++g_reads;
     return ESP_CODEC_DEV_OK;
 }
 

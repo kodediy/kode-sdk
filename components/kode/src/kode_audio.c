@@ -821,13 +821,13 @@ bool kode_audio_play_stop(void)
 }
 
 /**
- * @brief Write @p ms of the tone @p bin to the open stream, a chunk at a time.
- * @param p   The sound; its window is taken.
- * @param bin The tone's index for ktone_fill().
- * @param ms  The length.
+ * @brief Write @p ms of a tone at @p hz to the open stream, a chunk at a time.
+ * @param p  The sound; its window is taken.
+ * @param hz The frequency, valid.
+ * @param ms The length.
  * @return true when it was all written or the sound was stopped; false with the error set.
  */
-static bool tone_pump(play_t *p, uint8_t bin, uint32_t ms)
+static bool tone_pump(play_t *p, uint16_t hz, uint32_t ms)
 {
     const uint32_t total = ms * AUDIO_FRAMES_PER_MS;
     uint32_t       done  = 0U;
@@ -842,7 +842,7 @@ static bool tone_pump(play_t *p, uint8_t bin, uint32_t ms)
             n = AUDIO_CHUNK_FRAMES;
         }
         /* cppcheck-suppress misra-c2012-11.5 ; the window holds 16-bit samples */
-        if ( ktone_fill(bin, done, AUDIO_TONE_AMP_Q15, (int16_t *)p->buf, n) != KODE_OK )
+        if ( ktone_fill_hz(hz, done, AUDIO_TONE_AMP_Q15, (int16_t *)p->buf, n) != KODE_OK )
         {
             kode_err_set("the tone could not be made");
             ok = false;
@@ -874,7 +874,7 @@ static bool tone_play(uint16_t hz, uint32_t ms)
     {
         sound_arm(&s_fg_running);
         p.stop = &s_sound_stop;
-        heard  = tone_pump(&p, ktone_bin_nearest(hz), ms);
+        heard  = tone_pump(&p, hz, ms);
         (void)kode_block_audio_stream_close();
         atomic_store(&s_fg_running, false);
     }

@@ -422,6 +422,29 @@ static bool logged(const char *text)
     return false;
 }
 
+#define CELL_UNDER_CUT_MV 3200U   /**< Under the cut and under the boost's floor.          */
+#define REG0B_RUNNING     0xE2U   /**< REG0B: VBUS_STAT 111, the boost running, no input.  */
+#define REG0B_NOTHING     0x02U   /**< REG0B: no input, PG 0.                              */
+#define REG03_OTG         0x20U   /**< REG03[5]: OTG_CONFIG, the boost asked.              */
+#define REG0C_BOOST_FAULT 0x40U   /**< REG0C[6]: BOOST_FAULT.                              */
+#define PEEKS_ASLEEP      5U      /**< Minute's peeks a case lets pass while asleep.        */
+#define BOOST_CUT_NONE    0xFFU   /**< boost_cut_seen(): no POWER_BOOST_CUT_SIG.           */
+#define CUT_VALUE_SLACK_MV 20U    /**< The event's cell against the scripted one: the PMIC's 20 mV step. */
+
+/** @brief Awake, on battery with a healthy cell, a boost asked for and running. */
+static void boost_running(void)
+{
+    lp_awake(AO_Power);             /* a rested AO polls nothing */
+    cell_reads(3720U);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NOTHING;
+    s_regs[PMIC][BQ_REG0C_FAULT]  = 0x00U;
+    (void)poll_once();
+    ctrl_req_pending(POWER_CTRL_BOOST, 1);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_RUNNING;
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, tick()->rc);
+    TEST_ASSERT_EQUAL_HEX8(REG03_OTG, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG);
+}
+
 /* ---- Bring-up -------------------------------------------------------------- */
 
 /* The chips are the drivers'; the policy is the owner's. Watchdog first,
@@ -1995,6 +2018,102 @@ TEST_CASE("a boost whose off switch failed is still watched by the next poll",
     Mockkhal_i2c_Destroy();
 }
 
+/**
+ * @brief Dispatch one poll and say the cause of the POWER_BOOST_CUT_SIG it
+ *        published; the spy must hear that signal.
+ * @return The PowerBoostCutEvt's why, or BOOST_CUT_NONE when none was said.
+ */
+static uint8_t boost_cut_seen(void)
+{
+    static const QEvt poll = QEVT_INITIALIZER(POWER_POLL_SIG);
+    uint8_t why = BOOST_CUT_NONE;
+
+    ao_spy_drain();
+    QASM_DISPATCH(AO_Power, &poll, 0U);
+    for ( const QEvt *e = ao_spy_take(); NULL != e; e = ao_spy_take() )
+    {
+        if ( (QSignal)POWER_BOOST_CUT_SIG == e->sig )
+        {
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(BOOST_CUT_NONE, why, "one stop said twice");
+            why = ((const PowerBoostCutEvt *)(const void *)e)->why;
+        }
+    }
+    return why;
+}
+
+/* The asker of a boost learns that the board stopped it: one
+ * POWER_BOOST_CUT_SIG per stop, with its cause, and none for a boost its
+ * asker stopped. */
+TEST_CASE("a boost the guard stops is said once on the bus, with its cause", "[power_ao]")
+{
+    power_up_once();
+    ao_spy_subscribe(POWER_BOOST_CUT_SIG);
+
+    boost_running();
+    cell_reads(CELL_UNDER_CUT_MV);
+    TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_CELL, boost_cut_seen());
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(BOOST_CUT_NONE, boost_cut_seen(), "a stopped boost said again");
+
+    boost_running();
+    s_regs[PMIC][BQ_REG0C_FAULT] = REG0C_BOOST_FAULT;
+    TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_FAULT, boost_cut_seen());
+    s_regs[PMIC][BQ_REG0C_FAULT] = 0x00U;
+
+    boost_running();
+    ctrl_req_pending(POWER_CTRL_BOOST, 0);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NOTHING;
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, tick()->rc);
+    cell_reads(CELL_UNDER_CUT_MV);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(BOOST_CUT_NONE, boost_cut_seen(), "the asker's own stop was said as a cut");
+
+    QActive_unsubscribe(ao_spy(), POWER_BOOST_CUT_SIG);
+    power_flush();
+    cell_reads(3720U);
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* The answer to a boost that did not start names its cause, so the facade
+ * can say it. */
+TEST_CASE("a boost refused or not started is answered with its cause", "[power_ao]")
+{
+    power_up_once();
+    cell_reads(3720U);
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x16U;      /* PG 1: a cable */
+    (void)poll_once();
+    const PowerCtrlEvt *a = ctrl_req(POWER_CTRL_BOOST, 1);
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, a->rc);
+    TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_CABLE, a->why);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NOTHING;
+    cell_reads(3500U);
+    (void)poll_once();
+    a = ctrl_req(POWER_CTRL_BOOST, 1);
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, a->rc);
+    TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_CELL, a->why);
+
+    cell_reads(3720U);
+    (void)poll_once();
+    ctrl_req_pending(POWER_CTRL_BOOST, 1);
+    s_regs[PMIC][BQ_REG0C_FAULT] = REG0C_BOOST_FAULT;
+    a = tick();
+    TEST_ASSERT_EQUAL_UINT8(KODE_ERROR, a->rc);
+    TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_FAULT, a->why);
+
+    s_regs[PMIC][BQ_REG0C_FAULT] = 0x00U;
+    ctrl_req_pending(POWER_CTRL_BOOST, 1);
+    a = tick();
+    TEST_ASSERT_EQUAL_UINT8(KODE_ERROR, a->rc);
+    TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_PIN, a->why);
+
+    a = ctrl_req(POWER_CTRL_ICHG, 1);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(POWER_BOOST_WHY_NONE, a->why, "another op carried a boost's cause");
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    Mockkhal_i2c_Destroy();
+}
+
 /* The same shape on the temperature guard: charging outside the pack's
  * window must not be recorded as held until the chip has taken the write. */
 TEST_CASE("a charge hold whose write failed is tried again on the next poll",
@@ -2652,6 +2771,58 @@ TEST_CASE("a cell that falls below the mark is one battery_low, and one again af
     Mockkhal_i2c_Destroy();
 }
 
+static char              s_cut_source[KODE_EVENT_SOURCE_MAX];   /**< The source of the last pin_power_5v_cut. */
+static volatile int32_t  s_cut_value;                          /**< Its value.                               */
+static SemaphoreHandle_t s_cut_given;                          /**< Counts the calls.                        */
+
+/** @brief The listener: keep the cut's source and value. */
+static void on_cut(const kode_event_t *e)
+{
+    (void)snprintf(s_cut_source, sizeof(s_cut_source), "%s", e->source);
+    s_cut_value = e->value;
+    (void)xSemaphoreGive(s_cut_given);
+}
+
+/* The real chain: the poll's guard stops the boost, POWER_BOOST_CUT_SIG, the
+ * standard layer's Active Object and a listener of pin_power_5v_cut. */
+TEST_CASE("a boost the guard stops reaches an app's listener as pin_power_5v_cut", "[power_ao]")
+{
+    power_up_once();
+    power_flush();
+    qf_support_init();
+    atomic_store(&kode_sys_init_once.state, KHAL_ONCE_DONE);
+    fake_sync_real(true);
+    TEST_ASSERT_TRUE(kode_standard_ao_ensure());
+    QActive_subscribe(AO_KodeStandard, POWER_BOOST_CUT_SIG);
+    if ( NULL == s_cut_given )
+    {
+        s_cut_given = xSemaphoreCreateCounting(EVENT_REC_MAX, 0U);
+    }
+    TEST_ASSERT_NOT_NULL(s_cut_given);
+    while ( xSemaphoreTake(s_cut_given, 0U) == pdTRUE )
+    {
+    }
+    TEST_ASSERT_TRUE(kode_event_add_listener("pin_power_5v_cut", &on_cut));
+
+    boost_running();
+    cell_reads(CELL_UNDER_CUT_MV);
+    poll_and_listen();
+    TEST_ASSERT_TRUE_MESSAGE(xSemaphoreTake(s_cut_given, pdMS_TO_TICKS(TEST_WAIT_MS)) == pdTRUE,
+                             "the stop never reached the listener");
+    TEST_ASSERT_EQUAL_STRING("cell", s_cut_source);
+    TEST_ASSERT_INT32_WITHIN((int32_t)CUT_VALUE_SLACK_MV, (int32_t)CELL_UNDER_CUT_MV, s_cut_value);
+    TEST_ASSERT_FALSE_MESSAGE(xSemaphoreTake(s_cut_given, pdMS_TO_TICKS(50U)) == pdTRUE,
+                              "one stop, two events");
+
+    TEST_ASSERT_TRUE(kode_event_remove_listener("pin_power_5v_cut", &on_cut));
+    QActive_unsubscribe(AO_KodeStandard, POWER_BOOST_CUT_SIG);
+    power_flush();
+    cell_reads(3720U);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_ON_USB;
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
 /* ---- The critical mark, before the cut -------------------------------------- */
 
 #define CELL_CRITICAL_MV 3550U   /**< 8 % on the curve: at or under the critical mark. */
@@ -2933,6 +3104,212 @@ TEST_CASE("a control request waiting on the chip refuses the round", "[power_ao]
     lp_round(AO_Power, KODE_LP_ASLEEP);
     lp_expect_answer(false, NULL);
     lp_awake(AO_Power);
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* Asleep the tick is stopped and the minute's peek is the only look at the
+ * cell: it stops a running boost on a cell under the cut, and those readings
+ * count towards ship mode. The round for ASLEEP itself leaves the boost on. */
+TEST_CASE("asleep, the minute's peeks stop a boost on a cell under the cut and count towards ship mode",
+          "[power_ao][lowpower]")
+{
+    static const QEvt peek = QEVT_INITIALIZER(POWER_PEEK_REQ_SIG);
+
+    power_up_once();
+    power_flush();
+    boost_running();
+    lp_round(AO_Power, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(REG03_OTG, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG,
+                                   "the round for ASLEEP stopped the boost");
+
+    cell_reads(CELL_UNDER_CUT_MV);
+    s_batfet_writes = 0U;
+    for ( uint32_t i = 0U; PEEKS_ASLEEP > i; ++i )
+    {
+        QASM_DISPATCH(AO_Power, &peek, 0U);
+    }
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG,
+                                   "OTG_CONFIG=1 after five peeks at 3200 mV");
+    TEST_ASSERT_TRUE_MESSAGE(power_queue_has(POWER_SHIP_REQ_SIG),
+                             "the readings under the cut never asked for ship mode");
+
+    cell_reads(3720U);
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    lp_awake(AO_Power);
+    power_flush();
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* A boost fault asleep: the peek's reading goes through the same guard as the poll's. */
+TEST_CASE("asleep, the minute's peek stops a boost on a boost fault", "[power_ao][lowpower]")
+{
+    static const QEvt peek = QEVT_INITIALIZER(POWER_PEEK_REQ_SIG);
+
+    power_up_once();
+    power_flush();
+    boost_running();
+    lp_round(AO_Power, KODE_LP_ASLEEP);
+    lp_expect_answer(false, NULL);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NOTHING;   /* the converter hiccups */
+    s_regs[PMIC][BQ_REG0C_FAULT]  = REG0C_BOOST_FAULT;
+    QASM_DISPATCH(AO_Power, &peek, 0U);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG,
+                                   "a peek left a faulted boost asked");
+
+    s_regs[PMIC][BQ_REG0C_FAULT]  = 0x00U;
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    lp_awake(AO_Power);
+    power_flush();
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* Deep sleep stops every look, so a boost left on would run the cell down to
+ * the charger's own floor. The round for OFF stops it before it answers. */
+TEST_CASE("the round for OFF stops a running boost before it says ready", "[power_ao][lowpower]")
+{
+    power_up_once();
+    power_flush();
+    boost_running();
+    ao_spy_subscribe(POWER_BOOST_CUT_SIG);
+    ao_spy_drain();
+    fake_klog_reset();
+
+    lp_round(AO_Power, KODE_LP_OFF);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG,
+                                   "OTG_CONFIG=1 once AO_Power said ready for OFF");
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_TRUE(logged("boost off: the board switches off"));
+    {
+        const QEvt *e = ao_spy_take();
+
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "the stop for OFF was not said");
+        TEST_ASSERT_EQUAL_INT(POWER_BOOST_CUT_SIG, e->sig);
+        TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_OFF, ((const PowerBoostCutEvt *)(const void *)e)->why);
+    }
+
+    QActive_unsubscribe(ao_spy(), POWER_BOOST_CUT_SIG);
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    lp_awake(AO_Power);
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* A stop that does not land must not let the board go off boosting: the
+ * round is answered busy, and the next one stops it. */
+TEST_CASE("a round for OFF whose boost stop failed is busy, and the next one stops it",
+          "[power_ao][lowpower]")
+{
+    power_up_once();
+    power_flush();
+    boost_running();
+
+    s_write_fails_reg = BQ_REG03_CTRL;
+    lp_round(AO_Power, KODE_LP_OFF);
+    lp_expect_answer(true, "boost");
+    TEST_ASSERT_EQUAL_HEX8(REG03_OTG, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG);
+
+    s_write_fails_reg = NO_WRITE_FAIL;
+    lp_round_again(AO_Power, KODE_LP_OFF);
+    lp_expect_answer(false, NULL);
+    TEST_ASSERT_EQUAL_HEX8(0x00U, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG);
+
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    lp_awake(AO_Power);
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/** @brief Report a flash write in progress to AO_Power, as AO_AppMgr does. */
+static void flash_write_starts(void)
+{
+    static AppProgressEvt prog;
+
+    prog.super   = (QEvt)QEVT_INITIALIZER(APP_FLASH_PROGRESS_SIG);
+    prog.percent = 10U;
+    prog.what    = (uint8_t)KWRITE_APP;
+    (void)snprintf(prog.file, sizeof(prog.file), "doom.bin");
+    QASM_DISPATCH(AO_Power, &prog.super, 0U);
+}
+
+/** @brief End the flash write flash_write_starts() reported. */
+static void flash_write_ends(void)
+{
+    static const AppFlashDoneEvt done = { QEVT_INITIALIZER(APP_FLASH_DONE_SIG), "doom" };
+
+    QASM_DISPATCH(AO_Power, &done.super, 0U);
+    (void)qf_support_tick(AO_Power, 2U);
+}
+
+/* An order for OFF goes off without the owners still busy, so a busy
+ * AO_Power must not leave the boost running: the stop comes first, and the
+ * round is answered as the write says. */
+TEST_CASE("a round for OFF stops a running boost while a flash write keeps AO_Power busy",
+          "[power_ao][lowpower]")
+{
+    power_up_once();
+    power_flush();
+    boost_running();
+    flash_write_starts();
+
+    lp_round(AO_Power, KODE_LP_OFF);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG,
+                                   "OTG_CONFIG=1 after a round for OFF answered busy");
+    lp_expect_answer(true, "flash write");
+
+    flash_write_ends();
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    lp_awake(AO_Power);
+    power_flush();
+    ao_spy_drain();
+    Mockkhal_i2c_Destroy();
+}
+
+/* A round for OFF that AO_Power answered (ready, or busy in an order) is not
+ * asked again, so nothing may start the boost behind it until the board is
+ * awake: AWAKE is what the wake, an abandoned round and a cable all say. */
+TEST_CASE("a boost on is refused from a round for OFF until the board is awake",
+          "[power_ao][lowpower]")
+{
+    power_up_once();
+    power_flush();
+    lp_awake(AO_Power);
+    cell_reads(3720U);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_NOTHING;
+    s_regs[PMIC][BQ_REG0C_FAULT]  = 0x00U;
+    (void)poll_once();
+
+    lp_round(AO_Power, KODE_LP_OFF);
+    lp_expect_answer(false, NULL);
+    const PowerCtrlEvt *a = ctrl_req(POWER_CTRL_BOOST, 1);
+    TEST_ASSERT_EQUAL_UINT8(KODE_DENIED, a->rc);
+    TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_OFF, a->why);
+    TEST_ASSERT_EQUAL_HEX8(0x00U, s_regs[PMIC][BQ_REG03_CTRL] & REG03_OTG);
+
+    lp_awake(AO_Power);
+    (void)poll_once();
+    flash_write_starts();
+    lp_round(AO_Power, KODE_LP_OFF);
+    lp_expect_answer(true, "flash write");
+    a = ctrl_req(POWER_CTRL_BOOST, 1);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_DENIED, a->rc, "a busy answer to an order let the boost start");
+    TEST_ASSERT_EQUAL_UINT8(POWER_BOOST_WHY_OFF, a->why);
+    flash_write_ends();
+
+    lp_awake(AO_Power);
+    (void)poll_once();
+    ctrl_req_pending(POWER_CTRL_BOOST, 1);
+    s_regs[PMIC][BQ_REG0B_STATUS] = REG0B_RUNNING;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(KODE_OK, tick()->rc, "the boost stays refused once awake");
+
+    ctrl_req_pending(POWER_CTRL_BOOST, 0);
+    s_regs[PMIC][BQ_REG0B_STATUS] = 0x14U;
+    TEST_ASSERT_EQUAL_UINT8(KODE_OK, tick()->rc);
+    power_flush();
     ao_spy_drain();
     Mockkhal_i2c_Destroy();
 }

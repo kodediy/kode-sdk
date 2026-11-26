@@ -614,8 +614,10 @@ kode_status_t kode_sys_rest_end(void);
  * @brief 5 V on the expansion header from the battery, or not.
  * @note 0.5 A, not persisted.
  *
- * Refused while USB is present and while the cell is under the pack's floor;
- * AO_Power stops it on a low cell or a boost fault.
+ * Refused while USB is present, while the cell is under the pack's floor
+ * and from a round for OFF until the board is awake; AO_Power stops it on a
+ * low cell, a boost fault and the round for OFF, and says so with
+ * POWER_BOOST_CUT_SIG.
  * @param on true to switch it on.
  * @return As the commands' rule above.
  */

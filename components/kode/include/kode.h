@@ -200,6 +200,10 @@ kode_buttons_t kode_button_read_all(void);
  * its length in bytes.
  * Also battery_low: the value is the level, in percent, as it fell below
  * KODE_BATTERY_LOW_PCT.
+ * Also pin_power_5v_cut: the board stopped the 5 V kode_pin_power_5v() put on
+ * J3. The source says why: "cell" (the cell under 3.3 V), "fault" (the boost's
+ * fault) or "off" (the board switching off); the value is the cell's voltage
+ * in mV, 0 when unread. Never sent for the app's own kode_pin_power_5v(false).
  * ir_received: source "NEC", value the command, text the address "0x0004"; "unknown" for any other frame.
  * A listener or a waiter for it arms the receiver, once the C5 link is up.
  * nfc_tag: source the card, text the UID; also on the app's own NFC reads, with or without kode_nfc_scan_start().
@@ -970,7 +974,7 @@ bool kode_audio_stream_close(void);
  * a loop each play in full. Refused at once while a sound plays in the
  * background or a recording runs.
  *
- * @param hz KODE_AUDIO_TONE_HZ_MIN to KODE_AUDIO_TONE_HZ_MAX; the board snaps it to a nearby frequency.
+ * @param hz KODE_AUDIO_TONE_HZ_MIN to KODE_AUDIO_TONE_HZ_MAX; the tone plays at this frequency.
  * @param ms 1 to KODE_AUDIO_TONE_MAX_MS.
  * @return true when it was heard or kode_audio_play_stop() ended it; false with kode_error() saying why.
  */
@@ -1972,6 +1976,7 @@ const char *kode_setting_get(const char *key);
 /* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
 #define KODE_PIN_SETTLE_MS  30U     /**< From a pin's edge to the read of its level, ms (pin_<n>_changed). */
 #define KODE_PIN_POWER_MS   300000U /**< How long kode_pin_power_3v3() waits for J3's supply to switch, ms: a sweep at its 90 s ceiling, an autojoin round's joins and room. */
+#define KODE_PIN_POWER_5V_MS 1000U  /**< How long kode_pin_power_5v() waits for the power manager's answer, ms: the boost's start and room. */
 
 /**
  * @brief Make @p pin an output and drive it high or low.
@@ -2039,15 +2044,34 @@ bool kode_pin_write_pwm(uint8_t pin, uint32_t hz, uint8_t duty_pct);
 bool kode_pin_power_3v3(bool on);
 
 /**
- * @brief Put 5 V from the cell on J3, up to 0.5 A, or take it off. Not stored.
+ * @brief Put 5 V from the cell on J3, up to 0.5 A, and wait until the power
+ *        manager says they are on; or ask for them off. Not stored.
  *
- * Switching it on is refused while USB is plugged in and while the cell is
- * under the voltage the pack needs; the power manager also stops it on a low
- * cell or a fault. Switching it off is always taken.
+ * Switching it on is refused while USB is plugged in, while the cell is
+ * under the 3.6 V the boost needs and while the board is switching off
+ * (until it is awake again), and fails when the charger's boost does not
+ * start: a boost fault (an overload or an over-voltage on the 5 V, or the
+ * cell too low), the cell under -10 C or over 55 C or no pack fitted, USB
+ * plugged in meanwhile, or the charger's OTG pin low. Switching it off is
+ * always asked: it needs no reading, waits for no answer and starts no
+ * Active Object. Once on, the 5 V stay on while the board is asleep, and the
+ * power manager stops them by itself, sending pin_power_5v_cut (see the
+ * events): when the cell falls under 3.3 V, on the boost's fault, and before
+ * the board switches off. Asleep it looks once a minute. A boot always
+ * starts with the 5 V off. The call returns within milliseconds, and waits
+ * up to KODE_BATTERY_WAIT_MS for the first battery reading and for room and,
+ * switching on, up to KODE_PIN_POWER_5V_MS for the answer. The first call
+ * that switches on starts the standard layer's Active Object, as the first
+ * event call does (level 3, KODE_PRIO_USER_GUI), and fails while an Active
+ * Object of the app's own holds that level.
  * @param on true to switch it on.
- * @return true when the power manager took the request; false with
- *         kode_error() saying why. Waits up to KODE_BATTERY_WAIT_MS for the
- *         first battery reading and for room.
+ * @return On: true when the power manager says the 5 V are on; false with
+ *         kode_error() saying why: "the boost cannot start while USB is
+ *         plugged in", the cell under the boost's floor, "the board is
+ *         switching off", "the boost did not start: " and the charger's
+ *         reason, "the power manager is busy", "the power manager did not
+ *         answer within 1000 ms", or the level taken. Off: true when the
+ *         power manager took the request; false with kode_error() saying why.
  */
 bool kode_pin_power_5v(bool on);
 

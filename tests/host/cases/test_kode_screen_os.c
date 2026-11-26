@@ -14,6 +14,8 @@
 #define kode_standard_ao_pin_arm       kode_standard_ao_pin_arm_screen_os
 #define kode_standard_ao_power_expect kode_standard_ao_power_expect_screen_os
 #define kode_standard_ao_power_await  kode_standard_ao_power_await_screen_os
+#define kode_standard_ao_boost_expect kode_standard_ao_boost_expect_screen_os
+#define kode_standard_ao_boost_await  kode_standard_ao_boost_await_screen_os
 #define kode_standard_ao_subscribe     kode_standard_ao_subscribe_screen_os
 #define kode_screen_new                    kode_screen_new_os
 #define kode_screen_add_text               kode_screen_add_text_os

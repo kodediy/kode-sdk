@@ -75,6 +75,18 @@ kode_status_t kode_standard_ao_power_await(uint32_t ms)
     return KODE_TIMEOUT;
 }
 
+void kode_standard_ao_boost_expect(khal_sem_t done)
+{
+    (void)done;
+}
+
+kode_status_t kode_standard_ao_boost_await(uint32_t ms, uint8_t *why)
+{
+    (void)ms;
+    *why = POWER_BOOST_WHY_NONE;
+    return KODE_TIMEOUT;
+}
+
 bool kode_standard_ao_subscribe(kode_owner_subscribe_t subscribe)
 {
     /* cppcheck-suppress misra-c2012-11.1 ; the kodeOS image subscribes nothing, so the function is unused, not converted */
@@ -218,32 +230,55 @@ static QTimeEvt *s_pin_settle;
 /** @brief The one-shot the first-use start is elected by. */
 static khal_once_t s_once;
 
-/** @brief No kode_pin_power_3v3() waits (s_power_wait). */
-/* cppcheck-suppress misra-c2012-2.5 ; s_power_wait's value, used by the app build; the kodeOS image builds only the refusals */
+/** @brief No call waits (an owner_wait_t's @c wait). */
+/* cppcheck-suppress misra-c2012-2.5 ; an owner_wait_t's value, used by the app build; the kodeOS image builds only the refusals */
 #define POWER_WAIT_NONE 0U
 
 /** @brief A kode_pin_power_3v3() waits for J3's supply to be off. */
-/* cppcheck-suppress misra-c2012-2.5 ; s_power_wait's value, used by the app build; the kodeOS image builds only the refusals */
+/* cppcheck-suppress misra-c2012-2.5 ; an owner_wait_t's value, used by the app build; the kodeOS image builds only the refusals */
 #define POWER_WAIT_OFF  1U
 
 /** @brief A kode_pin_power_3v3() waits for J3's supply to be on. */
-/* cppcheck-suppress misra-c2012-2.5 ; s_power_wait's value, used by the app build; the kodeOS image builds only the refusals */
+/* cppcheck-suppress misra-c2012-2.5 ; an owner_wait_t's value, used by the app build; the kodeOS image builds only the refusals */
 #define POWER_WAIT_ON   2U
 
+/** @brief A kode_pin_power_5v(true) waits for AO_Power's answer to the boost on. */
+/* cppcheck-suppress misra-c2012-2.5 ; an owner_wait_t's value, used by the app build; the kodeOS image builds only the refusals */
+#define BOOST_WAIT_ON   1U
+
+/** @brief The source of pin_power_5v_cut for the cell under the boost's floor. */
+/* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
+#define BOOST_CUT_SOURCE_CELL  "cell"
+
+/** @brief The source of pin_power_5v_cut for the boost's fault. */
+/* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
+#define BOOST_CUT_SOURCE_FAULT "fault"
+
+/** @brief The source of pin_power_5v_cut for the board switching off. */
+/* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
+#define BOOST_CUT_SOURCE_OFF   "off"
+
 /**
- * @brief The one wait for J3's supply: POWER_WAIT_NONE, _OFF or _ON.
+ * @brief One wait for an owner's answer, which a call arms and the Active
+ *        Object ends.
  *
- * Whoever takes it back to POWER_WAIT_NONE owns the end: the Active Object,
- * which then signals s_power_done, or the waiter giving up, after which the
- * Active Object touches nothing.
+ * @c wait is POWER_WAIT_NONE or what the call waits for. Whoever takes it back
+ * to POWER_WAIT_NONE owns the end: the Active Object, which then signals
+ * @c done, or the waiter giving up, after which the Active Object touches
+ * nothing.
  */
-static atomic_uint s_power_wait;
+typedef struct {
+    _Atomic uint32_t wait;   /**< POWER_WAIT_NONE, or what is waited for.                       */
+    khal_sem_t       done;   /**< The waiter's semaphore; set before @c wait is armed.          */
+    _Atomic uint32_t rc;     /**< The end's code (a kode_status_t); written before @c done.     */
+    _Atomic uint32_t why;    /**< The end's cause, a POWER_BOOST_WHY_*; written before @c done. */
+} owner_wait_t;
 
-/** @brief The waiter's semaphore; set before s_power_wait is armed. */
-static khal_sem_t s_power_done;
+/** @brief The one wait for J3's supply: POWER_WAIT_NONE, _OFF or _ON. */
+static owner_wait_t s_power;
 
-/** @brief The end's code the Active Object took (a kode_status_t); written before s_power_done is signalled. */
-static atomic_uint s_power_rc;
+/** @brief The one wait for the boost: POWER_WAIT_NONE or BOOST_WAIT_ON. */
+static owner_wait_t s_boost;
 
 static QState KodeStandard_initial(KodeStandard * const me, void const * const par);
 static QState KodeStandard_running(KodeStandard * const me, QEvt const * const e);
@@ -498,23 +533,92 @@ static void pin_listen(KodeStandard * const me, const PinListenEvt *pe)
 }
 
 /**
+ * @brief End @p w when it waits for @p want: keep the end, then signal.
+ *
+ * @param w    The wait.
+ * @param want What the end answers.
+ * @param rc   The end's code.
+ * @param why  Its cause.
+ */
+static void owner_wait_end(owner_wait_t *w, uint32_t want, uint32_t rc, uint32_t why)
+{
+    uint32_t armed = want;
+
+    if ( atomic_compare_exchange_strong(&w->wait, &armed, POWER_WAIT_NONE) )
+    {
+        atomic_store(&w->rc, rc);
+        atomic_store(&w->why, why);
+        khal_sem_signal(w->done);
+    }
+}
+
+/**
  * @brief A switch of J3's supply is over: end the wait that names it, if any.
  *
  * @param d What AO_Radio published.
  */
 static void power_done(const ExpPowerDoneEvt *d)
 {
-    unsigned want = POWER_WAIT_OFF;
+    uint32_t want = POWER_WAIT_OFF;
 
     if ( d->on )
     {
         want = POWER_WAIT_ON;
     }
-    if ( atomic_compare_exchange_strong(&s_power_wait, &want, POWER_WAIT_NONE) )
+    owner_wait_end(&s_power, want, (uint32_t)d->rc, POWER_BOOST_WHY_NONE);
+}
+
+/**
+ * @brief AO_Power answered a control request: an answer to a boost on ends
+ *        the wait for it, if any.
+ *
+ * Every answer to a boost on is boosting and KODE_OK, or not boosting and
+ * a refusal or a failure; an answer that is one but not the other is a boost
+ * off's (KODE_OK and not boosting, or a failure still boosting), and ends
+ * nothing.
+ *
+ * @param a What AO_Power published.
+ */
+static void boost_done(const PowerCtrlEvt *a)
+{
+    bool const ok       = ((uint8_t)KODE_OK == a->rc);
+    bool const boosting = (0 != a->value);
+
+    if ( (POWER_CTRL_BOOST == a->op) && (ok == boosting) )
     {
-        atomic_store(&s_power_rc, (unsigned)d->rc);
-        khal_sem_signal(s_power_done);
+        owner_wait_end(&s_boost, BOOST_WAIT_ON, (uint32_t)a->rc, (uint32_t)a->why);
     }
+}
+
+/**
+ * @brief Push "pin_power_5v_cut" for a boost the board stopped: the cause is
+ *        the source, the cell's voltage the value (0 when unread).
+ *
+ * @param c What AO_Power published.
+ */
+static void boost_cut_event(const PowerBoostCutEvt *c)
+{
+    kode_sys_battery_t r;
+    const char        *source = BOOST_CUT_SOURCE_CELL;
+    int32_t            mv     = 0;
+
+    if ( POWER_BOOST_WHY_FAULT == c->why )
+    {
+        source = BOOST_CUT_SOURCE_FAULT;
+    }
+    else if ( POWER_BOOST_WHY_OFF == c->why )
+    {
+        source = BOOST_CUT_SOURCE_OFF;
+    }
+    else
+    {
+        /* the cell */
+    }
+    if ( kode_sys_battery_read(&r) == KODE_OK )
+    {
+        mv = (int32_t)r.vbat_mv;
+    }
+    kode_event_push(KODE_EVENT_PIN_5V_CUT_NAME, source, mv, NULL);
 }
 
 /**
@@ -624,8 +728,9 @@ static QState screen_forward(KodeStandard * const me, QEvt const * const e)
 
 /**
  * @brief The initial transition: subscribe to the buttons, the radio, the
- *        broker, the battery, the infrared receiver, the NFC poller and the
- *        end of a switch of J3's supply, seed the address, then run.
+ *        broker, the battery, the infrared receiver, the NFC poller, the
+ *        end of a switch of J3's supply, AO_Power's answers and its stops
+ *        of the boost, seed the address, then run.
  *
  * @param me  The Active Object.
  * @param par Unused.
@@ -642,6 +747,8 @@ static QState KodeStandard_initial(KodeStandard * const me, void const * const p
     QActive_subscribe(&me->super, IR_RX_SIG);
     QActive_subscribe(&me->super, NFC_TAG_SIG);
     QActive_subscribe(&me->super, EXP_POWER_SIG);
+    QActive_subscribe(&me->super, POWER_CTRL_SIG);
+    QActive_subscribe(&me->super, POWER_BOOST_CUT_SIG);
     wifi_seed(me);
     return Q_TRAN(&KodeStandard_running);
 }
@@ -653,7 +760,8 @@ static QState KodeStandard_initial(KodeStandard * const me, void const * const p
  *        each touch sample, and each settled change of a listened J3 pin
  *        becomes an event, the end of a switch of J3's supply ends the wait
  *        for it, and the screen's signals go to its table, every touch
- *        sample included.
+ *        sample included. AO_Power's answer to the boost ends the wait for
+ *        it, and each stop of the boost by the board becomes an event.
  *
  * The table's attach() subscribes to what it draws from (kscreen_start()),
  * so nothing reaches the screen before it is there.
@@ -769,6 +877,16 @@ static QState KodeStandard_running(KodeStandard * const me, QEvt const * const e
         }
         case EXP_POWER_SIG: {
             power_done(Q_EVT_CAST(ExpPowerDoneEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case POWER_CTRL_SIG: {
+            boost_done(Q_EVT_CAST(PowerCtrlEvt));
+            status = Q_HANDLED();
+            break;
+        }
+        case POWER_BOOST_CUT_SIG: {
+            boost_cut_event(Q_EVT_CAST(PowerBoostCutEvt));
             status = Q_HANDLED();
             break;
         }
@@ -1067,55 +1185,121 @@ bool kode_standard_ao_pin_arm(uint8_t pin)
     return ok;
 }
 
-void kode_standard_ao_power_expect(bool on, khal_sem_t done)
+/**
+ * @brief Arm @p w for @p want, before the request it waits for is posted.
+ *
+ * @param w    The wait.
+ * @param want What it waits for.
+ * @param done The waiting task's semaphore, holding no signal.
+ */
+static void owner_wait_arm(owner_wait_t *w, uint32_t want, khal_sem_t done)
 {
-    unsigned wait = POWER_WAIT_OFF;
-
-    if ( on )
-    {
-        wait = POWER_WAIT_ON;
-    }
-    s_power_done = done;
-    atomic_store(&s_power_rc, (unsigned)KODE_TIMEOUT);
-    atomic_store(&s_power_wait, wait);
+    w->done = done;
+    atomic_store(&w->rc, (uint32_t)KODE_TIMEOUT);
+    atomic_store(&w->why, POWER_BOOST_WHY_NONE);
+    atomic_store(&w->wait, want);
 }
 
-kode_status_t kode_standard_ao_power_await(uint32_t ms)
+/**
+ * @brief Wait up to @p ms for @p w's end, then disarm it.
+ *
+ * When the time runs out at the moment the Active Object takes the end, the
+ * end is waited for still: the Active Object signals right after, so no
+ * signal is left for a later wait and no end is lost.
+ *
+ * @param w  The wait.
+ * @param ms How long to wait; 0 disarms a wait whose request never went out.
+ * @return true when the end came: its code and cause are in @p w.
+ */
+static bool owner_wait_take(owner_wait_t *w, uint32_t ms)
 {
-    kode_status_t     end = KODE_TIMEOUT;
-    bool              got = false;
+    bool got = false;
 
     if ( 0U < ms )
     {
-        got = khal_sem_wait_timeout(s_power_done, ms);
+        got = khal_sem_wait_timeout(w->done, ms);
     }
     if ( !got )
     {
-        const unsigned left = atomic_exchange(&s_power_wait, POWER_WAIT_NONE);
+        const uint32_t left = atomic_exchange(&w->wait, POWER_WAIT_NONE);
 
         /* NONE: the Active Object took the end as the time ran out, so its
          * signal is certain and comes next. */
         while ( (POWER_WAIT_NONE == left) && !got )
         {
-            got = khal_sem_wait_timeout(s_power_done, KODE_FOREVER);
+            got = khal_sem_wait_timeout(w->done, KODE_FOREVER);
         }
     }
-    if ( got )
+    return got;
+}
+
+void kode_standard_ao_power_expect(bool on, khal_sem_t done)
+{
+    uint32_t wait = POWER_WAIT_OFF;
+
+    if ( on )
     {
-        const unsigned rc = atomic_load(&s_power_rc);
+        wait = POWER_WAIT_ON;
+    }
+    owner_wait_arm(&s_power, wait, done);
+}
+
+kode_status_t kode_standard_ao_power_await(uint32_t ms)
+{
+    kode_status_t end = KODE_TIMEOUT;
+
+    if ( owner_wait_take(&s_power, ms) )
+    {
+        const uint32_t rc = atomic_load(&s_power.rc);
 
         /* The three codes AO_Radio says, by name: no cast makes an enum. */
-        if ( (unsigned)KODE_OK == rc )
+        if ( (uint32_t)KODE_OK == rc )
         {
             end = KODE_OK;
         }
-        else if ( (unsigned)KODE_IO_ERROR == rc )
+        else if ( (uint32_t)KODE_IO_ERROR == rc )
         {
             end = KODE_IO_ERROR;
         }
         else
         {
             end = KODE_DENIED;
+        }
+    }
+    return end;
+}
+
+void kode_standard_ao_boost_expect(khal_sem_t done)
+{
+    owner_wait_arm(&s_boost, BOOST_WAIT_ON, done);
+}
+
+kode_status_t kode_standard_ao_boost_await(uint32_t ms, uint8_t *why)
+{
+    kode_status_t end = KODE_TIMEOUT;
+
+    *why = POWER_BOOST_WHY_NONE;
+    if ( owner_wait_take(&s_boost, ms) )
+    {
+        const uint32_t rc = atomic_load(&s_boost.rc);
+
+        *why = (uint8_t)atomic_load(&s_boost.why);
+        /* The codes AO_Power says, by name: no cast makes an enum. */
+        if ( (uint32_t)KODE_OK == rc )
+        {
+            end = KODE_OK;
+        }
+        else if ( (uint32_t)KODE_DENIED == rc )
+        {
+            end = KODE_DENIED;
+        }
+        else if ( (uint32_t)KODE_NO_RESOURCES == rc )
+        {
+            end = KODE_NO_RESOURCES;
+        }
+        else
+        {
+            end = KODE_ERROR;
         }
     }
     return end;

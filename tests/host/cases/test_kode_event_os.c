@@ -14,12 +14,16 @@
 #define kode_standard_ao_pin_arm       kode_standard_ao_pin_arm_os_build
 #define kode_standard_ao_power_expect kode_standard_ao_power_expect_os_build
 #define kode_standard_ao_power_await  kode_standard_ao_power_await_os_build
+#define kode_standard_ao_boost_expect kode_standard_ao_boost_expect_os_build
+#define kode_standard_ao_boost_await  kode_standard_ao_boost_await_os_build
 #define kode_standard_ao_subscribe     kode_standard_ao_subscribe_os_build
 #include "kode_standard_ao.c"
 #undef kode_standard_ao_touch_listen
 #undef kode_standard_ao_pin_arm
 #undef kode_standard_ao_power_expect
 #undef kode_standard_ao_power_await
+#undef kode_standard_ao_boost_expect
+#undef kode_standard_ao_boost_await
 #undef kode_standard_ao_subscribe
 #undef kode_standard_ao_screen_post
 #undef kode_standard_ao_screen_attach

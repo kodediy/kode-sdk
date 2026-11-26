@@ -1859,6 +1859,127 @@ TEST_CASE("the top button held publishes one hold with the top id",
     Mockkhal_gpio_Destroy();
 }
 
+/* ---- Two buttons held -------------------------------------------------------
+ * Each round button has a clock of its own: a press or a release of the other
+ * one never moves it. */
+
+/** @brief How long the first button is down before the other one moves. */
+#define OTHER_AFTER_MS  100U
+
+/** @brief Take the one event in the spy: @p sig, a ButtonHoldEvt for @p id. */
+static void expect_hold(QSignal sig, kdrv_button_t id)
+{
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    const ButtonHoldEvt *h = (const ButtonHoldEvt *)ao_spy_take();
+    TEST_ASSERT_EQUAL(sig, h->super.sig);
+    TEST_ASSERT_EQUAL_UINT((unsigned)id, h->id);
+    ao_spy_drain();
+}
+
+TEST_CASE("a tap on the top button leaves the bottom one's hold and home hold",
+          "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    bot_confirmed_down();
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(OTHER_AFTER_MS));
+
+    /* The top button goes down and up again; the bottom one stays down. */
+    press_confirmed(BOT_DOWN, false);
+    press_confirmed(BOT_DOWN, true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, ao_spy_count(), "the tap's two edges");
+    ao_spy_drain();
+
+    (void)qf_support_tick(AO_Buttons,
+                          QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS - OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+                                   "the bottom button is timed from its own press");
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOLD_SIG, KDRV_BTN_BOT);
+
+    (void)qf_support_tick(AO_Buttons, HOME_STEPS - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOME_HOLD_SIG, KDRV_BTN_BOT);
+
+    bot_confirmed_up();
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+TEST_CASE("a tap on the bottom button leaves the top one's hold", "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    press_confirmed(ALL_UP, false);
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    ao_spy_drain();
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(OTHER_AFTER_MS));
+
+    /* The bottom button goes down and up again; the top one stays down. */
+    press_confirmed(BOT_DOWN, false);
+    press_confirmed(ALL_UP, false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, ao_spy_count(), "the tap's two edges");
+    ao_spy_drain();
+
+    (void)qf_support_tick(AO_Buttons,
+                          QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS - OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+                                   "the top button is timed from its own press");
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOLD_SIG, KDRV_BTN_TOP);
+
+    /* The tap was too short to hold, and the top button has no home hold. */
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_HOME_HOLD_MS));
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    settle();
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+TEST_CASE("both round buttons held each publish their own hold", "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    bot_confirmed_down();
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(OTHER_AFTER_MS));
+    press_confirmed(BOT_DOWN, false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ao_spy_count(), "the top button's press");
+    ao_spy_drain();
+
+    /* The bottom button's hold, from its press. */
+    (void)qf_support_tick(AO_Buttons,
+                          QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS - OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOLD_SIG, KDRV_BTN_BOT);
+
+    /* The top button's hold, from its own press. */
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOLD_SIG, KDRV_BTN_TOP);
+
+    /* And the bottom button's home hold, from its press. */
+    (void)qf_support_tick(AO_Buttons,
+                          HOME_STEPS - QF_SUPPORT_STEPS(OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOME_HOLD_SIG, KDRV_BTN_BOT);
+
+    /* Held on, neither says anything more. */
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_HOME_HOLD_MS));
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    settle();
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
 /* ---- The double press ------------------------------------------------------
  * A double press is the top button pressed twice: the second press confirmed
  * within KODE_BUTTON_DOUBLE_MS of the first one's release, the first never

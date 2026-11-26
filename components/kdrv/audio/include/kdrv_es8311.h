@@ -224,7 +224,11 @@ typedef enum {
                                *   with a drain of silence, so its outcome
                                *   means the SPEAKER has heard the sound and
                                *   not merely that the ring has taken it.     */
-    KDRV_ES8311_JOB_RECORD,   /**< Read up to @c frames mono frames into @c buf. */
+    KDRV_ES8311_JOB_RECORD,   /**< Read up to @c frames mono frames into @c buf.
+                               *   The first one after an open reads and
+                               *   throws away the microphone's start-up step
+                               *   first, about 224 ms, uncounted; a window
+                               *   since the open has read past it already.   */
     KDRV_ES8311_JOB_STREAM,   /**< Play the stream's ring for as long as the
                                *   stream is open: whatever the writer put in,
                                *   a block at a time, and silence while it is

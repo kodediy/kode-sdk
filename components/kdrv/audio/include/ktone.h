@@ -220,17 +220,23 @@ uint8_t ktone_bin_nearest(uint16_t hz);
 int16_t ktone_sample(uint8_t i, uint32_t n, int16_t amp);
 
 /**
- * @brief Fill @p out with @p frames samples of candidate @p i's tone.
+ * @brief Fill @p out with @p frames samples of a tone at @p hz.
  *
- * @param i      Which candidate.
+ * Any whole frequency from KTONE_HZ_MIN to KTONE_HZ_MAX, not only a
+ * candidate. The phase is an integer accumulator modulo KTONE_RATE_HZ: a
+ * whole frequency completes a whole number of cycles in one second, so the
+ * phase is exact for as long as the tone runs and a fill that continues at
+ * @p n0 joins the one before it with no step.
+ *
+ * @param hz     The frequency, KTONE_HZ_MIN to KTONE_HZ_MAX.
  * @param n0     The frame index the first sample carries.
  * @param amp    Peak amplitude, out of 32768.
  * @param out    Where to write, mono.
  * @param frames How many.
- * @return KODE_OK, or KODE_DENIED for a NULL @p out or an @p i out of range.
+ * @return KODE_OK, or KODE_DENIED for a NULL @p out or an @p hz out of range.
  */
-kode_status_t ktone_fill(uint8_t i, uint32_t n0, int16_t amp,
-                         int16_t *out, size_t frames);
+kode_status_t ktone_fill_hz(uint16_t hz, uint32_t n0, int16_t amp,
+                            int16_t *out, size_t frames);
 
 /* ---- The detector -------------------------------------------------------- */
 

@@ -52,6 +52,9 @@
 /** @brief The event for a pairing that ended: kode.h's KODE_EVENT_BLE_PAIR_DONE. */
 #define KODE_EVENT_BLE_PAIR_DONE_NAME "ble_pair_done"
 
+/** @brief The event for J3's 5 V the board stopped: kode.h's pin_power_5v_cut. */
+#define KODE_EVENT_PIN_5V_CUT_NAME "pin_power_5v_cut"
+
 /* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
 /** @brief How long asking for the finger keeps trying while the Active Object's queue is full, in ms. */
 #define KODE_TOUCH_LISTEN_BOUND_MS 100U
@@ -181,6 +184,36 @@ void kode_standard_ao_power_expect(bool on, khal_sem_t done);
  *         wait was armed. In the kodeOS image KODE_TIMEOUT.
  */
 kode_status_t kode_standard_ao_power_await(uint32_t ms);
+
+/**
+ * @brief Arm the one wait for AO_Power's answer to the boost on, before the
+ *        request is posted.
+ *
+ * The Active Object subscribes to POWER_CTRL_SIG from its start; once armed,
+ * the first POWER_CTRL_BOOST answer that can be a boost on's (KODE_OK and
+ * boosting, or another code and not boosting) ends the wait: it keeps the
+ * code and the cause and signals @p done. A boost off's answer ends nothing.
+ * One wait at a time: kode_pin_power_5v() calls take turns before they arm.
+ * Call it once kode_standard_ao_ensure() has answered true, with @p done
+ * holding no signal.
+ *
+ * @param done The waiting task's semaphore.
+ */
+void kode_standard_ao_boost_expect(khal_sem_t done);
+
+/**
+ * @brief Wait for the answer kode_standard_ao_boost_expect() armed, then
+ *        disarm, as kode_standard_ao_power_await() does.
+ *
+ * @param ms  How long to wait; 0 disarms a wait whose request never went out.
+ * @param why Receives the answer's POWER_BOOST_WHY_*; POWER_BOOST_WHY_NONE
+ *            with no answer.
+ * @return The answer's code (POWER_CTRL_SIG's rc: KODE_OK, KODE_DENIED,
+ *         KODE_NO_RESOURCES, or KODE_ERROR for any other), or KODE_TIMEOUT
+ *         when nothing answered in time or no wait was armed. In the kodeOS
+ *         image KODE_TIMEOUT.
+ */
+kode_status_t kode_standard_ao_boost_await(uint32_t ms, uint8_t *why);
 
 /**
  * @brief Have the Active Object subscribe to an owner's signals, from the caller's task.
