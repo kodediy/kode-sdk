@@ -1,6 +1,6 @@
 # The budget of internal RAM for the minimal app (main/minimal.c), the
-# variant `minimal`, read by tools/check_ram.sh (`minimal_noradio` has its
-# own, ram_budget.minimal_noradio.txt):
+# variant `minimal`, read by tools/check_ram.sh (`minimal_noradio` and
+# `minimal_ble` each have their own, ram_budget.<variant>.txt):
 #
 #   ../../tools/check_ram.sh build/kode_target.elf ram_budget.minimal.txt
 #

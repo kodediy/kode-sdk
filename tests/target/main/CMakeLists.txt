@@ -4,11 +4,13 @@
 # kscreen is compiled, not started: this project runs no Active Object of its
 # own, and the screen calls are linked, never made.
 #
-# The variants `minimal` and `minimal_noradio` (KODE_TARGET_VARIANT) build
-# minimal.c instead: the LED and the buttons on an app's default configuration,
-# the image that says what an app using two owners links
-# (tools/check_starts.sh --absent); the second with the radio compiled out,
-# which builds the C5's reset line alone (kdrv_c5_hold.c).
+# The variants `minimal`, `minimal_noradio` and `minimal_ble`
+# (KODE_TARGET_VARIANT) build minimal.c instead: the LED and the buttons on an
+# app's default configuration, the image that says what an app using two
+# owners links (tools/check_starts.sh --absent); the second with the radio
+# compiled out, which builds the C5's reset line alone (kdrv_c5_hold.c); the
+# third with Bluetooth on and no BLE console, which builds the Bluetooth
+# calls with no pairing type in kdrv_ble.h.
 if("$ENV{KODE_TARGET_VARIANT}" MATCHES "^minimal")
     idf_component_register(
         SRCS "minimal.c"
