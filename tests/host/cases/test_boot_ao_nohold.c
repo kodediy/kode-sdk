@@ -21,6 +21,11 @@
 #define boot_app_end_of            boot_app_end_of_nohold
 #define boot_crashes_next          boot_crashes_next_nohold
 #define boot_app_end_name          boot_app_end_name_nohold
+#define boot_os_end                boot_os_end_nohold
+#define boot_os_dump               boot_os_dump_nohold
+#define boot_os_end_of             boot_os_end_of_nohold
+#define boot_dump_explains         boot_dump_explains_nohold
+#define boot_os_end_name           boot_os_end_name_nohold
 #define boot_os_switch_request     boot_os_switch_request_nohold
 #define boot_app_run_request       boot_app_run_request_nohold
 #define boot_info_request          boot_info_request_nohold

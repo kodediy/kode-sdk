@@ -4723,6 +4723,40 @@ typedef enum {
 kboot_app_end_t boot_app_end(void);
 
 /**
+ * @brief How the kodeOS that ran before this boot ended, whichever slot it ran
+ *        from.
+ *
+ * From the chip's reset reason, and only when no app ran in between: a fault
+ * after an app is the app's (kboot_app_end_t).
+ */
+typedef enum {
+    KBOOT_OS_END_NONE = 0,   /**< No fault of kodeOS's own before this boot.    */
+    KBOOT_OS_END_PANIC,      /**< A panic or a CPU lockup.                      */
+    KBOOT_OS_END_WATCHDOG    /**< Any watchdog.                                 */
+} kboot_os_end_t;
+
+/**
+ * @brief How kodeOS ended before this boot, as AO_Boot worked it out on the
+ *        way up.
+ *
+ * @return KBOOT_OS_END_NONE when no fault of kodeOS's own came before this
+ *         boot; always KBOOT_OS_END_NONE in the app role.
+ */
+kboot_os_end_t boot_os_end(void);
+
+/**
+ * @brief Whether the fault before this boot left a core dump of a kodeOS image.
+ *
+ * Read once, on the way up, and only when boot_os_end() is a fault whose reset
+ * boot_dump_explains(): the coredump partition then holds a dump whose ELF
+ * SHA-256 is that of a kodeOS image in flash (kdrv_coredump_t.kodeos).
+ *
+ * @return true when that dump is waiting; false on every other boot, and
+ *         always in the app role.
+ */
+bool boot_os_dump(void);
+
+/**
  * @brief What boot_app_offset() answers when no app ran before this boot.
  *
  * No image sits here: every one starts on a KAPPS_ALIGN page of the apps
@@ -4758,9 +4792,35 @@ uint32_t boot_app_offset(void);
 kboot_app_end_t boot_app_end_of(kboot_reason_t r, int reason);
 
 /**
+ * @brief Classify how kodeOS ended before this boot from the chip's reset reason.
+ *
+ * Pure, so a table test holds the whole mapping. An unknown reason reads as
+ * NONE: a false fault would blame a healthy kodeOS.
+ *
+ * @param reason    What the chip says reset it: a KDRV_RESET_ value (kdrv_slot.h),
+ *                  or any other number.
+ * @param after_app An app ran before this boot, so the reason is the app's.
+ * @return KBOOT_OS_END_NONE when @p after_app; otherwise PANIC (panic, CPU
+ *         lockup), WATCHDOG (any watchdog) or NONE for every other reason.
+ */
+kboot_os_end_t boot_os_end_of(int reason, bool after_app);
+
+/**
+ * @brief Whether a core dump can explain a reset of this reason.
+ *
+ * Pure. The panic handler writes the dump on a panic and on the interrupt and
+ * task watchdogs; any other reset leaves the partition as it was.
+ *
+ * @param reason What the chip says reset it: a KDRV_RESET_ value, or any other number.
+ * @return true for KDRV_RESET_PANIC, KDRV_RESET_INT_WDT and KDRV_RESET_TASK_WDT;
+ *         false otherwise.
+ */
+bool boot_dump_explains(int reason);
+
+/**
  * @brief The crashes in a row of the running kodeOS slot, this boot counted.
  *
- * Pure, with boot_app_end_of()'s classes: a panic or watchdog adds one, up to
+ * Pure, with boot_os_end_of()'s classes: a panic or watchdog adds one, up to
  * KODE_BOOT_CRASHES_MAX; a brownout or glitch changes nothing; anything else resets
  * the count to none.
  *
@@ -4798,6 +4858,15 @@ void boot_system_up(void);
  *         that is none of them. Never NULL.
  */
 const char *boot_app_end_name(kboot_app_end_t e);
+
+/**
+ * @brief The word for how kodeOS ended, as the log prints it.
+ *
+ * @param e The class.
+ * @return "none", "panic" or "watchdog"; "?" for a value that is none of them.
+ *         Never NULL.
+ */
+const char *boot_os_end_name(kboot_os_end_t e);
 
 /** @brief Ask AO_Boot to switch kodeOS to its other OTA slot. The board resets. */
 void boot_os_switch_request(void);

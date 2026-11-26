@@ -12,6 +12,7 @@
 
 #include "sdkconfig.h"
 
+#include "kaos.h"
 #include "kdrv_apps.h"
 #include "kdrv_slot.h"
 #include "khal_identity.h"
@@ -110,7 +111,7 @@ void kode_banner_print(void)
     /* After a return from an app the dump in flash is an old kodeOS one: not read. */
     char dump[BANNER_DUMP_MAX];
     char const *dump_reason = NULL;
-    if ( (NULL == app) && kode_banner_dump_explains(reason)
+    if ( (NULL == app) && boot_dump_explains((int)reason)
         && (kdrv_slot_coredump_reason(dump, sizeof(dump)) == KODE_OK) )
     {
         dump_reason = dump;
