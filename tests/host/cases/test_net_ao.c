@@ -8956,6 +8956,74 @@ TEST_CASE("test_a_request_with_no_event_block_is_refused: false when the pool "
     dump_done();
 }
 
+/** @brief What an upload whose PUT the worker refused came to. */
+typedef struct {
+    unsigned forgets;   /**< kdrv_net_http_forget() calls once refused.   */
+    unsigned answers;   /**< Answers to the asker.                        */
+    uint8_t  result;    /**< The last answer's result.                    */
+} refused_put_t;
+
+TEST_CASE("test_a_put_the_worker_refuses_leaves_no_copy_in_kdrv_net: a "
+          "capture, a stream's frame and a dump", "[net_ao][dump][shot]")
+{
+    refused_put_t     capture;
+    refused_put_t     frame;
+    refused_put_t     dump;
+    DisplayShotReqEvt q;
+    NetShotRspEvt     sr;
+    NetDumpRspEvt     dr;
+    spied_t           s;
+
+    /* A capture: prepared, then the worker will not take its PUT. */
+    shot_fresh();
+    drive_to_up();
+    ao_spy_drain();
+    shot_ask(SHOT_TOKEN);
+    (void)display_take(&q, sizeof(q));
+    s_nforget = 0U;
+    fake_khal_worker_refuse_for(WORKER_NAME, true);
+    display_answer(KODE_OK, 500U);
+    fake_khal_worker_refuse_for(WORKER_NAME, false);
+    capture.forgets = s_nforget;
+    capture.answers = shot_answers(&sr);
+    capture.result  = sr.result;
+    net_done();
+
+    /* A stream's frame: the same refusal costs the frame alone. */
+    stream_fresh();
+    stream_ask(2U, 60U);
+    (void)spied();
+    (void)display_take(&q, sizeof(q));
+    s_nforget = 0U;
+    fake_khal_worker_refuse_for(WORKER_NAME, true);
+    display_answer(KODE_OK, 1000U);
+    fake_khal_worker_refuse_for(WORKER_NAME, false);
+    frame.forgets = s_nforget;
+    s             = spied();
+    frame.answers = s.answers;
+    net_done();
+
+    /* A dump. */
+    dump_up();
+    s_nforget = 0U;
+    fake_khal_worker_refuse_for(WORKER_NAME, true);
+    dump_ask();
+    fake_khal_worker_refuse_for(WORKER_NAME, false);
+    dump.forgets = s_nforget;
+    dump.answers = dump_answers(&dr);
+    dump.result  = dr.result;
+    dump_done();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, capture.forgets, "a capture's copy stayed in kdrv_net");
+    TEST_ASSERT_EQUAL_UINT(1U, capture.answers);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KSHOT_R_BUSY, capture.result);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, frame.forgets, "a frame's copy stayed in kdrv_net");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, frame.answers, "a skipped frame ended the stream");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, dump.forgets, "a dump's copy stayed in kdrv_net");
+    TEST_ASSERT_EQUAL_UINT(1U, dump.answers);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)KDUMP_R_BUSY, dump.result);
+}
+
 /* ---- kode_sys's requests: answered to the asking AO ---------------------------
  * The network requests post and return; AO_Net hands the I/O to its worker and
  * posts one answer to the AO that asked, the spy here, its status inside. A

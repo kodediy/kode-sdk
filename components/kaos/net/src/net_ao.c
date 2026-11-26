@@ -5026,6 +5026,7 @@ static void shot_frame_landed(Net * const me, const DisplayShotRspEvt *d)
     req.keep = true;   /* a stream: the next frame reuses the connection */
     if ( !net_submit(me, &req) )
     {
+        kdrv_net_http_forget();   /* no job runs to wipe kdrv_net's copy */
         shot_frame_skip(me);
         return;
     }
@@ -5098,6 +5099,7 @@ static void shot_on_display(Net * const me, const DisplayShotRspEvt *d)
     req.keep = false;   /* one capture: the connection closes with the job */
     if ( !net_submit(me, &req) )
     {
+        kdrv_net_http_forget();   /* no job runs to wipe kdrv_net's copy */
         shot_end_with(me, KSHOT_R_BUSY);
         return;
     }
