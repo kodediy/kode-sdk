@@ -28,7 +28,7 @@ typedef struct
 } keep_free_t;
 
 static uint8_t    *s_keep;
-static keep_free_t s_last;   /**< The free block that ends highest: the heap walk writes it. */
+static keep_free_t s_keep_top;   /**< The free block that ends highest: the heap walk writes it. */
 
 /**
  * @brief An address, for judging where a block sits.
@@ -57,16 +57,16 @@ static bool keep_walk_top(walker_heap_into_t heap_info, walker_block_info_t bloc
 
     (void)heap_info;
     (void)user_data;
-    if ( (!block_info.used) && ((s_last.from + s_last.bytes) < (from + block_info.size)) )
+    if ( (!block_info.used) && ((s_keep_top.from + s_keep_top.bytes) < (from + block_info.size)) )
     {
-        s_last.from  = from;
-        s_last.bytes = block_info.size;
+        s_keep_top.from  = from;
+        s_keep_top.bytes = block_info.size;
     }
     return true;
 }
 
 /**
- * @brief Walk the heap for the free block that ends highest, into s_last.
+ * @brief Walk the heap for the free block that ends highest, into s_keep_top.
  *
  * The walk gives the block's exact size; the heap's largest-block answer is rounded down to its class.
  *
@@ -74,8 +74,8 @@ static bool keep_walk_top(walker_heap_into_t heap_info, walker_block_info_t bloc
  */
 static void keep_walk(uint32_t caps)
 {
-    s_last.from  = 0U;
-    s_last.bytes = 0U;
+    s_keep_top.from  = 0U;
+    s_keep_top.bytes = 0U;
     heap_caps_walk(caps, keep_walk_top, NULL);
 }
 
@@ -95,14 +95,14 @@ void khal_keep_init(void)
     uintptr_t const top = (uintptr_t)SOC_EXTRAM_LOW + esp_psram_get_size();
 
     keep_walk(caps);
-    if ( (KHAL_KEEP_HOLD_BYTES + KHAL_KEEP_SLACK_MIN) > s_last.bytes )
+    if ( (KHAL_KEEP_HOLD_BYTES + KHAL_KEEP_SLACK_MIN) > s_keep_top.bytes )
     {
         KLOG_W(TAG, "no room to set the kept block aside");
         return;
     }
     /* The heap cuts a request from the front of a free block and takes it at the request's class:
      * fills it takes exactly eat the top block from below until the held piece and its slack are left. */
-    size_t fill = khal_keep_fill(s_last.bytes);
+    size_t fill = khal_keep_fill(s_keep_top.bytes);
 
     while ( (0U != fill) && (KHAL_KEEP_FILLS_MAX > count) )
     {
@@ -115,10 +115,10 @@ void khal_keep_init(void)
         {
             ++count;
             keep_walk(caps);
-            fill = khal_keep_fill(s_last.bytes);
+            fill = khal_keep_fill(s_keep_top.bytes);
         }
     }
-    if ( khal_keep_ready(s_last.bytes) )
+    if ( khal_keep_ready(s_keep_top.bytes) )
     {
         /* Heap poisoning or heap task tracking adds bytes to every request: then this misses the top
          * and the warning below says so, never a wrong block. */
@@ -134,7 +134,7 @@ void khal_keep_init(void)
     {
         /* Not where it has to be: no copy this boot, and nothing else lost. */
         KLOG_W(TAG, "the kept block did not land at the top (0x%08lx, top block %lu B)",
-               (unsigned long)from, (unsigned long)s_last.bytes);
+               (unsigned long)from, (unsigned long)s_keep_top.bytes);
         if ( NULL != held )
         {
             heap_caps_free(held);
