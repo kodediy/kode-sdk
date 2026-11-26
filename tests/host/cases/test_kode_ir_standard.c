@@ -1352,6 +1352,32 @@ TEST_CASE("a start with a bad path fails and starts nothing", "[kode_ir_capture]
     world_end();
 }
 
+TEST_CASE("a start with a path a write refuses fails as the write does and starts nothing",
+          "[kode_ir_capture]")
+{
+    char path[KODE_FILE_PATH_MAX];
+    char want[KODE_ERROR_MAX];
+
+    /* "flash/" and a name: one byte more than a whole-file write takes, less than a path may hold. */
+    (void)memcpy(path, "flash/", sizeof("flash/"));
+    (void)memset(&path[sizeof("flash/") - 1U], 'c', KODE_FILE_WRITE_PATH_MAX + 1U - sizeof("flash/"));
+    path[KODE_FILE_WRITE_PATH_MAX] = '\0';
+    (void)snprintf(want, sizeof(want), "path '%s' is too long to write", path);
+
+    world_fresh();
+    TEST_ASSERT_FALSE(kode_file_write_bytes(path, "x", 1U));
+    TEST_ASSERT_EQUAL_STRING(want, kode_error());
+
+    const uint32_t allocs = (uint32_t)fake_psram_alloc_count();
+
+    TEST_ASSERT_FALSE(kode_ir_capture_start(path));
+    TEST_ASSERT_EQUAL_STRING(want, kode_error());
+    TEST_ASSERT_FALSE(kode_ir_capturing());
+    TEST_ASSERT_EQUAL_UINT32(0U, ir_pending());
+    TEST_ASSERT_EQUAL_UINT32(allocs, (uint32_t)fake_psram_alloc_count());
+    world_end();
+}
+
 TEST_CASE("a stop with nothing heard says so and writes no file", "[kode_ir_capture]")
 {
     char text[TEST_FILE_BYTES];

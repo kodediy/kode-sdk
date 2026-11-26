@@ -7592,15 +7592,22 @@ static QState console_own(Console * const me, QEvt const * const e)
             if ( (uint8_t)KCLI_FS_LIST == me->inflight )
             {
                 /* sd_ls's record plus `type=`. Only a path listing knows
-                 * directories: the medium walk sets is_dir false. */
+                 * directories: the medium walk sets is_dir false. A name
+                 * longer than an entry holds ends the record with `cut=yes`:
+                 * no path reaches the entry by the name printed. */
                 const char *type = "file";
+                const char *cut  = "";
                 if ( en->is_dir )
                 {
                     type = "dir";
                 }
-                console_reply(">|name=%s type=%s size=%lu medium=%s",
+                if ( en->name_cut )
+                {
+                    cut = " cut=yes";
+                }
+                console_reply(">|name=%s type=%s size=%lu medium=%s%s",
                       console_quote(qn, sizeof(qn), en->name), type,
-                      (unsigned long)en->size, medium);
+                      (unsigned long)en->size, medium, cut);
             }
             else if ( ((uint8_t)KCLI_APPDATA_LS == me->inflight)
                      || ((uint8_t)KCLI_APPDATA_INFO == me->inflight) )

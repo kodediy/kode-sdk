@@ -1318,7 +1318,9 @@ typedef FileRspEvt kode_sys_file_answer_t;
 /* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
 /**
  * @brief One entry of a listing (STORAGE_ENTRY_SIG): @c name, @c size, @c is_dir,
- *        and @c pos, its place in the listing.
+ *        @c pos, its place in the listing, and @c name_cut, set when the name
+ *        is longer than @c name holds and is cut at a whole UTF-8 character
+ *        (no path opens the entry by it).
  */
 typedef StorageEntryEvt kode_sys_file_entry_t;
 

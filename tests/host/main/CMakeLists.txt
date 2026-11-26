@@ -79,6 +79,7 @@ set(SOURCES_UNDER_TEST
     "${SDK_DIR}/components/kode_sys/src/kode_gate.c"
     "${SDK_DIR}/components/khal/sync/src/khal_once.c"
     "${SDK_DIR}/components/khal/time/src/khal_time_zone.c"
+    "${SDK_DIR}/components/khal/utf8/src/khal_utf8.c"
     "${SDK_DIR}/components/kode/src/kode_audio.c"
     "${SDK_DIR}/components/kode/src/kode_battery.c"
     "${SDK_DIR}/components/kode/src/kode_bus.c"
@@ -515,6 +516,14 @@ set_source_files_properties(
 set_source_files_properties(
     "${SDK_DIR}/components/kaos/storage/src/storage_fetch.c"
     PROPERTIES COMPILE_DEFINITIONS "net_stream_buf=host_fetch_stream_buf")
+
+# A replacement that fails at its second or third rename leaves states no host
+# folder can be made to produce on demand. The storage driver's rename() is
+# renamed here, for this source alone, to a function test_kode_file.c defines:
+# the real rename(), but for the ones a case arms to fail.
+set_source_files_properties(
+    "${SDK_DIR}/components/kdrv/storage/src/kdrv_storage.c"
+    PROPERTIES COMPILE_DEFINITIONS "rename=host_storage_rename")
 
 # The install records wait for the port their command came on: the Kode
 # channel and the BLE console are on for this source, so the cases can bring

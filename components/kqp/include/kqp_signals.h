@@ -2743,6 +2743,11 @@ typedef struct {
                           *   across pages and across both media: a
                           *   subscriber stores entry `pos` at index `pos`,
                           *   and 0 begins a new listing.                 */
+    bool     name_cut;  /**< The name is longer than `name` holds and is
+                          *   cut at a whole UTF-8 character: no path opens
+                          *   the entry by it. Only the path-based walk
+                          *   cuts; the medium-based one leaves such a name
+                          *   out and sets this false.                     */
 } StorageEntryEvt;
 
 /** @brief What to do to a medium (STORAGE_CMD_SIG). */
@@ -7252,7 +7257,7 @@ typedef struct {
  * @brief One entry of a listing, written straight into a blocked task's own
  *        storage rather than published as a StorageEntryEvt.
  *
- * The three fields StorageEntryEvt carries that a caller of the facade
+ * The fields StorageEntryEvt carries that a caller of the facade
  * actually asked about, minus the QEvt only an Active Object can receive and
  * minus `from_sd`, which a caller that named the directory itself already
  * knows. See StorageWaiter for why a second shape exists at all.
@@ -7261,6 +7266,7 @@ typedef struct {
     char     name[KODE_STORAGE_NAME_MAX];
     bool     is_dir;
     uint32_t size;
+    bool     name_cut;  /**< As StorageEntryEvt.name_cut. */
 } StorageRow;
 
 /**

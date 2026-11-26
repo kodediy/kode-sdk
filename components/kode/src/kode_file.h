@@ -28,6 +28,16 @@ struct kode_file_state;
 bool kode_file_path(const char *user, char *out, uint32_t cap);
 
 /**
+ * @brief As kode_file_path(), for a path a whole-file write will take.
+ * @param user What the caller typed.
+ * @param out  Receives the volume path.
+ * @param cap  Bytes of @p out, NUL included.
+ * @return true on success; false with the task's error set, as
+ *         kode_file_path() fails or for a path over KODE_FILE_WRITE_PATH_MAX.
+ */
+bool kode_file_write_path(const char *user, char *out, uint32_t cap);
+
+/**
  * @brief The calling task's files state, taken from PSRAM on first use.
  * @return The state; NULL if PSRAM has none to give.
  */
@@ -71,6 +81,11 @@ kode_status_t kode_file_window(const char *vol, uint32_t size, uint32_t offset, 
 
 /**
  * @brief Write or append bytes to a typed path, in parts, in its turn among the file calls.
+ *
+ * A write goes to `<path>.tmp` and takes the file's place once all of it is
+ * there; a failure leaves what kode_file_write()'s leaves. Its path takes at
+ * most KODE_FILE_WRITE_PATH_MAX bytes. An append goes onto the file itself.
+ *
  * @param user   The path as typed.
  * @param data   The bytes; NULL is refused.
  * @param len    How many; 0 creates or empties the file.

@@ -450,6 +450,7 @@ bool kode_led_toggle(void);
  */
 
 #define KODE_FILE_PATH_MAX 91U      /**< Bytes of a path, NUL included. */
+#define KODE_FILE_WRITE_PATH_MAX 87U /**< Bytes of a path a whole-file write takes, NUL included: room for ".tmp". */
 #define KODE_FILE_NAME_MAX 96U      /**< Bytes of one name in a listing, NUL included. */
 #define KODE_FILE_LIST_MAX 24U      /**< Entries one listing carries. */
 #define KODE_FILE_READ_MAX 4194304U /**< Largest file a read returns: 4 MiB. */
@@ -464,9 +465,11 @@ typedef struct {
 
 /** @brief One entry of a listing. */
 typedef struct {
-    char     name[KODE_FILE_NAME_MAX];  /**< Its name, without the folder. */
+    char     name[KODE_FILE_NAME_MAX];  /**< Its name, without the folder; cut when name_cut is set. */
     bool     is_folder;                 /**< A folder rather than a file. */
     uint32_t size;                      /**< Bytes of a file; 0 for a folder. */
+    bool     name_cut;                  /**< The name is longer than name holds and is cut at a whole
+                                         *   UTF-8 character: no call opens the entry by it. */
 } kode_file_entry_t;
 
 /** @brief What a listing carries. */
@@ -527,7 +530,15 @@ bool kode_file_read_at(const char *path, uint32_t offset, void *buf, uint32_t ca
  * @brief Create a file with @p text, or replace what it held.
  *
  * Blocks. "" empties the file. The folder must already exist. The text goes
- * in parts: a failure after the first leaves the file cut, not as it was.
+ * to a copy beside the file, its name with ".tmp" added, which takes the
+ * file's place once all of it is written. A failure leaves the file as it
+ * was and removes the copy, but for one case: the copy cannot take the name
+ * and no file is left on it, the old one included. Then the copy stays, any
+ * old file is its name with ".bak" added, and kode_error() says so. The
+ * volume holds the old file and the copy together until then, so it
+ * needs room for both. A path takes at most KODE_FILE_WRITE_PATH_MAX bytes. A
+ * reset during the write can leave the copy, or the old file as ".bak" and
+ * nothing on the name. The next write of the path that succeeds removes both.
  *
  * @param path "sd/..." or "flash/...".
  * @param text The text to write.
@@ -539,7 +550,8 @@ bool kode_file_write(const char *path, const char *text);
 /**
  * @brief Add @p text at the end of a file, creating it if it is not there.
  *
- * Blocks.
+ * Blocks. The text goes onto the file itself, in parts: a failure after the
+ * first leaves what the parts before it added.
  *
  * @param path "sd/..." or "flash/...".
  * @param text The text to add.
@@ -551,10 +563,12 @@ bool kode_file_append(const char *path, const char *text);
  * @brief Create a file with @p len bytes, or replace what it held.
  *
  * Blocks. A 0 inside @p data is written like any byte. The folder must
- * already exist. @p len is any size the volume can hold; the bytes go in
- * parts, so a failure after the first leaves the file cut, not as it was. A
- * @p len of 0 with a @p data that is not NULL empties the file. An Active
- * Object writes with kode_sys_file_write().
+ * already exist. @p len is any size the volume can hold beside the file it
+ * replaces: as kode_file_write(), the bytes go to a copy that takes the
+ * file's place once all of them are written, and a failure leaves what
+ * kode_file_write()'s leaves. A @p len of 0 with a @p data that is not NULL
+ * empties the file.
+ * An Active Object writes with kode_sys_file_write(), which writes in place.
  *
  * @param path "sd/..." or "flash/...".
  * @param data The bytes. NULL is refused, whatever @p len is.
@@ -619,6 +633,8 @@ bool kode_file_exists(const char *path);
  * @brief List one folder: its own entries, one level.
  *
  * Blocks. KODE_FILE_LIST_MAX entries at most; `more` says there were others.
+ * A name longer than KODE_FILE_NAME_MAX holds is listed cut, with `name_cut`
+ * set; such an entry cannot be opened by that name.
  *
  * @param folder "sd", "flash" or "sd/...", "flash/..." naming a folder.
  * @return The listing, valid until this task's next kode_file_list() or
@@ -1061,9 +1077,10 @@ bool kode_audio_record_stop(void);
  * @brief Write the recording to a WAV file.
  *
  * Blocks. The recording stays in PSRAM until the next kode_audio_record_start(),
- * so it can be saved again.
+ * so it can be saved again. The file is written as kode_file_write_bytes()
+ * writes one, and a failure leaves what kode_file_write()'s leaves.
  *
- * @param path As for kode_audio_record_file().
+ * @param path As for kode_audio_record_file(), at most KODE_FILE_WRITE_PATH_MAX bytes.
  * @return true when the file is written; false with kode_error() saying why.
  */
 bool kode_audio_record_save(const char *path);
@@ -2370,7 +2387,9 @@ bool kode_ir_send_raw(const uint16_t *us, uint32_t n, uint32_t carrier_hz);
  * Blocks only for its turn. Until kode_ir_capture_stop(), reads fail at once
  * and sends still work.
  *
- * @param path "sd/..." or "flash/..." the capture is written to by the stop; the folder must exist.
+ * @param path "sd/..." or "flash/..." the capture is written to by the stop, as
+ *             kode_file_write() writes; the folder must exist. A path over
+ *             KODE_FILE_WRITE_PATH_MAX bytes is refused here.
  * @return true when the capture runs; false with kode_error() saying why.
  */
 bool kode_ir_capture_start(const char *path);

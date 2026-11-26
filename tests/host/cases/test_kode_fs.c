@@ -1025,11 +1025,12 @@ typedef struct {
     bool     dir_is_dir;
 } list_capture_t;
 
-static bool list_collect(const char *name, bool is_dir, uint32_t size,
+static bool list_collect(const char *name, bool is_dir, uint32_t size, bool name_cut,
                          void *ctx)
 {
     list_capture_t * const c = (list_capture_t *)ctx;
 
+    (void)name_cut;
     ++c->calls;
     if ( strcmp(name, "notes.txt") == 0 )
     {
@@ -1049,6 +1050,7 @@ TEST_CASE("list offers every entry of a directory to the callback",
           "[kode_fs]")
 {
     list_capture_t cap = { 0U, false, false, 0U, false, false };
+    bool           more = true;
 
     fs_fresh();
     fake_media_put_fs_file("notes.txt", "hello");
@@ -1056,7 +1058,7 @@ TEST_CASE("list offers every entry of a directory to the callback",
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-                          kode_block_file_list_each(FS_VOL, 0U, &list_collect, &cap));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_collect, &cap, &more));
     TEST_ASSERT_EQUAL_UINT(2U, cap.calls);
     TEST_ASSERT_TRUE(cap.saw_file);
     TEST_ASSERT_FALSE(cap.file_is_dir);
@@ -1066,25 +1068,27 @@ TEST_CASE("list offers every entry of a directory to the callback",
 }
 
 /** @brief Count entries and take every one of them; @p ctx is a uint32_t. */
-static bool list_count_only(const char *name, bool is_dir, uint32_t size,
+static bool list_count_only(const char *name, bool is_dir, uint32_t size, bool name_cut,
                             void *ctx)
 {
     uint32_t * const calls = (uint32_t *)ctx;
     (void)name;
     (void)is_dir;
     (void)size;
+    (void)name_cut;
     ++(*calls);
     return true;
 }
 
 /** @brief Count one entry and then stop the walk; @p ctx is a uint32_t. */
-static bool list_stop_after_one(const char *name, bool is_dir, uint32_t size,
+static bool list_stop_after_one(const char *name, bool is_dir, uint32_t size, bool name_cut,
                                 void *ctx)
 {
     uint32_t * const calls = (uint32_t *)ctx;
     (void)name;
     (void)is_dir;
     (void)size;
+    (void)name_cut;
     ++(*calls);
     return false;
 }
@@ -1093,6 +1097,7 @@ TEST_CASE("list stops offering entries once the callback says so",
           "[kode_fs]")
 {
     uint32_t calls = 0U;
+    bool     more  = true;
 
     fs_fresh();
     fake_media_put_fs_file("a.txt", "1");
@@ -1100,18 +1105,19 @@ TEST_CASE("list stops offering entries once the callback says so",
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-                          kode_block_file_list_each(FS_VOL, 0U, &list_stop_after_one, &calls));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_stop_after_one, &calls, &more));
     TEST_ASSERT_EQUAL_UINT32(1U, calls);
 }
 
 /* The truncation signal, and the reason it exists: a directory of two hundred
- * entries answering KODE_OK after twenty-four is indistinguishable from a
- * directory of exactly twenty-four. The rows that DID fit are still offered
- * first - a caller that only wanted a look gets one - and then the truth
- * about the rest is told rather than swallowed. */
+ * entries is not a directory of exactly twenty-four. The rows that DID fit
+ * are offered - a caller that only wanted a look gets one - and `more` tells
+ * the truth about the rest. The status stays KODE_OK: a page is no failure,
+ * and KODE_NO_RESOURCES is kept for a listing memory refused. */
 TEST_CASE("list says so when there was more than it could carry", "[kode_fs]")
 {
     uint32_t calls = 0U;
+    bool     more  = false;
     char     name[32];
 
     fs_fresh();
@@ -1122,9 +1128,10 @@ TEST_CASE("list says so when there was more than it could carry", "[kode_fs]")
     }
 
     fs_will_settle();
-    TEST_ASSERT_EQUAL_INT(KODE_NO_RESOURCES,
-                          kode_block_file_list_each(FS_VOL, 0U, &list_count_only, &calls));
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+                          kode_block_file_list_each(FS_VOL, 0U, &list_count_only, &calls, &more));
     TEST_ASSERT_EQUAL_UINT32(KODE_STORAGE_LIST_MAX, calls);
+    TEST_ASSERT_TRUE(more);
 }
 
 /* And the edge under it, which is what makes the signal worth anything: a
@@ -1132,6 +1139,7 @@ TEST_CASE("list says so when there was more than it could carry", "[kode_fs]")
 TEST_CASE("list of exactly the ceiling is not a truncation", "[kode_fs]")
 {
     uint32_t calls = 0U;
+    bool     more  = false;
     char     name[32];
 
     fs_fresh();
@@ -1143,8 +1151,9 @@ TEST_CASE("list of exactly the ceiling is not a truncation", "[kode_fs]")
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-                          kode_block_file_list_each(FS_VOL, 0U, &list_count_only, &calls));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_count_only, &calls, &more));
     TEST_ASSERT_EQUAL_UINT32(KODE_STORAGE_LIST_MAX, calls);
+    TEST_ASSERT_FALSE(more);
 }
 
 /**
@@ -1152,13 +1161,14 @@ TEST_CASE("list of exactly the ceiling is not a truncation", "[kode_fs]")
  *        case from inside kode_block_file_list_each()'s own claim - see list_collect()'s
  *        comment for why a callback never asserts directly.
  */
-static bool list_never_called(const char *name, bool is_dir, uint32_t size,
+static bool list_never_called(const char *name, bool is_dir, uint32_t size, bool name_cut,
                               void *ctx)
 {
     bool * const ran = (bool *)ctx;
     (void)name;
     (void)is_dir;
     (void)size;
+    (void)name_cut;
     *ran = true;
     return false;
 }
@@ -1166,21 +1176,23 @@ static bool list_never_called(const char *name, bool is_dir, uint32_t size,
 TEST_CASE("list refuses a path that is not there before ever asking",
           "[kode_fs]")
 {
-    bool ran = false;
+    bool ran  = false;
+    bool more = true;
 
     fs_fresh();
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_DENIED,
                           kode_block_file_list_each(FS_VOL "/nope", 0U, &list_never_called,
-                                       &ran));
+                                       &ran, &more));
     TEST_ASSERT_FALSE_MESSAGE(ran,
         "the callback ran for a listing that should have been refused first");
 }
 
 TEST_CASE("list refuses a file the same way cd refuses one", "[kode_fs]")
 {
-    bool ran = false;
+    bool ran  = false;
+    bool more = true;
 
     fs_fresh();
     fake_media_put_fs_file("notes.txt", "hello");
@@ -1188,7 +1200,7 @@ TEST_CASE("list refuses a file the same way cd refuses one", "[kode_fs]")
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_DENIED,
                           kode_block_file_list_each(FS_VOL "/notes.txt", 0U,
-                                       &list_never_called, &ran));
+                                       &list_never_called, &ran, &more));
     TEST_ASSERT_FALSE_MESSAGE(ran,
         "the callback ran for a listing that should have been refused first");
 }
@@ -1202,6 +1214,7 @@ TEST_CASE("list refuses a file the same way cd refuses one", "[kode_fs]")
 TEST_CASE("a facade listing puts nothing on the bus", "[kode_fs]")
 {
     list_capture_t cap = { 0U, false, false, 0U, false, false };
+    bool           more = true;
 
     fs_fresh();
     fake_media_put_fs_file("notes.txt", "hello");
@@ -1212,7 +1225,7 @@ TEST_CASE("a facade listing puts nothing on the bus", "[kode_fs]")
 
     fs_will_settle();
     TEST_ASSERT_EQUAL_INT(KODE_OK,
-                          kode_block_file_list_each(FS_VOL, 0U, &list_collect, &cap));
+                          kode_block_file_list_each(FS_VOL, 0U, &list_collect, &cap, &more));
     TEST_ASSERT_EQUAL_UINT(1U, cap.calls);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
         "a facade listing reached the bus, where an operator's own `ls` and "
@@ -1326,10 +1339,11 @@ static void every_call_again_then_settle(void)
     static kode_sys_file_status_t st;
     static kode_sys_file_space_t  sp;
     static char           buf[16];
+    static bool           more;
 
     s_call_rc[0] = kode_block_file_status(FS_VOL "/f.txt", &st);
     s_call_rc[1] = kode_block_file_list_each(FS_VOL, 0U, &list_stop_after_one,
-                                 &s_call_list_calls);
+                                 &s_call_list_calls, &more);
     s_call_rc[2] = kode_block_file_create_folder(FS_VOL "/d");
     s_call_rc[3] = kode_block_file_delete(FS_VOL "/f.txt");
     s_call_rc[4] = kode_block_file_rename_path(FS_VOL "/a", FS_VOL "/b");
