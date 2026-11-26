@@ -44,6 +44,10 @@ bool kode_standard_ao_screen_post(QEvt const *e);
 /**
  * @brief The first thing every kode.h call does: refuse an Active Object, else
  *        bring the system up and clear the task's error.
+ *
+ * The text kode_error() gave before stays whole, so the call can read it as
+ * one of its arguments; a failure of the call writes over it.
+ *
  * @param name The public name of the call: the name a refusal carries.
  * @return true when the call may go on; false when it must return its failure value.
  */

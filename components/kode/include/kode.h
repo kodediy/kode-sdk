@@ -40,7 +40,8 @@ extern "C" {
  * @brief Why this task's last kode.h call failed.
  *
  * A failed call sets it, a successful one clears it. Valid until the task's
- * next kode.h call.
+ * next kode.h call, which may take it as an argument:
+ * `kode_print("no file: %s", kode_error())` prints the reason.
  *
  * kode.h is for tasks: a call from an ISR or an Active Object is refused, and this says why.
  *

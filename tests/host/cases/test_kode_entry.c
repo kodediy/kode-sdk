@@ -207,6 +207,25 @@ TEST_CASE("a successful call clears the error", "[kode_entry]")
     TEST_ASSERT_EQUAL_STRING("", kode_error());
 }
 
+TEST_CASE("the text of an error stays whole for the call after it", "[kode_entry]")
+{
+    system_is_up();
+    kode_err_set("boom %d", 7);
+
+    const char *const why = kode_error();
+
+    /* The next call clears the error for whoever asks, and can still read the
+     * text it was handed. */
+    TEST_ASSERT_TRUE(kode_enter("kode_probe"));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_STRING("boom 7", why);
+
+    /* A failure of that call is what writes over it. */
+    kode_err_set("bang");
+    TEST_ASSERT_EQUAL_STRING("bang", kode_error());
+    TEST_ASSERT_EQUAL_STRING("bang", why);
+}
+
 TEST_CASE("a long error is cut to the maximum and ends in an ellipsis", "[kode_entry]")
 {
     char long_text[KODE_ERROR_MAX * 2U];
