@@ -356,9 +356,23 @@ kode_status_t kode_sys_wifi_connect(const char *ssid, const char *pass);
 
 /**
  * @brief Ask AO_Radio to leave the network; the credentials stay remembered.
+ *
+ * Asked while a join runs or waits, during the round over the remembered
+ * networks or while the link is down, the leave is kept and made as soon as
+ * AO_Radio can; kode_sys_wifi_left() says when it is.
+ *
  * @return As the commands' rule above; KODE_DENIED without CONFIG_KODEOS_WIFI.
  */
 kode_status_t kode_sys_wifi_disconnect(void);
+
+/**
+ * @brief Whether a leave is made and nobody has asked for a network since:
+ *        AO_Radio joins none by itself until somebody does. Never waits.
+ * @note Naming it links AO_Radio, as the commands do.
+ * @return true when it is; false before the first leave, and without
+ *         CONFIG_KODEOS_WIFI.
+ */
+bool kode_sys_wifi_left(void);
 
 /* ---- Bluetooth: to AO_Radio; DENIED without CONFIG_KODEOS_BLE ----
  * The board's advert carries the console's service and is never changed; an

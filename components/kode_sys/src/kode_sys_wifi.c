@@ -49,6 +49,11 @@ kode_status_t kode_sys_wifi_disconnect(void)
     return kode_sys_cmd_post(AO_Radio, wifi_leave_evt(), KQP_RADIO_CMD_MARGIN);
 }
 
+bool kode_sys_wifi_left(void)
+{
+    return wifi_leave_done();
+}
+
 #else  /* !CONFIG_KODEOS_WIFI - the surface still links, and refuses */
 
 kode_status_t kode_sys_wifi_connect(const char *ssid, const char *pass)
@@ -60,6 +65,11 @@ kode_status_t kode_sys_wifi_connect(const char *ssid, const char *pass)
 kode_status_t kode_sys_wifi_disconnect(void)
 {
     return KODE_DENIED;
+}
+
+bool kode_sys_wifi_left(void)
+{
+    return false;
 }
 
 #endif /* CONFIG_KODEOS_WIFI */

@@ -585,7 +585,7 @@ TEST_CASE("a join that arrives with the link off brings the link up and is made"
     wifi_owed_cleanup();
 }
 
-TEST_CASE("a leave that arrives while a join is owed clears the join",
+TEST_CASE("a leave that arrives while a join is owed takes the join's place",
           "[radio_ao][owed]")
 {
     radio_fresh();
@@ -594,11 +594,16 @@ TEST_CASE("a leave that arrives while a join is owed clears the join",
     pump();
     TEST_ASSERT_TRUE(wifi_join_request("net", "pw12345678", false));
     pump();
+    TEST_ASSERT_FALSE(kode_sys_wifi_left());
     TEST_ASSERT_TRUE(wifi_leave_request());
     pump();
+    TEST_ASSERT_FALSE_MESSAGE(kode_sys_wifi_left(), "said left before the leave was made");
 
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
-    TEST_ASSERT_FALSE(job_held());
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(), "the leave was lost");
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(job_held(), "the join was made after the leave");
+    TEST_ASSERT_TRUE_MESSAGE(kode_sys_wifi_left(), "kode_wifi_disconnect() would still be waiting");
     wifi_owed_cleanup();
 }
 
@@ -9936,6 +9941,377 @@ TEST_CASE("a step off the network the person asked for is not tried again",
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
     finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
     TEST_ASSERT_TRUE(wifi_state_now().reconnecting);
+    wifi_owed_cleanup();
+}
+
+/**
+ * @brief What kode_wifi_disconnect() waits for holds, and keeps holding: the
+ *        leave made, no wait for a next round, and no round begun by itself.
+ */
+static void leave_holds(void)
+{
+    TEST_ASSERT_TRUE_MESSAGE(kode_sys_wifi_left(), "kode_wifi_disconnect() would still be waiting");
+    TEST_ASSERT_FALSE_MESSAGE(wifi_state_now().reconnecting, "the waits go on");
+    retry_wait(700000U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a round ran after the leave");
+    TEST_ASSERT_TRUE(kode_sys_wifi_left());
+}
+
+/** @brief End the jobs the boot runs until @p job, which must come before the round's sweep. */
+static void leave_boot_until(kdrv_radio_job_t job)
+{
+    unsigned guard = 0U;
+
+    while ( job_held() && (running_job() != (int)job) && (8U > guard) )
+    {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(),
+                                      "the boot's round ran");
+        finish_whatever_runs();
+        ++guard;
+    }
+    TEST_ASSERT_EQUAL_INT((int)job, running_job());
+}
+
+TEST_CASE("a leave during a join with the worker is made once the join lands, and "
+          "nothing is tried again", "[radio_ao][leave]")
+{
+    retry_ready();
+    TEST_ASSERT_TRUE(wifi_join_request("net", "pw12345678", false));
+    pump();
+    TEST_ASSERT_TRUE(joining("net"));
+    TEST_ASSERT_FALSE(kode_sys_wifi_left());
+
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_TRUE_MESSAGE(joining("net"), "the join was cut");
+    TEST_ASSERT_FALSE_MESSAGE(kode_sys_wifi_left(), "said left with the join still out");
+
+    wifi_station_up();
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(), "the leave was lost");
+    TEST_ASSERT_FALSE(kode_sys_wifi_left());
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+    pump();
+    TEST_ASSERT_NOT_EQUAL_MESSAGE((int)KDRV_WIFI_GOT_IP, (int)kdrv_wifi_state(NULL),
+                                  "the board kept an address");
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a leave during the boot's round ends the round, and nothing is tried again",
+          "[radio_ao][leave]")
+{
+    radio_fresh();
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    pump();
+    while ( job_held() && (running_job() != (int)KDRV_RADIO_JOB_WIFI_SCAN) )
+    {
+        finish_whatever_runs();
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(), "the round never started");
+
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(),
+                                  "the round went on, or the leave was lost");
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+/* An app that wants no network asks for the leave right after kode_init(),
+ * with the link still coming up: the round that link-up would begin is the
+ * leave instead. */
+TEST_CASE("a leave while the link comes up takes the place of the boot's round",
+          "[radio_ao][leave]")
+{
+    radio_fresh();
+    dispatch(WIFI_START_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_FALSE_MESSAGE(kode_sys_wifi_left(), "said left before the link was up");
+
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    pump();
+    leave_boot_until(KDRV_RADIO_JOB_WIFI_LEAVE);
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a leave during a wait between rounds, or during the round a wait began, "
+          "ends the waits", "[radio_ao][leave]")
+{
+    retry_ready();
+    TEST_ASSERT_TRUE(wifi_state_now().reconnecting);
+    TEST_ASSERT_FALSE(kode_sys_wifi_left());
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
+    wifi_owed_cleanup();
+
+    retry_ready();
+    retry_wait(31000U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(), "the wait began no round");
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_DENIED);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(),
+                                  "the round went on, or the leave was lost");
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a tagged join that waits, then a leave: the join is told once it never "
+          "ran, the leave is made and nothing is tried again", "[radio_ao][leave][join_gen]")
+{
+    WifiStateEvt w;
+
+    retry_ready();
+    (void)wifi_scan_request(NULL);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    ao_spy_drain();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_EQUAL_UINT(0U, join_ends(gen, NULL));
+
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_TRUE(w.join_dropped);
+
+    finish(KDRV_RADIO_JOB_WIFI_SCAN, KODE_ERROR);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(),
+                                  "the dropped join ran, or the leave was lost");
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    retry_wait(700000U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a round ran after the leave");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, join_ends(gen, NULL), "the join was answered twice");
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a tagged join with the worker, then a leave: the join is answered with "
+          "its outcome, then the network is left", "[radio_ao][leave][join_gen]")
+{
+    WifiStateEvt w;
+
+    retry_ready();
+    ao_spy_drain();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_TRUE(joining("net"));
+
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, join_ends(gen, NULL), "the join was answered before it ended");
+
+    wifi_station_up();
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_OK);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)KDRV_WIFI_GOT_IP, (unsigned)w.state,
+                                   "the answer is not the join's own outcome");
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(), "the leave was lost");
+
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    fake_wifi_events_deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+    pump();
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, join_ends(gen, NULL), "the join was answered twice");
+    TEST_ASSERT_NOT_EQUAL((int)KDRV_WIFI_GOT_IP, (int)kdrv_wifi_state(NULL));
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a leave while the link goes down is made by the next link, and no round "
+          "runs", "[radio_ao][leave]")
+{
+    retry_ready();
+    dispatch(RADIO_DOWN_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_STOPPING, link_now());
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+
+    dispatch(RADIO_UP_REQ_SIG);
+    pump();
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    pump();
+    leave_boot_until(KDRV_RADIO_JOB_WIFI_LEAVE);
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a leave with the link off survives a bring-up that fails, and the next "
+          "link makes it", "[radio_ao][leave]")
+{
+    retry_ready();
+    dispatch(RADIO_DOWN_REQ_SIG);
+    pump();
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_TRUE(kode_sys_wifi_left());
+
+    dispatch(RADIO_UP_REQ_SIG);
+    pump();
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_ERROR);
+    storage_drain();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
+
+    retry_wait(31000U);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    pump();
+    leave_boot_until(KDRV_RADIO_JOB_WIFI_LEAVE);
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a leave owed to a busy link survives the link being lost, and the link "
+          "built again makes it", "[radio_ao][leave]")
+{
+    retry_ready();
+    (void)wifi_scan_request(NULL);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+
+    storage_drain();
+    finish_lost(KODE_ERROR);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    pump();
+    leave_boot_until(KDRV_RADIO_JOB_WIFI_LEAVE);
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a Wi-Fi start asked after a leave with no link ends the leave: the link "
+          "begins a round", "[radio_ao][leave]")
+{
+    radio_fresh();
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_TRUE(kode_sys_wifi_left());
+
+    TEST_ASSERT_TRUE(wifi_start_request());
+    pump();
+    TEST_ASSERT_FALSE_MESSAGE(kode_sys_wifi_left(), "still said left after the start");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    pump();
+    while ( job_held() && (running_job() != (int)KDRV_RADIO_JOB_WIFI_SCAN) )
+    {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(),
+                                      "the leave outlived the start");
+        finish_whatever_runs();
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job(), "no round began");
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a leave kept with no link survives the c5 row bringing the link up, and "
+          "is made once the row ends", "[radio_ao][leave]")
+{
+    retry_ready();
+    dispatch(RADIO_DOWN_REQ_SIG);
+    pump();
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_TRUE(kode_sys_wifi_left());
+
+    ask_row();
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_TRUE_MESSAGE(kode_sys_wifi_left(), "a round began over the leave");
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_C5_INFO, running_job(),
+                                  "the row did not get the channel");
+    finish_info();
+    finish_rest();
+    TEST_ASSERT_TRUE(take_verdict());
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_LEAVE, running_job(),
+                                  "the row ended and the leave was not made");
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a join waiting for the link the c5 row rides is made once the row ends, "
+          "and answered once", "[radio_ao][owed][join_gen]")
+{
+    WifiStateEvt w;
+
+    radio_fresh();
+    ao_spy_drain();
+    uint8_t const gen = join_gen_ask("net", "pw12345678");
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    ask_row();
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_C5_INFO, running_job(),
+                                  "the row did not get the channel");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, join_ends(gen, NULL), "the join was ended for a round");
+    finish_info();
+    finish_rest();
+    TEST_ASSERT_TRUE_MESSAGE(joining("net"), "the row ended and the join was not made");
+    finish(KDRV_RADIO_JOB_WIFI_JOIN, KODE_ERROR);
+    TEST_ASSERT_EQUAL_UINT(1U, join_ends(gen, &w));
+    TEST_ASSERT_FALSE(w.join_dropped);
+    wifi_owed_cleanup();
+}
+
+TEST_CASE("a leave owed to a join whose link is lost and not built again counts as "
+          "made, and the next link still makes it", "[radio_ao][leave]")
+{
+    retry_ready();
+    TEST_ASSERT_TRUE(wifi_join_request("net", "pw12345678", false));
+    pump();
+    TEST_ASSERT_TRUE(joining("net"));
+    TEST_ASSERT_TRUE(wifi_leave_request());
+    pump();
+    TEST_ASSERT_FALSE(kode_sys_wifi_left());
+
+    storage_drain();
+    finish_lost(KODE_ERROR);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_ERROR);
+    storage_drain();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
+    TEST_ASSERT_TRUE_MESSAGE(kode_sys_wifi_left(),
+                             "no link and none coming, and the board is not said out");
+    dispatch(RADIO_DOWN_REQ_SIG);
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    TEST_ASSERT_TRUE(kode_sys_wifi_left());
+
+    dispatch(RADIO_UP_REQ_SIG);
+    pump();
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    pump();
+    leave_boot_until(KDRV_RADIO_JOB_WIFI_LEAVE);
+    finish(KDRV_RADIO_JOB_WIFI_LEAVE, KODE_OK);
+    leave_holds();
     wifi_owed_cleanup();
 }
 

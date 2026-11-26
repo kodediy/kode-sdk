@@ -316,7 +316,8 @@ typedef enum {
 enum {
     WOWED_NONE = 0,  /**< Nothing waits.                                      */
     WOWED_JOIN,      /**< A join, with its network and password.              */
-    WOWED_AUTO       /**< The round over the remembered networks.             */
+    WOWED_AUTO,      /**< The round over the remembered networks.             */
+    WOWED_LEAVE      /**< A leave of the network.                             */
 };
 
 /** Which of the two services a flag call is about. An enum rather than a
@@ -733,8 +734,8 @@ typedef struct {
     bool     join_auto;          /**< `wifi_join`: the link coming up joins
                                   *   a remembered network by itself.     */
 
-    /* The one join or autojoin that arrived while the radio could not serve
-     * it: the latest replaces the one kept, a leave or a stop drops it. */
+    /* The one join, autojoin or leave that arrived while the radio could not
+     * serve it: the latest replaces the one kept, a stop drops it. */
     uint8_t  wifi_owed;          /**< WOWED_*.                             */
     bool     owed_remember;      /**< The kept join saves its network.     */
     uint8_t  owed_gen;           /**< The kept join's generation.          */
@@ -1514,6 +1515,25 @@ QEvt const *wifi_leave_evt(void)
 bool wifi_leave_request(void)
 {
     return QACTIVE_POST_X(AO_Radio, wifi_leave_evt(), KQP_RADIO_POST_MARGIN, NULL);
+}
+
+/** @brief A leave is made and nobody has asked for a network since, for wifi_leave_done(). */
+static bool s_wifi_off;
+
+/**
+ * @brief Publish to wifi_leave_done()'s readers whether the board stays off networks.
+ * @param off true once a leave is made; false when a network is asked for.
+ */
+static void wifi_off_note(bool off)
+{
+    /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
+    __atomic_store_n(&s_wifi_off, off, __ATOMIC_RELEASE);
+}
+
+bool wifi_leave_done(void)
+{
+    /* cppcheck-suppress misra-c2012-17.3 ; GCC's __atomic builtins are the compiler's own, never declared in a header */
+    return __atomic_load_n(&s_wifi_off, __ATOMIC_ACQUIRE);
 }
 
 /** @brief The request to start Wi-Fi, one static event for the door and AO_Radio's own ask. */
@@ -7188,30 +7208,85 @@ static void wifi_owed_clear(Radio * const me)
 }
 
 /**
- * @brief Keep a join or an autojoin the radio cannot serve now.
+ * @brief Somebody asks for a network: the person's leave ends.
  * @param me The AO.
- * @param e  A WIFI_JOIN_REQ_SIG or WIFI_AUTO_REQ_SIG; it replaces the one kept.
+ */
+static void wifi_left_end(Radio * const me)
+{
+    me->wifi_left = false;
+    wifi_off_note(false);
+}
+
+/**
+ * @brief Keep a join, an autojoin or a leave the radio cannot serve now.
+ *
+ * A leave holds from here: nothing goes back on a network by itself, the
+ * waits stop, and a start owed to Wi-Fi joins nothing.
+ *
+ * @param me The AO.
+ * @param e  A WIFI_JOIN_REQ_SIG, WIFI_AUTO_REQ_SIG or WIFI_LEAVE_REQ_SIG; it
+ *           replaces the one kept.
  */
 static void wifi_owe(Radio * const me, QEvt const * const e)
 {
     uint8_t const replaced = wifi_owed_forget(me);
 
-    me->wifi_left = false;   /* somebody wants a network again */
     if ( (QSignal)WIFI_JOIN_REQ_SIG == e->sig )
     {
         WifiJoinEvt const * const j = Q_EVT_CAST(WifiJoinEvt);
 
+        wifi_left_end(me);
         me->wifi_owed     = (uint8_t)WOWED_JOIN;
         me->owed_remember = j->remember;
         me->owed_gen      = j->gen;
         (void)snprintf(me->owed_ssid, sizeof(me->owed_ssid), "%s", j->ssid);
         (void)snprintf(me->owed_pass, sizeof(me->owed_pass), "%s", j->pass);
     }
+    else if ( (QSignal)WIFI_LEAVE_REQ_SIG == e->sig )
+    {
+        me->wifi_owed          = (uint8_t)WOWED_LEAVE;
+        me->wifi_left          = true;
+        me->wifi_start_pending = false;
+        wifi_retry_stop(me);
+    }
     else
     {
+        wifi_left_end(me);
         me->wifi_owed = (uint8_t)WOWED_AUTO;
     }
     wifi_owed_dropped(me, replaced);
+}
+
+/**
+ * @brief The link is gone: a join or an autojoin that waited for it ends. A
+ *        leave stays for the next link to make, and with no link the board
+ *        is off every network already.
+ * @param me The AO.
+ */
+static void wifi_owed_link_gone(Radio * const me)
+{
+    if ( (uint8_t)WOWED_LEAVE == me->wifi_owed )
+    {
+        wifi_off_note(true);
+    }
+    else
+    {
+        wifi_owed_clear(me);
+    }
+}
+
+/**
+ * @brief Somebody asks for Wi-Fi on: the person's leave ends, the one that
+ *        waits for the link included.
+ * @param me The AO.
+ */
+static void wifi_start_asked(Radio * const me)
+{
+    if ( (uint8_t)WOWED_LEAVE == me->wifi_owed )
+    {
+        (void)wifi_owed_forget(me);
+    }
+    wifi_left_end(me);
 }
 
 /**
@@ -7247,6 +7322,12 @@ static bool wifi_owed_replay(Radio * const me)
         {
             KLOG_W(TAG, "out of events; the owed Wi-Fi join waits");
         }
+    }
+    else if ( (uint8_t)WOWED_LEAVE == me->wifi_owed )
+    {
+        wifi_owed_clear(me);
+        radio_self_post(wifi_leave_evt());
+        posted = true;
     }
     else
     {
@@ -7524,6 +7605,13 @@ static void radio_reconcile_next(Radio * const me)
     if ( wifi_owed_ready(me) && wifi_owed_replay(me) )
     {
         /* The request that waited for the link is the wifi step. */
+        me->wifi_adopted = false;
+    }
+    else if ( (uint8_t)WOWED_NONE != me->wifi_owed )
+    {
+        /* It waits for the channel (the row that brought the link up holds
+         * it): radio_settle() makes it once the channel is free, in the
+         * round's place. */
         me->wifi_adopted = false;
     }
     else if ( me->wifi_want )
@@ -10038,6 +10126,7 @@ void Radio_ctor(void)
     me->retry_on    = false;
     me->retry_owed  = false;
     me->wifi_left   = false;
+    wifi_off_note(false);
     me->quiet_left  = false;
     me->lp_yield    = false;
 #endif
@@ -11722,14 +11811,20 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             break;
         }
         case WIFI_JOIN_REQ_SIG:
-        case WIFI_LEAVE_REQ_SIG:
         case WIFI_AUTO_REQ_SIG: {
-            if ( (QSignal)WIFI_LEAVE_REQ_SIG == e->sig )
-            {
-                wifi_owed_clear(me);
-            }
             KLOG_W(TAG, "no link to the C5; `radio_up` first");
             wifi_publish_refusal(me, e);
+            status = Q_HANDLED();
+            break;
+        }
+        case WIFI_LEAVE_REQ_SIG: {
+            /* No link, no address. Kept for the next link, where it takes the
+             * place of the round over the remembered networks; a link on its
+             * way may bring the network the C5 kept, so there the leave is
+             * made only once the link is up. */
+            wifi_owe(me, e);
+            wifi_off_note(!me->linking);
+            wifi_publish_state(me);
             status = Q_HANDLED();
             break;
         }
@@ -11745,6 +11840,7 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             /* The flag is the pending state, and Radio_up's entry reconciles
              * to it. Radio_off and Radio_failed override this to start the
              * link too; starting and stopping only record the flag. */
+            wifi_start_asked(me);
             radio_flag_set(me, SVC_WIFI, true);
             wifi_publish_state(me);
             status = Q_HANDLED();
@@ -11962,6 +12058,7 @@ static QState radio_service_on(Radio * const me, QEvt const * const e)
 #if CONFIG_KODEOS_WIFI
     if ( wifi )
     {
+        wifi_start_asked(me);
         radio_flag_set(me, SVC_WIFI, true);
     }
 #endif
@@ -12098,7 +12195,7 @@ static QState Radio_off(Radio * const me, QEvt const * const e)
             me->wifi_start_pending = false;
             me->ble_start_pending  = false;
 #if CONFIG_KODEOS_WIFI
-            wifi_owed_clear(me);
+            wifi_owed_link_gone(me);
 #endif
 #if RADIO_ASKS
             scan_ask_end(me, KODE_ERROR);   /* an asked scan waits for no link */
@@ -12550,13 +12647,14 @@ static QState Radio_failed(Radio * const me, QEvt const * const e)
 #if CONFIG_KODEOS_BLE
             ble_publish_state(me);
 #endif
-            /* The link that was claimed or owed things is gone with it. */
+            /* The link that was claimed or owed things is gone with it; a
+             * leave stays, for the next link. */
             me->wifi_stop_pending  = false;
             me->ble_stop_pending   = false;
             me->wifi_start_pending = false;
             me->ble_start_pending  = false;
 #if CONFIG_KODEOS_WIFI
-            wifi_owed_clear(me);
+            wifi_owed_link_gone(me);
 #endif
 #if RADIO_ASKS
             scan_ask_end(me, KODE_ERROR);   /* an asked scan waits for no link */
@@ -13019,6 +13117,10 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
         }
         case RADIO_OUT_WIFI_LEAVE_DONE: {
             me->busy = false;
+            if ( me->wifi_left )
+            {
+                wifi_off_note(true);   /* the person's leave, not a station's pass */
+            }
             wifi_publish_state(me);
             status = Q_HANDLED();
             break;
@@ -13625,6 +13727,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
              * or the next boot delivers it. */
             bool const was_on = me->wifi_want;
 
+            wifi_start_asked(me);
             radio_flag_set(me, SVC_WIFI, true);
             if ( me->busy )
             {
@@ -13786,7 +13889,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 (void)snprintf(req.ssid, sizeof(req.ssid), "%s", j->ssid);
                 (void)snprintf(me->ssid, sizeof(me->ssid), "%s", j->ssid);
                 me->autojoin  = false;
-                me->wifi_left = false;
+                wifi_left_end(me);
                 me->join_gen  = j->gen;
                 /* A network asked for by name is kept through a pass. */
                 me->quiet_left = me->quiet;
@@ -13835,14 +13938,17 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             break;
         }
         case WIFI_LEAVE_REQ_SIG: {
-            wifi_owed_clear(me);
             if ( me->busy )
             {
-                radio_say_busy("wifi_leave", RADIO_BUSY_NO);
+                /* Made when the job in flight ends, a join included: the
+                 * network it lands on is left. */
+                radio_say_busy("wifi_leave", RADIO_BUSY_OWED);
+                wifi_owe(me, e);
                 wifi_publish_state(me);
             }
             else
             {
+                wifi_owed_clear(me);
                 /* Leaving is not forgetting: `wifi_forget` is the verb for
                  * that, and conflating them meant you could not step off a
                  * network without losing it. And it is leaving: nothing goes
@@ -13951,7 +14057,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                     /* Its end starts the next wait, if there is to be one. */
                     (void)QTimeEvt_disarm(&me->wifi_retry);
                     me->retry_owed = false;
-                    me->wifi_left  = false;
+                    wifi_left_end(me);
                     me->retry_on   = me->wifi_want;
                     KLOG_I(TAG, "looking for a network we know");
                     status = Q_TRAN(&Radio_autojoin);
@@ -14447,6 +14553,16 @@ static QState auto_finish(Radio * const me);
 static QState auto_quiet(Radio * const me);
 
 /**
+ * @brief Whether a join or a leave somebody asked for waits for the round.
+ * @param me The AO.
+ * @return true when one does: the round begins nothing more and ends.
+ */
+static bool auto_asked(Radio const * const me)
+{
+    return ((uint8_t)WOWED_JOIN == me->wifi_owed) || ((uint8_t)WOWED_LEAVE == me->wifi_owed);
+}
+
+/**
  * @brief The next candidate of the round: ready this side for the C5's join
  *        of the strongest saved network still untried, or end the round.
  * @param me The AO (its busy flag already cleared by the caller).
@@ -14458,9 +14574,9 @@ static QState auto_try(Radio * const me)
     {
         return auto_quiet(me);
     }
-    if ( (uint8_t)WOWED_JOIN == me->wifi_owed )
+    if ( auto_asked(me) )
     {
-        return auto_finish(me);   /* somebody chose a network: it goes first */
+        return auto_finish(me);   /* somebody chose a network, or none: it goes first */
     }
     if ( me->lp_yield )
     {
@@ -14656,10 +14772,11 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                         status = auto_quiet(me);
                         break;
                     }
-                    if ( (uint8_t)WOWED_JOIN == me->wifi_owed )
+                    if ( auto_asked(me) )
                     {
-                        /* Cut for the network somebody chose, or ended on its
-                         * own: the join goes now, and the cut is withdrawn. */
+                        /* Cut for the network somebody chose or the leave
+                         * somebody asked for, or ended on its own: that goes
+                         * now, and the cut is withdrawn. */
                         kdrv_wifi_scan_abort(false);
                         status = auto_finish(me);
                         break;
@@ -14744,7 +14861,7 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                     bool                      go = false;
 
                     kdrv_radio_probe_result(&heard);
-                    go = ((uint8_t)WOWED_JOIN != me->wifi_owed)
+                    go = (!auto_asked(me))
                          && ((uint8_t)KODE_OK == job->status) && heard.net[0].seen;
                     if ( me->hint_alt )
                     {
@@ -14764,7 +14881,7 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                             }
                             me->hint_fall = 0U;
                         }
-                        if ( ((uint8_t)WOWED_JOIN != me->wifi_owed)
+                        if ( (!auto_asked(me))
                             && auto_hint_try(me, me->hint_chan, me->hint_rssi, 0U) )
                         {
                             status = Q_HANDLED();
@@ -14809,7 +14926,7 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
                         status = auto_quiet(me);
                         break;
                     }
-                    if ( ((uint8_t)WOWED_JOIN != me->wifi_owed)
+                    if ( (!auto_asked(me))
                         && ((uint8_t)KODE_OK == job->status)
                         && radio_vault_join(me, me->ssid) )
                     {
@@ -15010,8 +15127,16 @@ static QState Radio_autojoin(Radio * const me, QEvt const * const e)
             break;
         }
         case WIFI_LEAVE_REQ_SIG: {
-            wifi_owed_clear(me);
-            radio_say_busy("the request", RADIO_BUSY_NO);
+            /* The round ends for it: no look, sweep or join is begun after
+             * the job in hand, and a join already with the C5 is left once it
+             * lands. */
+            radio_say_busy("wifi_leave", RADIO_BUSY_OWED);
+            wifi_owe(me, e);
+            if ( me->winflight && (NULL != me->jobs)
+                && (KDRV_RADIO_JOB_WIFI_SCAN == me->jobs->wreq.type) )
+            {
+                kdrv_wifi_scan_abort(true);
+            }
             status = Q_HANDLED();
             break;
         }
@@ -15582,7 +15707,9 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
         case WIFI_STOP_REQ_SIG: {
             if ( (QSignal)WIFI_LEAVE_REQ_SIG == e->sig )
             {
-                wifi_owed_clear(me);
+                /* The waits for a next round stop; the update ends with the
+                 * link down, which leaves the network. */
+                wifi_owe(me, e);
             }
             radio_say_busy("the request", RADIO_BUSY_NO);
             wifi_publish_refusal(me, e);

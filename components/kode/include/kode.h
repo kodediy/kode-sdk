@@ -1096,7 +1096,15 @@ bool kode_wifi_is_connected(void);
 
 /**
  * @brief Leave the network; its password stays remembered.
- * @return true when the board has no address any more; false with kode_error() saying why.
+ *
+ * A join under way, the board's own search for a remembered network and its
+ * retries end too, and the board joins nothing by itself until a
+ * kode_wifi_connect() or Settings asks. Returns at once when the board is off
+ * already and nothing has asked for a network since the last leave.
+ *
+ * @return true when the board has no address and nothing is about to give it
+ *         one; false with kode_error() saying why, after KODE_WIFI_LEAVE_MS at
+ *         most: a leave the radio has not made by then is still made.
  */
 bool kode_wifi_disconnect(void);
 

@@ -2415,12 +2415,22 @@ QEvt const *wifi_join_evt(const char *ssid, const char *pass, bool remember);
 /**
  * @brief Leave the network. The credentials stay remembered.
  *
- * wifi_forget_request() forgets them.
+ * wifi_forget_request() forgets them. A leave that comes while a join runs or
+ * waits, during the round over the remembered networks or while the link is
+ * down is kept and made as soon as AO_Radio can; from then on nothing joins a
+ * network by itself until somebody asks for one.
  *
  * @return true when the request was posted; false when AO_Radio's queue is
  *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
 bool wifi_leave_request(void);
+
+/**
+ * @brief Whether a leave is made and nobody has asked for a network since,
+ *        as AO_Radio last wrote it. Never waits; false before the first leave.
+ * @return true when the board stays off Wi-Fi networks until somebody asks.
+ */
+bool wifi_leave_done(void);
 
 /**
  * @brief The event wifi_leave_request() posts, for a caller that posts it itself.

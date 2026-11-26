@@ -344,18 +344,33 @@ bool kode_wifi_is_connected(void)
     return up;
 }
 
-/** @brief One look at the link: true once the board has no address. */
+/**
+ * @brief Whether the board is off every network and stays off.
+ * @param st A status just read.
+ * @return true with no address and the leave made, nobody asking for a network since.
+ */
+static bool wifi_is_out(const kode_sys_wifi_status_t *st)
+{
+    return !wifi_is_on(st, NULL) && kode_sys_wifi_left();
+}
+
+/** @brief One look at the link: true once the board is out (wifi_is_out()). */
 static bool wifi_gone_attempt(void *ctx)
 {
-    kode_sys_wifi_status_t st = { 0U, 0U, "" };
+    /* cppcheck-suppress misra-c2012-11.5 ; the context is the kode_sys_wifi_status_t wifi_drop() passed */
+    kode_sys_wifi_status_t *const st = (kode_sys_wifi_status_t *)ctx;
 
-    (void)ctx;
-    return (kode_sys_wifi_status(&st) != KODE_OK) || !wifi_is_on(&st, NULL);
+    return (kode_sys_wifi_status(st) != KODE_OK) || wifi_is_out(st);
 }
 
 /**
  * @brief The leave itself, under the Wi-Fi lock.
- * @return true when the board has no address any more.
+ *
+ * Posted whenever the board is not out already: a join that runs or waits,
+ * the round over the remembered networks and the waits between rounds are
+ * all ended by it.
+ *
+ * @return true when the board has no address and nothing is about to give it one.
  */
 static bool wifi_drop(void)
 {
@@ -367,22 +382,30 @@ static bool wifi_drop(void)
     {
         wifi_fail(rc);
     }
-    else if ( wifi_is_on(&st, NULL) )
+    else if ( !wifi_is_out(&st) )
     {
         wifi_post_t p = { NULL, NULL, true, KODE_ERROR };
 
         const uint32_t seconds = KODE_WIFI_LEAVE_MS / KODE_MS_PER_S;
 
         ok = wifi_post(&p);
-        if ( ok && !kode_retry(&wifi_gone_attempt, NULL, KODE_WIFI_LEAVE_MS) )
+        if ( ok && !kode_retry(&wifi_gone_attempt, &st, KODE_WIFI_LEAVE_MS) )
         {
-            kode_err_set("could not leave '%s' within %" PRIu32 " s", st.ssid, seconds);
+            if ( wifi_is_on(&st, NULL) )
+            {
+                kode_err_set("could not leave '%s' within %" PRIu32 " s", st.ssid, seconds);
+            }
+            else
+            {
+                kode_err_set("the leave still waits for the radio after %" PRIu32
+                             " s: a join or the link's start is under way", seconds);
+            }
             ok = false;
         }
     }
     else
     {
-        /* not connected: nothing to leave */
+        /* out already: nothing to leave */
     }
     return ok;
 }
