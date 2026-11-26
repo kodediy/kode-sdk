@@ -59,7 +59,9 @@ jobs:
         # the only one with the display linked, the console on and no stream.
         # `testdot` is the full build with AO_TestDot on: the only one that
         # compiles the E5 final test, the OV5640 and the station's chips.
-        variant: ['', nowifi, minimal, minimal_noradio, minimal_ble, testdot]
+        # `noble` is an app with Wi-Fi and low power and without BLE: the
+        # only one with KODE_LOWPOWER on.
+        variant: ['', nowifi, noble, minimal, minimal_noradio, minimal_ble, testdot]
     steps:
       # Without submodules, for the reason host-tests.yml gives: the only one
       # is the C5's firmware, a project for another chip that nothing here
