@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <sys/resource.h>
 
 #include "unity.h"
 
@@ -1668,6 +1670,273 @@ TEST_CASE("a write that fails after the first part says how far it got", "[kode_
     file_no_settle();
 }
 
+/* ---- A write that replaces a file ------------------------------------------ */
+
+/** @brief What the file a replacing write finds holds. */
+#define TEST_OLD_TEXT "the old text"
+
+/** @brief Bytes the host lets a file grow to in the case of a volume with no room for the copy. */
+#define TEST_ROOM_NONE 8U
+
+/** @brief Bytes of the text, one part, that a volume with no room is asked to take. */
+#define TEST_ROOM_TEXT_BYTES 1000U
+
+/** @brief Bytes the host lets a file grow to in the case whose later part finds no room: one part fits. */
+#define TEST_ROOM_ONE_PART 40000U
+
+/** @brief The limit on a file's size before a case lowered it. */
+static struct rlimit s_fsize_was;
+
+/** @brief What SIGXFSZ did before a case ignored it. */
+static void (*s_xfsz_was)(int);
+
+/**
+ * @brief Make the host refuse to grow any file past @p bytes, as a volume with
+ *        that much room left refuses the bytes past it.
+ *
+ * Asserts nothing: a case restores the room with host_room_again() before it
+ * asserts, so a failed case leaves the next one a host that writes.
+ *
+ * @return true when the limit is in place.
+ */
+static bool host_room_only(rlim_t bytes)
+{
+    struct rlimit lim;
+    bool          ok = (getrlimit(RLIMIT_FSIZE, &s_fsize_was) == 0);
+
+    if ( ok )
+    {
+        /* The write past the limit fails with EFBIG instead of ending the process. */
+        s_xfsz_was   = signal(SIGXFSZ, SIG_IGN);
+        lim.rlim_cur = bytes;
+        lim.rlim_max = s_fsize_was.rlim_max;
+        ok           = (setrlimit(RLIMIT_FSIZE, &lim) == 0);
+    }
+    return ok;
+}
+
+/** @brief Give the host back the room host_room_only() took. */
+static void host_room_again(void)
+{
+    (void)setrlimit(RLIMIT_FSIZE, &s_fsize_was);
+    (void)signal(SIGXFSZ, s_xfsz_was);
+}
+
+/** @brief A text of @p n 'q's, to be freed by the caller. */
+static char *q_text(uint32_t n)
+{
+    char *const text = (char *)malloc(n + 1U);
+
+    TEST_ASSERT_NOT_NULL(text);
+    (void)memset(text, 'q', n);
+    text[n] = '\0';
+    return text;
+}
+
+/** @brief Expect flash/keep.txt to hold the old text and nothing beside it. */
+static void expect_old_kept(void)
+{
+    TEST_ASSERT_EQUAL_STRING(TEST_OLD_TEXT, kode_file_read("flash/keep.txt"));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt.tmp"),
+                                     "the copy was left behind");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt.bak"),
+                                     "the old file was left aside");
+}
+
+TEST_CASE("a write the volume has no room for fails and leaves the old file whole", "[kode_file]")
+{
+    char *const text = q_text(TEST_ROOM_TEXT_BYTES);
+    bool        limited;
+    bool        wrote;
+
+    file_fresh();
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", TEST_OLD_TEXT));
+    limited = host_room_only(TEST_ROOM_NONE);
+    wrote   = kode_file_write("flash/keep.txt", text);
+    host_room_again();
+    free(text);
+
+    TEST_ASSERT_TRUE(limited);
+    TEST_ASSERT_FALSE(wrote);
+    TEST_ASSERT_NOT_EQUAL_CHAR('\0', kode_error()[0]);
+    expect_old_kept();
+    file_no_settle();
+}
+
+TEST_CASE("a write whose first part fails leaves the old file whole", "[kode_file]")
+{
+    char *const text = q_text(TEST_TEXT_BYTES);
+    bool        limited;
+    bool        wrote;
+
+    file_fresh();
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", TEST_OLD_TEXT));
+    limited = host_room_only(TEST_ROOM_NONE);
+    wrote   = kode_file_write("flash/keep.txt", text);
+    host_room_again();
+    free(text);
+
+    TEST_ASSERT_TRUE(limited);
+    TEST_ASSERT_FALSE(wrote);
+    TEST_ASSERT_NULL_MESSAGE(strstr(kode_error(), "wrote"), "the first part did not land");
+    expect_old_kept();
+    file_no_settle();
+}
+
+TEST_CASE("a write whose later part fails leaves the old file whole", "[kode_file]")
+{
+    char *const text = q_text(TEST_TEXT_BYTES);
+    bool        limited;
+    bool        wrote;
+
+    file_fresh();
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", TEST_OLD_TEXT));
+    limited = host_room_only(TEST_ROOM_ONE_PART);
+    wrote   = kode_file_write("flash/keep.txt", text);
+    host_room_again();
+    free(text);
+
+    TEST_ASSERT_TRUE(limited);
+    TEST_ASSERT_FALSE(wrote);
+    TEST_ASSERT_EQUAL_STRING_LEN("flash/keep.txt: wrote 32768 of 70000 bytes: ", kode_error(), 44U);
+    expect_old_kept();
+    file_no_settle();
+}
+
+TEST_CASE("a write that replaces a file leaves nothing beside it", "[kode_file]")
+{
+    file_fresh();
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", "first"));
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", "second, longer"));
+    TEST_ASSERT_EQUAL_STRING("second, longer", kode_file_read("flash/keep.txt"));
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", "3"));
+    TEST_ASSERT_EQUAL_STRING("3", kode_file_read("flash/keep.txt"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt.tmp"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt.bak"));
+    file_no_settle();
+}
+
+TEST_CASE("a write clears the copy and the old file a reset left beside it", "[kode_file]")
+{
+    file_fresh();
+    fake_media_put_fs_path("keep.txt.tmp", "half", 4U);
+    fake_media_put_fs_path("keep.txt.bak", TEST_OLD_TEXT, (uint32_t)strlen(TEST_OLD_TEXT));
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", "new"));
+    TEST_ASSERT_EQUAL_STRING("new", kode_file_read("flash/keep.txt"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt.tmp"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt.bak"));
+    file_no_settle();
+}
+
+/** @brief kdrv_storage.c's renames that go through before the failing ones. */
+static uint32_t s_rename_pass;
+
+/** @brief kdrv_storage.c's renames that fail after those. */
+static uint32_t s_rename_fail;
+
+/**
+ * @brief kdrv_storage.c's rename(), renamed by main/CMakeLists.txt: the real
+ *        one, but for the renames a case arms to fail.
+ * @param from The real path renamed.
+ * @param to   Its new real path.
+ * @return 0 when renamed; -1 when not.
+ */
+int host_storage_rename(const char *from, const char *to);
+
+int host_storage_rename(const char *from, const char *to)
+{
+    int rc;
+
+    if ( (0U == s_rename_fail) || (0U < s_rename_pass) )
+    {
+        if ( 0U < s_rename_pass )
+        {
+            s_rename_pass--;
+        }
+        rc = rename(from, to);
+    }
+    else
+    {
+        s_rename_fail--;
+        rc = -1;
+    }
+    return rc;
+}
+
+/** @brief Let @p pass renames through, then fail @p fail of them. */
+static void renames_fail(uint32_t pass, uint32_t fail)
+{
+    s_rename_pass = pass;
+    s_rename_fail = fail;
+}
+
+TEST_CASE("a write whose copy cannot take the name puts the old file back and removes the copy",
+          "[kode_file]")
+{
+    bool wrote;
+
+    file_fresh();
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", TEST_OLD_TEXT));
+    /* The old file goes aside; the copy fails to take the name. */
+    renames_fail(1U, 1U);
+    wrote = kode_file_write("flash/keep.txt", "new");
+    renames_fail(0U, 0U);
+
+    TEST_ASSERT_FALSE(wrote);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kode_error(), "wrote all of it, then could not put it on the file"),
+                                 kode_error());
+    expect_old_kept();
+    file_no_settle();
+}
+
+TEST_CASE("a write whose old file cannot go back keeps the copy, the old file aside, and says so",
+          "[kode_file]")
+{
+    bool wrote;
+
+    file_fresh();
+    TEST_ASSERT_TRUE(kode_file_write("flash/keep.txt", TEST_OLD_TEXT));
+    /* The old file goes aside; neither the copy nor the old file takes the name. */
+    renames_fail(1U, 2U);
+    wrote = kode_file_write("flash/keep.txt", "new");
+    renames_fail(0U, 0U);
+
+    TEST_ASSERT_FALSE(wrote);
+    TEST_ASSERT_EQUAL_STRING("flash/keep.txt: the name is left empty: the bytes are in .tmp, "
+                             "any old file in .bak", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt"));
+    TEST_ASSERT_EQUAL_STRING("new", kode_file_read("flash/keep.txt.tmp"));
+    TEST_ASSERT_EQUAL_STRING(TEST_OLD_TEXT, kode_file_read("flash/keep.txt.bak"));
+
+    /* The next write puts its own bytes on the name and removes both. */
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_write("flash/keep.txt", "next"), kode_error());
+    TEST_ASSERT_EQUAL_STRING("next", kode_file_read("flash/keep.txt"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt.tmp"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, host_size(fake_media_fs_dir(), "keep.txt.bak"));
+    file_no_settle();
+}
+
+TEST_CASE("a path with no room for the write's copy is refused by a write, not by an append",
+          "[kode_file]")
+{
+    char path[KODE_FILE_PATH_MAX];
+
+    /* "flash/" and a name: the whole of KODE_FILE_WRITE_PATH_MAX, one byte too many. */
+    (void)memcpy(path, "flash/", sizeof("flash/"));
+    (void)memset(&path[sizeof("flash/") - 1U], 'n', KODE_FILE_WRITE_PATH_MAX - sizeof("flash/"));
+    path[KODE_FILE_WRITE_PATH_MAX - 1U] = '\0';
+
+    file_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_write(path, "fits"), kode_error());
+    path[KODE_FILE_WRITE_PATH_MAX - 1U] = 'n';
+    path[KODE_FILE_WRITE_PATH_MAX]      = '\0';
+    TEST_ASSERT_FALSE(kode_file_write(path, "too long"));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kode_error(), "' is too long to write"), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_append(path, "appended"), kode_error());
+    TEST_ASSERT_EQUAL_STRING("appended", kode_file_read(path));
+    file_no_settle();
+}
+
 /* ---- Two tasks, one files layer -------------------------------------------- */
 
 /** @brief Bytes of the file the other task finds in place. */
@@ -2239,6 +2508,91 @@ TEST_CASE("a name of 64 characters and one as long as an entry holds list whole"
     TEST_ASSERT_EQUAL_UINT32(TEST_LONG_NAMES, list->count);
     TEST_ASSERT_NOT_NULL_MESSAGE(entry_named(list, name_64), "the 64-character name");
     TEST_ASSERT_NOT_NULL_MESSAGE(entry_named(list, longest), "the longest name an entry holds");
+    file_no_settle();
+}
+
+/** @brief The 'a's before the euro sign of the name too long for an entry. */
+#define TEST_CUT_KEEP (KODE_FILE_NAME_MAX - 3U)
+
+/** @brief The euro sign: three bytes of UTF-8, the second and third continuation bytes. */
+#define TEST_EURO "\xE2\x82\xAC"
+
+TEST_CASE("a name longer than an entry holds lists cut at a whole character and says so", "[kode_file]")
+{
+    char                     too_long[KODE_FILE_NAME_MAX + sizeof(TEST_EURO) + 1U];
+    char                     kept[TEST_CUT_KEEP + 1U];
+    const kode_file_list_t  *list;
+    const kode_file_entry_t *e;
+
+    /* 93 'a's, then the euro sign on bytes 93 to 95, then 'z': the 95 bytes
+     * an entry holds would end inside the euro sign, so the cut keeps 93. */
+    (void)memset(too_long, 'a', TEST_CUT_KEEP);
+    (void)memcpy(&too_long[TEST_CUT_KEEP], TEST_EURO "z", sizeof(TEST_EURO "z"));
+    (void)memset(kept, 'a', TEST_CUT_KEEP);
+    kept[TEST_CUT_KEEP] = '\0';
+
+    file_fresh();
+    put_fs_bytes("short.txt", 1U);
+    put_fs_bytes(too_long, TEST_SMALL_BYTES);
+
+    list = kode_file_list("flash");
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(2U, list->count);
+    TEST_ASSERT_FALSE(list->more);
+    e = entry_named(list, "short.txt");
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_FALSE(e->name_cut);
+    e = entry_named(list, kept);
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the long name, cut before the euro sign");
+    TEST_ASSERT_TRUE(e->name_cut);
+    TEST_ASSERT_FALSE(e->is_folder);
+    TEST_ASSERT_EQUAL_UINT32(TEST_SMALL_BYTES, e->size);
+    file_no_settle();
+}
+
+/** @brief The blocks the dry-pool listing case took from the events' pool. */
+static qf_support_dry_t s_list_dry;
+
+/** @brief Take every block a storage request comes from, the one the helper leaves for an answer too. */
+static bool list_pool_dry(void)
+{
+    bool ok = (0U != qf_support_pool_dry_second(&s_list_dry, (uint16_t)sizeof(StoragePathEvt),
+                                                (uint16_t)sizeof(QEvt)));
+
+    while ( ok && (QF_SUPPORT_DRY_MAX > s_list_dry.n) )
+    {
+        QEvt * const e = QF_newX_((uint_fast16_t)sizeof(StoragePathEvt), 0U, (enum_t)Q_USER_SIG);
+
+        if ( NULL == e )
+        {
+            break;
+        }
+        s_list_dry.held[s_list_dry.n] = e;
+        s_list_dry.n++;
+    }
+    return ok;
+}
+
+TEST_CASE("a listing with no event for its page fails out of memory and says no more", "[kode_file]")
+{
+    const kode_file_list_t *list;
+
+    file_fresh();
+    put_fs_bytes("a.txt", 1U);
+
+    /* The two STATs are answered; the page's request then finds no block. */
+    s_waits     = 0U;
+    s_change_at = 2U;
+    s_change    = &list_pool_dry;
+    s_change_ok = false;
+    fake_sem_wait_hook(&file_change_hook);
+    list = kode_file_list("flash");
+    qf_support_pool_give_back(&s_list_dry);
+
+    TEST_ASSERT_TRUE(s_change_ok);
+    TEST_ASSERT_EQUAL_STRING("flash: out of memory", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, list->count);
+    TEST_ASSERT_FALSE(list->more);
     file_no_settle();
 }
 
@@ -3485,4 +3839,28 @@ TEST_CASE("a PNG drawn does not free what the task's last byte read returned", "
     TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)fake_task_slot_watch_frees());
     TEST_ASSERT_EQUAL_MEMORY(first, kept, sizeof(first));
     png_case_end();
+}
+
+TEST_CASE("a name that is not UTF-8 is refused before the volume is asked", "[kode_file]")
+{
+    unsigned asked;
+
+    /* Latin-1, a character cut short, and an overlong '/'. */
+    expect_refused("sd/caf\xE9.txt", "bad path 'sd/caf\xE9.txt': a name that is not UTF-8");
+    expect_refused("flash/a\xE2\x82", "bad path 'flash/a\xE2\x82': a name that is not UTF-8");
+    expect_refused("flash/\xC0\xAF" "x", "bad path 'flash/\xC0\xAF" "x': a name that is not UTF-8");
+    expect_path("flash/caf\xC3\xA9.txt", "/storage/caf\xC3\xA9.txt");
+
+    file_fresh();
+    asked = fake_fs_mount_calls();
+    TEST_ASSERT_FALSE(kode_file_write("flash/caf\xE9.txt", "x"));
+    TEST_ASSERT_EQUAL_STRING("bad path 'flash/caf\xE9.txt': a name that is not UTF-8", kode_error());
+    TEST_ASSERT_EQUAL_UINT(asked, fake_fs_mount_calls());
+
+    /* A new name is held to the same rule. */
+    TEST_ASSERT_TRUE_MESSAGE(kode_file_write("flash/cafe.txt", "x"), kode_error());
+    TEST_ASSERT_FALSE(kode_file_rename("flash/cafe.txt", "caf\xE9.txt"));
+    TEST_ASSERT_EQUAL_STRING("bad name 'caf\xE9.txt': not UTF-8", kode_error());
+    TEST_ASSERT_EQUAL_STRING("x", kode_file_read("flash/cafe.txt"));
+    file_no_settle();
 }

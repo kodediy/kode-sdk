@@ -727,6 +727,25 @@ TEST_CASE("the panel's state is answered to whoever asks late", "[display_ao]")
     Mockkdrv_display_Destroy();
 }
 
+/* The door AO_Touch subscribes through, which is what links AO_Display into
+ * an app that only uses the touch: the controller is powered and released
+ * from reset by the panel's bring-up. */
+TEST_CASE("display_state_subscribe() makes its AO hear the panel's state", "[display_ao]")
+{
+    Mockkdrv_display_Init();
+    display_up_once(0U);
+    QActive_unsubscribe(ao_spy(), DISPLAY_STATE_SIG);
+    TEST_ASSERT_NULL_MESSAGE(announced(), "the spy heard the state with no subscription");
+
+    display_state_subscribe(ao_spy());
+    const DisplayStateEvt * const e = announced();
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the subscription through the door heard nothing");
+    TEST_ASSERT_TRUE(e->up);
+
+    ao_spy_drain();
+    Mockkdrv_display_Destroy();
+}
+
 /* ---- The floor, and the one case it must not apply to ---------------------- */
 
 /* A chosen brightness has a floor. Without it a slider dragged to the bottom

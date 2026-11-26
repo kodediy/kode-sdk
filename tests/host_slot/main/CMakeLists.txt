@@ -14,6 +14,7 @@ idf_component_register(
          "app_desc_stub.c"
          ${CASE_SOURCES}
          "${SDK_DIR}/components/kdrv/apps/src/kdrv_slot.c"
+         "${SDK_DIR}/components/khal/crc32/src/khal_crc32_esp.c"
     INCLUDE_DIRS "."
                  "${SDK_DIR}/components/kdrv/audio/include"
                  "${SDK_DIR}/components/kdrv/buttons/include"
@@ -27,7 +28,7 @@ idf_component_register(
                  ${khal_includes}
                  "${SDK_DIR}/components/kdefs/include"
                  "${SDK_DIR}/components/klog/include"
-    REQUIRES unity esp_ota_ops esp_partition
+    REQUIRES unity esp_ota_ops esp_core_dump esp_partition
     WHOLE_ARCHIVE)
 
 # Sanitizers, only when KODE_SANITIZE is set; see tests/sanitize.cmake.

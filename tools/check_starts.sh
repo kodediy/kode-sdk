@@ -22,12 +22,15 @@
 #      references: AO_AppMgr names AO_Storage and AO_Net, AO_Net names
 #      AO_Radio, AO_Radio names AO_Storage, AO_Audio and AO_Ir name AO_Radio
 #      (the amplifier's enable and the infrared block are the C5's), AO_Audio
-#      names AO_Storage (record-to-file), and AO_Haptic names AO_Imu, each
-#      through a symbol its object needs strongly - so linking the first
-#      links the second, and kode_init() starts both.
+#      names AO_Storage (record-to-file), AO_Haptic names AO_Imu, and
+#      AO_Touch names AO_Display (the panel's bring-up powers the touch
+#      controller and releases the reset line the two share), each through a
+#      symbol its object needs strongly - so linking the first links the
+#      second, and kode_init() starts both.
 #   5. The doors that only publish, subscribe or read - they name no
 #      AO_<Name>, so checks 1 and 2 cannot see them - sit beside their
 #      owner's start: touch_subscribe() beside kaos_touch_start(),
+#      display_state_subscribe() beside kaos_display_start(),
 #      radio_amp_request(), ble_app_subscribe(), ble_pair_subscribe() and
 #      radio_c5_release() beside kaos_radio_start(). A door of that kind added
 #      anywhere else is a door that links nothing; list it here.
@@ -143,7 +146,7 @@ while read -r obj sym; do
 done < <(printf '%s\n' "$sys_defs" | awk '$2 ~ /^kode_sys_[a-z0-9]+_init$/')
 
 # 4. The dependencies, where both owners were compiled.
-for pair in AppMgr:Storage AppMgr:Net Net:Radio Radio:Storage Audio:Radio Audio:Storage Ir:Radio Haptic:Imu; do
+for pair in AppMgr:Storage AppMgr:Net Net:Radio Radio:Storage Audio:Radio Audio:Storage Ir:Radio Haptic:Imu Touch:Display; do
     user="AO_${pair%%:*}"
     owner="AO_${pair##*:}"
     user_obj="$(printf '%s\n' "$kaos_defs" | awk -v s="$user" '$2 == s { print $1 }')"
@@ -163,7 +166,7 @@ for pair in AppMgr:Storage AppMgr:Net Net:Radio Radio:Storage Audio:Radio Audio:
 done
 
 # 5. The doors with no AO pointer in them, beside their start.
-for pair in touch_subscribe:touch radio_amp_request:radio ble_app_subscribe:radio ble_pair_subscribe:radio radio_c5_release:radio; do
+for pair in touch_subscribe:touch display_state_subscribe:display radio_amp_request:radio ble_app_subscribe:radio ble_pair_subscribe:radio radio_c5_release:radio; do
     door="${pair%%:*}"
     start="kaos_${pair##*:}_start"
     door_obj="$(awk -v s="$door" '$2 == s { print $1 }' <<< "$kaos_defs")"

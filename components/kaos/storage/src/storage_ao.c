@@ -25,6 +25,7 @@
 #include "khal_crc32.h"
 #include "khal_system.h"
 #include "khal_time.h"
+#include "khal_utf8.h"
 #include "kode_log.h"
 #include "krows.h"
 #include "storage_fetch.h"
@@ -1673,6 +1674,7 @@ static bool publish_entry(const char *name, uint32_t size, void *ctx)
      * genuinely does not know, and false is said outright rather than left
      * to whatever the pool block last held. */
     ev->is_dir  = false;
+    ev->name_cut = false;
     list_send(c->who, &ev->super);
     ++c->published;
     return true;
@@ -1772,17 +1774,31 @@ typedef struct {
 } PathListCtx;
 
 /**
+ * @brief Copy a listed name into an entry's KODE_STORAGE_NAME_MAX bytes, cut
+ *        at a whole UTF-8 character when it is longer.
+ * @param out  The entry's name.
+ * @param name The name the walk found.
+ * @return true when the name was cut.
+ */
+static bool entry_name_copy(char *out, const char *name)
+{
+    size_t const len = khal_utf8_fit(name, KODE_STORAGE_NAME_MAX - 1U);
+
+    (void)memcpy(out, name, len);
+    out[len] = '\0';
+    return '\0' != name[len];
+}
+
+/**
  * @brief Post one entry of an ask's page, leaving KODE_STORAGE_LIST_FREE_SLOTS
  *        free in the asker's queue; an entry that does not fit ends the page.
  * @param c      The walk.
- * @param name   The entry's name, shorter than KODE_STORAGE_NAME_MAX.
- * @param len    Its length.
+ * @param name   The entry's name, of any length.
  * @param is_dir A directory.
  * @param size   Its bytes.
  * @return false to end the walk: the page is full, or the pool or the asker's queue is.
  */
-static bool ask_path_entry(PathListCtx *c, const char *name, size_t len, bool is_dir,
-                           uint32_t size)
+static bool ask_path_entry(PathListCtx *c, const char *name, bool is_dir, uint32_t size)
 {
     StorageEntryEvt *ev;
 
@@ -1802,11 +1818,11 @@ static bool ask_path_entry(PathListCtx *c, const char *name, size_t len, bool is
         c->truncated = true;
         return false;
     }
-    (void)memcpy(ev->name, name, len + 1U);
-    ev->size    = size;
-    ev->from_sd = path_entry_from_sd(c->dir_path, name);
-    ev->is_dir  = is_dir;
-    ev->pos     = (uint16_t)(c->base + c->published);
+    ev->name_cut = entry_name_copy(ev->name, name);
+    ev->size     = size;
+    ev->from_sd  = path_entry_from_sd(c->dir_path, name);
+    ev->is_dir   = is_dir;
+    ev->pos      = (uint16_t)(c->base + c->published);
     if ( !QACTIVE_POST_X(c->ask, &ev->super, KODE_STORAGE_LIST_FREE_SLOTS, AO_Storage) )
     {
         c->truncated = true;   /* QP took the entry back; the page ends here */
@@ -1821,26 +1837,17 @@ static bool ask_path_entry(PathListCtx *c, const char *name, size_t len, bool is
  *        kdrv_storage_list_path(), on this AO's thread.
  *
  * Only the path walk knows `is_dir`, which `ls` prints as `type=file|dir`.
+ * A name longer than an entry holds is listed cut and marked `name_cut`: the
+ * entry is there, and a page counts it like any other.
  */
 static bool publish_path_entry(const char *name, bool is_dir, uint32_t size,
                                void *ctx)
 {
     PathListCtx *c = (PathListCtx *)ctx;
 
-    /* Skip rather than truncate: a name that does not fit the event would come
-     * back as a request nobody could resolve to a file. Same rule
-     * publish_entry() applies above. */
-    size_t const len = strlen(name);
-    if ( KODE_STORAGE_NAME_MAX <= len )
-    {
-        KLOG_W(TAG, "ignoring '%s': name longer than %u chars",
-               name, (unsigned)(KODE_STORAGE_NAME_MAX - 1U));
-        return true;
-    }
-
     if ( NULL != c->ask )
     {
-        return ask_path_entry(c, name, len, is_dir, size);
+        return ask_path_entry(c, name, is_dir, size);
     }
     if ( NULL != c->wait )
     {
@@ -1859,9 +1866,9 @@ static bool publish_path_entry(const char *name, bool is_dir, uint32_t size,
             return false;
         }
         StorageRow * const row = &c->wait->rows[c->published];
-        (void)memcpy(row->name, name, len + 1U);
-        row->is_dir = is_dir;
-        row->size   = size;
+        row->name_cut = entry_name_copy(row->name, name);
+        row->is_dir   = is_dir;
+        row->size     = size;
         ++c->published;
         return true;
     }
@@ -1881,11 +1888,11 @@ static bool publish_path_entry(const char *name, bool is_dir, uint32_t size,
         c->truncated = true;
         return false;
     }
-    (void)memcpy(ev->name, name, len + 1U);
-    ev->size    = size;
-    ev->from_sd = path_entry_from_sd(c->dir_path, name);
-    ev->is_dir  = is_dir;
-    ev->pos     = (uint16_t)c->published;
+    ev->name_cut = entry_name_copy(ev->name, name);
+    ev->size     = size;
+    ev->from_sd  = path_entry_from_sd(c->dir_path, name);
+    ev->is_dir   = is_dir;
+    ev->pos      = (uint16_t)c->published;
     QACTIVE_PUBLISH(&ev->super, &l_storage.super);
     ++c->published;
     return true;

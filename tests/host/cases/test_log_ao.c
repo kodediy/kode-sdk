@@ -304,6 +304,112 @@ TEST_CASE("a control byte is ignored, not buffered", "[log_ao]")
     TEST_ASSERT_EQUAL_STRING("ab", published());
 }
 
+/** @brief Feed bytes in, @p n of them, the way the reader task would. */
+static void type_bytes(const uint8_t *b, size_t n)
+{
+    for ( size_t i = 0U; n > i; ++i )
+    {
+        type(b[i]);
+    }
+}
+
+/* UTF-8 has one place in the grammar, a quoted value: a name typed on the
+ * cable reaches the parser byte for byte, and the echo shows it. */
+TEST_CASE("a byte past ASCII inside a quoted value is taken and echoed",
+          "[log_ao][utf8]")
+{
+    log_fresh();
+
+    type_str("wifi_join ssid=\"Caf");
+    type(0xC3U);
+    type(0xA9U);
+    type_str("\"\r");
+
+    TEST_ASSERT_EQUAL_STRING("wifi_join ssid=\"Caf\xC3\xA9\"", published());
+    TEST_ASSERT_EQUAL_STRING("kode> wifi_join ssid=\"Caf\xC3\xA9\"\r\n", fake_console_out());
+}
+
+/* Outside a quote the grammar has no use for them: a key, a bare value, the
+ * byte right after `=`, past a closing quote. They are dropped there as a
+ * control byte is. */
+TEST_CASE("a byte past ASCII outside a quoted value is ignored, not buffered",
+          "[log_ao][utf8]")
+{
+    static const uint8_t utf8[] = { 0xC3U, 0xA9U };
+
+    log_fresh();
+
+    type_str("wi");
+    type_bytes(utf8, sizeof(utf8));
+    type_str("fi_join a=b");
+    type_bytes(utf8, sizeof(utf8));
+    type_str(" c=");
+    type_bytes(utf8, sizeof(utf8));
+    type_str(" d=\"e\"");
+    type_bytes(utf8, sizeof(utf8));
+    type('\r');
+
+    TEST_ASSERT_EQUAL_STRING("wifi_join a=b c= d=\"e\"", published());
+}
+
+/* An escaped quote keeps the value open and an escaped backslash does not
+ * close it, as the parser reads them; a value opened after a bare `=` later
+ * in the token is no quote. */
+TEST_CASE("escapes keep a quoted value open, and only the first `=` opens one",
+          "[log_ao][utf8]")
+{
+    log_fresh();
+
+    type_str("x a=\"\\\"");
+    type(0xC3U);
+    type(0xA9U);
+    type_str("\\\\");
+    type(0xC3U);
+    type(0xA9U);
+    type_str("\" b=c=\"");
+    type(0xC3U);
+    type_str("\"\r");
+
+    TEST_ASSERT_EQUAL_STRING("x a=\"\\\"\xC3\xA9\\\\\xC3\xA9\" b=c=\"\"", published());
+}
+
+/* A character on the glass of the terminal is one column, however many
+ * bytes it took: one backspace rubs it out whole. */
+TEST_CASE("backspace takes a whole UTF-8 character and rubs out one column",
+          "[log_ao][utf8]")
+{
+    static const uint8_t two[]  = { 0xC3U, 0xA9U };
+    static const uint8_t four[] = { 0xF0U, 0x9FU, 0x98U, 0x80U };
+
+    log_fresh();
+
+    type_str("a=\"b");
+    type_bytes(two, sizeof(two));
+    type(0x7fU);
+    type_bytes(four, sizeof(four));
+    type(0x08U);
+    type_str("\"\r");
+
+    TEST_ASSERT_EQUAL_STRING("a=\"b\"", published());
+    TEST_ASSERT_EQUAL_STRING("kode> a=\"b\xC3\xA9\b \b\xF0\x9F\x98\x80\b \b\"\r\n",
+                             fake_console_out());
+}
+
+/* A continuation byte with no lead before it is a character of its own: the
+ * backspace takes it and leaves the ASCII before it. */
+TEST_CASE("backspace over a stray continuation byte takes that byte alone",
+          "[log_ao][utf8]")
+{
+    log_fresh();
+
+    type_str("a=\"bc");
+    type(0xA9U);
+    type(0x7fU);
+    type_str("\"\r");
+
+    TEST_ASSERT_EQUAL_STRING("a=\"bc\"", published());
+}
+
 /* ---- The line that does not fit -------------------------------------------- */
 
 /* A line silently cut in half is a protocol lie. Over the cable a human sees

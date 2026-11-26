@@ -110,6 +110,7 @@ static void publish_touch(int16_t x, int16_t y, bool pressed)
     e->y       = y;
     e->pressed = pressed;
     e->t_ms    = 0U;
+    e->remote  = false;
     QACTIVE_PUBLISH(&e->super, (void *)0);
 }
 

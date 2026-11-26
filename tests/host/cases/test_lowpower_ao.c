@@ -319,7 +319,7 @@ static void console_line(uint8_t src)
 /** @brief Hand AO_LowPower a button's change. */
 static void button_event(void)
 {
-    ButtonEvt b = { QEVT_INITIALIZER(BUTTON_EVT_SIG), KDRV_BTN_TOP, true, 0U };
+    ButtonEvt b = { QEVT_INITIALIZER(BUTTON_EVT_SIG), KDRV_BTN_TOP, true, 0U, false };
 
     feed(&b.super);
 }
@@ -327,7 +327,7 @@ static void button_event(void)
 /** @brief Hand AO_LowPower a touch sample. */
 static void touch_event(void)
 {
-    TouchEvt t = { QEVT_INITIALIZER(TOUCH_EVT_SIG), 1, 1, true, 0U, false };
+    TouchEvt t = { QEVT_INITIALIZER(TOUCH_EVT_SIG), 1, 1, true, 0U, false, false };
 
     feed(&t.super);
 }
@@ -814,7 +814,7 @@ TEST_CASE("any input abandons a round the idle time began", "[lowpower_ao]")
 /** @brief Hand AO_LowPower the release of a contact that stopped counting. */
 static void touch_stale_release(void)
 {
-    TouchEvt t = { QEVT_INITIALIZER(TOUCH_EVT_SIG), 1, 1, false, 0U, true };
+    TouchEvt t = { QEVT_INITIALIZER(TOUCH_EVT_SIG), 1, 1, false, 0U, true, false };
 
     feed(&t.super);
 }

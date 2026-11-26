@@ -596,7 +596,8 @@ TEST_CASE("ls lists a folder longer than a page whole, then says ok",
 
 /* Every name an entry holds is listed. The entry once held 64 bytes and `ls`
  * left a name of 64 characters or more out, still saying `>ok`. A name longer
- * than an entry holds, which FAT allows, is left out and the log says so. */
+ * than an entry holds, which FAT allows, is listed cut and its record ends
+ * `cut=yes`. */
 TEST_CASE("ls lists a name of 64 characters and one as long as an entry holds",
           "[console_fs]")
 {
@@ -604,10 +605,8 @@ TEST_CASE("ls lists a name of 64 characters and one as long as an entry holds",
     char longest[LS_NAME_LONGEST + 1U];
     char too_long[KODE_STORAGE_NAME_MAX + 1U];
     char want[LS_RECORD_MAX];
-    char why[sizeof("name longer than 999 chars")];
 
     console_up_once();
-    (void)snprintf(why, sizeof(why), "name longer than %u chars", (unsigned)LS_NAME_LONGEST);
     (void)memset(name_64, 'a', LS_NAME_64);
     name_64[LS_NAME_64] = '\0';
     (void)memset(longest, 'b', LS_NAME_LONGEST);
@@ -626,8 +625,10 @@ TEST_CASE("ls lists a name of 64 characters and one as long as an entry holds",
     TEST_ASSERT_TRUE_MESSAGE(replied_line(want), "the 64-character name");
     (void)snprintf(want, sizeof(want), ">|name=\"%s\" type=dir size=0 medium=fs", longest);
     TEST_ASSERT_TRUE_MESSAGE(replied_line(want), "the longest name an entry holds");
-    TEST_ASSERT_FALSE(replied(">|name=\"c"));
-    TEST_ASSERT_TRUE(replied(why));
+    too_long[LS_NAME_LONGEST] = '\0';
+    (void)snprintf(want, sizeof(want), ">|name=\"%s\" type=file size=1 medium=fs cut=yes", too_long);
+    TEST_ASSERT_TRUE_MESSAGE(replied_line(want), "the name longer than an entry holds, cut");
+    TEST_ASSERT_FALSE(replied("name longer than"));
     TEST_ASSERT_TRUE(replied_line(">ok"));
 }
 
@@ -912,6 +913,27 @@ TEST_CASE("mkdir whose parent is missing is refused", "[console_fs]")
     type_line("mkdir path=\"/storage/a/b\"");
     settle();
     TEST_ASSERT_TRUE(replied_line(">err code=5 msg=noparent"));
+}
+
+/* FatFs takes names in UTF-8 and answers a name that is not with
+ * FR_INVALID_NAME, which reads as a failed card. The path is refused before
+ * the volume is asked, the same word as any other bad path. */
+TEST_CASE("mkdir of a name that is not UTF-8 is refused before the volume is asked",
+          "[console_fs]")
+{
+    unsigned asked;
+
+    console_up_once();
+    asked = fake_fs_mount_calls();
+    type_line("mkdir path=\"/storage/caf\xE9\"");
+    settle();
+    TEST_ASSERT_TRUE(replied_line(">err code=3 msg=path"));
+    TEST_ASSERT_EQUAL_UINT(asked, fake_fs_mount_calls());
+
+    fake_klog_reset();
+    type_line("mkdir path=\"/storage/caf\xC3\xA9\"");
+    settle();
+    TEST_ASSERT_TRUE(replied_line(">ok"));
 }
 
 /* fake_sdmmc_fail_file_writes() fails the real mkdir() inside

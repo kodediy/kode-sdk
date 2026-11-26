@@ -27,7 +27,17 @@ kode_status_t kdrv_led_init(void);
  */
 kode_status_t kdrv_led_park(void);
 
-/** @brief Set the colour. (0,0,0) turns the LED off but remembers the colour. */
+/**
+ * @brief Set the colour. (0,0,0) turns the LED off but remembers the colour.
+ *
+ * The colour and whether the LED is lit are kept only when the chip took the
+ * write: one that did not land leaves both as they were.
+ *
+ * @param r Red, 0 to 255.
+ * @param g Green, 0 to 255.
+ * @param b Blue, 0 to 255.
+ * @return KODE_OK, or the bus's error.
+ */
 kode_status_t kdrv_led_rgb(uint8_t r, uint8_t g, uint8_t b);
 
 /** @brief Drive the LED on (at the last colour set, or white) or off. */
@@ -35,6 +45,12 @@ kode_status_t kdrv_led_set(bool on);
 
 /** @brief Invert the LED. */
 kode_status_t kdrv_led_toggle(void);
+
+/**
+ * @brief Whether the LED is lit, as the last write that landed left it.
+ * @return true when lit; false when dark or never brought up.
+ */
+bool kdrv_led_is_on(void);
 
 #ifdef __cplusplus
 }

@@ -28,12 +28,16 @@
 #define FRAME_ADDR  0x0004U
 #define FRAME_CMD   0x0008U
 
-/* How many 10 ms ticks that frame's suppression window lasts: 53 ms rounded
- * up from the symbols, plus KODE_IR_ECHO_TAIL_MS, rounded up again to whole
- * ticks. Spelled out rather than computed, so that changing the tail changes
- * a number somebody reads - which is what happened when the block moved to
- * the C5 and the tail went from 30 ms to 120. */
-#define ECHO_TICKS  18U
+/* How many 10 ms ticks a suppression window lasts once the C5 has said the
+ * frame ended: KODE_IR_ECHO_TAIL_MS alone, 120 ms, whatever the frame. Spelled
+ * out rather than computed, so that changing the tail changes a number
+ * somebody reads - which is what happened when the block moved to the C5 and
+ * the tail went from 30 ms to 120. */
+#define ECHO_TICKS  12U
+
+/* The window of a send the C5 said nothing of: that frame's 53 ms, rounded up
+ * from the symbols, plus the tail, rounded up again to whole ticks. */
+#define UNCONFIRMED_TICKS  18U
 
 /* What a capture request here asks to wait, and the same in whole ticks. A
  * requester's deadline is the thing that keeps AO_Ir from writing into a
@@ -414,11 +418,11 @@ TEST_CASE("our own echo is not published", "[ir_ao]")
     Mockkdrv_ir_Destroy();
 }
 
-/* A transmission the driver refused produces no photons, so there is no echo
- * to suppress - and a window opened for one would make the AO deaf to a real
- * remote for its length, which is a bug that only shows up on a board that is
- * already having a bad day. The AO opens the window only when kdrv_ir_send()
- * said yes, and that is a claim, so it is asserted. */
+/* A transmission the driver refused, or the C5 says failed, produces no
+ * photons, so there is no echo to suppress - and a window opened for one would
+ * make the AO deaf to a real remote for its length, which is a bug that only
+ * shows up on a board that is already having a bad day. That is a claim, so it
+ * is asserted. */
 TEST_CASE("a transmission that was refused opens no window", "[ir_ao]")
 {
     kdrv_ir_symbol_t sym[KNEC_SYMBOLS];
@@ -509,6 +513,29 @@ TEST_CASE("a frame after the echo window is published again", "[ir_ao]")
     TEST_ASSERT_NOT_NULL_MESSAGE(rx, "the window closed, so this one is somebody else's");
     TEST_ASSERT_EQUAL_HEX16(FRAME_ADDR, rx->addr);
     TEST_ASSERT_EQUAL_HEX16(FRAME_CMD, rx->cmd);
+    ao_spy_drain();
+
+    Mockkdrv_ir_Verify();
+    Mockkdrv_ir_Destroy();
+}
+
+/* A send the C5 said nothing of may still have gone out, and may have started
+ * as late as the moment the wait gave up: the window then covers the whole
+ * frame from there, and its tail. */
+TEST_CASE("a send the C5 said nothing of is deaf for its frame and the tail", "[ir_ao]")
+{
+    ir_up_once();
+
+    kdrv_ir_send_ExpectAnyArgsAndReturn(KODE_TIMEOUT);
+    ir_send_request(FRAME_ADDR, FRAME_CMD);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_pump(AO_Ir, 4U),
+                                   "the request reaches the AO");
+    run_job();
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_tick(AO_Ir, ECHO_TICKS),
+                                   "still deaf past the tail");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, qf_support_tick(AO_Ir, UNCONFIRMED_TICKS - ECHO_TICKS),
+                                   "and the window closes at the frame and the tail");
     ao_spy_drain();
 
     Mockkdrv_ir_Verify();
@@ -709,19 +736,6 @@ TEST_CASE("the board's own transmission is not handed to a pending capture reque
 /** @brief KODE_IR_TEST_ECHO_MS as whole QP ticks, one attempt's deadline. */
 #define WAIT_TICKS  QF_SUPPORT_STEPS(KODE_IR_TEST_ECHO_MS)
 
-/**
- * @brief The most ticks a row frame's suppression window can last.
- *
- * ECHO_TICKS above is one frame's exact length because the cases above send
- * one known frame. The row's command is a nonce, so its frames vary: a NEC
- * frame of all ones is 86 ms against the 52 ms of the one this file otherwise
- * uses. This is that worst case plus KODE_IR_ECHO_TAIL_MS - 86 + 120 ms, 21
- * ticks - and it is what a row case has to run out before the next one
- * starts: a window still armed here is an expiry the next case's first pump
- * delivers and counts as its own. Spelled out, for ECHO_TICKS' reason.
- */
-#define ROW_ECHO_TICKS  21U
-
 /** @brief What kdrv_ir_rx_present() reports; static, because CMock copies
  *         from this pointer when the call happens rather than when it is
  *         armed, so a local would have gone out of scope by then. */
@@ -841,7 +855,7 @@ static void row_probe_again(void)
 /** @brief Run out whatever the row left armed, so the next case starts clean. */
 static void row_settles(void)
 {
-    (void)qf_support_tick(AO_Ir, ROW_ECHO_TICKS);
+    (void)qf_support_tick(AO_Ir, ECHO_TICKS);
     ao_spy_drain();
 }
 
@@ -1750,6 +1764,49 @@ TEST_CASE("a raw request sends the lent frame on its carrier and answers OK",
     Mockkdrv_ir_Destroy();
 }
 
+/** @brief A lent frame of about a second: LONG_N symbols of 33 ms each. */
+#define LONG_N         30U
+#define LONG_MARK_US   16000U
+#define LONG_SPACE_US  17000U
+
+/* The window opens when the C5 says the frame ended, so it is the tail alone,
+ * however long the frame was: a remote pressed just after it is heard. */
+TEST_CASE("a frame heard just after the tail of a confirmed send is published",
+          "[ir_ao][raw]")
+{
+    kode_sys_ir_symbol_t long_frame[LONG_N];
+    kdrv_ir_symbol_t     sym[KNEC_SYMBOLS];
+    khal_sem_t const     done = khal_sem_create();
+    uint32_t             rc   = 0xFFU;
+    uint32_t             ack  = 0U;
+    const IrRxEvt       *rx;
+
+    raw_up(KODE_OK);
+    a_frame(sym);
+    for ( uint16_t i = 0U; LONG_N > i; ++i )
+    {
+        long_frame[i].mark_us  = (uint16_t)LONG_MARK_US;
+        long_frame[i].space_us = (uint16_t)LONG_SPACE_US;
+    }
+    ir_send_raw_request(long_frame, LONG_N, RAW_CARRIER_HZ, RAW_START_MS, &rc, done, 21U, &ack);
+    (void)qf_support_pump(AO_Ir, 4U);
+    run_job();
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)KODE_OK, rc);
+
+    echo_window_closes();
+    ao_spy_drain();
+    deliver(sym, KNEC_SYMBOLS);
+
+    rx = (const IrRxEvt *)ao_spy_take();
+    TEST_ASSERT_NOT_NULL_MESSAGE(rx, "the tail has passed, so this one is somebody else's");
+    TEST_ASSERT_EQUAL_HEX16(FRAME_ADDR, rx->addr);
+    TEST_ASSERT_EQUAL_HEX16(FRAME_CMD, rx->cmd);
+    ao_spy_drain();
+
+    Mockkdrv_ir_Verify();
+    Mockkdrv_ir_Destroy();
+}
+
 TEST_CASE("a raw request's frame is copied as its call starts: changed after, nothing sent changes",
           "[ir_ao][raw]")
 {
@@ -2623,6 +2680,78 @@ TEST_CASE("kode_sys_ir_send_raw sends the lent frame and answers the asking AO o
     (void)qf_support_pump(AO_Ir, 4U);
     run_job();
     (void)ask_take(IR_SEND_RAW_RSP_SIG);
+    echo_window_drains();
+    ask_down();
+}
+
+TEST_CASE("kode_sys_ir_send_raw refuses a carrier or a duration out of range and takes the limits",
+          "[ir_ao][ask]")
+{
+    static const uint32_t refused_hz[] = { 38U, 19999U, 500001U };
+    static const uint32_t taken_hz[]   = { 20000U, 38000U, 500000U };
+    kode_sys_ir_symbol_t  sym[RAW_N];
+
+    ask_up(KODE_OK);
+    raw_frame(sym);
+    for ( uint32_t i = 0U; (sizeof(refused_hz) / sizeof(refused_hz[0])) > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ir_send_raw(ao_spy(), sym, RAW_N, refused_hz[i]));
+    }
+    sym[1].mark_us = (uint16_t)(KODE_SYS_IR_DURATION_MAX_US + 1U);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ir_send_raw(ao_spy(), sym, RAW_N, RAW_CARRIER_HZ));
+    raw_frame(sym);
+    sym[RAW_N - 1U].space_us = (uint16_t)(KODE_SYS_IR_DURATION_MAX_US + 1U);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ir_send_raw(ao_spy(), sym, RAW_N, RAW_CARRIER_HZ));
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Ir->eQueue));
+
+    /* One duration at the limit: the echo window still closes within ECHO_TICKS. */
+    raw_frame(sym);
+    sym[1].mark_us = (uint16_t)KODE_SYS_IR_DURATION_MAX_US;
+    for ( uint32_t i = 0U; (sizeof(taken_hz) / sizeof(taken_hz[0])) > i; i++ )
+    {
+        const kode_sys_ir_send_answer_t *a;
+
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ir_send_raw(ao_spy(), sym, RAW_N, taken_hz[i]));
+        TEST_ASSERT_EQUAL_UINT(1U, qf_support_pump(AO_Ir, 4U));
+        run_job();
+        a = (const kode_sys_ir_send_answer_t *)ask_take(IR_SEND_RAW_RSP_SIG);
+        TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+        TEST_ASSERT_EQUAL_UINT32(taken_hz[i], s_raw_seen_hz);
+        echo_window_drains();
+    }
+    ask_down();
+}
+
+/** @brief A frame of exactly KODE_SYS_IR_FRAME_MAX_MS: LIMIT_N marks and spaces of LIMIT_HALF_US. */
+#define LIMIT_N        50U
+#define LIMIT_HALF_US  15000U
+
+TEST_CASE("kode_sys_ir_send_raw refuses a frame longer than 1500 ms and takes one of 1500 ms",
+          "[ir_ao][ask]")
+{
+    kode_sys_ir_symbol_t             sym[LIMIT_N];
+    const kode_sys_ir_send_answer_t *a;
+
+    ask_up(KODE_OK);
+    TEST_ASSERT_EQUAL_UINT32(1500U, KODE_SYS_IR_FRAME_MAX_MS);
+    for ( uint16_t i = 0U; LIMIT_N > i; ++i )
+    {
+        sym[i].mark_us  = (uint16_t)LIMIT_HALF_US;
+        sym[i].space_us = (uint16_t)LIMIT_HALF_US;
+    }
+    sym[LIMIT_N - 1U].space_us = 0U;   /* sent as 32767 us */
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ir_send_raw(ao_spy(), sym, LIMIT_N, RAW_CARRIER_HZ));
+    sym[LIMIT_N - 1U].space_us = (uint16_t)(LIMIT_HALF_US + 1U);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_sys_ir_send_raw(ao_spy(), sym, LIMIT_N, RAW_CARRIER_HZ));
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)uxQueueMessagesWaiting(AO_Ir->eQueue));
+
+    sym[LIMIT_N - 1U].space_us = (uint16_t)LIMIT_HALF_US;
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_ir_send_raw(ao_spy(), sym, LIMIT_N, RAW_CARRIER_HZ));
+    TEST_ASSERT_EQUAL_UINT(1U, qf_support_pump(AO_Ir, 4U));
+    run_job();
+    a = (const kode_sys_ir_send_answer_t *)ask_take(IR_SEND_RAW_RSP_SIG);
+    TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, a->rc);
+    TEST_ASSERT_EQUAL_UINT(LIMIT_N, s_raw_seen_n);
     echo_window_drains();
     ask_down();
 }

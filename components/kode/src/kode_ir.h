@@ -80,9 +80,10 @@ bool kode_ir_nec_send(uint32_t address, uint32_t command);
 /**
  * @brief Send a raw frame, waiting its turn, with the lock held; the error is set on failure.
  * @param us         The durations, mark first.
- * @param n          How many, 1..KODE_IR_RAW_MAX.
- * @param carrier_hz The carrier, above 0.
- * @return true when the frame went out.
+ * @param n          How many, 1..KODE_IR_RAW_MAX; none over KODE_IR_DURATION_MAX_US.
+ * @param carrier_hz The carrier, KODE_IR_CARRIER_MIN_HZ to KODE_IR_CARRIER_MAX_HZ.
+ * @return true when the C5 says the frame went out; false, unsent, for a frame
+ *         longer than KODE_IR_FRAME_MAX_MS.
  */
 bool kode_ir_raw_send(const uint16_t *us, uint32_t n, uint32_t carrier_hz);
 

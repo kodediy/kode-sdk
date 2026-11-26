@@ -7,7 +7,7 @@
 #define KQP_SIGNALS_H_
 
 #include "qpc.h"
-#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER */
+#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER, CONFIG_KODEOS_DUMP_HTTP */
 #include "kqp_config.h"   /* KODE_CONSOLE_LINE_MAX, KODE_APP_FILE_MAX */
 #include "khal_sync.h"    /* khal_sem_t: the `done` of every blocking request */
 
@@ -260,6 +260,9 @@ enum KodeSignals {
     WIFI_SAVED_END_SIG,         /**< AO_Radio: that was the last remembered
                                  *   one (WifiScanEndEvt, same shape - a
                                  *   count and whether it worked).           */
+    WIFI_FORGET_SIG,            /**< AO_Radio: the answer to one
+                                 *   WIFI_FORGET_REQ_SIG (WifiForgetEvt): the
+                                 *   vault's own, or the refusal.            */
     BLE_STATE_SIG,              /**< AO_Radio: what the BLE half is doing
                                  *   (BleStateEvt). Published on every
                                  *   change - a phone connecting is news
@@ -558,9 +561,15 @@ enum KodeSignals {
                                  *   mode. Over when a cable comes or the level
                                  *   climbs KODE_POWER_CRITICAL_REARM_PCT above
                                  *   the mark. kscreen shows its notice for it
-                                 *   (kscreen_critical()). Last of the published
-                                 *   signals, so the ones before it keep their
-                                 *   numbers.                                */
+                                 *   (kscreen_critical()).                   */
+    POWER_BOOST_CUT_SIG,        /**< AO_Power: the board stopped a boost that
+                                 *   was asked for (PowerBoostCutEvt): the
+                                 *   cell under the boost's floor, a boost
+                                 *   fault, or the round for OFF. Not said for
+                                 *   a boost its asker stopped, nor for one
+                                 *   that did not start (POWER_CTRL_SIG says
+                                 *   that). Last of the published signals, so
+                                 *   the ones before it keep their numbers. */
     /* Published signals end here: QF sizes subscriber lists by it; a publish above asserts. */
     MAX_PUB_SIG,
 
@@ -1058,9 +1067,10 @@ enum KodeSignals {
                                  *   operator did not press the button a step
                                  *   asked for in time, or did not let it go
                                  *   within KODE_BUTTONS_TEST_RELEASE_MS.     */
-    BUTTONS_HOLD_TMO_SIG,       /**< AO_Buttons private one-shot QTimeEvt: the
-                                 *   top or the bottom button has been down
-                                 *   for KODE_BUTTON_HOLD_MS.                */
+    BUTTONS_HOLD_TMO_SIG,       /**< AO_Buttons private one-shot QTimeEvt: one
+                                 *   of the two hold clocks, one per round
+                                 *   button, ran out (the clock at zero says
+                                 *   which).                                 */
     BUTTONS_ROTATE_SIG,         /**< AO_Buttons: turn the pad by a number of
                                  *   quarter turns (ButtonsRotateEvt), from
                                  *   buttons_rotation_request().              */
@@ -1750,7 +1760,8 @@ enum KodeSignals {
                                  *   networks (names only).                  */
     WIFI_FORGET_REQ_SIG,        /**< AO_Radio: remove WifiJoinEvt.ssid from
                                  *   the store. The password field is unused
-                                 *   and must be left empty.                 */
+                                 *   and must be left empty. Answered with
+                                 *   one WIFI_FORGET_SIG.                    */
     WIFI_START_REQ_SIG,         /**< AO_Radio: enable the WiFi service - set
                                  *   the stored flag, bring the link up if it
                                  *   is down, autojoin as always.            */
@@ -2006,6 +2017,15 @@ enum KodeSignals {
                                  *   net_shot_stop_request()): end the
                                  *   running stream of uploads
                                  *   (NetShotStopEvt).                        */
+
+#if CONFIG_KODEOS_DUMP_HTTP
+    NET_DUMP_REQ_SIG,           /**< AO_Net (direct post, from
+                                 *   net_dump_request()): send the core dump
+                                 *   of a kodeOS fault to the Kode channel's
+                                 *   `dumps` link (NetDumpReqEvt).            */
+    NET_DUMP_RSP_SIG,           /**< To the requester: how the fault report
+                                 *   ended (NetDumpRspEvt).                   */
+#endif
 
     FUNCTION_ANS_SIG,           /**< Posted to AO_Console by the owner of a
                                  *   function that answers (FunctionAnsEvt):
@@ -2723,6 +2743,11 @@ typedef struct {
                           *   across pages and across both media: a
                           *   subscriber stores entry `pos` at index `pos`,
                           *   and 0 begins a new listing.                 */
+    bool     name_cut;  /**< The name is longer than `name` holds and is
+                          *   cut at a whole UTF-8 character: no path opens
+                          *   the entry by it. Only the path-based walk
+                          *   cuts; the medium-based one leaves such a name
+                          *   out and sets this false.                     */
 } StorageEntryEvt;
 
 /** @brief What to do to a medium (STORAGE_CMD_SIG). */
@@ -3364,7 +3389,8 @@ typedef struct {
  * Published on change only, already debounced, so a subscriber never has to
  * know that a tactile switch bounces. The event says when as well as what: a
  * subscriber that decides on elapsed time (a double press) cannot stamp the
- * event itself, because it may be dispatched late. */
+ * event itself, because it may be dispatched late. It also says whether a
+ * console line from the Kode channel or a cron entry injected the press. */
 typedef struct {
     QEvt     super;
     uint8_t  id;        /**< kdrv_button_t */
@@ -3372,6 +3398,11 @@ typedef struct {
     uint32_t t_ms;      /**< khal_time_ms() when the edge was confirmed. It
                          *   wraps at about 49 days, so an interval is an
                          *   unsigned subtraction of two stamps. */
+    bool     remote;    /**< true when a console line from the Kode channel
+                         *   or a scheduled entry (KODE_CONSOLE_SRC_NET,
+                         *   KODE_CONSOLE_SRC_SCHED) injected it; false for a
+                         *   button on the board, or one injected over the
+                         *   cable, the dock or BLE. */
 } ButtonEvt;
 
 /** @brief The top or the bottom button is being held (BUTTON_HOLD_SIG,
@@ -3380,11 +3411,12 @@ typedef struct {
  * BUTTON_HOLD_SIG is published once per press, KODE_BUTTON_HOLD_MS after the
  * debounce confirmed it and only if the button is still down at that moment.
  * The bottom button, held on, publishes BUTTON_HOME_HOLD_SIG once more,
- * KODE_HOME_HOLD_MS after the same confirmation. The release that follows
- * arrives as the usual ButtonEvt. The console's `btn id=top|bot state=hold`
- * publishes the same events on request, with no press before them and no
- * release after: a host reproducing a thumb sends the press, the hold and
- * the release. */
+ * KODE_HOME_HOLD_MS after the same confirmation. Each button is timed on its
+ * own: both may be held at once, and the other button's press or release
+ * never moves a button's count. The release that follows arrives as the usual
+ * ButtonEvt. The console's `btn id=top|bot state=hold` publishes the same
+ * events on request, with no press before them and no release after: a host
+ * reproducing a thumb sends the press, the hold and the release. */
 typedef struct {
     QEvt    super;
     uint8_t id;        /**< kdrv_button_t: KDRV_BTN_TOP or KDRV_BTN_BOT. */
@@ -4585,6 +4617,20 @@ typedef struct {
 #define POWER_CTRL_ICHG    2U   /**< value mA, 64..the cell's. Answer: kept.  */
 #define POWER_CTRL_RESET   3U   /**< value ignored. Answer: 0.                */
 
+/* Why a boost is not running: a PowerCtrlEvt's @c why for POWER_CTRL_BOOST,
+ * and a PowerBoostCutEvt's. */
+#define POWER_BOOST_WHY_NONE   0U  /**< Nothing to say: as asked, or the rc alone says it. */
+#define POWER_BOOST_WHY_CABLE  1U  /**< USB is present, or arrived during the start. */
+#define POWER_BOOST_WHY_UNREAD 2U  /**< No battery reading yet.                    */
+#define POWER_BOOST_WHY_CELL   3U  /**< The cell is under the boost's floor.       */
+#define POWER_BOOST_WHY_TEMP   4U  /**< TS outside the boost's window: no pack, or
+                                    *   the cell under -10 or over 55 C.          */
+#define POWER_BOOST_WHY_FAULT  5U  /**< BOOST_FAULT: an overload or an over-voltage
+                                    *   on the 5 V, or the cell too low.          */
+#define POWER_BOOST_WHY_PIN    6U  /**< No fault and no boost: the OTG pin is low. */
+#define POWER_BOOST_WHY_OFF    7U  /**< The board switches off: a round for OFF
+                                    *   was asked and the board is not awake. */
+
 /**
  * @brief One owner-level operation on the PMIC (POWER_CTRL_REQ_SIG).
  *
@@ -4621,13 +4667,28 @@ typedef struct {
     QEvt     super;
     uint8_t  op;
     uint8_t  rc;        /**< kode_status_t                             */
+    uint8_t  why;       /**< POWER_CTRL_BOOST not as asked: a
+                         *   POWER_BOOST_WHY_*; POWER_BOOST_WHY_NONE
+                         *   for every other op.                       */
     int32_t  value;
 } PowerCtrlEvt;
+
+/**
+ * @brief The board stopped a boost that was asked for (POWER_BOOST_CUT_SIG).
+ *
+ * One static event per cause, so a dry pool never loses one.
+ */
+typedef struct {
+    QEvt    super;
+    uint8_t why;        /**< POWER_BOOST_WHY_CELL, _FAULT or _OFF.     */
+} PowerBoostCutEvt;
 
 /** @brief A touch sample from AO_Touch (TOUCH_EVT_SIG).
  *
  * It carries the time it was read, for the same reason ButtonEvt does: a
- * subscriber that measures a drag cannot stamp a sample it was handed late. */
+ * subscriber that measures a drag cannot stamp a sample it was handed late.
+ * Like ButtonEvt it says whether a console line from the Kode channel or a
+ * cron entry injected it. */
 typedef struct {
     QEvt     super;
     int16_t  x;
@@ -4640,6 +4701,11 @@ typedef struct {
                          *   stayed still past KODE_TOUCH_STILL_MS and stopped
                          *   counting as a finger (a drop of water, a cloth).
                          *   Nothing was tapped and nobody is there. */
+    bool     remote;    /**< true when a console line from the Kode channel
+                         *   or a scheduled entry (KODE_CONSOLE_SRC_NET,
+                         *   KODE_CONSOLE_SRC_SCHED) injected it, its release
+                         *   included; false for a finger on the glass, or a
+                         *   sample injected over the cable, the dock or BLE. */
 } TouchEvt;
 
 /**
@@ -4895,6 +4961,10 @@ typedef struct {
     char ssid[33];   /**< 32 bytes plus the terminator (802.11).            */
     char pass[65];   /**< 64 plus the terminator (WPA2 PSK as a passphrase). */
     bool remember;   /**< Save it in the C5's vault once it has worked.     */
+    uint8_t gen;     /**< The request's generation, from
+                      *   wifi_join_request_gen(); KQP_SCAN_GEN_NONE for
+                      *   none. The state that ends the join carries it
+                      *   (WifiStateEvt.join_gen).                        */
 } WifiJoinEvt;
 
 /** @brief What WIFI_FAST_REQ_SIG carries: the wish, a static event each. */
@@ -5502,6 +5572,27 @@ typedef struct {
     char ssid[33];
 } WifiSavedEvt;
 
+/** @brief What became of a request to forget a network (WifiForgetEvt.result). */
+/* cppcheck-suppress misra-c2012-2.4 ; the type names the values of a uint8_t field, which keeps the event its size */
+typedef enum {
+    WIFI_FORGET_RES_DONE = 0,  /**< The C5's vault forgot it.                */
+    WIFI_FORGET_RES_BUSY,      /**< The vault was busy with another request:
+                                *   nothing is forgotten; ask again.         */
+    WIFI_FORGET_RES_NO_LINK,   /**< No link to the C5, or it went before the
+                                *   vault answered.                          */
+    WIFI_FORGET_RES_REFUSED    /**< The vault said no, the request could not
+                                *   be sent, or no answer came; the log says
+                                *   which.                                   */
+/* cppcheck-suppress misra-c2012-2.3 ; the type names the values of a uint8_t field, which keeps the event its size */
+} WifiForgetResult;
+
+/** @brief What became of a request to forget a network (WIFI_FORGET_SIG). */
+typedef struct {
+    QEvt    super;
+    char    ssid[33];   /**< The network asked for.                          */
+    uint8_t result;     /**< WifiForgetResult as a plain integer.            */
+} WifiForgetEvt;
+
 /**
  * @brief Where the connection stands (WIFI_STATE_SIG).
  *
@@ -5525,6 +5616,14 @@ typedef struct {
     bool     reconnecting; /**< Off the network, and AO_Radio is working on
                          *   getting back on one, waiting between tries or
                          *   until the board wakes included.                 */
+    uint8_t  join_gen;  /**< The generation of the join this state ends
+                         *   (WifiJoinEvt.gen), carried by that one state
+                         *   alone; KQP_SCAN_GEN_NONE in every state
+                         *   published for another reason.                   */
+    bool     join_dropped; /**< With @c join_gen: true when that join never
+                         *   ran. A newer join or the automatic round took
+                         *   its place, or Wi-Fi switched off, a leave or the
+                         *   link's end dropped it while it waited.          */
 } WifiStateEvt;
 
 /* ---- AO_Net -------------------------------------------------------------
@@ -5803,6 +5902,8 @@ typedef struct {
                          *   otherwise.                                     */
     uint8_t  session;   /**< chan_session_t (kaos.h): what the broker said of
                          *   the session at the last connect.               */
+    bool     dumps;     /**< UP, and the session names a `dumps` link: a core
+                         *   dump can be sent (CONFIG_KODEOS_DUMP_HTTP).    */
 } ChannelStateEvt;
 
 /**
@@ -6195,6 +6296,21 @@ typedef struct {
     uint8_t  fps;               /**< A stream's frames a second.            */
     uint16_t secs;              /**< A stream's length in seconds.          */
 } NetShotRspEvt;
+
+#if CONFIG_KODEOS_DUMP_HTTP
+/** @brief Send the core dump to the Kode channel's `dumps` link (NET_DUMP_REQ_SIG). */
+typedef struct {
+    QEvt     super;
+    QActive *who;      /**< Where the answer (NET_DUMP_RSP_SIG) goes.       */
+} NetDumpReqEvt;
+
+/** @brief How a fault report ended (NET_DUMP_RSP_SIG). */
+typedef struct {
+    QEvt     super;
+    uint8_t  result;   /**< kdump_result_t.                                 */
+    uint16_t http;     /**< The service's status; 0 when none came.         */
+} NetDumpRspEvt;
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /**
  * @brief All six buttons, right now (BTN_STATE_SIG).
@@ -7141,7 +7257,7 @@ typedef struct {
  * @brief One entry of a listing, written straight into a blocked task's own
  *        storage rather than published as a StorageEntryEvt.
  *
- * The three fields StorageEntryEvt carries that a caller of the facade
+ * The fields StorageEntryEvt carries that a caller of the facade
  * actually asked about, minus the QEvt only an Active Object can receive and
  * minus `from_sd`, which a caller that named the directory itself already
  * knows. See StorageWaiter for why a second shape exists at all.
@@ -7150,6 +7266,7 @@ typedef struct {
     char     name[KODE_STORAGE_NAME_MAX];
     bool     is_dir;
     uint32_t size;
+    bool     name_cut;  /**< As StorageEntryEvt.name_cut. */
 } StorageRow;
 
 /**

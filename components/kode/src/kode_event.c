@@ -144,6 +144,7 @@ static const kode_known_t s_known[] = {
     { KODE_EVENT_WIFI_LOST_NAME, &kaos_radio_start, "KODE_EVENT_WIFI_LOST",      NULL             },
     { "mqtt_message",            NULL,              NULL,                        NULL             },
     { "battery_low",             NULL,              NULL,                        NULL             },
+    { KODE_EVENT_PIN_5V_CUT_NAME, NULL,             NULL,                        NULL             },
     { KODE_EVENT_IR_NAME,        &kaos_ir_start,    "KODE_EVENT_IR_RECEIVED",    &ir_arm_listener },
     { KODE_EVENT_NFC_TAG,        NULL,              NULL,                        NULL             },
     { KODE_EVENT_TOUCH_PRESSED_NAME,  &kaos_touch_start, "KODE_EVENT_TOUCH_PRESSED",  &touch_listen },

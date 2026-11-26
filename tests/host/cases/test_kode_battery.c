@@ -6,12 +6,15 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "fakes.h"
 #include "kaos.h"
@@ -20,12 +23,14 @@
 #include "kode.h"
 #include "kode_battery.h"
 #include "kode_entry.h"
+#include "kode_standard_ao.h"
 #include "kode_sys.h"
 #include "kode_sys_priv.h"
 #include "kqp.h"
 #include "kqp_config.h"
 #include "qf_support.h"
 #include "sdkconfig.h"
+#include "standard_ao_support.h"
 
 #define POWER_FILL_MAX   64U    /**< Posts that surely fill AO_Power's or AO_LowPower's queue. */
 #define READING_MV       3912U  /**< The cell voltage the scripted reading carries.      */
@@ -33,6 +38,10 @@
 #define PMIC_MV          3900U  /**< A voltage in the PMIC's 20 mV steps.                */
 #define READY_AT_READ    5U     /**< The read at which a late reading appears.           */
 #define RETRY_SLACK_MS   (2U * KODE_RETRY_STEP_MS)  /**< How far past its bound a wait may run. */
+#define CALLER_STACK     8192U  /**< Stack of a calling task, in bytes.                  */
+#define CALLER_PRIO      2U     /**< Level of a calling task.                            */
+#define TEST_WAIT_MS     4000U  /**< Longest a case waits for a call or a request.       */
+#define QUIET_MS         50U    /**< How long a case watches for something not to come.  */
 
 /* ---- The facade's seam: the reading, scripted --------------------------------- */
 
@@ -431,17 +440,185 @@ TEST_CASE("charge_limit outside the range is refused naming it, and posts nothin
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0U, kode_sys_time_ms(), "a refusal does not wait");
 }
 
-TEST_CASE("boost on, on battery with a healthy cell, posts the request", "[kode_battery]")
+/** @brief One call of kode_pin_power_5v() in a task of its own. */
+typedef struct {
+    bool              on;                     /**< What it asks.               */
+    bool              result;                 /**< What it answered.           */
+    char              error[KODE_ERROR_MAX];  /**< kode_error() after it.      */
+    SemaphoreHandle_t done;                   /**< Given when it has answered. */
+} boost_caller_t;
+
+/** @brief Call kode_pin_power_5v(), keep what it said, and say it is over. */
+static void boost_caller_task(void *arg)
 {
+    boost_caller_t *const c = (boost_caller_t *)arg;
+
+    c->result = seam_power_boost(c->on);
+    (void)snprintf(c->error, sizeof(c->error), "%s", kode_error());
+    (void)xSemaphoreGive(c->done);
+    vTaskDelete(NULL);
+}
+
+/** @brief The layer up, locks and semaphores real, then a call of kode_pin_power_5v(@p on) in its own task. */
+static void boost_call(boost_caller_t *c, bool on)
+{
+    fake_sync_real(true);
+    TEST_ASSERT_TRUE(kode_standard_ao_ensure());
+    QActive_subscribe(AO_KodeStandard, POWER_CTRL_SIG);
+    c->on       = on;
+    c->result   = false;
+    c->error[0] = '\0';
+    if ( NULL == c->done )
+    {
+        c->done = xSemaphoreCreateBinary();
+    }
+    (void)xSemaphoreTake(c->done, 0U);
+    TEST_ASSERT_EQUAL(pdPASS, xTaskCreate(&boost_caller_task, "t_boost", CALLER_STACK, c,
+                                          CALLER_PRIO, NULL));
+}
+
+/** @brief Whether the call answered within @p ms. */
+static bool boost_call_done(boost_caller_t *c, uint32_t ms)
+{
+    return xSemaphoreTake(c->done, pdMS_TO_TICKS(ms)) == pdTRUE;
+}
+
+/** @brief Wait for the call's request in AO_Power's queue and take it into s_ctrl. */
+static void power_request_wait(void)
+{
+    for ( uint32_t i = 0U; (TEST_WAIT_MS > i) && (uxQueueMessagesWaiting(AO_Power->eQueue) == 0U); i++ )
+    {
+        vTaskDelay(pdMS_TO_TICKS(1U));
+    }
+    TEST_ASSERT_TRUE_MESSAGE(power_take_ctrl(), "no request reached AO_Power");
+    TEST_ASSERT_EQUAL_UINT8(POWER_CTRL_BOOST, s_ctrl.op);
+}
+
+/** @brief Publish AO_Power's answer to the request, and let the layer hear it. */
+static void power_answers(uint8_t op, kode_status_t rc, uint8_t why, int32_t value)
+{
+    static PowerCtrlEvt a;
+
+    a.super = (QEvt)QEVT_INITIALIZER(POWER_CTRL_SIG);
+    a.op    = op;
+    a.rc    = (uint8_t)rc;
+    a.why   = why;
+    a.value = value;
+    QACTIVE_PUBLISH(&a.super, NULL);
+    standard_ao_support_drained();
+}
+
+TEST_CASE("boost on, on battery with a healthy cell, asks and answers true once the boost runs",
+          "[kode_battery]")
+{
+    static boost_caller_t c;
+
     fresh();
     script(READING_MV, READING_PCT, KODE_SYS_CHARGE_NONE, false, true);
-
-    TEST_ASSERT_TRUE(seam_power_boost(true));
-    TEST_ASSERT_EQUAL_STRING("", kode_error());
-    TEST_ASSERT_TRUE(power_take_ctrl());
-    TEST_ASSERT_EQUAL_UINT8(POWER_CTRL_BOOST, s_ctrl.op);
+    boost_call(&c, true);
+    power_request_wait();
     TEST_ASSERT_EQUAL_INT32(1, s_ctrl.value);
-    TEST_ASSERT_EQUAL_UINT32(0U, kode_sys_time_ms());
+    TEST_ASSERT_FALSE_MESSAGE(boost_call_done(&c, QUIET_MS), "answered before the power manager did");
+
+    power_answers(POWER_CTRL_BOOST, KODE_OK, POWER_BOOST_WHY_NONE, 1);
+    TEST_ASSERT_TRUE(boost_call_done(&c, TEST_WAIT_MS));
+    TEST_ASSERT_TRUE(c.result);
+    TEST_ASSERT_EQUAL_STRING("", c.error);
+}
+
+TEST_CASE("an answer to another request does not end the boost's wait", "[kode_battery]")
+{
+    static boost_caller_t c;
+
+    fresh();
+    script(READING_MV, READING_PCT, KODE_SYS_CHARGE_NONE, false, true);
+    boost_call(&c, true);
+    power_request_wait();
+    power_answers(POWER_CTRL_CHARGE, KODE_OK, POWER_BOOST_WHY_NONE, 1);
+    TEST_ASSERT_FALSE_MESSAGE(boost_call_done(&c, QUIET_MS), "the charge's answer ended the wait");
+
+    power_answers(POWER_CTRL_BOOST, KODE_OK, POWER_BOOST_WHY_NONE, 1);
+    TEST_ASSERT_TRUE(boost_call_done(&c, TEST_WAIT_MS));
+    TEST_ASSERT_TRUE(c.result);
+}
+
+/* An earlier boost off posts and does not wait, so its answer may come while
+ * a boost on waits: the off's answers are told from the on's. */
+TEST_CASE("a boost off's answer does not end a boost on's wait", "[kode_battery]")
+{
+    static boost_caller_t c;
+
+    fresh();
+    script(READING_MV, READING_PCT, KODE_SYS_CHARGE_NONE, false, true);
+    boost_call(&c, true);
+    power_request_wait();
+    power_answers(POWER_CTRL_BOOST, KODE_OK, POWER_BOOST_WHY_NONE, 0);
+    TEST_ASSERT_FALSE_MESSAGE(boost_call_done(&c, QUIET_MS), "a boost off's success ended the wait");
+    power_answers(POWER_CTRL_BOOST, KODE_ERROR, POWER_BOOST_WHY_NONE, 1);
+    TEST_ASSERT_FALSE_MESSAGE(boost_call_done(&c, QUIET_MS), "a boost off's failure ended the wait");
+
+    power_answers(POWER_CTRL_BOOST, KODE_OK, POWER_BOOST_WHY_NONE, 1);
+    TEST_ASSERT_TRUE(boost_call_done(&c, TEST_WAIT_MS));
+    TEST_ASSERT_TRUE(c.result);
+}
+
+/** @brief One answer that is not the boost on, and what kode_error() says for it. */
+typedef struct {
+    kode_status_t rc;     /**< The answer's code. */
+    uint8_t       why;    /**< Its cause.          */
+    const char   *text;   /**< kode_error().       */
+} boost_no_t;
+
+TEST_CASE("a boost that does not start is false, with the power manager's reason", "[kode_battery]")
+{
+    static const boost_no_t no[] = {
+        { KODE_ERROR, POWER_BOOST_WHY_FAULT,
+          "the boost did not start: an overload or an over-voltage on J3's 5 V, or the cell too low" },
+        { KODE_ERROR, POWER_BOOST_WHY_TEMP,
+          "the boost did not start: the cell is under -10 C or over 55 C, or no pack is fitted" },
+        { KODE_ERROR, POWER_BOOST_WHY_CABLE, "the boost cannot start while USB is plugged in" },
+        { KODE_ERROR, POWER_BOOST_WHY_PIN, "the boost did not start: the charger's OTG pin is low" },
+        { KODE_DENIED, POWER_BOOST_WHY_CELL, "the cell is under the 3600 mV the boost needs" },
+        { KODE_DENIED, POWER_BOOST_WHY_UNREAD, "the battery has not been read yet" },
+        { KODE_DENIED, POWER_BOOST_WHY_OFF, "the board is switching off" },
+        { KODE_NO_RESOURCES, POWER_BOOST_WHY_NONE, "the power manager is busy" },
+        { KODE_ERROR, POWER_BOOST_WHY_NONE, "the charger did not start the boost" },
+    };
+    static boost_caller_t c;
+
+    for ( uint32_t i = 0U; (sizeof(no) / sizeof(no[0])) > i; ++i )
+    {
+        fresh();
+        script(READING_MV, READING_PCT, KODE_SYS_CHARGE_NONE, false, true);
+        boost_call(&c, true);
+        power_request_wait();
+        power_answers(POWER_CTRL_BOOST, no[i].rc, no[i].why, 0);
+        TEST_ASSERT_TRUE(boost_call_done(&c, TEST_WAIT_MS));
+        TEST_ASSERT_FALSE(c.result);
+        TEST_ASSERT_EQUAL_STRING(no[i].text, c.error);
+    }
+}
+
+TEST_CASE("a boost the power manager never answers is false after its bound", "[kode_battery]")
+{
+    static boost_caller_t c;
+
+    fresh();
+    script(READING_MV, READING_PCT, KODE_SYS_CHARGE_NONE, false, true);
+    boost_call(&c, true);
+    power_request_wait();
+    TEST_ASSERT_TRUE(boost_call_done(&c, KODE_PIN_POWER_5V_MS + TEST_WAIT_MS));
+    TEST_ASSERT_FALSE(c.result);
+    TEST_ASSERT_EQUAL_STRING("the power manager did not answer within 1000 ms", c.error);
+
+    /* A late answer ends nothing and leaves nothing for the next call. */
+    power_answers(POWER_CTRL_BOOST, KODE_OK, POWER_BOOST_WHY_NONE, 1);
+    boost_call(&c, true);
+    power_request_wait();
+    TEST_ASSERT_FALSE_MESSAGE(boost_call_done(&c, QUIET_MS), "the late answer ended the next wait");
+    power_answers(POWER_CTRL_BOOST, KODE_OK, POWER_BOOST_WHY_NONE, 1);
+    TEST_ASSERT_TRUE(boost_call_done(&c, TEST_WAIT_MS));
+    TEST_ASSERT_TRUE(c.result);
 }
 
 TEST_CASE("boost on with USB plugged in is refused and posts nothing", "[kode_battery]")
@@ -457,6 +634,8 @@ TEST_CASE("boost on with USB plugged in is refused and posts nothing", "[kode_ba
 
 TEST_CASE("boost on with a cell under the pack's floor is refused and posts nothing", "[kode_battery]")
 {
+    static boost_caller_t c;
+
     fresh();
     script(KBSP_CELL_BOOST_MIN_MV - 1U, READING_PCT, KODE_SYS_CHARGE_NONE, false, true);
 
@@ -465,8 +644,11 @@ TEST_CASE("boost on with a cell under the pack's floor is refused and posts noth
     TEST_ASSERT_EQUAL_UINT(0U, uxQueueMessagesWaiting(AO_Power->eQueue));
 
     s_seam_reading.vbat_mv = KBSP_CELL_BOOST_MIN_MV;
-    TEST_ASSERT_TRUE(seam_power_boost(true));
-    TEST_ASSERT_TRUE(power_take_ctrl());
+    boost_call(&c, true);
+    power_request_wait();
+    power_answers(POWER_CTRL_BOOST, KODE_OK, POWER_BOOST_WHY_NONE, 1);
+    TEST_ASSERT_TRUE(boost_call_done(&c, TEST_WAIT_MS));
+    TEST_ASSERT_TRUE(c.result);
 }
 
 TEST_CASE("boost on with no reading cannot tell USB from battery, so it posts nothing", "[kode_battery]")
@@ -497,6 +679,8 @@ TEST_CASE("boost off is always taken: no reading, USB or a low cell do not stop 
 TEST_CASE("boost waits for room in the power manager's queue, then says it is busy", "[kode_battery]")
 {
     fresh();
+    fake_sync_real(true);
+    TEST_ASSERT_TRUE(kode_standard_ao_ensure());
     script(READING_MV, READING_PCT, KODE_SYS_CHARGE_NONE, false, true);
     power_fill_to_margin();
 

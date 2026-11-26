@@ -35,6 +35,11 @@
 cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
+# The fault report's option is kaos's Kconfig, not this project's, and it
+# sets how large a PUT's body may be (KDRV_NET_PUT_MAX): the cases build with
+# it on, the SDK's default.
+idf_build_set_property(COMPILE_DEFINITIONS "CONFIG_KODEOS_DUMP_HTTP=1" APPEND)
+
 set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/mocks"
     "$ENV{IDF_PATH}/tools/mocks/esp_netif")

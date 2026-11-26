@@ -20,6 +20,9 @@ static const uint16_t KTONE_BIN_K[KTONE_BIN_N] = {
     87U, 97U, 107U, 119U, 131U, 143U, 155U, 167U
 };
 
+_Static_assert(((uint64_t)KTONE_HZ_MAX * (uint64_t)KTONE_RATE_HZ) <= (uint64_t)UINT32_MAX,
+               "the phase of a tone at any frame of its second fits 32 bits");
+
 /** @brief Full scale, as the divisor that normalises a sample to +/- 1. */
 #define KTONE_FULL_SCALE_F   32768.0f
 
@@ -112,18 +115,30 @@ int16_t ktone_sample(uint8_t i, uint32_t n, int16_t amp)
     return (int16_t)lrintf(v * (float)amp);
 }
 
-kode_status_t ktone_fill(uint8_t i, uint32_t n0, int16_t amp,
-                         int16_t *out, size_t frames)
+kode_status_t ktone_fill_hz(uint16_t hz, uint32_t n0, int16_t amp,
+                            int16_t *out, size_t frames)
 {
-    size_t f;
+    uint32_t turn;
+    size_t   f;
 
-    if ( (NULL == out) || ((uint8_t)KTONE_BIN_N <= i) )
+    if ( (NULL == out) || ((uint16_t)KTONE_HZ_MIN > hz) || ((uint16_t)KTONE_HZ_MAX < hz) )
     {
         return KODE_DENIED;
     }
+    /* The phase in units of 1 / KTONE_RATE_HZ of a turn. (hz * n) mod rate,
+     * taken as (hz * (n mod rate)) mod rate so the product stays in 32 bits
+     * however long the tone runs; then hz is added per frame. */
+    turn = ((uint32_t)hz * (n0 % KTONE_RATE_HZ)) % KTONE_RATE_HZ;
     for ( f = 0U; f < frames; ++f )
     {
-        out[f] = ktone_sample(i, n0 + (uint32_t)f, amp);
+        float const v = sinf((KGOERTZEL_TWO_PI_F * (float)turn) / (float)KTONE_RATE_HZ);
+
+        out[f] = (int16_t)lrintf(v * (float)amp);
+        turn += (uint32_t)hz;
+        if ( KTONE_RATE_HZ <= turn )
+        {
+            turn -= KTONE_RATE_HZ;
+        }
     }
     return KODE_OK;
 }

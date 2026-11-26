@@ -356,9 +356,23 @@ kode_status_t kode_sys_wifi_connect(const char *ssid, const char *pass);
 
 /**
  * @brief Ask AO_Radio to leave the network; the credentials stay remembered.
+ *
+ * Asked while a join runs or waits, during the round over the remembered
+ * networks or while the link is down, the leave is kept and made as soon as
+ * AO_Radio can; kode_sys_wifi_left() says when it is.
+ *
  * @return As the commands' rule above; KODE_DENIED without CONFIG_KODEOS_WIFI.
  */
 kode_status_t kode_sys_wifi_disconnect(void);
+
+/**
+ * @brief Whether a leave is made and nobody has asked for a network since:
+ *        AO_Radio joins none by itself until somebody does. Never waits.
+ * @note Naming it links AO_Radio, as the commands do.
+ * @return true when it is; false before the first leave, and without
+ *         CONFIG_KODEOS_WIFI.
+ */
+bool kode_sys_wifi_left(void);
 
 /* ---- Bluetooth: to AO_Radio; DENIED without CONFIG_KODEOS_BLE ----
  * The board's advert carries the console's service and is never changed; an
@@ -614,8 +628,10 @@ kode_status_t kode_sys_rest_end(void);
  * @brief 5 V on the expansion header from the battery, or not.
  * @note 0.5 A, not persisted.
  *
- * Refused while USB is present and while the cell is under the pack's floor;
- * AO_Power stops it on a low cell or a boost fault.
+ * Refused while USB is present, while the cell is under the pack's floor
+ * and from a round for OFF until the board is awake; AO_Power stops it on a
+ * low cell, a boost fault and the round for OFF, and says so with
+ * POWER_BOOST_CUT_SIG.
  * @param on true to switch it on.
  * @return As the commands' rule above.
  */
@@ -836,6 +852,19 @@ kode_status_t kode_sys_nvs_set(const char *key, const char *value);
 /** @brief The most symbols one capture holds. */
 #define KODE_SYS_IR_RX_MAX_SYMBOLS   256U
 
+/** @brief The lowest carrier a raw frame is sent on, Hz: the driver's limit. */
+#define KODE_SYS_IR_CARRIER_MIN_HZ   20000U
+
+/** @brief The highest carrier a raw frame is sent on, Hz: the driver's limit. */
+#define KODE_SYS_IR_CARRIER_MAX_HZ   500000U
+
+/** @brief The longest mark or space of a raw frame, us: the C5's RMT symbol, as the driver says. */
+#define KODE_SYS_IR_DURATION_MAX_US  32767U
+
+/** @brief The longest raw frame, ms, a zero space counted as KODE_SYS_IR_DURATION_MAX_US:
+ *         one the C5 says the end of, as the driver says. */
+#define KODE_SYS_IR_FRAME_MAX_MS     1500U
+
 /** @brief One mark (carrier on) and the space after it: @c mark_us, @c space_us. */
 typedef IrSymbol kode_sys_ir_symbol_t;
 
@@ -861,10 +890,16 @@ typedef IrLastRspEvt kode_sys_ir_last_answer_t;
  *       call has returned after a stall. A frame that waited too long to start
  *       is answered KODE_TIMEOUT, unsent.
  * @param me         The asking AO; IR_SEND_RAW_RSP_SIG answers it.
- * @param sym        Symbols, mark first.
+ * @param sym        Symbols, mark first; no mark or space over KODE_SYS_IR_DURATION_MAX_US,
+ *                   and KODE_SYS_IR_FRAME_MAX_MS at most in all, a zero space counted as
+ *                   KODE_SYS_IR_DURATION_MAX_US.
  * @param n          1 to KODE_SYS_IR_RAW_MAX_SYMBOLS.
- * @param carrier_hz The carrier, not 0; 38000 is what the board's own receiver hears.
- * @return As the requests' rules above.
+ * @param carrier_hz KODE_SYS_IR_CARRIER_MIN_HZ to KODE_SYS_IR_CARRIER_MAX_HZ; 38000 is what
+ *                   the board's own receiver hears.
+ * @return As the requests' rules above; KODE_DENIED for a count, a carrier, a duration or
+ *         the frame's length out of range. The answer's @c rc is KODE_OK once the C5 says
+ *         the frame went out, KODE_ERROR when it says the frame failed, KODE_TIMEOUT when it
+ *         said nothing.
  */
 kode_status_t kode_sys_ir_send_raw(QActive *me, const kode_sys_ir_symbol_t *sym, size_t n,
                                    uint32_t carrier_hz);
@@ -1302,7 +1337,9 @@ typedef FileRspEvt kode_sys_file_answer_t;
 /* cppcheck-suppress misra-c2012-2.3 ; an answer's name for the apps that read it, never used inside the SDK */
 /**
  * @brief One entry of a listing (STORAGE_ENTRY_SIG): @c name, @c size, @c is_dir,
- *        and @c pos, its place in the listing.
+ *        @c pos, its place in the listing, and @c name_cut, set when the name
+ *        is longer than @c name holds and is cut at a whole UTF-8 character
+ *        (no path opens the entry by it).
  */
 typedef StorageEntryEvt kode_sys_file_entry_t;
 
@@ -1954,7 +1991,10 @@ bool kode_sys_screen_is_asleep(void);
  * @brief Subscribe @p me to TOUCH_EVT_SIG, AO_Touch's report of the finger, and link AO_Touch.
  *
  * Each press, each move while pressed and each release arrives as a
- * TouchEvt: the point, whether the finger is down, and the time it was read.
+ * TouchEvt: the point, whether the finger is down, the time it was read,
+ * whether a release is a still contact that stopped counting as a finger
+ * (`stale`), and whether a console line from the Kode channel or a cron entry
+ * injected it (`remote`).
  * A bare subscription to TOUCH_EVT_SIG links nothing, so no AO_Touch starts
  * and nothing arrives: this call is that subscription with its owner linked.
  * kscreen subscribes its own owner; an AO that reads touch by hand calls this.

@@ -221,7 +221,7 @@ bool kode_ir_capture_start(const char *path)
     {
         char vol[KODE_PATH_MAX];
 
-        if ( !kode_file_path(path, vol, sizeof(vol)) )
+        if ( !kode_file_write_path(path, vol, sizeof(vol)) )
         {
             /* The error is set. */
         }

@@ -214,6 +214,51 @@ TEST_CASE("a press is published once, after the confirming sample, and so is the
     Mockkhal_gpio_Destroy();
 }
 
+/**
+ * @brief Hand the small pool back a ButtonEvt block that says remote.
+ *
+ * The pool gives the last block back first, so the next ButtonEvt taken is
+ * this one: unless its publisher writes the field, it still says true.
+ */
+static void pool_dirty_button(void)
+{
+    ButtonEvt * const e = Q_NEW_X(ButtonEvt, 0U, BUTTON_EVT_SIG);
+
+    TEST_ASSERT_NOT_NULL(e);
+    e->remote = true;
+    QF_gc(&e->super);
+}
+
+TEST_CASE("a button pressed on the board is not remote, nor its release",
+          "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    feed(PAD_UP_DOWN, true);
+    settle_fires();
+    pool_dirty_button();
+    feed(PAD_UP_DOWN, true);
+    const ButtonEvt *b = (const ButtonEvt *)ao_spy_take();
+    TEST_ASSERT_NOT_NULL(b);
+    TEST_ASSERT_TRUE(b->pressed);
+    TEST_ASSERT_FALSE_MESSAGE(b->remote, "a thumb's press says remote");
+    ao_spy_drain();
+
+    feed(ALL_UP, true);
+    settle_fires();
+    pool_dirty_button();
+    feed(ALL_UP, true);
+    b = (const ButtonEvt *)ao_spy_take();
+    TEST_ASSERT_NOT_NULL(b);
+    TEST_ASSERT_FALSE(b->pressed);
+    TEST_ASSERT_FALSE_MESSAGE(b->remote, "a thumb's release says remote");
+    ao_spy_drain();
+
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
 /* A double press and a drag are judged from when they happened, and AO_Gui
  * dispatches late under a render pass, so the publisher stamps the event.
  * The time is the confirming sample's, not the first look at the pin: a
@@ -267,13 +312,13 @@ TEST_CASE("an injected press carries the time of the call", "[buttons_ao]")
     fake_time_reset();
 
     fake_time_advance_ms(CALL_MS);
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     const ButtonEvt *b = (const ButtonEvt *)ao_spy_take();
     TEST_ASSERT_NOT_NULL(b);
     TEST_ASSERT_EQUAL_UINT32(CALL_MS, b->t_ms);
     ao_spy_drain();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     ao_spy_drain();
 
     Mockkhal_gpio_Verify();
@@ -346,7 +391,7 @@ TEST_CASE("an injected press reads as down until its own release",
     buttons_up_once();
     settle();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
     const ButtonEvt *b = (const ButtonEvt *)ao_spy_take();
     TEST_ASSERT_EQUAL_INT(BUTTON_EVT_SIG, b->super.sig);
@@ -366,9 +411,9 @@ TEST_CASE("an injected press reads as down until its own release",
     TEST_ASSERT_EQUAL_HEX32(BIT(KDRV_BTN_TOP), kode_sys_button_read_mask());
     ao_spy_drain();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     TEST_ASSERT_EQUAL_HEX32(0U, kode_sys_button_read_mask());
-    TEST_ASSERT_FALSE_MESSAGE(buttons_inject((uint8_t)KDRV_BTN_COUNT, true),
+    TEST_ASSERT_FALSE_MESSAGE(buttons_inject((uint8_t)KDRV_BTN_COUNT, true, false),
                               "an id past the six is refused");
     ao_spy_drain();
 
@@ -392,7 +437,7 @@ TEST_CASE("a poll answers what the last event about a button said, whoever sent 
     TEST_ASSERT_EQUAL_HEX32(BIT(KDRV_BTN_BOT), kode_sys_button_read_mask());
     ao_spy_drain();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_BOT, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_BOT, false, false));
     const ButtonEvt *b = (const ButtonEvt *)ao_spy_take();
     TEST_ASSERT_NOT_NULL(b);
     TEST_ASSERT_FALSE(b->pressed);
@@ -1215,12 +1260,12 @@ TEST_CASE("test_an_injected_press_passes_its_step", "[buttons_ao]")
     settle();
     test_starts();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, true, false));
     (void)qf_support_pump(AO_Buttons, 4U);
     TEST_ASSERT_NULL_MESSAGE(next_test_evt(), "an injected press is passed on its release, not before");
     ao_spy_drain();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, false, false));
     (void)qf_support_pump(AO_Buttons, 4U);
     const ButtonsTestEvt *t = next_test_evt();
     TEST_ASSERT_NOT_NULL_MESSAGE(t, "the injected release passes the step");
@@ -1246,9 +1291,9 @@ TEST_CASE("test_an_injection_outside_a_run_posts_nothing", "[buttons_ao]")
     buttons_up_once();
     settle();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, true, false));
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, qf_support_pump(AO_Buttons, 4U), "nothing was posted to the AO");
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_LEFT, false, false));
     (void)qf_support_pump(AO_Buttons, 4U);   /* the pad going idle may post */
     TEST_ASSERT_NULL(next_test_evt());
     ao_spy_drain();
@@ -1859,6 +1904,127 @@ TEST_CASE("the top button held publishes one hold with the top id",
     Mockkhal_gpio_Destroy();
 }
 
+/* ---- Two buttons held -------------------------------------------------------
+ * Each round button has a clock of its own: a press or a release of the other
+ * one never moves it. */
+
+/** @brief How long the first button is down before the other one moves. */
+#define OTHER_AFTER_MS  100U
+
+/** @brief Take the one event in the spy: @p sig, a ButtonHoldEvt for @p id. */
+static void expect_hold(QSignal sig, kdrv_button_t id)
+{
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    const ButtonHoldEvt *h = (const ButtonHoldEvt *)ao_spy_take();
+    TEST_ASSERT_EQUAL(sig, h->super.sig);
+    TEST_ASSERT_EQUAL_UINT((unsigned)id, h->id);
+    ao_spy_drain();
+}
+
+TEST_CASE("a tap on the top button leaves the bottom one's hold and home hold",
+          "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    bot_confirmed_down();
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(OTHER_AFTER_MS));
+
+    /* The top button goes down and up again; the bottom one stays down. */
+    press_confirmed(BOT_DOWN, false);
+    press_confirmed(BOT_DOWN, true);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, ao_spy_count(), "the tap's two edges");
+    ao_spy_drain();
+
+    (void)qf_support_tick(AO_Buttons,
+                          QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS - OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+                                   "the bottom button is timed from its own press");
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOLD_SIG, KDRV_BTN_BOT);
+
+    (void)qf_support_tick(AO_Buttons, HOME_STEPS - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOME_HOLD_SIG, KDRV_BTN_BOT);
+
+    bot_confirmed_up();
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+TEST_CASE("a tap on the bottom button leaves the top one's hold", "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    press_confirmed(ALL_UP, false);
+    TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());
+    ao_spy_drain();
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(OTHER_AFTER_MS));
+
+    /* The bottom button goes down and up again; the top one stays down. */
+    press_confirmed(BOT_DOWN, false);
+    press_confirmed(ALL_UP, false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2U, ao_spy_count(), "the tap's two edges");
+    ao_spy_drain();
+
+    (void)qf_support_tick(AO_Buttons,
+                          QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS - OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
+                                   "the top button is timed from its own press");
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOLD_SIG, KDRV_BTN_TOP);
+
+    /* The tap was too short to hold, and the top button has no home hold. */
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_HOME_HOLD_MS));
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    settle();
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
+TEST_CASE("both round buttons held each publish their own hold", "[buttons_ao]")
+{
+    buttons_up_once();
+    settle();
+
+    bot_confirmed_down();
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(OTHER_AFTER_MS));
+    press_confirmed(BOT_DOWN, false);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, ao_spy_count(), "the top button's press");
+    ao_spy_drain();
+
+    /* The bottom button's hold, from its press. */
+    (void)qf_support_tick(AO_Buttons,
+                          QF_SUPPORT_STEPS(KODE_BUTTON_HOLD_MS - OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOLD_SIG, KDRV_BTN_BOT);
+
+    /* The top button's hold, from its own press. */
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOLD_SIG, KDRV_BTN_TOP);
+
+    /* And the bottom button's home hold, from its press. */
+    (void)qf_support_tick(AO_Buttons,
+                          HOME_STEPS - QF_SUPPORT_STEPS(OTHER_AFTER_MS) - 1U);
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    (void)qf_support_tick(AO_Buttons, 1U);
+    expect_hold(BUTTON_HOME_HOLD_SIG, KDRV_BTN_BOT);
+
+    /* Held on, neither says anything more. */
+    (void)qf_support_tick(AO_Buttons, QF_SUPPORT_STEPS(KODE_HOME_HOLD_MS));
+    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+
+    settle();
+    Mockkhal_gpio_Verify();
+    Mockkhal_gpio_Destroy();
+}
+
 /* ---- The double press ------------------------------------------------------
  * A double press is the top button pressed twice: the second press confirmed
  * within KODE_BUTTON_DOUBLE_MS of the first one's release, the first never
@@ -2235,14 +2401,14 @@ TEST_CASE("injected presses never make a double", "[buttons_ao]")
     buttons_up_once();
     settle();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     fake_time_advance_ms(TAP_DOWN_MS);
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     fake_time_advance_ms(TAP_DOWN_MS);
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, doubles_taken(), "no double from injection");
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     ao_spy_drain();
 
     Mockkhal_gpio_Verify();
@@ -2260,9 +2426,9 @@ TEST_CASE("an injected press does not complete a real first press", "[buttons_ao
     ao_spy_drain();
 
     fake_time_advance_ms(TAP_DOWN_MS);
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     TEST_ASSERT_EQUAL_UINT(0U, doubles_taken());
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     ao_spy_drain();
 
     Mockkhal_gpio_Verify();
@@ -2274,9 +2440,9 @@ TEST_CASE("an injected release does not start a double for a real press", "[butt
     buttons_up_once();
     settle();
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     fake_time_advance_ms(TAP_DOWN_MS);
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     ao_spy_drain();
 
     fake_time_advance_ms(TAP_DOWN_MS);
@@ -2388,11 +2554,11 @@ TEST_CASE("top and bot never rotate", "[buttons_ao][rotation]")
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_BOT, press_id(BOT_DOWN));
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_BOT, release_id());
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     const ButtonEvt *b = (const ButtonEvt *)ao_spy_take();
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_TOP, b->id);
     ao_spy_drain();
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     ao_spy_drain();
     rotation_end();
 }
@@ -2422,7 +2588,7 @@ TEST_CASE("an injected pad press is rotated too", "[buttons_ao][rotation]")
     buttons_up_once();
     settle();
     rotate(3U);
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_RIGHT, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_RIGHT, true, false));
     const ButtonEvt *b = (const ButtonEvt *)ao_spy_take();
     TEST_ASSERT_NOT_NULL(b);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_UP, b->id);
@@ -2430,7 +2596,7 @@ TEST_CASE("an injected pad press is rotated too", "[buttons_ao][rotation]")
     ao_spy_drain();
     TEST_ASSERT_EQUAL_HEX32(BIT(KDRV_BTN_UP), kode_sys_button_read_mask());
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_RIGHT, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_RIGHT, false, false));
     b = (const ButtonEvt *)ao_spy_take();
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KDRV_BTN_UP, b->id);
     TEST_ASSERT_FALSE(b->pressed);
@@ -2479,22 +2645,22 @@ TEST_CASE("a rotation held back by an injected press applies on its injected rel
 {
     buttons_up_once();
     settle();
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, true, false));
     ao_spy_drain();
     rotate(3U);
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, false, false));
     const ButtonEvt *b = (const ButtonEvt *)ao_spy_take();
     TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KDRV_BTN_UP, b->id,
         "the release must say what its press said");
     ao_spy_drain();
     (void)qf_support_pump(AO_Buttons, 4U);
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, true, false));
     b = (const ButtonEvt *)ao_spy_take();
     TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)KDRV_BTN_LEFT, b->id,
         "the turn never applied after the pad went idle");
     ao_spy_drain();
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_UP, false, false));
     ao_spy_drain();
     rotation_end();
 }
@@ -2598,9 +2764,9 @@ TEST_CASE("an injected press counts", "[buttons_ao][presses]")
     settle();
     uint32_t const before = buttons_presses((uint8_t)KDRV_BTN_TOP);
 
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, true, false));
     TEST_ASSERT_EQUAL_UINT32(before + 1U, kode_sys_button_read_presses((uint8_t)KDRV_BTN_TOP));
-    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false));
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_TOP, false, false));
     TEST_ASSERT_EQUAL_UINT32(before + 1U, kode_sys_button_read_presses((uint8_t)KDRV_BTN_TOP));
     ao_spy_drain();
 

@@ -81,10 +81,15 @@ uint16_t kode_block_rest_answers(kode_status_t *rc, uint8_t *parts, bool *open, 
  * @brief Send any infrared frame of @p n {mark_us, space_us} symbols on @p carrier_hz.
  * @note Blocks until AO_Ir answers. One call at a time. AO_Ir copies @p sym as
  *       the call starts, so the caller may reuse it on return.
- * @param sym        The symbols, mark first.
+ * @param sym        The symbols, mark first; none over KODE_SYS_IR_DURATION_MAX_US, and
+ *                   KODE_SYS_IR_FRAME_MAX_MS at most in all, a zero space counted as
+ *                   KODE_SYS_IR_DURATION_MAX_US.
  * @param n          How many, 1..KODE_SYS_IR_RAW_MAX_SYMBOLS.
- * @param carrier_hz The carrier; 38000 for most remotes and for this board's receiver.
- * @return KODE_OK when the frame went to the C5. KODE_DENIED for a bad argument,
+ * @param carrier_hz KODE_SYS_IR_CARRIER_MIN_HZ..KODE_SYS_IR_CARRIER_MAX_HZ; 38000 for most
+ *                   remotes and for this board's receiver.
+ * @return KODE_OK when the C5 says the frame went out. KODE_ERROR when it says the
+ *         frame failed. KODE_DENIED for a bad argument (a count, a carrier, a duration
+ *         or the frame's length out of range),
  *         while another raw send is in flight, while a timed-out one is still
  *         unanswered, or when AO_Ir's queue of held requests is full.
  *         KODE_NO_RESOURCES when the event pool was dry, AO_Ir had no memory
@@ -456,36 +461,40 @@ kode_status_t kode_block_file_space(const char *path, kode_sys_file_space_t *out
 
 /**
  * @brief Called once per entry of a directory listing.
- * @param name   The entry's name, one path segment.
- * @param is_dir Whether it is a directory.
- * @param size   Its size in bytes; meaningless for a directory.
- * @param ctx    As given to the listing.
+ * @param name     The entry's name, one path segment.
+ * @param is_dir   Whether it is a directory.
+ * @param size     Its size in bytes; meaningless for a directory.
+ * @param name_cut The name is longer than KODE_STORAGE_NAME_MAX holds and is
+ *                 cut at a whole UTF-8 character: no path opens it.
+ * @param ctx      As given to the listing.
  * @return false to stop the walk early.
  */
 typedef bool (*kode_sys_file_entry_cb)(const char *name, bool is_dir, uint32_t size,
-                                       void *ctx);
+                                       bool name_cut, void *ctx);
 
 /**
  * @brief List one directory's own entries, one level, from the @p skip-th on.
  *
  * More than KODE_SYS_FILE_LIST_MAX entries after the ones left out: the first
- * ones are all offered to @p cb, then KODE_NO_RESOURCES says that was a page,
- * not the whole. A @p skip at or past the last entry offers nothing and is
- * KODE_OK.
+ * ones are all offered to @p cb, then @p more says that was a page, not the
+ * whole. A @p skip at or past the last entry offers nothing and is KODE_OK.
  * @note Blocks. Two round trips (a STAT, then the list); the claim is held
  *       across the callbacks.
  * @param path Absolute, virtual, and a directory.
  * @param skip Entries to leave out: the ones earlier pages offered.
  * @param cb   Called once per entry, in AO_Storage's order.
  * @param ctx  Passed to every call of @p cb.
- * @return KODE_OK once every entry has been offered and there were no more.
- *         KODE_NO_RESOURCES when there were more than fitted. KODE_DENIED for a
- *         malformed path, a path that is not there or is a file, or another file
- *         call waiting. KODE_ERROR when the volume will not mount, or for a NULL
- *         @p path or @p cb. KODE_TIMEOUT when AO_Storage did not answer.
+ * @param more Out: true when the folder held more entries than were offered;
+ *             false otherwise and on any failure. NULL is refused.
+ * @return KODE_OK once every entry that fitted has been offered. KODE_DENIED
+ *         for a malformed path, a path that is not there or is a file, or
+ *         another file call waiting. KODE_ERROR when the volume will not
+ *         mount, or for a NULL @p path, @p cb or @p more. KODE_NO_RESOURCES
+ *         when no memory or no event was there for the request. KODE_TIMEOUT
+ *         when AO_Storage did not answer.
  */
 kode_status_t kode_block_file_list_each(const char *path, uint32_t skip, kode_sys_file_entry_cb cb,
-                                        void *ctx);
+                                        void *ctx, bool *more);
 
 /**
  * @brief Make one directory at @p path.
@@ -525,6 +534,25 @@ kode_status_t kode_block_file_delete(const char *path);
  *         KODE_TIMEOUT when AO_Storage did not answer.
  */
 kode_status_t kode_block_file_rename_path(const char *from, const char *to);
+
+/**
+ * @brief Put @p from on @p to, where a file may already be: AO_Storage's
+ *        STORAGE_PAIR_REPLACE, on the same volume only.
+ *
+ * The file on @p to goes to `<to>.bak`, @p from takes its name and the
+ * backup goes; a step that fails puts the file back and leaves @p from where
+ * it was. A `<to>.bak` already there is removed.
+ * @note Blocks.
+ * @param from Absolute, virtual, a file that is there.
+ * @param to   Absolute, virtual, on the same volume; room for ".bak" after it
+ *             in KODE_PATH_MAX.
+ * @return KODE_OK. KODE_DENIED for a folder on @p to, a @p to with no room
+ *         for its backup's name, a transfer in flight or another file call
+ *         waiting. KODE_ERROR when a step fails, the volume will not mount, or
+ *         @p from or @p to is NULL. KODE_TIMEOUT when AO_Storage did not
+ *         answer.
+ */
+kode_status_t kode_block_file_replace_path(const char *from, const char *to);
 
 /**
  * @brief Read up to @p cap bytes of @p path from @p offset in one round trip, no STAT.

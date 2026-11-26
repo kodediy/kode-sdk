@@ -11,10 +11,7 @@
 
 #include "kode.h"
 
-/** @brief The highest carrier a file may name, Hz. */
-#define KODE_IR_FILE_CARRIER_MAX 1000000U
-
-/** @brief The highest NEC address, NEC command or raw duration a file may carry. */
+/** @brief The highest NEC address or NEC command a file may carry. */
 #define KODE_IR_FILE_VALUE_MAX 65535U
 
 /** @brief One signal of a capture file: a decoded NEC frame or raw durations. */
@@ -22,9 +19,9 @@ typedef struct {
     bool     raw;                    /**< Raw durations; false: NEC.                 */
     uint32_t address;                /**< NEC address, 0 to 65535.                   */
     uint32_t command;                /**< NEC command, 0 to 65535.                   */
-    uint32_t carrier_hz;             /**< Raw carrier, 1 to KODE_IR_FILE_CARRIER_MAX. */
+    uint32_t carrier_hz;             /**< Raw carrier, KODE_IR_CARRIER_MIN_HZ to KODE_IR_CARRIER_MAX_HZ. */
     uint32_t count;                  /**< Raw durations, 1 to KODE_IR_RAW_MAX.       */
-    uint16_t us[KODE_IR_RAW_MAX];    /**< Raw durations, mark first, each 1 or more. */
+    uint16_t us[KODE_IR_RAW_MAX];    /**< Raw durations, mark first, 1 to KODE_IR_DURATION_MAX_US. */
 } kode_ir_signal_t;
 
 /**

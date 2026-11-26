@@ -214,6 +214,19 @@ menu "kodeOS active objects"
 
                 If unsure, say Y.
 
+        config KODEOS_DUMP_HTTP
+            bool "Send the core dump to the Kode channel's dumps link"
+            depends on KODEOS_CHANNEL
+            default y
+            help
+                On a request from the interface, AO_Net sends the core dump of
+                a fault of kodeOS to the channel's `dumps` link and erases it
+                once the service has stored it. A session whose answer names
+                no valid link refuses the request. A build with no core dump
+                answers that there is none.
+
+                If unsure, say Y.
+
         config KODEOS_BLE
             bool "BLE (NimBLE here, the controller on the C5)"
             depends on KODEOS_RADIO && BT_NIMBLE_ENABLED

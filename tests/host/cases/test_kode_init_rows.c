@@ -213,6 +213,21 @@ TEST_CASE("the startup order: AO_Boot first, AO_Storage before AO_AppMgr, "
     TEST_ASSERT_LESS_THAN_size_t(radio, display);
 }
 
+/* Whatever links AO_Touch links AO_Display (tools/check_starts.sh, check 4).
+ * AO_Touch subscribes to the panel's state in its initial transition and asks
+ * nothing, so its row comes first: the state AO_Display publishes once the
+ * panel is up finds the subscription in place. */
+TEST_CASE("AO_Touch starts before AO_Display, which publishes the state it waits for",
+          "[kode_init]")
+{
+    size_t const touch   = row_of(&kaos_touch_start);
+    size_t const display = row_of(&kaos_display_start);
+
+    TEST_ASSERT_LESS_THAN_size_t(KODE_SYS_ROWS, display);
+    TEST_ASSERT_LESS_THAN_size_t(display, touch);
+    TEST_ASSERT_TRUE(kode_sys_rows[display].park == &kaos_park_display);
+}
+
 TEST_CASE("this binary links every module, so kode_init() would park nothing",
           "[kode_init]")
 {
@@ -481,6 +496,7 @@ TEST_CASE("touch_subscribe() makes its caller hear AO_Touch's reports",
     touch_subscribe(spy);
     touch.super   = (QEvt)QEVT_INITIALIZER(TOUCH_EVT_SIG);
     touch.pressed = true;
+    touch.remote  = false;
     QACTIVE_PUBLISH(&touch.super, NULL);
 
     TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());

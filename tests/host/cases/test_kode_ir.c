@@ -970,6 +970,61 @@ TEST_CASE("kode_block_ir_send_raw refuses a bad argument and posts nothing", "[k
     TEST_ASSERT_EQUAL_UINT(0U, ir_pending());
 }
 
+TEST_CASE("kode_block_ir_send_raw refuses a carrier or a duration out of range and takes the limits",
+          "[kode_ir]")
+{
+    static const uint32_t refused_hz[] = { 38U, 19999U, 500001U };
+    static const uint32_t taken_hz[]   = { 20000U, 38000U, 500000U };
+    kode_sys_ir_symbol_t  sym[RAW_N] = { { 9000U, 4500U }, { 560U, 560U }, { 560U, 0U } };
+
+    ir_fresh();
+    for ( uint32_t i = 0U; (sizeof(refused_hz) / sizeof(refused_hz[0])) > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ir_send_raw(sym, RAW_N, refused_hz[i]));
+    }
+    sym[0].mark_us = (uint16_t)(KODE_SYS_IR_DURATION_MAX_US + 1U);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ir_send_raw(sym, RAW_N, RAW_CARRIER_HZ));
+    sym[0].mark_us  = 9000U;
+    sym[1].space_us = (uint16_t)(KODE_SYS_IR_DURATION_MAX_US + 1U);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ir_send_raw(sym, RAW_N, RAW_CARRIER_HZ));
+    TEST_ASSERT_EQUAL_UINT(0U, ir_pending());
+
+    sym[1].space_us = (uint16_t)KODE_SYS_IR_DURATION_MAX_US;
+    for ( uint32_t i = 0U; (sizeof(taken_hz) / sizeof(taken_hz[0])) > i; i++ )
+    {
+        fake_sem_wait_hook(&ir_answers_head_raw);
+        TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ir_send_raw(sym, RAW_N, taken_hz[i]));
+        ir_hook_ok();
+        TEST_ASSERT_EQUAL_UINT32(taken_hz[i], s_raw_got_hz);
+        TEST_ASSERT_EQUAL_UINT16(KODE_SYS_IR_DURATION_MAX_US, s_raw_got[1].space_us);
+    }
+}
+
+TEST_CASE("kode_block_ir_send_raw refuses a frame longer than 1500 ms and takes one of 1500 ms",
+          "[kode_ir]")
+{
+    /* 50 marks and spaces of 15 ms: 1500 ms exactly. */
+    kode_sys_ir_symbol_t sym[50U];
+
+    for ( uint32_t i = 0U; 50U > i; i++ )
+    {
+        sym[i].mark_us  = 15000U;
+        sym[i].space_us = 15000U;
+    }
+    ir_fresh();
+    TEST_ASSERT_EQUAL_UINT32(1500U, KODE_SYS_IR_FRAME_MAX_MS);
+    sym[49].space_us = 0U;   /* sent as 32767 us */
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ir_send_raw(sym, 50U, RAW_CARRIER_HZ));
+    sym[49].space_us = 15001U;
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, kode_block_ir_send_raw(sym, 50U, RAW_CARRIER_HZ));
+    TEST_ASSERT_EQUAL_UINT(0U, ir_pending());
+
+    sym[49].space_us = 15000U;
+    fake_sem_wait_hook(&ir_answers_head_raw);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_ir_send_raw(sym, 50U, RAW_CARRIER_HZ));
+    ir_hook_ok();
+}
+
 TEST_CASE("kode_block_ir_send_raw lends the frame while it waits and returns the answer", "[kode_ir]")
 {
     kode_sys_ir_symbol_t sym[RAW_N] = { { 9000U, 4500U }, { 560U, 1690U }, { 560U, 0U } };

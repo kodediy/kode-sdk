@@ -26,9 +26,19 @@ _Static_assert(KODE_IR_RAW_MAX == (2U * KDRV_IR_RX_MAX_SYMBOLS),
                "the raw result and the receiver's longest capture have drifted apart");
 _Static_assert(KODE_IR_RAW_MAX == (2U * KODE_SYS_IR_RAW_MAX_SYMBOLS),
                "the raw frame and the transmitter's longest frame have drifted apart");
+_Static_assert((KODE_IR_CARRIER_MIN_HZ == KODE_SYS_IR_CARRIER_MIN_HZ)
+               && (KODE_IR_CARRIER_MAX_HZ == KODE_SYS_IR_CARRIER_MAX_HZ),
+               "the raw send's carriers and the transmitter's have drifted apart");
+_Static_assert(KODE_IR_DURATION_MAX_US == KODE_SYS_IR_DURATION_MAX_US,
+               "the raw send's longest duration and the transmitter's have drifted apart");
+_Static_assert(KODE_IR_FRAME_MAX_MS == KODE_SYS_IR_FRAME_MAX_MS,
+               "the raw send's longest frame and the transmitter's have drifted apart");
 
 /** @brief Durations of one symbol: a mark and a space. */
 #define KODE_IR_DURATIONS_PER_SYMBOL 2U
+
+/** @brief Microseconds in a millisecond. */
+#define KODE_IR_US_PER_MS 1000U
 
 /** @brief The protocol name a NEC frame reads as. */
 #define KODE_IR_NEC_NAME "NEC"
@@ -177,7 +187,7 @@ void kode_ir_fail(kode_status_t rc, const char *part)
  * @brief Send a frame, waiting its turn; the error is set on failure.
  * @param sym        The symbols, mark first.
  * @param n          How many, 1..KODE_SYS_IR_RAW_MAX_SYMBOLS.
- * @param carrier_hz The carrier, above 0.
+ * @param carrier_hz The carrier, KODE_IR_CARRIER_MIN_HZ to KODE_IR_CARRIER_MAX_HZ.
  * @return true when the frame went out.
  */
 static bool frame_send(const kode_sys_ir_symbol_t *sym, size_t n, uint32_t carrier_hz)
@@ -276,12 +286,68 @@ static size_t symbols_from_durations(const uint16_t *us, uint32_t n, kode_sys_ir
     return count;
 }
 
+/**
+ * @brief How long a frame lasts, a zero space counted as KODE_IR_DURATION_MAX_US, as the C5 sends it.
+ * @param sym   The symbols.
+ * @param count How many.
+ * @return Milliseconds, rounded up.
+ */
+static uint32_t raw_frame_ms(const kode_sys_ir_symbol_t *sym, size_t count)
+{
+    uint32_t us = 0U;
+
+    for ( size_t i = 0U; i < count; i++ )
+    {
+        us += (uint32_t)sym[i].mark_us;
+        if ( 0U == sym[i].space_us )
+        {
+            us += KODE_IR_DURATION_MAX_US;
+        }
+        else
+        {
+            us += (uint32_t)sym[i].space_us;
+        }
+    }
+    return (us + (KODE_IR_US_PER_MS - 1U)) / KODE_IR_US_PER_MS;
+}
+
 bool kode_ir_raw_send(const uint16_t *us, uint32_t n, uint32_t carrier_hz)
 {
     kode_sys_ir_symbol_t sym[KODE_SYS_IR_RAW_MAX_SYMBOLS];
     const size_t         count = symbols_from_durations(us, n, sym);
+    const uint32_t       ms    = raw_frame_ms(sym, count);
+    bool                 ok    = false;
 
-    return frame_send(sym, count, carrier_hz);
+    if ( KODE_IR_FRAME_MAX_MS < ms )
+    {
+        kode_err_set("the frame lasts %" PRIu32 " ms, longer than %" PRIu32 " ms",
+                     ms, (uint32_t)KODE_IR_FRAME_MAX_MS);
+    }
+    else
+    {
+        ok = frame_send(sym, count, carrier_hz);
+    }
+    return ok;
+}
+
+/**
+ * @brief The first duration longer than KODE_IR_DURATION_MAX_US.
+ * @param us The durations.
+ * @param n  How many.
+ * @return Its index; @p n when every duration fits.
+ */
+static uint32_t duration_too_long(const uint16_t *us, uint32_t n)
+{
+    uint32_t at = n;
+
+    for ( uint32_t i = 0U; (at == n) && (i < n); i++ )
+    {
+        if ( KODE_IR_DURATION_MAX_US < (uint32_t)us[i] )
+        {
+            at = i;
+        }
+    }
+    return at;
 }
 
 bool kode_ir_send_raw(const uint16_t *us, uint32_t n, uint32_t carrier_hz)
@@ -299,13 +365,24 @@ bool kode_ir_send_raw(const uint16_t *us, uint32_t n, uint32_t carrier_hz)
             kode_err_set("a raw frame holds 1 to %" PRIu32 " durations, not %" PRIu32,
                          (uint32_t)KODE_IR_RAW_MAX, n);
         }
-        else if ( 0U == carrier_hz )
+        else if ( (KODE_IR_CARRIER_MIN_HZ > carrier_hz) || (KODE_IR_CARRIER_MAX_HZ < carrier_hz) )
         {
-            kode_err_set("the carrier must be above 0 Hz");
+            kode_err_set("carrier %" PRIu32 " Hz is out of range (%" PRIu32 " to %" PRIu32 ")",
+                         carrier_hz, (uint32_t)KODE_IR_CARRIER_MIN_HZ, (uint32_t)KODE_IR_CARRIER_MAX_HZ);
         }
         else
         {
-            ok = kode_ir_raw_send(us, n, carrier_hz);
+            const uint32_t at = duration_too_long(us, n);
+
+            if ( at < n )
+            {
+                kode_err_set("duration %" PRIu32 " is %" PRIu32 " us, out of range (0 to %" PRIu32 ")",
+                             at + 1U, (uint32_t)us[at], (uint32_t)KODE_IR_DURATION_MAX_US);
+            }
+            else
+            {
+                ok = kode_ir_raw_send(us, n, carrier_hz);
+            }
         }
         kode_ir_leave();
     }

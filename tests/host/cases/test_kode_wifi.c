@@ -70,10 +70,16 @@ static uint32_t          s_seam_reads;            /**< How many reads status has
 static kode_status_t     s_seam_status_rc;        /**< What status answers.                   */
 static kode_status_t     s_seam_connect_rc;       /**< What connect answers.                  */
 static uint32_t          s_seam_joins;            /**< Requests connect has taken.            */
+static uint32_t          s_seam_leaves;           /**< Requests disconnect has taken.         */
+static uint32_t          s_seam_left_from;        /**< The radio says left from this many reads on. */
+
+/** @brief The radio never says it has left. */
+#define SEAM_NEVER_LEFT UINT32_MAX
 
 static kode_status_t seam_status(kode_sys_wifi_status_t *out);
 static kode_status_t seam_connect(const char *ssid, const char *pass);
 static kode_status_t seam_disconnect(void);
+static bool seam_left(void);
 bool seam_wifi_connect(const char *ssid, const char *password);
 bool seam_wifi_is_connected(void);
 bool seam_wifi_disconnect(void);
@@ -91,6 +97,7 @@ int seam_wifi_scan(kode_wifi_network_t *out, size_t cap);
 #define kode_sys_wifi_status     seam_status
 #define kode_sys_wifi_connect    seam_connect
 #define kode_sys_wifi_disconnect seam_disconnect
+#define kode_sys_wifi_left       seam_left
 #define kode_wifi_connect        seam_wifi_connect
 #define kode_wifi_is_connected   seam_wifi_is_connected
 #define kode_wifi_disconnect     seam_wifi_disconnect
@@ -102,6 +109,7 @@ int seam_wifi_scan(kode_wifi_network_t *out, size_t cap);
 #undef kode_sys_wifi_status
 #undef kode_sys_wifi_connect
 #undef kode_sys_wifi_disconnect
+#undef kode_sys_wifi_left
 #undef kode_wifi_connect
 #undef kode_wifi_is_connected
 #undef kode_wifi_disconnect
@@ -190,7 +198,13 @@ static kode_status_t seam_connect(const char *ssid, const char *pass)
 
 static kode_status_t seam_disconnect(void)
 {
+    s_seam_leaves++;
     return KODE_OK;
+}
+
+static bool seam_left(void)
+{
+    return s_seam_reads >= s_seam_left_from;
 }
 
 /** @brief Script the states status will report and the answers of the doors. */
@@ -206,6 +220,8 @@ static void seam_script(const seam_step_t *steps, uint32_t n, kode_status_t stat
     s_seam_status_rc  = status_rc;
     s_seam_connect_rc = connect_rc;
     s_seam_joins      = 0U;
+    s_seam_leaves     = 0U;
+    s_seam_left_from  = SEAM_NEVER_LEFT;
 }
 
 /* ---- The world: AO_Radio's queue and the real driver --------------------------- */
@@ -493,30 +509,6 @@ TEST_CASE("is_connected reads the driver and never waits", "[kode_wifi]")
 
 /* ---- disconnect ------------------------------------------------------------------ */
 
-TEST_CASE("disconnect posts a leave and returns true once the address is gone", "[kode_wifi]")
-{
-    world_up();
-    reach_ip("net");
-    fake_time_delay_hook(&net_drops);
-
-    TEST_ASSERT_TRUE(kode_wifi_disconnect());
-    TEST_ASSERT_EQUAL_STRING("", kode_error());
-    QF_gc(radio_only(WIFI_LEAVE_REQ_SIG));
-    TEST_ASSERT_LESS_THAN_UINT32(KODE_WIFI_LEAVE_MS, kode_sys_time_ms());
-    world_down();
-}
-
-TEST_CASE("disconnect when not connected posts nothing", "[kode_wifi]")
-{
-    world_up();
-
-    TEST_ASSERT_TRUE(kode_wifi_disconnect());
-    TEST_ASSERT_EQUAL_STRING("", kode_error());
-    TEST_ASSERT_EQUAL_UINT(0U, uxQueueMessagesWaiting(AO_Radio->eQueue));
-    TEST_ASSERT_EQUAL_UINT32(0U, kode_sys_time_ms());
-    world_down();
-}
-
 TEST_CASE("disconnect that the radio does not carry out fails after the bound", "[kode_wifi]")
 {
     world_up();
@@ -527,6 +519,88 @@ TEST_CASE("disconnect that the radio does not carry out fails after the bound", 
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_WIFI_LEAVE_MS, kode_sys_time_ms());
     QF_gc(radio_only(WIFI_LEAVE_REQ_SIG));
     world_down();
+}
+
+/* ---- Scripted: the leave ---------------------------------------------------------- */
+
+TEST_CASE("disconnect posts a leave and returns true once the address is gone and the radio has left",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = {
+        { KDRV_WIFI_GOT_IP, "net" }, { KDRV_WIFI_GOT_IP, "net" }, { KDRV_WIFI_DISCONNECTED, "" },
+    };
+
+    fresh();
+    seam_script(script, 3U, KODE_OK, KODE_OK);
+    s_seam_left_from = 2U;
+
+    TEST_ASSERT_TRUE(seam_wifi_disconnect());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_leaves);
+    TEST_ASSERT_LESS_THAN_UINT32(KODE_WIFI_LEAVE_MS, kode_sys_time_ms());
+}
+
+TEST_CASE("disconnect when the board is out already answers true at once and posts nothing",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = { { KDRV_WIFI_DISCONNECTED, "" } };
+
+    fresh();
+    seam_script(script, 1U, KODE_OK, KODE_OK);
+    s_seam_left_from = 0U;
+
+    TEST_ASSERT_TRUE(seam_wifi_disconnect());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, s_seam_leaves);
+    TEST_ASSERT_EQUAL_UINT32(0U, kode_sys_time_ms());
+}
+
+TEST_CASE("disconnect during a join posts the leave and waits until the joined network is left",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = {
+        { KDRV_WIFI_CONNECTING, "net" }, { KDRV_WIFI_CONNECTING, "net" }, { KDRV_WIFI_GOT_IP, "net" },
+        { KDRV_WIFI_GOT_IP, "net" }, { KDRV_WIFI_DISCONNECTED, "" },
+    };
+
+    fresh();
+    seam_script(script, 5U, KODE_OK, KODE_OK);
+    s_seam_left_from = 4U;
+
+    TEST_ASSERT_TRUE(seam_wifi_disconnect());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_leaves);
+    TEST_ASSERT_EQUAL_UINT32(5U, s_seam_reads);
+    TEST_ASSERT_LESS_THAN_UINT32(KODE_WIFI_LEAVE_MS, kode_sys_time_ms());
+}
+
+TEST_CASE("disconnect off a network while the radio looks for one posts the leave",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = { { KDRV_WIFI_DISCONNECTED, "" } };
+
+    fresh();
+    seam_script(script, 1U, KODE_OK, KODE_OK);
+    s_seam_left_from = 2U;
+
+    TEST_ASSERT_TRUE(seam_wifi_disconnect());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_leaves);
+}
+
+TEST_CASE("disconnect whose leave the radio has not made within the bound says so",
+          "[kode_wifi]")
+{
+    static const seam_step_t script[] = { { KDRV_WIFI_IDLE, "" } };
+
+    fresh();
+    seam_script(script, 1U, KODE_OK, KODE_OK);
+
+    TEST_ASSERT_FALSE(seam_wifi_disconnect());
+    TEST_ASSERT_EQUAL_STRING("the leave still waits for the radio after 5 s: "
+                             "a join or the link's start is under way", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_seam_leaves);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_WIFI_LEAVE_MS, kode_sys_time_ms());
 }
 
 /* ---- Scripted: the join seen trying, and a firmware without Wi-Fi ----------------- */

@@ -29,7 +29,8 @@
 
 #if CONFIG_KODEOS_CHANNEL
 #include "kaos_wire.h"      /* the base64 encoder shared with the console    */
-#include "kdrv_slot.h"      /* kdrv_running_desc(): the version `info` shows */
+#include "kdrv_slot.h"      /* kdrv_running_desc(), the version `info` shows;
+                             * the core dump a fault report reads and erases */
 #include "kode_wire.h"      /* KODE_ST_*: what the C5 answers with           */
 #include "net_channel.h"
 #include "kset.h"
@@ -359,7 +360,29 @@ typedef enum {
     SJ_CLOSE       /**< The close of a stream's kept connection.            */
 /* cppcheck-suppress misra-c2012-2.3 ; the type names the values of a uint8_t field, which keeps AO_Net's struct small */
 } shot_job_t;
+
+/* kdrv_net carries the largest JPEG of the glass in one PUT: a capture over
+ * KDRV_NET_PUT_MAX would be refused by the driver, in every build. */
+_Static_assert(KDRV_NET_PUT_MAX >= KSHOT_JPEG_CAP,
+               "a PUT must carry the largest capture");
 #endif /* CONFIG_KODEOS_SHOT_HTTP */
+
+#if CONFIG_KODEOS_DUMP_HTTP
+/** @brief The type a core dump is sent as. */
+#define DUMP_CONTENT_TYPE  "application/octet-stream"
+
+/** @brief The one status that says the service stored the dump. */
+#define DUMP_HTTP_STORED   201U
+
+/* kdrv_net carries a dump whole in one PUT. */
+_Static_assert(KDRV_NET_PUT_MAX >= KDRV_COREDUMP_MAX,
+               "a PUT must carry the largest core dump");
+
+/* The longest link the api may name and the longest name fit one PUT URL,
+ * terminator included: dump_send()'s refusal is only a defence. */
+_Static_assert((KSHOT_PREFIX_MAX + KDUMP_NAME_MAX) < KDRV_NET_PUT_URL_MAX,
+               "a dumps link and a dump's name must fit one PUT URL");
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /** @brief The channel's buffers. PSRAM, taken on the first join (rule 8). */
 typedef struct {
@@ -398,15 +421,21 @@ typedef struct {
                                     *   logged once already.                 */
     bool                cq_bsaid;  /**< So was the console's being busy; both
                                     *   end with the line.                   */
-#if CONFIG_KODEOS_SHOT_HTTP
+#if CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP
     char                jwt[KDRV_MQTT_TOKEN_MAX]; /**< The session's token, the
                                     *   uploads' bearer: the MQTT start wipes
                                     *   sess.token, this lives as long as the
                                     *   session does.                        */
+#endif
+#if CONFIG_KODEOS_SHOT_HTTP
     char                shot_token[KSHOT_TOKEN_MAX + 1U]; /**< The upload in
                                     *   hand's token.                        */
     char                shot_url[KDRV_NET_PUT_URL_MAX]; /**< `shots` + that
                                     *   token, built from the live session.  */
+#endif
+#if CONFIG_KODEOS_DUMP_HTTP
+    char                dump_url[KDRV_NET_PUT_URL_MAX]; /**< `dumps` + the
+                                    *   dump's name, while kdrv_net takes it. */
 #endif
 } ChanWork;
 #endif /* CONFIG_KODEOS_CHANNEL */
@@ -580,6 +609,11 @@ typedef struct {
                               *   started since.                             */
     bool      sclose;        /**< A stream ended: its kept connection is
                               *   closed before anything else goes out.      */
+#endif
+#if CONFIG_KODEOS_DUMP_HTTP
+    QActive  *dwho;          /**< Who the dump being sent answers; NULL when
+                              *   none is, or its guard already answered.    */
+    bool      dput;          /**< The PUT with the worker is the dump's.     */
 #endif
 #endif
 } Net;
@@ -957,6 +991,27 @@ void net_shot_stop_request(QActive *who)
     {
         KLOG_E(TAG, "out of events; a stop of the uploads was dropped");
     }
+}
+#endif
+
+#if CONFIG_KODEOS_DUMP_HTTP
+/* cppcheck-suppress misra-c2012-8.7 ; kaos.h's interface: the interface asks for the fault report */
+bool net_dump_request(QActive *who)
+{
+    NetDumpReqEvt *e      = NULL;
+    bool           posted = false;
+
+    if ( NULL != who )
+    {
+        e = Q_NEW_X(NetDumpReqEvt, 0U, NET_DUMP_REQ_SIG);
+    }
+    if ( NULL != e )
+    {
+        e->who = who;
+        /* QActive_post_ recycles the event itself when it refuses. */
+        posted = QACTIVE_POST_X(AO_Net, &e->super, KQP_NET_CMD_MARGIN, NULL);
+    }
+    return posted;
 }
 #endif
 
@@ -2419,6 +2474,51 @@ static uint32_t shot_left_s(const Net * const me)
 }
 #endif
 
+#if CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP
+/**
+ * @brief Whether the session serves an upload now: up, or the old session of
+ *        a renewal whose token still has an hour left.
+ */
+static bool chan_serving(const Net * const me)
+{
+    return ((uint8_t)CHAN_UP == me->cstate)
+           || (me->crenew && ((uint8_t)MQTT_LIVE == me->phase));
+}
+
+/**
+ * @brief Whether an upload waits for its answer: a capture in hand, or a
+ *        dump being sent. One upload of the two at a time.
+ */
+static bool upload_in_hand(const Net * const me)
+{
+#if CONFIG_KODEOS_SHOT_HTTP && CONFIG_KODEOS_DUMP_HTTP
+    return ((uint8_t)KSHOT_ONE == me->smode) || (NULL != me->dwho);
+#elif CONFIG_KODEOS_SHOT_HTTP
+    return (uint8_t)KSHOT_ONE == me->smode;
+#else
+    return NULL != me->dwho;
+#endif
+}
+
+/**
+ * @brief The channel's session ended: forget its bearer, end the capture or
+ *        stream in hand.
+ *
+ * A dump being sent is left to finish: kdrv_net holds its own copy of the
+ * bearer, and a 201 means the service has it whatever the channel does.
+ */
+static void upload_channel_gone(Net * const me)
+{
+    if ( NULL != me->cw )
+    {
+        (void)memset(me->cw->jwt, 0, sizeof(me->cw->jwt));
+    }
+#if CONFIG_KODEOS_SHOT_HTTP
+    shot_channel_gone(me);
+#endif
+}
+#endif /* CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP */
+
 /** @brief Milliseconds as QP ticks, never zero (a zero arms nothing). */
 static uint32_t chan_ticks(uint32_t ms)
 {
@@ -2595,6 +2695,13 @@ static void chan_publish(const Net * const me)
     e->shot_fps_x10 = 0U;
     e->shot_left_s  = 0U;
 #endif
+    e->dumps = false;
+#if CONFIG_KODEOS_DUMP_HTTP
+    if ( ((uint8_t)CHAN_UP == me->cstate) && (NULL != me->cw) )
+    {
+        e->dumps = ('\0' != me->cw->sess.dumps[0]);
+    }
+#endif
     (void)snprintf(e->why, sizeof(e->why), "%s", me->cwhy);
     e->broker[0] = '\0';
     if ( NULL != me->cw )
@@ -2750,9 +2857,9 @@ static void chan_fail(Net * const me, const char *why, uint16_t http)
     if ( !me->crenew )
     {
         chan_stop_client(me);
-#if CONFIG_KODEOS_SHOT_HTTP
-        shot_channel_gone(me);   /* a renewal's old session still serves,
-                                  * with its bearer */
+#if CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP
+        upload_channel_gone(me);   /* a renewal's old session still serves,
+                                    * with its bearer */
 #endif
     }
     if ( (uint8_t)CJ_LIVE == me->cjob )
@@ -2791,8 +2898,8 @@ static void chan_refused(Net * const me, const char *why)
     (void)QTimeEvt_disarm(&me->wtmo);
     chan_fast_set(me, false);
     chan_stop_client(me);
-#if CONFIG_KODEOS_SHOT_HTTP
-    shot_channel_gone(me);
+#if CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP
+    upload_channel_gone(me);
 #endif
     chan_set(me, CHAN_REFUSED, why);
     KLOG_N(TAG, "channel: refused (%s)", why);
@@ -2811,8 +2918,8 @@ static void chan_no_identity(Net * const me)
     (void)QTimeEvt_disarm(&me->wtmo);
     chan_fast_set(me, false);
     chan_stop_client(me);   /* a renewal's old client must not outlive this */
-#if CONFIG_KODEOS_SHOT_HTTP
-    shot_channel_gone(me);
+#if CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP
+    upload_channel_gone(me);
 #endif
     chan_set(me, CHAN_NO_IDENTITY, "no_identity");
     KLOG_N(TAG, "channel: no identity in the C5");
@@ -3095,8 +3202,8 @@ static void chan_halt(Net * const me)
          * to a join that is over. */
         me->cjob = (uint8_t)CJ_STALE;
     }
-#if CONFIG_KODEOS_SHOT_HTTP
-    shot_channel_gone(me);
+#if CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP
+    upload_channel_gone(me);
 #endif
     if ( NULL != me->cw )
     {
@@ -3535,10 +3642,12 @@ static void chan_on_connect(Net * const me, uint8_t job_status)
          * topics. */
         me->cw->sess = me->cw->scratch;
         (void)memset(&me->cw->scratch, 0, sizeof(me->cw->scratch));
-#if CONFIG_KODEOS_SHOT_HTTP
+#if CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP
         /* The uploads' bearer, kept: the MQTT start wipes the session's. */
         (void)snprintf(me->cw->jwt, sizeof(me->cw->jwt), "%s", me->cw->sess.token);
-        if ( !kchan_shots_valid(me->cw->sess.shots) )
+#endif
+#if CONFIG_KODEOS_SHOT_HTTP
+        if ( !kchan_upload_valid(me->cw->sess.shots) )
         {
             KLOG_W(TAG, "channel: the session names no upload link; "
                         "uploads are refused");
@@ -4347,13 +4456,11 @@ static void chan_on_cmd(Net * const me, const kdrv_mqtt_msg_t *m)
  */
 static bool shot_ready(const Net * const me)
 {
-    bool const serving = ((uint8_t)CHAN_UP == me->cstate)
-                         || (me->crenew && ((uint8_t)MQTT_LIVE == me->phase));
-    bool       ready   = false;
+    bool ready = false;
 
-    if ( (NULL != me->cw) && serving )
+    if ( (NULL != me->cw) && chan_serving(me) )
     {
-        ready = kchan_shots_valid(me->cw->sess.shots) && ('\0' != me->cw->jwt[0]);
+        ready = kchan_upload_valid(me->cw->sess.shots) && ('\0' != me->cw->jwt[0]);
     }
     return ready;
 }
@@ -4564,17 +4671,14 @@ static void shot_stream_end(Net * const me, const char *why)
 }
 
 /**
- * @brief The channel's session ended: forget its bearer, end the upload in hand.
+ * @brief The channel's session ended: end the capture or stream in hand.
  *
  * A capture is answered now, wherever it is; a PUT that is out is marked
- * stale and its answer dropped. A stream ends with `channel`.
+ * stale and its answer dropped. A stream ends with `channel`. The bearer is
+ * upload_channel_gone()'s to forget.
  */
 static void shot_channel_gone(Net * const me)
 {
-    if ( NULL != me->cw )
-    {
-        (void)memset(me->cw->jwt, 0, sizeof(me->cw->jwt));
-    }
     if ( (uint8_t)KSHOT_STREAM == me->smode )
     {
         shot_stream_end(me, "channel");
@@ -4793,15 +4897,16 @@ static void shot_on_wait(Net * const me)
 /**
  * @brief An upload order: check it, then a capture or a stream.
  *
- * One upload at a time. A capture is answered before anything else is taken;
- * a stream is replaced by any valid order, which ends it (`replaced`). A
- * capture that follows a stream waits for that stream's close.
+ * One upload at a time: a capture, or a dump being sent, is answered before
+ * anything else is taken (upload_in_hand()); a stream is replaced by any
+ * valid order, which ends it (`replaced`). A capture that follows a stream
+ * waits for that stream's close.
  */
 static void shot_on_request(Net * const me, const NetShotReqEvt *r)
 {
     bool const stream = (0U != r->fps) || (0U != r->secs);
 
-    if ( (uint8_t)KSHOT_ONE == me->smode )
+    if ( upload_in_hand(me) )
     {
         shot_refuse(me, r->who, KSHOT_R_BUSY);
     }
@@ -4921,6 +5026,7 @@ static void shot_frame_landed(Net * const me, const DisplayShotRspEvt *d)
     req.keep = true;   /* a stream: the next frame reuses the connection */
     if ( !net_submit(me, &req) )
     {
+        kdrv_net_http_forget();   /* no job runs to wipe kdrv_net's copy */
         shot_frame_skip(me);
         return;
     }
@@ -4993,6 +5099,7 @@ static void shot_on_display(Net * const me, const DisplayShotRspEvt *d)
     req.keep = false;   /* one capture: the connection closes with the job */
     if ( !net_submit(me, &req) )
     {
+        kdrv_net_http_forget();   /* no job runs to wipe kdrv_net's copy */
         shot_end_with(me, KSHOT_R_BUSY);
         return;
     }
@@ -5172,6 +5279,366 @@ static void shot_put_expired(Net * const me)
     }
 }
 #endif /* CONFIG_KODEOS_SHOT_HTTP */
+
+#if CONFIG_KODEOS_DUMP_HTTP
+/* ---- Fault reports --------------------------------------------------------
+ * The core dump of a kodeOS fault, one request at a time: read whole into
+ * PSRAM taken for the request, handed to kdrv_net, which copies it, and PUT
+ * to the session's `dumps` link under its name, the channel's JWT as the
+ * bearer. A 201 erases it; anything else leaves it in flash. Nothing is
+ * retried here: the asker decides.
+ */
+
+/** @brief Whether the session can take a dump: serving, with a valid `dumps`
+ *         link and a bearer. */
+static bool dump_ready(const Net * const me)
+{
+    bool ready = false;
+
+    if ( (NULL != me->cw) && chan_serving(me) )
+    {
+        ready = kchan_upload_valid(me->cw->sess.dumps) && ('\0' != me->cw->jwt[0]);
+    }
+    return ready;
+}
+
+/**
+ * @brief Whether the network is taken: a job with the worker, an upload that
+ *        waits for its answer, a stream, or the close a stream owes.
+ */
+static bool dump_busy(const Net * const me)
+{
+#if CONFIG_KODEOS_SHOT_HTTP
+    return me->busy || upload_in_hand(me) || ((uint8_t)KSHOT_IDLE != me->smode)
+           || me->sclose;
+#else
+    return me->busy || upload_in_hand(me);
+#endif
+}
+
+/** @brief The word the log says for @p result. */
+static const char *dump_word(kdump_result_t result)
+{
+    const char *word = "unknown";
+
+    switch ( result )
+    {
+        case KDUMP_R_OK: {
+            word = "sent";
+            break;
+        }
+        case KDUMP_R_NO_ANSWER: {
+            word = "no answer";
+            break;
+        }
+        case KDUMP_R_BUSY: {
+            word = "busy";
+            break;
+        }
+        case KDUMP_R_CHANNEL: {
+            word = "no channel";
+            break;
+        }
+        case KDUMP_R_NONE: {
+            word = "none to send";
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    return word;
+}
+
+/**
+ * @brief Answer a fault report request, and say how it ended in one NOTICE.
+ *
+ * The NOTICE names the outcome and a refusal's status: never the link, the
+ * dump's name or the bearer. The answer never asserts: with no event block,
+ * or no slot in the asker's queue (KQP_DUMP_ANSWER_MARGIN), it is lost with a
+ * WARN, and the asker's own guard ends its wait. The asker is the interface,
+ * one of the lowest AOs, and an assert here would reset the board and write
+ * a new core dump.
+ *
+ * @param me     The AO.
+ * @param who    Who asked.
+ * @param result How it ended.
+ * @param http   The service's status; 0 when none came.
+ */
+static void dump_reply(Net * const me, QActive *who, kdump_result_t result,
+                       uint16_t http)
+{
+    NetDumpRspEvt * const e      = Q_NEW_X(NetDumpRspEvt, 0U, NET_DUMP_RSP_SIG);
+    bool                  posted = false;
+
+    (void)me;   /* the sender is only named when QP traces */
+    if ( KDUMP_R_REFUSED == result )
+    {
+        KLOG_N(TAG, "dump: refused, http %u", (unsigned)http);
+    }
+    else
+    {
+        KLOG_N(TAG, "dump: %s", dump_word(result));
+    }
+    if ( NULL != e )
+    {
+        e->result = (uint8_t)result;
+        e->http   = http;
+        /* A refused post gives the event back to its pool. */
+        posted = QACTIVE_POST_X(who, &e->super, KQP_DUMP_ANSWER_MARGIN, &me->super);
+    }
+    if ( !posted )
+    {
+        KLOG_W(TAG, "dump: no room for a fault report's answer; the asker's "
+                    "guard ends its wait");
+    }
+}
+
+/**
+ * @brief Read the dump into @p buf and hand it to kdrv_net under its name.
+ *
+ * @param me   The AO.
+ * @param buf  KDRV_COREDUMP_MAX bytes of PSRAM.
+ * @param sha  The dump's SHA prefix, from kdrv_slot_coredump().
+ * @param[out] len The bytes handed over.
+ * @return KDUMP_R_OK once kdrv_net holds its copy; else how the request ends.
+ */
+static kdump_result_t dump_prepare(Net * const me, uint8_t *buf,
+                                   const char *sha, size_t *len)
+{
+    ChanWork * const w      = me->cw;
+    kdump_result_t   result = KDUMP_R_OK;
+    uint32_t         crc    = 0U;
+    char             name[KDUMP_NAME_MAX + 1U];
+
+    if ( (KODE_OK != kdrv_slot_coredump_read(buf, KDRV_COREDUMP_MAX, len, &crc))
+        || (0U == *len) )
+    {
+        result = KDUMP_R_NONE;
+    }
+    else if ( !kdump_name(name, sizeof(name), sha, crc) )
+    {
+        result = KDUMP_R_NONE;
+    }
+    else
+    {
+        int const n = snprintf(w->dump_url, sizeof(w->dump_url), "%s%s",
+                               w->sess.dumps, name);
+
+        if ( (0 >= n) || ((size_t)n >= sizeof(w->dump_url)) )
+        {
+            KLOG_W(TAG, "dump: the link and the name do not fit %u bytes",
+                   (unsigned)KDRV_NET_PUT_URL_MAX);
+            result = KDUMP_R_CHANNEL;
+        }
+    }
+    if ( KDUMP_R_OK == result )
+    {
+        kode_status_t const rc = kdrv_net_http_put_prepare(w->dump_url, buf, *len,
+                                                           DUMP_CONTENT_TYPE,
+                                                           w->jwt);
+
+        if ( KODE_OK != rc )
+        {
+            KLOG_W(TAG, "dump: the network driver refused the upload (%d)", (int)rc);
+            result = KDUMP_R_BUSY;
+        }
+    }
+    (void)memset(w->dump_url, 0, sizeof(w->dump_url));
+    return result;
+}
+
+/**
+ * @brief Send the kodeOS dump in flash: read it, hand it over, PUT it.
+ *
+ * Only a dump of a kodeOS image leaves the board: none, a sketch's, another
+ * build's or one that cannot be read answers KDUMP_R_NONE. The PSRAM it is
+ * read into is wiped and goes back as soon as kdrv_net has its copy; a PUT
+ * that cannot be handed to the worker has kdrv_net's copy wiped too.
+ *
+ * @param me  The AO.
+ * @param who Who asked.
+ */
+static void dump_send(Net * const me, QActive *who)
+{
+    kdrv_coredump_t info;
+    kdrv_net_req_t  req;
+    kdump_result_t  result = KDUMP_R_OK;
+    size_t          len    = 0U;
+
+    (void)memset(&info, 0, sizeof(info));
+    if ( (KODE_OK != kdrv_slot_coredump(&info)) || !info.present || !info.kodeos )
+    {
+        result = KDUMP_R_NONE;
+    }
+    else
+    {
+        /* cppcheck-suppress misra-c2012-11.5 ; khal_alloc_psram() answers void *: PSRAM is taken by name (rule 8) */
+        uint8_t * const buf = (uint8_t *)khal_alloc_psram(sizeof(uint32_t),
+                                                          KDRV_COREDUMP_MAX);
+
+        if ( NULL == buf )
+        {
+            KLOG_W(TAG, "dump: no PSRAM for %u bytes", (unsigned)KDRV_COREDUMP_MAX);
+            result = KDUMP_R_BUSY;
+        }
+        else
+        {
+            result = dump_prepare(me, buf, info.sha, &len);
+            (void)memset(buf, 0, KDRV_COREDUMP_MAX);   /* no copy goes back to the heap */
+            khal_free(buf);
+        }
+    }
+    if ( KDUMP_R_OK == result )
+    {
+        net_req_init(&req, KDRV_NET_JOB_HTTP_PUT);
+        req.keep = false;   /* one dump: the connection closes with the job */
+        if ( !net_submit(me, &req) )
+        {
+            kdrv_net_http_forget();   /* no job runs to wipe kdrv_net's copy */
+            result = KDUMP_R_BUSY;
+        }
+    }
+    if ( KDUMP_R_OK == result )
+    {
+        me->dwho = who;
+        me->dput = true;
+        KLOG_N(TAG, "dump: sending %u bytes", (unsigned)len);
+    }
+    else
+    {
+        dump_reply(me, who, result, 0U);
+    }
+}
+
+/**
+ * @brief A fault report request: no channel, busy, or send the dump.
+ *
+ * The channel is judged first: with no session to send on, the worker's
+ * being taken does not matter.
+ */
+static void dump_on_request(Net * const me, const NetDumpReqEvt *r)
+{
+    if ( !dump_ready(me) )
+    {
+        dump_reply(me, r->who, KDUMP_R_CHANNEL, 0U);
+    }
+    else if ( dump_busy(me) )
+    {
+        dump_reply(me, r->who, KDUMP_R_BUSY, 0U);
+    }
+    else
+    {
+        dump_send(me, r->who);
+    }
+}
+
+/**
+ * @brief The dump's PUT came back: erase after a 201, answer the asker.
+ *
+ * Only a 201 erases. Any other status is a refusal and no status line, a TLS
+ * or socket failure or a timeout is no answer: both leave the dump in flash.
+ * A 201 whose erase fails still answers OK - the service has it - with a
+ * WARN. A PUT whose guard already answered (KDUMP_R_NO_ANSWER) ends here too,
+ * and nobody is answered again: a 201 still erases the dump, because the
+ * service has it and a retry would send it twice; anything else is only
+ * wiped.
+ */
+static void dump_on_job(Net * const me, uint8_t job_status)
+{
+    QActive * const        who    = me->dwho;
+    uint16_t               status = 0U;
+    kdrv_net_http_result_t r;
+
+    me->dput = false;
+    me->dwho = NULL;
+    if ( (uint8_t)KODE_OK == job_status )
+    {
+        (void)memset(&r, 0, sizeof(r));
+        kdrv_net_http_result(&r);
+        status = r.status;
+    }
+    kdrv_net_http_forget();
+    if ( DUMP_HTTP_STORED == status )
+    {
+        if ( KODE_OK != kdrv_slot_coredump_erase() )
+        {
+            KLOG_W(TAG, "dump: stored, but it could not be erased");
+        }
+    }
+    if ( NULL == who )
+    {
+        if ( DUMP_HTTP_STORED == status )
+        {
+            KLOG_N(TAG, "dump: stored after its guard had answered; nobody is answered again");
+        }
+        else
+        {
+            KLOG_I(TAG, "dump: the answer to a report that had ended was dropped");
+        }
+    }
+    else if ( DUMP_HTTP_STORED == status )
+    {
+        dump_reply(me, who, KDUMP_R_OK, status);
+    }
+    else if ( 0U == status )
+    {
+        dump_reply(me, who, KDUMP_R_NO_ANSWER, 0U);   /* a failed job, or no status line */
+    }
+    else
+    {
+        dump_reply(me, who, KDUMP_R_REFUSED, status);
+    }
+}
+
+/**
+ * @brief The PUT with the worker outlived its guard: if it is the dump's,
+ *        answer KDUMP_R_NO_ANSWER now. Its late end answers nobody
+ *        (dump_on_job()).
+ */
+static void dump_put_expired(Net * const me)
+{
+    QActive * const who = me->dwho;
+
+    if ( me->dput && (NULL != who) )
+    {
+        me->dwho = NULL;
+        dump_reply(me, who, KDUMP_R_NO_ANSWER, 0U);
+    }
+}
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
+
+#if CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP
+/** @brief The worker finished a PUT or a close: the dump's, or the uploads'. */
+static void upload_on_job(Net * const me, uint8_t job_status)
+{
+#if CONFIG_KODEOS_DUMP_HTTP && CONFIG_KODEOS_SHOT_HTTP
+    if ( me->dput )
+    {
+        dump_on_job(me, job_status);
+    }
+    else
+    {
+        shot_on_job(me, job_status);
+    }
+#elif CONFIG_KODEOS_DUMP_HTTP
+    dump_on_job(me, job_status);   /* the uploads have no other PUT */
+#else
+    shot_on_job(me, job_status);
+#endif
+}
+
+/** @brief The PUT with the worker outlived its guard: whoever it is, end it. */
+static void upload_put_expired(Net * const me)
+{
+#if CONFIG_KODEOS_DUMP_HTTP
+    dump_put_expired(me);
+#endif
+#if CONFIG_KODEOS_SHOT_HTTP
+    shot_put_expired(me);
+#endif
+}
+#endif /* CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP */
 
 #endif /* CONFIG_KODEOS_CHANNEL */
 
@@ -6005,6 +6472,10 @@ void Net_ctor(void)
     me->sdue         = false;
     me->sclose       = false;
 #endif
+#if CONFIG_KODEOS_DUMP_HTTP
+    me->dwho         = NULL;
+    me->dput         = false;
+#endif
 #endif
 }
 
@@ -6224,8 +6695,8 @@ static void net_expired_net(Net * const me)
             break;
         }
         case KDRV_NET_JOB_HTTP_PUT: {
-#if CONFIG_KODEOS_SHOT_HTTP
-            shot_put_expired(me);
+#if CONFIG_KODEOS_CHANNEL && (CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP)
+            upload_put_expired(me);
 #endif
             me->wreplied = true;
             break;
@@ -6771,10 +7242,11 @@ static void net_done_net(Net * const me, kdrv_net_job_t type, kode_status_t rc,
         case KDRV_NET_JOB_HTTP_PUT:
         case KDRV_NET_JOB_HTTP_CLOSE: {
             /* Never gated on @p replied: the upload's own record says whether
-             * somebody still waits (SJ_LIVE) and what a late end owes
-             * (SJ_STALE wipes the answer). */
-#if CONFIG_KODEOS_SHOT_HTTP
-            shot_on_job(me, (uint8_t)rc);
+             * somebody still waits (SJ_LIVE, a dump's asker) and what a
+             * late end owes (SJ_STALE, or a dump answered: no answer, and
+             * an erase on a 201). */
+#if CONFIG_KODEOS_CHANNEL && (CONFIG_KODEOS_SHOT_HTTP || CONFIG_KODEOS_DUMP_HTTP)
+            upload_on_job(me, (uint8_t)rc);
 #endif
             break;
         }
@@ -7118,6 +7590,7 @@ static void chan_state_answer(const Net * const me)
         cs->shot_left_s  = 0U;
         cs->keep_s       = 0U;
         cs->session      = (uint8_t)CHAN_SESSION_NONE;
+        cs->dumps        = false;
         QACTIVE_PUBLISH(&cs->super, &me->super);
     }
 #endif
@@ -7385,6 +7858,13 @@ static QState Net_root(Net * const me, QEvt const * const e)
             status = Q_HANDLED();
             break;
         }
+#if CONFIG_KODEOS_DUMP_HTTP
+        case NET_DUMP_REQ_SIG: {
+            dump_on_request(me, Q_EVT_CAST(NetDumpReqEvt));
+            status = Q_HANDLED();
+            break;
+        }
+#endif
 #if CONFIG_KODEOS_SHOT_HTTP
         case NET_SHOT_REQ_SIG: {
             shot_on_request(me, Q_EVT_CAST(NetShotReqEvt));
@@ -7651,6 +8131,11 @@ static bool net_work_refuse(Net * const me, QEvt const * const e)
 #if CONFIG_KODEOS_CHANNEL && CONFIG_KODEOS_SHOT_HTTP
         case NET_SHOT_REQ_SIG:
             shot_refuse(me, Q_EVT_CAST(NetShotReqEvt)->who, KSHOT_R_BUSY);
+            break;
+#endif
+#if CONFIG_KODEOS_CHANNEL && CONFIG_KODEOS_DUMP_HTTP
+        case NET_DUMP_REQ_SIG:
+            dump_reply(me, Q_EVT_CAST(NetDumpReqEvt)->who, KDUMP_R_BUSY, 0U);
             break;
 #endif
         default:

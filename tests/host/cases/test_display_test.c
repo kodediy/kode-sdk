@@ -251,7 +251,7 @@ static void row_request(void)
 static void button(kdrv_button_t id, bool pressed)
 {
     ButtonEvt e = { .super = QEVT_INITIALIZER(BUTTON_EVT_SIG),
-                    .id = 0U, .pressed = false };
+                    .id = 0U, .pressed = false, .remote = false };
 
     e.id      = (uint8_t)id;
     e.pressed = pressed;

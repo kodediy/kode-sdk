@@ -15,6 +15,40 @@ static int16_t s_buf[KTONE_WIN_N];
 static ktone_det_t     s_det;
 static ktone_measure_t s_m;
 
+/** @brief One second of a tone: a whole number of cycles at any whole frequency. */
+static int16_t s_sec[KTONE_RATE_HZ];
+
+/** @brief Cycles a count may miss at the ends of one second: 1 Hz. */
+#define TEST_CYCLE_SLACK 1U
+/** @brief LSB a sample may differ from the double-precision sine by. */
+#define TEST_SAMPLE_SLACK 1
+/** @brief What a refused fill must leave in place. */
+#define TEST_SENTINEL ((int16_t)0x5A5A)
+
+/** @brief Frequencies across the whole range, most of them no candidate. */
+static const uint16_t s_hz[] = { KTONE_HZ_MIN, 440U, 1000U, 1999U, KTONE_HZ_MAX };
+
+/**
+ * @brief Upward zero crossings in @p n samples: the cycles of a tone.
+ *
+ * @param x The samples.
+ * @param n How many.
+ * @return The count.
+ */
+static uint32_t cycles(const int16_t *x, size_t n)
+{
+    uint32_t up = 0U;
+
+    for ( size_t i = 1U; i < n; ++i )
+    {
+        if ( (x[i - 1U] < 0) && (x[i] >= 0) )
+        {
+            up++;
+        }
+    }
+    return up;
+}
+
 /**
  * @brief Fill the buffer with candidate @p i and measure a whole window.
  *
@@ -23,7 +57,10 @@ static ktone_measure_t s_m;
  */
 static void measure_tone(uint8_t i, int16_t amp)
 {
-    TEST_ASSERT_EQUAL_INT(KODE_OK, ktone_fill(i, 0U, amp, s_buf, KTONE_WIN_N));
+    for ( uint32_t n = 0U; KTONE_WIN_N > n; ++n )
+    {
+        s_buf[n] = ktone_sample(i, n, amp);
+    }
     ktone_reset(&s_det);
     ktone_feed(&s_det, s_buf, KTONE_WIN_N);
     TEST_ASSERT_EQUAL_INT(KODE_OK, ktone_result(&s_det, &s_m));
@@ -122,6 +159,77 @@ TEST_CASE("the generator's phase does not drift, however long it runs",
                                 KTONE_TONE_AMP_Q15));
         }
     }
+}
+
+TEST_CASE("a tone at any frequency of the range has that many cycles a second",
+          "[ktone]")
+{
+    for ( size_t h = 0U; (sizeof(s_hz) / sizeof(s_hz[0])) > h; ++h )
+    {
+        TEST_ASSERT_EQUAL_INT(KODE_OK, ktone_fill_hz(s_hz[h], 0U, (int16_t)KTONE_TONE_AMP_Q15,
+                                                     s_sec, KTONE_RATE_HZ));
+        TEST_ASSERT_UINT32_WITHIN_MESSAGE(TEST_CYCLE_SLACK, s_hz[h], cycles(s_sec, KTONE_RATE_HZ),
+                                          "the tone has the frequency asked for");
+    }
+}
+
+TEST_CASE("and each sample is the sine at that frequency and the peak asked for",
+          "[ktone]")
+{
+    for ( size_t h = 0U; (sizeof(s_hz) / sizeof(s_hz[0])) > h; ++h )
+    {
+        int16_t peak = 0;
+
+        TEST_ASSERT_EQUAL_INT(KODE_OK, ktone_fill_hz(s_hz[h], 0U, (int16_t)KTONE_TONE_AMP_Q15,
+                                                     s_sec, KTONE_RATE_HZ));
+        for ( size_t n = 0U; (size_t)KTONE_RATE_HZ > n; ++n )
+        {
+            double const ph = (2.0 * M_PI * (double)s_hz[h] * (double)n) / (double)KTONE_RATE_HZ;
+
+            TEST_ASSERT_INT_WITHIN(TEST_SAMPLE_SLACK,
+                                   (int32_t)lrint((double)KTONE_TONE_AMP_Q15 * sin(ph)), s_sec[n]);
+            if ( s_sec[n] > peak )
+            {
+                peak = s_sec[n];
+            }
+        }
+        TEST_ASSERT_INT_WITHIN(TEST_SAMPLE_SLACK, KTONE_TONE_AMP_Q15, peak);
+    }
+}
+
+TEST_CASE("a tone continued at its next frame joins with no step and repeats each second",
+          "[ktone]")
+{
+    static int16_t part[KTONE_RATE_HZ];
+    size_t const   cut = 7919U;
+
+    for ( size_t h = 0U; (sizeof(s_hz) / sizeof(s_hz[0])) > h; ++h )
+    {
+        TEST_ASSERT_EQUAL_INT(KODE_OK, ktone_fill_hz(s_hz[h], 0U, (int16_t)KTONE_TONE_AMP_Q15,
+                                                     s_sec, KTONE_RATE_HZ));
+        TEST_ASSERT_EQUAL_INT(KODE_OK, ktone_fill_hz(s_hz[h], 0U, (int16_t)KTONE_TONE_AMP_Q15,
+                                                     part, cut));
+        TEST_ASSERT_EQUAL_INT(KODE_OK, ktone_fill_hz(s_hz[h], (uint32_t)cut, (int16_t)KTONE_TONE_AMP_Q15,
+                                                     &part[cut], (size_t)KTONE_RATE_HZ - cut));
+        TEST_ASSERT_EQUAL_INT16_ARRAY(s_sec, part, KTONE_RATE_HZ);
+        TEST_ASSERT_EQUAL_INT(KODE_OK, ktone_fill_hz(s_hz[h], 1000U * KTONE_RATE_HZ,
+                                                     (int16_t)KTONE_TONE_AMP_Q15, part, KTONE_RATE_HZ));
+        TEST_ASSERT_EQUAL_INT16_ARRAY(s_sec, part, KTONE_RATE_HZ);
+    }
+}
+
+TEST_CASE("a tone outside the range, or with nowhere to go, is refused and writes nothing",
+          "[ktone]")
+{
+    int16_t one = TEST_SENTINEL;
+
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, ktone_fill_hz(KTONE_HZ_MIN - 1U, 0U, (int16_t)KTONE_TONE_AMP_Q15,
+                                                     &one, 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, ktone_fill_hz(KTONE_HZ_MAX + 1U, 0U, (int16_t)KTONE_TONE_AMP_Q15,
+                                                     &one, 1U));
+    TEST_ASSERT_EQUAL_INT16(TEST_SENTINEL, one);
+    TEST_ASSERT_EQUAL_INT(KODE_DENIED, ktone_fill_hz(KTONE_HZ_MIN, 0U, (int16_t)KTONE_TONE_AMP_Q15,
+                                                     NULL, 1U));
 }
 
 TEST_CASE("the row's own amplitude reads -12.0 dBFS", "[ktone]")

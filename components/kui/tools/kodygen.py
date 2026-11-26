@@ -86,7 +86,8 @@ HEADER = Path("kody") / "include" / "kui_kody_anims.h"
 SCENE = re.compile(r"^[a-z0-9_]{1,15}$")
 FILE_NAME_MAX = 40
 FACE_CANVAS = (410, 334)
-ROLE_CANVAS = {"empty": (410, 369), "writing": (410, 160), "goodbye": (410, 160), "loading": (264, 264)}
+ROLE_CANVAS = {"empty": (410, 369), "writing": (410, 160), "goodbye": (410, 160), "loading": (264, 264),
+               "fault": (410, 160)}
 TRIGGERS = ("look", "hour", "notice", "plug", "joke")
 
 # The keys the player never reads: an exporter's block, and the match name and the name of every

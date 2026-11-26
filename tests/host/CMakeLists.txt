@@ -28,10 +28,15 @@ idf_build_set_property(COMPILE_OPTIONS
 # CMock chains every mock's expectations from one pool, and only a Mock*_Init()
 # empties it. test_net_ao.c never calls one (runner.c says why), so its cases
 # and setUp()'s khal_gpio expectation pile up in the pool until the next file
-# that does: CMock's default 32 KB ran out there, and every case after it
-# failed with "CMock has run out of memory". Defined for the whole build, so
-# cmock.c and every generated mock agree on the size.
-idf_build_set_property(COMPILE_DEFINITIONS "CMOCK_MEM_SIZE=65536" APPEND)
+# that does. The pool holds them all at 128 KB; when it is too small, every
+# case after the overflow fails with "CMock has run out of memory". Defined
+# for the whole build, so cmock.c and every generated mock agree on the size.
+idf_build_set_property(COMPILE_DEFINITIONS "CMOCK_MEM_SIZE=131072" APPEND)
+# The fault report's option is kaos's Kconfig, not this project's. It decides
+# signals, event types and the channel's session layout, which every file of
+# one binary must agree on, so it is on for the whole build (the SDK's
+# default) rather than for AO_Net's sources alone.
+idf_build_set_property(COMPILE_DEFINITIONS "CONFIG_KODEOS_DUMP_HTTP=1" APPEND)
 # Unity's TEST_PASS() and the fakes' restart leave by longjmp. On macOS
 # longjmp restores the signal mask with sigprocmask(), which there rewrites
 # every thread's mask: the port's suspended task threads then take the tick

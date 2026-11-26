@@ -97,6 +97,21 @@ uint32_t console_rx_dropped(void)
 #define LOG_BYTE_MARGIN  8U   /**< Slots a console byte leaves free in AO_Log's queue. */
 #define LOG_LINE_MARGIN  16U  /**< Slots a log line leaves free in AO_Log's queue.     */
 
+/* Bytes past ASCII are UTF-8 to the line editor, taken inside a quoted value
+ * alone: the grammar has no other place for them. */
+#define LOG_UTF8_MIN        0x80U  /**< The first byte that is not ASCII.             */
+#define LOG_UTF8_CONT_MASK  0xC0U  /**< The bits that tell a continuation byte.       */
+#define LOG_UTF8_CONT       0x80U  /**< Those bits in a continuation byte.            */
+
+/** @brief Where the line editor stands in the grammar, as console_token() reads it. */
+typedef enum {
+    LOG_LQ_KEY,    /**< A token's key, or between tokens.       */
+    LOG_LQ_EQ,     /**< Right after a token's first `=`.        */
+    LOG_LQ_VALUE,  /**< A bare value, or past a closing quote.  */
+    LOG_LQ_QUOTE,  /**< Inside a quoted value.                  */
+    LOG_LQ_ESC     /**< Right after a `\\` inside a quoted value. */
+} log_lq_t;
+
 /* How much backlog counts as "wait". A quarter of the driver's ring: enough
  * that the drain always has work in hand, little enough that a slice does not
  * refill it the moment it clears. */
@@ -895,6 +910,77 @@ static QState Log_initial(Log * const me, void const * const par)
     return Q_TRAN(&Log_active);
 }
 
+/**
+ * @brief Whether the next byte of a line falls inside a quoted value.
+ *
+ * A value opens a quote right after its token's first `=` and nowhere else,
+ * and a `\` inside one takes the byte after it, as console_token() reads.
+ *
+ * @param line The line typed so far.
+ * @param len  Its bytes.
+ * @return true inside an open quote.
+ */
+static bool line_in_quote(const char *line, size_t len)
+{
+    log_lq_t st = LOG_LQ_KEY;
+
+    for ( size_t i = 0U; len > i; ++i )
+    {
+        char const ch = line[i];
+
+        switch ( st )
+        {
+            case LOG_LQ_KEY:
+                if ( '=' == ch )
+                {
+                    st = LOG_LQ_EQ;
+                }
+                break;
+            case LOG_LQ_EQ:
+                if ( '"' == ch )
+                {
+                    st = LOG_LQ_QUOTE;
+                }
+                else if ( ' ' == ch )
+                {
+                    st = LOG_LQ_KEY;
+                }
+                else
+                {
+                    st = LOG_LQ_VALUE;
+                }
+                break;
+            case LOG_LQ_QUOTE:
+                if ( '\\' == ch )
+                {
+                    st = LOG_LQ_ESC;
+                }
+                else if ( '"' == ch )
+                {
+                    st = LOG_LQ_VALUE;
+                }
+                else
+                {
+                    /* the quoted value goes on */
+                }
+                break;
+            case LOG_LQ_ESC:
+                st = LOG_LQ_QUOTE;
+                break;
+            case LOG_LQ_VALUE:
+                if ( ' ' == ch )
+                {
+                    st = LOG_LQ_KEY;
+                }
+                break;
+            default:
+                st = LOG_LQ_KEY;
+                break;
+        }
+    }
+    return (LOG_LQ_QUOTE == st) || (LOG_LQ_ESC == st);
+}
+
 /** Handle one input byte: echo, edit, and put finished lines on the bus. */
 static void handle_byte(Log * const me, uint8_t c)
 {
@@ -942,14 +1028,23 @@ static void handle_byte(Log * const me, uint8_t c)
     {   /* DEL / backspace */
         if ( 0U < me->len )
         {
-            --me->len;
+            /* One character: a UTF-8 one goes with its continuation bytes. */
+            size_t n = me->len - 1U;
+            while ( (0U < n)
+                    && (LOG_UTF8_CONT == ((uint8_t)me->line[n] & LOG_UTF8_CONT_MASK))
+                    && (LOG_UTF8_MIN <= (uint8_t)me->line[n - 1U]) )
+            {
+                --n;
+            }
+            me->len = n;
             khal_console_write("\b \b", 3);
         }
         /* Deleting brings the line back under the limit, so somebody who
          * overshot, backed up and retyped is not refused a line that fits. */
         me->overflow = false;
     }
-    else if ( (0x20U <= c) && (0x7fU > c) )
+    else if ( ((0x20U <= c) && (0x7fU > c))
+              || ((LOG_UTF8_MIN <= c) && line_in_quote(me->line, me->len)) )
     {
         if ( (sizeof(me->line) - 1U) > me->len )
         {
@@ -971,7 +1066,7 @@ static void handle_byte(Log * const me, uint8_t c)
     }
     else
     {
-        /* a control byte nobody asked about */
+        /* a control byte nobody asked about, or past ASCII outside a quote */
     }
 }
 

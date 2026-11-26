@@ -244,6 +244,19 @@ static bool confirm_self(int calls)
     return was;
 }
 
+/* ---- The core dump, as the partition would hold it -------------------------- */
+
+static kdrv_coredump_t s_dump;        /**< What kdrv_slot_coredump() finds.    */
+static unsigned        s_dump_reads;  /**< How many times it was asked.         */
+
+static kode_status_t dump_read(kdrv_coredump_t *out, int calls)
+{
+    (void)calls;
+    ++s_dump_reads;
+    *out = s_dump;
+    return KODE_OK;
+}
+
 /** @brief The word as a board that has never crashed left it. */
 static void crashes_none(void)
 {
@@ -291,6 +304,8 @@ static void boot_up(int reset_reason, bool rescued)
     kdrv_slot_newer_IgnoreAndReturn(s_other_newer);
     kdrv_running_info_StubWithCallback(&running_info);
     kdrv_reset_reason_IgnoreAndReturn(reset_reason);
+    s_dump_reads = 0U;
+    kdrv_slot_coredump_StubWithCallback(&dump_read);
     /* One answer for the whole boot: an ignore queued twice hands out the
      * first value once and only then the second. */
     kdrv_running_is_factory_IgnoreAndReturn(rescued || s_on_factory);
@@ -636,6 +651,9 @@ TEST_CASE("coming back from an app that panicked says panic", "[boot_ao]")
     TEST_ASSERT_EQUAL_INT(KBOOT_APP_END_PANIC, boot_app_end());
     TEST_ASSERT_EQUAL_UINT(1U, log_lines_with("how the user app ended: panic"));
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KBOOT_APP_END_PANIC, boot_info_app_end());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(KBOOT_OS_END_NONE, boot_os_end(),
+        "the app's panic is not kodeOS's");
+    TEST_ASSERT_EQUAL_UINT(0U, s_dump_reads);
 
     Mockkdrv_slot_Destroy();
 }
@@ -667,6 +685,145 @@ TEST_CASE("a cold boot publishes no app end", "[boot_ao]")
     TEST_ASSERT_EQUAL_UINT(0U, log_lines_with("how the user app ended"));
     TEST_ASSERT_EQUAL_UINT8((uint8_t)KBOOT_APP_END_NONE, boot_info_app_end());
 
+    Mockkdrv_slot_Destroy();
+}
+
+/* ---- How kodeOS ended before this boot -------------------------------------- */
+
+/** @brief A kboot_os_end_t value no class has. */
+#define OS_END_NO_CLASS     99
+
+TEST_CASE("a panic or a lockup with no app before is kodeOS crashing", "[boot_ao][os_end]")
+{
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_PANIC,
+                          boot_os_end_of((int)KDRV_RESET_PANIC, false));
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_PANIC,
+                          boot_os_end_of((int)KDRV_RESET_CPU_LOCKUP, false));
+}
+
+TEST_CASE("any watchdog with no app before is kodeOS hanging", "[boot_ao][os_end]")
+{
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_WATCHDOG,
+                          boot_os_end_of((int)KDRV_RESET_INT_WDT, false));
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_WATCHDOG,
+                          boot_os_end_of((int)KDRV_RESET_TASK_WDT, false));
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_WATCHDOG,
+                          boot_os_end_of((int)KDRV_RESET_WDT, false));
+}
+
+TEST_CASE("every other reset is no fault of kodeOS", "[boot_ao][os_end]")
+{
+    static const int others[] = {
+        (int)KDRV_RESET_POWERON,  (int)KDRV_RESET_EXTERNAL, (int)KDRV_RESET_SOFTWARE,
+        (int)KDRV_RESET_DEEPSLEEP, (int)KDRV_RESET_BROWNOUT, (int)KDRV_RESET_SDIO,
+        (int)KDRV_RESET_USB,      (int)KDRV_RESET_JTAG,     (int)KDRV_RESET_EFUSE,
+        (int)KDRV_RESET_PWR_GLITCH, (int)KDRV_RESET_UNKNOWN, RESET_BELOW_FIRST,
+        RESET_FAR_OUT,
+    };
+    char msg[RESET_MSG_MAX];
+
+    for ( size_t i = 0U; (sizeof(others) / sizeof(others[0])) > i; ++i )
+    {
+        (void)snprintf(msg, sizeof(msg), "no app before, reset reason %d", others[i]);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KBOOT_OS_END_NONE,
+                                      boot_os_end_of(others[i], false), msg);
+    }
+}
+
+TEST_CASE("a fault after an app is the app's", "[boot_ao][os_end]")
+{
+    char msg[RESET_MSG_MAX];
+
+    for ( int r = (int)KDRV_RESET_UNKNOWN; (int)KDRV_RESET_CPU_LOCKUP >= r; ++r )
+    {
+        (void)snprintf(msg, sizeof(msg), "after an app, reset reason %d", r);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(KBOOT_OS_END_NONE, boot_os_end_of(r, true), msg);
+    }
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_NONE, boot_os_end_of(RESET_BELOW_FIRST, true));
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_NONE, boot_os_end_of(RESET_FAR_OUT, true));
+}
+
+TEST_CASE("a dump explains a panic and the two task watchdogs", "[boot_ao][os_end]")
+{
+    TEST_ASSERT_TRUE(boot_dump_explains((int)KDRV_RESET_PANIC));
+    TEST_ASSERT_TRUE(boot_dump_explains((int)KDRV_RESET_INT_WDT));
+    TEST_ASSERT_TRUE(boot_dump_explains((int)KDRV_RESET_TASK_WDT));
+    TEST_ASSERT_FALSE(boot_dump_explains((int)KDRV_RESET_WDT));
+    TEST_ASSERT_FALSE(boot_dump_explains((int)KDRV_RESET_CPU_LOCKUP));
+    TEST_ASSERT_FALSE(boot_dump_explains((int)KDRV_RESET_POWERON));
+    TEST_ASSERT_FALSE(boot_dump_explains((int)KDRV_RESET_SOFTWARE));
+}
+
+TEST_CASE("the kodeOS end has a name for each class and a mark for none", "[boot_ao][os_end]")
+{
+    TEST_ASSERT_EQUAL_STRING("none",     boot_os_end_name(KBOOT_OS_END_NONE));
+    TEST_ASSERT_EQUAL_STRING("panic",    boot_os_end_name(KBOOT_OS_END_PANIC));
+    TEST_ASSERT_EQUAL_STRING("watchdog", boot_os_end_name(KBOOT_OS_END_WATCHDOG));
+    TEST_ASSERT_EQUAL_STRING("?", boot_os_end_name((kboot_os_end_t)OS_END_NO_CLASS));
+}
+
+/**
+ * @brief Boot after @p reason, no app before, with a dump waiting in flash.
+ *
+ * The dump is the partition's for this boot alone: it reads as none again once
+ * the initial transition is over. The case destroys the mock session.
+ *
+ * @param reason  What kdrv_reset_reason() answers.
+ * @param present The partition holds a dump.
+ * @param kodeos  Its ELF SHA-256 is that of a kodeOS image in flash.
+ */
+static void boot_with_dump(int reason, bool present, bool kodeos)
+{
+    Mockkdrv_slot_Init();
+    crashes_none();
+    fake_klog_reset();
+    (void)memset(&s_dump, 0, sizeof(s_dump));
+    s_dump.present = present;
+    s_dump.kodeos  = kodeos;
+    boot_up(reason, false);
+    (void)memset(&s_dump, 0, sizeof(s_dump));
+}
+
+TEST_CASE("a fault that left a kodeOS dump says so", "[boot_ao][os_end]")
+{
+    boot_with_dump((int)KDRV_RESET_PANIC, true, true);
+
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_PANIC, boot_os_end());
+    TEST_ASSERT_TRUE(boot_os_dump());
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump_reads);
+    TEST_ASSERT_EQUAL_UINT(1U, log_lines_with("how kodeOS ended before this boot: panic"));
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("a fault with a dump of no kodeOS image has none to send", "[boot_ao][os_end]")
+{
+    boot_with_dump((int)KDRV_RESET_PANIC, true, false);
+
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_PANIC, boot_os_end());
+    TEST_ASSERT_FALSE(boot_os_dump());
+    TEST_ASSERT_EQUAL_UINT(1U, s_dump_reads);
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("a watchdog that writes no dump has none to send", "[boot_ao][os_end]")
+{
+    boot_with_dump((int)KDRV_RESET_WDT, true, true);
+
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_WATCHDOG, boot_os_end());
+    TEST_ASSERT_FALSE(boot_os_dump());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_dump_reads, "the partition is not read");
+    TEST_ASSERT_EQUAL_UINT(1U, log_lines_with("how kodeOS ended before this boot: watchdog"));
+    Mockkdrv_slot_Destroy();
+}
+
+TEST_CASE("a boot that is no fault reads no dump", "[boot_ao][os_end]")
+{
+    boot_with_dump((int)KDRV_RESET_POWERON, true, true);
+
+    TEST_ASSERT_EQUAL_INT(KBOOT_OS_END_NONE, boot_os_end());
+    TEST_ASSERT_FALSE(boot_os_dump());
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_dump_reads, "the partition is not read");
+    TEST_ASSERT_EQUAL_UINT(0U, log_lines_with("how kodeOS ended"));
     Mockkdrv_slot_Destroy();
 }
 

@@ -327,6 +327,28 @@ TEST_CASE("the controller is not touched until the panel says it is up, and a "
     mock_down();
 }
 
+/* AO_Touch starts before AO_Display and subscribes in its initial transition,
+ * through AO_Display's door: the state AO_Display publishes once its own start
+ * has brought the panel up reaches AO_Touch's queue, with no ask of its own. */
+TEST_CASE("the panel's state published after AO_Touch's start reaches it", "[touch_ao]")
+{
+    static DisplayStateEvt s_state;
+
+    touch_up_once();
+    (void)memset(&s_state, 0, sizeof(s_state));
+    s_state.super = (QEvt)QEVT_INITIALIZER(DISPLAY_STATE_SIG);
+    s_state.up    = false;
+    QACTIVE_PUBLISH(&s_state.super, NULL);
+
+    TEST_ASSERT_FALSE_MESSAGE(logged("no panel"), "heard before it was served");
+    serve();
+    TEST_ASSERT_TRUE_MESSAGE(logged("no panel"), "the published state never reached AO_Touch");
+    TEST_ASSERT_EQUAL_UINT(0U, s_reads);
+
+    ao_spy_drain();
+    mock_down();
+}
+
 /* ---- A controller that does not answer at the bring-up -------------------- */
 
 /* These cases run before any other brings the controller up, in this order:
@@ -509,6 +531,43 @@ TEST_CASE("test_old_tcal_blob_is_ignored", "[touch_ao]")
     TEST_ASSERT_EQUAL_INT16(100, e->x);
     TEST_ASSERT_EQUAL_INT16(100, e->y);
     sample(false, 100, 100);
+    ao_spy_drain();
+    mock_down();
+}
+
+/**
+ * @brief Hand the small pool back a TouchEvt block that says remote.
+ *
+ * The pool gives the last block back first, so the next sample taken is
+ * this one: unless AO_Touch writes the field, it still says true.
+ */
+static void pool_dirty_touch(void)
+{
+    TouchEvt * const e = Q_NEW_X(TouchEvt, 0U, TOUCH_EVT_SIG);
+
+    TEST_ASSERT_NOT_NULL(e);
+    e->remote = true;
+    QF_gc(&e->super);
+}
+
+TEST_CASE("a finger on the glass is not remote, nor its lift", "[touch_ao]")
+{
+    touch_sampling();
+
+    pool_dirty_touch();
+    sample(true, 100, 100);
+    const TouchEvt *e = published();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_TRUE(e->pressed);
+    TEST_ASSERT_FALSE_MESSAGE(e->remote, "a finger's press says remote");
+    ao_spy_drain();
+
+    pool_dirty_touch();
+    sample(false, 100, 100);
+    e = published();
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_FALSE(e->pressed);
+    TEST_ASSERT_FALSE_MESSAGE(e->remote, "a finger's lift says remote");
     ao_spy_drain();
     mock_down();
 }

@@ -25,6 +25,7 @@ TEST_CASE("kode_sys_touch_subscribe() makes its AO hear AO_Touch's reports",
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_sys_touch_subscribe(spy));
     touch.super   = (QEvt)QEVT_INITIALIZER(TOUCH_EVT_SIG);
     touch.pressed = true;
+    touch.remote  = false;
     QACTIVE_PUBLISH(&touch.super, NULL);
 
     TEST_ASSERT_EQUAL_UINT(1U, ao_spy_count());

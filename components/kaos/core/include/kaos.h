@@ -9,7 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER */
+#include "sdkconfig.h" /* CONFIG_KODE_LOWPOWER, CONFIG_KODEOS_DUMP_HTTP */
 #include "kqp.h"
 #include "khal_sync.h"
 #include "kode_log.h"
@@ -1449,6 +1449,18 @@ void kaos_display_register(void);
  */
 void display_state_request(void);
 
+/**
+ * @brief Subscribe @p who to DISPLAY_STATE_SIG, AO_Display's report of the panel.
+ *
+ * A bare subscription names nobody: this call is what links AO_Display into
+ * an app whose AO needs the panel up, so that kode_init() starts it and its
+ * bring-up publishes the state. It posts nothing, so an initial transition
+ * that runs before AO_Display's start may call it.
+ *
+ * @param who The listening Active Object.
+ */
+void display_state_subscribe(QActive const *who);
+
 #if CONFIG_KODE_LOWPOWER
 /**
  * @brief Ask AO_Display to light the glass for the minute's glyphs, then let it
@@ -1953,17 +1965,19 @@ uint32_t buttons_presses(uint8_t id);
 /**
  * @brief Publish one button change as though AO_Buttons had confirmed it.
  *
- * The console's `btn`: indistinguishable downstream, and buttons_down() follows it.
- * Stamped with the call's time; safe from any task. It starts no hold clock and
- * feeds no double-press detector: a script publishes hold or double itself
- * (`btn ... state=hold|double`).
+ * The console's `btn`: downstream it reads as a thumb's, but for ButtonEvt's
+ * `remote`, and buttons_down() follows it. Stamped with the call's time; safe
+ * from any task. It starts no hold clock and feeds no double-press detector: a
+ * script publishes hold or double itself (`btn ... state=hold|double`).
  *
  * @param id      A kdrv_button_t.
  * @param pressed The new state.
+ * @param remote  What the event's `remote` says: true when a console line
+ *                from the Kode channel or a scheduled entry asked for it.
  * @return false for an id out of range or a dry event pool (nothing
  *         published, nothing recorded); true once published.
  */
-bool buttons_inject(uint8_t id, bool pressed);
+bool buttons_inject(uint8_t id, bool pressed, bool remote);
 
 /**
  * @brief Turn the pad with the glass, by @p quarter_turns.
@@ -2357,12 +2371,16 @@ bool wifi_frames_request(QActive *who, bool on, uint8_t channel);
  */
 bool ble_heard_request(QActive *who, bool on);
 
+#define KODE_WIFI_PASS_MIN  8U  /**< Bytes of a Wi-Fi password that is not empty, at least (WPA2 passphrase). */
+
 /**
  * @brief Ask AO_Radio to join @p ssid.
  *
  * Answered with WIFI_STATE_SIG: got-ip, or the refusal. Passwords live in the C5's
  * vault: a saved network asked with an empty @p pass is joined without a password
  * crossing the link; otherwise @p pass is sent once and kept if @p remember.
+ * The join carries no generation (KQP_SCAN_GEN_NONE); wifi_join_request_gen()
+ * gives it one.
  *
  * @param ssid     The network to join.
  * @param pass     Its password; empty for a saved network or an open one.
@@ -2372,6 +2390,30 @@ bool ble_heard_request(QActive *who, bool on);
  *         and then nothing answers.
  */
 bool wifi_join_request(const char *ssid, const char *pass, bool remember);
+
+/**
+ * @brief Ask AO_Radio to join @p ssid, as wifi_join_request(), with a
+ *        generation that tells its answer from every other state.
+ *
+ * Exactly one WIFI_STATE_SIG carries the generation in WifiStateEvt.join_gen:
+ * the one that ends this join. That is its outcome, the refusal, or, with
+ * WifiStateEvt.join_dropped, the news that it never ran (a newer join or the
+ * automatic round took its place, or Wi-Fi switched off, a leave or the
+ * link's end dropped it while it waited). Every state published for another
+ * reason carries KQP_SCAN_GEN_NONE. The generation comes from the count
+ * wifi_scan_request() takes its own from.
+ *
+ * @param ssid     The network to join.
+ * @param pass     Its password; empty for a saved network or an open one.
+ * @param remember Save the network in the vault once it has worked.
+ * @param gen      Out: this request's generation; NULL for none, and then the
+ *                 join carries KQP_SCAN_GEN_NONE, as wifi_join_request()'s.
+ * @return true when the request was posted; false when the event pool was
+ *         dry or AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full,
+ *         and then nothing answers.
+ */
+bool wifi_join_request_gen(const char *ssid, const char *pass, bool remember,
+                           uint8_t *gen);
 
 /**
  * @brief The event wifi_join_request() posts, built for a caller that posts it itself.
@@ -2385,12 +2427,22 @@ QEvt const *wifi_join_evt(const char *ssid, const char *pass, bool remember);
 /**
  * @brief Leave the network. The credentials stay remembered.
  *
- * wifi_forget_request() forgets them.
+ * wifi_forget_request() forgets them. A leave that comes while a join runs or
+ * waits, during the round over the remembered networks or while the link is
+ * down is kept and made as soon as AO_Radio can; from then on nothing joins a
+ * network by itself until somebody asks for one.
  *
  * @return true when the request was posted; false when AO_Radio's queue is
  *         within KQP_RADIO_POST_MARGIN of full, and then nothing answers.
  */
 bool wifi_leave_request(void);
+
+/**
+ * @brief Whether a leave is made and nobody has asked for a network since,
+ *        as AO_Radio last wrote it. Never waits; false before the first leave.
+ * @return true when the board stays off Wi-Fi networks until somebody asks.
+ */
+bool wifi_leave_done(void);
 
 /**
  * @brief The event wifi_leave_request() posts, for a caller that posts it itself.
@@ -2489,6 +2541,13 @@ bool wifi_list_request(void);
 
 /**
  * @brief Ask AO_Radio to forget @p ssid. Does not disconnect.
+ *
+ * Answered with one published WIFI_FORGET_SIG once the forget has ended: the
+ * C5's vault forgot the network or refused it, no answer came, or the link
+ * went. A vault busy with another request, or no link, is answered at once
+ * and forgets nothing. A forget the vault answered is followed by the saved
+ * networks read again.
+ *
  * @param ssid The network.
  * @return true when the request was posted; false when the pool is dry or
  *         AO_Radio's queue is within KQP_RADIO_POST_MARGIN of full - nothing
@@ -3417,6 +3476,64 @@ void net_shot_request(QActive *who, const char *token, uint8_t fps,
  * @param who The AO the answer goes to.
  */
 void net_shot_stop_request(QActive *who);
+
+#if CONFIG_KODEOS_DUMP_HTTP
+/* ---- Fault reports, over the Kode channel's session ----------------------
+ * The connect answer may name an HTTPS prefix, `dumps`. AO_Net PUTs the core
+ * dump of a kodeOS fault to `dumps` + kdump_name() with the channel's JWT and
+ * erases it once the service has stored it (CONFIG_KODEOS_DUMP_HTTP).
+ */
+#define KDUMP_CRC_HEX   8U   /**< Hex digits of the image's CRC32 in a dump's name. */
+
+/** @brief Characters of a dump's name, without its terminator: the SHA, a
+ *         dash, the CRC. */
+#define KDUMP_NAME_MAX  (KDRV_COREDUMP_SHA_HEX + 1U + KDUMP_CRC_HEX)
+
+/** @brief How a fault report ended (NetDumpRspEvt.result). */
+typedef enum {
+    KDUMP_R_OK = 0,      /**< The service took it (201); the dump is erased. */
+    KDUMP_R_REFUSED,     /**< Any other answer; `http` says which. The dump
+                          *   stays.                                         */
+    KDUMP_R_NO_ANSWER,   /**< TLS, socket or timeout. The dump stays.        */
+    KDUMP_R_BUSY,        /**< The worker or another upload holds the network,
+                          *   or there is no memory for the dump.            */
+    KDUMP_R_CHANNEL,     /**< The channel is down or names no `dumps` link.  */
+    KDUMP_R_NONE         /**< No dump of a kodeOS image is in flash, or it
+                          *   cannot be read.                                */
+} kdump_result_t;
+
+/**
+ * @brief The name a core dump is uploaded under: `<sha>-<crc>`.
+ *
+ * @param out Receives the name and a terminator.
+ * @param cap Bytes @p out holds; KDUMP_NAME_MAX + 1 fits any dump.
+ * @param sha The image's SHA prefix: 1 to KDRV_COREDUMP_SHA_HEX characters of
+ *            `[0-9a-f]`.
+ * @param crc The dump's CRC32, written as eight lowercase hex digits.
+ * @return true when @p out holds the name; false for a NULL or empty @p sha,
+ *         a byte outside `[0-9a-f]`, or too little room.
+ */
+bool kdump_name(char *out, size_t cap, const char *sha, uint32_t crc);
+
+/**
+ * @brief Ask AO_Net to send the core dump of a kodeOS fault to the Kode
+ *        channel's `dumps` link.
+ *
+ * A 201 erases the dump, also one that comes after AO_Net's guard answered;
+ * anything else leaves it in flash. Never asserts, neither the request nor
+ * its answer.
+ *
+ * @param who The AO the answer goes to.
+ * @return true when the request is in AO_Net's queue: one NET_DUMP_RSP_SIG
+ *         (NetDumpRspEvt) normally comes to @p who. An answer that finds no
+ *         event block or no slot in @p who's queue is lost with a WARN, so
+ *         the asker keeps a guard of its own on the wait. false when nothing
+ *         was asked and no answer will come: @p who is NULL, the event pool
+ *         has no block, or AO_Net's queue is within KQP_NET_CMD_MARGIN of
+ *         full.
+ */
+bool net_dump_request(QActive *who);
+#endif /* CONFIG_KODEOS_DUMP_HTTP */
 
 /* ---- AO_Storage: owner of the microSD and the internal FAT --------------
  * The only code in kodeOS that opens a file. Listing is published on the bus
@@ -4723,6 +4840,40 @@ typedef enum {
 kboot_app_end_t boot_app_end(void);
 
 /**
+ * @brief How the kodeOS that ran before this boot ended, whichever slot it ran
+ *        from.
+ *
+ * From the chip's reset reason, and only when no app ran in between: a fault
+ * after an app is the app's (kboot_app_end_t).
+ */
+typedef enum {
+    KBOOT_OS_END_NONE = 0,   /**< No fault of kodeOS's own before this boot.    */
+    KBOOT_OS_END_PANIC,      /**< A panic or a CPU lockup.                      */
+    KBOOT_OS_END_WATCHDOG    /**< Any watchdog.                                 */
+} kboot_os_end_t;
+
+/**
+ * @brief How kodeOS ended before this boot, as AO_Boot worked it out on the
+ *        way up.
+ *
+ * @return KBOOT_OS_END_NONE when no fault of kodeOS's own came before this
+ *         boot; always KBOOT_OS_END_NONE in the app role.
+ */
+kboot_os_end_t boot_os_end(void);
+
+/**
+ * @brief Whether the fault before this boot left a core dump of a kodeOS image.
+ *
+ * Read once, on the way up, and only when boot_os_end() is a fault whose reset
+ * boot_dump_explains(): the coredump partition then holds a dump whose ELF
+ * SHA-256 is that of a kodeOS image in flash (kdrv_coredump_t.kodeos).
+ *
+ * @return true when that dump is waiting; false on every other boot, and
+ *         always in the app role.
+ */
+bool boot_os_dump(void);
+
+/**
  * @brief What boot_app_offset() answers when no app ran before this boot.
  *
  * No image sits here: every one starts on a KAPPS_ALIGN page of the apps
@@ -4758,9 +4909,35 @@ uint32_t boot_app_offset(void);
 kboot_app_end_t boot_app_end_of(kboot_reason_t r, int reason);
 
 /**
+ * @brief Classify how kodeOS ended before this boot from the chip's reset reason.
+ *
+ * Pure, so a table test holds the whole mapping. An unknown reason reads as
+ * NONE: a false fault would blame a healthy kodeOS.
+ *
+ * @param reason    What the chip says reset it: a KDRV_RESET_ value (kdrv_slot.h),
+ *                  or any other number.
+ * @param after_app An app ran before this boot, so the reason is the app's.
+ * @return KBOOT_OS_END_NONE when @p after_app; otherwise PANIC (panic, CPU
+ *         lockup), WATCHDOG (any watchdog) or NONE for every other reason.
+ */
+kboot_os_end_t boot_os_end_of(int reason, bool after_app);
+
+/**
+ * @brief Whether a core dump can explain a reset of this reason.
+ *
+ * Pure. The panic handler writes the dump on a panic and on the interrupt and
+ * task watchdogs; any other reset leaves the partition as it was.
+ *
+ * @param reason What the chip says reset it: a KDRV_RESET_ value, or any other number.
+ * @return true for KDRV_RESET_PANIC, KDRV_RESET_INT_WDT and KDRV_RESET_TASK_WDT;
+ *         false otherwise.
+ */
+bool boot_dump_explains(int reason);
+
+/**
  * @brief The crashes in a row of the running kodeOS slot, this boot counted.
  *
- * Pure, with boot_app_end_of()'s classes: a panic or watchdog adds one, up to
+ * Pure, with boot_os_end_of()'s classes: a panic or watchdog adds one, up to
  * KODE_BOOT_CRASHES_MAX; a brownout or glitch changes nothing; anything else resets
  * the count to none.
  *
@@ -4798,6 +4975,15 @@ void boot_system_up(void);
  *         that is none of them. Never NULL.
  */
 const char *boot_app_end_name(kboot_app_end_t e);
+
+/**
+ * @brief The word for how kodeOS ended, as the log prints it.
+ *
+ * @param e The class.
+ * @return "none", "panic" or "watchdog"; "?" for a value that is none of them.
+ *         Never NULL.
+ */
+const char *boot_os_end_name(kboot_os_end_t e);
 
 /** @brief Ask AO_Boot to switch kodeOS to its other OTA slot. The board resets. */
 void boot_os_switch_request(void);

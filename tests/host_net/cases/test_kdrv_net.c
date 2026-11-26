@@ -787,10 +787,12 @@ TEST_CASE("the host of a URL is cut before its path", "[kdrv_net]")
 
 TEST_CASE("put_prepare refuses what it cannot carry", "[kdrv_net]")
 {
+    static uint8_t whole[KDRV_NET_PUT_MAX];   /* a core dump at its largest */
     char     longurl[KDRV_NET_PUT_URL_MAX + 2U];
     uint8_t  b = 0x55U;
 
     TEST_ASSERT_EQUAL_UINT(260U, KDRV_NET_PUT_URL_MAX);
+    TEST_ASSERT_EQUAL_UINT(128U * 1024U, KDRV_NET_PUT_MAX);
 
     (void)memset(longurl, 'a', sizeof(longurl));
     (void)memcpy(longurl, "https://", 8U);
@@ -825,6 +827,11 @@ TEST_CASE("put_prepare refuses what it cannot carry", "[kdrv_net]")
         kdrv_net_http_put_prepare(longurl, &b, 1U, PUT_TYPE, PUT_BEARER));
     TEST_ASSERT_EQUAL_INT(KODE_OK,
         kdrv_net_http_put_prepare(PUT_URL, &b, 1U, PUT_TYPE, PUT_BEARER));
+
+    /* KDRV_NET_PUT_MAX bytes exactly: the largest body is carried whole. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_put_prepare(PUT_URL, whole, KDRV_NET_PUT_MAX, PUT_TYPE,
+                                  PUT_BEARER));
 }
 
 TEST_CASE("the bearer is wiped by the job, so a PUT with none is refused",
@@ -1259,6 +1266,96 @@ TEST_CASE("no copy of the link stays in PSRAM after a PUT that keeps nothing",
 
     Mockesp_http_client_Verify();
     Mockesp_http_client_Destroy();
+}
+
+/** @brief Whether the body this file PUTs is anywhere in kdrv_net's PUT block. */
+static bool put_block_holds_body(void)
+{
+    size_t                     size = 0U;
+    const unsigned char *const blk  = psram_stub_block(KDRV_NET_PUT_MAX, &size);
+    bool                       held = false;
+
+    TEST_ASSERT_NOT_NULL(blk);
+    for ( size_t i = 0U; ((i + PUT_BODY_LEN) <= size) && !held; ++i )
+    {
+        held = (memcmp(&blk[i], s_put_body, PUT_BODY_LEN) == 0);
+    }
+    return held;
+}
+
+/* The body can be a core dump: nothing of it waits in PSRAM once its PUT is
+ * over, whatever the PUT came to, nor once a PUT prepared and never run is
+ * forgotten. */
+TEST_CASE("no copy of the body stays in PSRAM after a PUT, whatever it came to",
+          "[kdrv_net]")
+{
+    esp_http_client_handle_t const h = (esp_http_client_handle_t)&s_put_token;
+    bool after_stored;
+    bool after_refused;
+    bool after_failed;
+    bool after_unsent;
+    bool prepared;
+    bool after_forget;
+
+    for ( size_t i = 0U; PUT_BODY_LEN > i; ++i )
+    {
+        s_put_body[i] = (uint8_t)((i * 7U) + 3U);   /* nothing else in the block looks so */
+    }
+    (void)memset(&s_init_seen, 0, sizeof(s_init_seen));
+    s_init_seen.hand_out = h;
+    exchange_mock_init();
+    esp_http_client_init_Stub(put_init_stub);
+    esp_http_client_write_Stub(put_write_checked);
+
+    /* Stored. */
+    put_expect_headers(h);
+    esp_http_client_open_ExpectAndReturn(h, (int)PUT_BODY_LEN, ESP_OK);
+    put_expect_answer(h, 201);
+    esp_http_client_close_ExpectAndReturn(h, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(h, ESP_OK);
+    put_run(PUT_URL, false);
+    after_stored = put_block_holds_body();
+
+    /* Refused. */
+    put_expect_headers(h);
+    esp_http_client_open_ExpectAndReturn(h, (int)PUT_BODY_LEN, ESP_OK);
+    put_expect_answer(h, 403);
+    esp_http_client_close_ExpectAndReturn(h, ESP_OK);
+    esp_http_client_cleanup_ExpectAndReturn(h, ESP_OK);
+    put_run(PUT_URL, false);
+    after_refused = put_block_holds_body();
+
+    /* Failed. */
+    put_expect_headers(h);
+    esp_http_client_open_ExpectAndReturn(h, (int)PUT_BODY_LEN, ESP_FAIL);
+    esp_http_client_get_and_clear_last_tls_error_ExpectAnyArgsAndReturn(TLS_LAST_ERROR);
+    esp_http_client_cleanup_ExpectAndReturn(h, ESP_OK);
+    put_run(PUT_URL, true);
+    after_failed = put_block_holds_body();
+
+    /* Never sent: the HTTP client's log could not be held quiet. */
+    log_stub_refuse_holds(true);
+    put_run(PUT_URL, false);
+    log_stub_refuse_holds(false);
+    after_unsent = put_block_holds_body();
+
+    /* Prepared, its job never run, then forgotten. */
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_net_http_put_prepare(PUT_URL, s_put_body, PUT_BODY_LEN, PUT_TYPE,
+                                  PUT_BEARER));
+    prepared = put_block_holds_body();
+    kdrv_net_http_forget();
+    after_forget = put_block_holds_body();
+
+    Mockesp_http_client_Verify();
+    Mockesp_http_client_Destroy();
+
+    TEST_ASSERT_FALSE_MESSAGE(after_stored, "a stored PUT left its body in PSRAM");
+    TEST_ASSERT_FALSE_MESSAGE(after_refused, "a refused PUT left its body in PSRAM");
+    TEST_ASSERT_FALSE_MESSAGE(after_failed, "a failed PUT left its body in PSRAM");
+    TEST_ASSERT_FALSE_MESSAGE(after_unsent, "a PUT never sent left its body in PSRAM");
+    TEST_ASSERT_TRUE_MESSAGE(prepared, "the search cannot see the body at all");
+    TEST_ASSERT_FALSE_MESSAGE(after_forget, "a forgotten PUT left its body in PSRAM");
 }
 
 TEST_CASE("a kept PUT keeps the link only with its handle, until the close",

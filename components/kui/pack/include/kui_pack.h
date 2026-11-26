@@ -34,8 +34,8 @@ extern "C" {
 #define KUI_PACK_REACT_MAX      128U              /**< Reactions of every scene together, at most. */
 #define KUI_PACK_EMPTY_W        410U              /**< The empty launcher's canvas width, px. */
 #define KUI_PACK_EMPTY_H        369U              /**< The empty launcher's canvas height, px. */
-#define KUI_PACK_CARD_W         410U              /**< The Opening card's canvas width, px. */
-#define KUI_PACK_CARD_H         160U              /**< The Opening card's canvas height, px. */
+#define KUI_PACK_CARD_W         410U              /**< A card's band width, px. */
+#define KUI_PACK_CARD_H         160U              /**< A card's band height, px. */
 #define KUI_PACK_LOADING_SIDE   264U              /**< The loading screen's square canvas, px. */
 #define KUI_PACK_HOUR_LAST      23U               /**< The last hour a window may start at. */
 #define KUI_PACK_HOUR_END       24U               /**< The hour the last window may end at. */
@@ -66,6 +66,7 @@ typedef enum {
     KUI_PACK_ROLE_WRITING,    /**< Named by the format, played by no screen: 410 x 160. */
     KUI_PACK_ROLE_GOODBYE,    /**< Named by the format, played by no screen: 410 x 160. */
     KUI_PACK_ROLE_LOADING,    /**< The loading screen: 264 x 264. */
+    KUI_PACK_ROLE_FAULT,      /**< The fault notice's band: 410 x 160. */
     KUI_PACK_ROLE_COUNT
 } kui_pack_role_t;
 

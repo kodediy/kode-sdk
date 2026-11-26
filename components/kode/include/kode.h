@@ -200,6 +200,10 @@ kode_buttons_t kode_button_read_all(void);
  * its length in bytes.
  * Also battery_low: the value is the level, in percent, as it fell below
  * KODE_BATTERY_LOW_PCT.
+ * Also pin_power_5v_cut: the board stopped the 5 V kode_pin_power_5v() put on
+ * J3. The source says why: "cell" (the cell under 3.3 V), "fault" (the boost's
+ * fault) or "off" (the board switching off); the value is the cell's voltage
+ * in mV, 0 when unread. Never sent for the app's own kode_pin_power_5v(false).
  * ir_received: source "NEC", value the command, text the address "0x0004"; "unknown" for any other frame.
  * A listener or a waiter for it arms the receiver, once the C5 link is up.
  * nfc_tag: source the card, text the UID; also on the app's own NFC reads, with or without kode_nfc_scan_start().
@@ -441,11 +445,14 @@ bool kode_led_toggle(void);
  * "flash/data/a.csv". Any case for the volume; no leading "/", no empty, "."
  * or ".." part, no name FAT does not take (a control character or one of
  * " * : < > ? | \ in it, or only dots and spaces). A bad path fails at once
- * and kode_error() names it. A file call waits for another task's file call
- * to finish.
+ * and kode_error() names it. Names are UTF-8, in a path and in a listing,
+ * and a path that is not well-formed UTF-8 is a bad path; a computer reads
+ * the same names off the card. A file call waits for another task's file
+ * call to finish.
  */
 
 #define KODE_FILE_PATH_MAX 91U      /**< Bytes of a path, NUL included. */
+#define KODE_FILE_WRITE_PATH_MAX 87U /**< Bytes of a path a whole-file write takes, NUL included: room for ".tmp". */
 #define KODE_FILE_NAME_MAX 96U      /**< Bytes of one name in a listing, NUL included. */
 #define KODE_FILE_LIST_MAX 24U      /**< Entries one listing carries. */
 #define KODE_FILE_READ_MAX 4194304U /**< Largest file a read returns: 4 MiB. */
@@ -460,9 +467,11 @@ typedef struct {
 
 /** @brief One entry of a listing. */
 typedef struct {
-    char     name[KODE_FILE_NAME_MAX];  /**< Its name, without the folder. */
+    char     name[KODE_FILE_NAME_MAX];  /**< Its name, without the folder; cut when name_cut is set. */
     bool     is_folder;                 /**< A folder rather than a file. */
     uint32_t size;                      /**< Bytes of a file; 0 for a folder. */
+    bool     name_cut;                  /**< The name is longer than name holds and is cut at a whole
+                                         *   UTF-8 character: no call opens the entry by it. */
 } kode_file_entry_t;
 
 /** @brief What a listing carries. */
@@ -523,7 +532,15 @@ bool kode_file_read_at(const char *path, uint32_t offset, void *buf, uint32_t ca
  * @brief Create a file with @p text, or replace what it held.
  *
  * Blocks. "" empties the file. The folder must already exist. The text goes
- * in parts: a failure after the first leaves the file cut, not as it was.
+ * to a copy beside the file, its name with ".tmp" added, which takes the
+ * file's place once all of it is written. A failure leaves the file as it
+ * was and removes the copy, but for one case: the copy cannot take the name
+ * and no file is left on it, the old one included. Then the copy stays, any
+ * old file is its name with ".bak" added, and kode_error() says so. The
+ * volume holds the old file and the copy together until then, so it
+ * needs room for both. A path takes at most KODE_FILE_WRITE_PATH_MAX bytes. A
+ * reset during the write can leave the copy, or the old file as ".bak" and
+ * nothing on the name. The next write of the path that succeeds removes both.
  *
  * @param path "sd/..." or "flash/...".
  * @param text The text to write.
@@ -535,7 +552,8 @@ bool kode_file_write(const char *path, const char *text);
 /**
  * @brief Add @p text at the end of a file, creating it if it is not there.
  *
- * Blocks.
+ * Blocks. The text goes onto the file itself, in parts: a failure after the
+ * first leaves what the parts before it added.
  *
  * @param path "sd/..." or "flash/...".
  * @param text The text to add.
@@ -547,10 +565,12 @@ bool kode_file_append(const char *path, const char *text);
  * @brief Create a file with @p len bytes, or replace what it held.
  *
  * Blocks. A 0 inside @p data is written like any byte. The folder must
- * already exist. @p len is any size the volume can hold; the bytes go in
- * parts, so a failure after the first leaves the file cut, not as it was. A
- * @p len of 0 with a @p data that is not NULL empties the file. An Active
- * Object writes with kode_sys_file_write().
+ * already exist. @p len is any size the volume can hold beside the file it
+ * replaces: as kode_file_write(), the bytes go to a copy that takes the
+ * file's place once all of them are written, and a failure leaves what
+ * kode_file_write()'s leaves. A @p len of 0 with a @p data that is not NULL
+ * empties the file.
+ * An Active Object writes with kode_sys_file_write(), which writes in place.
  *
  * @param path "sd/..." or "flash/...".
  * @param data The bytes. NULL is refused, whatever @p len is.
@@ -615,6 +635,8 @@ bool kode_file_exists(const char *path);
  * @brief List one folder: its own entries, one level.
  *
  * Blocks. KODE_FILE_LIST_MAX entries at most; `more` says there were others.
+ * A name longer than KODE_FILE_NAME_MAX holds is listed cut, with `name_cut`
+ * set; such an entry cannot be opened by that name.
  *
  * @param folder "sd", "flash" or "sd/...", "flash/..." naming a folder.
  * @return The listing, valid until this task's next kode_file_list() or
@@ -691,6 +713,7 @@ bool kode_file_move(const char *from, const char *to);
 /* ---- IMU and magnetometer ---- */
 
 /* Axes are the parts' own: QMI8658A for accel and gyro, QMC5883P for the field.
+ * The QMI8658A's x points to the glass's left and its y to the glass's bottom.
  * A failed read answers NAN and kode_error() says why. All four block: a read
  * takes its turn behind other tasks' reads, keeps trying for KODE_MOTION_BUSY_MS,
  * and its last try can take 600 ms more. */
@@ -970,7 +993,7 @@ bool kode_audio_stream_close(void);
  * a loop each play in full. Refused at once while a sound plays in the
  * background or a recording runs.
  *
- * @param hz KODE_AUDIO_TONE_HZ_MIN to KODE_AUDIO_TONE_HZ_MAX; the board snaps it to a nearby frequency.
+ * @param hz KODE_AUDIO_TONE_HZ_MIN to KODE_AUDIO_TONE_HZ_MAX; the tone plays at this frequency.
  * @param ms 1 to KODE_AUDIO_TONE_MAX_MS.
  * @return true when it was heard or kode_audio_play_stop() ended it; false with kode_error() saying why.
  */
@@ -1057,9 +1080,10 @@ bool kode_audio_record_stop(void);
  * @brief Write the recording to a WAV file.
  *
  * Blocks. The recording stays in PSRAM until the next kode_audio_record_start(),
- * so it can be saved again.
+ * so it can be saved again. The file is written as kode_file_write_bytes()
+ * writes one, and a failure leaves what kode_file_write()'s leaves.
  *
- * @param path As for kode_audio_record_file().
+ * @param path As for kode_audio_record_file(), at most KODE_FILE_WRITE_PATH_MAX bytes.
  * @return true when the file is written; false with kode_error() saying why.
  */
 bool kode_audio_record_save(const char *path);
@@ -1092,7 +1116,15 @@ bool kode_wifi_is_connected(void);
 
 /**
  * @brief Leave the network; its password stays remembered.
- * @return true when the board has no address any more; false with kode_error() saying why.
+ *
+ * A join under way, the board's own search for a remembered network and its
+ * retries end too, and the board joins nothing by itself until a
+ * kode_wifi_connect() or Settings asks. Returns at once when the board is off
+ * already and nothing has asked for a network since the last leave.
+ *
+ * @return true when the board has no address and nothing is about to give it
+ *         one; false with kode_error() saying why, after KODE_WIFI_LEAVE_MS at
+ *         most: a leave the radio has not made by then is still made.
  */
 bool kode_wifi_disconnect(void);
 
@@ -1972,6 +2004,7 @@ const char *kode_setting_get(const char *key);
 /* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
 #define KODE_PIN_SETTLE_MS  30U     /**< From a pin's edge to the read of its level, ms (pin_<n>_changed). */
 #define KODE_PIN_POWER_MS   300000U /**< How long kode_pin_power_3v3() waits for J3's supply to switch, ms: a sweep at its 90 s ceiling, an autojoin round's joins and room. */
+#define KODE_PIN_POWER_5V_MS 1000U  /**< How long kode_pin_power_5v() waits for the power manager's answer, ms: the boost's start and room. */
 
 /**
  * @brief Make @p pin an output and drive it high or low.
@@ -2039,15 +2072,34 @@ bool kode_pin_write_pwm(uint8_t pin, uint32_t hz, uint8_t duty_pct);
 bool kode_pin_power_3v3(bool on);
 
 /**
- * @brief Put 5 V from the cell on J3, up to 0.5 A, or take it off. Not stored.
+ * @brief Put 5 V from the cell on J3, up to 0.5 A, and wait until the power
+ *        manager says they are on; or ask for them off. Not stored.
  *
- * Switching it on is refused while USB is plugged in and while the cell is
- * under the voltage the pack needs; the power manager also stops it on a low
- * cell or a fault. Switching it off is always taken.
+ * Switching it on is refused while USB is plugged in, while the cell is
+ * under the 3.6 V the boost needs and while the board is switching off
+ * (until it is awake again), and fails when the charger's boost does not
+ * start: a boost fault (an overload or an over-voltage on the 5 V, or the
+ * cell too low), the cell under -10 C or over 55 C or no pack fitted, USB
+ * plugged in meanwhile, or the charger's OTG pin low. Switching it off is
+ * always asked: it needs no reading, waits for no answer and starts no
+ * Active Object. Once on, the 5 V stay on while the board is asleep, and the
+ * power manager stops them by itself, sending pin_power_5v_cut (see the
+ * events): when the cell falls under 3.3 V, on the boost's fault, and before
+ * the board switches off. Asleep it looks once a minute. A boot always
+ * starts with the 5 V off. The call returns within milliseconds, and waits
+ * up to KODE_BATTERY_WAIT_MS for the first battery reading and for room and,
+ * switching on, up to KODE_PIN_POWER_5V_MS for the answer. The first call
+ * that switches on starts the standard layer's Active Object, as the first
+ * event call does (level 3, KODE_PRIO_USER_GUI), and fails while an Active
+ * Object of the app's own holds that level.
  * @param on true to switch it on.
- * @return true when the power manager took the request; false with
- *         kode_error() saying why. Waits up to KODE_BATTERY_WAIT_MS for the
- *         first battery reading and for room.
+ * @return On: true when the power manager says the 5 V are on; false with
+ *         kode_error() saying why: "the boost cannot start while USB is
+ *         plugged in", the cell under the boost's floor, "the board is
+ *         switching off", "the boost did not start: " and the charger's
+ *         reason, "the power manager is busy", "the power manager did not
+ *         answer within 1000 ms", or the level taken. Off: true when the
+ *         power manager took the request; false with kode_error() saying why.
  */
 bool kode_pin_power_5v(bool on);
 
@@ -2252,6 +2304,10 @@ bool kode_uart_end(void);
 #define KODE_IR_PROTOCOL_MAX 8U     /**< Bytes of a protocol name, NUL included.       */
 #define KODE_IR_RAW_MAX      512U   /**< Durations in one raw frame: 256 marks and spaces. */
 #define KODE_IR_BUSY_MS      5000U  /**< How long a call waits for the infrared path.  */
+#define KODE_IR_CARRIER_MIN_HZ  20000U   /**< The lowest carrier a raw send takes, Hz: below every remote's.      */
+#define KODE_IR_CARRIER_MAX_HZ  500000U  /**< The highest carrier a raw send takes, Hz: above every remote's.     */
+#define KODE_IR_DURATION_MAX_US 32767U   /**< The longest mark or space a raw send takes, us: the C5's RMT's.     */
+#define KODE_IR_FRAME_MAX_MS    1500U    /**< The longest frame a raw send takes, ms, a final or zero space counted as KODE_IR_DURATION_MAX_US. */
 
 /** @brief One frame that was heard and read as a protocol. */
 typedef struct {
@@ -2269,7 +2325,7 @@ typedef struct {
 } kode_ir_raw_t;
 
 /**
- * @brief Send a frame of a protocol the board encodes, and wait until it is on its way.
+ * @brief Send a frame of a protocol the board encodes, and wait until it went out.
  *
  * Blocks. Only "nec" (any case) is encoded. For anything else encode the frame
  * yourself and use kode_ir_send_raw().
@@ -2314,15 +2370,19 @@ kode_ir_code_t kode_ir_last(void);
 const kode_ir_raw_t *kode_ir_receive_raw(uint32_t ms);
 
 /**
- * @brief Send a frame as the lengths of its marks and spaces, and wait until it is on its way.
+ * @brief Send a frame as the lengths of its marks and spaces, and wait until it went out.
  *
- * Blocks. The durations alternate mark, space, mark first; an odd count ends
- * on a mark.
+ * Blocks until the radio says the frame went out. The durations alternate
+ * mark, space, mark first; an odd count ends on a mark.
  *
- * @param us         Microseconds, mark first.
+ * @param us         Microseconds, mark first; 0 to KODE_IR_DURATION_MAX_US each, and
+ *                   KODE_IR_FRAME_MAX_MS at most in all: a zero space, and the one after
+ *                   an odd count's last mark, count as KODE_IR_DURATION_MAX_US.
  * @param n          1 to KODE_IR_RAW_MAX.
- * @param carrier_hz The carrier, above 0; 38000 for most remotes.
- * @return true when the frame went out; false with kode_error() saying why.
+ * @param carrier_hz KODE_IR_CARRIER_MIN_HZ to KODE_IR_CARRIER_MAX_HZ; 38000 for most remotes.
+ * @return true when the frame went out; false with kode_error() saying why,
+ *         also when a carrier, a duration or the frame's length is out of range
+ *         (nothing is sent).
  */
 bool kode_ir_send_raw(const uint16_t *us, uint32_t n, uint32_t carrier_hz);
 
@@ -2338,7 +2398,9 @@ bool kode_ir_send_raw(const uint16_t *us, uint32_t n, uint32_t carrier_hz);
  * Blocks only for its turn. Until kode_ir_capture_stop(), reads fail at once
  * and sends still work.
  *
- * @param path "sd/..." or "flash/..." the capture is written to by the stop; the folder must exist.
+ * @param path "sd/..." or "flash/..." the capture is written to by the stop, as
+ *             kode_file_write() writes; the folder must exist. A path over
+ *             KODE_FILE_WRITE_PATH_MAX bytes is refused here.
  * @return true when the capture runs; false with kode_error() saying why.
  */
 bool kode_ir_capture_start(const char *path);
@@ -2358,6 +2420,7 @@ bool kode_ir_capture_stop(void);
  * @brief Send every signal of a capture file in order, KODE_IR_FILE_GAP_MS apart.
  *
  * Blocks. The whole file is read first: if any line is wrong nothing is sent.
+ * A raw signal longer than KODE_IR_FRAME_MAX_MS is not sent, and the send ends there.
  *
  * @param path "sd/..." or "flash/...".
  * @return true when all went out; false with kode_error() saying why.
@@ -2570,6 +2633,9 @@ bool kode_display_sleep(bool sleep);
  * second, so the moves are coalesced: at most one touch_moved of a stroke
  * waits for the listeners, and a newer point takes its place: a drag never
  * fills the queue, and the other events still arrive.
+ *
+ * Linking the touch panel links the display too, which brings the panel up at
+ * boot: the touch controller shares the panel's supply and reset line.
  *
  * Nothing is asked of the touch panel until the first touch listener, wait or
  * kode_touch_read(); the points start then. With a screen on the glass a finger

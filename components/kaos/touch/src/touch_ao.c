@@ -157,6 +157,7 @@ void touch_test_inject(int16_t x, int16_t y, bool pressed)
         j->pressed = pressed;
         j->t_ms    = khal_time_ms();
         j->stale   = false;
+        j->remote  = false;   /* the judge's copy, read by AO_Touch alone */
         /* A refused post gives the event back to its pool. */
         (void)QACTIVE_POST_X(AO_Touch, &j->super, 1U, NULL);
     }
@@ -289,7 +290,9 @@ static QState Touch_initial(Touch * const me, void const * const par)
 {
     (void)par;
     kaos_claim(KBSP_RES_TOUCH, me, "AO_Touch");
-    QActive_subscribe(&me->super, DISPLAY_STATE_SIG);
+    /* Through AO_Display's door, which links it: the panel's bring-up is what
+     * powers the controller and releases the reset line the two share. */
+    display_state_subscribe(&me->super);
     QActive_subscribe(&me->super, IOEXP_INPUT_SIG);
 #if CONFIG_KODE_LOWPOWER
     me->lp_who = lowpower_join(&me->super, "touch");
@@ -358,6 +361,7 @@ static bool touch_publish(int16_t x, int16_t y, bool pressed, bool stale)
     ev->pressed = pressed;
     ev->t_ms    = khal_time_ms();
     ev->stale   = stale;
+    ev->remote  = false;   /* a finger on the glass */
     QACTIVE_PUBLISH(&ev->super, AO_Touch);
     return true;
 }

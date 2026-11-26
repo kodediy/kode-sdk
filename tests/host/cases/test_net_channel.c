@@ -50,6 +50,16 @@ static size_t answer_with_shots(char *out, size_t cap, const char *shots)
                                    ",\"shots\":\"%s\"}", shots);
 }
 
+/** @brief The bench capture with a `dumps` member added before its closing brace. */
+static size_t answer_with_dumps(char *out, size_t cap, const char *dumps)
+{
+    size_t base = strlen(CONNECT_ANSWER) - 1U;   /* up to the closing brace */
+
+    (void)memcpy(out, CONNECT_ANSWER, base);
+    return base + (size_t)snprintf(out + base, cap - base,
+                                   ",\"dumps\":\"%s\"}", dumps);
+}
+
 /* ---- The scanner ------------------------------------------------------------ */
 
 TEST_CASE("the bench capture parses into a whole session", "[net_channel]")
@@ -137,29 +147,75 @@ TEST_CASE("a shots prefix past 128 bytes is dropped", "[net_channel]")
     TEST_ASSERT_EQUAL_UINT(0U, s.shots[0]);
 }
 
-TEST_CASE("kchan_shots_valid takes an https prefix ending in a slash only",
+TEST_CASE("kchan_upload_valid takes an https prefix ending in a slash only",
           "[net_channel]")
 {
-    TEST_ASSERT_FALSE(kchan_shots_valid(NULL));
-    TEST_ASSERT_FALSE(kchan_shots_valid(""));
-    TEST_ASSERT_TRUE(kchan_shots_valid("https://a/"));
-    TEST_ASSERT_FALSE(kchan_shots_valid("https://a b/"));
-    TEST_ASSERT_FALSE(kchan_shots_valid("https://a\tb/"));
-    TEST_ASSERT_FALSE(kchan_shots_valid("http://a/"));
-    TEST_ASSERT_FALSE(kchan_shots_valid("https://a"));
-    TEST_ASSERT_FALSE(kchan_shots_valid("https:/"));
+    TEST_ASSERT_FALSE(kchan_upload_valid(NULL));
+    TEST_ASSERT_FALSE(kchan_upload_valid(""));
+    TEST_ASSERT_TRUE(kchan_upload_valid("https://a/"));
+    TEST_ASSERT_FALSE(kchan_upload_valid("https://a b/"));
+    TEST_ASSERT_FALSE(kchan_upload_valid("https://a\tb/"));
+    TEST_ASSERT_FALSE(kchan_upload_valid("http://a/"));
+    TEST_ASSERT_FALSE(kchan_upload_valid("https://a"));
+    TEST_ASSERT_FALSE(kchan_upload_valid("https:/"));
 }
 
 /* A prefix with no host: esp_http_client would refuse to parse it, and its
  * error line prints the whole URL - the token included - at ERROR, which is
  * always on. */
-TEST_CASE("kchan_shots_valid refuses a prefix with no host after the scheme",
+TEST_CASE("kchan_upload_valid refuses a prefix with no host after the scheme",
           "[net_channel]")
 {
-    TEST_ASSERT_FALSE(kchan_shots_valid("https:///"));
-    TEST_ASSERT_FALSE(kchan_shots_valid("https:///kodes/x/shots/up/"));
-    TEST_ASSERT_FALSE(kchan_shots_valid("https://"));
-    TEST_ASSERT_TRUE(kchan_shots_valid("https://h/"));
+    TEST_ASSERT_FALSE(kchan_upload_valid("https:///"));
+    TEST_ASSERT_FALSE(kchan_upload_valid("https:///kodes/x/shots/up/"));
+    TEST_ASSERT_FALSE(kchan_upload_valid("https://"));
+    TEST_ASSERT_TRUE(kchan_upload_valid("https://h/"));
+}
+
+/* ---- The dumps prefix ------------------------------------------------------- */
+
+/** @brief The prefix the api names for this unit's core dumps. */
+#define DUMPS_GOOD "https://api.kode.diy/kodes/KODE0001F00MR1C/dumps/"
+
+TEST_CASE("test_the_answer_names_a_dumps_link: the connect answer's dumps "
+          "prefix is kept", "[net_channel]")
+{
+    char            buf[1024];
+    kchan_session_t s;
+    size_t          n = answer_with_dumps(buf, sizeof(buf), DUMPS_GOOD);
+
+    TEST_ASSERT_TRUE(kchan_parse_connect(buf, n, NULL, &s));
+    TEST_ASSERT_EQUAL_STRING(DUMPS_GOOD, s.dumps);
+    TEST_ASSERT_EQUAL_UINT(0U, s.shots[0]);
+}
+
+TEST_CASE("test_an_answer_with_no_dumps_link_is_whole: a connect answer "
+          "without dumps is still a session", "[net_channel]")
+{
+    kchan_session_t s;
+
+    memset(&s, 0x5A, sizeof(s));
+    TEST_ASSERT_TRUE(kchan_parse_connect(CONNECT_ANSWER, strlen(CONNECT_ANSWER), NULL, &s));
+    TEST_ASSERT_EQUAL_UINT(0U, s.dumps[0]);
+    TEST_ASSERT_EQUAL_STRING("mqtts://kodes.kode.diy:8883", s.broker);
+    TEST_ASSERT_EQUAL_STRING("kode/KODE0001F00MR1C/cmd/in", s.t_in);
+}
+
+TEST_CASE("test_a_dumps_link_that_is_not_https_is_left_out: the session "
+          "stands without it", "[net_channel]")
+{
+    char            buf[1024];
+    kchan_session_t s;
+    size_t          n;
+
+    n = answer_with_dumps(buf, sizeof(buf), "http://api.kode.diy/kodes/S/dumps/");
+    TEST_ASSERT_TRUE(kchan_parse_connect(buf, n, NULL, &s));
+    TEST_ASSERT_EQUAL_UINT(0U, s.dumps[0]);
+    TEST_ASSERT_EQUAL_STRING("mqtts://kodes.kode.diy:8883", s.broker);
+
+    n = answer_with_dumps(buf, sizeof(buf), "https://api.kode.diy/kodes/S/dumps");
+    TEST_ASSERT_TRUE(kchan_parse_connect(buf, n, NULL, &s));
+    TEST_ASSERT_EQUAL_UINT(0U, s.dumps[0]);
 }
 
 
