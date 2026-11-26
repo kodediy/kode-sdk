@@ -457,10 +457,13 @@ _Static_assert(KODE_SYS_BLE_HID_KEYBOARD == KDRV_BLE_HID_KEYBOARD, "the keyboard
 _Static_assert(KODE_SYS_BLE_HID_KEYS_MAX == KDRV_BLE_HID_KEYS_MAX, "a report's keys are the driver's");
 _Static_assert(KODE_SYS_BLE_HID_KEY_MAX == KDRV_BLE_HID_KEY_MAX, "the last key is the report map's");
 _Static_assert(KODE_SYS_BLE_HID_RING_SLOTS == KDRV_BLE_HID_RING_SLOTS, "the ring is the driver's");
+/* kdrv_ble.h declares a pairing's phases and outcomes with the passkey alone. */
+#if CONFIG_KODEOS_BLE_PAIRING_PASSKEY
 _Static_assert(KODE_SYS_BLE_PAIR_SHOW == (uint32_t)KDRV_BLE_PAIR_SHOW, "SHOW is the driver's");
 _Static_assert(KODE_SYS_BLE_PAIR_DONE == (uint32_t)KDRV_BLE_PAIR_DONE, "DONE is the driver's");
 _Static_assert(KODE_SYS_BLE_PAIR_REFUSED == (uint32_t)KDRV_BLE_PAIR_REFUSED, "REFUSED is the driver's");
 _Static_assert(KODE_SYS_BLE_PAIR_OK == (uint32_t)KDRV_BLE_PAIR_OK, "OK is the driver's");
+#endif /* CONFIG_KODEOS_BLE_PAIRING_PASSKEY */
 
 /* cppcheck-suppress misra-c2012-8.7 ; a facade call: the apps outside this tree call it */
 kode_status_t kode_sys_ble_hid_select(uint8_t kinds)
