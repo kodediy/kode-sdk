@@ -3374,8 +3374,7 @@ typedef struct {
  * know that a tactile switch bounces. The event says when as well as what: a
  * subscriber that decides on elapsed time (a double press) cannot stamp the
  * event itself, because it may be dispatched late. It also says whether a
- * person at the board could have made it: a press a remote console line
- * injected is marked, so a subscriber can refuse it what needs a person. */
+ * console line from the Kode channel or a cron entry injected the press. */
 typedef struct {
     QEvt     super;
     uint8_t  id;        /**< kdrv_button_t */
@@ -4644,7 +4643,8 @@ typedef struct {
  *
  * It carries the time it was read, for the same reason ButtonEvt does: a
  * subscriber that measures a drag cannot stamp a sample it was handed late.
- * Like ButtonEvt it says whether a remote console line injected it. */
+ * Like ButtonEvt it says whether a console line from the Kode channel or a
+ * cron entry injected it. */
 typedef struct {
     QEvt     super;
     int16_t  x;

@@ -28,9 +28,9 @@ idf_build_set_property(COMPILE_OPTIONS
 # CMock chains every mock's expectations from one pool, and only a Mock*_Init()
 # empties it. test_net_ao.c never calls one (runner.c says why), so its cases
 # and setUp()'s khal_gpio expectation pile up in the pool until the next file
-# that does: CMock's default 32 KB ran out there, then 64 KB, and every case
-# after it failed with "CMock has run out of memory". Defined for the whole
-# build, so cmock.c and every generated mock agree on the size.
+# that does. The pool holds them all at 128 KB; when it is too small, every
+# case after the overflow fails with "CMock has run out of memory". Defined
+# for the whole build, so cmock.c and every generated mock agree on the size.
 idf_build_set_property(COMPILE_DEFINITIONS "CMOCK_MEM_SIZE=131072" APPEND)
 # The fault report's option is kaos's Kconfig, not this project's. It decides
 # signals, event types and the channel's session layout, which every file of

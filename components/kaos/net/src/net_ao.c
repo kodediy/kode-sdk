@@ -29,7 +29,8 @@
 
 #if CONFIG_KODEOS_CHANNEL
 #include "kaos_wire.h"      /* the base64 encoder shared with the console    */
-#include "kdrv_slot.h"      /* kdrv_running_desc(): the version `info` shows */
+#include "kdrv_slot.h"      /* kdrv_running_desc(), the version `info` shows;
+                             * the core dump a fault report reads and erases */
 #include "kode_wire.h"      /* KODE_ST_*: what the C5 answers with           */
 #include "net_channel.h"
 #include "kset.h"
@@ -4892,8 +4893,9 @@ static void shot_on_wait(Net * const me)
  * @brief An upload order: check it, then a capture or a stream.
  *
  * One upload at a time: a capture, or a dump being sent, is answered before
- * anything else is taken (upload_in_hand()); a stream is replaced by any valid order, which ends it (`replaced`). A
- * capture that follows a stream waits for that stream's close.
+ * anything else is taken (upload_in_hand()); a stream is replaced by any
+ * valid order, which ends it (`replaced`). A capture that follows a stream
+ * waits for that stream's close.
  */
 static void shot_on_request(Net * const me, const NetShotReqEvt *r)
 {

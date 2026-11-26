@@ -1954,7 +1954,10 @@ bool kode_sys_screen_is_asleep(void);
  * @brief Subscribe @p me to TOUCH_EVT_SIG, AO_Touch's report of the finger, and link AO_Touch.
  *
  * Each press, each move while pressed and each release arrives as a
- * TouchEvt: the point, whether the finger is down, and the time it was read.
+ * TouchEvt: the point, whether the finger is down, the time it was read,
+ * whether a release is a still contact that stopped counting as a finger
+ * (`stale`), and whether a console line from the Kode channel or a cron entry
+ * injected it (`remote`).
  * A bare subscription to TOUCH_EVT_SIG links nothing, so no AO_Touch starts
  * and nothing arrives: this call is that subscription with its owner linked.
  * kscreen subscribes its own owner; an AO that reads touch by hand calls this.
