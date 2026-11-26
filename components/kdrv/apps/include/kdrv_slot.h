@@ -225,6 +225,12 @@ kode_status_t kdrv_slot_info(kdrv_slot_id_t id, kdrv_slot_info_t *out);
  * asked about the same way `info` asks about them: present or not, and whose.
  */
 
+#define KDRV_COREDUMP_MAX     (128U * 1024U) /**< The coredump partition's size
+                                              *   (kbsp/partitions.csv): no
+                                              *   dump is larger.             */
+#define KDRV_COREDUMP_SHA_HEX 9U             /**< Hex digits of the ELF SHA-256
+                                              *   a dump carries.             */
+
 /**
  * @brief What `info` needs to know about a coredump waiting in flash.
  */
@@ -238,6 +244,10 @@ typedef struct {
                         *   libraries; this build verifies SHA-256 only, so
                         *   it cannot even open such a dump to read who or
                         *   where - task and pc are then left empty).       */
+    bool     kodeos;  /**< Its ELF SHA-256 is that of a kodeOS image in
+                        *   flash: the factory's, ota_0's or ota_1's.       */
+    char     sha[KDRV_COREDUMP_SHA_HEX + 1U]; /**< That SHA as the dump
+                        *   carries it, in hex; "" when unread.             */
     char     task[16];/**< The task that crashed, as the dump recorded it;
                         *   empty when the dump could not be read.          */
     uint32_t pc;       /**< Its program counter at the crash; 0 when the
@@ -258,9 +268,10 @@ typedef struct {
  * image_check() has already refused. When the checksum does verify but
  * esp_core_dump_get_summary() still fails (no crashed TCB found), the same
  * "present, not mine, nothing else known" answer is given. Only when both
- * calls succeed are @p out->task, @p out->pc and @p out->mine filled from
- * the summary - @p out->mine by comparing its ELF SHA-256 against this
- * image's own.
+ * calls succeed are @p out->task, @p out->pc, @p out->sha, @p out->mine and
+ * @p out->kodeos filled from the summary - @p out->mine by comparing its ELF
+ * SHA-256 against this image's own, @p out->kodeos against the description
+ * of each of the three app partitions, over KDRV_COREDUMP_SHA_HEX digits.
  *
  * @param out Filled on KODE_OK; @p out->present is false when flash holds
  *            no dump.
@@ -286,6 +297,31 @@ kode_status_t kdrv_slot_coredump(kdrv_coredump_t *out);
  *         no reason, a NULL or empty @p buf, or a build with no core dump).
  */
 kode_status_t kdrv_slot_coredump_reason(char *buf, size_t len);
+
+/**
+ * @brief Copy the dump out of flash whole, with its CRC32.
+ *
+ * The image is the bytes esp_core_dump_image_get() delimits, read only once
+ * esp_core_dump_image_check() has proved its checksum.
+ *
+ * @param buf Receives the image.
+ * @param cap Room in @p buf; KDRV_COREDUMP_MAX holds any dump.
+ * @param len Receives the image's length on KODE_OK.
+ * @param crc Receives its CRC32 (zlib's, khal_crc32()) on KODE_OK.
+ * @return KODE_OK; KODE_DENIED with no dump, a dump whose checksum this build
+ *         refuses, a NULL argument or a build with no core dump;
+ *         KODE_NO_RESOURCES when the image is larger than @p cap; KODE_ERROR
+ *         when the flash cannot be read.
+ */
+kode_status_t kdrv_slot_coredump_read(uint8_t *buf, size_t cap, size_t *len, uint32_t *crc);
+
+/**
+ * @brief Erase the dump, so flash holds none.
+ *
+ * @return KODE_OK; KODE_ERROR when the erase fails; KODE_DENIED in a build
+ *         with no core dump.
+ */
+kode_status_t kdrv_slot_coredump_erase(void);
 
 /* ---- Where we are running ------------------------------------------------ */
 
