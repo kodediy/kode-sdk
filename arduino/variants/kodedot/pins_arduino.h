@@ -6,8 +6,10 @@
 
 // The Kode Dot with the Kode SDK in its libraries. The board's own buses and pins (its I2C bus, the NFC
 // reader, the buttons, the card, the RFID front end, the display) are the SDK's; a sketch reaches them
-// through Kode. The names below are the expansion header's, J3: a position is the index of EXP<n>, as the
-// SDK's Kode.pin numbers it, and PIN<n> is the connector's own pin number.
+// through Kode. The names below are the expansion header's, J3, and hold GPIO numbers, for Arduino's own
+// calls (digitalWrite(), Wire, SPI, Serial1); PIN<n> is the connector's own pin number. The SDK numbers
+// the header by position, 1 to 14 (the n of EXP<n>), where a sketch still meets it: the pin_<n>_changed
+// events and a rest's wake pin.
 //
 // BOARD_HAS_PIN_REMAP is never defined here: with it Arduino makes tone() a macro, which breaks
 // Kode.audio.tone().

@@ -1,22 +1,18 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/**
- * @file HeaderUart.ino
- * @brief A line every second on Serial1: out at the header's position 1, in at position 2.
- */
-#define UART_BAUD     115200U /**< The line's speed, in bits per second. */
-#define UART_EVERY_MS 1000U   /**< How often a line goes out. */
+// A line every second on Serial1: out at the header's position 1, in at position 2.
 
-static uint32_t s_lines; /**< How many lines have gone out. */
+const uint32_t UART_BAUD = 115200;    // The line's speed, in bits per second.
+const uint32_t UART_EVERY_MS = 1000;  // How often a line goes out.
 
-void setup(void)
-{
-    Serial1.begin(UART_BAUD, SERIAL_8N1, EXP2, EXP1);
+int lines = 0;  // How many lines have gone out.
+
+void setup() {
+  Serial1.begin(UART_BAUD, SERIAL_8N1, EXP2, EXP1);
 }
 
-void loop(void)
-{
-    s_lines++;
-    Serial1.print("line ");
-    Serial1.println(s_lines);
-    delay(UART_EVERY_MS);
+void loop() {
+  lines++;
+  Serial1.print("line ");
+  Serial1.println(lines);
+  delay(UART_EVERY_MS);
 }

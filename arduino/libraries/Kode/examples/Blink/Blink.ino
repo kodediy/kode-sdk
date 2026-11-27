@@ -1,21 +1,17 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/**
- * @file Blink.ino
- * @brief The RGB LED on and off, and a line on the console each time.
- */
-#define BLINK_HALF_MS 500U /**< How long the LED stays on, and off. */
+// The RGB LED on and off, and a line in the board's log each time.
 
-static uint32_t s_blinks; /**< How many times the LED has changed. */
+const uint32_t BLINK_HALF_MS = 500;  // How long the LED stays on, and off.
 
-void setup(void)
-{
-    (void)Kode.led.setColor(KODE_BLUE);
+int blinks = 0;  // How many times the LED has changed.
+
+void setup() {
+  Kode.led.setColor(KODE_PURE_BLUE);
 }
 
-void loop(void)
-{
-    (void)Kode.led.toggle();
-    s_blinks++;
-    Kode.printf("blink %lu, battery %u %%", (unsigned long)s_blinks, (unsigned)Kode.battery.level());
-    delay(BLINK_HALF_MS);
+void loop() {
+  Kode.led.toggle();
+  blinks++;
+  Kode.printf("blink %d, battery %d %%", blinks, Kode.battery.level());
+  delay(BLINK_HALF_MS);
 }

@@ -5,8 +5,8 @@
     arduino/tools/gen_layer.py --check          exit 1 when a file on disk is not what kode.h says
     arduino/tools/gen_layer.py --all-calls FILE write a sketch that names every method once
 
-Every function of kode.h becomes one method that calls it and does nothing
-else, so a sketch reads as Arduino and runs the SDK itself:
+A function of kode.h becomes one method that calls it and does nothing else,
+so a sketch reads as Arduino and runs the SDK itself:
 
     kode_led_set_color(c)         Kode.led.setColor(c)
     kode_widget_set_text(w, ...)  w.setText(...)         w is a KodeWidget
@@ -16,6 +16,14 @@ else, so a sketch reads as Arduino and runs the SDK itself:
 The rule is place(); the names it cannot give are in RENAMED. A function the
 rule would name with a C++ keyword, two that would share a name, or one named
 as a group stop the run, so kode.h cannot grow a call this file passes over.
+
+Some functions have no method, because a sketch has a better call for the
+job: those of LEFT_OUT, every function of a group in LEFT_OUT_GROUPS, and an
+event's name, kode_event_<name>(void), which a sketch names by its constant
+KODE_EVENT_<NAME>. left_out() lists them, and a line of a table that names
+nothing in kode.h, or an event's name with no constant, stops the run.
+DEFAULTS gives trailing parameters that are NULL in the common case a default
+in the method's declaration; a line kode.h does not bear out stops the run.
 
 The layer's names at file scope are the object Kode, its class Kode_Sdk, a
 class Kode_<group> behind each Kode.<group>, the handles' classes and an alias
@@ -62,12 +70,62 @@ HANDLE_BRIEFS = {
 # The names the rule cannot give, as (group, method); "" is Kode itself.
 # `new` and `delete` are C++ keywords, so a screen is shown and a file removed;
 # kode_rest() shares its group's name; kode_print() takes a format, which
-# Arduino calls printf.
+# Arduino calls printf. kode_pin_power_*() feed the expansion header and are
+# all the layer keeps of kode_pin_*(), so their group is the header.
 RENAMED = {
-    "kode_print":       ("", "printf"),
-    "kode_rest":        ("rest", "begin"),
-    "kode_screen_new":  ("screen", "show"),
-    "kode_file_delete": ("file", "remove"),
+    "kode_print":         ("", "printf"),
+    "kode_rest":          ("rest", "begin"),
+    "kode_screen_new":    ("screen", "show"),
+    "kode_file_delete":   ("file", "remove"),
+    "kode_pin_power_3v3": ("header", "power3v3"),
+    "kode_pin_power_5v":  ("header", "power5v"),
+}
+
+# The functions with no method, as function -> what a sketch uses instead.
+# kode_pin_*() takes the header's position (1 to 14) where the board's
+# Arduino names (EXP1, SDA, TX...) hold GPIO numbers, so a method would take
+# one for the other with no error. kode_random(1, 6) includes 6 where
+# Arduino's random(1, 6) stops at 5. The rest are Arduino's own calls again.
+LEFT_OUT = {
+    "kode_delay":           "Arduino's delay()",
+    "kode_uptime_ms":       "Arduino's millis()",
+    "kode_random":          "Arduino's random()",
+    "kode_pin_write":       "Arduino's digitalWrite()",
+    "kode_pin_read":        "Arduino's digitalRead()",
+    "kode_pin_read_analog": "Arduino's analogRead()",
+    "kode_pin_write_pwm":   "Arduino's analogWrite()",
+}
+
+# The groups with no method, every function of the group, as group -> what a
+# sketch uses instead: they take the header's position, as kode_pin_*() does,
+# and Arduino's own buses do the job.
+LEFT_OUT_GROUPS = {
+    "i2c":  "Arduino's Wire",
+    "spi":  "Arduino's SPI",
+    "uart": "Arduino's Serial1",
+}
+
+# An event's name, kode_event_<name>(void) answering const char *, has no
+# method either: Kode.event.wifiConnected() in an if reads as a question and is
+# always true. A sketch names the event by its constant KODE_EVENT_<NAME>,
+# which kode.h defines as the call.
+EVENT_NAME = re.compile(r"kode_event_([a-z0-9_]+)")
+EVENT_NAME_RETURN = "const char *"
+
+# The defaults of trailing parameters that are NULL in the common case, as
+# function -> {parameter: the default as C++ text}. kode.h allows NULL for each.
+DEFAULTS = {
+    "kode_event_wait":           {"out": "nullptr"},
+    "kode_audio_stream_write":   {"taken": "nullptr"},
+    "kode_audio_record_samples": {"frames": "nullptr"},
+    "kode_wifi_connect":         {"ssid": "nullptr", "password": "nullptr"},
+    "kode_http_get":             {"headers": "nullptr"},
+    "kode_http_post":            {"headers": "nullptr"},
+    "kode_http_get_range":       {"headers": "nullptr"},
+    "kode_rest":                 {"wake": "nullptr"},
+    "kode_touch_read":           {"x": "nullptr", "y": "nullptr"},
+    "kode_screen_new":           {"title": "nullptr"},
+    "kode_screen_add_value":     {"unit": "nullptr"},
 }
 
 CPP_KEYWORDS = frozenset("""
@@ -109,7 +167,7 @@ OBJECT_CLASS = "Kode_Sdk"  # Its class: a capital after the underscore, where a 
 PREAMBLE = """/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file KodeArduino.h
- * @brief kode.h in Arduino's style: every call is a method of Kode.
+ * @brief kode.h in Arduino's style: its calls as methods of Kode.
  *
  * Generated by arduino/tools/gen_layer.py from kode.h. Do not edit.
  */
@@ -202,6 +260,72 @@ def place(fn):
     return words[0], camel(words[1:])
 
 
+def is_event_name(fn):
+    """Whether a function is an event's name: kode_event_<name>(void) answering const char *."""
+    return (EVENT_NAME.fullmatch(fn.name) is not None and fn.ret == EVENT_NAME_RETURN
+            and not fn.params and not fn.variadic)
+
+
+def event_constant(fn):
+    """The constant a sketch names an event by: kode_event_ir_received() as KODE_EVENT_IR_RECEIVED."""
+    return f"KODE_EVENT_{EVENT_NAME.fullmatch(fn.name).group(1).upper()}"
+
+
+def left_out(fns, text):
+    """{function: what a sketch uses instead} for the functions with no method.
+
+    A line of LEFT_OUT or LEFT_OUT_GROUPS that names nothing in the header, or
+    an event's name the header defines no constant for, stops the run.
+    """
+    bare = COMMENT.sub("", text)
+    names = {fn.name for fn in fns}
+    for name in LEFT_OUT:
+        if name not in names:
+            fail(f"{name}() is in LEFT_OUT but is no function of the header: drop the line")
+    groups = {place(fn)[0] for fn in fns}
+    for group in LEFT_OUT_GROUPS:
+        if group not in groups:
+            fail(f"the group '{group}' is in LEFT_OUT_GROUPS but has no function in the header: drop the line")
+    out = {}
+    for fn in fns:
+        if fn.name in LEFT_OUT:
+            out[fn.name] = LEFT_OUT[fn.name]
+        elif place(fn)[0] in LEFT_OUT_GROUPS:
+            out[fn.name] = LEFT_OUT_GROUPS[place(fn)[0]]
+        elif is_event_name(fn):
+            constant = event_constant(fn)
+            defined = re.compile(rf"^[ \t]*#[ \t]*define[ \t]+{constant}[ \t]+{fn.name}\(\)[ \t]*$", re.M)
+            if defined.search(bare) is None:
+                fail(f"{fn.name}() is an event's name but the header has no "
+                     f"'#define {constant} {fn.name}()' for a sketch to name it by")
+            out[fn.name] = constant
+    return out
+
+
+def check_defaults(fns, out):
+    """Stop the run on a line of DEFAULTS the header does not bear out."""
+    by_name = {fn.name: fn for fn in fns}
+    for name, given in DEFAULTS.items():
+        if name not in by_name:
+            fail(f"{name}() is in DEFAULTS but is no function of the header: drop the line")
+        if name in out:
+            fail(f"{name}() is in DEFAULTS but is left out of the layer: drop the line")
+        params = [param.name for param in by_name[name].params]
+        for param in given:
+            if param not in params:
+                fail(f"{name}() has no parameter '{param}' for DEFAULTS")
+        if set(params[len(params) - len(given):]) != set(given):
+            fail(f"{name}(): DEFAULTS gives {', '.join(given)}, which must be its last parameters")
+
+
+def layer_functions(text):
+    """A header's functions that become methods, in its order: all of them but what left_out() names."""
+    fns = functions(text)
+    out = left_out(fns, text)
+    check_defaults(fns, out)
+    return [fn for fn in fns if fn.name not in out]
+
+
 def layout(fns):
     """The functions by owner, each owner's methods in kode.h's order."""
     owners = {}
@@ -220,10 +344,15 @@ def layout(fns):
     return owners
 
 
-def signature(ret, method, params, variadic):
-    """The lines that declare one method, up to its body."""
+def signature(ret, method, params, variadic, defaults):
+    """The lines that declare one method, up to its body, a default after each parameter that has one."""
     lines = []
-    listed = [param.text for param in params]
+    listed = []
+    for param in params:
+        if param.name in defaults:
+            listed.append(f"{param.text} = {defaults[param.name]}")
+        else:
+            listed.append(param.text)
     if variadic:
         lines.append("    template <typename... Args>")
         listed.append("Args... args")
@@ -252,7 +381,7 @@ def method_lines(method, handle):
     else:
         body = f"return {call};"
     lines = [f"    /** @brief {fn.name}(). */"]
-    lines += signature(ret, method.name, params, fn.variadic)
+    lines += signature(ret, method.name, params, fn.variadic, DEFAULTS.get(fn.name, {}))
     lines += ["    {", f"        {body}", "    }"]
     return lines
 
@@ -311,10 +440,28 @@ def check_names(groups, c_types):
         seen[name] = what
 
 
+def calls_of(group, methods):
+    """What a group holds, in words: "the kode_led_*() calls", or its functions by name when RENAMED made the group."""
+    names = [method.fn.name for method in methods]
+    if all(name.startswith(f"kode_{group}") for name in names):
+        return f"the kode_{group}_*() calls"
+    listed = [f"{name}()" for name in names]
+    if len(listed) == 1:
+        return listed[0]
+    return f"{', '.join(listed[:-1])} and {listed[-1]}"
+
+
+def sentence(words):
+    """Words as the start of a sentence: a capital on "the", never on a function's name."""
+    if words.startswith("the "):
+        return "T" + words[1:]
+    return words
+
+
 def group_class(group, methods):
     """The class behind Kode.<group>."""
     lines = [
-        f"/** @brief {OBJECT}.{group}: the kode_{group}_*() calls. */",
+        f"/** @brief {OBJECT}.{group}: {calls_of(group, methods)}. */",
         f"class {group_class_name(group)}",
         "{",
         "public:",
@@ -327,7 +474,7 @@ def group_class(group, methods):
     return lines
 
 
-def object_class(groups, loose):
+def object_class(owners, groups, loose):
     """Kode_Sdk: a member per group, then the calls that belong to no group."""
     lines = [
         "/** @brief The Kode SDK: a member for each group of kode.h, and the calls of no group. */",
@@ -338,7 +485,7 @@ def object_class(groups, loose):
     width = max(len(f"{group_class_name(group)} {group};") for group in groups)
     for group in groups:
         member = f"{group_class_name(group)} {group};"
-        lines.append(f"    {member.ljust(width)} /**< The kode_{group}_*() calls. */")
+        lines.append(f"    {member.ljust(width)} /**< {sentence(calls_of(group, owners[group]))}. */")
     for method in loose:
         lines.append("")
         lines += method_lines(method, None)
@@ -372,8 +519,23 @@ def read(path):
 
 
 def sdk_functions():
-    """kode.h's functions."""
-    return functions(read(HEADER))
+    """kode.h's functions that become methods."""
+    return layer_functions(read(HEADER))
+
+
+def left_out_lines():
+    """A comment that lists what the layer leaves out and what a sketch uses instead."""
+    text = read(HEADER)
+    fns = functions(text)
+    out = left_out(fns, text)
+    rows = [(f"kode_{group}_*()", instead) for group, instead in LEFT_OUT_GROUPS.items()]
+    rows += [(f"{fn.name}()", out[fn.name]) for fn in fns
+             if fn.name in out and place(fn)[0] not in LEFT_OUT_GROUPS]
+    width = max(len(row[0]) for row in rows)
+    lines = ["/* Left out of the layer, with what a sketch uses instead:"]
+    lines += [f" *   {row[0].ljust(width)}  {row[1]}" for row in rows]
+    lines.append(" */")
+    return lines
 
 
 def owners_of_the_sdk():
@@ -388,6 +550,7 @@ def header():
     groups = [owner for owner in owners if owner and owner not in HANDLES]
     check_names(groups, alias_types(text, sdk_functions()))
     lines = PREAMBLE.split("\n")
+    lines += left_out_lines() + [""]
     lines += ["/* ---- Types ---- */", ""] + aliases(text, sdk_functions()) + [""]
     lines += ["/* ---- Handles ---- */"]
     for handle in HANDLES:
@@ -398,7 +561,7 @@ def header():
     for group in groups:
         lines += [""] + group_class(group, owners[group])
     lines += ["", "/* ---- Kode ---- */", ""]
-    lines += object_class(groups, owners.get("", []))
+    lines += object_class(owners, groups, owners.get("", []))
     lines += ["", f"inline {OBJECT_CLASS} {OBJECT}; /**< The SDK, as a sketch names it. */", "",
               "#endif /* KODE_ARDUINO_H_ */", ""]
     return "\n".join(lines)
