@@ -15,7 +15,8 @@ name: arduino
 #
 # package: the libraries built, the two archives and the index made by
 # arduino/tools/make_package.py, and the package proved by installing it from
-# its own index and compiling the library's examples against it. The three
+# its own index and compiling two things against it: every example of the
+# library, and a sketch that calls every method of the Kode layer. The three
 # files are the artifact `arduino-package`, which release.yml attaches to the
 # release whose tag it passes.
 #
@@ -267,17 +268,23 @@ jobs:
           arduino-cli core install "kode:esp32@$VERSION"
           arduino-cli core list
 
-      # The library's examples as installed, and a sketch that calls every
-      # method of the Kode layer once, so every call links against the
-      # libraries. Each sketch is built even after one fails.
+      # Every folder of the library's examples as installed, then a sketch
+      # that calls every method of the Kode layer once, so every call links
+      # against the libraries. Each sketch is built even after one fails, and
+      # the step fails naming each one that does not build.
       - name: Build the examples against the package
         run: |
           set -euo pipefail
           examples="$ARDUINO_DIRECTORIES_DATA/packages/kode/hardware/esp32/$VERSION/libraries/Kode/examples"
           mkdir -p "$RUNNER_TEMP/sketches/AllCalls"
           python3 arduino/tools/gen_layer.py --all-calls "$RUNNER_TEMP/sketches/AllCalls/AllCalls.ino"
+          sketches=("$examples"/*/)
+          if [ ! -d "${sketches[0]}" ]; then
+            echo "::error::the installed library has no example under $examples" >&2
+            exit 1
+          fi
           failed=""
-          for sketch in "$examples/Blink" "$examples/TagReader" "$examples/HeaderUart" "$examples/SerialLog" "$RUNNER_TEMP/sketches/AllCalls"; do
+          for sketch in "${sketches[@]%/}" "$RUNNER_TEMP/sketches/AllCalls"; do
             name="$(basename "$sketch")"
             echo "::group::$name"
             if ! arduino-cli compile --fqbn kode:esp32:kodedot --warnings all \

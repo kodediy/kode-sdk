@@ -72,6 +72,58 @@ void kode_delay(uint32_t ms);
 bool kode_led_off(void);
 bool kode_touch_read(int16_t *x, int16_t *y);
 """
+# A header with a narrow integer of each kind by value, one of them in a handle's method beside a pointer to one.
+NARROW = """
+bool kode_led_set_level(uint8_t level);
+bool kode_audio_beep(uint16_t hz, uint32_t ms);
+bool kode_ble_nudge(int8_t dx, int16_t dy);
+bool kode_draw_dot(kode_canvas_t c, uint8_t size, const uint8_t *mask);
+"""
+# What a sketch does with a handle: a global with no value, one from a call, a copy, an assignment and a test.
+HANDLES_SKETCH = """KodeWidget s_line; // None yet.
+
+void setup(void)
+{
+    KodeWidget made = Kode.screen.addText("t");
+    KodeWidget copy = made;
+    s_line = copy;
+    if ( s_line )
+    {
+        (void)s_line.setText("made");
+    }
+}
+
+void loop(void)
+{
+}
+"""
+# Two ways to take a number, or another handle, for a handle: neither builds.
+NUMBER_AS_WIDGET = "void setup(void)\n{\n    KodeWidget w = 5;\n    (void)w;\n}\n\nvoid loop(void)\n{\n}\n"
+WIDGET_AS_CANVAS = ("void setup(void)\n{\n    KodeCanvas c(Kode.screen.addText(\"t\"));\n    (void)c;\n}\n\n"
+                    "void loop(void)\n{\n}\n")
+# What each fitting function answers, as (function, number given, number answered): the ends of each range and past them.
+FITTED = [
+    ("kode_arduino_fit_u8", -1, 0),
+    ("kode_arduino_fit_u8", 0, 0),
+    ("kode_arduino_fit_u8", 255, 255),
+    ("kode_arduino_fit_u8", 256, 255),
+    ("kode_arduino_fit_u8", 70000, 255),
+    ("kode_arduino_fit_u16", -1, 0),
+    ("kode_arduino_fit_u16", 65535, 65535),
+    ("kode_arduino_fit_u16", 65536, 65535),
+    ("kode_arduino_fit_i8", -129, -128),
+    ("kode_arduino_fit_i8", -128, -128),
+    ("kode_arduino_fit_i8", 127, 127),
+    ("kode_arduino_fit_i8", 128, 127),
+    ("kode_arduino_fit_i16", -32769, -32768),
+    ("kode_arduino_fit_i16", -32768, -32768),
+    ("kode_arduino_fit_i16", 32767, 32767),
+    ("kode_arduino_fit_i16", 32768, 32767),
+]
+FIT_DEFINED = re.compile(r"^inline u?int(?:8|16)_t (kode_arduino_fit_[a-z0-9]+)\(int32_t value\)$", re.M)
+FIT_USED = re.compile(r"\b(kode_arduino_fit_[a-z0-9]+)\(")
+# A narrow integer declared by value in a method: the type with no `*` after it.
+NARROW_BY_VALUE = re.compile(r"\bu?int(?:8|16)_t [A-Za-z_]\w*\s*[,)=]")
 # The variant's lines that bring the layer: C++ linkage, and the header by a path from the variant's folder.
 LAYER_INCLUDE = re.compile(r'#ifdef __cplusplus\nextern "C\+\+" \{\n#include "([^"]+)"\n\}\n#endif\n')
 
@@ -105,8 +157,11 @@ def include_dirs():
     return found
 
 
-def compile_sketch(case, sketch):
-    """Build a sketch as C++ the way the board does, the variant's pins_arduino.h above it; skip with no c++."""
+def build_sketch(case, sketch, output):
+    """Build a sketch as C++ the way the board does, the variant's pins_arduino.h above it; skip with no c++.
+
+    With no output the build checks the syntax alone; with one it links a program there.
+    """
     compiler = shutil.which("c++")
     if compiler is None:
         case.skipTest("this machine has no c++")
@@ -120,9 +175,35 @@ def compile_sketch(case, sketch):
     flags = ["-U", "unix", "-U", "linux", "-include", str(arduino_h), "-I", str(folder)]
     for include in include_dirs():
         flags += ["-I", str(include)]
-    built = subprocess.run([compiler, "-std=gnu++2b", "-fsyntax-only", "-x", "c++"] + flags + [str(sketch)],
-                           capture_output=True, text=True)
+    if output is None:
+        flags.append("-fsyntax-only")
+    else:
+        flags += ["-o", str(output)]
+    return subprocess.run([compiler, "-std=gnu++2b", "-x", "c++"] + flags + [str(sketch)],
+                          capture_output=True, text=True)
+
+
+def compile_sketch(case, sketch):
+    """Build a sketch as C++ the way the board does: it must build."""
+    built = build_sketch(case, sketch, None)
     case.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+
+
+def refused_sketch(case, sketch):
+    """Build a sketch as C++ the way the board does: it must not build. Answers what the compiler said."""
+    built = build_sketch(case, sketch, None)
+    case.assertNotEqual(built.returncode, 0, f"{sketch.name} builds")
+    return built.stderr
+
+
+def run_program(case, source):
+    """Build a C++ program the way the board builds a sketch, run it, and answer what it printed."""
+    program = source.parent / "program"
+    built = build_sketch(case, source, program)
+    case.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+    ran = subprocess.run([str(program)], capture_output=True, text=True)
+    case.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+    return ran.stdout
 
 
 TABLED_LEFT_OUT = {"kode_delay": "Arduino's delay()"}
@@ -243,6 +324,11 @@ class Refused(unittest.TestCase):
         said = self.refusal("\nbool kode_screen_new(void);\nbool kode_screen_show(void);\n")
         self.assertIn("kode_screen_show()", said)
         self.assertIn("kode_screen_new()", said)
+
+    def test_a_handle_after_the_first_parameter(self):
+        said = self.refusal("\nbool kode_screen_focus(uint32_t index, kode_widget_t w);\n")
+        self.assertIn("kode_screen_focus()", said)
+        self.assertIn("raw()", said)
 
     def test_a_function_named_as_a_group(self):
         said = self.refusal("\nbool kode_led(void);\nbool kode_led_off(void);\n")
@@ -377,7 +463,125 @@ class Defaults(unittest.TestCase):
         self.assertIn("last", said)
 
 
+class Fit(unittest.TestCase):
+    """A narrow integer by value is taken as int32_t and brought into its type's range for the call."""
+
+    def lines(self, text, name):
+        fn = [fn for fn in gen_layer.functions(text) if fn.name == name][0]
+        owner, method = gen_layer.place(fn)
+        handle = owner if owner in gen_layer.HANDLES else None
+        return gen_layer.method_lines(gen_layer.Method(method, fn), handle)
+
+    def test_each_narrow_type_is_taken_as_int32_and_fitted(self):
+        self.assertIn("    bool setLevel(int32_t level) const", self.lines(NARROW, "kode_led_set_level"))
+        self.assertIn("        return kode_led_set_level(kode_arduino_fit_u8(level));",
+                      self.lines(NARROW, "kode_led_set_level"))
+        beep = self.lines(NARROW, "kode_audio_beep")
+        self.assertIn("    bool beep(int32_t hz, uint32_t ms) const", beep)
+        self.assertIn("        return kode_audio_beep(kode_arduino_fit_u16(hz), ms);", beep)
+        nudge = self.lines(NARROW, "kode_ble_nudge")
+        self.assertIn("    bool nudge(int32_t dx, int32_t dy) const", nudge)
+        self.assertIn("        return kode_ble_nudge(kode_arduino_fit_i8(dx), kode_arduino_fit_i16(dy));", nudge)
+
+    def test_a_handles_method_fits_its_narrow_parameter_and_keeps_a_pointer(self):
+        dot = self.lines(NARROW, "kode_draw_dot")
+        self.assertIn("    bool drawDot(int32_t size, const uint8_t *mask) const", dot)
+        self.assertIn("        return kode_draw_dot(handle, kode_arduino_fit_u8(size), mask);", dot)
+
+    def test_the_fitting_functions_are_the_ones_used(self):
+        every = "\n".join(gen_layer.fitting(gen_layer.layout(gen_layer.functions(NARROW))))
+        self.assertEqual(FIT_DEFINED.findall(every), ["kode_arduino_fit_u8", "kode_arduino_fit_u16",
+                                                      "kode_arduino_fit_i8", "kode_arduino_fit_i16"])
+        one = "\n".join(gen_layer.fitting(gen_layer.layout(gen_layer.functions(
+            "\nbool kode_audio_beep(uint16_t hz, uint32_t ms);\n"))))
+        self.assertEqual(FIT_DEFINED.findall(one), ["kode_arduino_fit_u16"])
+        self.assertEqual(gen_layer.fitting(gen_layer.layout(gen_layer.functions("\nbool kode_led_off(void);\n"))), [])
+
+    def test_a_fitting_function_has_no_ternary_and_no_bare_limit(self):
+        text = "\n".join(gen_layer.fitting(gen_layer.layout(gen_layer.functions(NARROW))))
+        self.assertNotIn("?", text)
+        for limit in ("UINT8_MAX", "UINT16_MAX", "INT8_MIN", "INT8_MAX", "INT16_MIN", "INT16_MAX"):
+            self.assertIn(limit, text)
+        self.assertIsNone(re.search(r"\b(?:255|65535|127|128|32767|32768)\b", text))
+
+    def test_a_default_on_a_narrow_parameter_is_refused(self):
+        text = "\nbool kode_led_glow(uint32_t ms, uint8_t level);\n"
+        with tables(left_out={}, groups={}, defaults={"kode_led_glow": {"level": "0"}}):
+            said = stopped(self, text)
+        self.assertIn("kode_led_glow()", said)
+        self.assertIn("'level'", said)
+        self.assertIn("DEFAULTS", said)
+
+
 class Generated(unittest.TestCase):
+    def test_the_narrow_parameters_are_taken_as_int32(self):
+        text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")
+        self.assertIn("    bool setBrightness(int32_t pct) const\n    {\n"
+                      "        return kode_display_set_brightness(kode_arduino_fit_u8(pct));\n", text)
+        self.assertIn("    bool setRgb(int32_t r, int32_t g, int32_t b) const\n", text)
+        self.assertIn("    bool tone(int32_t hz, uint32_t ms) const\n", text)
+        self.assertIn("const uint8_t *keys", text)
+        signatures = SIGNATURE.findall(text)
+        self.assertEqual([line for line in signatures if NARROW_BY_VALUE.search(line)], [])
+
+    def test_the_fitting_functions_are_the_ones_used_each_before_its_first_use(self):
+        text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")
+        defined = FIT_DEFINED.findall(text)
+        bodies = "\n".join(line for line in text.splitlines() if line.startswith("        "))
+        used = set(FIT_USED.findall(bodies))
+        self.assertTrue(used)
+        self.assertEqual(sorted(defined), sorted(used))
+        for name in defined:
+            self.assertLess(text.index(f" {name}(int32_t value)"), text.index(f"{name}(", text.index("\nclass ")))
+
+    def test_the_fitting_functions_fit(self):
+        text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")
+        defined = set(FIT_DEFINED.findall(text))
+        cases = [case for case in FITTED if case[0] in defined]
+        self.assertIn("kode_arduino_fit_u8", defined)
+        self.assertIn("kode_arduino_fit_u16", defined)
+        lines = ["#include <iostream>", "", "int main(void)", "{"]
+        for name, given, _ in cases:
+            lines.append(f"    std::cout << static_cast<int32_t>({name}({given})) << \"\\n\";")
+        lines += ["    return 0;", "}", ""]
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "Fit.cpp"
+            source.write_text("\n".join(lines), encoding="utf-8")
+            printed = run_program(self, source)
+        self.assertEqual(printed.split(), [str(answered) for _, _, answered in cases])
+
+    def test_a_handle_is_not_a_number(self):
+        text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")
+        for handle, name in gen_layer.HANDLES.items():
+            self.assertIn(f"    explicit {name}({handle} from) : handle(from)\n", text)
+            self.assertNotIn(f"operator {handle}", text)
+        self.assertEqual(text.count("    explicit operator bool(void) const\n"), len(gen_layer.HANDLES))
+        self.assertIn("        return KODE_ARDUINO_NO_HANDLE != handle;\n", text)
+
+    def test_a_handle_builds_as_a_sketch_uses_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sketch = Path(tmp) / "Handles.ino"
+            sketch.write_text(HANDLES_SKETCH, encoding="utf-8")
+            compile_sketch(self, sketch)
+
+    def test_a_number_is_no_widget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sketch = Path(tmp) / "NumberAsWidget.ino"
+            sketch.write_text(NUMBER_AS_WIDGET, encoding="utf-8")
+            self.assertIn("KodeWidget", refused_sketch(self, sketch))
+
+    def test_a_widget_is_no_canvas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sketch = Path(tmp) / "WidgetAsCanvas.ino"
+            sketch.write_text(WIDGET_AS_CANVAS, encoding="utf-8")
+            self.assertIn("KodeCanvas", refused_sketch(self, sketch))
+
+    def test_all_calls_sketch_passes_a_zero_of_the_declared_type(self):
+        sketch = gen_layer.all_calls("AllCalls.ino")
+        self.assertIn("    (void)Kode.display.setBrightness(zero<int32_t>());", sketch)
+        self.assertIn("    (void)Kode.audio.tone(zero<int32_t>(), zero<uint32_t>());", sketch)
+        self.assertIsNone(re.search(r"zero<u?int(?:8|16)_t>", sketch))
+
     def test_check_fails_on_a_stale_header(self):
         with tempfile.TemporaryDirectory() as tmp:
             tree = Path(tmp)

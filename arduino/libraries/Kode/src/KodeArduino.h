@@ -12,6 +12,75 @@
 
 #define KODE_ARDUINO_NO_HANDLE 0U /**< What kode.h answers for a widget or a canvas it could not make. */
 
+/**
+ * @brief A number brought into uint8_t's range, for a call of kode.h.
+ * @param value The number a sketch passed.
+ * @return value, or 0 below the range and UINT8_MAX above it.
+ */
+inline uint8_t kode_arduino_fit_u8(int32_t value)
+{
+    int32_t fitted = value;
+    if ( 0 > fitted )
+    {
+        fitted = 0;
+    }
+    else if ( UINT8_MAX < fitted )
+    {
+        fitted = UINT8_MAX;
+    }
+    else
+    {
+        /* In the range already. */
+    }
+    return static_cast<uint8_t>(fitted);
+}
+
+/**
+ * @brief A number brought into uint16_t's range, for a call of kode.h.
+ * @param value The number a sketch passed.
+ * @return value, or 0 below the range and UINT16_MAX above it.
+ */
+inline uint16_t kode_arduino_fit_u16(int32_t value)
+{
+    int32_t fitted = value;
+    if ( 0 > fitted )
+    {
+        fitted = 0;
+    }
+    else if ( UINT16_MAX < fitted )
+    {
+        fitted = UINT16_MAX;
+    }
+    else
+    {
+        /* In the range already. */
+    }
+    return static_cast<uint16_t>(fitted);
+}
+
+/**
+ * @brief A number brought into int8_t's range, for a call of kode.h.
+ * @param value The number a sketch passed.
+ * @return value, or INT8_MIN below the range and INT8_MAX above it.
+ */
+inline int8_t kode_arduino_fit_i8(int32_t value)
+{
+    int32_t fitted = value;
+    if ( INT8_MIN > fitted )
+    {
+        fitted = INT8_MIN;
+    }
+    else if ( INT8_MAX < fitted )
+    {
+        fitted = INT8_MAX;
+    }
+    else
+    {
+        /* In the range already. */
+    }
+    return static_cast<int8_t>(fitted);
+}
+
 /* Left out of the layer, with what a sketch uses instead:
  *   kode_i2c_*()                   Arduino's Wire
  *   kode_spi_*()                   Arduino's SPI
@@ -75,15 +144,15 @@ public:
     {
     }
 
-    /** @brief The one kode.h answered. */
-    KodeWidget(kode_widget_t from) : handle(from)
+    /** @brief The one kode.h answered, by name: a number is no handle. */
+    explicit KodeWidget(kode_widget_t from) : handle(from)
     {
     }
 
-    /** @brief The handle, for a call of kode.h. */
-    operator kode_widget_t(void) const
+    /** @brief Whether kode.h made it: false for none yet and for one it could not make. */
+    explicit operator bool(void) const
     {
-        return handle;
+        return KODE_ARDUINO_NO_HANDLE != handle;
     }
 
     /** @brief kode_widget_set_text(). */
@@ -118,15 +187,15 @@ public:
     {
     }
 
-    /** @brief The one kode.h answered. */
-    KodeCanvas(kode_canvas_t from) : handle(from)
+    /** @brief The one kode.h answered, by name: a number is no handle. */
+    explicit KodeCanvas(kode_canvas_t from) : handle(from)
     {
     }
 
-    /** @brief The handle, for a call of kode.h. */
-    operator kode_canvas_t(void) const
+    /** @brief Whether kode.h made it: false for none yet and for one it could not make. */
+    explicit operator bool(void) const
     {
-        return handle;
+        return KODE_ARDUINO_NO_HANDLE != handle;
     }
 
     /** @brief kode_canvas_fill(). */
@@ -280,9 +349,9 @@ public:
     }
 
     /** @brief kode_led_set_rgb(). */
-    bool setRgb(uint8_t r, uint8_t g, uint8_t b) const
+    bool setRgb(int32_t r, int32_t g, int32_t b) const
     {
-        return kode_led_set_rgb(r, g, b);
+        return kode_led_set_rgb(kode_arduino_fit_u8(r), kode_arduino_fit_u8(g), kode_arduino_fit_u8(b));
     }
 
     /** @brief kode_led_off(). */
@@ -474,9 +543,9 @@ public:
     }
 
     /** @brief kode_haptic_add_profile(). */
-    bool addProfile(const char *name, const uint16_t *pattern_ms, uint32_t n, uint8_t intensity) const
+    bool addProfile(const char *name, const uint16_t *pattern_ms, uint32_t n, int32_t intensity) const
     {
-        return kode_haptic_add_profile(name, pattern_ms, n, intensity);
+        return kode_haptic_add_profile(name, pattern_ms, n, kode_arduino_fit_u8(intensity));
     }
 };
 
@@ -515,9 +584,9 @@ public:
     }
 
     /** @brief kode_audio_stream_open(). */
-    bool streamOpen(uint8_t channels) const
+    bool streamOpen(int32_t channels) const
     {
-        return kode_audio_stream_open(channels);
+        return kode_audio_stream_open(kode_arduino_fit_u8(channels));
     }
 
     /** @brief kode_audio_stream_write(). */
@@ -533,9 +602,9 @@ public:
     }
 
     /** @brief kode_audio_tone(). */
-    bool tone(uint16_t hz, uint32_t ms) const
+    bool tone(int32_t hz, uint32_t ms) const
     {
-        return kode_audio_tone(hz, ms);
+        return kode_audio_tone(kode_arduino_fit_u16(hz), ms);
     }
 
     /** @brief kode_audio_set(). */
@@ -675,9 +744,9 @@ public:
     }
 
     /** @brief kode_ble_hid_select(). */
-    bool hidSelect(uint8_t kinds) const
+    bool hidSelect(int32_t kinds) const
     {
-        return kode_ble_hid_select(kinds);
+        return kode_ble_hid_select(kode_arduino_fit_u8(kinds));
     }
 
     /** @brief kode_ble_hid_ready(). */
@@ -687,27 +756,27 @@ public:
     }
 
     /** @brief kode_ble_hid_mouse(). */
-    bool hidMouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel) const
+    bool hidMouse(int32_t buttons, int32_t dx, int32_t dy, int32_t wheel) const
     {
-        return kode_ble_hid_mouse(buttons, dx, dy, wheel);
+        return kode_ble_hid_mouse(kode_arduino_fit_u8(buttons), kode_arduino_fit_i8(dx), kode_arduino_fit_i8(dy), kode_arduino_fit_i8(wheel));
     }
 
     /** @brief kode_ble_hid_click(). */
-    bool hidClick(uint8_t buttons) const
+    bool hidClick(int32_t buttons) const
     {
-        return kode_ble_hid_click(buttons);
+        return kode_ble_hid_click(kode_arduino_fit_u8(buttons));
     }
 
     /** @brief kode_ble_hid_keys(). */
-    bool hidKeys(uint8_t modifiers, const uint8_t *keys) const
+    bool hidKeys(int32_t modifiers, const uint8_t *keys) const
     {
-        return kode_ble_hid_keys(modifiers, keys);
+        return kode_ble_hid_keys(kode_arduino_fit_u8(modifiers), keys);
     }
 
     /** @brief kode_ble_hid_tap(). */
-    bool hidTap(uint8_t modifiers, uint8_t key) const
+    bool hidTap(int32_t modifiers, int32_t key) const
     {
-        return kode_ble_hid_tap(modifiers, key);
+        return kode_ble_hid_tap(kode_arduino_fit_u8(modifiers), kode_arduino_fit_u8(key));
     }
 
     /** @brief kode_ble_pair_open(). */
@@ -768,9 +837,9 @@ class Kode_udp
 {
 public:
     /** @brief kode_udp_send(). */
-    bool send(const char *host, uint16_t port, const void *data, uint32_t len) const
+    bool send(const char *host, int32_t port, const void *data, uint32_t len) const
     {
-        return kode_udp_send(host, port, data, len);
+        return kode_udp_send(host, kode_arduino_fit_u16(port), data, len);
     }
 };
 
@@ -861,9 +930,9 @@ public:
     }
 
     /** @brief kode_power_set_charge_current(). */
-    bool setChargeCurrent(uint16_t ma) const
+    bool setChargeCurrent(int32_t ma) const
     {
-        return kode_power_set_charge_current(ma);
+        return kode_power_set_charge_current(kode_arduino_fit_u16(ma));
     }
 };
 
@@ -1058,9 +1127,9 @@ class Kode_display
 {
 public:
     /** @brief kode_display_set_brightness(). */
-    bool setBrightness(uint8_t pct) const
+    bool setBrightness(int32_t pct) const
     {
-        return kode_display_set_brightness(pct);
+        return kode_display_set_brightness(kode_arduino_fit_u8(pct));
     }
 
     /** @brief kode_display_sleep(). */
@@ -1176,9 +1245,9 @@ public:
     }
 
     /** @brief kode_rgb(). */
-    kode_color_t rgb(uint8_t r, uint8_t g, uint8_t b) const
+    kode_color_t rgb(int32_t r, int32_t g, int32_t b) const
     {
-        return kode_rgb(r, g, b);
+        return kode_rgb(kode_arduino_fit_u8(r), kode_arduino_fit_u8(g), kode_arduino_fit_u8(b));
     }
 };
 
