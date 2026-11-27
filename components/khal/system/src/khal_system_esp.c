@@ -231,6 +231,11 @@ bool khal_task_stack_in_psram(void)
     return esp_ptr_external_ram(&probe);
 }
 
+bool khal_in_isr(void)
+{
+    return xPortInIsrContext() != pdFALSE;
+}
+
 const char *khal_task_name(void)
 {
     TaskHandle_t const self = xTaskGetCurrentTaskHandle();

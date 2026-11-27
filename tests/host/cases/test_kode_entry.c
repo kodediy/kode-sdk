@@ -7,7 +7,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "unity.h"
 
@@ -365,6 +368,183 @@ TEST_CASE("an Active Object is refused before the bring-up is waited on", "[kode
     TEST_ASSERT_TRUE(took);
     TEST_ASSERT_FALSE(r.entered);
     TEST_ASSERT_EQUAL_UINT32(0U, s_wait_hook_runs);
+}
+
+/* ---- A call from an interrupt --------------------------------------------- */
+
+/** @brief The line the rescue path gets the first time an interrupt calls. */
+#define ISR_LINE "kodeOS: a kode.h call from an interrupt was refused; kode.h is for tasks\r\n"
+
+/** @brief Bytes of the suite's output a case keeps while it captures. */
+#define CAPTURE_MAX 4096U
+
+/** @brief stdout as it was before capture_start(), to put back. */
+static int s_saved_out = -1;
+
+/** @brief Bytes of the path of the file a case captures into. */
+#define CAPTURE_PATH_MAX 512U
+
+/** @brief That file's name under TMPDIR; mkstemp() fills in the X's. */
+#define CAPTURE_NAME "kode_captureXXXXXX"
+
+/** @brief Where stdout goes while a case captures. */
+static FILE *s_capture;
+
+/**
+ * @brief A file of no name under TMPDIR, open for update.
+ *
+ * Not tmpfile(): on macOS it calls sigprocmask(), which rewrites every
+ * thread's signal mask, so the port's suspended tasks take the tick and a
+ * later case aborts or hangs. mkstemp() leaves the masks alone.
+ * @return The file, or NULL.
+ */
+static FILE *capture_file(void)
+{
+    char        path[CAPTURE_PATH_MAX];
+    const char *tmp = getenv("TMPDIR");
+    const char *sep = "/";
+    FILE       *f   = NULL;
+
+    if ( (NULL == tmp) || ('\0' == tmp[0]) )
+    {
+        tmp = "/tmp";
+    }
+    if ( '/' == tmp[strlen(tmp) - 1U] )
+    {
+        sep = "";
+    }
+    const int len = snprintf(path, sizeof(path), "%s%s%s", tmp, sep, CAPTURE_NAME);
+
+    if ( (0 < len) && ((size_t)len < sizeof(path)) )
+    {
+        const int fd = mkstemp(path);
+
+        if ( 0 <= fd )
+        {
+            (void)unlink(path);
+            f = fdopen(fd, "w+");
+            if ( NULL == f )
+            {
+                (void)close(fd);
+            }
+        }
+    }
+    return f;
+}
+
+/**
+ * @brief Send the suite's output to a file of its own: the rescue path writes
+ *        through the ROM's printf, which on the host is stdout.
+ * @return true when the capture is on.
+ */
+static bool capture_start(void)
+{
+    bool on = false;
+
+    (void)fflush(stdout);
+    s_capture = capture_file();
+    if ( NULL != s_capture )
+    {
+        s_saved_out = dup(STDOUT_FILENO);
+        on = (0 <= s_saved_out) && (0 <= dup2(fileno(s_capture), STDOUT_FILENO));
+    }
+    return on;
+}
+
+/**
+ * @brief Put stdout back and read what was written meanwhile.
+ * @param out Receives the text, always terminated; CAPTURE_MAX bytes.
+ */
+static void capture_end(char *out)
+{
+    size_t n = 0U;
+
+    (void)fflush(stdout);
+    if ( 0 <= s_saved_out )
+    {
+        (void)dup2(s_saved_out, STDOUT_FILENO);
+        (void)close(s_saved_out);
+        s_saved_out = -1;
+    }
+    if ( NULL != s_capture )
+    {
+        rewind(s_capture);
+        n = fread(out, 1U, CAPTURE_MAX - 1U, s_capture);
+        (void)fclose(s_capture);
+        s_capture = NULL;
+    }
+    out[n] = '\0';
+}
+
+/** @brief How many times @p line is in @p text. */
+static uint32_t count_of(const char *text, const char *line)
+{
+    uint32_t    n  = 0U;
+    const char *at = strstr(text, line);
+
+    while ( NULL != at )
+    {
+        ++n;
+        at = strstr(&at[strlen(line)], line);
+    }
+    return n;
+}
+
+/** @brief The probe's job: an error of its own, then kode_enter(), then what kode_error() says. */
+static void enter_after_error_job(void *ctx)
+{
+    Entered *r = (Entered *)ctx;
+
+    kode_err_set("the probe's own error");
+    r->entered = kode_enter("kode_led_toggle");
+    text_copy(r->error, kode_error());
+}
+
+TEST_CASE("a call from an interrupt fails at once, touches nothing and is said once",
+          "[kode_entry]")
+{
+    static char out[CAPTURE_MAX];
+    Entered     r = { true, "" };
+
+    system_is_up();
+    (void)probe_ao_run(NULL, NULL, TEST_WAIT_MS);   /* the probe up first */
+    kode_err_set("the task's own error");
+    fake_klog_reset();
+    fake_isr_set(true);
+
+    TEST_ASSERT_TRUE(capture_start());
+    const bool first = kode_enter("kode_led_toggle");
+    /* The second one inside an Active Object: an interrupt is asked about
+     * before the task is, so the AO's refusal never runs. */
+    const bool took  = probe_ao_run(&enter_after_error_job, &r, TEST_WAIT_MS);
+    capture_end(out);
+    fake_isr_set(false);
+
+    TEST_ASSERT_FALSE(first);
+    TEST_ASSERT_TRUE(took);
+    TEST_ASSERT_FALSE(r.entered);
+    /* No task's error is written or cleared, and klog hears nothing. */
+    TEST_ASSERT_EQUAL_STRING("the task's own error", kode_error());
+    TEST_ASSERT_EQUAL_STRING("the probe's own error", r.error);
+    TEST_ASSERT_EQUAL_UINT32(0U, fake_klog_count());
+    /* The rescue path has the line once for both calls. */
+    TEST_ASSERT_EQUAL_UINT32(1U, count_of(out, ISR_LINE));
+}
+
+TEST_CASE("a call from a task is let in and says nothing of an interrupt", "[kode_entry]")
+{
+    static char out[CAPTURE_MAX];
+
+    system_is_up();
+    kode_err_set("boom");
+
+    TEST_ASSERT_TRUE(capture_start());
+    const bool entered = kode_enter("kode_led_toggle");
+    capture_end(out);
+
+    TEST_ASSERT_TRUE(entered);
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(0U, count_of(out, ISR_LINE));
 }
 
 TEST_CASE("kode_has_prefix matches the start of a text in any case", "[kode_entry]")

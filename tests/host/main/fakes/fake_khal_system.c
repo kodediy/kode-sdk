@@ -57,6 +57,10 @@ static unsigned s_psram_grants;
  * unless a case says so. */
 static bool s_stack_in_psram;
 
+/* What khal_in_isr() answers: a host caller is never in an interrupt unless
+ * a case says so. */
+static bool s_in_isr;
+
 /* How many tasks khal_task_list() says the scheduler runs: none unless a
  * case says so, which reads as a build that cannot ask. */
 static size_t s_tasks;
@@ -105,6 +109,7 @@ void fake_system_reset(void)
     s_psram_refusals       = 0U;
     s_psram_grants         = 0U;
     s_stack_in_psram       = false;
+    s_in_isr               = false;
     s_tasks                = 0U;
     s_alloc_failures       = 0U;
     s_internal_low         = HEAP_LOW_DEFAULT;
@@ -273,6 +278,16 @@ void fake_task_stack_in_psram_set(bool on)
 bool khal_task_stack_in_psram(void)
 {
     return s_stack_in_psram;
+}
+
+void fake_isr_set(bool on)
+{
+    s_in_isr = on;
+}
+
+bool khal_in_isr(void)
+{
+    return s_in_isr;
 }
 
 void fake_heap_set_internal_low(size_t bytes)

@@ -306,6 +306,13 @@ uint32_t fake_task_slot_owned(void);
  */
 void fake_task_stack_in_psram_set(bool on);
 
+/**
+ * @brief Make khal_in_isr() answer @p on, for every task, until the next
+ *        fakes_reset().
+ * @param on true for a caller in an interrupt.
+ */
+void fake_isr_set(bool on);
+
 /** @brief Empty the stand-in neighbours' queues. */
 void fake_neighbours_reset(void);
 

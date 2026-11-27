@@ -46,6 +46,9 @@ KAOS_WEAK void kode_tag_state_free(struct kode_tag_state *s);
 /** @brief The distance between an ASCII capital and its lower-case letter. */
 #define KODE_ASCII_CASE_GAP ('a' - 'A')
 
+/** @brief What the rescue path gets the first time an interrupt calls kode.h. */
+#define KODE_ISR_REFUSED_LINE "kodeOS: a kode.h call from an interrupt was refused; kode.h is for tasks\r\n"
+
 /** @brief What kode_error() answers when the task has no text. */
 static const char s_no_error[] = "";
 
@@ -191,30 +194,48 @@ void kode_name_unknown_warn(kode_name_kind_t kind)
 
 bool kode_enter(const char *name)
 {
-    const char *ao = NULL;
-    const char *who = s_no_error;
+    /* Set once an interrupt's call has been said on the rescue path. */
+    static atomic_bool isr_said;
+
+    const char *ao      = NULL;
+    const char *who     = s_no_error;
+    bool        entered = false;
 
     if ( NULL != name )
     {
         who = name;
     }
-    if ( kqp_current_is_ao(&ao) )
+    /* The interrupt first: from one, the current task is the task it
+     * interrupted. An interrupt has no task state to write, so it gets the
+     * failure alone, and the rescue path one fixed line per boot. */
+    if ( khal_in_isr() )
+    {
+        /* cppcheck-suppress misra-c2012-17.3 ; <stdatomic.h>'s generic: the compiler sees it declared, cppcheck does not */
+        if ( !atomic_exchange(&isr_said, true) )
+        {
+            kode_log_emergency(KODE_ISR_REFUSED_LINE);
+        }
+    }
+    else if ( kqp_current_is_ao(&ao) )
     {
         kode_err_set("%s was called from an Active Object (%s); kode.h calls "
                      "block - call kode_sys_* instead", who, ao);
         KLOG_E(TAG, "%s", kode_error());
-        return false;
     }
-    kode_init();
-
-    kode_task_t *const task = kode_task_get();
-
-    if ( NULL != task )
+    else
     {
-        /* The text stays: the call may be reading it as an argument. */
-        task->failed = false;
+        kode_init();
+
+        kode_task_t *const task = kode_task_get();
+
+        if ( NULL != task )
+        {
+            /* The text stays: the call may be reading it as an argument. */
+            task->failed = false;
+        }
+        entered = true;
     }
-    return true;
+    return entered;
 }
 
 char kode_ascii_lower(char c)
