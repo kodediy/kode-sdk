@@ -169,6 +169,7 @@ setRgb	KEYWORD2
 setText	KEYWORD2
 setValue	KEYWORD2
 setting	KEYWORD2
+show	KEYWORD2
 sleep	KEYWORD2
 space	KEYWORD2
 spi	KEYWORD2

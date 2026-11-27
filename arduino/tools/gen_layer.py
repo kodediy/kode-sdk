@@ -59,14 +59,14 @@ HANDLE_BRIEFS = {
 }
 
 # The names the rule cannot give, as (group, method); "" is Kode itself.
-# kode_init() and kode_screen_new() begin something, as Arduino says it;
-# `new` and `delete` are C++ keywords; kode_rest() shares its group's name;
-# kode_print() takes a format, which Arduino calls printf.
+# kode_init() begins the SDK, as Arduino says it; `new` and `delete` are C++
+# keywords, so a screen is shown and a file removed; kode_rest() shares its
+# group's name; kode_print() takes a format, which Arduino calls printf.
 RENAMED = {
     "kode_init":        ("", "begin"),
     "kode_print":       ("", "printf"),
     "kode_rest":        ("rest", "begin"),
-    "kode_screen_new":  ("screen", "begin"),
+    "kode_screen_new":  ("screen", "show"),
     "kode_file_delete": ("file", "remove"),
 }
 
