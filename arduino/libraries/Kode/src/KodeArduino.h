@@ -1261,7 +1261,7 @@ class Kode_screen
 {
 public:
     /** @brief kode_screen_new(). */
-    bool begin(const char *title) const
+    bool show(const char *title) const
     {
         return kode_screen_new(title);
     }

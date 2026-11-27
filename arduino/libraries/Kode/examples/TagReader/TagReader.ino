@@ -13,7 +13,7 @@ static KodeWidget s_tag;     /**< The last tag's line. */
 void setup(void)
 {
     Kode.begin();
-    (void)Kode.screen.begin("Tag reader");
+    (void)Kode.screen.show("Tag reader");
     s_battery = Kode.screen.addText("Battery: --");
     s_tag     = Kode.screen.addText("No tag yet");
 }

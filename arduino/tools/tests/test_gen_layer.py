@@ -94,7 +94,7 @@ class Rule(unittest.TestCase):
 
     def test_the_renamed_ones(self):
         where = placed(HEADER)
-        self.assertEqual(where["kode_screen_new"], ("screen", "begin"))
+        self.assertEqual(where["kode_screen_new"], ("screen", "show"))
         self.assertEqual(where["kode_print"], ("", "printf"))
         self.assertEqual(where["kode_rest"], ("rest", "begin"))
         self.assertEqual(where["kode_rest_end"], ("rest", "end"))
@@ -179,8 +179,8 @@ class Refused(unittest.TestCase):
         self.assertIn("C++ keyword", said)
 
     def test_two_functions_with_one_name(self):
-        said = self.refusal("\nbool kode_screen_new(void);\nbool kode_screen_begin(void);\n")
-        self.assertIn("kode_screen_begin()", said)
+        said = self.refusal("\nbool kode_screen_new(void);\nbool kode_screen_show(void);\n")
+        self.assertIn("kode_screen_show()", said)
         self.assertIn("kode_screen_new()", said)
 
     def test_a_function_named_as_a_group(self):
