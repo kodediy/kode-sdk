@@ -65,7 +65,7 @@ check_mailbox() {   # check_mailbox <name> <bytes> <expected_exit> [<text expect
     rc=$?
     if [ "$rc" -ne "$expected_exit" ]; then
         fault "$name" "expected exit $expected_exit, got $rc"$'\n'"$out"
-    elif [ -n "$expected_text" ] && ! printf '%s' "$out" | grep -qF -- "$expected_text"; then
+    elif [ -n "$expected_text" ] && ! grep -qF -- "$expected_text" <<<"$out"; then
         fault "$name" "expected the output to say '$expected_text', got:"$'\n'"$out"
     else
         pass "$name"

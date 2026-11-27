@@ -73,14 +73,14 @@ check() {   # check <name> <report> <baseline> <expected_exit> [<text expected i
            FAKE_EXIT="${FAKE_EXIT:-0}" FAKE_ERR="${FAKE_ERR:-}" \
            "$script" "$work/db.json" "$work/$baseline" components 2>&1)"
     rc=$?
-    if printf '%s' "$out" | grep -q 'check_misra.sh: line'; then
+    if grep -q 'check_misra.sh: line' <<<"$out"; then
         # The shell complaining about the script itself, whatever the verdict.
         printf 'FAIL  %s  the script tripped over its own input:\n%s\n' "$name" "$out"
         fail=1
     elif [ "$rc" -ne "$expected_exit" ]; then
         printf 'FAIL  %s  expected exit %s, got %s\n%s\n' "$name" "$expected_exit" "$rc" "$out"
         fail=1
-    elif [ -n "$expected_text" ] && ! printf '%s' "$out" | grep -qF -- "$expected_text"; then
+    elif [ -n "$expected_text" ] && ! grep -qF -- "$expected_text" <<<"$out"; then
         printf 'FAIL  %s  expected the output to say %q, got:\n%s\n' "$name" "$expected_text" "$out"
         fail=1
     else
@@ -161,7 +161,7 @@ check updated more.report written.baseline 0
 echo '[]' > "$work/empty.json"
 out="$(cd "$work/src" && PATH="$work/bin:$PATH" FAKE_REPORT="$work/plain.report" \
        "$script" "$work/empty.json" "$work/plain.baseline" components 2>&1)"
-if [ "$?" -ne 1 ] || ! printf '%s' "$out" | grep -qF 'compiles no .c file'; then
+if [ "$?" -ne 1 ] || ! grep -qF 'compiles no .c file' <<<"$out"; then
     printf 'FAIL  nofiles  expected a refusal, got:\n%s\n' "$out"
     fail=1
 else

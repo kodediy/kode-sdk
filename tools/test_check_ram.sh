@@ -46,14 +46,14 @@ check() {   # check <name> <expected_exit> [<text expected in the output>]
     local out rc
     out="$(PATH="$work/bin:$PATH" tools/check_ram.sh "$work/$name.elf" "$work/$name.budget" 2>&1)"
     rc=$?
-    if printf '%s' "$out" | grep -q 'check_ram.sh: line'; then
+    if grep -q 'check_ram.sh: line' <<<"$out"; then
         # The shell complaining about the script itself, whatever the verdict.
         printf 'FAIL  %s  the script tripped over its own input:\n%s\n' "$name" "$out"
         fail=1
     elif [ "$rc" -ne "$expected_exit" ]; then
         printf 'FAIL  %s  expected exit %s, got %s\n%s\n' "$name" "$expected_exit" "$rc" "$out"
         fail=1
-    elif [ -n "$expected_text" ] && ! printf '%s' "$out" | grep -qF -- "$expected_text"; then
+    elif [ -n "$expected_text" ] && ! grep -qF -- "$expected_text" <<<"$out"; then
         printf 'FAIL  %s  expected the output to say %q, got:\n%s\n' "$name" "$expected_text" "$out"
         fail=1
     else

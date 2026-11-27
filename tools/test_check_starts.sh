@@ -47,13 +47,13 @@ check() {   # check <name> <expected_exit> [<text expected in the output> [<opti
     shift 3 2>/dev/null || shift $#
     out="$(NM="$nm_tool" tools/check_starts.sh "$work/$name" "$@" 2>&1)"
     rc=$?
-    if printf '%s' "$out" | grep -q 'check_starts.sh: line'; then
+    if grep -q 'check_starts.sh: line' <<<"$out"; then
         printf 'FAIL  %s  the script tripped over its own input:\n%s\n' "$name" "$out"
         fail=1
     elif [ "$rc" -ne "$expected_exit" ]; then
         printf 'FAIL  %s  expected exit %s, got %s\n%s\n' "$name" "$expected_exit" "$rc" "$out"
         fail=1
-    elif [ -n "$expected_text" ] && ! printf '%s' "$out" | grep -qF -- "$expected_text"; then
+    elif [ -n "$expected_text" ] && ! grep -qF -- "$expected_text" <<<"$out"; then
         printf 'FAIL  %s  expected the output to say %q, got:\n%s\n' "$name" "$expected_text" "$out"
         fail=1
     else
@@ -131,7 +131,7 @@ check dep_touch_ok 0 "starts: 2 Active Objects"
 printf '__attribute__((weak)) void probe(void); void f(void) { if (probe) { probe(); } }\n' \
     > "$work/weak_probe.c"
 "$cc_tool" -c -o "$work/weak_probe.o" "$work/weak_probe.c" || exit 1
-if "$nm_tool" "$work/weak_probe.o" | grep -q ' w '; then
+if grep -q ' w ' <<<"$("$nm_tool" "$work/weak_probe.o")"; then
     archive dep_weak kaos \
         'audio_ao=__attribute__((weak)) void radio_amp_request(int on); void *const AO_Audio = 0; void kaos_audio_start(void) { if (radio_amp_request) { radio_amp_request(1); } }' \
         'radio_ao=void *const AO_Radio = 0; void kaos_radio_start(void) {} void radio_amp_request(int on) { (void)on; }'
@@ -214,7 +214,7 @@ image os_noinit "$OS_IMAGE"
 role os_noinit OS
 check os_noinit 1 "no object defines kode_init" --all
 
-if "$nm_tool" "$work/weak_probe.o" | grep -q ' w '; then
+if grep -q ' w ' <<<"$("$nm_tool" "$work/weak_probe.o")"; then
     archive os_weak kaos "${OS_KAOS[@]}"
     archive os_weak kode_sys "$SYS_OK" \
         'kode_sys=__attribute__((weak)) void kaos_radio_start(void); void kaos_ledmgr_start(void); void kode_sys_ir_init(void); void (*const rows[])(void) = { kaos_radio_start, kaos_ledmgr_start, kode_sys_ir_init }; void kode_init(void) {}'
