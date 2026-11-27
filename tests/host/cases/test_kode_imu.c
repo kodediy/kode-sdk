@@ -21,6 +21,7 @@
 #include "ao_spy.h"
 #include "fakes.h"
 #include "kaos.h"
+#include "kbsp_board.h"
 #include "kdrv_qmc5883p.h"
 #include "kdrv_qmi8658.h"
 #include "khal_sync.h"
@@ -697,16 +698,26 @@ static void store_cal(int32_t scale_x)
     TEST_ASSERT_EQUAL_INT(KODE_OK, kode_block_mag_cal_set(&corr));
 }
 
-/** @brief Stage the Dot flat, its top east: the field as the chip reads it with the case's offsets in. */
+/**
+ * @brief Stage the Dot flat, its top east: the field on the board's axes, put on
+ *        the chip's through kbsp_board.h's map, with the case's offsets in.
+ */
 static void stage_flat_east(int32_t accel_z_mg)
 {
-    const int32_t a_mg[AXES]   = { 0, 0, accel_z_mg };
-    const int32_t w_mdps[AXES] = { 0, 0, 0 };
+    static const int32_t off[AXES]   = { CAL_OFFSET_X, CAL_OFFSET_Y, CAL_OFFSET_Z };
+    const int32_t        board[AXES] = { EAST_FIELD_X, 0, DOWN_FIELD_Z };
+    const int32_t        a_mg[AXES]  = { 0, 0, accel_z_mg };
+    const int32_t        w_mdps[AXES] = { 0, 0, 0 };
+    int32_t              chip[AXES];
 
     stage_sample(a_mg, w_mdps, 0);
-    s_mag_field[0] = (int16_t)(EAST_FIELD_X + CAL_OFFSET_X);
-    s_mag_field[1] = (int16_t)(0 + CAL_OFFSET_Y);
-    s_mag_field[2] = (int16_t)(DOWN_FIELD_Z + CAL_OFFSET_Z);
+    chip[KBSP_MAG_AXIS_X] = KBSP_MAG_SIGN_X * board[0];
+    chip[KBSP_MAG_AXIS_Y] = KBSP_MAG_SIGN_Y * board[1];
+    chip[KBSP_MAG_AXIS_Z] = KBSP_MAG_SIGN_Z * board[2];
+    for ( uint32_t i = 0U; AXES > i; i++ )
+    {
+        s_mag_field[i] = (int16_t)(chip[i] + off[i]);
+    }
 }
 
 TEST_CASE("a stored calibration corrects what kode_mag_read_axis answers", "[kode_compass]")

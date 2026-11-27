@@ -144,6 +144,24 @@ static void expect_heading(float heading, float pitch, float roll)
     TEST_ASSERT_TRUE_MESSAGE(FULL_TURN > got, why);
 }
 
+TEST_CASE("the maps put the QMC5883P a quarter turn from the QMI8658A about z", "[kcompass]")
+{
+    static const float board[AXES][AXES] = { { 1.0F, 0.0F, 0.0F }, { 0.0F, 1.0F, 0.0F }, { 0.0F, 0.0F, 1.0F } };
+
+    for ( uint32_t k = 0U; AXES > k; k++ )
+    {
+        float imu[AXES];
+        float mag[AXES];
+
+        imu_chip(board[k], imu);
+        mag_chip(board[k], mag);
+        /* As measured on a board: the QMC5883P's x is the QMI8658A's y, its y the QMI8658A's -x. */
+        TEST_ASSERT_EQUAL_FLOAT(imu[1], mag[0]);
+        TEST_ASSERT_EQUAL_FLOAT(-imu[0], mag[1]);
+        TEST_ASSERT_EQUAL_FLOAT(imu[2], mag[2]);
+    }
+}
+
 TEST_CASE("heading: north, east, south and west with the Dot flat", "[kcompass]")
 {
     expect_heading(0.0F, 0.0F, 0.0F);
