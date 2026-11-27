@@ -1,38 +1,37 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/**
- * @file TagReader.ino
- * @brief A screen with the battery and the last NFC tag; the top button buzzes.
- */
-#define TAG_WAIT_MS 200U /**< How long one look for a tag lasts. */
-#define TAG_TONE_HZ 880U /**< The tone a tag is answered with. */
-#define TAG_TONE_MS 120U /**< How long that tone sounds. */
+// A screen with the battery and the last NFC tag. A tag turns the LED green and sounds a tone;
+// the top button gives a tap and turns the LED off.
 
-static KodeWidget s_battery; /**< The battery's line. */
-static KodeWidget s_tag;     /**< The last tag's line. */
+const uint32_t TAG_WAIT_MS = 200;  // How long one look for a tag lasts.
+const uint16_t TAG_TONE_HZ = 880;  // The tone a tag is answered with.
+const uint32_t TAG_TONE_MS = 120;  // How long that tone sounds.
 
-void setup(void)
-{
-    (void)Kode.screen.show("Tag reader");
-    s_battery = Kode.screen.addText("Battery: --");
-    s_tag     = Kode.screen.addText("No tag yet");
+KodeWidget batteryLine;  // The battery's line.
+KodeWidget tagLine;      // The last tag's line.
+int shownLevel = -1;     // The battery level the screen shows.
+
+void setup() {
+  Kode.screen.show("Tag reader");
+  batteryLine = Kode.screen.addText("Battery: --");
+  tagLine = Kode.screen.addText("No tag yet");
 }
 
-void loop(void)
-{
-    KodeTag tag = Kode.nfc.readId(TAG_WAIT_MS);
+void loop() {
+  KodeTag tag = Kode.nfc.readId(TAG_WAIT_MS);
+  if (tag.ok) {
+    tagLine.setText("Tag %s", tag.id);
+    Kode.led.setColor(KODE_PURE_GREEN);
+    Kode.audio.tone(TAG_TONE_HZ, TAG_TONE_MS);
+  }
 
-    if ( tag.ok )
-    {
-        (void)Kode.led.setColor(KODE_GREEN);
-        (void)Kode.audio.tone(TAG_TONE_HZ, TAG_TONE_MS);
-        (void)s_tag.setText("%s", tag.id);
-    }
+  if (Kode.button.wasPressed("top")) {
+    Kode.haptic.play("click");
+    Kode.led.off();
+  }
 
-    if ( Kode.button.wasPressed("top") )
-    {
-        (void)Kode.haptic.play("click");
-        (void)Kode.led.off();
-    }
-
-    (void)s_battery.setText("Battery: %u %%", (unsigned)Kode.battery.level());
+  int level = Kode.battery.level();
+  if (level != shownLevel) {
+    batteryLine.setText("Battery: %d %%", level);
+    shownLevel = level;
+  }
 }

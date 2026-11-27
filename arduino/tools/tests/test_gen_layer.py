@@ -44,7 +44,34 @@ ALIAS = re.compile(r"^using Kode[A-Za-z0-9]+ = (kode_[a-z0-9_]+_t);", re.M)
 ALIAS_NAME = re.compile(r"^using (\w+) = ", re.M)
 CLASS_NAME = re.compile(r"^class (\w+)$", re.M)
 INCLUDE = re.compile(r"^\s*#\s*include\b", re.M)
+KEYWORD2 = re.compile(r"^(\w+)\tKEYWORD2$", re.M)
 VARIANT = gen_layer.SDK / "arduino" / "variants" / "kodedot" / "pins_arduino.h"
+# The calls a sketch makes leaning on the defaults of DEFAULTS.
+DEFAULTS_SKETCH = """void setup(void)
+{
+    (void)Kode.http.get("u");
+    (void)Kode.wifi.connect();
+    (void)Kode.screen.show();
+    (void)Kode.touch.read();
+    (void)Kode.event.wait("x", 1);
+    (void)Kode.rest.begin(0);
+    (void)Kode.screen.addValue("1");
+}
+
+void loop(void)
+{
+}
+"""
+# A header with an event's name, a function of a group, two of no group and a call with trailing pointers.
+TABLED = """
+#define KODE_EVENT_IR_RECEIVED kode_event_ir_received()
+const char *kode_event_ir_received(void);
+bool kode_event_wait(const char *event, uint32_t ms, kode_event_t *out);
+bool kode_i2c_probe(uint8_t addr);
+void kode_delay(uint32_t ms);
+bool kode_led_off(void);
+bool kode_touch_read(int16_t *x, int16_t *y);
+"""
 # The variant's lines that bring the layer: C++ linkage, and the header by a path from the variant's folder.
 LAYER_INCLUDE = re.compile(r'#ifdef __cplusplus\nextern "C\+\+" \{\n#include "([^"]+)"\n\}\n#endif\n')
 
@@ -76,6 +103,40 @@ def include_dirs():
                 raise AssertionError(f"{path.name} includes {name}, which no include folder holds")
             waiting.append(holders[0] / name)
     return found
+
+
+def compile_sketch(case, sketch):
+    """Build a sketch as C++ the way the board does, the variant's pins_arduino.h above it; skip with no c++."""
+    compiler = shutil.which("c++")
+    if compiler is None:
+        case.skipTest("this machine has no c++")
+    folder = sketch.parent
+    (folder / "sdkconfig.h").write_text("", encoding="utf-8")
+    # What the board's Arduino.h does: the variant's pins_arduino.h, inside extern "C", above the sketch.
+    arduino_h = folder / "Arduino.h"
+    arduino_h.write_text(f'extern "C" {{\n#include "{VARIANT}"\n}}\n', encoding="utf-8")
+    # A GNU dialect on a Unix host predefines unix and linux, which the board's compiler does not:
+    # Kode.time.unix() would read as Kode.time.1().
+    flags = ["-U", "unix", "-U", "linux", "-include", str(arduino_h), "-I", str(folder)]
+    for include in include_dirs():
+        flags += ["-I", str(include)]
+    built = subprocess.run([compiler, "-std=gnu++2b", "-fsyntax-only", "-x", "c++"] + flags + [str(sketch)],
+                           capture_output=True, text=True)
+    case.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+
+
+TABLED_LEFT_OUT = {"kode_delay": "Arduino's delay()"}
+TABLED_GROUPS = {"i2c": "Arduino's Wire"}
+TABLED_DEFAULTS = {"kode_touch_read": {"x": "nullptr", "y": "nullptr"}}
+
+
+@contextlib.contextmanager
+def tables(left_out=TABLED_LEFT_OUT, groups=TABLED_GROUPS, defaults=TABLED_DEFAULTS):
+    """LEFT_OUT, LEFT_OUT_GROUPS and DEFAULTS as a synthetic header needs them: TABLED's unless a case says."""
+    with mock.patch.dict(gen_layer.LEFT_OUT, left_out, clear=True), \
+            mock.patch.dict(gen_layer.LEFT_OUT_GROUPS, groups, clear=True), \
+            mock.patch.dict(gen_layer.DEFAULTS, defaults, clear=True):
+        yield
 
 
 class Rule(unittest.TestCase):
@@ -227,6 +288,95 @@ class Names(unittest.TestCase):
         self.assertIn("KodeTag", said)
 
 
+def stopped(case, text):
+    """What the run says when it stops on a header's tables."""
+    with contextlib.redirect_stderr(io.StringIO()):
+        with case.assertRaises(SystemExit) as stop:
+            gen_layer.layer_functions(text)
+    return str(stop.exception.code)
+
+
+class LeftOut(unittest.TestCase):
+    """A function the layer leaves out has no method; a stale line of a table stops the run."""
+
+    def test_by_name_by_group_and_an_events_name(self):
+        with tables():
+            out = gen_layer.left_out(gen_layer.functions(TABLED), TABLED)
+            kept = [fn.name for fn in gen_layer.layer_functions(TABLED)]
+        self.assertEqual(out, {
+            "kode_event_ir_received": "KODE_EVENT_IR_RECEIVED",
+            "kode_i2c_probe": "Arduino's Wire",
+            "kode_delay": "Arduino's delay()",
+        })
+        self.assertEqual(kept, ["kode_event_wait", "kode_led_off", "kode_touch_read"])
+
+    def test_a_name_that_is_no_function(self):
+        with tables(left_out={"kode_delay": "Arduino's delay()", "kode_gone": "nothing"}):
+            said = stopped(self, TABLED)
+        self.assertIn("kode_gone", said)
+        self.assertIn("LEFT_OUT", said)
+
+    def test_a_group_with_no_function(self):
+        with tables(groups={"i2c": "Arduino's Wire", "spi": "Arduino's SPI"}):
+            said = stopped(self, TABLED)
+        self.assertIn("spi", said)
+        self.assertIn("LEFT_OUT_GROUPS", said)
+
+    def test_an_events_name_with_no_constant(self):
+        text = TABLED.replace("#define KODE_EVENT_IR_RECEIVED kode_event_ir_received()\n", "")
+        with tables():
+            said = stopped(self, text)
+        self.assertIn("kode_event_ir_received()", said)
+        self.assertIn("KODE_EVENT_IR_RECEIVED", said)
+
+    def test_an_events_name_whose_constant_is_another_call(self):
+        text = TABLED.replace("KODE_EVENT_IR_RECEIVED kode_event_ir_received()", "KODE_EVENT_IR_RECEIVED \"ir\"")
+        with tables():
+            said = stopped(self, text)
+        self.assertIn("KODE_EVENT_IR_RECEIVED", said)
+
+    def test_a_question_that_takes_a_parameter_is_no_events_name(self):
+        text = TABLED + "const char *kode_event_name(uint32_t index);\n"
+        with tables():
+            kept = [fn.name for fn in gen_layer.layer_functions(text)]
+        self.assertIn("kode_event_name", kept)
+
+
+class Defaults(unittest.TestCase):
+    """A trailing parameter that is NULL in the common case has a default; a wrong line stops the run."""
+
+    def test_the_declaration_carries_the_default(self):
+        with tables():
+            fn = [fn for fn in gen_layer.layer_functions(TABLED) if fn.name == "kode_touch_read"][0]
+            lines = gen_layer.method_lines(gen_layer.Method("read", fn), None)
+        self.assertIn("    bool read(int16_t *x = nullptr, int16_t *y = nullptr) const", lines)
+        self.assertIn("        return kode_touch_read(x, y);", lines)
+
+    def test_a_function_that_is_not_there(self):
+        with tables(defaults={"kode_gone": {"x": "nullptr"}}):
+            said = stopped(self, TABLED)
+        self.assertIn("kode_gone", said)
+        self.assertIn("DEFAULTS", said)
+
+    def test_a_parameter_that_is_not_there(self):
+        with tables(defaults={"kode_touch_read": {"z": "nullptr"}}):
+            said = stopped(self, TABLED)
+        self.assertIn("kode_touch_read()", said)
+        self.assertIn("'z'", said)
+
+    def test_a_function_that_is_left_out(self):
+        with tables(defaults={"kode_delay": {"ms": "0"}}):
+            said = stopped(self, TABLED)
+        self.assertIn("kode_delay()", said)
+        self.assertIn("left out", said)
+
+    def test_parameters_that_are_not_the_last(self):
+        with tables(defaults={"kode_touch_read": {"x": "nullptr"}}):
+            said = stopped(self, TABLED)
+        self.assertIn("kode_touch_read()", said)
+        self.assertIn("last", said)
+
+
 class Generated(unittest.TestCase):
     def test_check_fails_on_a_stale_header(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,13 +420,60 @@ class Generated(unittest.TestCase):
         self.assertEqual((VARIANT.parent / found.group(1)).resolve(), (gen_layer.LIBRARY / gen_layer.OUT_HEADER).resolve())
         self.assertLess(found.end(), text.index("#endif /* Pins_Arduino_h */"))
 
-    def test_every_function_of_kode_h_is_a_method(self):
-        names = [fn.name for fn in gen_layer.functions((gen_layer.SDK / gen_layer.HEADER).read_text(encoding="utf-8"))]
+    def test_every_function_of_kode_h_is_a_method_or_left_out_never_both(self):
+        text = (gen_layer.SDK / gen_layer.HEADER).read_text(encoding="utf-8")
+        names = [fn.name for fn in gen_layer.functions(text)]
+        out = gen_layer.left_out(gen_layer.functions(text), text)
         methods = METHOD_BRIEF.findall((gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8"))
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len(methods), len(set(methods)))
-        self.assertEqual(len(names), len(methods))
-        self.assertEqual(set(names), set(methods))
+        self.assertTrue(out)
+        self.assertEqual(sorted(set(methods) & set(out)), [])
+        self.assertEqual(set(names), set(methods) | set(out))
+
+    def test_the_traps_have_no_method(self):
+        text = (gen_layer.SDK / gen_layer.HEADER).read_text(encoding="utf-8")
+        methods = set(METHOD_BRIEF.findall((gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")))
+        for name in ("kode_delay", "kode_uptime_ms", "kode_random", "kode_pin_write", "kode_pin_read",
+                     "kode_pin_read_analog", "kode_pin_write_pwm"):
+            self.assertNotIn(name, methods)
+        for fn in gen_layer.functions(text):
+            if fn.name.startswith(("kode_i2c_", "kode_spi_", "kode_uart_")):
+                self.assertNotIn(fn.name, methods)
+        for name in ("kode_event_ir_received", "kode_event_wifi_connected", "kode_event_ble_pair_code",
+                     "kode_event_touch_released"):
+            self.assertNotIn(name, methods)
+        for name in ("kode_pin_power_3v3", "kode_pin_power_5v", "kode_event_add_listener",
+                     "kode_event_remove_listener", "kode_event_wait"):
+            self.assertIn(name, methods)
+        self.assertNotIn("Kode_uptime", CLASS_NAME.findall((gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")))
+
+    def test_the_declarations_carry_the_defaults(self):
+        text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")
+        self.assertIn("const char *get(const char *url, const kode_http_header_t *headers = nullptr) const", text)
+        self.assertIn("bool connect(const char *ssid = nullptr, const char *password = nullptr) const", text)
+        self.assertIn("bool show(const char *title = nullptr) const", text)
+
+    def test_the_left_out_names_are_no_keywords(self):
+        named = set(KEYWORD2.findall((gen_layer.LIBRARY / gen_layer.OUT_KEYWORDS).read_text(encoding="utf-8")))
+        for name in ("ms", "readAnalog", "writePwm", "writeRead", "transfer", "probe", "delay", "random",
+                     "uptime", "i2c", "spi", "uart", "irReceived", "wifiConnected", "touchReleased"):
+            self.assertNotIn(name, named)
+        for name in ("begin", "read", "write", "end", "power3v3", "wait", "header", "event"):
+            self.assertIn(name, named)
+        self.assertNotIn("pin", named)
+
+    def test_the_header_power_is_under_header(self):
+        # kode_pin_power_*() feed the expansion header and are all the layer keeps of kode_pin_*().
+        text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")
+        classes = CLASS_NAME.findall(text)
+        self.assertIn("Kode_header", classes)
+        self.assertNotIn("Kode_pin", classes)
+        self.assertIn("/** @brief Kode.header: kode_pin_power_3v3() and kode_pin_power_5v(). */", text)
+        self.assertIn("/**< kode_pin_power_3v3() and kode_pin_power_5v(). */", text)
+        self.assertNotIn("kode_header_", text)
+        self.assertIn("/** @brief Kode.led: the kode_led_*() calls. */", text)
+        self.assertIn("/**< The kode_rest_*() calls. */", text)
 
     def test_the_start_of_the_sdk_is_not_a_method(self):
         # The board's variant starts the SDK before setup(): a sketch has no start to call.
@@ -304,27 +501,31 @@ class Generated(unittest.TestCase):
     def test_all_calls_sketch_includes_nothing(self):
         self.assertIsNone(INCLUDE.search(gen_layer.all_calls("AllCalls.ino")))
 
+    def test_all_calls_sketch_names_no_left_out_function(self):
+        text = (gen_layer.SDK / gen_layer.HEADER).read_text(encoding="utf-8")
+        sketch = gen_layer.all_calls("AllCalls.ino")
+        self.assertNotIn("Kode.delay(", sketch)
+        self.assertNotIn("Kode.uptime.", sketch)
+        self.assertNotIn("Kode.i2c.", sketch)
+        self.assertNotIn("Kode.event.wifiConnected(", sketch)
+        self.assertIn("Kode.event.wait(", sketch)
+        calls = re.findall(r"^    (?:\(void\))?(?:Kode|widget|canvas)\.", sketch, re.M)
+        fns = gen_layer.functions(text)
+        self.assertEqual(len(calls), len(fns) - len(gen_layer.left_out(fns, text)))
+
     def test_all_calls_sketch_compiles_as_cpp(self):
-        compiler = shutil.which("c++")
-        if compiler is None:
-            self.skipTest("this machine has no c++")
         with tempfile.TemporaryDirectory() as tmp:
             sketch = Path(tmp) / "AllCalls.ino"
             done = subprocess.run([sys.executable, str(TOOLS / "gen_layer.py"), "--all-calls", str(sketch)],
                                   capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-            (Path(tmp) / "sdkconfig.h").write_text("", encoding="utf-8")
-            # What the board's Arduino.h does: the variant's pins_arduino.h, inside extern "C", above the sketch.
-            arduino_h = Path(tmp) / "Arduino.h"
-            arduino_h.write_text(f'extern "C" {{\n#include "{VARIANT}"\n}}\n', encoding="utf-8")
-            # A GNU dialect on a Unix host predefines unix and linux, which the board's compiler does not:
-            # Kode.time.unix() would read as Kode.time.1().
-            flags = ["-U", "unix", "-U", "linux", "-include", str(arduino_h), "-I", tmp]
-            for folder in include_dirs():
-                flags += ["-I", str(folder)]
-            built = subprocess.run([compiler, "-std=gnu++2b", "-fsyntax-only", "-x", "c++"] + flags + [str(sketch)],
-                                   capture_output=True, text=True)
-            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            compile_sketch(self, sketch)
+
+    def test_calls_that_lean_on_the_defaults_compile_as_cpp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sketch = Path(tmp) / "Defaults.ino"
+            sketch.write_text(DEFAULTS_SKETCH, encoding="utf-8")
+            compile_sketch(self, sketch)
 
 
 if __name__ == "__main__":
