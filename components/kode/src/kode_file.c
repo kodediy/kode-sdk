@@ -650,19 +650,22 @@ static bool walk_file(const walk_t *w)
 {
     /* Each window asks for one byte past the end: a file that has grown
      * answers with it, one that has shrunk answers short. A file of no bytes
-     * is no read; the sink sees one empty window. */
-    uint32_t offset = 0U;
+     * is no read; the sink sees one empty window. The offset is 64 bits: one
+     * byte past a file of 4 GiB - 1 is 2^32. A window is read only at an
+     * offset within the file, so there it fits in 32. */
+    uint64_t offset = 0U;
     bool     ended  = false;
     bool     ok     = true;
 
     while ( ok && !ended )
     {
-        uint32_t cap = (w->size + 1U) - offset;
-        uint32_t got = 0U;
+        uint64_t const left = ((uint64_t)w->size + 1U) - offset;
+        uint32_t       cap  = KODE_SYS_FILE_READ_MAX;
+        uint32_t       got  = 0U;
 
-        if ( KODE_SYS_FILE_READ_MAX < cap )
+        if ( left < (uint64_t)cap )
         {
-            cap = KODE_SYS_FILE_READ_MAX;
+            cap = (uint32_t)left;
         }
         if ( 0U == w->size )
         {
@@ -674,10 +677,10 @@ static bool walk_file(const walk_t *w)
 
             if ( w->in_place )
             {
-                window = &w->buf[offset];
+                window = &w->buf[(uint32_t)offset];
             }
 
-            read_try_t          t  = { w->vol, offset, window, cap, 0U, w->size };
+            read_try_t          t  = { w->vol, (uint32_t)offset, window, cap, 0U, w->size };
             const kode_status_t rc = kode_file_sys(&read_op, &t);
 
             if ( KODE_OK != rc )
@@ -687,15 +690,15 @@ static bool walk_file(const walk_t *w)
             }
             got = t.got;
             /* Short: the end. The extra byte arrived: the file grew. */
-            ended = (got < cap) || ((offset + got) > w->size);
+            ended = (got < cap) || ((offset + (uint64_t)got) > (uint64_t)w->size);
         }
         if ( ok && (NULL != w->sink) && ((0U < got) || (0U == offset)) )
         {
-            ok = w->sink(w, got, offset);
+            ok = w->sink(w, got, (uint32_t)offset);
         }
-        offset += got;
+        offset += (uint64_t)got;
     }
-    if ( ok && (offset != w->size) )
+    if ( ok && (offset != (uint64_t)w->size) )
     {
         kode_err_set("%s: changed while it was %s", w->user, w->verb);
         ok = false;

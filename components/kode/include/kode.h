@@ -509,7 +509,8 @@ const uint8_t *kode_file_read_bytes(const char *path, uint32_t *len);
 /**
  * @brief Read up to @p cap bytes of a file, starting at @p offset.
  *
- * Blocks. The file can be of any size: KODE_FILE_READ_MAX does not limit it.
+ * Blocks. The file can be of any size FAT32 holds, up to 4 GiB - 1
+ * (4,294,967,295 bytes): KODE_FILE_READ_MAX does not limit it.
  * The bytes land in @p buf; the task keeps nothing. A read that ends past the
  * end of the file gives the bytes there are. A read at or past the end, of an
  * empty file, or of 0 bytes gives none and is not an error. A file that is

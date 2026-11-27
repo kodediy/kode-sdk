@@ -102,6 +102,7 @@ void fake_media_reset(void)
      * driver's own idea of what is mounted cannot outlive the fake's. */
     kdrv_sd_unmount();
     fake_sdmmc_reset();
+    fake_storage_libc_reset();
     s_fs_raw        = false;
     s_fs_raw_begins = 0U;
 

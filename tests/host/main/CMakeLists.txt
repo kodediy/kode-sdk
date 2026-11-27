@@ -480,6 +480,16 @@ set_source_files_properties(
     "${SDK_DIR}/components/kaos/display/src/display_ao.c"
     PROPERTIES COMPILE_DEFINITIONS "CONFIG_KODEOS_BLE_CONSOLE=1")
 
+# The media layer sizes files, moves its reader and reads with fstat(), stat(),
+# lseek() and read(). Their header, force-included here alone, sends those
+# calls to fakes/fake_storage_libc.c, which can answer as the board's 32-bit
+# off_t does - the host's is 64 bits, so a file of 2 GiB or more looks nothing
+# like the board's otherwise - and as its FAT does after a disk error.
+set_source_files_properties(
+    "${SDK_DIR}/components/kdrv/storage/src/kdrv_storage.c"
+    PROPERTIES COMPILE_OPTIONS
+        "-include;${CMAKE_CURRENT_LIST_DIR}/fakes/fake_storage_libc.h")
+
 # The compose call of an image without CONFIG_KODE_COMPOSE, compiled beside the real one under another name.
 set_source_files_properties(
     "${SDK_DIR}/components/kaos/display/src/display_compose_none.c"
