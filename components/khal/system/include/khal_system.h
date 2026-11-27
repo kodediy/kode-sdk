@@ -141,6 +141,12 @@ const char *khal_task_name(void);
  */
 bool khal_task_stack_in_psram(void);
 
+/**
+ * @brief Whether the caller runs in an interrupt. Safe from an ISR.
+ * @return true inside an ISR; false in a task, and on the host unless a test says otherwise.
+ */
+bool khal_in_isr(void);
+
 /** @brief What a task started by khal_task_start() runs; it may return, and the task then ends. */
 typedef void (*khal_task_fn_t)(void *arg);
 

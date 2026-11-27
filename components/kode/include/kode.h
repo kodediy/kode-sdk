@@ -46,7 +46,12 @@ extern "C" {
  * The first unknown name of each kind (a button, an axis, a vibration, an
  * event...) is also written to the log as a warning, once per boot.
  *
- * kode.h is for tasks: a call from an ISR or an Active Object is refused, and this says why.
+ * kode.h is for tasks. A call from an interrupt returns its failure value at
+ * once and does nothing, and the log says so once per boot; a call from an
+ * Active Object is refused, and this says why. Calls that only read are not
+ * checked: this one, kode_http_status(), kode_rgb(), kode_ble_hid_ready() and
+ * the event names, such as kode_event_wifi_connected(); kode_ble_hid_select()
+ * keeps its choice before it checks.
  *
  * @return Short English text; "" when there is none. Never NULL.
  */
