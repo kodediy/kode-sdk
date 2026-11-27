@@ -413,8 +413,17 @@ typedef struct {
 /**
  * @brief A listener.
  *
- * Runs in kodeOS's listener task, one at a time, in event order. Any kode.h
- * call but kode_event_wait() is allowed. The strings live until it returns.
+ * Runs in kodeOS's listener task, one at a time, in event order. The strings
+ * live until it returns.
+ *
+ * kode_event_wait() is refused there, and so are kode_setting_set() and
+ * kode_setting_get(), as that task's stack is in PSRAM; every other kode.h
+ * call is allowed.
+ *
+ * The task runs at the priority of an Arduino sketch's loop(), beside the
+ * app's own task and not between its calls: data they share needs a lock,
+ * an atomic or a queue. kode_error() is per task, so a listener's failure
+ * shows in the listener, not in the app's task.
  *
  * @param e The event.
  */
@@ -424,7 +433,7 @@ typedef void (*kode_listener_t)(const kode_event_t *e);
  * @brief Call @p fn every time the event happens.
  *
  * Listeners run in the order they were added; adding the same pair twice
- * registers it once.
+ * registers it once. What a listener may call: kode_listener_t.
  *
  * @param event The event's name.
  * @param fn    The listener.
