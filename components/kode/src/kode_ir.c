@@ -40,12 +40,6 @@ _Static_assert(KODE_IR_FRAME_MAX_MS == KODE_SYS_IR_FRAME_MAX_MS,
 /** @brief Microseconds in a millisecond. */
 #define KODE_IR_US_PER_MS 1000U
 
-/** @brief The protocol name a NEC frame reads as. */
-#define KODE_IR_NEC_NAME "NEC"
-
-/** @brief The protocol name of a frame that is none the board decodes. */
-#define KODE_IR_UNKNOWN_NAME "unknown"
-
 /** @brief The text of a refused read while a capture runs. */
 #define KODE_IR_CAPTURING_TEXT "an IR capture is running; kode_ir_capture_stop() ends it"
 
@@ -238,9 +232,10 @@ bool kode_ir_send(const char *protocol, uint32_t address, uint32_t command)
         {
             kode_err_set("no protocol given");
         }
-        else if ( !kode_name_is(protocol, "nec") )
+        else if ( !kode_name_is(protocol, KODE_IR_NEC) )
         {
             kode_err_set("protocol '%s' not supported", protocol);
+            kode_name_unknown_warn(KODE_NAME_IR_PROTOCOL);
         }
         else if ( KODE_IR_FILE_VALUE_MAX < address )
         {
@@ -487,13 +482,13 @@ kode_ir_code_t kode_ir_receive(uint32_t ms)
             r.ok = true;
             if ( knec_decode(sym, n, &addr, &cmd) )
             {
-                (void)snprintf(r.protocol, sizeof(r.protocol), "%s", KODE_IR_NEC_NAME);
+                (void)snprintf(r.protocol, sizeof(r.protocol), "%s", KODE_IR_NEC);
                 r.address = addr;
                 r.command = cmd;
             }
             else
             {
-                (void)snprintf(r.protocol, sizeof(r.protocol), "%s", KODE_IR_UNKNOWN_NAME);
+                (void)snprintf(r.protocol, sizeof(r.protocol), "%s", KODE_IR_UNKNOWN);
             }
         }
         kode_ir_leave();
@@ -522,13 +517,13 @@ kode_ir_code_t kode_ir_last(void)
             r.ok = true;
             if ( f.nec )
             {
-                (void)snprintf(r.protocol, sizeof(r.protocol), "%s", KODE_IR_NEC_NAME);
+                (void)snprintf(r.protocol, sizeof(r.protocol), "%s", KODE_IR_NEC);
                 r.address = f.addr;
                 r.command = f.cmd;
             }
             else
             {
-                (void)snprintf(r.protocol, sizeof(r.protocol), "%s", KODE_IR_UNKNOWN_NAME);
+                (void)snprintf(r.protocol, sizeof(r.protocol), "%s", KODE_IR_UNKNOWN);
             }
         }
         else if ( KODE_DENIED == rc )

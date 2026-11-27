@@ -114,6 +114,20 @@ TEST_CASE("names are case-insensitive", "[kode_button]")
     ao_spy_drain();
 }
 
+TEST_CASE("the button constants name the buttons as the words do", "[kode_button]")
+{
+    pad_up();
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_BOT, true, false));
+    ao_spy_drain();
+
+    TEST_ASSERT_TRUE(kode_button_is_pressed(KODE_BUTTON_BOTTOM));
+    TEST_ASSERT_FALSE(kode_button_is_pressed(KODE_BUTTON_TOP));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+
+    TEST_ASSERT_TRUE(buttons_inject((uint8_t)KDRV_BTN_BOT, false, false));
+    ao_spy_drain();
+}
+
 TEST_CASE("a leading space fails and the error names the name as typed", "[kode_button]")
 {
     pad_up();

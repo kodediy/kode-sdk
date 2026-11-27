@@ -1318,6 +1318,18 @@ TEST_CASE("a setting is named in any case", "[kode_audio_standard]")
     audio_done();
 }
 
+TEST_CASE("the setting constants name the settings as the words do", "[kode_audio_standard]")
+{
+    audio_fresh();
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_set(KODE_AUDIO_VOLUME, 12U), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_set(KODE_AUDIO_MIC_GAIN, 6U), kode_error());
+    TEST_ASSERT_TRUE_MESSAGE(kode_audio_set(KODE_AUDIO_MUTE, 0U), kode_error());
+    TEST_ASSERT_EQUAL_UINT32(12U, kode_audio_get(KODE_AUDIO_VOLUME));
+    TEST_ASSERT_EQUAL_UINT32(6U, kode_audio_get(KODE_AUDIO_MIC_GAIN));
+    TEST_ASSERT_EQUAL_UINT32(0U, kode_audio_get(KODE_AUDIO_MUTE));
+    audio_done();
+}
+
 TEST_CASE("an unknown or NULL setting is refused", "[kode_audio_standard]")
 {
     audio_fresh();

@@ -200,21 +200,22 @@ static bool type_parse(const char *type, bool allow_uid, nfc_type_t *out)
         kode_err_set("no NFC type given");
         ok = false;
     }
-    else if ( kode_name_is(type, "text") )
+    else if ( kode_name_is(type, KODE_NFC_TEXT) )
     {
         *out = NFC_TYPE_TEXT;
     }
-    else if ( kode_name_is(type, "uri") )
+    else if ( kode_name_is(type, KODE_NFC_URI) )
     {
         *out = NFC_TYPE_URI;
     }
-    else if ( allow_uid && kode_name_is(type, "uid") )
+    else if ( allow_uid && kode_name_is(type, KODE_NFC_UID) )
     {
         *out = NFC_TYPE_UID;
     }
     else
     {
         kode_err_set("unknown NFC type '%s'", type);
+        kode_name_unknown_warn(KODE_NAME_NFC_TYPE);
         ok = false;
     }
     return ok;

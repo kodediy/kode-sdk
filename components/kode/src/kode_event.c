@@ -9,7 +9,6 @@
 #include <string.h>
 
 #include "kdrv_buttons.h"
-#include "kode_button.h"
 #include "kode_entry.h"
 #include "kode_log.h"
 #include "kode_pin_lock.h"
@@ -22,23 +21,45 @@
 
 #define TAG "kode.event"
 
-/** @brief The prefix of every button event. */
-static const char s_button_prefix[] = "button_";
+/** @brief One button event: the button, what it did, and the event's name. */
+typedef struct {
+    uint8_t            id;     /**< The button, a kdrv_button_t.          */
+    kode_button_edge_t edge;   /**< What it did.                          */
+    const char        *name;   /**< The event, a KODE_EVENT_BUTTON_ constant. */
+} kode_button_event_t;
 
-/** @brief The suffix of a button event for a press. */
-static const char s_what_pressed[] = "pressed";
+/** @brief Every button event: a press and a release of each button, a hold of top and bottom. */
+static const kode_button_event_t s_button_events[] = {
+    { (uint8_t)KDRV_BTN_UP,    KODE_BUTTON_EDGE_PRESSED,  KODE_EVENT_BUTTON_UP_PRESSED      },
+    { (uint8_t)KDRV_BTN_UP,    KODE_BUTTON_EDGE_RELEASED, KODE_EVENT_BUTTON_UP_RELEASED     },
+    { (uint8_t)KDRV_BTN_DOWN,  KODE_BUTTON_EDGE_PRESSED,  KODE_EVENT_BUTTON_DOWN_PRESSED    },
+    { (uint8_t)KDRV_BTN_DOWN,  KODE_BUTTON_EDGE_RELEASED, KODE_EVENT_BUTTON_DOWN_RELEASED   },
+    { (uint8_t)KDRV_BTN_LEFT,  KODE_BUTTON_EDGE_PRESSED,  KODE_EVENT_BUTTON_LEFT_PRESSED    },
+    { (uint8_t)KDRV_BTN_LEFT,  KODE_BUTTON_EDGE_RELEASED, KODE_EVENT_BUTTON_LEFT_RELEASED   },
+    { (uint8_t)KDRV_BTN_RIGHT, KODE_BUTTON_EDGE_PRESSED,  KODE_EVENT_BUTTON_RIGHT_PRESSED   },
+    { (uint8_t)KDRV_BTN_RIGHT, KODE_BUTTON_EDGE_RELEASED, KODE_EVENT_BUTTON_RIGHT_RELEASED  },
+    { (uint8_t)KDRV_BTN_TOP,   KODE_BUTTON_EDGE_PRESSED,  KODE_EVENT_BUTTON_TOP_PRESSED     },
+    { (uint8_t)KDRV_BTN_TOP,   KODE_BUTTON_EDGE_RELEASED, KODE_EVENT_BUTTON_TOP_RELEASED    },
+    { (uint8_t)KDRV_BTN_TOP,   KODE_BUTTON_EDGE_HELD,     KODE_EVENT_BUTTON_TOP_HELD        },
+    { (uint8_t)KDRV_BTN_BOT,   KODE_BUTTON_EDGE_PRESSED,  KODE_EVENT_BUTTON_BOTTOM_PRESSED  },
+    { (uint8_t)KDRV_BTN_BOT,   KODE_BUTTON_EDGE_RELEASED, KODE_EVENT_BUTTON_BOTTOM_RELEASED },
+    { (uint8_t)KDRV_BTN_BOT,   KODE_BUTTON_EDGE_HELD,     KODE_EVENT_BUTTON_BOTTOM_HELD     },
+};
 
-/** @brief The suffix of a button event for a release. */
-static const char s_what_released[] = "released";
+/** @brief How many button events there are. */
+#define KODE_BUTTON_EVENTS (sizeof(s_button_events) / sizeof(s_button_events[0]))
 
-/** @brief The suffix of a button event for a hold (top and bottom only). */
-static const char s_what_held[] = "held";
+/** @brief Every J3 pin's event, indexed by the pin less KODE_PIN_FIRST. */
+static const char *const s_pin_events[] = {
+    KODE_EVENT_PIN_1_CHANGED,  KODE_EVENT_PIN_2_CHANGED,  KODE_EVENT_PIN_3_CHANGED,
+    KODE_EVENT_PIN_4_CHANGED,  KODE_EVENT_PIN_5_CHANGED,  KODE_EVENT_PIN_6_CHANGED,
+    KODE_EVENT_PIN_7_CHANGED,  KODE_EVENT_PIN_8_CHANGED,  KODE_EVENT_PIN_9_CHANGED,
+    KODE_EVENT_PIN_10_CHANGED, KODE_EVENT_PIN_11_CHANGED, KODE_EVENT_PIN_12_CHANGED,
+    KODE_EVENT_PIN_13_CHANGED, KODE_EVENT_PIN_14_CHANGED,
+};
 
-/** @brief A pin's number in its event is written in decimal. */
-#define PIN_NUMBER_BASE 10U
-
-/** @brief Digits of the highest pin's number, KODE_PIN_LAST. */
-#define PIN_NUMBER_DIGITS_MAX 2U
+_Static_assert((sizeof(s_pin_events) / sizeof(s_pin_events[0])) == KODE_PIN_COUNT,
+               "s_pin_events holds one event per pin");
 
 /* The owners an event comes from, and AO_Ir's capture door, named weakly
  * (KAOS_WEAK, kaos.h): an event is refused when its owner is not in the image,
@@ -142,9 +163,9 @@ typedef struct {
 static const kode_known_t s_known[] = {
     { KODE_EVENT_WIFI_UP_NAME,   &kaos_radio_start, "KODE_EVENT_WIFI_CONNECTED", NULL             },
     { KODE_EVENT_WIFI_LOST_NAME, &kaos_radio_start, "KODE_EVENT_WIFI_LOST",      NULL             },
-    { "mqtt_message",            NULL,              NULL,                        NULL             },
-    { "battery_low",             NULL,              NULL,                        NULL             },
-    { KODE_EVENT_PIN_5V_CUT_NAME, NULL,             NULL,                        NULL             },
+    { KODE_EVENT_MQTT_MESSAGE,   NULL,              NULL,                        NULL             },
+    { KODE_EVENT_BATTERY_LOW,    NULL,              NULL,                        NULL             },
+    { KODE_EVENT_PIN_POWER_5V_CUT, NULL,            NULL,                        NULL             },
     { KODE_EVENT_IR_NAME,        &kaos_ir_start,    "KODE_EVENT_IR_RECEIVED",    &ir_arm_listener },
     { KODE_EVENT_NFC_TAG,        NULL,              NULL,                        NULL             },
     { KODE_EVENT_TOUCH_PRESSED_NAME,  &kaos_touch_start, "KODE_EVENT_TOUCH_PRESSED",  &touch_listen },
@@ -263,83 +284,89 @@ static bool has_prefix(const char *name, const char *prefix, const char **rest)
     return '\0' == prefix[i];
 }
 
-/**
- * @brief Whether @p name (lower case) is a J3 pin's event, "pin_<n>_changed",
- *        and which pin.
- *
- * The number is written as kode.h prints it: 1 to 14 in decimal, with no
- * leading zero.
- *
- * @param name The event, in lower case.
- * @param pin  Receives the pin when the answer is true; untouched otherwise.
- * @return true for pin_1_changed to pin_14_changed.
- */
-static bool pin_event_number(const char *name, uint8_t *pin)
+/* cppcheck-suppress misra-c2012-8.7 ; kode_standard_ao.c calls it */
+const char *kode_event_button_name(uint8_t id, kode_button_edge_t edge)
 {
-    const char *rest   = NULL;
-    uint32_t    n      = 0U;
-    size_t      digits = 0U;
-    bool        ok     = has_prefix(name, KODE_EVENT_PIN_PREFIX, &rest);
+    const char *name = NULL;
 
-    if ( ok && ('0' == rest[0]) )
+    for ( size_t i = 0U; (KODE_BUTTON_EVENTS > i) && (NULL == name); i++ )
     {
-        ok = false;   /* a leading zero, or pin 0 */
+        if ( (s_button_events[i].id == id) && (s_button_events[i].edge == edge) )
+        {
+            name = s_button_events[i].name;
+        }
     }
-    while ( ok && (PIN_NUMBER_DIGITS_MAX > digits) && ('0' <= rest[digits]) && ('9' >= rest[digits]) )
+    return name;
+}
+
+/* cppcheck-suppress misra-c2012-8.7 ; kode_standard_ao.c calls it */
+const char *kode_event_pin_name(uint8_t pin)
+{
+    const char *name = NULL;
+
+    if ( (KODE_PIN_FIRST <= pin) && (KODE_PIN_LAST >= pin) )
     {
-        n = (n * PIN_NUMBER_BASE) + ((uint32_t)rest[digits] - (uint32_t)'0');
-        digits++;
+        name = s_pin_events[pin - KODE_PIN_FIRST];
     }
-    if ( ok )
+    return name;
+}
+
+/**
+ * @brief Whether @p name is a button's event, any case.
+ *
+ * @param name The event.
+ * @return true for a name of the button events' table.
+ */
+static bool button_event_is(const char *name)
+{
+    bool found = false;
+
+    for ( size_t i = 0U; (KODE_BUTTON_EVENTS > i) && !found; i++ )
     {
-        ok = (0U < digits) && (strcmp(&rest[digits], KODE_EVENT_PIN_SUFFIX) == 0)
-             && (KODE_PIN_FIRST <= n) && (KODE_PIN_LAST >= n);
+        found = kode_name_is(name, s_button_events[i].name);
     }
-    if ( ok )
+    return found;
+}
+
+/**
+ * @brief Whether @p name is a J3 pin's event, any case, and which pin.
+ *
+ * @param name The event.
+ * @param pin  Receives the pin when the answer is true; untouched otherwise.
+ * @return true for a name of the pin events' table: pin_1_changed to pin_14_changed.
+ */
+static bool pin_event_find(const char *name, uint8_t *pin)
+{
+    bool found = false;
+
+    for ( uint8_t i = 0U; ((uint8_t)KODE_PIN_COUNT > i) && !found; i++ )
     {
-        *pin = (uint8_t)n;
+        if ( kode_name_is(name, s_pin_events[i]) )
+        {
+            *pin  = (uint8_t)(i + KODE_PIN_FIRST);
+            found = true;
+        }
     }
-    return ok;
+    return found;
 }
 
 /**
  * @brief Whether @p name (lower case) is an event that exists.
  *
- * "button_<name>_<what>": a button the kode.h calls know, then pressed or
- * released, or held for the top and bottom buttons alone; "pin_<n>_changed"
- * for a J3 pin; or one of the exact names in s_known.
+ * A name of the button events' table or the pin events' table, or one of the
+ * exact names in s_known.
  *
  * @param name The event, in lower case.
  * @return true when something can send it.
  */
 static bool event_is_known(const char *name)
 {
-    bool known = false;
-    const char *rest = NULL;
+    uint8_t pin   = 0U;
+    bool    known = button_event_is(name);
 
-    if ( has_prefix(name, s_button_prefix, &rest) )
-    {
-        for ( uint8_t id = 0U; ((uint8_t)KDRV_BTN_COUNT > id) && !known; id++ )
-        {
-            const char *what = NULL;
-            const char *const button = kode_button_name(id);
-
-            if ( has_prefix(rest, button, &what) && ('_' == what[0]) )
-            {
-                what = &what[1];
-                known = (strcmp(what, s_what_pressed) == 0) || (strcmp(what, s_what_released) == 0);
-                if ( ((uint8_t)KDRV_BTN_TOP == id) || ((uint8_t)KDRV_BTN_BOT == id) )
-                {
-                    known = known || (strcmp(what, s_what_held) == 0);
-                }
-            }
-        }
-    }
     if ( !known )
     {
-        uint8_t pin = 0U;
-
-        known = pin_event_number(name, &pin);
+        known = pin_event_find(name, &pin);
     }
     for ( size_t i = 0U; (NULL != s_known[i].name) && !known; i++ )
     {
@@ -387,7 +414,7 @@ static bool event_listen(const char *name)
     bool    asked = true;
     uint8_t pin   = 0U;
 
-    if ( pin_event_number(name, &pin) )
+    if ( pin_event_find(name, &pin) )
     {
         asked = kode_pin_listen(pin, &kode_standard_ao_pin_arm);
         if ( !asked )
@@ -425,7 +452,7 @@ static void event_unlisten(const char *name)
 {
     uint8_t pin = 0U;
 
-    if ( pin_event_number(name, &pin) )
+    if ( pin_event_find(name, &pin) )
     {
         kode_pin_unlisten(pin);
     }
@@ -479,6 +506,7 @@ static bool name_prepare_known(const char *event, char *out)
     if ( ok && !event_is_known(out) )
     {
         kode_err_set("unknown event '%s'", event);
+        kode_name_unknown_warn(KODE_NAME_EVENT);
         ok = false;
     }
     if ( ok )

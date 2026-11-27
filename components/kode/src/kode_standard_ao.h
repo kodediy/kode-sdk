@@ -22,9 +22,6 @@
 /** @brief The event for the address the radio lost: kode.h's KODE_EVENT_WIFI_LOST. */
 #define KODE_EVENT_WIFI_LOST_NAME "wifi_lost"
 
-/** @brief The event for a tag the NFC poller activated. */
-#define KODE_EVENT_NFC_TAG "nfc_tag"
-
 /** @brief The event for a finger that lands: kode.h's KODE_EVENT_TOUCH_PRESSED. */
 #define KODE_EVENT_TOUCH_PRESSED_NAME "touch_pressed"
 
@@ -52,18 +49,9 @@
 /** @brief The event for a pairing that ended: kode.h's KODE_EVENT_BLE_PAIR_DONE. */
 #define KODE_EVENT_BLE_PAIR_DONE_NAME "ble_pair_done"
 
-/** @brief The event for J3's 5 V the board stopped: kode.h's pin_power_5v_cut. */
-#define KODE_EVENT_PIN_5V_CUT_NAME "pin_power_5v_cut"
-
 /* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
 /** @brief How long asking for the finger keeps trying while the Active Object's queue is full, in ms. */
 #define KODE_TOUCH_LISTEN_BOUND_MS 100U
-
-/** @brief What a J3 pin's event starts with: "pin_<n>_changed". */
-#define KODE_EVENT_PIN_PREFIX "pin_"
-
-/** @brief What a J3 pin's event ends with, after the pin's number. */
-#define KODE_EVENT_PIN_SUFFIX "_changed"
 
 /* cppcheck-suppress misra-c2012-2.5 ; the app build of kode_standard_ao.c uses it, and the kodeOS image builds only its refusal */
 /** @brief How long arming a pin keeps trying while the Active Object's queue is full, in ms. */
@@ -232,6 +220,31 @@ kode_status_t kode_standard_ao_boost_await(uint32_t ms, uint8_t *why);
  * @return true; in the kodeOS image false, with kode_standard_ao_ensure()'s error.
  */
 bool kode_standard_ao_subscribe(kode_owner_subscribe_t subscribe);
+
+/** @brief What a button did, for its event's name. */
+typedef enum {
+    KODE_BUTTON_EDGE_PRESSED = 0,  /**< It went down: button_<b>_pressed.          */
+    KODE_BUTTON_EDGE_RELEASED,     /**< It came up: button_<b>_released.           */
+    KODE_BUTTON_EDGE_HELD          /**< It is held, top and bottom alone: button_<b>_held. */
+} kode_button_edge_t;
+
+/**
+ * @brief The name of the event a button sends, from the button events' table.
+ *
+ * @param id   The button, a kdrv_button_t.
+ * @param edge What it did.
+ * @return A KODE_EVENT_BUTTON_ constant; NULL for a button that sends no such
+ *         event (a hold of the pad's buttons) or an id past the last.
+ */
+const char *kode_event_button_name(uint8_t id, kode_button_edge_t edge);
+
+/**
+ * @brief The name of the event a J3 pin sends, from the pin events' table.
+ *
+ * @param pin The pin, KODE_PIN_FIRST to KODE_PIN_LAST.
+ * @return A KODE_EVENT_PIN_<N>_CHANGED constant; NULL for any other number.
+ */
+const char *kode_event_pin_name(uint8_t pin);
 
 /**
  * @brief Make the event ring, the listener table and the dispatch task.

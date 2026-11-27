@@ -346,6 +346,16 @@ TEST_CASE("the protocol name is read in any case", "[kode_ir_standard]")
     TEST_ASSERT_EQUAL_UINT32(1U, s_raw_calls);
 }
 
+TEST_CASE("the protocol constant sends as the word does", "[kode_ir_standard]")
+{
+    ir_fresh();
+    raw_reset();
+    fake_sem_wait_hook(&ir_answers_head_raw);
+    TEST_ASSERT_TRUE_MESSAGE(kode_ir_send(KODE_IR_NEC, 1U, 2U), kode_error());
+    ir_hook_ok();
+    TEST_ASSERT_EQUAL_UINT32(1U, s_raw_calls);
+}
+
 TEST_CASE("the largest address and command are sent", "[kode_ir_standard]")
 {
     ir_fresh();
@@ -619,6 +629,19 @@ TEST_CASE("a heard NEC frame reads as its protocol, address and command", "[kode
     TEST_ASSERT_EQUAL_UINT32(HEARD_CMD, r.command);
     TEST_ASSERT_EQUAL_STRING("", kode_error());
     TEST_ASSERT_EQUAL_UINT32(1000U, s_asked_ms[0]);
+}
+
+TEST_CASE("a heard NEC frame's protocol is KODE_IR_NEC", "[kode_ir_standard]")
+{
+    ir_fresh();
+    script_reset();
+    script_window(script_nec(), 0U);
+
+    const kode_ir_code_t r = kode_ir_receive(1000U);
+
+    ir_hook_ok();
+    TEST_ASSERT_TRUE_MESSAGE(r.ok, kode_error());
+    TEST_ASSERT_EQUAL_STRING(KODE_IR_NEC, r.protocol);
 }
 
 TEST_CASE("a frame that is not NEC reads ok as unknown with address and command 0", "[kode_ir_standard]")

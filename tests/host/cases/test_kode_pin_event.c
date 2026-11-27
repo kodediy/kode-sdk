@@ -20,6 +20,7 @@
 #include "Mockkhal_pwm.h"
 
 #include "fakes.h"
+#include "kbsp_exp.h"
 #include "khal_exp.h"
 #include "khal_once.h"
 #include "kode.h"
@@ -478,6 +479,50 @@ TEST_CASE("pin_0_changed, pin_15_changed and other near names are refused as unk
         TEST_ASSERT_TRUE_MESSAGE(kode_event_add_listener(name, &listener_rec), name);
         TEST_ASSERT_TRUE(kode_event_remove_listener(name, &listener_rec));
     }
+    pin_event_done();
+}
+
+/** @brief A pin and the constant of its event. */
+typedef struct {
+    uint8_t     pin;    /**< The pin, KODE_PIN_FIRST to KODE_PIN_LAST. */
+    const char *name;   /**< Its event's constant.                      */
+} pin_name_row_t;
+
+TEST_CASE("pin_1_changed and pin_14_changed are known and pushed for their own pins",
+          "[kode_pin_event]")
+{
+    static const pin_name_row_t rows[] = {
+        { KODE_PIN_FIRST, KODE_EVENT_PIN_1_CHANGED },
+        { KODE_PIN_LAST, KODE_EVENT_PIN_14_CHANGED },
+    };
+
+    pin_event_fresh();
+    for ( uint32_t i = 0U; (sizeof(rows) / sizeof(rows[0])) > i; i++ )
+    {
+        const uint8_t gpio = KBSP_EXP[rows[i].pin - KODE_PIN_FIRST].gpio;
+
+        TEST_ASSERT_TRUE_MESSAGE(kode_event_add_listener(rows[i].name, &listener_rec), kode_error());
+        atomic_store(&s_level[gpio], true);
+        edge(gpio);
+        ticks(SETTLE_TICKS);
+        TEST_ASSERT_TRUE(rec_wait(1U));
+        TEST_ASSERT_EQUAL_STRING(rows[i].name, s_rec[i].name);
+        TEST_ASSERT_EQUAL_INT32(1, s_rec[i].value);
+        atomic_store(&s_level[gpio], false);
+        TEST_ASSERT_TRUE(kode_event_remove_listener(rows[i].name, &listener_rec));
+    }
+    pin_event_done();
+}
+
+TEST_CASE("pin_01_changed, with a leading zero, is unknown", "[kode_pin_event]")
+{
+    pin_event_fresh();
+    TEST_ASSERT_FALSE(kode_event_add_listener("pin_01_changed", &listener_rec));
+    TEST_ASSERT_EQUAL_STRING("unknown event 'pin_01_changed'", kode_error());
+    TEST_ASSERT_FALSE(kode_event_add_listener("PIN_014_CHANGED", &listener_rec));
+    TEST_ASSERT_EQUAL_STRING("unknown event 'PIN_014_CHANGED'", kode_error());
+    TEST_ASSERT_TRUE(kode_event_add_listener("PIN_14_Changed", &listener_rec));
+    TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_PIN_14_CHANGED, &listener_rec));
     pin_event_done();
 }
 

@@ -43,6 +43,9 @@ extern "C" {
  * next kode.h call, which may take it as an argument:
  * `kode_print("no file: %s", kode_error())` prints the reason.
  *
+ * The first unknown name of each kind (a button, an axis, a vibration, an
+ * event...) is also written to the log as a warning, once per boot.
+ *
  * kode.h is for tasks: a call from an ISR or an Active Object is refused, and this says why.
  *
  * @return Short English text; "" when there is none. Never NULL.
@@ -139,9 +142,17 @@ uint32_t kode_random(uint32_t min, uint32_t max);
 /* ---- Buttons ---- */
 
 /*
- * Names: "up", "down", "left", "right", "top", "bottom", any case, no spaces.
- * An unknown name or NULL fails and kode_error() names it.
+ * Names: "up", "down", "left", "right", "top", "bottom", any case, no spaces;
+ * the KODE_BUTTON_ constants below are the same words. An unknown name or NULL
+ * fails and kode_error() names it.
  */
+
+#define KODE_BUTTON_UP     "up"      /**< The pad's up button.            */
+#define KODE_BUTTON_DOWN   "down"    /**< The pad's down button.          */
+#define KODE_BUTTON_LEFT   "left"    /**< The pad's left button.          */
+#define KODE_BUTTON_RIGHT  "right"   /**< The pad's right button.         */
+#define KODE_BUTTON_TOP    "top"     /**< The side button at the top.     */
+#define KODE_BUTTON_BOTTOM "bottom"  /**< The side button at the bottom.  */
 
 /** @brief Which buttons are down, from one reading. */
 typedef struct {
@@ -155,7 +166,7 @@ typedef struct {
 
 /**
  * @brief Whether a button is down now.
- * @param name The button, such as "top".
+ * @param name The button, such as KODE_BUTTON_TOP or "top".
  * @return true while held; false otherwise, on a bad name or when refused.
  */
 bool kode_button_is_pressed(const char *name);
@@ -166,7 +177,7 @@ bool kode_button_is_pressed(const char *name);
  * Shares one count per button with kode_button_get_presses() and with every
  * task: asking either consumes the news. The first ask counts from boot.
  *
- * @param name The button, such as "top".
+ * @param name The button, such as KODE_BUTTON_TOP or "top".
  * @return true after at least one press; false otherwise, on a bad name or
  *         when refused.
  */
@@ -177,7 +188,7 @@ bool kode_button_was_pressed(const char *name);
  *
  * The same shared count as kode_button_was_pressed().
  *
- * @param name The button, such as "top".
+ * @param name The button, such as KODE_BUTTON_TOP or "top".
  * @return The presses; 0 on a bad name or when refused (kode_error() tells
  *         them from no press).
  */
@@ -204,7 +215,8 @@ kode_buttons_t kode_button_read_all(void);
  * J3. The source says why: "cell" (the cell under 3.3 V), "fault" (the boost's
  * fault) or "off" (the board switching off); the value is the cell's voltage
  * in mV, 0 when unread. Never sent for the app's own kode_pin_power_5v(false).
- * ir_received: source "NEC", value the command, text the address "0x0004"; "unknown" for any other frame.
+ * ir_received: source "NEC" (KODE_IR_NEC), value the command, text the address
+ * "0x0004"; "unknown" (KODE_IR_UNKNOWN) for any other frame.
  * A listener or a waiter for it arms the receiver, once the C5 link is up.
  * nfc_tag: source the card, text the UID; also on the app's own NFC reads, with or without kode_nfc_scan_start().
  * touch_pressed, touch_moved and touch_released: the finger's point in x and
@@ -245,7 +257,48 @@ kode_buttons_t kode_button_read_all(void);
  * KODE_EVENT_TOUCH_ constants and the KODE_EVENT_BLE_ constants, which link
  * it. Typed as a string in an app that links no such owner, the event is
  * refused and kode_error() names the constant.
+ *
+ * The events with no owner to link have a constant each, the same word:
+ * KODE_EVENT_BUTTON_<B>_PRESSED and _RELEASED, KODE_EVENT_BUTTON_TOP_HELD and
+ * _BOTTOM_HELD, KODE_EVENT_PIN_<N>_CHANGED, KODE_EVENT_MQTT_MESSAGE,
+ * KODE_EVENT_BATTERY_LOW, KODE_EVENT_PIN_POWER_5V_CUT and KODE_EVENT_NFC_TAG.
+ * The words as text, any case, work the same.
  */
+
+#define KODE_EVENT_BUTTON_UP_PRESSED      "button_up_pressed"       /**< The pad's up button went down.        */
+#define KODE_EVENT_BUTTON_UP_RELEASED     "button_up_released"      /**< The pad's up button came up.          */
+#define KODE_EVENT_BUTTON_DOWN_PRESSED    "button_down_pressed"     /**< The pad's down button went down.      */
+#define KODE_EVENT_BUTTON_DOWN_RELEASED   "button_down_released"    /**< The pad's down button came up.        */
+#define KODE_EVENT_BUTTON_LEFT_PRESSED    "button_left_pressed"     /**< The pad's left button went down.      */
+#define KODE_EVENT_BUTTON_LEFT_RELEASED   "button_left_released"    /**< The pad's left button came up.        */
+#define KODE_EVENT_BUTTON_RIGHT_PRESSED   "button_right_pressed"    /**< The pad's right button went down.     */
+#define KODE_EVENT_BUTTON_RIGHT_RELEASED  "button_right_released"   /**< The pad's right button came up.       */
+#define KODE_EVENT_BUTTON_TOP_PRESSED     "button_top_pressed"      /**< The top side button went down.        */
+#define KODE_EVENT_BUTTON_TOP_RELEASED    "button_top_released"     /**< The top side button came up.          */
+#define KODE_EVENT_BUTTON_TOP_HELD        "button_top_held"         /**< The top side button is held.          */
+#define KODE_EVENT_BUTTON_BOTTOM_PRESSED  "button_bottom_pressed"   /**< The bottom side button went down.     */
+#define KODE_EVENT_BUTTON_BOTTOM_RELEASED "button_bottom_released"  /**< The bottom side button came up.       */
+#define KODE_EVENT_BUTTON_BOTTOM_HELD     "button_bottom_held"      /**< The bottom side button is held.       */
+
+#define KODE_EVENT_PIN_1_CHANGED          "pin_1_changed"           /**< Pin 1 of J3 changed level.            */
+#define KODE_EVENT_PIN_2_CHANGED          "pin_2_changed"           /**< Pin 2 of J3 changed level.            */
+#define KODE_EVENT_PIN_3_CHANGED          "pin_3_changed"           /**< Pin 3 of J3 changed level.            */
+#define KODE_EVENT_PIN_4_CHANGED          "pin_4_changed"           /**< Pin 4 of J3 changed level.            */
+#define KODE_EVENT_PIN_5_CHANGED          "pin_5_changed"           /**< Pin 5 of J3 changed level.            */
+#define KODE_EVENT_PIN_6_CHANGED          "pin_6_changed"           /**< Pin 6 of J3 changed level.            */
+#define KODE_EVENT_PIN_7_CHANGED          "pin_7_changed"           /**< Pin 7 of J3 changed level.            */
+#define KODE_EVENT_PIN_8_CHANGED          "pin_8_changed"           /**< Pin 8 of J3 changed level.            */
+#define KODE_EVENT_PIN_9_CHANGED          "pin_9_changed"           /**< Pin 9 of J3 changed level.            */
+#define KODE_EVENT_PIN_10_CHANGED         "pin_10_changed"          /**< Pin 10 of J3 changed level.           */
+#define KODE_EVENT_PIN_11_CHANGED         "pin_11_changed"          /**< Pin 11 of J3 changed level.           */
+#define KODE_EVENT_PIN_12_CHANGED         "pin_12_changed"          /**< Pin 12 of J3 changed level.           */
+#define KODE_EVENT_PIN_13_CHANGED         "pin_13_changed"          /**< Pin 13 of J3 changed level.           */
+#define KODE_EVENT_PIN_14_CHANGED         "pin_14_changed"          /**< Pin 14 of J3 changed level.           */
+
+#define KODE_EVENT_MQTT_MESSAGE           "mqtt_message"            /**< A broker's message arrived.           */
+#define KODE_EVENT_BATTERY_LOW            "battery_low"             /**< The level fell below KODE_BATTERY_LOW_PCT. */
+#define KODE_EVENT_PIN_POWER_5V_CUT       "pin_power_5v_cut"        /**< The board stopped J3's 5 V.           */
+#define KODE_EVENT_NFC_TAG                "nfc_tag"                 /**< A tag was read.                       */
 
 /* cppcheck-suppress misra-c2012-2.5 ; a name for the apps that listen, never used inside the SDK */
 /** @brief "ir_received", naming the infrared so the app links it. */
@@ -344,7 +397,7 @@ const char *kode_event_wifi_lost(void);
 
 /** @brief An event, as a listener or a waiter receives it. */
 typedef struct {
-    const char *name;   /**< Such as "button_top_pressed". */
+    const char *name;   /**< Such as "button_top_pressed", KODE_EVENT_BUTTON_TOP_PRESSED. */
     const char *source; /**< Who sent it; "" when nobody. */
     int32_t     value;  /**< Its number; 0 when it has none. */
     const char *text;   /**< Its payload; "" when it has none. */
@@ -739,9 +792,18 @@ typedef struct {
     float z;  /**< Field on z, microtesla. */
 } kode_mag_t;
 
+#define KODE_IMU_ACCEL_X "accel_x"  /**< Acceleration on x, g.          */
+#define KODE_IMU_ACCEL_Y "accel_y"  /**< Acceleration on y, g.          */
+#define KODE_IMU_ACCEL_Z "accel_z"  /**< Acceleration on z, g.          */
+#define KODE_IMU_GYRO_X  "gyro_x"   /**< Rotation about x, degrees/s.   */
+#define KODE_IMU_GYRO_Y  "gyro_y"   /**< Rotation about y, degrees/s.   */
+#define KODE_IMU_GYRO_Z  "gyro_z"   /**< Rotation about z, degrees/s.   */
+#define KODE_IMU_TEMP    "temp"     /**< The IMU's temperature, deg C.  */
+
 /**
  * @brief One IMU reading by name.
- * @param axis "accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z" or "temp", any case.
+ * @param axis A KODE_IMU_ constant, or its word as text in any case: "accel_x",
+ *             "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z" or "temp".
  * @return The reading; NAN on a bad name, a failure or a refusal.
  */
 float kode_imu_read_axis(const char *axis);
@@ -752,9 +814,13 @@ float kode_imu_read_axis(const char *axis);
  */
 kode_imu_t kode_imu_read(void);
 
+#define KODE_MAG_X "x"  /**< The field on x, microtesla. */
+#define KODE_MAG_Y "y"  /**< The field on y, microtesla. */
+#define KODE_MAG_Z "z"  /**< The field on z, microtesla. */
+
 /**
  * @brief One magnetometer axis by name.
- * @param axis "x", "y" or "z", any case.
+ * @param axis KODE_MAG_X, KODE_MAG_Y or KODE_MAG_Z, or "x", "y" or "z" as text in any case.
  * @return The field, microtesla; NAN on a bad name, a failure or a refusal.
  */
 float kode_mag_read_axis(const char *axis);
@@ -838,12 +904,19 @@ bool kode_mag_calibrate(void);
  */
 bool kode_haptic_vibrate(bool on);
 
+#define KODE_HAPTIC_CLICK   "click"    /**< One short pulse.                   */
+#define KODE_HAPTIC_TICK    "tick"     /**< The lightest pulse.                */
+#define KODE_HAPTIC_DOUBLE  "double"   /**< Two pulses.                        */
+#define KODE_HAPTIC_SUCCESS "success"  /**< A short pulse, then a longer one.  */
+#define KODE_HAPTIC_WARNING "warning"  /**< Three pulses.                      */
+#define KODE_HAPTIC_ERROR   "error"    /**< Two short pulses, then a long one. */
+
 /**
  * @brief Play a named vibration: "click", "tick", "double", "success", "warning", "error" or an added one.
  *
  * Returns once the vibration is started, not when it ends.
  *
- * @param profile The name, any case.
+ * @param profile A KODE_HAPTIC_ constant, or the name as text in any case.
  * @return true when started; false for an unknown name, while kode_haptic_vibrate(true)
  *         holds the motor, or if the motor stayed busy.
  */
@@ -1000,9 +1073,15 @@ bool kode_audio_stream_close(void);
  */
 bool kode_audio_tone(uint16_t hz, uint32_t ms);
 
+#define KODE_AUDIO_VOLUME   "volume"    /**< The speaker's volume, 0 to 100.            */
+#define KODE_AUDIO_MIC_GAIN "mic_gain"  /**< The microphone's gain, 0 to 42 dB by 6.    */
+#define KODE_AUDIO_MUTE     "mute"      /**< The speaker muted, 0 or 1.                 */
+
 /**
  * @brief Change an audio setting for this boot.
- * @param setting "volume" (0 to 100), "mic_gain" (0 to 42 dB, in steps of 6) or "mute" (0 or 1), any case.
+ * @param setting KODE_AUDIO_VOLUME "volume" (0 to 100), KODE_AUDIO_MIC_GAIN
+ *                "mic_gain" (0 to 42 dB, in steps of 6) or KODE_AUDIO_MUTE "mute"
+ *                (0 or 1); the words as text in any case work the same.
  * @param value   The new value.
  * @return true when sent; false for an unknown name, a value out of range, or no
  *         room for the request (no event block free), with kode_error() saying which.
@@ -2323,10 +2402,13 @@ bool kode_uart_end(void);
 #define KODE_IR_DURATION_MAX_US 32767U   /**< The longest mark or space a raw send takes, us: the C5's RMT's.     */
 #define KODE_IR_FRAME_MAX_MS    1500U    /**< The longest frame a raw send takes, ms, a final or zero space counted as KODE_IR_DURATION_MAX_US. */
 
+#define KODE_IR_NEC     "NEC"      /**< The NEC protocol: what a heard frame says, and what kode_ir_send() takes, any case. */
+#define KODE_IR_UNKNOWN "unknown"  /**< A heard frame that did not decode.  */
+
 /** @brief One frame that was heard and read as a protocol. */
 typedef struct {
     bool     ok;                              /**< A frame was heard.                          */
-    char     protocol[KODE_IR_PROTOCOL_MAX];  /**< "NEC", or "unknown" for any other frame.     */
+    char     protocol[KODE_IR_PROTOCOL_MAX];  /**< KODE_IR_NEC, or KODE_IR_UNKNOWN for any other frame. */
     uint32_t address;                         /**< The address; 0 for "unknown".               */
     uint32_t command;                         /**< The command; 0 for "unknown".               */
 } kode_ir_code_t;
@@ -2341,10 +2423,10 @@ typedef struct {
 /**
  * @brief Send a frame of a protocol the board encodes, and wait until it went out.
  *
- * Blocks. Only "nec" (any case) is encoded. For anything else encode the frame
+ * Blocks. Only NEC is encoded. For anything else encode the frame
  * yourself and use kode_ir_send_raw().
  *
- * @param protocol "nec".
+ * @param protocol KODE_IR_NEC, or "nec" as text in any case.
  * @param address  0 to 65535.
  * @param command  0 to 65535.
  * @return true when the frame went out; false with kode_error() saying why.
@@ -2455,6 +2537,11 @@ bool kode_ir_send_file(const char *path);
 #define KODE_NFC_PROFILE_NAME_MAX  16U   /**< Bytes of a profile name, NUL included.           */
 #define KODE_NFC_BUSY_MS           5000U /**< How long a call waits for the reader.            */
 
+/* The NFC types a call takes; the words as text, any case, work the same. */
+#define KODE_NFC_TEXT "text"  /**< A text a phone reads.                 */
+#define KODE_NFC_URI  "uri"   /**< A link a phone opens.                 */
+#define KODE_NFC_UID  "uid"   /**< A card clone for an access reader.    */
+
 /** @brief One tag that was found. */
 typedef struct {
     bool ok;                       /**< A tag was found.                                    */
@@ -2499,7 +2586,7 @@ kode_tag_t kode_nfc_read_id(uint32_t ms);
  * Blocks for up to @p ms. Fails at once while the Dot emulates a card. The text
  * belongs to the calling task and is valid until its next kode_nfc_read(); it is never NULL.
  *
- * @param type "text" or "uri" (any case): what the tag must carry.
+ * @param type KODE_NFC_TEXT or KODE_NFC_URI ("text" or "uri", any case): what the tag must carry.
  * @param ms   Milliseconds to wait, or KODE_FOREVER.
  * @return The text or link, at most KODE_NFC_TAG_DATA_MAX bytes; "" with
  *         kode_error() saying why on failure, also when the tag carries the
@@ -2514,7 +2601,7 @@ const char *kode_nfc_read(const char *type, uint32_t ms);
  * Blocks for up to @p ms. Fails at once while the Dot emulates a card. Nothing is
  * written if it does not fit; a write that times out may have written part of the tag.
  *
- * @param type "text" or "uri" (any case).
+ * @param type KODE_NFC_TEXT or KODE_NFC_URI ("text" or "uri", any case).
  * @param data At most KODE_NFC_TAG_DATA_MAX (95) bytes; a longer one is refused, never cut.
  * @param ms   Milliseconds to wait, or KODE_FOREVER.
  * @return true when written; false with kode_error() saying why.
@@ -2544,7 +2631,8 @@ bool kode_nfc_emulate_stop(void);
  * A profile with the same name, in any case, is replaced. There are no profiles to begin with.
  *
  * @param name KODE_NFC_PROFILE_NAME_MAX - 1 bytes at most; any case.
- * @param type "text" or "uri": a tag a phone reads; "uid": a card clone for an access reader.
+ * @param type KODE_NFC_TEXT or KODE_NFC_URI: a tag a phone reads; KODE_NFC_UID: a card
+ *             clone for an access reader. The words as text, any case, work the same.
  * @param data The text or link, 1 to KODE_NFC_TEXT_MAX - 1 bytes; or for "uid" the ID as 4 or 7 hex bytes, "04:A2:3B:91".
  * @return true when added; false with kode_error() saying why.
  */

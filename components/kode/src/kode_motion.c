@@ -118,9 +118,11 @@ typedef struct {
  * @param axis  What the caller typed.
  * @param names The axis names.
  * @param count How many there are.
+ * @param kind  KODE_NAME_IMU_AXIS or KODE_NAME_MAG_AXIS: what an unknown name warns as.
  * @return The index; @p count when there is none.
  */
-static uint32_t axis_find(const char *axis, const char *const *names, uint32_t count)
+static uint32_t axis_find(const char *axis, const char *const *names, uint32_t count,
+                          kode_name_kind_t kind)
 {
     uint32_t found = count;
 
@@ -140,6 +142,7 @@ static uint32_t axis_find(const char *axis, const char *const *names, uint32_t c
         if ( found == count )
         {
             kode_err_set("unknown axis '%s'", axis);
+            kode_name_unknown_warn(kind);
         }
     }
     return found;
@@ -474,12 +477,12 @@ float kode_imu_read_axis(const char *axis)
     if ( motion_enter("kode_imu_read_axis") )
     {
         static const char *const names[IMU_AXIS_COUNT] = {
-            [IMU_AXIS_ACCEL_X] = "accel_x", [IMU_AXIS_ACCEL_Y] = "accel_y",
-            [IMU_AXIS_ACCEL_Z] = "accel_z", [IMU_AXIS_GYRO_X] = "gyro_x",
-            [IMU_AXIS_GYRO_Y] = "gyro_y", [IMU_AXIS_GYRO_Z] = "gyro_z",
-            [IMU_AXIS_TEMP] = "temp"
+            [IMU_AXIS_ACCEL_X] = KODE_IMU_ACCEL_X, [IMU_AXIS_ACCEL_Y] = KODE_IMU_ACCEL_Y,
+            [IMU_AXIS_ACCEL_Z] = KODE_IMU_ACCEL_Z, [IMU_AXIS_GYRO_X] = KODE_IMU_GYRO_X,
+            [IMU_AXIS_GYRO_Y] = KODE_IMU_GYRO_Y, [IMU_AXIS_GYRO_Z] = KODE_IMU_GYRO_Z,
+            [IMU_AXIS_TEMP] = KODE_IMU_TEMP
         };
-        const uint32_t idx = axis_find(axis, names, (uint32_t)IMU_AXIS_COUNT);
+        const uint32_t idx = axis_find(axis, names, (uint32_t)IMU_AXIS_COUNT, KODE_NAME_IMU_AXIS);
         kode_imu_t     reading = imu_none();
 
         if ( ((uint32_t)IMU_AXIS_COUNT > idx) && imu_sample(&reading) )
@@ -510,9 +513,9 @@ float kode_mag_read_axis(const char *axis)
     if ( motion_enter("kode_mag_read_axis") )
     {
         static const char *const names[MAG_AXIS_COUNT] = {
-            [MAG_AXIS_X] = "x", [MAG_AXIS_Y] = "y", [MAG_AXIS_Z] = "z"
+            [MAG_AXIS_X] = KODE_MAG_X, [MAG_AXIS_Y] = KODE_MAG_Y, [MAG_AXIS_Z] = KODE_MAG_Z
         };
-        const uint32_t idx = axis_find(axis, names, (uint32_t)MAG_AXIS_COUNT);
+        const uint32_t idx = axis_find(axis, names, (uint32_t)MAG_AXIS_COUNT, KODE_NAME_MAG_AXIS);
         kode_mag_t     reading = mag_none();
 
         if ( ((uint32_t)MAG_AXIS_COUNT > idx) && mag_sample(&reading) )

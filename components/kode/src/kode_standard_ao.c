@@ -284,32 +284,25 @@ static QState KodeStandard_initial(KodeStandard * const me, void const * const p
 static QState KodeStandard_running(KodeStandard * const me, QEvt const * const e);
 
 /**
- * @brief Push "button_<name>_<what>" for button @p id.
+ * @brief Push the event of button @p id for @p edge, its name from the button
+ *        events' table and the button's name as its source.
  *
  * @param id   A KODE_SYS_BUTTON_x.
- * @param what "pressed", "released" or "held".
+ * @param edge What it did.
  */
-static void button_event(uint8_t id, const char *what)
+static void button_event(uint8_t id, kode_button_edge_t edge)
 {
     const char *const button = kode_button_name(id);
+    const char *const name   = kode_event_button_name(id, edge);
 
-    if ( NULL != button )
+    if ( (NULL != button) && (NULL != name) )
     {
-        char name[KODE_EVENT_NAME_MAX];
-
-        (void)snprintf(name, sizeof(name), "button_%s_%s", button, what);
         kode_event_push(name, button, 0, NULL);
     }
 }
 
 /** @brief Bytes of "0x" and four hex digits of a NEC address, NUL included. */
 #define IR_ADDR_TEXT_BYTES 7U
-
-/** @brief The source of a frame that did not decode as NEC. */
-#define IR_SOURCE_UNKNOWN "unknown"
-
-/** @brief The source of a NEC frame. */
-#define IR_SOURCE_NEC "NEC"
 
 /** @brief Characters a UID byte takes in the text: two digits and a colon. */
 #define NFC_UID_TEXT_PER_BYTE 3U
@@ -360,7 +353,7 @@ static void mqtt_message(const MqttMsgEvt *m)
     }
     (void)memcpy(text, m->data, len);
     text[len] = '\0';
-    kode_event_push("mqtt_message", m->topic, (int32_t)len, text);
+    kode_event_push(KODE_EVENT_MQTT_MESSAGE, m->topic, (int32_t)len, text);
 }
 
 /**
@@ -373,7 +366,7 @@ static void battery_edge(KodeStandard * const me)
 
     if ( (kode_sys_battery_read(&r) == KODE_OK) && kode_battery_low_edge(&me->battery_low, &r) )
     {
-        kode_event_push("battery_low", NULL, (int32_t)r.soc_pct, NULL);
+        kode_event_push(KODE_EVENT_BATTERY_LOW, NULL, (int32_t)r.soc_pct, NULL);
     }
 }
 
@@ -407,11 +400,11 @@ static void ir_event(const IrRxEvt *ie)
         char text[IR_ADDR_TEXT_BYTES];
 
         (void)snprintf(text, sizeof(text), "0x%04" PRIX32, (uint32_t)ie->addr);
-        kode_event_push(KODE_EVENT_IR_NAME, IR_SOURCE_NEC, (int32_t)ie->cmd, text);
+        kode_event_push(KODE_EVENT_IR_NAME, KODE_IR_NEC, (int32_t)ie->cmd, text);
     }
     else
     {
-        kode_event_push(KODE_EVENT_IR_NAME, IR_SOURCE_UNKNOWN, 0, "");
+        kode_event_push(KODE_EVENT_IR_NAME, KODE_IR_UNKNOWN, 0, "");
     }
 }
 
@@ -492,7 +485,6 @@ static void pin_settled(KodeStandard * const me, QEvt const * const e)
 
                 if ( level != last )
                 {
-                    char    name[KODE_EVENT_NAME_MAX];
                     int32_t value = 0;
 
                     me->pin_level ^= bit;
@@ -500,9 +492,7 @@ static void pin_settled(KodeStandard * const me, QEvt const * const e)
                     {
                         value = 1;
                     }
-                    (void)snprintf(name, sizeof(name), "%s%u%s", KODE_EVENT_PIN_PREFIX,
-                                   (unsigned)pin, KODE_EVENT_PIN_SUFFIX);
-                    kode_event_push(name, NULL, value, NULL);
+                    kode_event_push(kode_event_pin_name(pin), NULL, value, NULL);
                 }
             }
         }
@@ -618,7 +608,7 @@ static void boost_cut_event(const PowerBoostCutEvt *c)
     {
         mv = (int32_t)r.vbat_mv;
     }
-    kode_event_push(KODE_EVENT_PIN_5V_CUT_NAME, source, mv, NULL);
+    kode_event_push(KODE_EVENT_PIN_POWER_5V_CUT, source, mv, NULL);
 }
 
 /**
@@ -836,17 +826,17 @@ static QState KodeStandard_running(KodeStandard * const me, QEvt const * const e
 
             if ( be->pressed )
             {
-                button_event(be->id, "pressed");
+                button_event(be->id, KODE_BUTTON_EDGE_PRESSED);
             }
             else
             {
-                button_event(be->id, "released");
+                button_event(be->id, KODE_BUTTON_EDGE_RELEASED);
             }
             status = Q_HANDLED();
             break;
         }
         case BUTTON_HOLD_SIG: {
-            button_event(Q_EVT_CAST(ButtonHoldEvt)->id, "held");
+            button_event(Q_EVT_CAST(ButtonHoldEvt)->id, KODE_BUTTON_EDGE_HELD);
             status = Q_HANDLED();
             break;
         }

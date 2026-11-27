@@ -964,7 +964,8 @@ bool kode_audio_play_samples(const int16_t *samples, uint32_t count)
 static uint32_t setting_find(const char *setting)
 {
     static const char *const names[AUDIO_SET_COUNT] = {
-        [AUDIO_SET_VOLUME] = "volume", [AUDIO_SET_MIC_GAIN] = "mic_gain", [AUDIO_SET_MUTE] = "mute"
+        [AUDIO_SET_VOLUME] = KODE_AUDIO_VOLUME, [AUDIO_SET_MIC_GAIN] = KODE_AUDIO_MIC_GAIN,
+        [AUDIO_SET_MUTE] = KODE_AUDIO_MUTE
     };
     uint32_t found = (uint32_t)AUDIO_SET_COUNT;
 
@@ -984,6 +985,7 @@ static uint32_t setting_find(const char *setting)
         if ( (uint32_t)AUDIO_SET_COUNT == found )
         {
             kode_err_set("unknown setting '%s'", setting);
+            kode_name_unknown_warn(KODE_NAME_AUDIO_SETTING);
         }
     }
     return found;

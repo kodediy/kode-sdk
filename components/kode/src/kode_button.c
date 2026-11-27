@@ -20,7 +20,8 @@ static const char s_short_bottom[] = "bot";
 
 /** @brief The buttons' names, indexed by kdrv_button_t. */
 static const char *const s_names[KDRV_BTN_COUNT] = {
-    "up", "down", "left", "right", "top", "bottom"
+    KODE_BUTTON_UP, KODE_BUTTON_DOWN, KODE_BUTTON_LEFT, KODE_BUTTON_RIGHT, KODE_BUTTON_TOP,
+    KODE_BUTTON_BOTTOM
 };
 
 /** @brief The press count each button had when it was last asked for. */
@@ -53,16 +54,19 @@ static uint8_t button_find(const char *name)
         }
         else if ( kode_name_is(name, s_short_bottom) )
         {
-            kode_err_set("unknown button '%s' (did you mean 'bottom'?)", name);
+            kode_err_set("unknown button '%s' (did you mean '%s'?)", name, KODE_BUTTON_BOTTOM);
+            kode_name_unknown_warn(KODE_NAME_BUTTON);
         }
         else
         {
             kode_err_set("unknown button '%s'", name);
+            kode_name_unknown_warn(KODE_NAME_BUTTON);
         }
     }
     return found;
 }
 
+/* cppcheck-suppress misra-c2012-8.7 ; kode_standard_ao.c calls it */
 const char *kode_button_name(uint8_t id)
 {
     const char *name = NULL;
