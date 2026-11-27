@@ -609,7 +609,11 @@ kode_status_t kdrv_st25r3916_discover_start(void)
     s_disc.compMode      = RFAL_COMPLIANCE_MODE_NFC;
     s_disc.techs2Find    = RFAL_NFC_POLL_TECH_A;
     s_disc.devLimit      = 1U;
-    s_disc.totalDuration = 1000U;
+    /* A short cycle, so a tag missed by the first poll is found well inside
+     * the window kode_sys_nfc_await() gives a request (KODE_NFC_POLL_MS plus
+     * KODE_NFC_WAIT_MARGIN_MS). With 1000 ms the second poll answered at
+     * ~1004-1015 ms, just after the app had given up (#321). */
+    s_disc.totalDuration = 100U;
 
     ReturnCode rc = rfalNfcDiscover(&s_disc);
     if ( RFAL_ERR_NONE != rc )
