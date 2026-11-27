@@ -10,7 +10,6 @@ static uint32_t s_seconds; /**< How many times the two lines have gone out. */
 
 void setup(void)
 {
-    Kode.begin();
     Serial.begin(LOG_BAUD);
 }
 
