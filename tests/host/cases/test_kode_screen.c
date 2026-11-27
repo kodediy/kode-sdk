@@ -1887,8 +1887,11 @@ TEST_CASE("an image or a PNG drawn with no path is refused", "[kode_image]")
 #define FULL_RADIUS_MG  200      /**< The full sweep's sphere: its radius, mG.             */
 #define SWEEP_TIME_READS 600U    /**< Readings that fit in the 30 s at 50 ms each.         */
 #define SWEEP_FAIL_AT   3U       /**< The reading the failing script gives up at.          */
-#define SWEEP_FAR_MG    19800    /**< Where the too-strong script starts on x, mG.         */
+#define SWEEP_FAR_MG    19800    /**< How far the too-strong script moves the full sweep on x, mG. */
 #define SWEEP_SLACK     2U       /**< Readings the clock may add to a count.               */
+
+/** @brief What a calibration whose spans were complete but whose readings were off one sphere says. */
+#define NOT_ROUND "the readings did not form a sphere: turn the Dot in every direction, away from metal and computers"
 
 /** @brief Readings of a full sweep that then holds still until it has settled. */
 #define SWEEP_SETTLED_READS (FULL_READS + (KODE_COMPASS_SETTLE_MS / KODE_COMPASS_STEP_MS))
@@ -1901,6 +1904,7 @@ TEST_CASE("an image or a PNG drawn with no path is refused", "[kode_image]")
 #define FIELD_POINTS    300U     /**< Readings of one spiral from pole to pole.            */
 #define FIELD_GOLDEN    2.39996323  /**< The golden angle, rad: spreads the spiral evenly. */
 #define FIELD_TOL_MG    50       /**< How far a stored offset may be from the truth, mG.   */
+#define FIELD_HEMI_TOL_MG 90     /**< The same for a hemisphere, a fifth of the field: the half never seen moves the centre. */
 #define FIELD_BAND_RAD  0.5235987756  /**< The band's tilt either side of the equator, rad (30 deg). */
 #define FIELD_BAND_WAVE 37U      /**< Readings of one tilt up and down the band.           */
 #define FIELD_SPIN_RAD  0.21     /**< The band's turn about z between two readings, rad.   */
@@ -1913,17 +1917,22 @@ TEST_CASE("an image or a PNG drawn with no path is refused", "[kode_image]")
 #define NOISE_MUL       1664525U     /**< The noise's linear congruential multiplier.      */
 #define NOISE_ADD       1013904223U  /**< And its increment.                               */
 #define NOISE_SHIFT     16U          /**< The state's high bits are the noisier ones.      */
+#define LATE_SWITCH     200U         /**< The reading the late script turns to the whole sphere at. */
+#define LATE_STRIDE     3U           /**< Points of the spiral the late script moves a reading. */
+#define STRAY_AT        150U         /**< The reading the stray script loses the field at.  */
 
 /** @brief What the scripted io does. */
 typedef enum {
     SCRIPT_FULL = 0,   /**< The six poles of a sphere about (200, -200, 200), then holds. */
     SCRIPT_FLAT_Z,     /**< x and y sweep, z stays put.                          */
     SCRIPT_FAILS,      /**< The reading at SWEEP_FAIL_AT fails.                  */
-    SCRIPT_FAR,        /**< x sweeps about 20000 mG: past what is stored.        */
+    SCRIPT_FAR,        /**< The full sweep about 20000 mG on x: past what is stored. */
     SCRIPT_SPHERE,     /**< A field with an offset, turned through a sphere.     */
     SCRIPT_BAND,       /**< The same field, turned only through a band about z.  */
     SCRIPT_CONE,       /**< The same field, turned through a 60 deg cone about (1, 1, 1). */
-    SCRIPT_HEMI        /**< The same field, turned through the hemisphere about (1, 1, 1). */
+    SCRIPT_HEMI,       /**< The same field, turned through the hemisphere about (1, 1, 1). */
+    SCRIPT_LATE,       /**< That cone until it has settled, then the whole sphere. */
+    SCRIPT_STRAY       /**< The sphere, with one reading of the offset alone.    */
 } script_t;
 
 static script_t            s_script;         /**< The case's script.                    */
@@ -1943,23 +1952,18 @@ static int32_t noise_next(void)
 /**
  * @brief The synthetic field at reading @p k turned through a cap about (1, 1, 1),
  *        evenly by area, plus the offset and noise.
- * @param k  The reading, from 0.
- * @param mg Out: the field, mG.
+ * @param k    The reading, from 0.
+ * @param half The cap's half-angle, rad.
+ * @param mg   Out: the field, mG.
  */
-static void cap_read(uint32_t k, int32_t mg[KDRV_QMC5883P_AXES])
+static void cap_read(uint32_t k, double half, int32_t mg[KDRV_QMC5883P_AXES])
 {
     static const int32_t off[KDRV_QMC5883P_AXES] = { FIELD_OFF_X, FIELD_OFF_Y, FIELD_OFF_Z };
     static const double  d[KDRV_QMC5883P_AXES]   = { 1.0 / FIELD_ROOT3, 1.0 / FIELD_ROOT3, 1.0 / FIELD_ROOT3 };
     static const double  u[KDRV_QMC5883P_AXES]   = { 1.0 / FIELD_ROOT2, -1.0 / FIELD_ROOT2, 0.0 };
     static const double  v[KDRV_QMC5883P_AXES]   = { 1.0 / FIELD_ROOT6, 1.0 / FIELD_ROOT6, -2.0 / FIELD_ROOT6 };
     const uint32_t       at   = k % FIELD_POINTS;
-    double               half = FIELD_CONE_RAD;
-
-    if ( SCRIPT_HEMI == s_script )
-    {
-        half = FIELD_HEMI_RAD;
-    }
-    const double c    = 1.0 - ((1.0 - cos(half)) * (double)at / (double)(FIELD_POINTS - 1U));
+    const double         c    = 1.0 - ((1.0 - cos(half)) * (double)at / (double)(FIELD_POINTS - 1U));
     const double side = sqrt(1.0 - (c * c));
     const double turn = (double)at * FIELD_GOLDEN;
 
@@ -1973,16 +1977,17 @@ static void cap_read(uint32_t k, int32_t mg[KDRV_QMC5883P_AXES])
 
 /**
  * @brief The synthetic field at reading @p k: the Earth's turned, plus the offset and noise.
- * @param k  The reading, from 0.
- * @param mg Out: the field, mG.
+ * @param k      The reading, from 0.
+ * @param sphere Turned through a sphere; else through a band about z.
+ * @param mg     Out: the field, mG.
  */
-static void field_read(uint32_t k, int32_t mg[KDRV_QMC5883P_AXES])
+static void field_read(uint32_t k, bool sphere, int32_t mg[KDRV_QMC5883P_AXES])
 {
     static const int32_t off[KDRV_QMC5883P_AXES] = { FIELD_OFF_X, FIELD_OFF_Y, FIELD_OFF_Z };
     double               polar;
     double               turn;
 
-    if ( SCRIPT_SPHERE == s_script )
+    if ( sphere )
     {
         const uint32_t at = k % FIELD_POINTS;
 
@@ -2007,15 +2012,40 @@ static bool script_read(int32_t mg[KDRV_QMC5883P_AXES])
     bool     ok = true;
 
     s_reads++;
-    if ( (SCRIPT_CONE == s_script) || (SCRIPT_HEMI == s_script) )
+    if ( SCRIPT_CONE == s_script )
     {
-        cap_read(at, mg);
+        cap_read(at, FIELD_CONE_RAD, mg);
     }
-    else if ( (SCRIPT_SPHERE == s_script) || (SCRIPT_BAND == s_script) )
+    else if ( SCRIPT_HEMI == s_script )
     {
-        field_read(at, mg);
+        cap_read(at, FIELD_HEMI_RAD, mg);
     }
-    else if ( SCRIPT_FULL == s_script )
+    else if ( SCRIPT_LATE == s_script )
+    {
+        if ( LATE_SWITCH > at )
+        {
+            cap_read(at * LATE_STRIDE, FIELD_CONE_RAD, mg);
+        }
+        else
+        {
+            field_read((at - LATE_SWITCH) * LATE_STRIDE, true, mg);
+        }
+    }
+    else if ( (SCRIPT_SPHERE == s_script) || (SCRIPT_STRAY == s_script) )
+    {
+        field_read(at, true, mg);
+        if ( (SCRIPT_STRAY == s_script) && (STRAY_AT == at) )
+        {
+            mg[0] = FIELD_OFF_X;
+            mg[1] = FIELD_OFF_Y;
+            mg[2] = FIELD_OFF_Z;
+        }
+    }
+    else if ( SCRIPT_BAND == s_script )
+    {
+        field_read(at, false, mg);
+    }
+    else if ( (SCRIPT_FULL == s_script) || (SCRIPT_FAR == s_script) )
     {
         /* +x, -x, +y, -y, +z, -z about (200, -200, 200); a sweep that is over keeps its last reading */
         static const int32_t centre[KDRV_QMC5883P_AXES] = { FULL_RADIUS_MG, -FULL_RADIUS_MG, FULL_RADIUS_MG };
@@ -2037,6 +2067,10 @@ static bool script_read(int32_t mg[KDRV_QMC5883P_AXES])
         {
             mg[pole / 2U] -= FULL_RADIUS_MG;
         }
+        if ( SCRIPT_FAR == s_script )
+        {
+            mg[0] += SWEEP_FAR_MG;
+        }
     }
     else
     {
@@ -2050,10 +2084,6 @@ static bool script_read(int32_t mg[KDRV_QMC5883P_AXES])
         if ( SCRIPT_FLAT_Z == s_script )
         {
             mg[2] = 0;
-        }
-        if ( SCRIPT_FAR == s_script )
-        {
-            mg[0] += SWEEP_FAR_MG;
         }
         if ( (SCRIPT_FAILS == s_script) && (SWEEP_FAIL_AT == s_reads) )
         {
@@ -2174,24 +2204,57 @@ TEST_CASE("a sweep that leaves an axis flat fails after the time limit", "[kode_
     TEST_ASSERT_EQUAL_STRING("Try again", s_set_log[atomic_load(&s_set_n) - 1U]);
 }
 
-TEST_CASE("a field turned through a 60 degree cone about the diagonal is refused", "[kode_compass]")
+TEST_CASE("a field turned through a 60 degree cone about the diagonal is refused at the time limit", "[kode_compass]")
 {
+    const uint32_t t0 = kode_uptime_ms();
+
     compass_case(SCRIPT_CONE);
     const uint32_t kept = held();
 
     TEST_ASSERT_FALSE(compass_run());
-    TEST_ASSERT_EQUAL_STRING("not enough directions were covered", kode_error());
+    TEST_ASSERT_EQUAL_STRING(NOT_ROUND, kode_error());
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(KODE_MAG_CALIBRATE_MS, kode_uptime_ms() - t0);
     TEST_ASSERT_EQUAL_UINT32(0U, s_stores);
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(kept, held(), "the readings' block was not given back");
 }
 
-TEST_CASE("a field turned through the hemisphere about the diagonal is refused", "[kode_compass]")
+TEST_CASE("a field turned through the hemisphere about the diagonal stores its offset within a fifth of the field", "[kode_compass]")
 {
     compass_case(SCRIPT_HEMI);
 
-    TEST_ASSERT_FALSE(compass_run());
-    TEST_ASSERT_EQUAL_STRING("not enough directions were covered", kode_error());
-    TEST_ASSERT_EQUAL_UINT32(0U, s_stores);
+    TEST_ASSERT_TRUE(compass_run());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_stores);
+    TEST_ASSERT_INT32_WITHIN(FIELD_HEMI_TOL_MG, FIELD_OFF_X, s_stored.offset_mg[0]);
+    TEST_ASSERT_INT32_WITHIN(FIELD_HEMI_TOL_MG, FIELD_OFF_Y, s_stored.offset_mg[1]);
+    TEST_ASSERT_INT32_WITHIN(FIELD_HEMI_TOL_MG, FIELD_OFF_Z, s_stored.offset_mg[2]);
+}
+
+TEST_CASE("a sweep whose spans settle before its readings are round keeps going and stores", "[kode_compass]")
+{
+    compass_case(SCRIPT_LATE);
+
+    TEST_ASSERT_TRUE(compass_run());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_stores);
+    TEST_ASSERT_GREATER_THAN_UINT32(LATE_SWITCH, s_reads);
+    TEST_ASSERT_LESS_THAN_UINT32(SWEEP_TIME_READS, s_reads);
+    TEST_ASSERT_INT32_WITHIN(FIELD_TOL_MG, FIELD_OFF_X, s_stored.offset_mg[0]);
+    TEST_ASSERT_INT32_WITHIN(FIELD_TOL_MG, FIELD_OFF_Y, s_stored.offset_mg[1]);
+    TEST_ASSERT_INT32_WITHIN(FIELD_TOL_MG, FIELD_OFF_Z, s_stored.offset_mg[2]);
+}
+
+TEST_CASE("one stray reading does not fail a sweep through a sphere", "[kode_compass]")
+{
+    compass_case(SCRIPT_STRAY);
+
+    TEST_ASSERT_TRUE(compass_run());
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    TEST_ASSERT_EQUAL_UINT32(1U, s_stores);
+    TEST_ASSERT_GREATER_THAN_UINT32(STRAY_AT, s_reads);
+    TEST_ASSERT_INT32_WITHIN(FIELD_TOL_MG, FIELD_OFF_X, s_stored.offset_mg[0]);
+    TEST_ASSERT_INT32_WITHIN(FIELD_TOL_MG, FIELD_OFF_Y, s_stored.offset_mg[1]);
+    TEST_ASSERT_INT32_WITHIN(FIELD_TOL_MG, FIELD_OFF_Z, s_stored.offset_mg[2]);
 }
 
 TEST_CASE("a calibration with no memory for its readings fails and reads nothing", "[kode_compass]")

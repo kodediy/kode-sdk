@@ -871,15 +871,19 @@ bool kode_mag_clear_calibration(void);
  * @brief Guide the user to calibrate the compass, and store the result.
  *
  * Takes the glass: a screen asks the user to turn the Dot in every direction
- * and shows how far along they are. Blocks until the sweep is complete or
- * KODE_MAG_CALIBRATE_MS have passed. One calibration runs at a time; if two
+ * and shows how far along they are. Blocks until the readings cover every
+ * direction and lie on one sphere, or KODE_MAG_CALIBRATE_MS have passed; metal
+ * or a computer near the Dot bends the field off that sphere, and the sweep then
+ * runs out of time. One calibration runs at a time; if two
  * overlap, the last one stored wins. Needs the kode_screen component, and is
  * not available in the kodeOS image.
  * Its screen replaces the app's: call kode_screen_new() again after it, as the old
  * widgets and canvases are gone.
  *
  * @return true when the calibration is stored; false with kode_error()
- *         saying why, such as "not enough directions were covered".
+ *         saying why, such as "not enough directions were covered" or
+ *         "the readings did not form a sphere: turn the Dot in every
+ *         direction, away from metal and computers".
  */
 bool kode_mag_calibrate(void);
 
