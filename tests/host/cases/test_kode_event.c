@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "ao_spy.h"
 #include "fakes.h"
 #include "khal_system.h"
 #include "kdrv_buttons.h"
@@ -1053,6 +1054,103 @@ TEST_CASE("an entry is after a wait by a count that survives the counter's wrap"
     /* The farthest apart that still has an order: half the range minus one. */
     TEST_ASSERT_TRUE(kode_event_is_after(INT32_MAX, 0U));
     TEST_ASSERT_FALSE(kode_event_is_after(0U, INT32_MAX));
+}
+
+/* ---- The names' constants ------------------------------------------------- */
+
+#define EDGE_PRESS   0   /**< A row's edge: a press.   */
+#define EDGE_RELEASE 1   /**< A row's edge: a release. */
+#define EDGE_HOLD    2   /**< A row's edge: a hold.    */
+
+/** @brief One button event: the edge that sends it and the constant it is. */
+typedef struct {
+    kdrv_button_t id;      /**< The button.                          */
+    int           edge;    /**< EDGE_PRESS, EDGE_RELEASE or EDGE_HOLD. */
+    const char   *name;    /**< Its constant.                        */
+    const char   *source;  /**< The button's word, the event's source. */
+} button_event_row_t;
+
+/** @brief Every button event, by its constant. */
+static const button_event_row_t s_button_events[] = {
+    { KDRV_BTN_UP,    EDGE_PRESS,   KODE_EVENT_BUTTON_UP_PRESSED,       KODE_BUTTON_UP },
+    { KDRV_BTN_UP,    EDGE_RELEASE, KODE_EVENT_BUTTON_UP_RELEASED,      KODE_BUTTON_UP },
+    { KDRV_BTN_DOWN,  EDGE_PRESS,   KODE_EVENT_BUTTON_DOWN_PRESSED,     KODE_BUTTON_DOWN },
+    { KDRV_BTN_DOWN,  EDGE_RELEASE, KODE_EVENT_BUTTON_DOWN_RELEASED,    KODE_BUTTON_DOWN },
+    { KDRV_BTN_LEFT,  EDGE_PRESS,   KODE_EVENT_BUTTON_LEFT_PRESSED,     KODE_BUTTON_LEFT },
+    { KDRV_BTN_LEFT,  EDGE_RELEASE, KODE_EVENT_BUTTON_LEFT_RELEASED,    KODE_BUTTON_LEFT },
+    { KDRV_BTN_RIGHT, EDGE_PRESS,   KODE_EVENT_BUTTON_RIGHT_PRESSED,    KODE_BUTTON_RIGHT },
+    { KDRV_BTN_RIGHT, EDGE_RELEASE, KODE_EVENT_BUTTON_RIGHT_RELEASED,   KODE_BUTTON_RIGHT },
+    { KDRV_BTN_TOP,   EDGE_PRESS,   KODE_EVENT_BUTTON_TOP_PRESSED,      KODE_BUTTON_TOP },
+    { KDRV_BTN_TOP,   EDGE_RELEASE, KODE_EVENT_BUTTON_TOP_RELEASED,     KODE_BUTTON_TOP },
+    { KDRV_BTN_TOP,   EDGE_HOLD,    KODE_EVENT_BUTTON_TOP_HELD,         KODE_BUTTON_TOP },
+    { KDRV_BTN_BOT,   EDGE_PRESS,   KODE_EVENT_BUTTON_BOTTOM_PRESSED,   KODE_BUTTON_BOTTOM },
+    { KDRV_BTN_BOT,   EDGE_RELEASE, KODE_EVENT_BUTTON_BOTTOM_RELEASED,  KODE_BUTTON_BOTTOM },
+    { KDRV_BTN_BOT,   EDGE_HOLD,    KODE_EVENT_BUTTON_BOTTOM_HELD,      KODE_BUTTON_BOTTOM },
+};
+
+TEST_CASE("every button event constant is known and is what its button pushes", "[kode_event]")
+{
+    events_up();
+    for ( size_t i = 0U; (sizeof(s_button_events) / sizeof(s_button_events[0])) > i; i++ )
+    {
+        const button_event_row_t *const row = &s_button_events[i];
+
+        rec_reset();
+        TEST_ASSERT_TRUE_MESSAGE(kode_event_add_listener(row->name, &listener_a), row->name);
+        if ( EDGE_HOLD == row->edge )
+        {
+            publish_hold(row->id);
+        }
+        else
+        {
+            publish_button(row->id, EDGE_PRESS == row->edge);
+        }
+        TEST_ASSERT_TRUE_MESSAGE(rec_wait(1U), row->name);
+        TEST_ASSERT_EQUAL_STRING(row->name, s_rec[0].name);
+        TEST_ASSERT_EQUAL_STRING(row->source, s_rec[0].source);
+        TEST_ASSERT_TRUE(kode_event_remove_listener(row->name, &listener_a));
+        /* Fourteen edges are more than the pool keeps for a spy an earlier
+         * file left on the bus: give back what it holds. */
+        ao_spy_drain();
+    }
+}
+
+TEST_CASE("button event names are matched in any case, and a hold of up is unknown", "[kode_event]")
+{
+    events_up();
+    TEST_ASSERT_TRUE(kode_event_add_listener("BUTTON_RIGHT_RELEASED", &listener_a));
+    TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_BUTTON_RIGHT_RELEASED, &listener_a));
+    TEST_ASSERT_TRUE(kode_event_add_listener("Button_Bottom_Held", &listener_a));
+    TEST_ASSERT_TRUE(kode_event_remove_listener(KODE_EVENT_BUTTON_BOTTOM_HELD, &listener_a));
+    TEST_ASSERT_FALSE(kode_event_add_listener("button_up_held", &listener_a));
+    TEST_ASSERT_EQUAL_STRING("unknown event 'button_up_held'", kode_error());
+    TEST_ASSERT_FALSE(kode_event_add_listener("button_bot_held", &listener_a));
+    TEST_ASSERT_EQUAL_STRING("unknown event 'button_bot_held'", kode_error());
+}
+
+TEST_CASE("mqtt_message, battery_low, pin_power_5v_cut and nfc_tag are known and pushed by their constants",
+          "[kode_event]")
+{
+    static const char *const names[] = {
+        KODE_EVENT_MQTT_MESSAGE, KODE_EVENT_BATTERY_LOW, KODE_EVENT_PIN_POWER_5V_CUT, KODE_EVENT_NFC_TAG,
+    };
+    const uint32_t n = (uint32_t)(sizeof(names) / sizeof(names[0]));
+
+    events_up();
+    for ( uint32_t i = 0U; n > i; i++ )
+    {
+        TEST_ASSERT_TRUE_MESSAGE(kode_event_add_listener(names[i], &listener_a), names[i]);
+    }
+    for ( uint32_t i = 0U; n > i; i++ )
+    {
+        kode_event_push(names[i], NULL, (int32_t)i, NULL);
+    }
+    TEST_ASSERT_TRUE(rec_wait(n));
+    for ( uint32_t i = 0U; n > i; i++ )
+    {
+        TEST_ASSERT_EQUAL_STRING(names[i], s_rec[i].name);
+        TEST_ASSERT_TRUE(kode_event_remove_listener(names[i], &listener_a));
+    }
 }
 
 /* ---- The point ------------------------------------------------------------ */

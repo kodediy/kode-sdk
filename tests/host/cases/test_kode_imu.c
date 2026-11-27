@@ -322,6 +322,16 @@ TEST_CASE("the axis names take any case", "[kode_imu]")
     TEST_ASSERT_EQUAL_STRING("", kode_error());
 }
 
+TEST_CASE("the axis constants read as the words do", "[kode_imu]")
+{
+    fresh();
+    will_settle();
+    TEST_ASSERT_FLOAT_WITHIN(TOL, 1.0F, kode_imu_read_axis(KODE_IMU_ACCEL_X));
+    will_settle();
+    TEST_ASSERT_FLOAT_WITHIN(TOL, 26.5F, kode_imu_read_axis(KODE_IMU_TEMP));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+}
+
 TEST_CASE("a bad IMU axis is NAN with the name in the error and no read made", "[kode_imu]")
 {
     fresh();
@@ -400,6 +410,14 @@ TEST_CASE("each field axis converts to microtesla", "[kode_mag]")
     TEST_ASSERT_FLOAT_WITHIN(TOL, -150.0F, kode_mag_read_axis("Y"));
     will_settle_n(MAG_WAITS);
     TEST_ASSERT_FLOAT_WITHIN(TOL, 30.0F, kode_mag_read_axis("z"));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+}
+
+TEST_CASE("the field axis constants read as the words do", "[kode_mag]")
+{
+    fresh();
+    will_settle_n(MAG_WAITS);
+    TEST_ASSERT_FLOAT_WITHIN(TOL, -150.0F, kode_mag_read_axis(KODE_MAG_Y));
     TEST_ASSERT_EQUAL_STRING("", kode_error());
 }
 

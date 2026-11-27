@@ -153,6 +153,16 @@ TEST_CASE("a profile name is matched without regard to case", "[kode_haptic]")
     expect_play(s_builtin[3].n, s_builtin[3].seg, s_builtin[3].gain);
 }
 
+TEST_CASE("the vibration constants play as the words do", "[kode_haptic]")
+{
+    fresh();
+    TEST_ASSERT_TRUE(kode_haptic_play(KODE_HAPTIC_CLICK));
+    expect_play(s_builtin[0].n, s_builtin[0].seg, s_builtin[0].gain);
+    motion_support_haptic_up();
+    TEST_ASSERT_TRUE(kode_haptic_play(KODE_HAPTIC_ERROR));
+    expect_play(s_builtin[5].n, s_builtin[5].seg, s_builtin[5].gain);
+}
+
 TEST_CASE("an unknown or NULL profile fails and posts nothing", "[kode_haptic]")
 {
     fresh();

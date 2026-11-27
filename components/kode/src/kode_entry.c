@@ -1,12 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file kode_entry.c
- * @brief kode_enter(), kode_err_set(), kode_error(), kode_retry() and the shared name comparison.
+ * @brief kode_enter(), kode_err_set(), kode_error(), kode_retry(), the shared name comparison
+ *        and the warning of an unknown name.
  */
 #include "kode_entry.h"
 
+#include <limits.h>
 /* cppcheck-suppress misra-c2012-17.1 ; a printf-style error text needs a variable argument list, bounded by vsnprintf() */
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -45,6 +48,12 @@ KAOS_WEAK void kode_tag_state_free(struct kode_tag_state *s);
 
 /** @brief What kode_error() answers when the task has no text. */
 static const char s_no_error[] = "";
+
+_Static_assert((size_t)KODE_NAME_KINDS <= (sizeof(uint32_t) * (size_t)CHAR_BIT),
+               "one bit per kind of name fits kode_name_warned");
+
+/* cppcheck-suppress misra-c2012-8.7 ; external so a host case can clear it, as kode_sys_init_once is */
+_Atomic uint32_t kode_name_warned;
 
 /**
  * @brief Free a task's state when the task ends.
@@ -163,6 +172,23 @@ void kode_err_set(const char *fmt, ...)
     }
 }
 
+void kode_name_unknown_warn(kode_name_kind_t kind)
+{
+    const uint32_t first_bit = 1U;
+
+    if ( KODE_NAME_KINDS > kind )
+    {
+        const uint32_t bit = first_bit << (uint32_t)kind;
+        /* cppcheck-suppress misra-c2012-17.3 ; <stdatomic.h>'s generic: the compiler sees it declared, cppcheck does not */
+        const uint32_t was = atomic_fetch_or(&kode_name_warned, bit);
+
+        if ( 0U == (was & bit) )
+        {
+            KLOG_W(TAG, "%s", kode_error());
+        }
+    }
+}
+
 bool kode_enter(const char *name)
 {
     const char *ao = NULL;
@@ -207,7 +233,7 @@ bool kode_name_is(const char *name, const char *word)
     size_t i = 0U;
 
     while ( ('\0' != name[i]) && ('\0' != word[i])
-           && (kode_ascii_lower(name[i]) == word[i]) )
+           && (kode_ascii_lower(name[i]) == kode_ascii_lower(word[i])) )
     {
         i++;
     }

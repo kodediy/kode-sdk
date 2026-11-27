@@ -61,12 +61,12 @@ static const uint16_t s_error_seg[]   = { 60U, 60U, 60U, 60U, 120U };
 
 /** @brief The built-ins. */
 static const builtin_t s_builtin[] = {
-    { "click",   s_click_seg,   sizeof(s_click_seg) / sizeof(s_click_seg[0]),     60U },
-    { "tick",    s_tick_seg,    sizeof(s_tick_seg) / sizeof(s_tick_seg[0]),       40U },
-    { "double",  s_double_seg,  sizeof(s_double_seg) / sizeof(s_double_seg[0]),   60U },
-    { "success", s_success_seg, sizeof(s_success_seg) / sizeof(s_success_seg[0]), 60U },
-    { "warning", s_warning_seg, sizeof(s_warning_seg) / sizeof(s_warning_seg[0]), 70U },
-    { "error",   s_error_seg,   sizeof(s_error_seg) / sizeof(s_error_seg[0]),     80U }
+    { KODE_HAPTIC_CLICK,   s_click_seg,   sizeof(s_click_seg) / sizeof(s_click_seg[0]),     60U },
+    { KODE_HAPTIC_TICK,    s_tick_seg,    sizeof(s_tick_seg) / sizeof(s_tick_seg[0]),       40U },
+    { KODE_HAPTIC_DOUBLE,  s_double_seg,  sizeof(s_double_seg) / sizeof(s_double_seg[0]),   60U },
+    { KODE_HAPTIC_SUCCESS, s_success_seg, sizeof(s_success_seg) / sizeof(s_success_seg[0]), 60U },
+    { KODE_HAPTIC_WARNING, s_warning_seg, sizeof(s_warning_seg) / sizeof(s_warning_seg[0]), 70U },
+    { KODE_HAPTIC_ERROR,   s_error_seg,   sizeof(s_error_seg) / sizeof(s_error_seg[0]),     80U }
 };
 
 /** @brief How many built-ins there are. */
@@ -227,6 +227,7 @@ bool kode_haptic_play(const char *profile)
         else if ( !profile_find(profile, &t.profile) )
         {
             kode_err_set("unknown vibration '%s'", profile);
+            kode_name_unknown_warn(KODE_NAME_VIBRATION);
         }
         else
         {

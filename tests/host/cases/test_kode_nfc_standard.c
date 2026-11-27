@@ -670,6 +670,17 @@ TEST_CASE("the type is read in any case, and the text is the task's until its ne
     world_end();
 }
 
+TEST_CASE("the type constants read as the words do", "[kode_nfc_standard]")
+{
+    world_fresh();
+    mem_area(s_area_text, sizeof(s_area_text));
+    TEST_ASSERT_EQUAL_STRING("hi", kode_nfc_read(KODE_NFC_TEXT, 1000U));
+    mem_area(s_area_uri, sizeof(s_area_uri));
+    TEST_ASSERT_EQUAL_STRING("https://a.io", kode_nfc_read(KODE_NFC_URI, 1000U));
+    TEST_ASSERT_EQUAL_STRING("", kode_error());
+    world_end();
+}
+
 TEST_CASE("an unknown or missing type is refused before the reader is asked", "[kode_nfc_standard]")
 {
     world_fresh();

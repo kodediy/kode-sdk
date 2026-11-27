@@ -10,6 +10,7 @@
 #error "kode_internal.h is private to kode and kode_screen: an app uses kode.h"
 #endif
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -60,6 +61,33 @@ bool kode_enter(const char *name);
  */
 void kode_err_set(const char *fmt, ...) KODE_PRINTF_FORMAT(1, 2);
 
+/** @brief The kinds of name kode.h takes as text; each warns of its first unknown name. */
+typedef enum {
+    KODE_NAME_BUTTON = 0,     /**< A button: KODE_BUTTON_UP...                  */
+    KODE_NAME_IMU_AXIS,       /**< An IMU axis: KODE_IMU_ACCEL_X...             */
+    KODE_NAME_MAG_AXIS,       /**< A magnetometer axis: KODE_MAG_X...           */
+    KODE_NAME_VIBRATION,      /**< A vibration: KODE_HAPTIC_CLICK...            */
+    KODE_NAME_AUDIO_SETTING,  /**< An audio setting: KODE_AUDIO_VOLUME...       */
+    KODE_NAME_IR_PROTOCOL,    /**< An infrared protocol: KODE_IR_NEC.           */
+    KODE_NAME_NFC_TYPE,       /**< An NFC type: KODE_NFC_TEXT...                */
+    KODE_NAME_EVENT,          /**< An event: KODE_EVENT_BUTTON_TOP_PRESSED...   */
+    KODE_NAME_KINDS           /**< How many kinds there are.                    */
+} kode_name_kind_t;
+
+/** @brief One bit per kode_name_kind_t already warned of since boot; a host case clears it. */
+extern _Atomic uint32_t kode_name_warned;
+
+/**
+ * @brief Write the calling task's error, kode_error()'s text, to the log as a
+ *        warning, the first time since boot a name of @p kind is unknown.
+ *
+ * Called right after the kode_err_set() that refuses the name. Later calls for
+ * the same kind write nothing. Takes no lock: safe from any task.
+ *
+ * @param kind The kind of the name refused; a value past the last writes nothing.
+ */
+void kode_name_unknown_warn(kode_name_kind_t kind);
+
 /**
  * @brief Call @p attempt at once, then every KODE_RETRY_STEP_MS, until it answers
  *        true or @p bound_ms has passed.
@@ -105,9 +133,9 @@ bool kode_mag_cal_store(const char *name, const kdrv_qmc5883p_cal_t *corr);
 char kode_ascii_lower(char c);
 
 /**
- * @brief Whether @p name spells @p word, ignoring ASCII case: no trimming, no locale.
+ * @brief Whether @p name spells @p word, ignoring ASCII case on both: no trimming, no locale.
  * @param name What the caller typed.
- * @param word The name to match, already in lower case.
+ * @param word The name to match, such as a kode.h constant.
  * @return true when the two are the same text apart from case.
  */
 bool kode_name_is(const char *name, const char *word);
