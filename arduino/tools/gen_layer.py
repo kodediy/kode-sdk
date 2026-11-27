@@ -25,6 +25,11 @@ nothing in kode.h, or an event's name with no constant, stops the run.
 DEFAULTS gives trailing parameters that are NULL in the common case a default
 in the method's declaration; a line kode.h does not bear out stops the run.
 
+A narrow integer passed by value (NARROW) is an int32_t in the method, which
+hands kode.h the number brought into the narrow type's range, so 256 asks for
+255 instead of 0. A handle's class is built from kode.h's handle by name and
+tests true when kode.h made it; it is no number either way.
+
 The layer's names at file scope are the object Kode, its class Kode_Sdk, a
 class Kode_<group> behind each Kode.<group>, the handles' classes and an alias
 Kode<Type> for each kode_<type>_t. An alias is "Kode" and capitalised words
@@ -127,6 +132,18 @@ DEFAULTS = {
     "kode_screen_new":           {"title": "nullptr"},
     "kode_screen_add_value":     {"unit": "nullptr"},
 }
+
+# The narrow integers a method takes as int32_t, as C type -> (the function
+# that fits a number into its range, its smallest value, its largest), in the
+# order the header defines them. A number a sketch passes from a variable
+# would otherwise wrap with no word: setBrightness(256) would ask for 0.
+NARROW = {
+    "uint8_t":  ("kode_arduino_fit_u8", "0", "UINT8_MAX"),
+    "uint16_t": ("kode_arduino_fit_u16", "0", "UINT16_MAX"),
+    "int8_t":   ("kode_arduino_fit_i8", "INT8_MIN", "INT8_MAX"),
+    "int16_t":  ("kode_arduino_fit_i16", "INT16_MIN", "INT16_MAX"),
+}
+WIDE = "int32_t"  # What a method declares a narrow integer as.
 
 CPP_KEYWORDS = frozenset("""
     alignas alignof and and_eq asm auto bitand bitor bool break case catch char
@@ -314,6 +331,10 @@ def check_defaults(fns, out):
         for param in given:
             if param not in params:
                 fail(f"{name}() has no parameter '{param}' for DEFAULTS")
+        for param in by_name[name].params:
+            if param.name in given and param.type in NARROW:
+                fail(f"{name}(): DEFAULTS gives '{param.name}', a {param.type} the method takes as {WIDE}: "
+                     f"drop the line")
         if set(params[len(params) - len(given):]) != set(given):
             fail(f"{name}(): DEFAULTS gives {', '.join(given)}, which must be its last parameters")
 
@@ -333,6 +354,10 @@ def layout(fns):
         owner, method = place(fn)
         if method in CPP_KEYWORDS:
             fail(f"{fn.name}() would be the method '{method}', a C++ keyword: name it in RENAMED")
+        for param in fn.params[1:]:
+            if param.type in HANDLES:
+                fail(f"{fn.name}() takes the {param.type} '{param.name}' after its first parameter, "
+                     f"and {HANDLES[param.type]} hands its value to no call: give the class a raw()")
         methods = owners.setdefault(owner, [])
         for other in methods:
             if other.name == method:
@@ -344,15 +369,36 @@ def layout(fns):
     return owners
 
 
+def declared_type(param):
+    """The type a method declares a parameter with: a narrow integer's is int32_t, any other kode.h's own."""
+    if param.type in NARROW:
+        return WIDE
+    return param.type
+
+
+def declared(param):
+    """A parameter as a method declares it: uint8_t pct as int32_t pct, any other as kode.h writes it."""
+    if param.type in NARROW:
+        return f"{WIDE} {param.name}"
+    return param.text
+
+
+def passed(param):
+    """A parameter as a method hands it to kode.h: a narrow integer fitted into its type's range."""
+    if param.type in NARROW:
+        return f"{NARROW[param.type][0]}({param.name})"
+    return param.name
+
+
 def signature(ret, method, params, variadic, defaults):
     """The lines that declare one method, up to its body, a default after each parameter that has one."""
     lines = []
     listed = []
     for param in params:
         if param.name in defaults:
-            listed.append(f"{param.text} = {defaults[param.name]}")
+            listed.append(f"{declared(param)} = {defaults[param.name]}")
         else:
-            listed.append(param.text)
+            listed.append(declared(param))
     if variadic:
         lines.append("    template <typename... Args>")
         listed.append("Args... args")
@@ -366,13 +412,13 @@ def method_lines(method, handle):
     """One method: its @brief and a body that is the call alone."""
     fn = method.fn
     params = fn.params
-    passed = [param.name for param in params]
+    given = [passed(param) for param in params]
     if handle:
         params = params[1:]
-        passed = ["handle"] + passed[1:]
+        given = ["handle"] + given[1:]
     if fn.variadic:
-        passed.append("args...")
-    call = f"{fn.name}({', '.join(passed)})"
+        given.append("args...")
+    call = f"{fn.name}({', '.join(given)})"
     ret = HANDLES.get(fn.ret, fn.ret)
     if fn.ret in HANDLES:
         body = f"return {ret}({call});"
@@ -399,21 +445,62 @@ def handle_class(handle, methods):
         "    {",
         "    }",
         "",
-        "    /** @brief The one kode.h answered. */",
-        f"    {name}({handle} from) : handle(from)",
+        "    /** @brief The one kode.h answered, by name: a number is no handle. */",
+        f"    explicit {name}({handle} from) : handle(from)",
         "    {",
         "    }",
         "",
-        "    /** @brief The handle, for a call of kode.h. */",
-        f"    operator {handle}(void) const",
+        "    /** @brief Whether kode.h made it: false for none yet and for one it could not make. */",
+        "    explicit operator bool(void) const",
         "    {",
-        "        return handle;",
+        "        return KODE_ARDUINO_NO_HANDLE != handle;",
         "    }",
     ]
     for method in methods:
         lines.append("")
         lines += method_lines(method, handle)
     lines += ["", "private:", f"    {handle} handle; /**< What kode.h knows it by. */", "};"]
+    return lines
+
+
+def fitting(owners):
+    """The function that fits a number into each narrow type a method takes, in NARROW's order; none unused."""
+    used = set()
+    for owner, methods in owners.items():
+        for method in methods:
+            params = method.fn.params
+            if owner in HANDLES:
+                params = params[1:]
+            used.update(param.type for param in params if param.type in NARROW)
+    lines = []
+    for c_type, (name, smallest, largest) in NARROW.items():
+        if c_type not in used:
+            continue
+        lines += [
+            "",
+            "/**",
+            f" * @brief A number brought into {c_type}'s range, for a call of kode.h.",
+            " * @param value The number a sketch passed.",
+            f" * @return value, or {smallest} below the range and {largest} above it.",
+            " */",
+            f"inline {c_type} {name}({WIDE} value)",
+            "{",
+            f"    {WIDE} fitted = value;",
+            f"    if ( {smallest} > fitted )",
+            "    {",
+            f"        fitted = {smallest};",
+            "    }",
+            f"    else if ( {largest} < fitted )",
+            "    {",
+            f"        fitted = {largest};",
+            "    }",
+            "    else",
+            "    {",
+            "        /* In the range already. */",
+            "    }",
+            f"    return static_cast<{c_type}>(fitted);",
+            "}",
+        ]
     return lines
 
 
@@ -549,7 +636,7 @@ def header():
     owners = owners_of_the_sdk()
     groups = [owner for owner in owners if owner and owner not in HANDLES]
     check_names(groups, alias_types(text, sdk_functions()))
-    lines = PREAMBLE.split("\n")
+    lines = PREAMBLE.rstrip("\n").split("\n") + fitting(owners) + [""]
     lines += left_out_lines() + [""]
     lines += ["/* ---- Types ---- */", ""] + aliases(text, sdk_functions()) + [""]
     lines += ["/* ---- Handles ---- */"]
@@ -600,11 +687,11 @@ def call_lines(owner, method):
         target = f"{OBJECT}.{owner}.{method.name}"
     else:
         target = f"{OBJECT}.{method.name}"
-    passed = ", ".join(f"zero<{param.type}>()" for param in params)
+    zeros = ", ".join(f"zero<{declared_type(param)}>()" for param in params)
     cast = ""
     if fn.ret != "void":
         cast = "(void)"
-    return [f"    {cast}{target}({passed});"]
+    return [f"    {cast}{target}({zeros});"]
 
 
 def handle_variable(handle):
