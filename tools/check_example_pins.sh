@@ -33,7 +33,7 @@ cd "$(dirname "$0")/.."
 # than listed, so a new one is checked the day it lands, and the Arduino
 # library. The Arduino sketch in examples/ has no pin.
 FILES=( components/*/idf_component.yml examples/*/main/idf_component.yml README.md
-        arduino/libraries/KodeDot/library.properties )
+        arduino/libraries/Kode/library.properties )
 
 pins=""
 for f in "${FILES[@]}"; do

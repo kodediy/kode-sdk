@@ -6,11 +6,11 @@
 
 // The Kode Dot with the Kode SDK in its libraries. The board's own buses and pins (its I2C bus, the NFC
 // reader, the buttons, the card, the RFID front end, the display) are the SDK's; a sketch reaches them
-// through Dot. The names below are the expansion header's, J3: a position is the index of EXP<n>, as the
-// SDK's Dot.pin numbers it, and PIN<n> is the connector's own pin number.
+// through Kode. The names below are the expansion header's, J3: a position is the index of EXP<n>, as the
+// SDK's Kode.pin numbers it, and PIN<n> is the connector's own pin number.
 //
 // BOARD_HAS_PIN_REMAP is never defined here: with it Arduino makes tone() a macro, which breaks
-// Dot.audio.tone().
+// Kode.audio.tone().
 
 // Serial is the USB-Serial/JTAG. UART0 (Serial0) is on J3 positions 1 and 2:
 // SOC_TX0/SOC_RX0 are what the core reads for it (the P4 defaults, GPIO37/38, are the codec's I2S pins here).
@@ -83,5 +83,16 @@ static const uint8_t A5 = 21;
 #define BOARD_SDIO_ESP_HOSTED_D3    52
 // The ESP32-C5's enable line, which resets it.
 #define BOARD_SDIO_ESP_HOSTED_RESET 23
+
+// The SDK's object, Kode, in every sketch with no include, as Serial is: the library Kode's layer, by its
+// path inside the platform, which is the same from this folder in the SDK's tree. Arduino's core includes
+// this file inside extern "C", where the layer's templates are refused ("template with C linkage"), so the
+// layer is given back C++ linkage. The core, its libraries and a sketch's own .cpp files build with the
+// layer in sight; a .c file does not see it.
+#ifdef __cplusplus
+extern "C++" {
+#include "../../libraries/Kode/src/KodeArduino.h"
+}
+#endif
 
 #endif /* Pins_Arduino_h */

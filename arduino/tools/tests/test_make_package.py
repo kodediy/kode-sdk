@@ -294,7 +294,7 @@ class CoreArchive(unittest.TestCase):
             for rel, data in ours(make_package.VARIANT).items():
                 self.assertEqual(made.read(f"{top}variants/kodedot/{rel}"), data)
             for rel, data in ours(make_package.LIBRARY).items():
-                self.assertEqual(made.read(f"{top}libraries/KodeDot/{rel}"), data)
+                self.assertEqual(made.read(f"{top}libraries/Kode/{rel}"), data)
             for rel in ("cores/esp32/Arduino.h", "libraries/Wire/src/Wire.h", "tools/get.py"):
                 self.assertEqual(made.read(top + rel), theirs.read(TOP + rel))
             mode = made.getinfo(top + "tools/get.py").external_attr >> 16
@@ -315,10 +315,10 @@ class CoreArchive(unittest.TestCase):
         self.assertIn("cores/esp32/Arduino.h", said)
         self.assertFalse(built.exists())
 
-    def test_an_espressif_kodedot_library_is_refused(self):
-        release_zip(self.source, [("libraries/KodeDot/src/KodeDot.h", b"theirs\n")])
+    def test_an_espressif_kode_library_is_refused(self):
+        release_zip(self.source, [("libraries/Kode/src/KodeArduino.h", b"theirs\n")])
         said = refusal(lambda: make_package.core_archive(self.source, VERSION, self.out))
-        self.assertIn("libraries/KodeDot/", said)
+        self.assertIn("libraries/Kode/", said)
         self.assertEqual(list(self.out.iterdir()), [])
 
     def test_two_top_level_folders_are_refused(self):

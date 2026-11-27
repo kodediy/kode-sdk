@@ -1,4 +1,4 @@
-Dot	KEYWORD1
+Kode	KEYWORD1
 KodeAlign	KEYWORD1
 KodeAudioRecordStatus	KEYWORD1
 KodeBleCharacteristic	KEYWORD1
@@ -7,7 +7,6 @@ KodeBleService	KEYWORD1
 KodeButtons	KEYWORD1
 KodeCanvas	KEYWORD1
 KodeColor	KEYWORD1
-KodeDot	KEYWORD1
 KodeEvent	KEYWORD1
 KodeFileEntry	KEYWORD1
 KodeFileList	KEYWORD1

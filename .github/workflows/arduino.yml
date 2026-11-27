@@ -268,14 +268,14 @@ jobs:
           arduino-cli core list
 
       # The library's examples as installed, and a sketch that calls every
-      # method of the Dot layer once, so every call links against the
+      # method of the Kode layer once, so every call links against the
       # libraries. Each sketch is built even after one fails.
       - name: Build the examples against the package
         run: |
           set -euo pipefail
-          examples="$ARDUINO_DIRECTORIES_DATA/packages/kode/hardware/esp32/$VERSION/libraries/KodeDot/examples"
+          examples="$ARDUINO_DIRECTORIES_DATA/packages/kode/hardware/esp32/$VERSION/libraries/Kode/examples"
           mkdir -p "$RUNNER_TEMP/sketches/AllCalls"
-          python3 arduino/tools/gen_dot.py --all-calls "$RUNNER_TEMP/sketches/AllCalls/AllCalls.ino"
+          python3 arduino/tools/gen_layer.py --all-calls "$RUNNER_TEMP/sketches/AllCalls/AllCalls.ino"
           failed=""
           for sketch in "$examples/Blink" "$examples/TagReader" "$examples/HeaderUart" "$examples/SerialLog" "$RUNNER_TEMP/sketches/AllCalls"; do
             name="$(basename "$sketch")"

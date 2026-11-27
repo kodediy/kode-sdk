@@ -19,7 +19,7 @@ if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 for f in components/*/idf_component.yml examples/*/main/idf_component.yml README.md \
-         arduino/libraries/KodeDot/library.properties; do
+         arduino/libraries/Kode/library.properties; do
     sed -i.bak -E \
         -e "s/^version: \"[0-9.]+\"/version: \"$v\"/" \
         -e "/kodediy\/[a-z_]+:/ s/\"==[0-9.]+\"/\"==$v\"/" \
