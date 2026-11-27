@@ -3368,11 +3368,11 @@ void mqtt_state_request(void);
 typedef enum {
     CHAN_OFF = 0,       /**< Not part of this firmware, or `chan` is off.   */
     CHAN_NO_NET,        /**< No address: Wi-Fi is off or not joined.        */
-    CHAN_NO_IDENTITY,   /**< The C5 holds no certificate. Terminal.         */
+    CHAN_NO_IDENTITY,   /**< The C5 holds no certificate. No try until a new address or `chan=on`. */
     CHAN_JOINING,       /**< Challenge, signature, connect, broker.         */
     CHAN_UP,            /**< Connected: commands may arrive.                */
-    CHAN_WAITING,       /**< A try failed; the next one is on a timer.      */
-    CHAN_REFUSED        /**< The api refused the certificate. Terminal.     */
+    CHAN_WAITING,       /**< A try failed; the next one is on a timer, or at `chan=on`. */
+    CHAN_REFUSED        /**< The api refused the certificate. No try until a new address or `chan=on`. */
 } chan_state_t;
 
 /** @brief What the broker did with the channel's session (ChannelStateEvt.session). */
