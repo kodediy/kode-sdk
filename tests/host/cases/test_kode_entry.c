@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -380,8 +381,56 @@ TEST_CASE("an Active Object is refused before the bring-up is waited on", "[kode
 /** @brief stdout as it was before capture_start(), to put back. */
 static int s_saved_out = -1;
 
+/** @brief Bytes of the path of the file a case captures into. */
+#define CAPTURE_PATH_MAX 512U
+
+/** @brief That file's name under TMPDIR; mkstemp() fills in the X's. */
+#define CAPTURE_NAME "kode_captureXXXXXX"
+
 /** @brief Where stdout goes while a case captures. */
 static FILE *s_capture;
+
+/**
+ * @brief A file of no name under TMPDIR, open for update.
+ *
+ * Not tmpfile(): on macOS it calls sigprocmask(), which rewrites every
+ * thread's signal mask, so the port's suspended tasks take the tick and a
+ * later case aborts or hangs. mkstemp() leaves the masks alone.
+ * @return The file, or NULL.
+ */
+static FILE *capture_file(void)
+{
+    char        path[CAPTURE_PATH_MAX];
+    const char *tmp = getenv("TMPDIR");
+    const char *sep = "/";
+    FILE       *f   = NULL;
+
+    if ( (NULL == tmp) || ('\0' == tmp[0]) )
+    {
+        tmp = "/tmp";
+    }
+    if ( '/' == tmp[strlen(tmp) - 1U] )
+    {
+        sep = "";
+    }
+    const int len = snprintf(path, sizeof(path), "%s%s%s", tmp, sep, CAPTURE_NAME);
+
+    if ( (0 < len) && ((size_t)len < sizeof(path)) )
+    {
+        const int fd = mkstemp(path);
+
+        if ( 0 <= fd )
+        {
+            (void)unlink(path);
+            f = fdopen(fd, "w+");
+            if ( NULL == f )
+            {
+                (void)close(fd);
+            }
+        }
+    }
+    return f;
+}
 
 /**
  * @brief Send the suite's output to a file of its own: the rescue path writes
@@ -393,7 +442,7 @@ static bool capture_start(void)
     bool on = false;
 
     (void)fflush(stdout);
-    s_capture = tmpfile();
+    s_capture = capture_file();
     if ( NULL != s_capture )
     {
         s_saved_out = dup(STDOUT_FILENO);
