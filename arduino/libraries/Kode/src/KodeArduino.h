@@ -81,6 +81,28 @@ inline int8_t kode_arduino_fit_i8(int32_t value)
     return static_cast<int8_t>(fitted);
 }
 
+/**
+ * @brief A format's argument as kode.h takes it: the characters of an object that holds a text.
+ * @param value The argument, a String for one.
+ * @return Its characters.
+ */
+template <typename T>
+inline auto kode_arduino_text(const T &value, int) -> decltype(value.c_str())
+{
+    return value.c_str();
+}
+
+/**
+ * @brief A format's argument as kode.h takes it: any other argument, as it is.
+ * @param value The argument.
+ * @return The argument.
+ */
+template <typename T>
+inline const T &kode_arduino_text(const T &value, long)
+{
+    return value;
+}
+
 /* Left out of the layer, with what a sketch uses instead:
  *   kode_i2c_*()                   Arduino's Wire
  *   kode_spi_*()                   Arduino's SPI
@@ -156,10 +178,32 @@ public:
     }
 
     /** @brief kode_widget_set_text(). */
-    template <typename... Args>
-    bool setText(const char *fmt, Args... args) const
+    template <typename First, typename... Rest>
+    bool setText(const char *fmt, const First &first, const Rest &...rest) const
     {
-        return kode_widget_set_text(handle, fmt, args...);
+        return kode_widget_set_text(handle, fmt, kode_arduino_text(first, 0), kode_arduino_text(rest, 0)...);
+    }
+
+    /** @brief kode_widget_set_text() with a text as it is: a '%' in it is shown, not read. */
+    bool setText(const char *text) const
+    {
+        bool answer;
+        if ( nullptr == text )
+        {
+            answer = kode_widget_set_text(handle, text);
+        }
+        else
+        {
+            answer = kode_widget_set_text(handle, "%s", text);
+        }
+        return answer;
+    }
+
+    /** @brief kode_widget_set_text() with the text an object holds, a String for one, as it is. */
+    template <typename Text>
+    auto setText(const Text &text) const -> decltype(text.c_str(), bool())
+    {
+        return kode_widget_set_text(handle, "%s", text.c_str());
     }
 
     /** @brief kode_widget_set_color(). */
@@ -1238,10 +1282,30 @@ public:
     }
 
     /** @brief kode_print(). */
-    template <typename... Args>
-    void printf(const char *fmt, Args... args) const
+    template <typename First, typename... Rest>
+    void printf(const char *fmt, const First &first, const Rest &...rest) const
     {
-        kode_print(fmt, args...);
+        kode_print(fmt, kode_arduino_text(first, 0), kode_arduino_text(rest, 0)...);
+    }
+
+    /** @brief kode_print() with a text as it is: a '%' in it is shown, not read. */
+    void printf(const char *text) const
+    {
+        if ( nullptr == text )
+        {
+            kode_print(text);
+        }
+        else
+        {
+            kode_print("%s", text);
+        }
+    }
+
+    /** @brief kode_print() with the text an object holds, a String for one, as it is. */
+    template <typename Text>
+    auto printf(const Text &text) const -> decltype(text.c_str(), void())
+    {
+        kode_print("%s", text.c_str());
     }
 
     /** @brief kode_rgb(). */
