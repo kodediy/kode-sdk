@@ -67,6 +67,9 @@ void test_qmc5883p_bring_up(void);
 #define QMI_BURST_LEN   14U
 
 #define QMI_ST_TRIGGER  0x80U   /**< aST in CTRL2, gST in CTRL3.             */
+#define QMI_CLOCK_OFF   0x01U   /**< CTRL1 sensorDisable: the clock stopped. */
+/** @brief CTRL1 as bring-up and every rest leave it: the clock stopped. */
+#define QMI_CTRL1_REST  0x59U
 #define QMI_CMD_DONE    0x80U   /**< STATUSINT bit 7: a CTRL9 command landed. */
 #define QMI_ST_DONE     0x01U   /**< STATUSINT bit 0: the self-test finished. */
 #define QMI_FIFO_FILL   0x0DU   /**< FIFO_CTRL: 128 samples, FIFO mode.      */
@@ -150,6 +153,7 @@ static bool     s_imu_acks;        /* the part answers a probe at 0x6A       */
 static bool     s_mag_acks;        /* and the magnetometer at 0x2C           */
 static bool     s_mag_stray;       /* or at 0x0C, after a bad power-up       */
 static bool     s_bus_dead;        /* every transfer fails                   */
+static unsigned s_ctrl1_refusals;  /* CTRL1 writes still to be refused       */
 
 static uint8_t  s_sample[QMI_BURST_LEN];  /* what one read burst answers     */
 /* What each sensor's self-test moves, raw. Two of them rather than one,
@@ -445,6 +449,11 @@ static kode_status_t on_write(khal_i2c_dev_t dev, uint8_t reg, uint8_t val,
     {
         return KODE_ERROR;
     }
+    if ( (QMI_CTRL1 == reg) && (0U < s_ctrl1_refusals) )
+    {
+        s_ctrl1_refusals -= 1U;
+        return KODE_ERROR;
+    }
 
     if ( QMC_CTRL2 == reg )
     {
@@ -491,8 +500,10 @@ static kode_status_t on_write(khal_i2c_dev_t dev, uint8_t reg, uint8_t val,
         /* The self-test's stimulus: set, the part works on its own for a
          * while and then says so; cleared, the flag falls with it. The
          * trigger's register is also which sensor is under test, and the
-         * result register answers for that one. */
-        if ( (val & QMI_ST_TRIGGER) != 0U )
+         * result register answers for that one. A self-test runs on the
+         * part's clock: with it stopped, a trigger does nothing. */
+        if ( ((val & QMI_ST_TRIGGER) != 0U)
+            && ((s_regs[QMI_CTRL1] & QMI_CLOCK_OFF) == 0U) )
         {
             s_st_armed  = true;
             s_st_seen   = 0U;
@@ -572,6 +583,8 @@ static void bus_up(bool imu, bool mag)
     (void)memset(s_regs, 0, sizeof(s_regs));
     s_regs[QMI_WHO_AM_I]      = (uint8_t)KDRV_QMI8658_WHOAMI;
     s_regs[QMI_WHO_AM_I + 1U] = 0x7CU;   /* the QMI8658A's revision */
+    s_regs[QMI_CTRL1]         = QMI_CTRL1_REST;
+    s_ctrl1_refusals = 0U;
     s_imu_acks  = imu;
     s_mag_acks  = mag;
     s_mag_stray = false;
@@ -919,7 +932,9 @@ TEST_CASE("no QMI8658A: the row stops at step 1 rather than measuring gravity "
     bus_up(false, false);
     imu_up();
 
+    /* Every row starts after the row's rest, a part or none. */
     row_req();
+    (void)qf_support_tick(AO_Imu, QF_SUPPORT_STEPS(ROW_REST_MS) + 2U);
     {
         const ImuTestEvt * const r = row_record(1U, (uint8_t)IMU_TEST_WHOAMI);
 
@@ -1261,20 +1276,25 @@ TEST_CASE("an IMU nobody asks for a whole rest time goes back to standby",
     imu_down();
 }
 
-TEST_CASE("the row on a resting IMU starts its self-test at once, without "
-          "waking the part first", "[imu_ao]")
+TEST_CASE("the row on a resting IMU starts its clock and triggers a rest "
+          "later, without waking the part first", "[imu_ao]")
 {
+    uint8_t ctrl7;
+    uint8_t clock_off;
+    bool    armed;
+
     bus_up(true, true);
     imu_up_raw();
     s_st_polls = 0U;
 
+    /* Inside the request's own step: the clock standby stopped is started,
+     * no sensor is switched on, and the trigger waits for the clock. Noted
+     * here and asserted once the row has run out, so a failure leaves no
+     * row behind for the next case. */
     row_req();
-    /* Inside the request's own step: nothing was waited for, and nothing
-     * was switched on. */
-    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, s_regs[QMI_CTRL7],
-                                   "the part was switched on before a "
-                                   "self-test that starts from sensors off");
-    TEST_ASSERT_TRUE_MESSAGE(s_st_armed, "the self-test was not triggered");
+    ctrl7     = s_regs[QMI_CTRL7];
+    clock_off = (uint8_t)(s_regs[QMI_CTRL1] & QMI_CLOCK_OFF);
+    armed     = s_st_armed;
 
     row_run();
     (void)row_record(1U, (uint8_t)IMU_TEST_WHOAMI);
@@ -1285,6 +1305,80 @@ TEST_CASE("the row on a resting IMU starts its self-test at once, without "
     /* And the row hands the part back running, to rest on its own time. */
     TEST_ASSERT_EQUAL_HEX8(QMI_SENSORS_ON, s_regs[QMI_CTRL7]);
     imu_down();
+
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, ctrl7,
+                                   "the part was switched on before a "
+                                   "self-test that starts from sensors off");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, clock_off,
+                                   "the row did not start the clock");
+    TEST_ASSERT_FALSE_MESSAGE(armed, "the self-test was triggered in the "
+                                     "same step as the clock's start");
+}
+
+TEST_CASE("the row on an awake IMU stops its sensors with the clock running "
+          "and triggers a rest later", "[imu_ao]")
+{
+    uint8_t ctrl7;
+    uint8_t clock_off;
+    bool    armed_at_once;
+    bool    armed_later;
+
+    bus_up(true, true);
+    imu_up();
+    s_st_polls = 10000U;   /* the trigger stays armed until the row gives up */
+
+    /* Noted and asserted once the row has run out, as above. */
+    row_req();
+    ctrl7         = s_regs[QMI_CTRL7];
+    clock_off     = (uint8_t)(s_regs[QMI_CTRL1] & QMI_CLOCK_OFF);
+    armed_at_once = s_st_armed;
+    (void)qf_support_tick(AO_Imu, QF_SUPPORT_STEPS(ROW_REST_MS) + 2U);
+    armed_later   = s_st_armed;
+
+    row_run();
+    (void)row_record(1U, (uint8_t)IMU_TEST_WHOAMI);
+    expect_verdict("imu", false);
+    imu_down();
+
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, ctrl7, "the row left the sensors on");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, clock_off,
+                                   "the row stopped the clock its self-test "
+                                   "runs on");
+    TEST_ASSERT_FALSE_MESSAGE(armed_at_once, "triggered before the rest ran out");
+    TEST_ASSERT_TRUE_MESSAGE(armed_later, "the self-test was not triggered");
+}
+
+/* Whatever st_begin() managed: a row whose clock never started has its
+ * trigger ignored and times out, and its end still leaves the part
+ * running rather than enabled on a stopped clock. */
+TEST_CASE("a row whose clock would not start still leaves the part running",
+          "[imu_ao]")
+{
+    bool    said;
+    uint8_t ctrl7;
+    uint8_t clock_off;
+
+    bus_up(true, true);
+    imu_up_raw();
+    s_ctrl1_refusals = 1U;
+
+    /* Noted before the part's own rest can change them, and asserted once
+     * the row has run out, as above. */
+    row_req();
+    said = logged("would not start its clock");
+    row_run();
+    (void)row_record(1U, (uint8_t)IMU_TEST_WHOAMI);
+    expect_verdict("imu", false);
+    ctrl7     = s_regs[QMI_CTRL7];
+    clock_off = (uint8_t)(s_regs[QMI_CTRL1] & QMI_CLOCK_OFF);
+    imu_down();
+
+    TEST_ASSERT_TRUE_MESSAGE(said, "the clock that did not start went unsaid");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00U, clock_off,
+                                   "the row's end left the clock stopped");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(QMI_SENSORS_ON, ctrl7,
+                                   "the row's end did not leave the part "
+                                   "running");
 }
 
 TEST_CASE("the magnetometer wakes for a read and rests on its own time",

@@ -25,6 +25,10 @@ extern "C" {
 /** @brief The same for the gyroscope, mdps (section 15.2: 300 dps). */
 #define KDRV_QMI8658_ST_GY_MIN_MDPS  300000
 
+/** @brief From a start of the part's clock to a clock it runs on, ms: the
+ *         datasheet's t0 out of Power-Down (section 7.3). */
+#define KDRV_QMI8658_CLOCK_MS        15U
+
 /** @brief Samples in one FIFO window: the part's largest FIFO. */
 #define KDRV_QMI8658_FIFO_DEPTH      128U
 /** @brief The rate a window is sampled at, Hz. With the gyroscope off the
@@ -57,9 +61,9 @@ typedef struct {
  * @brief Find the part, check who it is, configure it and leave it at rest.
  *
  * +-8 g and +-512 dps at the part's 896.8 Hz rate, little-endian, register
- * auto-increment on, and both sensors left disabled: a part nobody is
- * reading converts for nobody, and kdrv_qmi8658_standby() is what its owner
- * starts it with.
+ * auto-increment on, and the part left in standby, its clock stopped as
+ * kdrv_qmi8658_standby(true) leaves it: a part nobody is reading converts
+ * for nobody, and kdrv_qmi8658_standby() is what its owner starts it with.
  * INT1 is made a driven output, with nothing mapped to it: that pin is the
  * expander's P5, which has no pull-up, and a floating input there is
  * an interrupt source nobody asked for. INT2, wired to nothing, is driven
@@ -87,12 +91,16 @@ kode_status_t kdrv_qmi8658_create(kdrv_qmi8658_id_t *id);
 kode_status_t kdrv_qmi8658_park(void);
 
 /**
- * @brief Put both sensors at rest, or start them converting.
+ * @brief Put the part at rest, or start both sensors converting.
  *
- * Leaving standby enables the accelerometer and the gyroscope together at
- * the rates kdrv_qmi8658_create() set. The accelerometer has a sample within
- * a few periods; the gyroscope needs about 150 ms before its own means
- * anything, and waiting that out is the owner's business, not this call's.
+ * Standby is the datasheet's Power-Down: both sensors disabled and the
+ * part's clock stopped, the bus and the registers still answering. Leaving
+ * it starts the clock, waits KDRV_QMI8658_CLOCK_MS for it when it was
+ * stopped (a yielding delay), and then enables the accelerometer and the
+ * gyroscope together at the rates kdrv_qmi8658_create() set. From the
+ * return the accelerometer has a sample within a few periods and the
+ * gyroscope needs about 150 ms before its own means anything, and waiting
+ * that out is the owner's business, not this call's.
  * In standby the output registers keep the last conversion, so a read there
  * is a stale one - the owner is what stops it.
  *
@@ -114,11 +122,26 @@ kode_status_t kdrv_qmi8658_standby(bool on);
 kode_status_t kdrv_qmi8658_read(kdrv_qmi8658_sample_t *out);
 
 /**
+ * @brief Make the part ready for a self-test: both sensors disabled and its
+ *        clock started, the datasheet's Power-On Default.
+ *
+ * The caller waits at least KDRV_QMI8658_CLOCK_MS from here before
+ * kdrv_qmi8658_st_begin(): a trigger written while the clock or a sensor is
+ * still changing state is one the part may never act on.
+ *
+ * @return KODE_OK, KODE_DENIED before create, KODE_IO_ERROR when the part
+ *         did not take a write.
+ */
+kode_status_t kdrv_qmi8658_st_prepare(void);
+
+/**
  * @brief Start one sensor's self-test (datasheet section 15).
  *
- * Both sensors are disabled, as the procedure asks, and the stimulus is
- * triggered: an electrostatic force inside the die, so the verdict does not
- * depend on how the board is lying or whether it is being carried. The part
+ * The clock must have been running KDRV_QMI8658_CLOCK_MS:
+ * kdrv_qmi8658_st_prepare() starts it, this call does not. Both sensors are
+ * disabled, as the procedure asks, and the stimulus is triggered: an
+ * electrostatic force inside the die, so the verdict does not depend on how
+ * the board is lying or whether it is being carried. The part
  * then works on its own - about 25 ms for the accelerometer at this rate,
  * about 400 ms for the gyroscope - and kdrv_qmi8658_st_poll() says when.
  * Samples are meaningless until kdrv_qmi8658_st_end().
@@ -156,9 +179,12 @@ kode_status_t kdrv_qmi8658_st_poll(kdrv_qmi8658_sensor_t which, bool *done,
 bool kdrv_qmi8658_st_judge(kdrv_qmi8658_sensor_t which, const int32_t shift[3]);
 
 /**
- * @brief Leave self-test: triggers cleared, scales rewritten, sensors on.
+ * @brief Leave self-test: triggers cleared, scales rewritten, the clock
+ *        started if it is stopped, sensors on.
  *
- * Safe to call whether a self-test finished, timed out or never began. The
+ * Safe to call whether a self-test finished, timed out or never began, and
+ * whether kdrv_qmi8658_st_prepare() started the clock or not: a stopped
+ * clock is started and waited for as kdrv_qmi8658_standby() does. The
  * gyroscope needs about 150 ms after this before a sample means anything.
  *
  * @return KODE_OK, KODE_DENIED before create, KODE_IO_ERROR when the part
