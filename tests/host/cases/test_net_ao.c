@@ -1586,6 +1586,114 @@ TEST_CASE("a connect answer that is not a session is refused whole",
     net_done();
 }
 
+/* ---- Try now: chan=on asked while it is on ---------------------------------- */
+
+TEST_CASE("chan=on asked while the channel waits tries now, and the next failure "
+          "waits as a second one", "[net_ao]")
+{
+    const KodeConfigAnsEvt *a;
+    IdReqEvt                q;
+
+    chan_fresh();
+
+    drive_to_challenge();
+    http_reply(503U, "{\"error\":\"channel_unavailable\"}");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_WAITING, last_chan().state);
+    TEST_ASSERT_EQUAL_UINT(1U, s_nreq);
+
+    a = config_ask(AO_Net, &(config_ask_t){ .key = KSET_KEY_CHAN, .set = true, .b = true });
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_STRING("on", a->value);
+    pull_jobs();
+    /* A new challenge at once, with no wait and no new certificate. */
+    TEST_ASSERT_EQUAL_UINT(2U, s_nreq);
+    TEST_ASSERT_EQUAL_STRING("https://api.kode.diy/kodes/challenge", req_at(1)->url);
+    TEST_ASSERT_EQUAL_INT(0, (int)radio_take(&q, sizeof(q)));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_JOINING, chan_now().state);
+    TEST_ASSERT_TRUE(logged("channel: asked to try now"));
+
+    /* The back-off kept its count: 10 s at 75..125 %, not 5. */
+    http_reply(503U, "{\"error\":\"channel_unavailable\"}");
+    {
+        ChannelStateEvt const st = last_chan();
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_WAITING, st.state);
+        TEST_ASSERT_GREATER_OR_EQUAL_UINT32(8U, st.next_s);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(13U, st.next_s);
+    }
+
+    net_done();
+}
+
+TEST_CASE("chan=on asked while a try is out, or while the channel is up, starts "
+          "nothing", "[net_ao]")
+{
+    IdReqEvt q;
+
+    chan_fresh();
+
+    drive_to_challenge();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_JOINING, last_chan().state);
+    for ( unsigned i = 0U; 5U > i; ++i )
+    {
+        (void)config_ask(AO_Net, &(config_ask_t){ .key = KSET_KEY_CHAN, .set = true, .b = true });
+        pull_jobs();
+    }
+    TEST_ASSERT_EQUAL_UINT(1U, s_nreq);   /* the one challenge already out */
+    TEST_ASSERT_EQUAL_INT(0, (int)radio_take(&q, sizeof(q)));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_JOINING, chan_now().state);
+    TEST_ASSERT_FALSE(logged("channel: asked to try now"));
+    net_done();
+
+    chan_fresh();
+    drive_to_up();
+    s_nreq = 0U;
+    (void)config_ask(AO_Net, &(config_ask_t){ .key = KSET_KEY_CHAN, .set = true, .b = true });
+    pull_jobs();
+    TEST_ASSERT_EQUAL_UINT(0U, s_nreq);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_UP, chan_now().state);
+    net_done();
+}
+
+TEST_CASE("chan=on asked after a refusal tries again without a Wi-Fi cycle",
+          "[net_ao]")
+{
+    chan_fresh();
+
+    drive_to_connect();
+    http_reply(401U, "{\"error\":\"untrusted_cert\"}");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_REFUSED, last_chan().state);
+    TEST_ASSERT_EQUAL_UINT(2U, s_nreq);
+
+    (void)config_ask(AO_Net, &(config_ask_t){ .key = KSET_KEY_CHAN, .set = true, .b = true });
+    pull_jobs();
+    TEST_ASSERT_EQUAL_UINT(3U, s_nreq);
+    TEST_ASSERT_EQUAL_STRING("https://api.kode.diy/kodes/challenge", req_at(2)->url);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_JOINING, chan_now().state);
+
+    net_done();
+}
+
+TEST_CASE("chan=on asked with no identity asks the C5 for its certificate again",
+          "[net_ao]")
+{
+    IdReqEvt q;
+
+    chan_fresh();
+
+    go_online();
+    TEST_ASSERT_EQUAL_INT(ID_REQ_SIG, (int)radio_take(&q, sizeof(q)));
+    answer_end((uint8_t)KODE_ST_NOT_FOUND, 0U, 0U);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_NO_IDENTITY, last_chan().state);
+
+    (void)config_ask(AO_Net, &(config_ask_t){ .key = KSET_KEY_CHAN, .set = true, .b = true });
+    TEST_ASSERT_EQUAL_INT(ID_REQ_SIG, (int)radio_take(&q, sizeof(q)));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ID_OP_CERT, q.op);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_JOINING, chan_now().state);
+    answer_end((uint8_t)KODE_ST_NOT_FOUND, 0U, 0U);
+
+    net_done();
+}
+
 /* ---- Review focus 1: Wi-Fi flapping ---------------------------------------- */
 
 TEST_CASE("five Wi-Fi flaps in one tick make one request and keep the back-off",

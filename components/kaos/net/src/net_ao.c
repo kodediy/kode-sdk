@@ -2417,9 +2417,10 @@ static void net_ip_str(uint32_t ip4, char *out, size_t cap)
 /* ---- The Kode channel ----------------------------------------------------
  * One sequence, one phase, one timer. Every step arms what it waits for (the
  * C5's answer, the worker's outcome, the broker's CONNACK); every failure ends
- * in chan_fail(). A unit without a certificate stays off, a certificate the
- * api refuses is terminal until the Wi-Fi cycles, and anything else is retried
- * on a doubling, jittered wait.
+ * in chan_fail(). A unit without a certificate stays off and a certificate the
+ * api refuses is tried no more, both until the Wi-Fi cycles or `chan=on` is
+ * asked; anything else is retried on a doubling, jittered wait, which
+ * `chan=on` cuts short.
  */
 #if CONFIG_KODEOS_CHANNEL
 
@@ -2887,7 +2888,7 @@ static void chan_fail(Net * const me, const char *why, uint16_t http)
     }
 }
 
-/** @brief The api refused this unit's certificate: terminal until a new Wi-Fi cycle. */
+/** @brief The api refused this unit's certificate: no try until a new Wi-Fi cycle or `chan=on`. */
 static void chan_refused(Net * const me, const char *why)
 {
     (void)QTimeEvt_disarm(&me->ctmo);
@@ -2908,7 +2909,7 @@ static void chan_refused(Net * const me, const char *why)
 #endif
 }
 
-/** @brief The C5 holds no certificate: terminal until a new Wi-Fi cycle. */
+/** @brief The C5 holds no certificate: no try until a new Wi-Fi cycle or `chan=on`. */
 static void chan_no_identity(Net * const me)
 {
     (void)QTimeEvt_disarm(&me->ctmo);
@@ -3372,12 +3373,41 @@ static void chan_keep_config(Net * const me, KodeConfigReqEvt const * const r)
 }
 
 /**
+ * @brief `chan=on` asked while it is on: try now, when nothing is under way.
+ *
+ * A channel waiting out a failed try, refused, or with no identity starts a
+ * try at once, as a new address would start it. One joining, up, or waiting
+ * for anything else (a settle, somebody's own client) is left as it is, so
+ * two tries never run at once. The back-off keeps its count: a try that fails
+ * again waits as the next one in the series would.
+ *
+ * @param me The AO.
+ */
+static void chan_try_now(Net * const me)
+{
+    bool const waiting = ((uint8_t)CHAN_WAITING == me->cstate)
+                         && ((uint8_t)CP_WAIT == me->cp);
+    bool const ended   = (((uint8_t)CHAN_REFUSED == me->cstate)
+                          || ((uint8_t)CHAN_NO_IDENTITY == me->cstate))
+                         && ((uint8_t)CP_IDLE == me->cp);
+
+    if ( me->online && (waiting || ended) )
+    {
+        KLOG_N(TAG, "channel: asked to try now");
+        me->cwait_valid = false;
+        (void)QTimeEvt_disarm(&me->ctmo);
+        chan_enter(me, 0U);
+    }
+}
+
+/**
  * @brief Answer `config key="chan"`, setting it first when asked.
  *
  * Off leaves the channel at once - the session ends, its client stops, the
  * state reads CHAN_OFF - and the next address joins nothing. On joins at
  * once when there is an address and the one MQTT client is free; with a
- * client of somebody's own up, the channel joins at the next address.
+ * client of somebody's own up, the channel joins at the next address. On
+ * asked while it is on tries now (chan_try_now()).
  *
  * @param me The AO.
  * @param r  The request.
@@ -3443,6 +3473,14 @@ static void chan_config(Net * const me, KodeConfigReqEvt const * const r)
             chan_set(me, CHAN_NO_NET, "");
             KLOG_N(TAG, "channel: on (stored); it joins at the next address");
         }
+    }
+    else if ( r->set && r->b )
+    {
+        chan_try_now(me);
+    }
+    else
+    {
+        /* A read, or off asked while it is off: nothing changes. */
     }
     if ( me->chan_on )
     {
