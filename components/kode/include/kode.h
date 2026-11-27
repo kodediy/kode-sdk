@@ -2064,8 +2064,10 @@ bool kode_pin_write_pwm(uint8_t pin, uint32_t hz, uint8_t duty_pct);
  * job it is on, never one asked after it: a Wi-Fi sweep holds the C5 for
  * up to 90 s, and the boot's search for a known network holds
  * it for that sweep and then up to 20 s for each remembered network that will
- * not have the board. With no
- * link to the C5, "on" resets the C5 for about 10 ms, and the speaker is off
+ * not have the board. Taking over the network kodeOS left the C5 on, as the
+ * app starts, is two jobs, the station's start and the wait for its address
+ * (up to 20 s), and the call waits only for the one in hand.
+ * With no link to the C5, "on" resets the C5 for about 10 ms, and the speaker is off
  * meanwhile and while the C5 boots; "off" brings the link up first, as
  * kode_wifi_scan() does, with nothing switched on in Settings, and the C5
  * then stays up for the rest of the boot, drawing about 85 mA. Two calls take

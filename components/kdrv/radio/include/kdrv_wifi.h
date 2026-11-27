@@ -346,7 +346,11 @@ kode_status_t kdrv_wifi_prepare(const char *ssid, uint8_t channel);
  * Whatever the outcome, the radio is given both bands back before this
  * returns.
  *
- * @param ssid       The network, named in the state and in the log.
+ * The same wait follows kdrv_wifi_adopt(), with an empty @p ssid: the
+ * network is then the one the station reports once it has its lease.
+ *
+ * @param ssid       The network, named in the state and in the log; "" for
+ *                   an adopted station.
  * @param timeout_ms How long the lease may take.
  * @return KODE_OK once DHCP has answered; KODE_DENIED if the network turned
  *         us away; KODE_TIMEOUT if nothing came in time.
@@ -355,7 +359,7 @@ kode_status_t kdrv_wifi_await(const char *ssid, uint32_t timeout_ms);
 
 /**
  * @brief Take over a station the C5 already holds, without dropping it.
- *        Blocks up to @p timeout_ms; the worker's.
+ *        Blocks for the station's start and the connect; the worker's.
  *
  * For a C5 that was parked across a deliberate P4 reset and is still
  * associated. From a stack that is not yet started (the boot after the
@@ -365,15 +369,17 @@ kode_status_t kdrv_wifi_await(const char *ssid, uint32_t timeout_ms);
  * lease. No disconnect comes first. If the stack is already started and has
  * no netif, the netif is made the join way, with a stop and a start around
  * it, which a held association does not survive (a warning says so).
- * Afterwards the state, the address, the SSID and the signal read exactly
- * as after a join.
  *
- * @param timeout_ms How long the lease may take.
- * @return KODE_OK once DHCP has answered; KODE_DENIED if the C5 reported a
- *         disconnect; KODE_TIMEOUT if nothing came in time; KODE_ERROR if the
- *         stack or its netif would not start.
+ * Returns once the connect is asked, the lease's bits cleared before it and
+ * the state IDLE unless an event has already come, as after
+ * kdrv_wifi_prepare(): kdrv_wifi_await() with an empty name waits for the
+ * lease, and afterwards the state, the address, the SSID and the signal read
+ * exactly as after a join.
+ *
+ * @return KODE_OK once the connect is asked; KODE_ERROR if the stack or its
+ *         netif would not start, or the stack refused the connect.
  */
-kode_status_t kdrv_wifi_adopt(uint32_t timeout_ms);
+kode_status_t kdrv_wifi_adopt(void);
 
 /** @brief Leave the network. Idempotent. */
 kode_status_t kdrv_wifi_disconnect(void);

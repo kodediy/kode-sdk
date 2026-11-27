@@ -8384,6 +8384,8 @@ TEST_CASE("a boot that kept the C5 adopts instead of scanning",
 
     /* It worked: BLE is next if it is wanted, and no scan ever is. */
     finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_AWAIT, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
     TEST_ASSERT_TRUE(logged("Wi-Fi adopted from the parked C5"));
     for ( unsigned guard = 0U; (8U > guard) && job_held(); ++guard )
     {
@@ -8432,6 +8434,8 @@ TEST_CASE("an adopted station gets the power save this side believes in",
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_ADOPT, running_job());
     finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_AWAIT, running_job());
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
 
     /* The C5 may hold the mode the last firmware left it in: the default
      * this side believes in is applied the way a join applies it. */
@@ -8444,6 +8448,155 @@ TEST_CASE("an adopted station gets the power save this side believes in",
     wifi_station_gone();
     fake_nvs_reset();
     boot_wanting_nothing();
+}
+
+/* ---- J3's supply during the adoption ---------------------------------------
+ * The adoption is two jobs: the station up with the connect asked, then the
+ * wait for the lease. A switch of J3's supply goes between them, or ahead of
+ * both when the link-up owes it: never behind the wait it was asked before.
+ */
+
+/** @brief Boot with Wi-Fi wanted and a C5 that kept its station, the link
+ *         up: the adoption's connect is with the worker. */
+static void boot_adopting(void)
+{
+    boot_wanting_wifi();
+    fake_radio_set_adopted(true);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    fake_klog_reset();
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_ADOPT, running_job());
+}
+
+/** @brief The adoption's wait for the lease is with the worker, with no
+ *         name: the station says which network it holds. */
+static void adopt_wait_running(const char *what)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_AWAIT, running_job(), what);
+    TEST_ASSERT_EQUAL_STRING("", held_req()->ssid);
+}
+
+/** @brief The wish off and the AO booted again with nothing wanted. */
+static void adopt_case_end(void)
+{
+    exp_ask(false);
+    boot_wanting_nothing();
+}
+
+TEST_CASE("J3's switch asked during the adoption's connect goes before the wait for the lease",
+          "[radio_ao][exp_power][park]")
+{
+    boot_adopting();
+    exp_ask(true);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_ADOPT, running_job(),
+                                  "the job in flight was cut");
+
+    finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_OK);
+    TEST_ASSERT_FALSE_MESSAGE(logged("Wi-Fi adopted"),
+                              "the lease was waited for inside the connect");
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
+                                  "the switch waited behind the lease");
+    TEST_ASSERT_TRUE(held_req()->on);
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+
+    adopt_wait_running("the adoption did not go on after the switch");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
+    TEST_ASSERT_TRUE(logged("Wi-Fi adopted from the parked C5"));
+    adopt_case_end();
+}
+
+TEST_CASE("J3's switch asked during the wait for the lease goes when the wait ends",
+          "[radio_ao][exp_power][park]")
+{
+    boot_adopting();
+    finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_OK);
+    adopt_wait_running("the lease was waited for inside the connect");
+
+    exp_ask(true);
+    adopt_wait_running("the job in flight was cut");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
+    TEST_ASSERT_TRUE(logged("Wi-Fi adopted from the parked C5"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
+                                  "the switch was not the next job");
+    TEST_ASSERT_TRUE(held_req()->on);
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+    adopt_case_end();
+}
+
+TEST_CASE("J3's switch owed at the link-up goes before the adoption",
+          "[radio_ao][exp_power][park]")
+{
+    boot_wanting_wifi();
+    fake_radio_set_adopted(true);
+    fake_radio_connect_read();   /* the connect drove the wish it read: off */
+    exp_ask(true);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
+                                  "the adoption went ahead of the switch");
+    TEST_ASSERT_TRUE(held_req()->on);
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_WIFI_ADOPT, running_job(),
+                                  "the adoption did not follow the switch");
+    finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_OK);
+    adopt_wait_running("the adoption stopped after its connect");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
+    TEST_ASSERT_TRUE(logged("Wi-Fi adopted from the parked C5"));
+    adopt_case_end();
+}
+
+TEST_CASE("J3's switch asked off then on during the adoption is paid once, with the last wish",
+          "[radio_ao][exp_power][park]")
+{
+    boot_adopting();
+    exp_ask(true);
+    exp_ask(false);
+    exp_ask(true);
+
+    finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
+    TEST_ASSERT_TRUE(held_req()->on);
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    adopt_wait_running("a second switch was paid");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+    adopt_case_end();
+}
+
+TEST_CASE("J3's switch asked once the adoption is over goes at once",
+          "[radio_ao][exp_power][park]")
+{
+    boot_adopting();
+    finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_OK);
+    adopt_wait_running("the lease was waited for inside the connect");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_OK);
+    for ( unsigned guard = 0U; (8U > guard) && job_held(); ++guard )
+    {
+        finish_whatever_runs();
+    }
+    TEST_ASSERT_FALSE(job_held());
+
+    exp_ask(true);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_EXP_POWER, running_job());
+    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
+    TEST_ASSERT_TRUE(fake_radio_exp_pin());
+    adopt_case_end();
+}
+
+TEST_CASE("a lease that does not come falls back to the autojoin round",
+          "[radio_ao][park]")
+{
+    boot_adopting();
+    finish(KDRV_RADIO_JOB_WIFI_ADOPT, KODE_OK);
+    adopt_wait_running("the lease was waited for inside the connect");
+    finish(KDRV_RADIO_JOB_WIFI_AWAIT, KODE_TIMEOUT);
+    TEST_ASSERT_TRUE(logged("adoption failed (timed out)"));
+    TEST_ASSERT_TRUE_MESSAGE(drive_until(KDRV_RADIO_JOB_WIFI_SCAN),
+                             "the failed adoption left Wi-Fi unjoined");
+    adopt_case_end();
 }
 
 /* ---- What a scan entry carries past the name ------------------------------ */

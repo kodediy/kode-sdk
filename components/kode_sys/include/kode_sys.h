@@ -695,9 +695,13 @@ typedef ExpPowerDoneEvt kode_sys_exp_power_done_t;
  * carry the request out: a Wi-Fi sweep delays it by up to its ceiling,
  * KDRV_WIFI_SCAN_TIMEOUT_MS, and an autojoin round by that sweep and up to
  * 20 s for each remembered network that will not have the board (kode.h's
- * KODE_PIN_POWER_MS is the bound). With no C5 link, "on" resets the C5 for
- * about 10 ms to release the pin: the speaker amplifier is off meanwhile and
- * during its boot. "Off" brings the link up, as an asked Wi-Fi scan does: no
+ * KODE_PIN_POWER_MS is the bound). Taking over the network a parked C5
+ * kept, at the link-up, is two jobs, the station's start and the wait for
+ * its address (up to 20 s): a switch owed at the link-up goes before both,
+ * and one asked during either goes when that one ends. With no C5 link,
+ * "on" resets the C5 for about 10 ms to release the pin: the speaker
+ * amplifier is off meanwhile and during its boot. "Off" brings the link up,
+ * as an asked Wi-Fi scan does: no
  * service is switched on and nothing is stored, and the C5 then stays up for
  * the rest of the boot (about 85 mA). Claims nothing; J3's 5 V (pins 1 and
  * 20) is not switched.

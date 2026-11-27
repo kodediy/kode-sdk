@@ -261,8 +261,12 @@ typedef enum {
     RECON_START,     /**< Radio_up entry set this; the first step is next.    */
     RECON_BLE,       /**< BLE step in flight (start, then the advert); its
                       *   DONEs hand the baton to the wifi step.              */
-    RECON_ADOPT,     /**< The adoption of a parked C5's station in flight;
-                      *   its WIFI_JOIN_DONE hands the baton to the BLE step. */
+    RECON_ADOPT,     /**< The adoption of a parked C5's station, its first
+                      *   job next or in flight: the station up and the
+                      *   connect asked (WIFI_ADOPT).                         */
+    RECON_ADOPT_WAIT,/**< Its second job next or in flight: the wait for the
+                      *   lease (WIFI_AWAIT, no name); its WIFI_JOIN_DONE
+                      *   hands the baton to the BLE step.                    */
 } recon_t;
 
 /** Where a park for a jump has got (Radio.park_phase, RADIO_PARK_REQ_SIG). */
@@ -3374,9 +3378,11 @@ static bool wifi_join_out(Radio const * const me)
         {
             kdrv_radio_job_t const job = me->jobs->wreq.type;
 
+            /* The adoption's wait is nobody's request. */
             out = out || (KDRV_RADIO_JOB_WIFI_JOIN == job)
                   || (KDRV_RADIO_JOB_WIFI_PREPARE == job)
-                  || (KDRV_RADIO_JOB_WIFI_AWAIT == job);
+                  || ((KDRV_RADIO_JOB_WIFI_AWAIT == job)
+                      && ((uint8_t)RECON_ADOPT_WAIT != me->recon));
         }
         else
         {
@@ -5134,9 +5140,11 @@ static bool scan_join_running(Radio const * const me)
     {
         kdrv_radio_job_t const job = me->jobs->wreq.type;
 
+        /* The adoption's wait is nobody's request. */
         running = (KDRV_RADIO_JOB_WIFI_JOIN == job)
                   || (KDRV_RADIO_JOB_WIFI_PREPARE == job)
-                  || (KDRV_RADIO_JOB_WIFI_AWAIT == job);
+                  || ((KDRV_RADIO_JOB_WIFI_AWAIT == job)
+                      && ((uint8_t)RECON_ADOPT_WAIT != me->recon));
     }
     else
     {
@@ -7139,6 +7147,10 @@ static void radio_relink_judge(Radio * const me, RadioOutcome const * const job)
     }
 }
 
+#if CONFIG_KODEOS_WIFI
+static bool radio_adopt_step(Radio * const me);
+#endif
+
 /**
  * @brief Start the next service the flags ask for, one at a time.
  *
@@ -7156,12 +7168,15 @@ static void radio_reconcile_next(Radio * const me)
     {
         /* The C5 still holds the station the last firmware left: take it
          * over first, with no scan, then carry on with BLE. */
+        uint8_t const was = me->recon;
+
         me->adopt = false;
-        if ( radio_submit(me, KDRV_RADIO_JOB_WIFI_ADOPT) )
+        me->recon = (uint8_t)RECON_ADOPT;
+        if ( radio_adopt_step(me) )
         {
-            me->recon = (uint8_t)RECON_ADOPT;
             return;
         }
+        me->recon = was;
     }
 #endif
 #if CONFIG_KODEOS_BLE
@@ -7540,6 +7555,51 @@ static bool radio_exp_apply(Radio * const me)
     me->exp_job   = true;
     return true;
 }
+
+#if CONFIG_KODEOS_WIFI
+/**
+ * @brief Submit the adoption's next job, J3's switch ahead of it when one is
+ *        owed.
+ *
+ * The adoption is two jobs: the station up with the connect asked
+ * (RECON_ADOPT), then the wait for the lease (RECON_ADOPT_WAIT). The switch
+ * is one pin of the C5 and goes before either, so a request for it waits at
+ * most for the job in flight; the switch's end calls this again.
+ *
+ * @param me The AO, its worker free.
+ * @return true when a job is with the worker.
+ */
+static bool radio_adopt_step(Radio * const me)
+{
+    kdrv_radio_req_t req;
+
+    if ( radio_exp_apply(me) )
+    {
+        return true;
+    }
+    (void)memset(&req, 0, sizeof(req));
+    req.type = KDRV_RADIO_JOB_WIFI_ADOPT;
+    if ( (uint8_t)RECON_ADOPT_WAIT == me->recon )
+    {
+        req.type = KDRV_RADIO_JOB_WIFI_AWAIT;   /* no name: the station says which */
+    }
+    return radio_submit_req(me, &req);
+}
+
+/**
+ * @brief Go on with an adoption after one of its jobs, or after the switch
+ *        put ahead of one: its next job, or its end as failed when the
+ *        worker refuses it.
+ * @param me The AO, its worker free, an adoption under way.
+ */
+static void radio_adopt_resume(Radio * const me)
+{
+    if ( !radio_adopt_step(me) )
+    {
+        radio_adopt_done(me, KODE_ERROR);
+    }
+}
+#endif
 
 #if CONFIG_KODEOS_BLE
 /**
@@ -12473,6 +12533,14 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             {
                 radio_exp_said(me, on, KODE_OK);
             }
+#if CONFIG_KODEOS_WIFI
+            if ( ((uint8_t)RECON_ADOPT == me->recon)
+                || ((uint8_t)RECON_ADOPT_WAIT == me->recon) )
+            {
+                /* The switch went ahead of the adoption's next job. */
+                radio_adopt_resume(me);
+            }
+#endif
             status = Q_HANDLED();
             break;
         }
@@ -12528,6 +12596,22 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
         case RADIO_OUT_WIFI_JOIN_DONE: {
             me->busy = false;
             if ( (uint8_t)RECON_ADOPT == me->recon )
+            {
+                /* The adoption's connect: on to the wait for the lease,
+                 * or the chain goes on without the station. */
+                if ( (uint8_t)KODE_OK == job->status )
+                {
+                    me->recon = (uint8_t)RECON_ADOPT_WAIT;
+                    radio_adopt_resume(me);
+                }
+                else
+                {
+                    radio_adopt_done(me, (kode_status_t)job->status);
+                }
+                status = Q_HANDLED();
+                break;
+            }
+            if ( (uint8_t)RECON_ADOPT_WAIT == me->recon )
             {
                 /* Not a join of ours: the kept station, taken over
                  * (or not). */
