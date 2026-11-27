@@ -5,7 +5,6 @@
  */
 #include "kode.h"
 
-#include <float.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -22,11 +21,15 @@
 #define COMPASS_AGAIN          "Try again"                            /**< And when it failed.      */
 #define COMPASS_NOT_ENOUGH     "not enough directions were covered"   /**< The error of a thin sweep. */
 #define COMPASS_UNSETTLED      "the Dot was still reaching new directions when the time ran out; keep turning it" /**< Still growing at the limit. */
+#define COMPASS_NOT_ROUND      "the readings did not form a sphere: turn the Dot in every direction, away from metal and computers" /**< Spans complete, readings off one sphere. */
 #define COMPASS_NO_MEMORY      "no memory for the calibration"        /**< The readings' block was refused. */
 #define COMPASS_OUT_OF_RANGE   "the field is too strong to calibrate" /**< The error of a fit past the limits. */
 #define COMPASS_WHY_MAX        128U    /**< Bytes of the error kept across the last words. */
 #define COMPASS_READS_ALIGN    4U      /**< Alignment of the readings' block.                    */
 #define COMPASS_HALF           0.5F    /**< A range's middle and half width are half its ends' sum and gap. */
+#define COMPASS_LEN_BINS       200U    /**< Lengths counted in steps of 1 % of the field, up to twice it. */
+
+_Static_assert(COMPASS_LEN_BINS == (2U * COMPASS_PERCENT), "lengths up to twice the field, 1 % a step");
 
 /** @brief The least and greatest reading on each axis, and when a span last grew. */
 typedef struct {
@@ -36,6 +39,7 @@ typedef struct {
     uint32_t grew_ms;                   /**< kode_uptime_ms() of that growth.         */
     int16_t *kept;                      /**< The readings, KDRV_QMC5883P_AXES each.  */
     uint32_t n;                         /**< Readings kept, up to KODE_COMPASS_READS_MAX. */
+    bool     unround;                   /**< Complete spans have met readings off one sphere. */
 } sweep_t;
 
 /** @brief Start a sweep that has seen nothing. */
@@ -49,6 +53,7 @@ static void sweep_start(sweep_t *s, uint32_t now)
     }
     s->grew_ms = now;
     s->n       = 0U;
+    s->unround = false;
 }
 
 /** @brief The range axis @p i has covered, mG; 0 before its first reading. */
@@ -148,11 +153,80 @@ static uint32_t sweep_percent(const sweep_t *s)
 }
 
 /**
- * @brief Read the field until the spans agree and have settled, or the time is up.
+ * @brief Whether the readings lie on one sphere about the sweep's centre.
+ *
+ * Each reading, centred on the middle of each axis's range and divided by its
+ * half range, has a length; a sweep that covered every direction in an even
+ * field gives them all the same, a partial cover or a bent field does not.
+ * The lengths are counted in steps of 1 % of the field, and the band of
+ * KODE_COMPASS_ROUND_PCT steps that holds the most must hold
+ * KODE_COMPASS_ROUND_SHARE_PCT of the readings.
+ *
+ * @param s The sweep.
+ * @return true when that band holds them.
+ */
+static bool sweep_round(const sweep_t *s)
+{
+    float    centre[KDRV_QMC5883P_AXES];
+    float    half[KDRV_QMC5883P_AXES];
+    uint16_t bins[COMPASS_LEN_BINS];
+    uint32_t in   = 0U;
+    uint32_t most = 0U;
+    bool     ok   = (0U < s->n);
+
+    (void)memset(bins, 0, sizeof(bins));
+    for ( uint32_t i = 0U; KDRV_QMC5883P_AXES > i; i++ )
+    {
+        centre[i] = ((float)s->lo[i] + (float)s->hi[i]) * COMPASS_HALF;
+        half[i]   = ((float)s->hi[i] - (float)s->lo[i]) * COMPASS_HALF;
+        if ( 0.0F >= half[i] )
+        {
+            ok = false;
+        }
+    }
+    for ( uint32_t k = 0U; ok && (k < s->n); k++ )
+    {
+        float sum = 0.0F;
+
+        for ( uint32_t i = 0U; KDRV_QMC5883P_AXES > i; i++ )
+        {
+            const float d = ((float)s->kept[(k * KDRV_QMC5883P_AXES) + i] - centre[i]) / half[i];
+
+            sum += d * d;
+        }
+        const float at = sqrtf(sum) * (float)COMPASS_PERCENT;
+
+        if ( (float)COMPASS_LEN_BINS > at )
+        {
+            bins[(uint32_t)at]++;
+        }
+    }
+    for ( uint32_t b = 0U; ok && (COMPASS_LEN_BINS > b); b++ )
+    {
+        in += bins[b];
+        if ( KODE_COMPASS_ROUND_PCT <= b )
+        {
+            in -= bins[b - KODE_COMPASS_ROUND_PCT];
+        }
+        if ( in > most )
+        {
+            most = in;
+        }
+    }
+    if ( ok )
+    {
+        ok = (most * COMPASS_PERCENT) >= (s->n * KODE_COMPASS_ROUND_SHARE_PCT);
+    }
+    return ok;
+}
+
+/**
+ * @brief Read the field until the spans agree and have settled and the readings
+ *        lie on one sphere, or the time is up.
  * @param io   The readings.
  * @param s    The sweep.
  * @param prog The progress value on the screen.
- * @param done Out: true when the sweep agreed and settled in time.
+ * @param done Out: true when the sweep was complete in time.
  * @return false when a reading failed, with the error set.
  */
 static bool sweep_collect(const kode_compass_io_t *io, sweep_t *s, kode_widget_t prog, bool *done)
@@ -181,7 +255,15 @@ static bool sweep_collect(const kode_compass_io_t *io, sweep_t *s, kode_widget_t
                 shown = pct;
                 (void)kode_widget_set_text(prog, "%" PRIu32, pct);
             }
-            *done = (COMPASS_PERCENT == pct) && ((now - s->grew_ms) >= KODE_COMPASS_SETTLE_MS);
+            *done = false;
+            if ( (COMPASS_PERCENT == pct) && ((now - s->grew_ms) >= KODE_COMPASS_SETTLE_MS) )
+            {
+                *done = sweep_round(s);
+                if ( !*done )
+                {
+                    s->unround = true;
+                }
+            }
             more  = (!*done) && ((now - start) < KODE_MAG_CALIBRATE_MS) && (KODE_COMPASS_READS_MAX > s->n);
             if ( more )
             {
@@ -193,66 +275,11 @@ static bool sweep_collect(const kode_compass_io_t *io, sweep_t *s, kode_widget_t
 }
 
 /**
- * @brief Whether the readings lie on one sphere about the sweep's centre.
- *
- * Each reading, centred on the middle of each axis's range and divided by its
- * half range, has a length; a sweep that covered every direction gives them
- * all the same, a partial cover does not.
- *
- * @param s The sweep, every span above 0.
- * @return true when the longest and shortest are within KODE_COMPASS_ROUND_PCT.
- */
-static bool sweep_round(const sweep_t *s)
-{
-    float centre[KDRV_QMC5883P_AXES];
-    float half[KDRV_QMC5883P_AXES];
-    float least = FLT_MAX;
-    float most  = 0.0F;
-    bool  ok    = (0U < s->n);
-
-    for ( uint32_t i = 0U; KDRV_QMC5883P_AXES > i; i++ )
-    {
-        centre[i] = ((float)s->lo[i] + (float)s->hi[i]) * COMPASS_HALF;
-        half[i]   = ((float)s->hi[i] - (float)s->lo[i]) * COMPASS_HALF;
-        if ( 0.0F >= half[i] )
-        {
-            ok = false;
-        }
-    }
-    for ( uint32_t k = 0U; ok && (k < s->n); k++ )
-    {
-        float sum = 0.0F;
-
-        for ( uint32_t i = 0U; KDRV_QMC5883P_AXES > i; i++ )
-        {
-            const float d = ((float)s->kept[(k * KDRV_QMC5883P_AXES) + i] - centre[i]) / half[i];
-
-            sum += d * d;
-        }
-        const float m = sqrtf(sum);
-
-        if ( m < least )
-        {
-            least = m;
-        }
-        if ( m > most )
-        {
-            most = m;
-        }
-    }
-    if ( ok )
-    {
-        ok = ((most - least) * (float)COMPASS_PERCENT) <= (float)KODE_COMPASS_ROUND_PCT;
-    }
-    return ok;
-}
-
-/**
- * @brief Judge the sweep and keep what it gives.
+ * @brief Keep what a complete sweep gives, or say why the sweep was not.
  * @param io   The store.
  * @param s    The sweep.
- * @param done The sweep agreed and settled in time.
- * @return false with the error set when it covered too little or the store refused.
+ * @param done The sweep was complete in time.
+ * @return false with the error set when it was not, or the fit or the store refused.
  */
 static bool sweep_keep(const kode_compass_io_t *io, const sweep_t *s, bool done)
 {
@@ -265,6 +292,10 @@ static bool sweep_keep(const kode_compass_io_t *io, const sweep_t *s, bool done)
         {
             kode_err_set(COMPASS_NOT_ENOUGH);
         }
+        else if ( s->unround )
+        {
+            kode_err_set(COMPASS_NOT_ROUND);
+        }
         else
         {
             kode_err_set(COMPASS_UNSETTLED);
@@ -273,10 +304,6 @@ static bool sweep_keep(const kode_compass_io_t *io, const sweep_t *s, bool done)
     else if ( kdrv_qmc5883p_cal_fit(s->lo, s->hi, &corr) != KODE_OK )
     {
         kode_err_set(COMPASS_OUT_OF_RANGE);
-    }
-    else if ( !sweep_round(s) )
-    {
-        kode_err_set(COMPASS_NOT_ENOUGH);
     }
     else
     {

@@ -70,9 +70,10 @@ void kode_widget_tapped(uint32_t gen, uint32_t place);
 #define KODE_COMPASS_STEP_MS     50U    /**< Between two readings: the part converts at 50 Hz.           */
 #define KODE_COMPASS_SPAN_MIN_MG 200    /**< The widest span must reach this: the Dot was turned.        */
 #define KODE_COMPASS_GROWTH_MG   10     /**< A span grown by more than this found a new extreme, mG.     */
-#define KODE_COMPASS_SETTLE_MS   3000U  /**< No span has grown for this long: the sweep is complete.     */
+#define KODE_COMPASS_SETTLE_MS   3000U  /**< No span has grown for this long: the spans are complete.    */
 #define KODE_COMPASS_AGREE_PCT   80U    /**< Every span is at least this per cent of the widest.         */
-#define KODE_COMPASS_ROUND_PCT   20U    /**< Every corrected reading's length is within this per cent of the others'. */
+#define KODE_COMPASS_ROUND_PCT   30U    /**< The corrected readings' lengths fall in a band this many per cent of the field wide. */
+#define KODE_COMPASS_ROUND_SHARE_PCT 95U /**< Per cent of the readings that band must hold: a stray few do not count. */
 #define KODE_COMPASS_READS_SLACK 8U     /**< Readings past the time limit's count that the clock may allow. */
 #define KODE_COMPASS_READS_MAX   ((KODE_MAG_CALIBRATE_MS / KODE_COMPASS_STEP_MS) + KODE_COMPASS_READS_SLACK) /**< Readings a sweep keeps. */
 
