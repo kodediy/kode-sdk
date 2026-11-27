@@ -30,6 +30,11 @@ hands kode.h the number brought into the narrow type's range, so 256 asks for
 255 instead of 0. A handle's class is built from kode.h's handle by name and
 tests true when kode.h made it; it is no number either way.
 
+A function that takes a format is three methods: the format with arguments,
+where an argument that holds a text (a String) is passed as its characters;
+a text alone, shown as it is, so "50%" shows 50%; and an object that holds a
+text, shown as it is.
+
 The layer's names at file scope are the object Kode, its class Kode_Sdk, a
 class Kode_<group> behind each Kode.<group>, the handles' classes and an alias
 Kode<Type> for each kode_<type>_t. An alias is "Kode" and capitalised words
@@ -144,6 +149,9 @@ NARROW = {
     "int16_t":  ("kode_arduino_fit_i16", "INT16_MIN", "INT16_MAX"),
 }
 WIDE = "int32_t"  # What a method declares a narrow integer as.
+
+# The format a text alone or an object's text is shown with, so a '%' in it is shown, not read.
+AS_IT_IS = '"%s"'
 
 CPP_KEYWORDS = frozenset("""
     alignas alignof and and_eq asm auto bitand bitor bool break case catch char
@@ -391,7 +399,11 @@ def passed(param):
 
 
 def signature(ret, method, params, variadic, defaults):
-    """The lines that declare one method, up to its body, a default after each parameter that has one."""
+    """The lines that declare one method, up to its body, a default after each parameter that has one.
+
+    A format's arguments are taken by reference, each its own type, so an
+    object that holds a text reaches kode_arduino_text() whole.
+    """
     lines = []
     listed = []
     for param in params:
@@ -400,24 +412,85 @@ def signature(ret, method, params, variadic, defaults):
         else:
             listed.append(declared(param))
     if variadic:
-        lines.append("    template <typename... Args>")
-        listed.append("Args... args")
+        lines.append("    template <typename First, typename... Rest>")
+        listed += ["const First &first", "const Rest &...rest"]
     if not listed:
         listed = ["void"]
     lines.append(f"    {ret}{'' if ret.endswith('*') else ' '}{method}({', '.join(listed)}) const")
     return lines
 
 
+def format_lines(method, given, params):
+    """A format function's other two methods: a text alone, and an object that holds one, each shown as it is.
+
+    `given` is what the call takes before the format, `params` what the
+    method declares before it. A NULL text goes to kode.h as the format it
+    is, so kode.h refuses it.
+    """
+    fn = method.fn
+    ret = fn.ret
+    if ret in HANDLES or "*" in ret:
+        fail(f"{fn.name}() takes a format and answers '{ret}': the layer spells only a word there")
+    fmt = fn.params[-1]
+    text = Param(fmt.type, "text", f"{fmt.type}text")
+    raw = f"{fn.name}({', '.join(given + ['text'])})"
+    shown = f"{fn.name}({', '.join(given + [AS_IT_IS, 'text'])})"
+    held = f"{fn.name}({', '.join(given + [AS_IT_IS, 'text.c_str()'])})"
+    lines = ["", f"    /** @brief {fn.name}() with a text as it is: a '%' in it is shown, not read. */"]
+    lines += signature(ret, method.name, params + [text], False, {})
+    lines.append("    {")
+    if ret == "void":
+        lines += [
+            "        if ( nullptr == text )",
+            "        {",
+            f"            {raw};",
+            "        }",
+            "        else",
+            "        {",
+            f"            {shown};",
+            "        }",
+        ]
+    else:
+        lines += [
+            f"        {ret} answer;",
+            "        if ( nullptr == text )",
+            "        {",
+            f"            answer = {raw};",
+            "        }",
+            "        else",
+            "        {",
+            f"            answer = {shown};",
+            "        }",
+            "        return answer;",
+        ]
+    lines.append("    }")
+    listed = [declared(param) for param in params] + ["const Text &text"]
+    body = f"{held};"
+    if ret != "void":
+        body = f"return {held};"
+    lines += [
+        "",
+        f"    /** @brief {fn.name}() with the text an object holds, a String for one, as it is. */",
+        "    template <typename Text>",
+        f"    auto {method.name}({', '.join(listed)}) const -> decltype(text.c_str(), {ret}())",
+        "    {",
+        f"        {body}",
+        "    }",
+    ]
+    return lines
+
+
 def method_lines(method, handle):
-    """One method: its @brief and a body that is the call alone."""
+    """One method: its @brief and a body that is the call alone; a format function's two more after it."""
     fn = method.fn
     params = fn.params
     given = [passed(param) for param in params]
     if handle:
         params = params[1:]
         given = ["handle"] + given[1:]
+    ahead = given[:-1]
     if fn.variadic:
-        given.append("args...")
+        given += ["kode_arduino_text(first, 0)", "kode_arduino_text(rest, 0)..."]
     call = f"{fn.name}({', '.join(given)})"
     ret = HANDLES.get(fn.ret, fn.ret)
     if fn.ret in HANDLES:
@@ -429,6 +502,8 @@ def method_lines(method, handle):
     lines = [f"    /** @brief {fn.name}(). */"]
     lines += signature(ret, method.name, params, fn.variadic, DEFAULTS.get(fn.name, {}))
     lines += ["    {", f"        {body}", "    }"]
+    if fn.variadic:
+        lines += format_lines(method, ahead, params[:-1])
     return lines
 
 
@@ -502,6 +577,40 @@ def fitting(owners):
             "}",
         ]
     return lines
+
+
+def texts(owners):
+    """What a format's arguments go through, an object that holds a text as its characters; none with no format.
+
+    A call passes 0 second, which picks the first where value.c_str() exists.
+    Nothing names String: the core reads the layer before it declares one.
+    """
+    if not any(method.fn.variadic for methods in owners.values() for method in methods):
+        return []
+    return [
+        "",
+        "/**",
+        " * @brief A format's argument as kode.h takes it: the characters of an object that holds a text.",
+        " * @param value The argument, a String for one.",
+        " * @return Its characters.",
+        " */",
+        "template <typename T>",
+        "inline auto kode_arduino_text(const T &value, int) -> decltype(value.c_str())",
+        "{",
+        "    return value.c_str();",
+        "}",
+        "",
+        "/**",
+        " * @brief A format's argument as kode.h takes it: any other argument, as it is.",
+        " * @param value The argument.",
+        " * @return The argument.",
+        " */",
+        "template <typename T>",
+        "inline const T &kode_arduino_text(const T &value, long)",
+        "{",
+        "    return value;",
+        "}",
+    ]
 
 
 def group_class_name(group):
@@ -636,7 +745,7 @@ def header():
     owners = owners_of_the_sdk()
     groups = [owner for owner in owners if owner and owner not in HANDLES]
     check_names(groups, alias_types(text, sdk_functions()))
-    lines = PREAMBLE.rstrip("\n").split("\n") + fitting(owners) + [""]
+    lines = PREAMBLE.rstrip("\n").split("\n") + fitting(owners) + texts(owners) + [""]
     lines += left_out_lines() + [""]
     lines += ["/* ---- Types ---- */", ""] + aliases(text, sdk_functions()) + [""]
     lines += ["/* ---- Handles ---- */"]

@@ -124,6 +124,210 @@ FIT_DEFINED = re.compile(r"^inline u?int(?:8|16)_t (kode_arduino_fit_[a-z0-9]+)\
 FIT_USED = re.compile(r"\b(kode_arduino_fit_[a-z0-9]+)\(")
 # A narrow integer declared by value in a method: the type with no `*` after it.
 NARROW_BY_VALUE = re.compile(r"\bu?int(?:8|16)_t [A-Za-z_]\w*\s*[,)=]")
+# A format function's three methods: the format with arguments, a text alone, and an object that holds one.
+PRINTF_METHODS = [
+    "    /** @brief kode_print(). */",
+    "    template <typename First, typename... Rest>",
+    "    void printf(const char *fmt, const First &first, const Rest &...rest) const",
+    "    {",
+    "        kode_print(fmt, kode_arduino_text(first, 0), kode_arduino_text(rest, 0)...);",
+    "    }",
+    "",
+    "    /** @brief kode_print() with a text as it is: a '%' in it is shown, not read. */",
+    "    void printf(const char *text) const",
+    "    {",
+    "        if ( nullptr == text )",
+    "        {",
+    "            kode_print(text);",
+    "        }",
+    "        else",
+    "        {",
+    "            kode_print(\"%s\", text);",
+    "        }",
+    "    }",
+    "",
+    "    /** @brief kode_print() with the text an object holds, a String for one, as it is. */",
+    "    template <typename Text>",
+    "    auto printf(const Text &text) const -> decltype(text.c_str(), void())",
+    "    {",
+    "        kode_print(\"%s\", text.c_str());",
+    "    }",
+]
+SET_TEXT_METHODS = [
+    "    /** @brief kode_widget_set_text(). */",
+    "    template <typename First, typename... Rest>",
+    "    bool setText(const char *fmt, const First &first, const Rest &...rest) const",
+    "    {",
+    "        return kode_widget_set_text(handle, fmt, kode_arduino_text(first, 0), kode_arduino_text(rest, 0)...);",
+    "    }",
+    "",
+    "    /** @brief kode_widget_set_text() with a text as it is: a '%' in it is shown, not read. */",
+    "    bool setText(const char *text) const",
+    "    {",
+    "        bool answer;",
+    "        if ( nullptr == text )",
+    "        {",
+    "            answer = kode_widget_set_text(handle, text);",
+    "        }",
+    "        else",
+    "        {",
+    "            answer = kode_widget_set_text(handle, \"%s\", text);",
+    "        }",
+    "        return answer;",
+    "    }",
+    "",
+    "    /** @brief kode_widget_set_text() with the text an object holds, a String for one, as it is. */",
+    "    template <typename Text>",
+    "    auto setText(const Text &text) const -> decltype(text.c_str(), bool())",
+    "    {",
+    "        return kode_widget_set_text(handle, \"%s\", text.c_str());",
+    "    }",
+]
+# What a format's arguments go through: an object that holds a text as its characters, anything else as it is.
+TEXT_HELPERS = [
+    "",
+    "/**",
+    " * @brief A format's argument as kode.h takes it: the characters of an object that holds a text.",
+    " * @param value The argument, a String for one.",
+    " * @return Its characters.",
+    " */",
+    "template <typename T>",
+    "inline auto kode_arduino_text(const T &value, int) -> decltype(value.c_str())",
+    "{",
+    "    return value.c_str();",
+    "}",
+    "",
+    "/**",
+    " * @brief A format's argument as kode.h takes it: any other argument, as it is.",
+    " * @param value The argument.",
+    " * @return The argument.",
+    " */",
+    "template <typename T>",
+    "inline const T &kode_arduino_text(const T &value, long)",
+    "{",
+    "    return value;",
+    "}",
+]
+# A program that stands in for kode.h's two format calls and shows, a line each, what they were handed.
+# Text stands for Arduino's String; the long one is past what the core's String keeps inside itself.
+TEXTS_PROGRAM = r"""#include <cinttypes>
+#include <cstdarg>
+#include <cstdio>
+
+static const uint32_t SHOWN_MAX = 128U; /**< Room for what a call shows. */
+static char s_shown[SHOWN_MAX];         /**< What the last call showed. */
+
+/** @brief The format and arguments a call was handed, as they show, or "(null)" for no format. */
+static void show(const char *fmt, va_list args)
+{
+    if ( nullptr == fmt )
+    {
+        (void)std::snprintf(s_shown, SHOWN_MAX, "(null)");
+    }
+    else
+    {
+        (void)std::vsnprintf(s_shown, SHOWN_MAX, fmt, args);
+    }
+}
+
+extern "C" void kode_print(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    show(fmt, args);
+    va_end(args);
+}
+
+extern "C" bool kode_widget_set_text(kode_widget_t p, const char *fmt, ...)
+{
+    va_list args;
+    (void)p;
+    va_start(args, fmt);
+    show(fmt, args);
+    va_end(args);
+    return true;
+}
+
+/** @brief An object that holds a text, as Arduino's String does. */
+class Text
+{
+public:
+    explicit Text(const char *from) : chars(from)
+    {
+    }
+
+    const char *c_str(void) const
+    {
+        return chars;
+    }
+
+private:
+    const char *chars;
+};
+
+/** @brief What the last call showed, on a line of its own. */
+static void said(void)
+{
+    (void)std::printf("%s\n", s_shown);
+}
+
+int main(void)
+{
+    const KodeWidget widget(static_cast<kode_widget_t>(1U));
+    const Text name("Ada");
+    const Text longer("a text of more than fourteen characters");
+    const char *none = nullptr;
+
+    (void)widget.setText("50%");
+    said();
+    (void)widget.setText("100% done");
+    said();
+    (void)widget.setText(name);
+    said();
+    (void)widget.setText("hi %s, %" PRId32 " %%", name, static_cast<int32_t>(7));
+    said();
+    (void)widget.setText("%" PRIu32 " of %s", static_cast<uint32_t>(3U), "five");
+    said();
+    (void)widget.setText(none);
+    said();
+    (void)widget.setText(longer);
+    said();
+    (void)widget.setText("<%s>", longer);
+    said();
+
+    Kode.printf("50%");
+    said();
+    Kode.printf("100% done");
+    said();
+    Kode.printf(name);
+    said();
+    Kode.printf("hi %s, %" PRId32 " %%", name, static_cast<int32_t>(7));
+    said();
+    Kode.printf("%" PRIu32 " of %s", static_cast<uint32_t>(3U), "five");
+    said();
+    Kode.printf(none);
+    said();
+    Kode.printf(longer);
+    said();
+    Kode.printf("<%s>", longer);
+    said();
+    return 0;
+}
+"""
+# What TEXTS_PROGRAM shows, once through the widget and once through Kode.printf().
+TEXTS_SHOWN = [
+    "50%",
+    "100% done",
+    "Ada",
+    "hi Ada, 7 %",
+    "3 of five",
+    "(null)",
+    "a text of more than fourteen characters",
+    "<a text of more than fourteen characters>",
+] * 2
+# A number is no text: it does not build.
+NUMBER_AS_TEXT = ("void setup(void)\n{\n    KodeWidget widget;\n    (void)widget.setText(42);\n}\n\n"
+                  "void loop(void)\n{\n}\n")
 # The variant's lines that bring the layer: C++ linkage, and the header by a path from the variant's folder.
 LAYER_INCLUDE = re.compile(r'#ifdef __cplusplus\nextern "C\+\+" \{\n#include "([^"]+)"\n\}\n#endif\n')
 
@@ -274,11 +478,22 @@ class Body(unittest.TestCase):
         self.assertIn("        kode_exit();", self.lines("kode_exit"))
         self.assertIn("    void exit(void) const", self.lines("kode_exit"))
 
-    def test_a_format_is_forwarded_with_its_arguments(self):
-        lines = self.lines("kode_print")
-        self.assertIn("    template <typename... Args>", lines)
-        self.assertIn("    void printf(const char *fmt, Args... args) const", lines)
-        self.assertIn("        kode_print(fmt, args...);", lines)
+    def test_a_format_is_three_methods_a_format_a_text_and_an_object(self):
+        self.assertEqual(self.lines("kode_print"), PRINTF_METHODS)
+        self.assertEqual(self.lines("kode_widget_set_text"), SET_TEXT_METHODS)
+
+    def test_a_format_method_has_no_ternary_and_one_return(self):
+        for name in ("kode_print", "kode_widget_set_text"):
+            lines = self.lines(name)
+            self.assertNotIn("?", "\n".join(lines))
+            bodies = "\n".join(lines).split("\n\n")
+            for body in bodies:
+                self.assertLessEqual(body.count("return "), 1, body)
+
+    def test_the_text_helpers_come_only_with_a_format(self):
+        helpers = gen_layer.texts(gen_layer.layout(gen_layer.functions(HEADER)))
+        self.assertEqual(helpers, TEXT_HELPERS)
+        self.assertEqual(gen_layer.texts(gen_layer.layout(gen_layer.functions("\nbool kode_led_off(void);\n"))), [])
 
     def test_a_handles_method_passes_the_handle_first(self):
         lines = self.lines("kode_canvas_fill")
@@ -550,6 +765,35 @@ class Generated(unittest.TestCase):
             printed = run_program(self, source)
         self.assertEqual(printed.split(), [str(answered) for _, _, answered in cases])
 
+    def test_each_format_is_three_methods_and_the_helpers_come_once_before_the_first_class(self):
+        text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")
+        self.assertIn("\n".join(PRINTF_METHODS) + "\n", text)
+        self.assertIn("\n".join(SET_TEXT_METHODS) + "\n", text)
+        helpers = "\n".join(TEXT_HELPERS[1:]) + "\n"
+        self.assertEqual(text.count(helpers), 1)
+        self.assertLess(text.index(helpers), text.index("\nclass "))
+        self.assertNotIn("Args... args", text)
+        # The core reads the layer before it declares String: no code may need it.
+        self.assertIsNone(re.search(r"\bString\b", gen_layer.COMMENT.sub("", text)))
+
+    def test_a_text_is_shown_as_it_is_and_an_object_as_its_characters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "Texts.cpp"
+            source.write_text(TEXTS_PROGRAM, encoding="utf-8")
+            printed = run_program(self, source)
+        self.assertEqual(printed.splitlines(), TEXTS_SHOWN)
+
+    def test_a_number_is_no_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sketch = Path(tmp) / "NumberAsText.ino"
+            sketch.write_text(NUMBER_AS_TEXT, encoding="utf-8")
+            self.assertIn("setText", refused_sketch(self, sketch))
+
+    def test_the_files_on_disk_are_what_kode_h_says(self):
+        checked = subprocess.run([sys.executable, str(TOOLS / "gen_layer.py"), "--check"],
+                                 capture_output=True, text=True)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
     def test_a_handle_is_not_a_number(self):
         text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")
         for handle, name in gen_layer.HANDLES.items():
@@ -581,6 +825,11 @@ class Generated(unittest.TestCase):
         self.assertIn("    (void)Kode.display.setBrightness(zero<int32_t>());", sketch)
         self.assertIn("    (void)Kode.audio.tone(zero<int32_t>(), zero<uint32_t>());", sketch)
         self.assertIsNone(re.search(r"zero<u?int(?:8|16)_t>", sketch))
+        # A format function is one line, its text alone.
+        self.assertEqual(sketch.count("    Kode.printf("), 1)
+        self.assertIn("    Kode.printf(zero<const char *>());", sketch)
+        self.assertEqual(sketch.count("    (void)widget.setText("), 1)
+        self.assertIn("    (void)widget.setText(zero<const char *>());", sketch)
 
     def test_check_fails_on_a_stale_header(self):
         with tempfile.TemporaryDirectory() as tmp:
