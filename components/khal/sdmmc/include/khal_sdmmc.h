@@ -66,29 +66,14 @@ typedef struct {
  * @param[in]  width   Data lines to ask for: 1 or 4. Retrying at 1 is the caller's.
  * @param[in]  max_khz Ceiling for the host clock, in kHz.
  * @param[out] out     The card's registers, written only on KODE_OK. May be NULL.
- * @return KODE_OK; KODE_DENIED, with nothing tried, for a bad argument, a
- *         card already mounted, or a controller that khal_sdmmc_ready()
- *         says is not there; KODE_TIMEOUT when no card answered;
+ * @return KODE_OK; KODE_DENIED, with nothing tried, for a bad argument or a
+ *         card already mounted; KODE_TIMEOUT when no card answered;
  *         KODE_IO_ERROR when a card answered and has no FAT volume to mount
  *         (exFAT, or none); KODE_ERROR for any other failure. Only the try
  *         is logged here, at debug level: the caller tells the outcome.
  */
 kode_status_t khal_sdmmc_mount(uint8_t width, uint32_t max_khz,
                                khal_sdmmc_card_t *out);
-
-/**
- * @brief Whether a mount has a controller to join.
- *
- * In hosted mode the controller is esp-hosted's: the card's slot is added to
- * the one the link's slot created, and the controller goes with the link's
- * slot when the card's is not there. Between that teardown and the next link a
- * mount has no controller to add its slot to, and the errors ESP-IDF logs for
- * that are no answer about the card.
- *
- * @return false when the mount is hosted and the link's slot is not on the
- *         controller; true otherwise.
- */
-bool khal_sdmmc_ready(void);
 
 /**
  * @brief Where the card's files appear.
@@ -104,19 +89,6 @@ void khal_sdmmc_unmount(void);
  * @return true while a volume is mounted.
  */
 bool khal_sdmmc_mounted(void);
-
-/**
- * @brief Choose whether the next mount reuses the controller esp-hosted owns.
- * @param hosted true to reuse it, false to take the controller. Call with the
- *               card unmounted: a live mount is never moved.
- */
-void khal_sdmmc_set_hosted(bool hosted);
-
-/**
- * @brief Whether the next mount reuses the controller esp-hosted owns.
- * @return true at boot whenever esp-hosted is compiled in.
- */
-bool khal_sdmmc_hosted(void);
 
 /**
  * @brief How big the mounted volume is and how much of it is free.

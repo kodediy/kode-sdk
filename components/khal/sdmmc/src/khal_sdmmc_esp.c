@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * @file khal_sdmmc_esp.c
- * @brief The microSD on ESP-IDF: slot 0, its FAT volume, plain and hosted mount paths.
+ * @brief The microSD on ESP-IDF: slot 0 and its FAT volume, beside esp-hosted's slot 1.
  */
 #include "khal_sdmmc.h"
 
@@ -32,32 +32,32 @@
 #define SD_MAX_FILES         5              /**< Files the volume keeps open at once. */
 #define SD_ALLOC_UNIT_BYTES  (64U * 1024U)  /**< Cluster size a mount and a format ask for. */
 #define HZ_PER_KHZ           1000           /**< The CSD's rate is in Hz; the snapshot's in kHz. */
-#define SD_HOST_LOG_TAG      "SD_HOST"      /**< ESP-IDF's tag for the SDMMC host driver. */
-#define SD_LINK_SLOT         SDMMC_HOST_SLOT_1  /**< The slot esp-hosted takes for the C5's link. */
 
 static sdmmc_card_t        *s_card;          /**< The card under the volume. */
 static sd_pwr_ctrl_handle_t s_pwr;           /**< The IO domain's LDO, once it is up. */
-static StaticSemaphore_t    s_ctlr_lock_mem; /**< Storage for s_ctlr_lock. */
-static SemaphoreHandle_t    s_ctlr_lock;     /**< One controller change at a time. */
 
-/** @brief Whether the next mount reuses esp-hosted's controller; it takes it before app_main. */
 #if CONFIG_ESP_HOSTED_ENABLED
-static bool s_hosted = true;
-static bool s_link_slot;   /**< The link's slot is on the controller: it is there for the card's slot to join. */
+#define SD_HOST_LOG_TAG      "SD_HOST"      /**< ESP-IDF's tag for the SDMMC host driver. */
+#define SD_LINK_SLOT         SDMMC_HOST_SLOT_1  /**< The slot esp-hosted takes for the C5's link. */
+
+static StaticSemaphore_t s_ctlr_lock_mem; /**< Storage for s_ctlr_lock. */
+static SemaphoreHandle_t s_ctlr_lock;     /**< One controller change at a time. */
+static bool s_link_slot;   /**< The link's slot is on the controller. */
 static bool s_link_clock;  /**< esp-hosted brought the C5 up on the link's slot, which gave the slot its clock. */
 static bool s_link_heard;  /**< The C5 answered the last refresh of the link's slot, or none ran yet. */
-#else
-static bool s_hosted;
-#endif
 
 /* ---- The controller's lifetime ------------------------------------------ */
 
 /* The card's slot 0 and esp-hosted's slot 1 share one controller, and both
  * create, join, leave and delete it through ESP-IDF's sdmmc_host, whose
- * controller and slot handles have no lock. In hosted mode the linker routes
- * those four calls through this file (`--wrap`, khal's CMakeLists), and one
- * recursive mutex makes them take turns. Transfers need nothing here: the
- * controller's own mutex already serialises them. */
+ * controller and slot handles have no lock. With esp-hosted built in the
+ * linker routes those four calls through this file (`--wrap`, khal's
+ * CMakeLists), and one recursive mutex makes them take turns. Each slot is
+ * added and removed on its own pins. The controller is reset only when it is
+ * created, with no slot on it; a data error resets its FIFO alone, inside a
+ * transfer under the controller's own mutex. So either slot comes and goes
+ * under the other. Transfers need nothing here: that mutex already
+ * serialises them. */
 
 /**
  * @brief Take the controller's lock.
@@ -94,15 +94,6 @@ static void ctlr_unlock(bool taken)
     }
 }
 
-/* Hosted mode's host hooks: the controller is esp-hosted's, the slot is ours.
- * Init does nothing; deinit releases slot 0 and leaves the controller. */
-
-/** @brief Hosted mode's init: the controller is already up. */
-static esp_err_t sd_host_init_noop(void)
-{
-    return ESP_OK;
-}
-
 /**
  * @brief Release one slot of the shared controller, quietly when the other
  *        slot keeps it.
@@ -127,7 +118,8 @@ static esp_err_t deinit_slot_shared(int slot)
 }
 
 /**
- * @brief Hosted mode's deinit: release the card's slot only.
+ * @brief The card's deinit: release its slot, and the controller with it only
+ *        when the link's slot is not there.
  * @return What deinit_slot_shared() said for slot 0.
  */
 static esp_err_t sd_host_deinit_slot(void)
@@ -135,7 +127,6 @@ static esp_err_t sd_host_deinit_slot(void)
     return deinit_slot_shared(SDMMC_HOST_SLOT_0);
 }
 
-#if CONFIG_ESP_HOSTED_ENABLED
 /* MISRA C:2012 Rule 21.2 deviation, for every name below: the leading double
  * underscore is the name the linker's --wrap contract requires. */
 
@@ -160,18 +151,37 @@ esp_err_t __wrap_sdmmc_host_init(void)
 }
 
 /**
- * @brief sdmmc_host_init_slot(), under the controller's lock.
+ * @brief sdmmc_host_init_slot(), under the controller's lock, on a controller
+ *        that is there.
+ *
+ * A caller creates the controller and adds its slot in two calls. The other
+ * slot's last deinit may delete the controller between them: the controller
+ * is created again here, under the lock, before the slot is added.
+ *
  * @param slot        The slot to add to the controller.
  * @param slot_config Its pins and width.
- * @return What sdmmc_host_init_slot() said.
+ * @return What sdmmc_host_init() said when it failed, else what
+ *         sdmmc_host_init_slot() said.
  */
 esp_err_t __wrap_sdmmc_host_init_slot(int slot,
                                       const sdmmc_slot_config_t *slot_config);
 esp_err_t __wrap_sdmmc_host_init_slot(int slot,
                                       const sdmmc_slot_config_t *slot_config)
 {
-    bool const      taken = ctlr_lock();
-    esp_err_t const err   = __real_sdmmc_host_init_slot(slot, slot_config);
+    bool const         taken = ctlr_lock();
+    sdmmc_host_state_t state;
+    esp_err_t          err   = ESP_OK;
+
+    (void)memset(&state, 0, sizeof(state));
+    (void)sdmmc_host_get_state(&state);
+    if ( !state.host_initialized )
+    {
+        err = __real_sdmmc_host_init();
+    }
+    if ( ESP_OK == err )
+    {
+        err = __real_sdmmc_host_init_slot(slot, slot_config);
+    }
 
     if ( (ESP_OK == err) && (SD_LINK_SLOT == slot) )
     {
@@ -353,28 +363,9 @@ static void snapshot(const sdmmc_card_t *card, khal_sdmmc_card_t *out)
 
 /* ---- Mounting ------------------------------------------------------------ */
 
-void khal_sdmmc_set_hosted(bool hosted)
-{
-    s_hosted = hosted;
-}
-
-bool khal_sdmmc_hosted(void)
-{
-    return s_hosted;
-}
-
 bool khal_sdmmc_mounted(void)
 {
     return (NULL != s_card);
-}
-
-bool khal_sdmmc_ready(void)
-{
-#if CONFIG_ESP_HOSTED_ENABLED
-    return (!s_hosted) || s_link_slot;
-#else
-    return true;
-#endif
 }
 
 /**
@@ -411,7 +402,8 @@ const char *khal_sdmmc_mount_point(void)
  *
  * @param[in]  width   Data lines: 1 or 4.
  * @param[in]  max_khz Ceiling for the host clock, in kHz.
- * @param[out] host    Slot 0's host, with hosted mode's hooks when it applies.
+ * @param[out] host    Slot 0's host, with the shared controller's hooks when
+ *                     esp-hosted is built in.
  * @param[out] slot    Slot 0 on its IOMUX pins.
  */
 static void host_config(uint8_t width, uint32_t max_khz, sdmmc_host_t *host,
@@ -424,16 +416,12 @@ static void host_config(uint8_t width, uint32_t max_khz, sdmmc_host_t *host,
     host->slot            = SDMMC_HOST_SLOT_0;
     host->max_freq_khz    = (int)max_khz;
     host->pwr_ctrl_handle = s_pwr;
-    if ( s_hosted )
-    {
-        /* deinit shares a union with deinit_p, so its flag goes with it. */
-        host->init   = &sd_host_init_noop;
-        host->deinit = &sd_host_deinit_slot;
 #if CONFIG_ESP_HOSTED_ENABLED
-        host->do_transaction = &sd_host_do_transaction;
+    /* deinit shares a union with deinit_p, so its flag goes with it. */
+    host->deinit         = &sd_host_deinit_slot;
+    host->do_transaction = &sd_host_do_transaction;
+    host->flags         &= ~(uint32_t)SDMMC_HOST_FLAG_DEINIT_ARG;
 #endif
-        host->flags &= ~(uint32_t)SDMMC_HOST_FLAG_DEINIT_ARG;
-    }
 
     *slot = s;
     /* Slot 0 is on its IOMUX pins: no routing to give. */
@@ -447,9 +435,8 @@ static void host_config(uint8_t width, uint32_t max_khz, sdmmc_host_t *host,
  * @param[in]  max_khz Ceiling for the host clock, in kHz.
  * @param[out] host    Slot 0's host.
  * @param[out] slot    Slot 0's configuration.
- * @return KODE_OK; KODE_DENIED for a bad argument, a card already mounted or
- *         a hosted mount with no controller to join; KODE_ERROR when the LDO
- *         will not come up.
+ * @return KODE_OK; KODE_DENIED for a bad argument or a card already mounted;
+ *         KODE_ERROR when the LDO will not come up.
  */
 static kode_status_t card_prepare(uint8_t width, uint32_t max_khz,
                                   sdmmc_host_t *host, sdmmc_slot_config_t *slot)
@@ -459,10 +446,6 @@ static kode_status_t card_prepare(uint8_t width, uint32_t max_khz,
         return KODE_DENIED;
     }
     if ( NULL != s_card )
-    {
-        return KODE_DENIED;
-    }
-    if ( !khal_sdmmc_ready() )
     {
         return KODE_DENIED;
     }

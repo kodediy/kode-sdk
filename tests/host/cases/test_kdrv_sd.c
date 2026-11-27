@@ -99,11 +99,6 @@ TEST_CASE("with no card the driver's own state still answers", "[kdrv_sd]")
     TEST_ASSERT_EQUAL_INT32(0, field(KDRV_SD_MOUNTED));
     TEST_ASSERT_EQUAL_INT32((int32_t)KDRV_SD_WIDTH_USE, field(KDRV_SD_WIDTH_REQ));
     TEST_ASSERT_EQUAL_INT32((int32_t)KBSP_SD_FREQ_KHZ, field(KDRV_SD_FREQ_REQ_KHZ));
-
-    kdrv_sd_set_hosted(true);
-    TEST_ASSERT_EQUAL_INT32(1, field(KDRV_SD_HOSTED));
-    kdrv_sd_set_hosted(false);
-    TEST_ASSERT_EQUAL_INT32(0, field(KDRV_SD_HOSTED));
 }
 
 TEST_CASE("with no card there is no name and no sector to read", "[kdrv_sd]")
@@ -367,34 +362,8 @@ TEST_CASE("a card with no FAT volume is told once, as itself", "[kdrv_sd]")
     fake_sdmmc_set_no_volume(false);
 }
 
-/* While the link holds the controller and is down, the seam is not asked: no
- * try at one line, no "no card", and nothing at warning level or above. */
-TEST_CASE("a mount with no controller is not tried and is not a missing card",
-          "[kdrv_sd]")
-{
-    unsigned before;
-
-    install_card();
-    kdrv_sd_unmount();
-    before = fake_sdmmc_mounts();
-    fake_sdmmc_set_refuse(true);
-    fake_klog_reset();
-    kode_log_set_level(NULL, KODE_LOG_WARN);
-
-    TEST_ASSERT_NULL(kdrv_sd_mount());
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_sdmmc_mounts() - before, "no try");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_klog_count(), "nothing above debug is said");
-
-    /* The link is back: the card is asked again, and a first miss still counts. */
-    fake_sdmmc_set_refuse(false);
-    fake_sdmmc_set_present(false);
-    fake_klog_reset();
-    TEST_ASSERT_NULL(kdrv_sd_mount());
-    TEST_ASSERT_EQUAL_UINT(1U, told_no_card());
-}
-
-/* The controller can go between the query and the mount. A refusal is no
- * answer from the card either: one try, no second at one line, no report. */
+/* khal refuses a mount it does not try. A refusal is no answer from the
+ * card: one try, no second at one line, no report. */
 TEST_CASE("a mount khal refuses is not retried and is not a missing card",
           "[kdrv_sd]")
 {
@@ -1687,7 +1656,7 @@ TEST_CASE("a card that comes up on neither width is kept as one that failed",
     TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_FAILED, (int)kdrv_sd_why());
 }
 
-/* No try, or a try khal refused, says nothing about the card. */
+/* A try khal refused says nothing about the card. */
 TEST_CASE("a bring-up that answered nothing leaves the reason as it was",
           "[kdrv_sd]")
 {
@@ -1695,11 +1664,6 @@ TEST_CASE("a bring-up that answered nothing leaves the reason as it was",
     fake_sdmmc_set_no_volume(true);
     TEST_ASSERT_NULL(kdrv_sd_mount());
 
-    fake_sdmmc_set_refuse(true);
-    TEST_ASSERT_NULL(kdrv_sd_mount());
-    TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_NO_FAT, (int)kdrv_sd_why());
-
-    fake_sdmmc_set_refuse(false);
     fake_sdmmc_set_deny(true);
     TEST_ASSERT_NULL(kdrv_sd_mount());
     TEST_ASSERT_EQUAL_INT(KDRV_SD_WHY_NO_FAT, (int)kdrv_sd_why());

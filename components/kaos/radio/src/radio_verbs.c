@@ -1839,23 +1839,17 @@ static bool radio_answer(QEvt const *e)
                 };                                    /* kradio_link_t order */
                 const char * const link =
                     console_word(LINKS, sizeof(LINKS) / sizeof(LINKS[0]), r->link);
-                const char *sd = "direct";
-
-                if ( r->sd_hosted )
-                {
-                    sd = "hosted";
-                }
                 if ( r->fw_known )
                 {
-                    console_reply(">|link=%s fw=%" PRIu32 ".%" PRIu32 ".%" PRIu32 " sd=%s",
+                    console_reply(">|link=%s fw=%" PRIu32 ".%" PRIu32 ".%" PRIu32,
                           link,
                           (uint32_t)r->fw_major,
                           (uint32_t)r->fw_minor,
-                          (uint32_t)r->fw_patch, sd);
+                          (uint32_t)r->fw_patch);
                 }
                 else
                 {
-                    console_reply(">|link=%s fw=unknown sd=%s", link, sd);
+                    console_reply(">|link=%s fw=unknown", link);
                 }
                 console_reply(">ok");
                 console_end();

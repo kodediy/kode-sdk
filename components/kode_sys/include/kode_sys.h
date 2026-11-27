@@ -686,7 +686,7 @@ typedef ExpPowerDoneEvt kode_sys_exp_power_done_t;
  * drives the pin to the wish as it is at that moment, not as it was when the
  * link was asked for, so an "on" asked while the link comes up is not undone
  * by it. A wish that comes after the connect has read it is carried out by a
- * job once the card is back: the job cannot run during the card's remount.
+ * job once the link is up: the job cannot run while the connect does.
  * AO_Radio takes the rail as unknown until the C5 has driven or let go of
  * the pin, and again after a failed bring-up, a lost link or a C5 update, so
  * a request is carried out, never

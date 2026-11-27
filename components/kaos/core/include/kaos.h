@@ -2144,9 +2144,10 @@ bool power_boost_test_request(QActive *who, bool on);
 /* ---- AO_Radio: owner of the ESP32-C5 radio coprocessor ------------------
  * The C5's EN line, the esp-hosted SDIO link, its GPIOs (by RPC) and its flash,
  * all through one sequential RPC channel: one job in flight, blocking work on the
- * AO's workers. With the link off the C5 runs its own firmware (microSD and amp
- * power included). Around the link it moves AO_Storage's card between mount paths:
- * esp-hosted takes the SDMMC controller. Compiled under CONFIG_KODEOS_RADIO;
+ * AO's workers. With the link off the C5 runs its own firmware (amp power
+ * included). The link and AO_Storage's card share the SDMMC controller on two
+ * slots, and the card stays mounted as the link comes and goes. Compiled under
+ * CONFIG_KODEOS_RADIO;
  * publishes RADIO_STATE_SIG on every change and on request.
  */
 extern QActive * const AO_Radio;    /**< The C5 owner AO. */
@@ -2162,8 +2163,7 @@ void kaos_radio_register(void);
 /** @brief Where the C5 link is (RadioStateEvt.link). */
 typedef enum {
     KRADIO_OFF = 0,   /**< No link. The C5 runs its own firmware unbothered. */
-    KRADIO_STARTING,  /**< Bring-up in flight: the C5 is being reset, the
-                       *   card is unmounted until the link settles.         */
+    KRADIO_STARTING,  /**< Bring-up in flight: the C5 is being reset.       */
     KRADIO_UP,        /**< CP_INIT seen; the RPC channel answers.            */
     KRADIO_STOPPING,  /**< Teardown in flight.                               */
     KRADIO_FAILED,    /**< Bring-up failed or the transport dropped. A new
@@ -2222,8 +2222,8 @@ bool radio_state_request(void);
 void radio_park_request(kdrv_radio_note_t target);
 
 /**
- * @brief The interface reads its first screen off the card: leave it mounted
- *        through this boot's first connect, and hold the link's first words.
+ * @brief The interface reads its first screen off the card: hold the link's
+ *        first words.
  *
  * Called before AO_Radio starts. radio_boot_release() ends the hold, and
  * KDRV_RADIO_GATE_MS does if nobody calls it.
@@ -3613,22 +3613,6 @@ typedef enum {
 
 /** @brief Ask AO_Storage to do @p op to @p medium. */
 void storage_request(kdrv_medium_t medium, storage_op_t op);
-
-/**
- * @brief The same, and tell @p who when the command has run.
- *
- * A card mount runs on AO_Storage's worker, so the post returning says nothing.
- * STORAGE_CMD_RSP_SIG, posted to @p who once per accepted request, does: when the
- * call returns or its deadline passes.
- *
- * @param medium The medium.
- * @param op     What to do to it.
- * @param who    Who is waiting; not NULL.
- * @return true when the request is with AO_Storage and the answer will come;
- *         false when no event was left to carry it, and none will.
- */
-bool storage_request_answered(kdrv_medium_t medium, storage_op_t op,
-                              QActive *who);
 
 /**
  * @brief What to do to a pair of paths (STORAGE_PAIR_REQ_SIG).

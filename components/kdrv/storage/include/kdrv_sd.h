@@ -65,8 +65,6 @@ typedef enum {
 
     /* This driver's own state, answered with or without a card. */
     KDRV_SD_MOUNTED,        /**< Whether anything is mounted right now.     */
-    KDRV_SD_HOSTED,         /**< Whether the next mount reuses esp-hosted's
-                             *   controller.                                */
 
     /* The volume, asked afresh every time. */
     KDRV_SD_TOTAL_MB,       /**< How big the filesystem is.                 */
@@ -205,10 +203,8 @@ typedef enum {
  *
  * Idempotent: a second call on a mounted card just answers where it is.
  *
- * While the link holds the controller and is down, nothing is tried: NULL,
- * at debug level, and the card is asked again on the next call. After a miss
- * that was reported, the repeat probes hold ESP-IDF's account of the empty
- * slot quiet until a card mounts.
+ * After a miss that was reported, the repeat probes hold ESP-IDF's account
+ * of the empty slot quiet until a card mounts.
  *
  * @return The mount point, or NULL when there is no card. On failure the
  *         reason is logged and kdrv_sd_why() keeps it. The card's supply is
@@ -222,24 +218,13 @@ const char *kdrv_sd_mount(void);
  *
  * Every kdrv_sd_mount() that asks the slot sets it: an empty slot, a card
  * with no FAT volume, or a card that would not come up, and KDRV_SD_WHY_NONE
- * once a card mounts. A bring-up that was not tried (the link holds the
- * controller and is down) or that khal refused answers nothing and leaves it
- * as it was.
+ * once a card mounts. A bring-up that khal refused without a try answers
+ * nothing and leaves it as it was.
  *
  * @return The reason; KDRV_SD_WHY_NONE while a card is mounted, and when no
  *         bring-up has answered since the boot or the card was unmounted.
  */
 kdrv_sd_why_t kdrv_sd_why(void);
-
-/**
- * @brief Switch mount mode: true = reuse the SDMMC controller esp-hosted
- *        already owns (radio link up), false = the plain path (radio off).
- *
- * AO_Radio's to call, around the link's lifetime, with the card unmounted:
- * the mode decides what the *next* mount does, it does not migrate a live
- * one.
- */
-void kdrv_sd_set_hosted(bool hosted);
 
 /** @brief Unmount the card. Safe with nothing mounted. */
 void kdrv_sd_unmount(void);

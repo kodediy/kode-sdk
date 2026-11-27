@@ -1119,148 +1119,18 @@ TEST_CASE("the c5 row on a link that is off brings the link up without touching 
     TEST_ASSERT_EQUAL_UINT(nvs_before, fake_nvs_count());
 }
 
-TEST_CASE("the c5 row walks the card around the link: unmount before the connect, mount after",
+TEST_CASE("the c5 row brings the link up without asking anything of the card",
           "[radio_ao]")
 {
     radio_fresh();
 
     ask_row();
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
     TEST_ASSERT_EQUAL_INT(-1, next_storage_op());
 
     finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_MOUNT, next_storage_op());
+    TEST_ASSERT_EQUAL_INT(-1, next_storage_op());
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_C5_INFO, running_job());
-}
-
-/* The unmount is a call on AO_Storage's worker, so it has not run when the
- * request is posted: the C5 is reset only after AO_Storage has said it has. */
-TEST_CASE("the connect waits for the card's unmount to be answered",
-          "[radio_ao]")
-{
-    unsigned before;
-
-    radio_fresh();
-    s_gate_auto = false;
-    before = job_submits();
-
-    dispatch(RADIO_UP_REQ_SIG);
-
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(),
-                                  "the C5 was reset before the card let go");
-    TEST_ASSERT_FALSE(job_queued());
-    TEST_ASSERT_EQUAL_UINT(before, job_submits());
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_STARTING, link_now());
-
-    kdrv_storage_unmount(KDRV_MEDIUM_SD);
-    dispatch(STORAGE_CMD_RSP_SIG);
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
-    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
-}
-
-/* A refused unmount is asked again: the radio's own window, as it names it. */
-#define UNMOUNT_RETRY_MS  500U     /**< Between one ask and the next.            */
-#define UNMOUNT_WAIT_MS   10000U   /**< Asks go on this long, then give up.      */
-
-/** @brief AO_Storage's answer to an unmount it refused: the card stays mounted. */
-static void unmount_refused(void)
-{
-    static const QEvt rsp = QEVT_INITIALIZER(STORAGE_CMD_RSP_SIG);
-
-    QASM_DISPATCH(AO_Radio, &rsp, 0U);
-    (void)radio_settle();
-}
-
-/**
- * @brief Let the radio ask again after a refusal, @p asks times, and refuse each.
- *
- * Each round is one retry period: the expiry makes the radio ask the card to
- * let go again (read off the storage queue), and the card refuses once more.
- * The first ask is not consumed here.
- *
- * @param asks How many times the radio is asked again and refuses.
- */
-static void refuse_again(unsigned asks)
-{
-    for ( unsigned i = 0U; i < asks; ++i )
-    {
-        tick(QF_SUPPORT_STEPS(UNMOUNT_RETRY_MS));
-        TEST_ASSERT_EQUAL_INT_MESSAGE((int)STORAGE_OP_UNMOUNT, next_storage_op(),
-            "the refused unmount was not asked again");
-        unmount_refused();
-    }
-}
-
-/* The answer comes back when the unmount was refused (a transfer in flight),
- * when the worker is not up, or when the call overran: the card is then still
- * mounted, and the reset would glitch its supply under a live volume. It is
- * asked again every half second for ten before the bring-up gives up. */
-TEST_CASE("a card that is still mounted at the answer stops the bring-up "
-          "with the C5 untouched", "[radio_ao]")
-{
-    unsigned before;
-
-    radio_fresh();
-    s_gate_auto = false;
-    before = job_submits();
-    TEST_ASSERT_NOT_NULL(kdrv_storage_mount(KDRV_MEDIUM_SD));
-
-    ask_row();
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();
-
-    /* Refused once is not the end: the radio waits and asks again. */
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_STARTING, link_now());
-    TEST_ASSERT_FALSE(logged("stayed busy"));
-    refuse_again((UNMOUNT_WAIT_MS / UNMOUNT_RETRY_MS) - 1U);
-    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KRADIO_STARTING, link_now(),
-                                  "the bring-up gave up before the window");
-    TEST_ASSERT_FALSE(logged("stayed busy"));
-    tick(QF_SUPPORT_STEPS(UNMOUNT_RETRY_MS));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();
-
-    TEST_ASSERT_EQUAL_INT(-1, running_job());
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(before, job_submits(),
-                                   "the connect went out over a mounted card");
-    TEST_ASSERT_FALSE(take_verdict());
-    TEST_ASSERT_TRUE(logged("the SD card stayed busy for 10 s; link not started"));
-    TEST_ASSERT_TRUE(logged("test c5: FAIL - the card is still mounted"));
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
-    /* and the card goes back onto the plain path */
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_MOUNT, next_storage_op());
-}
-
-TEST_CASE("a refused unmount is asked again, and the link comes up once the "
-          "card lets go", "[radio_ao]")
-{
-    radio_fresh();
-    s_gate_auto = false;
-    TEST_ASSERT_NOT_NULL(kdrv_storage_mount(KDRV_MEDIUM_SD));
-
-    dispatch(RADIO_UP_REQ_SIG);
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();
-    refuse_again(2U);
-    TEST_ASSERT_EQUAL_INT(-1, running_job());
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_STARTING, link_now());
-
-    /* The transfer is over: the next ask is honoured. */
-    tick(QF_SUPPORT_STEPS(UNMOUNT_RETRY_MS));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    kdrv_storage_unmount(KDRV_MEDIUM_SD);
-    dispatch(STORAGE_CMD_RSP_SIG);
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
-    TEST_ASSERT_FALSE(logged("stayed busy"));
-    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
-
-    /* No expiry is left over to ask a settled card again. */
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_MOUNT, next_storage_op());
-    tick(QF_SUPPORT_STEPS(UNMOUNT_RETRY_MS) * 2U);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, next_storage_op(),
-                                  "the card was asked again after it let go");
 }
 
 TEST_CASE("the c5 row on a link that is up submits the info job and never a connect",
@@ -1302,9 +1172,7 @@ TEST_CASE("the c5 row ends with a verdict when the worker will not take the conn
     TEST_ASSERT_FALSE(take_verdict());
     TEST_ASSERT_TRUE(logged("test c5: FAIL - the worker refused the connect job"));
     TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
-    /* and the card went back where it was */
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_MOUNT, next_storage_op());
+    TEST_ASSERT_EQUAL_INT(-1, next_storage_op());
 }
 
 TEST_CASE("the c5 row fails when the C5 never answers CP_INIT", "[radio_ao]")
@@ -1358,7 +1226,7 @@ TEST_CASE("a link lost mid-row fails the row and tears down as usual", "[radio_a
 
     TEST_ASSERT_FALSE(take_verdict());
     TEST_ASSERT_TRUE(logged("test c5: FAIL - the link dropped"));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
+    TEST_ASSERT_EQUAL_INT(-1, next_storage_op());
     TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
 
     /* The row's info job is still inside the worker, using its storage: the
@@ -2098,7 +1966,6 @@ TEST_CASE("an asked scan owed with no job in flight is refused when a C5 update 
      * no job holds the channel, and the scan is still owed. */
     fake_radio_effects(KDRV_RADIO_JOB_CONNECT, KODE_OK);
     deliver_held(KODE_OK);
-    dispatch(STORAGE_CMD_RSP_SIG);
     TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(), "a job holds the channel");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, scan_take_spy().ends, "the owed scan was answered already");
     storage_drain();
@@ -2208,9 +2075,9 @@ TEST_CASE("a task's scan is written into its waiter, strongest kept, and tagged 
     ao_spy_drain();
 }
 
-/* ---- The card comes back before anything is asked of the C5 ------------------------ */
+/* ---- The link is up once the connect is done ------------------------------------ */
 
-TEST_CASE("the link is not up, and no service starts, until the card's remount has run",
+TEST_CASE("the link is up, and its services start, once the connect is done",
           "[radio_ao]")
 {
     radio_fresh();
@@ -2218,24 +2085,9 @@ TEST_CASE("the link is not up, and no service starts, until the card's remount h
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
     storage_drain();
 
-    finish_only(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
 
-    /* The remount is asked for, with an answer owed to this AO - and until
-     * it comes the link is still on its way and the C5 is asked nothing. */
-    const QEvt *e = NULL;
-    TEST_ASSERT_EQUAL_INT(pdTRUE, xQueueReceive(AO_Storage->eQueue, &e, 0U));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_CMD_SIG, (int)e->sig);
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_MOUNT,
-                          (int)((const StorageCmdEvt *)e)->op);
-    TEST_ASSERT_EQUAL_PTR(AO_Radio, ((const StorageCmdEvt *)e)->who);
-    QF_gc(e);
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_STARTING, link_now());
-    pump();
-    TEST_ASSERT_EQUAL_INT(-1, running_job());
-
-    dispatch(STORAGE_CMD_RSP_SIG);
-    pump();
-
+    TEST_ASSERT_EQUAL_INT(-1, next_storage_op());
     TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
     TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_WIFI_SCAN, running_job());
     TEST_ASSERT_TRUE(logged("looking for a network we know"));
@@ -2243,21 +2095,6 @@ TEST_CASE("the link is not up, and no service starts, until the card's remount h
     finish_whatever_runs();
     dispatch(WIFI_STOP_REQ_SIG);
     pump();
-}
-
-TEST_CASE("an answer from the card that nobody is waiting for changes nothing",
-          "[radio_ao]")
-{
-    radio_fresh();
-    dispatch(STORAGE_CMD_RSP_SIG);
-    pump();
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
-
-    go_up();
-    dispatch(STORAGE_CMD_RSP_SIG);
-    pump();
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
-    TEST_ASSERT_EQUAL_INT(-1, running_job());
 }
 
 /* ---- A C5 that stops answering ----------------------------------------------------- */
@@ -3543,8 +3380,8 @@ TEST_CASE("install dst=c5 on a link that is up arms the console, says ready "
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ack, "a single partial chunk earns no ack");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, done, "no result before the activate");
     TEST_ASSERT_EQUAL_UINT(0U, fail);
-    TEST_ASSERT_EQUAL_INT_MESSAGE((int)STORAGE_OP_UNMOUNT, next_storage_op(),
-        "the card is let go of before the C5 is asked to reboot");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, next_storage_op(),
+        "nothing is asked of the card before the C5 is asked to reboot");
 
     inst_push_to_end();
 
@@ -3554,8 +3391,8 @@ TEST_CASE("install dst=c5 on a link that is up arms the console, says ready "
     TEST_ASSERT_TRUE(logged("is written and activated"));
     TEST_ASSERT_TRUE_MESSAGE(logged("the board restarts by itself"),
         "the log says the board restarts to see what the C5 now runs");
-    TEST_ASSERT_EQUAL_INT_MESSAGE((int)STORAGE_OP_MOUNT, next_storage_op(),
-        "the card goes back on the plain path, as after radio_down");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, next_storage_op(),
+        "nothing is asked of the card after the update");
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)KRADIO_OFF, link_now(),
         "an update ends with the link off, as radio_down does - not failed");
     inst_restart();
@@ -4096,13 +3933,16 @@ TEST_CASE("an install dst=c5 refused before its ready leaves the glass alone",
  *
  * The one thing the rest of this file never does, because the AO is brought
  * up once per binary. It is safe here for test_imu_ao.c's reason: the AO is
- * walked to `off` first and ticked, so no one-shot is armed when the
- * constructor runs over it.
+ * walked to `off` first and ticked, and every time event it still has armed
+ * (a KODE service's guard, a job's) is disarmed and reaped, so none is linked
+ * when the constructor runs over it.
  */
 static void radio_reboot(void)
 {
     tick(QF_SUPPORT_STEPS(KODE_C5_BOOT_MS) + 8U);
     fake_radio_power_cycle();
+    qf_support_disarm_timers(AO_Radio);
+    qf_support_reap_timers();
     Radio_ctor();
     qf_support_give_queue(AO_Radio);
     AO_Radio->prio  = KODE_PRIO_RADIO;
@@ -6339,45 +6179,6 @@ TEST_CASE("an on asked while the link comes up is said once the connect has driv
     exp_listen_end();
 }
 
-TEST_CASE("an on asked during the card's remount waits for it, then one job drives it and says it",
-          "[radio_ao][exp_power]")
-{
-    uint32_t submits;
-
-    radio_fresh();
-    exp_ask(false);
-    exp_listen();
-
-    dispatch(RADIO_UP_REQ_SIG);
-    (void)exp_heard();
-    finish_only(KDRV_RADIO_JOB_CONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_STARTING, link_now());
-    TEST_ASSERT_FALSE(fake_radio_exp_pin());
-    submits = job_submits();
-
-    /* The connect has read the wish and driven the pin off; the answer of
-     * the card's remount has not come. */
-    exp_ask(true);
-    pump();
-    TEST_ASSERT_FALSE_MESSAGE(job_held(), "a job ran during the card's remount");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, exp_heard().n, "said before the pin was driven");
-    TEST_ASSERT_FALSE(fake_radio_exp_pin());
-
-    dispatch(STORAGE_CMD_RSP_SIG);
-    pump();
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
-    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_EXP_POWER, running_job(),
-                                  "no job drove the wish asked during the remount");
-    TEST_ASSERT_TRUE(held_req()->on);
-    TEST_ASSERT_EQUAL_UINT(0U, exp_heard().n);
-    finish(KDRV_RADIO_JOB_EXP_POWER, KODE_OK);
-    TEST_ASSERT_TRUE(fake_radio_exp_pin());
-    TEST_ASSERT_FALSE(job_held());
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(submits + 1U, job_submits(), "more than one job drove the wish");
-    exp_heard_one(true, KODE_OK);
-    exp_listen_end();
-}
-
 TEST_CASE("a switch the C5 refused leaves the wish at the rail, and the next connect drives that",
           "[radio_ao][exp_power]")
 {
@@ -6479,6 +6280,8 @@ static void radio_reboot_unheld(void)
 {
     tick(QF_SUPPORT_STEPS(KODE_C5_BOOT_MS) + 8U);
     fake_radio_power_cycle();
+    qf_support_disarm_timers(AO_Radio);
+    qf_support_reap_timers();
     /* Held by nobody the AO knows of: Radio_off's entry holds only a C5
      * that is not held already. */
     fake_radio_set_c5_held(true);
@@ -7933,289 +7736,6 @@ TEST_CASE("a lost link with a scan and a KODE send inside tears down once, after
           "[radio_ao][worker]")
 {
     teardown_after_both(false);
-}
-
-/* ---- The teardown waits for the card's unmount ---------------------------- */
-
-/* The unmount is a call on AO_Storage's worker and may sit behind another for
- * seconds. esp-hosted's teardown gives up the SDMMC host a mounted card is on,
- * and the C5 held in reset switches the card's supply off: neither may come
- * before AO_Storage has said the card let go. These cases withhold the answer
- * and then give it by hand. */
-
-/** @brief AO_Storage's answer to the radio's unmount, given by hand. */
-static void unmount_answered(void)
-{
-    static const QEvt rsp = QEVT_INITIALIZER(STORAGE_CMD_RSP_SIG);
-
-    kdrv_storage_unmount(KDRV_MEDIUM_SD);
-    QASM_DISPATCH(AO_Radio, &rsp, 0U);
-    (void)radio_settle();
-}
-
-TEST_CASE("a lost link does not tear down before the card's unmount is answered",
-          "[radio_ao][worker]")
-{
-    radio_fresh();
-    go_up();
-    s_gate_auto = false;
-    unsigned const before = job_submits();
-
-    fake_radio_drop_link();
-    (void)radio_settle();
-
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(RADIO_WORKER),
-        "esp-hosted was torn down with the card's unmount unanswered");
-    TEST_ASSERT_EQUAL_INT(-1, running_job());
-    TEST_ASSERT_TRUE(logged("the teardown waits for the card"));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-
-    unmount_answered();
-    (void)pull_jobs();
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
-    TEST_ASSERT_EQUAL_UINT(before + 1U, job_submits());
-    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(before + 1U, job_submits(),
-                                   "a second teardown was submitted");
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
-    c5_case_end();
-}
-
-TEST_CASE("radio_down holds the C5 only after the card's unmount is answered",
-          "[radio_ao][worker]")
-{
-    radio_fresh();
-    go_up();
-    s_gate_auto = false;
-
-    QEvt down = QEVT_INITIALIZER(RADIO_DOWN_REQ_SIG);
-    QASM_DISPATCH(AO_Radio, &down, 0U);
-    (void)radio_settle();
-
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(RADIO_WORKER),
-        "the teardown went with the card's unmount unanswered");
-    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KRADIO_STOPPING, link_now(),
-        "the C5 is held in reset only when the teardown has run");
-
-    unmount_answered();
-    (void)pull_jobs();
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
-    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
-    c5_case_end();
-}
-
-TEST_CASE("a card that stays mounted does not stop the link coming down, "
-          "after a window of asking", "[radio_ao][worker]")
-{
-    radio_fresh();
-    go_up();
-    s_gate_auto = false;
-    TEST_ASSERT_NOT_NULL(kdrv_storage_mount(KDRV_MEDIUM_SD));
-    storage_drain();
-
-    QEvt down = QEVT_INITIALIZER(RADIO_DOWN_REQ_SIG);
-    QASM_DISPATCH(AO_Radio, &down, 0U);
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();                   /* refused: the card is mounted still */
-    (void)pull_jobs();
-
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(),
-        "the link came down while the card was still being asked");
-    refuse_again((UNMOUNT_WAIT_MS / UNMOUNT_RETRY_MS) - 1U);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(),
-        "the link came down before the window was spent");
-    tick(QF_SUPPORT_STEPS(UNMOUNT_RETRY_MS));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();
-    (void)pull_jobs();
-
-    TEST_ASSERT_TRUE(logged("the SD card stayed busy for 10 s; the link comes "
-                            "down anyway"));
-    TEST_ASSERT_TRUE(logged("the card is still mounted; the link comes down"));
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
-    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
-    c5_case_end();
-}
-
-TEST_CASE("a refused unmount before a teardown is asked again, and the link "
-          "comes down on the first that is honoured", "[radio_ao][worker]")
-{
-    radio_fresh();
-    go_up();
-    s_gate_auto = false;
-    TEST_ASSERT_NOT_NULL(kdrv_storage_mount(KDRV_MEDIUM_SD));
-    storage_drain();
-
-    QEvt down = QEVT_INITIALIZER(RADIO_DOWN_REQ_SIG);
-    QASM_DISPATCH(AO_Radio, &down, 0U);
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();
-    refuse_again(1U);
-
-    tick(QF_SUPPORT_STEPS(UNMOUNT_RETRY_MS));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_answered();
-    (void)pull_jobs();
-
-    TEST_ASSERT_FALSE(logged("stayed busy"));
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
-    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
-    c5_case_end();
-}
-
-/**
- * @brief The link is lost with a KODE send inside the service worker AND the
- *        card's unmount unanswered: the teardown is owed twice, goes once, and
- *        only when both are back.
- *
- * @param answer_first true: the card answers, then the send returns; false:
- *                     the other way round.
- */
-static void teardown_after_card_and_send(bool answer_first)
-{
-    radio_fresh();
-    go_up();
-    vault_has("home");
-    ao_spy_drain();
-    s_gate_auto = false;
-
-    TEST_ASSERT_TRUE(id_sign_request(ao_spy(), "abc"));
-    (void)radio_settle();
-    TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(RADIO_SVC_WORKER));
-    unsigned const before = job_submits();
-
-    fake_radio_drop_link();
-    (void)radio_settle();
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(RADIO_WORKER),
-        "the teardown went with a send and the card's unmount outstanding");
-
-    if ( answer_first )
-    {
-        unmount_answered();
-        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(RADIO_WORKER),
-            "the teardown went with the send still inside");
-        TEST_ASSERT_TRUE(fake_khal_worker_run_next_for(RADIO_SVC_WORKER));
-        (void)radio_settle();
-    }
-    else
-    {
-        TEST_ASSERT_TRUE(fake_khal_worker_run_next_for(RADIO_SVC_WORKER));
-        (void)radio_settle();
-        TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(RADIO_WORKER),
-            "the teardown went with the card's unmount unanswered");
-        unmount_answered();
-    }
-
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(RADIO_WORKER),
-        "the teardown was not released by the last one back");
-    (void)pull_jobs();
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_DISCONNECT, running_job());
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(before + 1U, job_submits(),
-                                   "more than one job followed the lost link");
-    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(before + 1U, job_submits(),
-                                   "a second teardown was submitted");
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
-    c5_case_end();
-}
-
-TEST_CASE("a lost link tears down once, after the card's answer and the send, the card first",
-          "[radio_ao][worker]")
-{
-    teardown_after_card_and_send(true);
-}
-
-TEST_CASE("a lost link tears down once, after the card's answer and the send, the send first",
-          "[radio_ao][worker]")
-{
-    teardown_after_card_and_send(false);
-}
-
-TEST_CASE("a C5 update opens its session only after the card's unmount is answered",
-          "[radio_ao]")
-{
-    radio_fresh();
-    go_up();
-    recv_spy();
-    s_gate_auto = false;
-
-    inst_deliver();
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(),
-        "the session opened with the card's unmount unanswered");
-    TEST_ASSERT_FALSE(job_queued());
-
-    unmount_answered();
-    (void)pull_jobs();
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_C5_BEGIN, running_job());
-    s_gate_auto = true;
-    inst_push_to_end();
-    inst_restart();
-}
-
-TEST_CASE("a C5 update is refused while the card is still mounted, after a "
-          "window of asking", "[radio_ao]")
-{
-    unsigned ready, ack, done, fail, stall;
-
-    radio_fresh();
-    go_up();
-    recv_spy();
-    s_gate_auto = false;
-    storage_drain();
-
-    inst_deliver();
-    TEST_ASSERT_NOT_NULL(kdrv_storage_mount(KDRV_MEDIUM_SD));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();
-    refuse_again((UNMOUNT_WAIT_MS / UNMOUNT_RETRY_MS) - 1U);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(),
-        "the C5 was opened over a mounted card");
-    inst_answers(&ready, &ack, &done, &fail, &stall);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fail, "the update gave up early");
-
-    tick(QF_SUPPORT_STEPS(UNMOUNT_RETRY_MS));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();
-    (void)pull_jobs();
-
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, running_job(),
-        "the C5 was opened over a mounted card");
-    inst_answers(&ready, &ack, &done, &fail, &stall);
-    TEST_ASSERT_EQUAL_UINT(1U, fail);
-    TEST_ASSERT_TRUE(logged("the SD card stayed busy for 10 s; C5 update not "
-                            "started"));
-    TEST_ASSERT_TRUE(logged("the card is still mounted; the C5 was not touched"));
-    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
-}
-
-TEST_CASE("a C5 update waits out a refused unmount and opens its session when "
-          "the card lets go", "[radio_ao]")
-{
-    radio_fresh();
-    go_up();
-    recv_spy();
-    s_gate_auto = false;
-    storage_drain();
-
-    inst_deliver();
-    TEST_ASSERT_NOT_NULL(kdrv_storage_mount(KDRV_MEDIUM_SD));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_refused();
-    refuse_again(3U);
-    TEST_ASSERT_EQUAL_INT(-1, running_job());
-
-    tick(QF_SUPPORT_STEPS(UNMOUNT_RETRY_MS));
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
-    unmount_answered();
-    (void)pull_jobs();
-    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_C5_BEGIN, running_job());
-    TEST_ASSERT_FALSE(logged("stayed busy"));
-    s_gate_auto = true;
-    inst_push_to_end();
-    inst_restart();
 }
 
 /* The C5's update has no rollback, so a link that drops under it is the case
@@ -12048,7 +11568,7 @@ TEST_CASE("a link lost while an OFF round waits for AO_Net does not refuse it",
     lp_expect_silence();
     finish_lost(KODE_ERROR);
     lp_expect_silence();                      /* AO_Net has not left yet */
-    finish_only(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
     lp_net_left();
     lp_expect_answer(false, NULL);
     lp_expect_no_more();
@@ -12113,7 +11633,7 @@ TEST_CASE("an OFF abandoned after the answer finds the link as it was",
     lp_radio_awake();                         /* it repeats */
     TEST_ASSERT_EQUAL_UINT_MESSAGE(subs, job_submits(), "nothing to bring back");
     TEST_ASSERT_EQUAL_INT(-1, running_job());
-    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, next_storage_op(), "no remount, no unmount");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, next_storage_op(), "nothing asked of the card");
     TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
 }
 
@@ -15265,6 +14785,216 @@ TEST_CASE("with the link down the C5's fit is unknown", "[radio_ao]")
 
     kdrv_c5_forget();
     TEST_ASSERT_EQUAL_INT((int)KRADIO_C5_FIT_UNKNOWN, (int)radio_c5_fit());
+}
+
+/* ---- The card stays mounted around the link ------------------------------- */
+
+/* The card's slot and the C5's link share one SDMMC controller, each slot on
+ * its own pins, and the card's supply is the P4's: neither the link nor the
+ * C5's reset reaches the card. AO_Radio asks AO_Storage nothing on the way up
+ * or down, and the card a case mounts is still mounted at its end. */
+
+/** @brief Mount the card the way AO_Storage does, and empty its mailbox. */
+static void card_in(void)
+{
+    TEST_ASSERT_NOT_NULL(kdrv_storage_mount(KDRV_MEDIUM_SD));
+    storage_drain();
+}
+
+/** @brief The card is mounted and AO_Storage was asked nothing. */
+static void card_untouched(const char *what)
+{
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, next_storage_op(), what);
+    TEST_ASSERT_TRUE_MESSAGE(kdrv_storage_mounted(KDRV_MEDIUM_SD), what);
+}
+
+TEST_CASE("the link comes up over a mounted card with no ask of AO_Storage",
+          "[radio_ao][card]")
+{
+    radio_fresh();
+    card_in();
+
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_CONNECT, running_job(),
+        "the connect goes to the worker at once");
+    card_untouched("nothing is asked of the card before the connect");
+
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    card_untouched("nothing is asked of the card after the connect");
+    TEST_ASSERT_FALSE(logged("unmounted"));
+}
+
+TEST_CASE("radio_down over a mounted card sends the disconnect at once and "
+          "leaves the card mounted", "[radio_ao][card]")
+{
+    radio_fresh();
+    go_up();
+    card_in();
+
+    dispatch(RADIO_DOWN_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_DISCONNECT, running_job(),
+        "the teardown waits for nothing");
+    card_untouched("nothing is asked of the card before the teardown");
+
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    card_untouched("nothing is asked of the card after the teardown");
+}
+
+TEST_CASE("a bring-up that fails leaves the mounted card alone",
+          "[radio_ao][card]")
+{
+    radio_fresh();
+    card_in();
+
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_TIMEOUT);
+
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
+    card_untouched("a failed bring-up asks nothing of the card");
+}
+
+TEST_CASE("a connect the worker refuses leaves the mounted card alone",
+          "[radio_ao][card]")
+{
+    radio_fresh();
+    card_in();
+    fake_khal_worker_refuse_for(RADIO_WORKER, true);
+
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_TRUE(logged("the worker refused the connect job"));
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    card_untouched("a refused connect asks nothing of the card");
+}
+
+TEST_CASE("a lost link is torn down at once over a mounted card",
+          "[radio_ao][card]")
+{
+    radio_fresh();
+    go_up();
+    card_in();
+
+    fake_radio_drop_link();
+    pump();
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_FAILED, link_now());
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_DISCONNECT, running_job(),
+        "the teardown waits for nothing");
+    card_untouched("a lost link asks nothing of the card");
+
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    card_untouched("the teardown asks nothing of the card");
+}
+
+TEST_CASE("a C5 update opens its session over a mounted card and leaves it "
+          "mounted", "[radio_ao][card]")
+{
+    unsigned ready, ack, done, fail, stall;
+
+    radio_fresh();
+    go_up();
+    card_in();
+    recv_spy();
+
+    inst_deliver();
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)KDRV_RADIO_JOB_C5_BEGIN, running_job(),
+        "the session opens with the image verified, waiting for nothing");
+    card_untouched("the update asks nothing of the card before the C5 reboots");
+
+    inst_push_to_end();
+    inst_answers(&ready, &ack, &done, &fail, &stall);
+    TEST_ASSERT_EQUAL_UINT(1U, done);
+    TEST_ASSERT_EQUAL_UINT(0U, fail);
+    card_untouched("the update asks nothing of the card after the C5 reboots");
+    inst_restart();
+}
+
+TEST_CASE("the boot's first bring-up leaves the mounted card alone",
+          "[radio_ao][card]")
+{
+    radio_fresh();
+    card_in();
+
+    radio_boot_hold();
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    card_untouched("the boot's bring-up asks nothing of the card");
+    radio_boot_release();
+
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    card_untouched("the boot's link asks nothing of the card once up");
+}
+
+TEST_CASE("a link adopted from a parked C5 leaves the mounted card alone",
+          "[radio_ao][card]")
+{
+    radio_fresh();
+    card_in();
+    fake_radio_set_adopted(true);
+
+    dispatch(RADIO_UP_REQ_SIG);
+    TEST_ASSERT_EQUAL_INT((int)KDRV_RADIO_JOB_CONNECT, running_job());
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    card_untouched("an adopted link asks nothing of the card");
+
+    dispatch(RADIO_DOWN_REQ_SIG);
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    card_untouched("its teardown asks nothing of the card");
+}
+
+/** @brief The bytes the reading case writes and reads back. */
+#define CARD_READ_TEXT   "kept across the link coming up and going down"
+/** @brief How much of it each read takes. */
+#define CARD_READ_STEP   15U
+
+TEST_CASE("a file read off the card goes on across the link coming up and "
+          "going down", "[radio_ao][card]")
+{
+    static const char text[] = CARD_READ_TEXT;
+    char          got[sizeof(text)];
+    size_t        n      = 0U;
+    size_t        part   = 0U;
+    uint32_t      size   = 0U;
+    kdrv_medium_t medium = KDRV_MEDIUM_FS;
+
+    radio_fresh();
+    card_in();
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_storage_create("link.txt", KDRV_MEDIUM_SD, &medium));
+    TEST_ASSERT_EQUAL_INT((int)KDRV_MEDIUM_SD, (int)medium);
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_write(text, sizeof(text) - 1U));
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_close());
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_open("link.txt", &size, &medium));
+    TEST_ASSERT_EQUAL_INT((int)KDRV_MEDIUM_SD, (int)medium);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(sizeof(text) - 1U), size);
+    (void)memset(got, 0, sizeof(got));
+
+    TEST_ASSERT_EQUAL_INT(KODE_OK, kdrv_storage_read(got, CARD_READ_STEP, &part));
+    n += part;
+
+    dispatch(RADIO_UP_REQ_SIG);
+    finish(KDRV_RADIO_JOB_CONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_UP, link_now());
+    card_untouched("the link came up under an open file");
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_storage_read(&got[n], CARD_READ_STEP, &part));
+    n += part;
+
+    dispatch(RADIO_DOWN_REQ_SIG);
+    finish(KDRV_RADIO_JOB_DISCONNECT, KODE_OK);
+    TEST_ASSERT_EQUAL_INT((int)KRADIO_OFF, link_now());
+    card_untouched("the link went down under an open file");
+    TEST_ASSERT_EQUAL_INT(KODE_OK,
+        kdrv_storage_read(&got[n], sizeof(got) - 1U - n, &part));
+    n += part;
+
+    TEST_ASSERT_EQUAL_UINT((unsigned)(sizeof(text) - 1U), (unsigned)n);
+    TEST_ASSERT_EQUAL_STRING(text, got);
+    (void)kdrv_storage_close();
 }
 
 /* The next file to run the AO cannot finish a job this one holds. */

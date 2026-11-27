@@ -5533,8 +5533,8 @@ TEST_CASE("the card row is refused while a file is open, and answered",
                                    "a refused row printed a phase record");
 }
 
-/* A rescan from the launcher and a radio link coming up both post a mount or
- * an unmount, and either would pull the card out mid-run. */
+/* A rescan from the launcher posts a mount, and a mount or an unmount would
+ * pull the card out mid-run. */
 TEST_CASE("a mount arriving during the card row is ignored", "[storage_ao]")
 {
     bool ok[SD_TEST_STEPS];
@@ -5800,22 +5800,19 @@ static void card_out(void)
     TEST_ASSERT_FALSE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
 }
 
-/** @brief Ask for the card to be mounted, answered to the spy, and let the AO
- *         hand the call to its worker - without running it. */
+/** @brief Ask for the card to be mounted and let the AO hand the call to its
+ *         worker - without running it. */
 static void ask_mount_job(void)
 {
-    TEST_ASSERT_TRUE(storage_request_answered(KDRV_MEDIUM_SD, STORAGE_OP_MOUNT,
-                                              ao_spy()));
+    storage_request(KDRV_MEDIUM_SD, STORAGE_OP_MOUNT);
     (void)qf_support_pump(AO_Storage, 4U);
 }
 
-/** @brief Take the next event and assert it is the command answer. */
-static void take_cmd_rsp(void)
+/** @brief Ask for the card to be unmounted and let the AO take the request. */
+static void ask_unmount(void)
 {
-    const QEvt * const e = ao_spy_take();
-
-    TEST_ASSERT_NOT_NULL_MESSAGE(e, "the command was not answered");
-    TEST_ASSERT_EQUAL_INT(STORAGE_CMD_RSP_SIG, (int)e->sig);
+    storage_request(KDRV_MEDIUM_SD, STORAGE_OP_UNMOUNT);
+    (void)qf_support_pump(AO_Storage, 4U);
 }
 
 TEST_CASE("AO_Storage starts its card worker on a PSRAM stack",
@@ -5827,7 +5824,7 @@ TEST_CASE("AO_Storage starts its card worker on a PSRAM stack",
     TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
 }
 
-TEST_CASE("an sd mount is a job on the card worker, answered when it returns",
+TEST_CASE("an sd mount is a job on the card worker",
           "[storage_ao][worker]")
 {
     storage_fresh();
@@ -5840,13 +5837,10 @@ TEST_CASE("an sd mount is a job on the card worker, answered when it returns",
                                    "the mount was not handed to the worker");
     TEST_ASSERT_FALSE_MESSAGE(kdrv_storage_mounted(KDRV_MEDIUM_SD),
                               "the AO mounted the card in its own step");
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
-                                   "the asker was told before the call returned");
 
     TEST_ASSERT_TRUE(run_sd_job());
 
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
-    take_cmd_rsp();
 }
 
 TEST_CASE("an sd unmount is a job, and an open file keeps the card mounted",
@@ -5860,14 +5854,11 @@ TEST_CASE("an sd unmount is a job, and an open file keeps the card mounted",
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
 
     /* Idle: the unmount is a call, and the card is up until it returns. */
-    TEST_ASSERT_TRUE(storage_request_answered(KDRV_MEDIUM_SD,
-                                              STORAGE_OP_UNMOUNT, ao_spy()));
-    (void)qf_support_pump(AO_Storage, 4U);
+    ask_unmount();
     TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(SD_WORKER));
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
     TEST_ASSERT_TRUE(run_sd_job());
     TEST_ASSERT_FALSE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
-    take_cmd_rsp();
 
     /* A file open on the card: the unmount is refused and no call is made,
      * so nothing is inside the VFS when the card would have gone. */
@@ -5877,13 +5868,10 @@ TEST_CASE("an sd unmount is a job, and an open file keeps the card mounted",
     ask_open("/sdcard/held.bin");
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_open_status());
 
-    TEST_ASSERT_TRUE(storage_request_answered(KDRV_MEDIUM_SD,
-                                              STORAGE_OP_UNMOUNT, ao_spy()));
-    (void)qf_support_pump(AO_Storage, 4U);
+    ask_unmount();
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, fake_khal_worker_pending_for(SD_WORKER),
                                    "an unmount was made under an open file");
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
-    take_cmd_rsp();
 }
 
 TEST_CASE("a card request that arrives while a call to the card is out is "
@@ -5900,7 +5888,6 @@ TEST_CASE("a card request that arrives while a call to the card is out is "
     TEST_ASSERT_TRUE(run_sd_job());
     settle_card();
 
-    take_cmd_rsp();
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the held request was never served");
     TEST_ASSERT_EQUAL_INT(STORAGE_PATH_RSP_SIG, (int)e->sig);
@@ -5922,7 +5909,6 @@ TEST_CASE("a request for the internal partition is served while a call to "
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
                                    "the call to the card was not left alone");
     TEST_ASSERT_TRUE(run_sd_job());
-    take_cmd_rsp();
 }
 
 /* A rescan posts the card's listing and the partition's behind it, and the
@@ -5942,7 +5928,6 @@ TEST_CASE("a listing behind a held one keeps its place", "[storage_ao][worker]")
     TEST_ASSERT_TRUE(run_sd_job());
     settle_card();
 
-    take_cmd_rsp();
     const QEvt * const e = ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(e, "the burst never ended");
     TEST_ASSERT_EQUAL_INT(STORAGE_LIST_END_SIG, (int)e->sig);
@@ -5972,7 +5957,6 @@ TEST_CASE("a card request over the hold queue's room is refused as busy, "
 
     TEST_ASSERT_TRUE(run_sd_job());
     settle_card();
-    take_cmd_rsp();
     for ( unsigned i = 0U; KODE_STORAGE_DEFER_DEPTH > i; ++i )
     {
         const QEvt * const r = ao_spy_take();
@@ -5983,7 +5967,7 @@ TEST_CASE("a card request over the hold queue's room is refused as busy, "
     }
 }
 
-TEST_CASE("a worker with no room leaves the mount refused and answered",
+TEST_CASE("a worker with no room leaves the mount refused",
           "[storage_ao][worker]")
 {
     storage_fresh();
@@ -5994,11 +5978,10 @@ TEST_CASE("a worker with no room leaves the mount refused and answered",
 
     TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
     TEST_ASSERT_FALSE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
-    take_cmd_rsp();
 }
 
-/* The card hangs, the deadline passes and the asker is told; the call returns
- * long after, with the card gone, and its answer is nobody's any more. */
+/* The card hangs and the deadline passes; the call returns long after, with
+ * the card gone, and its result is nobody's any more. */
 TEST_CASE("a result after the card is gone is dropped, and the AO keeps what "
           "it was told last", "[storage_ao][worker]")
 {
@@ -6009,30 +5992,26 @@ TEST_CASE("a result after the card is gone is dropped, and the AO keeps what "
     card_out();
     ask_mount_job();
 
+    fake_klog_reset();
     (void)qf_support_tick(AO_Storage, steps - 1U);
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "told too early");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, log_count("did not return in time"),
+                                   "the deadline passed too early");
     (void)qf_support_tick(AO_Storage, 1U);
-    take_cmd_rsp();
+    TEST_ASSERT_EQUAL_UINT(1U, log_count("did not return in time"));
 
     /* While the call is still out its guard holds: a second mount is held. */
     fake_media_set_sd_present(false);
-    TEST_ASSERT_TRUE(storage_request_answered(KDRV_MEDIUM_SD, STORAGE_OP_MOUNT,
-                                              ao_spy()));
-    (void)qf_support_pump(AO_Storage, 4U);
-    TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
+    ask_mount_job();
     TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, fake_khal_worker_pending_for(SD_WORKER),
                                    "a second call queued behind the first");
 
-    /* The late call returns (the card is gone, so it failed). Its own asker
-     * has been told; only the held mount answers now, as a fresh call. */
-    fake_klog_reset();
+    /* The late call returns (the card is gone, so it failed); only then is
+     * the held mount made, as a fresh call. */
     TEST_ASSERT_TRUE(run_sd_job());
     TEST_ASSERT_FALSE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
-    TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(),
-                                   "a late result answered its asker twice");
     TEST_ASSERT_EQUAL_UINT(1U, fake_khal_worker_pending_for(SD_WORKER));
     TEST_ASSERT_TRUE(run_sd_job());
-    take_cmd_rsp();
+    TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(SD_WORKER));
     TEST_ASSERT_EQUAL_UINT(0U, ao_spy_count());
     fake_media_set_sd_present(true);
 }
@@ -6062,7 +6041,6 @@ TEST_CASE("a done event that is not the call's is dropped by its sequence",
 
     TEST_ASSERT_TRUE(run_sd_job());
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
-    take_cmd_rsp();
 }
 
 /* ---- Which calls are jobs, and which stay -------------------------------- */
@@ -6421,21 +6399,15 @@ TEST_CASE("an info refused while the card is busy still says why it is not "
     ao_spy_drain();
 }
 
-/* The radio asks for the card's unmount WITH an answer before it resets the C5
- * and reads the card's state when it comes: a request the worker cannot take
- * is answered, and the card is then still mounted. */
-TEST_CASE("an unmount the worker cannot take is answered and leaves the card "
-          "mounted", "[storage_ao][worker]")
+TEST_CASE("an unmount the worker cannot take leaves the card mounted",
+          "[storage_ao][worker]")
 {
     storage_fresh();
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
     fake_khal_worker_refuse_for(SD_WORKER, true);
 
-    TEST_ASSERT_TRUE(storage_request_answered(KDRV_MEDIUM_SD,
-                                              STORAGE_OP_UNMOUNT, ao_spy()));
-    (void)qf_support_pump(AO_Storage, 4U);
+    ask_unmount();
 
-    take_cmd_rsp();
     TEST_ASSERT_TRUE(kdrv_storage_mounted(KDRV_MEDIUM_SD));
 }
 
@@ -6444,8 +6416,8 @@ TEST_CASE("an unmount the worker cannot take is answered and leaves the card "
  * (here the identify's, already published), and the width stays owed - also
  * when the call that pays it overruns in turn. The identify ends the run on
  * one line (the card will not come up on more), so the slot has lines to be
- * put back on; the controller then goes away, as it does while the C5's link
- * is down, so no remount reaches the everyday width until it is back. */
+ * put back on; the controller then refuses, so no remount reaches the
+ * everyday width until it answers again. */
 TEST_CASE("an overrun of the final width restore adds no record and keeps the "
           "width owed", "[storage_ao][worker]")
 {
@@ -6506,7 +6478,6 @@ TEST_CASE("a page of the image listing waits behind a card call",
 
     TEST_ASSERT_TRUE(run_sd_job());
     settle_card();
-    take_cmd_rsp();
 
     StorageEntryEvt const * const en = (StorageEntryEvt const *)ao_spy_take();
     TEST_ASSERT_NOT_NULL_MESSAGE(en, "the held page never came");
@@ -6597,7 +6568,6 @@ TEST_CASE("a page over the hold queue's room is answered with its end",
 
     TEST_ASSERT_TRUE(run_sd_job());
     settle_card();
-    take_cmd_rsp();
     ao_spy_drain();
 }
 
@@ -6622,7 +6592,6 @@ TEST_CASE("a refused page that names nobody sends no end at all",
 
     TEST_ASSERT_TRUE(run_sd_job());
     settle_card();
-    take_cmd_rsp();
     ao_spy_drain();
 }
 
@@ -6854,7 +6823,6 @@ TEST_CASE("a space ask of the card waits for a call to the card, and the interna
 
     TEST_ASSERT_TRUE(run_sd_job());
     settle_card();
-    take_cmd_rsp();
     TEST_ASSERT_EQUAL_UINT((uint32_t)KODE_OK, sys_take(FILE_SPACE_RSP_SIG)->rc);
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, ao_spy_count(), "the held ask was answered or published twice");
     TEST_ASSERT_NULL_MESSAGE(ao_spy_other_take(), "the other asker was answered again");
@@ -7812,7 +7780,6 @@ TEST_CASE("a call out to the card refuses the round until it returns",
 
     TEST_ASSERT_TRUE(run_sd_job());
     settle_card();
-    take_cmd_rsp();
     ao_spy_drain();
 
     lp_round(AO_Storage, KODE_LP_ASLEEP);
@@ -9225,7 +9192,6 @@ TEST_CASE("a put that arrives while a call to the card is out is held, then "
     settle_card();
     drain_write();
 
-    take_cmd_rsp();
     TEST_ASSERT_EQUAL_INT(KODE_OK, take_put_status());
     assert_put_bufs_freed();
     TEST_ASSERT_TRUE(fake_media_file_exists(fake_media_sd_dir(), CARD_DEMO_JSON));
@@ -9521,7 +9487,6 @@ TEST_CASE("a folder on the card, the card out, a put and the card back read "
 
     ask_mount_job();
     TEST_ASSERT_TRUE(run_sd_job());
-    take_cmd_rsp();
 
     ask_appdata("demo");
     const AppDataFieldsEvt *f = take_fields(0U);
@@ -9920,9 +9885,7 @@ TEST_CASE("a card that mounts is published once, and one that goes is published"
     (void)run_sd_job();
     TEST_ASSERT_NULL_MESSAGE(take_card(), "a card already told was published again");
 
-    TEST_ASSERT_TRUE(storage_request_answered(KDRV_MEDIUM_SD, STORAGE_OP_UNMOUNT,
-                                              ao_spy()));
-    (void)qf_support_pump(AO_Storage, 4U);
+    ask_unmount();
     TEST_ASSERT_TRUE(run_sd_job());
     c = take_card();
     TEST_ASSERT_NOT_NULL_MESSAGE(c, "the card's going was not published");

@@ -2101,7 +2101,6 @@ static void link_says(kradio_link_t link)
     e->fw_major  = 0U;
     e->fw_minor  = 0U;
     e->fw_patch  = 0U;
-    e->sd_hosted = false;
     QACTIVE_POST(AO_Ir, &e->super, NULL);
     (void)qf_support_settle(AO_Ir);
 }
@@ -2246,8 +2245,8 @@ TEST_CASE("once AO_Radio says the link will not come, requests are refused at on
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, s_raw_calls, "nothing was sent");
     TEST_ASSERT_EQUAL_UINT(0U, fake_khal_worker_pending_for(IR_WORKER));
 
-    /* The next request is answered at once: no wait, and no unmount of the
-     * card for a bring-up that will not come. A listener's arm is owed. */
+    /* The next request is answered at once, with no wait for a bring-up
+     * that will not come. A listener's arm is owed. */
     rc = 0xFFU;
     ir_send_raw_request(sym, RAW_N, RAW_CARRIER_HZ, RAW_START_MS, &rc, done, 34U, &ack);
     ir_capture_request(NULL, 0U, NULL, NULL, 0U, 0U, NULL);

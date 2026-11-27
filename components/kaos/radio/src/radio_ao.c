@@ -31,7 +31,6 @@
 #include "kdrv_ble.h"
 #include "kdrv_ble_hid.h"
 #endif
-#include "kdrv_sd.h"
 #include "kset.h"
 #include "kode_log.h"
 #include "sdkconfig.h"
@@ -121,18 +120,6 @@ typedef enum {
 #endif
 } radio_out_t;
 
-/** @brief What an answer from AO_Storage is for (see radio_ask()). */
-typedef enum {
-    RADIO_ASK_NONE = 0, /**< Nothing: an answer nobody is waiting for.        */
-    RADIO_ASK_CONNECT,  /**< The unmount before the bring-up resets the C5.   */
-    RADIO_ASK_BEGIN,    /**< The unmount before a C5 update opens its session. */
-    RADIO_ASK_TEARDOWN, /**< The unmount before esp-hosted is torn down.      */
-    RADIO_ASK_MOUNT     /**< The remount after the link came up.              */
-} radio_ask_t;
-
-/** @brief Most asks of AO_Storage waiting for an answer at once. */
-#define RADIO_ASK_MAX  6U
-
 #if CONFIG_KODE_LOWPOWER
 /** @brief What the sentinel job in the worker is for (Radio.lp_job). */
 enum {
@@ -171,15 +158,7 @@ _Static_assert(sizeof(RADIO_LP_WHY_FAILED) <= KODE_LOWPOWER_WHY_MAX,
                "the longest busy reason must fit LowPowerReadyEvt.why");
 #endif /* CONFIG_KODE_LOWPOWER */
 
-/** @brief How long after a refused unmount (the card answered, and is still
- *         mounted) it is asked again, in ms. */
-#define RADIO_UNMOUNT_RETRY_MS  500U
-
-/** @brief How long a refused unmount is asked again before the link, the
- *         update or the teardown goes on without the card, in ms. */
-#define RADIO_UNMOUNT_WAIT_MS   10000U
-
-/** @brief Milliseconds in a second, to print RADIO_UNMOUNT_WAIT_MS. */
+/** @brief Milliseconds in a second, to print a time in seconds. */
 #define RADIO_MS_PER_S          1000U
 
 /** @brief Networks whose last channel is kept, most recent first. */
@@ -568,20 +547,6 @@ typedef struct {
                                *   automatic round: its search ends with the
                                *   job in hand (auto_rest_yield()).          */
 #endif
-    uint8_t  ask[RADIO_ASK_MAX]; /**< The asks of AO_Storage that are answered
-                               *   and not yet heard, oldest first (radio_ask_t):
-                               *   the answers come in the order the asks went. */
-    uint8_t  ask_n;           /**< How many.                                   */
-    QTimeEvt unmount_retry;   /**< RADIO_UNMOUNT_RETRY_SIG: a refused unmount
-                               *   is asked again when this expires.          */
-    uint8_t  retry_kind;      /**< radio_ask_t whose unmount is being asked
-                               *   again; RADIO_ASK_NONE when none is.        */
-    uint16_t retry_waited_ms; /**< Time spent since the first refusal.         */
-    bool     begin_wait;      /**< A C5 update waits for the card's unmount
-                               *   before it opens its session.               */
-    bool     card_wait;       /**< The link is up and the card's remount has
-                               *   been asked for: Radio_starting holds until
-                               *   AO_Storage says it has run.                */
     bool     link_asked;      /**< The link was asked for by itself - `radio_up`,
                                *   a row, a C5 update - with neither service
                                *   wanted, so no service going off ends it.   */
@@ -773,204 +738,6 @@ typedef struct {
 
 static Radio l_radio;
 
-/* radio_boot_hold(): the first connect of this boot leaves the card mounted. */
-static bool s_boot_card_stays;
-
-/**
- * @brief Ask AO_Storage for the card's mount or unmount, WITH an answer, and
- *        remember what the answer is for.
- *
- * AO_Storage's mount and unmount run on its worker, so a posted one has not
- * run when the post returns. Whatever must not happen before the card has
- * let go (resetting the C5, deinitialising esp-hosted, which gives up the
- * SDMMC host the card sits on) waits for the answer instead. The answers come
- * in the order the asks went, so a short queue of what each is for is enough.
- *
- * @param me   The AO.
- * @param op   STORAGE_OP_MOUNT or STORAGE_OP_UNMOUNT.
- * @param kind What the answer is for.
- * @return true when the ask is with AO_Storage and its answer will come;
- *         false when it could not be made, and none will.
- */
-static bool radio_ask(Radio * const me, storage_op_t op, radio_ask_t kind)
-{
-    if ( (uint8_t)RADIO_ASK_MAX <= me->ask_n )
-    {
-        KLOG_W(TAG, "too many asks of the card are waiting for an answer");
-        return false;
-    }
-    if ( !storage_request_answered(KDRV_MEDIUM_SD, op, &me->super) )
-    {
-        return false;
-    }
-    me->ask[me->ask_n] = (uint8_t)kind;
-    me->ask_n += 1U;
-    return true;
-}
-
-/**
- * @brief Take the oldest ask off the list: AO_Storage has answered it.
- * @param me The AO.
- * @return What it was for; RADIO_ASK_NONE for an answer nobody is waiting for.
- */
-static radio_ask_t radio_asked(Radio * const me)
-{
-    radio_ask_t kind = RADIO_ASK_NONE;
-
-    if ( 0U < me->ask_n )
-    {
-        kind = (radio_ask_t)me->ask[0];
-        for ( uint8_t i = 1U; i < me->ask_n; ++i )
-        {
-            me->ask[i - 1U] = me->ask[i];
-        }
-        me->ask_n -= 1U;
-    }
-    return kind;
-}
-
-/** @brief Whether an ask of @p kind is waiting for its answer. */
-static bool radio_asking(Radio const * const me, radio_ask_t kind)
-{
-    for ( uint8_t i = 0U; i < me->ask_n; ++i )
-    {
-        if ( (uint8_t)kind == me->ask[i] )
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-/**
- * @brief The unmount of @p kind is settled: stop asking again.
- * @param me   The AO.
- * @param kind The ask that ended.
- */
-static void radio_unmount_end(Radio * const me, radio_ask_t kind)
-{
-    if ( (uint8_t)kind == me->retry_kind )
-    {
-        (void)QTimeEvt_disarm(&me->unmount_retry);
-        me->retry_kind      = (uint8_t)RADIO_ASK_NONE;
-        me->retry_waited_ms = 0U;
-    }
-}
-
-/**
- * @brief Say that the card stayed busy for the whole window, and what comes of it.
- * @param kind The ask that gave up.
- */
-static void radio_unmount_gave_up(radio_ask_t kind)
-{
-    unsigned const secs = RADIO_UNMOUNT_WAIT_MS / RADIO_MS_PER_S;
-
-    switch ( kind )
-    {
-        case RADIO_ASK_CONNECT: {
-            KLOG_W(TAG, "the SD card stayed busy for %u s; link not started",
-                   secs);
-            break;
-        }
-        case RADIO_ASK_BEGIN: {
-            KLOG_W(TAG, "the SD card stayed busy for %u s; C5 update not "
-                        "started", secs);
-            break;
-        }
-        default: {
-            KLOG_W(TAG, "the SD card stayed busy for %u s; the link comes "
-                        "down anyway", secs);
-            break;
-        }
-    }
-}
-
-/**
- * @brief An unmount was answered: wait and ask again, or settle it.
- *
- * AO_Storage refuses an unmount while a transfer has the card open, and
- * answers all the same: a card still mounted is asked again every
- * RADIO_UNMOUNT_RETRY_MS until RADIO_UNMOUNT_WAIT_MS have gone by. One window
- * at a time: another ask refused meanwhile gets no second window.
- *
- * @param me   The AO.
- * @param kind What the answered ask was for.
- * @return true when the card is still mounted and the ask will be made again
- *         (the caller waits); false when the card let go, or the window is
- *         spent (one warning said), and the caller goes on.
- */
-static bool radio_unmount_wait(Radio * const me, radio_ask_t kind)
-{
-    bool wait = false;
-
-    if ( !kdrv_sd_mounted() || ((RADIO_ASK_CONNECT == kind) && s_boot_card_stays) )
-    {
-        radio_unmount_end(me, kind);
-    }
-    else if ( ((uint8_t)RADIO_ASK_NONE != me->retry_kind)
-             && ((uint8_t)kind != me->retry_kind) )
-    {
-        /* The timer is busy with another ask: no second window. */
-    }
-    else
-    {
-        if ( (uint8_t)RADIO_ASK_NONE == me->retry_kind )
-        {
-            me->retry_kind      = (uint8_t)kind;
-            me->retry_waited_ms = 0U;
-        }
-        if ( RADIO_UNMOUNT_WAIT_MS > me->retry_waited_ms )
-        {
-            QTimeEvt_armX(&me->unmount_retry,
-                          KQP_TICKS_PER_MS(RADIO_UNMOUNT_RETRY_MS), 0U);
-            wait = true;
-        }
-        else
-        {
-            radio_unmount_gave_up(kind);
-            radio_unmount_end(me, kind);
-        }
-    }
-    return wait;
-}
-
-/**
- * @brief The retry timer expired: ask for the unmount again.
- *
- * @param me The AO.
- * @return true when the ask was made again (its answer will come), or could
- *         not be made and the timer was set again; false when it could not
- *         be made and the window is spent: the caller runs the answer's path,
- *         which finds the window spent.
- */
-static bool radio_unmount_refire(Radio * const me)
-{
-    bool again = true;
-
-    me->retry_waited_ms += (uint16_t)RADIO_UNMOUNT_RETRY_MS;
-    if ( !radio_ask(me, STORAGE_OP_UNMOUNT, (radio_ask_t)me->retry_kind) )
-    {
-        if ( RADIO_UNMOUNT_WAIT_MS > me->retry_waited_ms )
-        {
-            QTimeEvt_armX(&me->unmount_retry,
-                          KQP_TICKS_PER_MS(RADIO_UNMOUNT_RETRY_MS), 0U);
-        }
-        else
-        {
-            again = false;
-        }
-    }
-    return again;
-}
-
-/** @brief Whether the teardown still waits for the card: an unmount asked and
- *         not answered, or one that is to be asked again. */
-static bool radio_teardown_waiting(Radio const * const me)
-{
-    return radio_asking(me, RADIO_ASK_TEARDOWN)
-        || ((uint8_t)RADIO_ASK_TEARDOWN == me->retry_kind);
-}
-
 QActive * const AO_Radio = &l_radio.super;
 
 /* The C5's own slots are 1.9 MB each (https://docs.kode.diy/sdk/kdrv/c5), so an
@@ -1109,7 +876,6 @@ bool radio_state_request(void)
 
 void radio_boot_hold(void)
 {
-    s_boot_card_stays = true;
     kdrv_radio_gate(true);
 }
 
@@ -3098,7 +2864,6 @@ static void radio_publish(Radio * const me, kradio_link_t link)
         e->fw_major  = e->fw_known ? fw.major : 0U;
         e->fw_minor  = e->fw_known ? fw.minor : 0U;
         e->fw_patch  = e->fw_known ? fw.patch : 0U;
-        e->sd_hosted = (KRADIO_UP == link);
         e->gave_up   = me->relink_dead;
         e->c5_fit    = (uint8_t)KRADIO_C5_FIT_UNKNOWN;
         if ( KRADIO_UP == link )
@@ -5633,39 +5398,18 @@ static bool scan_orphan_back(Radio * const me)
 #endif /* RADIO_ASKS */
 
 /**
- * @brief Post a request to AO_Storage and go on.
+ * @brief Bring the link up: the CONNECT job, which resets the C5.
  *
- * Posted, not waited for: AO_Storage's unmount and mount are calls on its
- * worker, so nothing here may assume they have run when this returns. What
- * must not go ahead of one is asked for with radio_ask().
- */
-static void radio_storage_ask(storage_op_t op)
-{
-    storage_request(KDRV_MEDIUM_SD, op);
-}
-
-/** @brief Back to the plain mount path, card remounted. */
-static void radio_restore_plain_sd(void)
-{
-    kdrv_sd_set_hosted(false);
-    radio_storage_ask(STORAGE_OP_MOUNT);
-}
-
-/**
- * @brief Everything that must happen before the C5 can be reset, then the
- *        CONNECT job.
+ * The card stays mounted: its slot and the link's share one SDMMC
+ * controller, each on its own pins, and the card's supply is the P4's.
  *
- * In order: hosted mode first, so a mount typed during bring-up fails cleanly
- * instead of fighting esp-hosted for the controller; then the unmount, asked
- * WITH an answer; only when it has run is the job handed to the worker
- * (radio_connect_after_unmount(), from Radio_starting). The channel is held
- * meanwhile. A request that cannot be asked undoes all of it.
- *
- * @return true when the unmount is asked for and `starting` may be entered;
- *         false when it could not be asked, and nothing changed.
+ * @return true when the job is with the worker and `starting` may be entered;
+ *         false when the worker refused it.
  */
 static bool radio_begin_connect(Radio * const me)
 {
+    kdrv_radio_req_t req;
+
     /* Whoever asks for the link with neither service wanted is asking for
      * the link itself, and it is theirs until `radio_down`: no service
      * going off will take it away. A service request sets its flag before
@@ -5686,78 +5430,11 @@ static bool radio_begin_connect(Radio * const me)
     me->relink_wake = false;
     me->relinked    = me->relink_owed;
     me->relink_owed = false;
-    KLOG_N(TAG, "bringing the C5 link up (the card is unmounted while the "
-                "C5 reboots)");
-    kdrv_sd_set_hosted(true);
-    /* An interface reading its first screen off the card asked for the card to
-     * stay (radio_boot_hold()): mounted, it is what the answer waits for. The
-     * card's supply is the P4's since the DVT, and the C5's reset does not
-     * reach it. */
-    if ( !radio_ask(me, s_boot_card_stays ? STORAGE_OP_MOUNT : STORAGE_OP_UNMOUNT,
-                    RADIO_ASK_CONNECT) )
-    {
-        KLOG_E(TAG, "the card could not be asked to let go; the C5 is not "
-                    "reset");
-        radio_restore_plain_sd();
-        return false;
-    }
-    me->busy = true;
-    return true;
-}
-
-/**
- * @brief Tell whoever was waiting for the link that it will not come.
- *
- * What the refusals at the request did, for a refusal that is only known when
- * the card has answered: an update that was bringing the link up for its image
- * fails, and the service whose switch asked for the link says its state.
- *
- * @param me The AO.
- */
-static void radio_connect_refused(Radio * const me)
-{
-    if ( (uint8_t)INST_LINKING == me->inst )
-    {
-        KLOG_E(TAG, "install dst=c5 failed: the link could not be brought up");
-        inst_fail(me);
-    }
-#if CONFIG_KODEOS_WIFI
-    wifi_publish_state(me);
-#endif
-#if CONFIG_KODEOS_BLE
-    ble_publish_state(me);
-#endif
-}
-
-/**
- * @brief The card has let go (or has not): reset the C5, or refuse to.
- *
- * Called from Radio_starting when AO_Storage answers the unmount that
- * radio_begin_connect() asked for.
- *
- * @return KODE_OK when the connect job is with the worker; KODE_DENIED when
- *         the card is still mounted and KODE_NO_RESOURCES when the worker
- *         refused: the bring-up is over, the plain mount path is back and the
- *         caller fails the state.
- */
-static kode_status_t radio_connect_after_unmount(Radio * const me)
-{
-    kdrv_radio_req_t req;
-
-    if ( kdrv_sd_mounted() && !s_boot_card_stays )
-    {
-        /* The reset glitches the card's supply: with a volume mounted that
-         * is a corrupted card, so the link is not brought up. */
-        KLOG_E(TAG, "the card is still mounted; the C5 is not reset");
-        me->busy = false;
-        radio_restore_plain_sd();
-        return KODE_DENIED;
-    }
+    KLOG_N(TAG, "bringing the C5 link up");
     /* The bring-up resets the C5, which lets go of J3's supply enable, and
      * then drives it as the wish is when it gets there (kdrv_radio_exp_wish()):
      * on from the reset, and where the wish says once the link is up. A pulse
      * still running is the reset's now. */
-    s_boot_card_stays = false;
     (void)memset(&req, 0, sizeof(req));
     req.type       = KDRV_RADIO_JOB_CONNECT;
     /* A C5 the last firmware parked is kept only for a boot that joins. */
@@ -5766,95 +5443,24 @@ static kode_status_t radio_connect_after_unmount(Radio * const me)
     if ( !radio_submit_req(me, &req) )
     {
         KLOG_E(TAG, "the worker refused the connect job");
-        radio_restore_plain_sd();
-        return KODE_NO_RESOURCES;
+        return false;
     }
     (void)QTimeEvt_disarm(&me->exp_pulse);
     me->exp_on    = true;   /* the bring-up resets the C5, which lets go of IO5 */
     me->exp_known = true;
-    return KODE_OK;
+    return true;
 }
 
 /**
- * @brief The card answered the unmount that gates the bring-up.
- *
- * A card still mounted is asked again (radio_unmount_wait()) and the
- * bring-up holds; one that let go gets the connect job; one that stayed
- * mounted for the whole window fails the link.
- *
- * @param me The AO, in Radio_starting.
- * @return The state's answer: handled while the connect is with the worker or
- *         the unmount is asked again, a transition to Radio_failed when the
- *         card stayed mounted and to Radio_off when the worker refused.
- */
-static QState radio_connect_answer(Radio * const me)
-{
-    QState status;
-
-    if ( radio_unmount_wait(me, RADIO_ASK_CONNECT) )
-    {
-        status = Q_HANDLED();
-    }
-    else
-    {
-        /* The connect goes to the worker only if the card really let go. */
-        kode_status_t const gate = radio_connect_after_unmount(me);
-
-        if ( KODE_OK == gate )
-        {
-            status = Q_HANDLED();
-        }
-        else if ( KODE_DENIED == gate )
-        {
-            /* A card still mounted is a refusal of its own: the link is
-             * failed, not just unasked. */
-            if ( (uint8_t)TEST_IDLE != me->test_phase )
-            {
-                c5_test_end(me, false, "the card is still mounted; the C5 was "
-                                       "not reset");
-            }
-            radio_connect_refused(me);
-            status = Q_TRAN(&Radio_failed);
-        }
-        else
-        {
-            /* The worker would not take the connect: what a refusal at the
-             * request always did - the link stays where it was, off, and
-             * whoever asked is told. */
-            if ( (uint8_t)TEST_IDLE != me->test_phase )
-            {
-                c5_test_end(me, false, "the worker refused the connect job");
-            }
-            radio_connect_refused(me);
-            status = Q_TRAN(&Radio_off);
-        }
-    }
-    return status;
-}
-
-/**
- * @brief The card has let go (or has not): open the C5 update's session, or
- *        refuse the update.
- *
- * The activate at the end of the push reboots the C5, which switches the
- * card's supply; with a volume still mounted that corrupts the card, so the
- * update does not start.
+ * @brief Open a C5 update's session: the image is verified in PSRAM.
  *
  * @param me The AO.
- * @return true when the session is being opened; false when the update ended
- *         (the card is still mounted, or the worker refused) and the caller
- *         leaves the state.
+ * @return true when the session is being opened; false when the worker
+ *         refused it, the update ended and the caller leaves the state.
  */
-static bool radio_begin_after_unmount(Radio * const me)
+static bool radio_c5_begin(Radio * const me)
 {
-    me->begin_wait = false;
-    me->busy       = false;
-    if ( kdrv_sd_mounted() )
-    {
-        c5_release(me);
-        ota_fail(me, "the card is still mounted; the C5 was not touched");
-        return false;
-    }
+    me->busy = false;
     KLOG_N(TAG, "sending %luKB to the C5 (do not power the board "
                 "off until this finishes)",
            (unsigned long)(me->kbuf.fill / 1024U));
@@ -5865,38 +5471,6 @@ static bool radio_begin_after_unmount(Radio * const me)
         return false;
     }
     return true;
-}
-
-/**
- * @brief The card answered the unmount that gates a C5 update's session.
- *
- * A card still mounted is asked again (radio_unmount_wait()) and the update
- * holds; the rest is radio_begin_after_unmount().
- *
- * @param me The AO, in Radio_updating.
- * @return Handled while the session is being opened or the unmount is asked
- *         again; a transition to Radio_up when the update ended.
- */
-static QState radio_begin_answer(Radio * const me)
-{
-    QState status = Q_HANDLED();
-
-    if ( !me->begin_wait )
-    {
-        radio_unmount_end(me, RADIO_ASK_BEGIN);   /* the update ended meanwhile */
-    }
-    else if ( !radio_unmount_wait(me, RADIO_ASK_BEGIN) )
-    {
-        if ( !radio_begin_after_unmount(me) )
-        {
-            status = Q_TRAN(&Radio_up);
-        }
-    }
-    else
-    {
-        /* Asked again in a moment. */
-    }
-    return status;
 }
 
 /* ---- The radio worker's jobs ----------------------------------------------- */
@@ -6090,24 +5664,13 @@ static bool radio_submit_req(Radio * const me, const kdrv_radio_req_t *req)
                (int)req->type);
         return false;
     }
-    if ( (KDRV_RADIO_JOB_DISCONNECT == req->type)
-        && (radio_svc_busy(me) || radio_teardown_waiting(me)) )
+    if ( (KDRV_RADIO_JOB_DISCONNECT == req->type) && radio_svc_busy(me) )
     {
         /* The teardown destroys what a send inside esp-hosted's RPC wait is
-         * sleeping on, gives up the SDMMC host a mounted card sits on, and
-         * ends with the C5 held in reset, which switches the card's supply
-         * off. It is owed, the channel is held for it, and the last of the
-         * sends and of the card's unmount answers pays it
-         * (radio_disc_release()). */
-        if ( radio_svc_busy(me) )
-        {
-            KLOG_I(TAG, "the teardown waits for a KODE request inside the C5 "
-                        "link");
-        }
-        else
-        {
-            KLOG_I(TAG, "the teardown waits for the card to be unmounted");
-        }
+         * sleeping on. It is owed, the channel is held for it, and the last
+         * of the sends pays it (radio_disc_release()). */
+        KLOG_I(TAG, "the teardown waits for a KODE request inside the C5 "
+                    "link");
         me->disc_owed = true;
         me->busy      = true;
         return true;
@@ -6261,84 +5824,19 @@ static bool radio_heard_stream_end(Radio * const me, kble_heard_why_t why)
 /**
  * @brief Send the owed teardown, if nothing it waits for is left.
  *
- * Three things hold a DISCONNECT: the job inside the radio worker (it uses the
- * worker's storage), a KODE send inside the service worker, and an unmount of
- * the card that has not been answered. It goes once, when the last of them is
- * back, whichever that is; this is called by each of their ends.
+ * Two things hold a DISCONNECT: the job inside the radio worker (it uses the
+ * worker's storage) and a KODE send inside the service worker. It goes once,
+ * when the last of them is back, whichever that is; this is called by each of
+ * their ends.
  *
  * @param me The AO.
  */
 static void radio_disc_release(Radio * const me)
 {
-    if ( me->disc_owed && (!me->winflight) && (!radio_svc_busy(me))
-        && (!radio_teardown_waiting(me)) )
+    if ( me->disc_owed && (!me->winflight) && (!radio_svc_busy(me)) )
     {
         me->disc_owed = false;
         (void)radio_submit(me, KDRV_RADIO_JOB_DISCONNECT);
-    }
-}
-
-/**
- * @brief The card has let go, or could not: the teardown it held may go.
- *
- * A teardown cannot wait for ever on a card that will not unmount: a refused
- * unmount is asked again for RADIO_UNMOUNT_WAIT_MS (radio_unmount_wait()),
- * then the link comes down with the card mounted under it, said in the log.
- *
- * @param me The AO.
- */
-static void radio_teardown_answered(Radio * const me)
-{
-    if ( radio_unmount_wait(me, RADIO_ASK_TEARDOWN) )
-    {
-        return;     /* asked again in a moment; the teardown keeps waiting */
-    }
-    if ( kdrv_sd_mounted() )
-    {
-        KLOG_W(TAG, "the card is still mounted; the link comes down anyway");
-    }
-    radio_disc_release(me);
-}
-
-/**
- * @brief The retry timer expired where only a teardown's unmount can be
- *        waiting (every state but the two that own the others).
- *
- * @param me The AO.
- */
-static void radio_teardown_retry(Radio * const me)
-{
-    if ( (uint8_t)RADIO_ASK_TEARDOWN != me->retry_kind )
-    {
-        /* An old expiry of a window that ended. */
-        radio_unmount_end(me, (radio_ask_t)me->retry_kind);
-    }
-    else if ( !radio_unmount_refire(me) )
-    {
-        radio_teardown_answered(me);
-    }
-    else
-    {
-        /* Asked again; the answer comes. */
-    }
-}
-
-/**
- * @brief Ask the card to let go before the link is torn down.
- *
- * Asked WITH an answer: the DISCONNECT that follows is held until it comes
- * (radio_submit_req()). When the ask cannot be made at all the unmount is
- * posted without one and the teardown does not wait.
- *
- * @param me The AO.
- */
-static void radio_unmount_for_teardown(Radio * const me)
-{
-    if ( !radio_ask(me, STORAGE_OP_UNMOUNT, RADIO_ASK_TEARDOWN) )
-    {
-        KLOG_W(TAG, "the card could not be asked to let go; the teardown "
-                    "does not wait for it");
-        radio_storage_ask(STORAGE_OP_UNMOUNT);
     }
 }
 
@@ -10159,8 +9657,6 @@ void Radio_ctor(void)
     me->announced    = false;
     QTimeEvt_ctorX(&me->inst_idle, &me->super, RADIO_RECV_IDLE_SIG, 0U);
     me->link_asked  = false;
-    me->card_wait   = false;
-    me->ask_n       = 0U;
     me->ask_scan    = (uint8_t)SCAN_ASK_NONE;
     me->ask_kind    = (uint8_t)KQP_SCAN_WIFI;
     me->ask_ms      = 0U;
@@ -10181,10 +9677,6 @@ void Radio_ctor(void)
     me->rsp_name[0] = '\0';
     me->rsp_len     = 0U;
     me->rsp_dirty   = false;
-    QTimeEvt_ctorX(&me->unmount_retry, &me->super, RADIO_UNMOUNT_RETRY_SIG, 0U);
-    me->retry_kind      = (uint8_t)RADIO_ASK_NONE;
-    me->retry_waited_ms = 0U;
-    me->begin_wait  = false;
     me->relink_owed = false;
     me->relinked    = false;
     QTimeEvt_ctorX(&me->relink_tmo, &me->super, RADIO_RELINK_SIG, 0U);
@@ -10776,10 +10268,10 @@ static bool radio_config(Radio * const me, QEvt const * const e)
 /* ---- Taking the link down, and the C5 into reset ---------------------------- */
 
 /**
- * @brief Take the link down the way `radio_down` does: the card lets go, then
- *        esp-hosted is torn down.
+ * @brief Take the link down the way `radio_down` does: esp-hosted is torn
+ *        down, and the card stays mounted.
  *
- * A refused DISCONNECT restores the card and leaves the link as it was.
+ * A refused DISCONNECT leaves the link as it was.
  *
  * @param me The AO.
  * @return true when the teardown is under way and the caller moves to
@@ -10787,15 +10279,7 @@ static bool radio_config(Radio * const me, QEvt const * const e)
  */
 static bool radio_teardown_begin(Radio * const me)
 {
-    bool going;
-
-    radio_unmount_for_teardown(me);
-    going = radio_submit(me, KDRV_RADIO_JOB_DISCONNECT);
-    if ( !going )
-    {
-        radio_storage_ask(STORAGE_OP_MOUNT);
-    }
-    return going;
+    return radio_submit(me, KDRV_RADIO_JOB_DISCONNECT);
 }
 
 #if defined(CONFIG_KODEOS_C5_HOLD)
@@ -11708,16 +11192,6 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
     QState status;
     switch ( e->sig )
     {
-        case STORAGE_CMD_RSP_SIG: {
-            /* The link is down or on its way: an answer of AO_Storage is
-             * the unmount a teardown was owed, or nobody's. */
-            if ( radio_asked(me) == RADIO_ASK_TEARDOWN )
-            {
-                radio_teardown_answered(me);
-            }
-            status = Q_HANDLED();
-            break;
-        }
         case Q_ENTRY_SIG: {
 #if CONFIG_KODE_LOWPOWER
             radio_lp_link_gone(me);
@@ -11734,11 +11208,6 @@ static QState Radio_down(Radio * const me, QEvt const * const e)
             {
                 radio_park_end(me, false, "the link went down");
             }
-            status = Q_HANDLED();
-            break;
-        }
-        case RADIO_UNMOUNT_RETRY_SIG: {
-            radio_teardown_retry(me);
             status = Q_HANDLED();
             break;
         }
@@ -12340,8 +11809,15 @@ static QState Radio_off(Radio * const me, QEvt const * const e)
             break;
         }
         case RADIO_UP_REQ_SIG: {
-            status = radio_begin_connect(me) ? Q_TRAN(&Radio_starting)
-                                             : Q_HANDLED();
+            if ( radio_begin_connect(me) )
+            {
+                status = Q_TRAN(&Radio_starting);
+            }
+            else
+            {
+                radio_publish(me, KRADIO_OFF);   /* refused: still off */
+                status = Q_HANDLED();
+            }
             break;
         }
         case RADIO_TEST_REQ_SIG: {
@@ -12459,115 +11935,21 @@ static QState Radio_starting(Radio * const me, QEvt const * const e)
                             && ((uint8_t)INST_LINKING != me->inst);
                 me->wifi_adopted = false;
             }
-            if ( me->card_wait
-                && ((uint8_t)RADIO_OUT_LINK_LOST == job->evt) )
-            {
-                /* The link dropped while the card was coming back. What
-                 * Radio_up does with a lost link, from one step earlier. */
-                me->card_wait = false;
-                if ( (uint8_t)TEST_IDLE != me->test_phase )
-                {
-                    c5_test_end(me, false, "the link dropped as it came up");
-                }
-                radio_unmount_for_teardown(me);
-                radio_disconnect_after_loss(me);
-                status = Q_TRAN(&Radio_failed);
-            }
-            else if ( (uint8_t)RADIO_OUT_CONNECT_DONE != job->evt )
+            if ( (uint8_t)RADIO_OUT_CONNECT_DONE != job->evt )
             {
                 status = Q_HANDLED();   /* not ours - a stale outcome */
             }
             else if ( (uint8_t)KODE_OK != job->status )
             {
-                /* The driver deinitialised on every failure path, so the
-                 * plain mount path is already safe again. */
+                /* The driver deinitialised on every failure path. */
                 me->busy = false;
                 c5_test_link_failed(me, (kode_status_t)job->status);
-                radio_restore_plain_sd();
                 status = Q_TRAN(&Radio_failed);
             }
-            else if ( (uint8_t)INST_LINKING == me->inst )
-            {
-                /* Up for an image already verified in PSRAM: the card is
-                 * not remounted (Radio_up's entry says why), so there is
-                 * nothing to wait for. */
-                me->busy = false;
-                status = Q_TRAN(&Radio_up);
-            }
-            else if ( radio_ask(me, STORAGE_OP_MOUNT, RADIO_ASK_MOUNT) )
-            {
-                /* The link is up and the slave (plus the driver's belt) has
-                 * the card powered again: give it back, through the hosted
-                 * path, and hold here until that has run. The channel stays
-                 * busy meanwhile - nothing goes to the C5 while the card is
-                 * being asked who it is. */
-                me->card_wait = true;
-                status = Q_HANDLED();
-            }
             else
             {
-                /* No event left to carry the answer, so none will come:
-                 * ask the plain way rather than wait for ever. */
-                radio_storage_ask(STORAGE_OP_MOUNT);
                 me->busy = false;
                 status = Q_TRAN(&Radio_up);
-            }
-            break;
-        }
-        case STORAGE_CMD_RSP_SIG: {
-            /* An answer of AO_Storage, in the order the asks went: the
-             * unmount that gates the reset, the remount after the link, or
-             * an unmount of a teardown that was owed. "Mounted" or "no card"
-             * both mean the card has settled. */
-            switch ( radio_asked(me) )
-            {
-                case RADIO_ASK_CONNECT: {
-                    status = radio_connect_answer(me);
-                    break;
-                }
-                case RADIO_ASK_MOUNT: {
-                    if ( me->card_wait )
-                    {
-                        me->card_wait = false;
-                        me->busy      = false;
-                        status = Q_TRAN(&Radio_up);
-                    }
-                    else
-                    {
-                        status = Q_HANDLED();
-                    }
-                    break;
-                }
-                case RADIO_ASK_TEARDOWN: {
-                    radio_teardown_answered(me);
-                    status = Q_HANDLED();
-                    break;
-                }
-                default: {
-                    status = Q_HANDLED();
-                    break;
-                }
-            }
-            break;
-        }
-        case RADIO_UNMOUNT_RETRY_SIG: {
-            if ( (uint8_t)RADIO_ASK_CONNECT == me->retry_kind )
-            {
-                /* The card was still mounted at the last answer: asked
-                 * again, and when that cannot be done in the window left,
-                 * the bring-up ends as the last answer would have ended it. */
-                if ( radio_unmount_refire(me) )
-                {
-                    status = Q_HANDLED();
-                }
-                else
-                {
-                    status = radio_connect_answer(me);
-                }
-            }
-            else
-            {
-                status = Q_SUPER(&Radio_down);
             }
             break;
         }
@@ -12638,7 +12020,6 @@ static QState Radio_stopping(Radio * const me, QEvt const * const e)
             if ( (uint8_t)RADIO_OUT_DISCONNECT_DONE == job->evt )
             {
                 me->busy = false;
-                radio_restore_plain_sd();
                 status = Q_TRAN(&Radio_off);
             }
             else
@@ -12784,8 +12165,15 @@ static QState Radio_failed(Radio * const me, QEvt const * const e)
             break;
         }
         case RADIO_UP_REQ_SIG: {
-            status = radio_begin_connect(me) ? Q_TRAN(&Radio_starting)
-                                             : Q_HANDLED();
+            if ( radio_begin_connect(me) )
+            {
+                status = Q_TRAN(&Radio_starting);
+            }
+            else
+            {
+                radio_publish(me, KRADIO_FAILED);   /* refused: still failed */
+                status = Q_HANDLED();
+            }
             break;
         }
         case RADIO_TEST_REQ_SIG: {
@@ -12809,7 +12197,6 @@ static QState Radio_failed(Radio * const me, QEvt const * const e)
         case RADIO_DOWN_REQ_SIG: {
             /* Nothing left to tear down - every path into this state
              * deinitialised (or has a DISCONNECT in flight); settle. */
-            radio_restore_plain_sd();
             status = Q_TRAN(&Radio_off);
             break;
         }
@@ -12841,12 +12228,10 @@ static QState Radio_failed(Radio * const me, QEvt const * const e)
                 }
                 else
                 {
-                    /* Nothing owed, or the card would not be asked: the next
-                     * wait, if there is one, is what is left. */
+                    /* Nothing owed, or the worker refused the connect: the
+                     * next wait, if there is one, is what is left. */
                 }
                 me->relink_owed = false;
-                /* The plain mount path is back. */
-                radio_restore_plain_sd();
             }
             status = Q_HANDLED();
             break;
@@ -12979,10 +12364,9 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
     switch ( (radio_out_t)job->evt )
     {
         case RADIO_OUT_LINK_LOST: {
-            /* The transport died under us and took the hosted
-             * mount's controller with it. Let go of the card, then
-             * have the worker deinitialise so `failed` always means
-             * "cleanly torn down, retry from scratch". */
+            /* The transport died under us. Have the worker
+             * deinitialise so `failed` always means "cleanly torn
+             * down, retry from scratch"; the card's slot stays. */
             probe_lost(me);
             if ( (uint8_t)TEST_IDLE != me->test_phase )
             {
@@ -13020,7 +12404,6 @@ static QState Radio_up_outcome(Radio * const me, RadioOutcome const * const job)
             kdrv_ble_scan_abort(false);
 #endif
             radio_relink_note(me, (kode_status_t)job->status);
-            radio_unmount_for_teardown(me);
             radio_disconnect_after_loss(me);
             settle = false;
             status = Q_TRAN(&Radio_failed);
@@ -13444,9 +12827,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 /* The link came up for an image already verified in PSRAM:
                  * the push goes first and nothing is reconciled, since a
                  * service would hold the channel, and once the image is
-                 * activated the link is down for this boot. The card is not
-                 * remounted: the push unmounts it again before the C5
-                 * reboots, and the update's end mounts it. */
+                 * activated the link is down for this boot. */
                 me->recon = (uint8_t)RECON_DONE;
                 me->inst  = (uint8_t)INST_READY;
                 radio_publish(me, KRADIO_UP);
@@ -13454,8 +12835,6 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 status = Q_HANDLED();
                 break;
             }
-            /* The card is back already: Radio_starting held until its
-             * remount had run. */
             me->relink_dead = false;
             radio_publish(me, KRADIO_UP);
             if ( KRADIO_C5_FIT_OLD == radio_c5_fit() )
@@ -13675,8 +13054,8 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
         }
         case RADIO_INSTALL_GO_SIG: {
             /* The verified image asks for the channel. Busy means owed, paid
-             * by the settle; free means the start `install dst=c5` makes,
-             * the card let go of before the C5 reboots. A row waiting its turn
+             * by the settle; free means the start `install dst=c5` makes:
+             * the session opens at once. A row waiting its turn
              * is ended first: the update holds the channel for a minute and
              * reboots the chip the row was about to describe. */
             if ( (uint8_t)INST_READY != me->inst )
@@ -13695,24 +13074,15 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             {
                 c5_test_end(me, false, "a C5 firmware update started");
             }
-            /* The activate reboots the C5 and the C5 switches the card's
-             * supply: the card is let go of first, asked for WITH an answer
-             * and waited for, and the session opens only when the card is
-             * no longer mounted (radio_begin_after_unmount()). */
-            if ( !radio_ask(me, STORAGE_OP_UNMOUNT, RADIO_ASK_BEGIN) )
-            {
-                c5_release(me);
-                ota_fail(me, "the card could not be asked to let go; the C5 "
-                             "was not touched");
-                status = Q_HANDLED();
-                break;
-            }
-            me->begin_wait = true;
-            me->busy       = true;
             me->push_off   = 0U;
             me->written    = 0U;
             me->pct        = 0U;
             me->c5_open    = false;
+            if ( !radio_c5_begin(me) )
+            {
+                status = Q_HANDLED();
+                break;
+            }
             me->phase      = (uint8_t)OTA_BEGIN;
             me->inst       = (uint8_t)INST_PUSHING;
 #if RADIO_ASKS
@@ -13730,10 +13100,7 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
                 break;
             }
             /* Whoever asked for the link by itself gives it back here.
-             *
-             * Unmount while esp-hosted still holds the controller (the
-             * hosted unmount's deinit is a no-op), then end the
-             * conversation. A refused job restores the card and stays up. */
+             * A refused job stays up. */
             me->link_asked = false;
             KLOG_N(TAG, "taking the C5 link down");
             if ( radio_teardown_begin(me) )
@@ -13765,21 +13132,6 @@ static QState Radio_up(Radio * const me, QEvt const * const e)
             {
                 status = Q_HANDLED();
             }
-            break;
-        }
-        case STORAGE_CMD_RSP_SIG: {
-            /* An answer of AO_Storage: only a teardown's unmount means
-             * anything here (the others belong to the states that asked). */
-            if ( radio_asked(me) == RADIO_ASK_TEARDOWN )
-            {
-                radio_teardown_answered(me);
-            }
-            status = Q_HANDLED();
-            break;
-        }
-        case RADIO_UNMOUNT_RETRY_SIG: {
-            radio_teardown_retry(me);
-            status = Q_HANDLED();
             break;
         }
         case RADIO_UP_REQ_SIG: {
@@ -15422,8 +14774,8 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
          * the update does not use; the BLE stop is a job of the radio worker,
          * submitted only when the worker is free. On the file or URL path it
          * is (nothing is in flight until the first chunk is read), and on the
-         * cable (staged) path the worker is held already for the card's
-         * unmount, so no stop is submitted: the asker is told BUSY, the
+         * cable (staged) path the worker is held already by the session's
+         * opening, so no stop is submitted: the asker is told BUSY, the
          * stream's scan stays on until the C5 reboots, and the knocks it
          * sends are dropped one at a time (RADIO_HEARD_KNOCK_SIG below). */
         case RADIO_QUIET_REQ_SIG: {
@@ -15476,25 +14828,6 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
             break;
         }
 #endif
-        case STORAGE_CMD_RSP_SIG: {
-            switch ( radio_asked(me) )
-            {
-                case RADIO_ASK_BEGIN: {
-                    status = radio_begin_answer(me);
-                    break;
-                }
-                case RADIO_ASK_TEARDOWN: {
-                    radio_teardown_answered(me);
-                    status = Q_HANDLED();
-                    break;
-                }
-                default: {
-                    status = Q_HANDLED();
-                    break;
-                }
-            }
-            break;
-        }
         case STORAGE_OPEN_RSP_SIG:
         case NET_STREAM_OPEN_RSP_SIG: {
             StorageOpenRspEvt const * const r = Q_EVT_CAST(StorageOpenRspEvt);
@@ -15554,17 +14887,8 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
             }
             if ( d->eof )
             {
-                /* The card's power is switched by the C5, and activate
-                 * reboots it - so let go of the medium before, not after. */
+                /* The image is all in PSRAM: the file is done with. */
                 c5_medium_close(me);
-                if ( !radio_ask(me, STORAGE_OP_UNMOUNT, RADIO_ASK_BEGIN) )
-                {
-                    c5_release(me);
-                    ota_fail(me, "the card could not be asked to let go; the "
-                                 "C5 was not touched");
-                    status = Q_TRAN(&Radio_up);
-                    break;
-                }
 
                 if ( kfw_end() != KODE_OK )
                 {
@@ -15583,12 +14907,17 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
                     status = Q_TRAN(&Radio_up);
                     break;
                 }
-                me->push_off   = 0U;
-                me->written    = 0U;
-                me->phase      = (uint8_t)OTA_BEGIN;
-                me->begin_wait = true;
-                me->busy       = true;
-                status = Q_HANDLED();
+                me->push_off = 0U;
+                me->written  = 0U;
+                me->phase    = (uint8_t)OTA_BEGIN;
+                if ( radio_c5_begin(me) )
+                {
+                    status = Q_HANDLED();
+                }
+                else
+                {
+                    status = Q_TRAN(&Radio_up);
+                }
                 break;
             }
 
@@ -15713,12 +15042,9 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
                     {
                         /* The same ending as Radio_stopping's: nothing failed,
                          * there is simply no link this boot, and the C5 runs
-                         * its firmware unbothered - which is Radio_off. The
-                         * card goes back to the plain path it takes whenever
-                         * there is no link to carry it. */
+                         * its firmware unbothered - which is Radio_off. */
                         me->phase = (uint8_t)OTA_IDLE;
                         c5_update_done(me);
-                        radio_restore_plain_sd();
                         /* The C5 restarted into the new image: what IO5
                          * holds is that image's, not known here. */
                         me->exp_known = false;
@@ -15746,7 +15072,6 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
                      * is still with the worker or already back. */
                     me->c5_open = false;
                     ota_fail(me, "the link dropped mid-transfer");
-                    radio_unmount_for_teardown(me);
                     radio_disconnect_after_loss(me);
                     status = Q_TRAN(&Radio_failed);
                     break;
@@ -15888,24 +15213,6 @@ static QState Radio_updating(Radio * const me, QEvt const * const e)
             break;
         }
 #endif
-        case RADIO_UNMOUNT_RETRY_SIG: {
-            if ( ((uint8_t)RADIO_ASK_BEGIN == me->retry_kind) && me->begin_wait )
-            {
-                if ( radio_unmount_refire(me) )
-                {
-                    status = Q_HANDLED();
-                }
-                else
-                {
-                    status = radio_begin_answer(me);
-                }
-            }
-            else
-            {
-                status = Q_SUPER(&Radio_up);
-            }
-            break;
-        }
         default: {
             status = Q_SUPER(&Radio_up);
             break;
