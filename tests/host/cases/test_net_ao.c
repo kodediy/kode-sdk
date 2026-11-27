@@ -1694,6 +1694,44 @@ TEST_CASE("chan=on asked with no identity asks the C5 for its certificate again"
     net_done();
 }
 
+TEST_CASE("chan=on asked while the channel's own client is still stopping joins once "
+          "the stop ends", "[net_ao]")
+{
+    ChannelStateEvt busy;
+    ChannelStateEvt after;
+    IdReqEvt        q;
+    int             sig_busy;
+    int             sig_after;
+
+    chan_fresh();
+    drive_to_up();
+
+    /* Off then on at once, as two presses on the row: the STOP is still with
+     * the worker when on arrives. */
+    (void)config_ask(AO_Net, &(config_ask_t){ .key = KSET_KEY_CHAN, .set = true, .b = false });
+    pull_jobs();
+    (void)config_ask(AO_Net, &(config_ask_t){ .key = KSET_KEY_CHAN, .set = true, .b = true });
+    pull_jobs();
+    busy     = chan_now();
+    sig_busy = (int)radio_take(&q, sizeof(q));
+
+    /* The stop ends: the join starts again from step 1, the halt having
+     * dropped the certificate with the session. */
+    job_done(KDRV_NET_JOB_MQTT_STOP, KODE_OK);
+    (void)net_settle();
+    (void)memset(&q, 0, sizeof(q));
+    sig_after = (int)radio_take(&q, sizeof(q));
+    after     = chan_now();
+    net_done();   /* before the checks: a failed one must not leave AO_Net up */
+
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_WAITING, busy.state);
+    TEST_ASSERT_EQUAL_STRING("mqtt_busy", busy.why);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, sig_busy, "the join began before the client was free");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(ID_REQ_SIG, sig_after, "the client is free and nothing joined");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ID_OP_CERT, q.op);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)CHAN_JOINING, after.state);
+}
+
 /* ---- Review focus 1: Wi-Fi flapping ---------------------------------------- */
 
 TEST_CASE("five Wi-Fi flaps in one tick make one request and keep the back-off",

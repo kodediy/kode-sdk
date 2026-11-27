@@ -3405,9 +3405,10 @@ static void chan_try_now(Net * const me)
  *
  * Off leaves the channel at once - the session ends, its client stops, the
  * state reads CHAN_OFF - and the next address joins nothing. On joins at
- * once when there is an address and the one MQTT client is free; with a
- * client of somebody's own up, the channel joins at the next address. On
- * asked while it is on tries now (chan_try_now()).
+ * once when there is an address and the one MQTT client is free; with the
+ * client still up or stopping - somebody's own, or the channel's on its way
+ * out - it waits as `mqtt_busy` and joins when that client stops
+ * (chan_on_mqtt_job()). On asked while it is on tries now (chan_try_now()).
  *
  * @param me The AO.
  * @param r  The request.
@@ -3463,10 +3464,11 @@ static void chan_config(Net * const me, KodeConfigReqEvt const * const r)
         }
         else if ( me->online )
         {
-            /* Somebody's own client holds the one MQTT client. */
+            /* The one MQTT client is somebody's own, or the channel's own
+             * still stopping after `chan=off`. */
             chan_set(me, CHAN_WAITING, "mqtt_busy");
             KLOG_N(TAG, "channel: on (stored); an MQTT client is up, so it "
-                        "joins at the next address");
+                        "joins when that client stops");
         }
         else
         {
@@ -4020,6 +4022,11 @@ static void chan_on_part(Net * const me, const IdPartEvt *p)
 /**
  * @brief An MQTT job the worker finished, seen from the channel.
  *
+ * A stop that frees the client ends the wait of a channel that `chan=on`
+ * found with the client busy (CHAN_WAITING in CP_IDLE, `mqtt_busy`): the
+ * channel's own client on its way out after `chan=off`, or a client of
+ * somebody's own. The channel joins then.
+ *
  * @param me   The AO.
  * @param type Which job: MQTT_START or MQTT_STOP.
  * @param rc   How it went.
@@ -4037,6 +4044,13 @@ static void chan_on_mqtt_job(Net * const me, kdrv_net_job_t type,
              && ((uint8_t)CP_STOPPING == me->cp) )
     {
         chan_start_now(me);
+    }
+    else if ( (KDRV_NET_JOB_MQTT_STOP == type) && me->online
+             && ((uint8_t)CHAN_WAITING == me->cstate)
+             && ((uint8_t)CP_IDLE == me->cp) )
+    {
+        KLOG_N(TAG, "channel: the MQTT client is free, so it joins");
+        chan_enter(me, 0U);
     }
     else
     {
