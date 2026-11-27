@@ -271,13 +271,18 @@ class Generated(unittest.TestCase):
         self.assertLess(found.end(), text.index("#endif /* Pins_Arduino_h */"))
 
     def test_every_function_of_kode_h_is_a_method(self):
-        names = [fn.name for fn in gen_layer.functions((gen_layer.SDK / gen_layer.INIT_HEADER).read_text(encoding="utf-8"))]
-        names += [fn.name for fn in gen_layer.functions((gen_layer.SDK / gen_layer.HEADER).read_text(encoding="utf-8"))]
+        names = [fn.name for fn in gen_layer.functions((gen_layer.SDK / gen_layer.HEADER).read_text(encoding="utf-8"))]
         methods = METHOD_BRIEF.findall((gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8"))
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len(methods), len(set(methods)))
         self.assertEqual(len(names), len(methods))
         self.assertEqual(set(names), set(methods))
+
+    def test_the_start_of_the_sdk_is_not_a_method(self):
+        # The board's variant starts the SDK before setup(): a sketch has no start to call.
+        methods = METHOD_BRIEF.findall((gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8"))
+        self.assertNotIn("kode_init", methods)
+        self.assertNotIn("kode_up", methods)
 
     def test_every_type_a_signature_names_has_its_alias(self):
         text = (gen_layer.LIBRARY / gen_layer.OUT_HEADER).read_text(encoding="utf-8")

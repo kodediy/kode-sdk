@@ -1335,18 +1335,6 @@ public:
     Kode_touch touch;     /**< The kode_touch_*() calls. */
     Kode_screen screen;   /**< The kode_screen_*() calls. */
 
-    /** @brief kode_init(). */
-    void begin(void) const
-    {
-        kode_init();
-    }
-
-    /** @brief kode_up(). */
-    bool up(void) const
-    {
-        return kode_up();
-    }
-
     /** @brief kode_error(). */
     const char *error(void) const
     {

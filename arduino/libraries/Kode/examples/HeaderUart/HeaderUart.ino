@@ -10,7 +10,6 @@ static uint32_t s_lines; /**< How many lines have gone out. */
 
 void setup(void)
 {
-    Kode.begin();
     Serial1.begin(UART_BAUD, SERIAL_8N1, EXP2, EXP1);
 }
 

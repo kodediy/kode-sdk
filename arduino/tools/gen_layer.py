@@ -5,8 +5,8 @@
     arduino/tools/gen_layer.py --check          exit 1 when a file on disk is not what kode.h says
     arduino/tools/gen_layer.py --all-calls FILE write a sketch that names every method once
 
-Every function of kode.h and kode_init.h becomes one method that calls it and
-does nothing else, so a sketch reads as Arduino and runs the SDK itself:
+Every function of kode.h becomes one method that calls it and does nothing
+else, so a sketch reads as Arduino and runs the SDK itself:
 
     kode_led_set_color(c)         Kode.led.setColor(c)
     kode_widget_set_text(w, ...)  w.setText(...)         w is a KodeWidget
@@ -24,7 +24,9 @@ with no underscore, so no class of a group can be one; check_names() stops
 the run on any two names that are one all the same.
 
 The board's variant includes the header from its pins_arduino.h, so a sketch
-names Kode with no include, as it names Serial.
+names Kode with no include, as it names Serial. The variant also starts the
+SDK before setup(), so kode_init.h is no part of the layer: a sketch has no
+start to call.
 
 Both files are checked in, so a sketch never needs Python; CI runs --check so
 they cannot drift. The --all-calls sketch only has to build: its calls are
@@ -39,9 +41,8 @@ from pathlib import Path
 SDK = Path(__file__).resolve().parent.parent.parent
 LIBRARY = SDK / "arduino" / "libraries" / "Kode"
 HEADER = Path("components") / "kode" / "include" / "kode.h"
-INIT_HEADER = Path("components") / "kode_sys" / "include" / "kode_init.h"
 COLORS_HEADER = Path("components") / "kode" / "internal" / "include" / "kode_colors.h"
-INPUTS = (HEADER, INIT_HEADER, COLORS_HEADER)
+INPUTS = (HEADER, COLORS_HEADER)
 OUT_HEADER = Path("src") / "KodeArduino.h"
 OUT_KEYWORDS = Path("keywords.txt")
 
@@ -59,11 +60,10 @@ HANDLE_BRIEFS = {
 }
 
 # The names the rule cannot give, as (group, method); "" is Kode itself.
-# kode_init() begins the SDK, as Arduino says it; `new` and `delete` are C++
-# keywords, so a screen is shown and a file removed; kode_rest() shares its
-# group's name; kode_print() takes a format, which Arduino calls printf.
+# `new` and `delete` are C++ keywords, so a screen is shown and a file removed;
+# kode_rest() shares its group's name; kode_print() takes a format, which
+# Arduino calls printf.
 RENAMED = {
-    "kode_init":        ("", "begin"),
     "kode_print":       ("", "printf"),
     "kode_rest":        ("rest", "begin"),
     "kode_screen_new":  ("screen", "show"),
@@ -372,12 +372,12 @@ def read(path):
 
 
 def sdk_functions():
-    """kode_init.h's functions and then kode.h's."""
-    return functions(read(INIT_HEADER)) + functions(read(HEADER))
+    """kode.h's functions."""
+    return functions(read(HEADER))
 
 
 def owners_of_the_sdk():
-    """The layout of kode_init.h's functions and then kode.h's."""
+    """The layout of kode.h's functions."""
     return layout(sdk_functions())
 
 

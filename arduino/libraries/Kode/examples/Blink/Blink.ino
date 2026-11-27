@@ -9,7 +9,6 @@ static uint32_t s_blinks; /**< How many times the LED has changed. */
 
 void setup(void)
 {
-    Kode.begin();
     (void)Kode.led.setColor(KODE_BLUE);
 }
 

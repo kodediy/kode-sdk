@@ -190,7 +190,6 @@ uart	KEYWORD2
 udp	KEYWORD2
 unix	KEYWORD2
 unsubscribe	KEYWORD2
-up	KEYWORD2
 uptime	KEYWORD2
 vibrate	KEYWORD2
 voltageMv	KEYWORD2
