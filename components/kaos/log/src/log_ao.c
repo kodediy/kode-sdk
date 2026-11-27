@@ -23,7 +23,9 @@
 #endif
 
 #define TAG        "kaos.log"
+#if !defined(CONFIG_KHAL_CONSOLE_APP_PORT)
 #define PROMPT     "kode> "
+#endif
 /* Carriage return + erase to end of line: wipes whatever the prompt had on
  * screen so a log line starts in column zero. */
 #define ERASE_LINE "\r\033[K"
@@ -535,16 +537,25 @@ static void log_on_ble_raw(const uint8_t *data, uint16_t len)
 /**
  * @brief Write the prompt and, after it, whatever of the line has been typed.
  *
+ * With the app's console port (CONFIG_KHAL_CONSOLE_APP_PORT) it writes
+ * nothing: the console reads nothing from that cable, and a write reaches it
+ * whatever other port it also reaches. With no prompt drawn, prompt_erase()
+ * wipes nothing either. Bluetooth never gets a prompt.
+ *
  * @param me The AO.
  */
 static void prompt_draw(Log * const me)
 {
+#if defined(CONFIG_KHAL_CONSOLE_APP_PORT)
+    (void)me;
+#else
     khal_console_write(PROMPT, sizeof(PROMPT) - 1U);
     if ( 0U < me->len )
     {
         khal_console_write(me->line, me->len);
     }
     me->prompt_drawn = true;
+#endif
 }
 
 /**
