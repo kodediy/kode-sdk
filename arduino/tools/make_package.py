@@ -12,7 +12,7 @@ writes into --out:
 
 The platform is Espressif's core at the release arduino/pins.env pins, taken
 by the address and checksum Espressif's index gives, with four things of ours:
-boards.txt (the Kode Dot alone), variants/kodedot, libraries/KodeDot, and
+boards.txt (the Kode Dot alone), variants/kodedot, libraries/Kode, and
 three lines of platform.txt (the name, the version and the path of the
 libraries' tool). The archive written is read back, and any file under cores/
 or Espressif's libraries/ that is not Espressif's stops the run.
@@ -47,7 +47,7 @@ ARDUINO = SDK / "arduino"
 PINS = ARDUINO / "pins.env"
 BOARDS = ARDUINO / "boards.txt"
 VARIANT = ARDUINO / "variants" / "kodedot"
-LIBRARY = ARDUINO / "libraries" / "KodeDot"
+LIBRARY = ARDUINO / "libraries" / "Kode"
 COMPONENT = SDK / "components" / "kode" / "idf_component.yml"
 
 ESPRESSIF_INDEX = "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
@@ -73,7 +73,7 @@ LIBS_KEY = "tools.esp32-arduino-libs.path"
 WINDOWS = ".windows"
 
 UNTOUCHED = ("cores/", "libraries/")
-KODEDOT_LIBRARY = "libraries/KodeDot/"
+KODE_LIBRARY = "libraries/Kode/"
 # Left out of the libraries' archive, as Espressif's release leaves them out of its own.
 LIBS_SKIPPED = ("dependencies.lock", "pioarduino-build.py")
 # The library builder's output folder; the folder above it is the build tree.
@@ -318,7 +318,7 @@ def untouched(archive):
     found = {}
     for info in archive.infolist():
         rel = info.filename[len(top):]
-        if rel.startswith(UNTOUCHED) and not rel.startswith(KODEDOT_LIBRARY) and not info.is_dir():
+        if rel.startswith(UNTOUCHED) and not rel.startswith(KODE_LIBRARY) and not info.is_dir():
             found[rel] = info
     return found
 
@@ -355,8 +355,8 @@ def write_core(source, version, folder, path):
         platform = None
         for info in theirs.infolist():
             rel = info.filename[len(top):]
-            if rel.startswith(KODEDOT_LIBRARY):
-                fail(f"{source.name} already has {KODEDOT_LIBRARY}")
+            if rel.startswith(KODE_LIBRARY):
+                fail(f"{source.name} already has {KODE_LIBRARY}")
             if rel == "platform.txt":
                 platform = theirs.read(info).decode("utf-8")
             elif rel != "boards.txt" and not rel.startswith("variants/"):
@@ -365,7 +365,7 @@ def write_core(source, version, folder, path):
             fail(f"{source.name} has no platform.txt")
         add_text(ours, f"{folder}/platform.txt", platform_txt(platform, version))
         add_file(ours, f"{folder}/boards.txt", BOARDS)
-        for root, under in ((VARIANT, "variants/kodedot"), (LIBRARY, KODEDOT_LIBRARY.rstrip("/"))):
+        for root, under in ((VARIANT, "variants/kodedot"), (LIBRARY, KODE_LIBRARY.rstrip("/"))):
             for file in files_of(root):
                 add_file(ours, f"{folder}/{under}/{file.relative_to(root).as_posix()}", file)
 
