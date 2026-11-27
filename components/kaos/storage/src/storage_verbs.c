@@ -77,7 +77,6 @@ static bool sd_field_row(uint16_t field, console_field_t *out)
         [KDRV_SD_MMC]             = "The part is an MMC rather than an SD card.",
         [KDRV_SD_UHS1]            = "The card is UHS-I capable. This board cannot use it: UHS-I needs the bus switched to 1.8 V.",
         [KDRV_SD_MOUNTED]         = "Whether a card is mounted right now. Answered with or without one.",
-        [KDRV_SD_HOSTED]          = "Whether the next mount reuses the SDMMC controller esp-hosted owns. AO_Radio sets this around the C5 link.",
         [KDRV_SD_TOTAL_MB]        = "How big the filesystem on the card is. Asked afresh every time.",
         [KDRV_SD_FREE_MB]         = "How much of that filesystem is unused.",
         [KDRV_SD_WIDTH_REQ]       = "Data lines the NEXT mount asks for: 1 or 4, nothing between. Does not touch the card, and lasts until the board resets.",

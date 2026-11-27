@@ -25,9 +25,8 @@ extern "C" {
 
 /* ---- The walk's order ------------------------------------------------------
  * A group runs its rows by these keys, whatever order the owners registered
- * in: the automatic rows first, the four operator rows last. Keep c5 after
- * sd (bringing the link up resets the C5, which switches the card's supply),
- * audio after c5 (its boot drives the amplifier's enable), buttons first of
+ * in: the automatic rows first, the four operator rows last. Keep audio
+ * after c5 (its boot drives the amplifier's enable), buttons first of
  * the operator rows (led and display are judged on the pad) and mem last.
  * The rows after mem answer by name only.
  */

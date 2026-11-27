@@ -34,7 +34,6 @@ static char s_dir[256];
 static char s_dir_nowrite[256];
 static bool s_fail_file_writes;
 static bool s_mounted;
-static bool s_refuse;   /**< The controller is not up: hosted, and the link is down. */
 static bool s_deny;     /**< The controller went away between the query and the mount. */
 static bool s_present  = true;
 static bool s_no_volume; /**< A card answers, with no FAT volume on it. */
@@ -61,7 +60,6 @@ static uint8_t  s_max_width = 4U;     /**< The widest mount that succeeds.   */
 static uint32_t s_alias;              /**< Non-zero: the real size, in sectors. */
 static uint32_t s_total_mb;           /**< Non-zero: force the volume's size. */
 static uint32_t s_cluster;            /**< The volume's allocation unit.      */
-static bool     s_hosted;
 
 static unsigned s_mounts;
 static uint8_t  s_last_width;
@@ -234,7 +232,6 @@ void fake_sdmmc_reset(void)
     (void)memset(&s_live, 0, sizeof(s_live));
 
     s_mounted     = false;
-    s_refuse      = false;
     s_deny        = false;
     s_present     = true;
     s_no_volume   = false;
@@ -253,7 +250,6 @@ void fake_sdmmc_reset(void)
     s_alias       = 0U;
     s_total_mb    = 0U;
     s_cluster     = FAKE_SD_CLUSTER_BYTES;
-    s_hosted      = false;
     s_mounts      = 0U;
     s_last_width  = 0U;
     s_last_khz    = 0U;
@@ -407,11 +403,6 @@ void fake_sdmmc_fail_format(bool fail)
     s_fail_format = fail;
 }
 
-void fake_sdmmc_set_refuse(bool refuse)
-{
-    s_refuse = refuse;
-}
-
 void fake_sdmmc_set_deny(bool deny)
 {
     s_deny = deny;
@@ -498,21 +489,6 @@ bool khal_sdmmc_mounted(void)
     return s_mounted;
 }
 
-void khal_sdmmc_set_hosted(bool hosted)
-{
-    s_hosted = hosted;
-}
-
-bool khal_sdmmc_hosted(void)
-{
-    return s_hosted;
-}
-
-bool khal_sdmmc_ready(void)
-{
-    return !s_refuse;
-}
-
 /**
  * @brief Answer one identification the way the card in the slot would.
  *
@@ -564,7 +540,7 @@ kode_status_t khal_sdmmc_mount(uint8_t width, uint32_t max_khz,
     }
     ++s_mounts;
     trace_call("mount", (uint32_t)width, true);
-    if ( s_refuse || s_deny )
+    if ( s_deny )
     {
         return KODE_DENIED;
     }

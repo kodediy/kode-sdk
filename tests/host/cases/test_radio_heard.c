@@ -1504,10 +1504,11 @@ TEST_CASE("test_a_cable_update_with_the_worker_held_tells_busy_and_breaks_nothin
     start_stream(ao_spy_other());
 
     /* The staged image asks for the channel: AO_Radio holds the worker for the
-     * card's unmount before it enters the update, so the stop is not submitted. */
+     * session's opening before it enters the update, so the stop is not
+     * submitted. */
     cable_image_arrives();
     expect_state(ao_spy_other(), false, KBLE_HEARD_BUSY, 0U, 0U);
-    TEST_ASSERT_EQUAL_INT((int)STORAGE_OP_UNMOUNT, next_storage_op());
+    TEST_ASSERT_EQUAL_INT(-1, next_storage_op());
 
     /* The passive scan stays on until the C5 reboots; records are dropped, one knock at a time. */
     air(1U);

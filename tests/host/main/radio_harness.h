@@ -95,85 +95,6 @@ static const QEvt *take_queued(enum_t sig)
     return found;
 }
 
-/* AO_Storage is not dispatched here, so the harness plays it for the one ask
- * that is answered: the unmount that gates the C5's reset. It unmounts the
- * card the way AO_Storage's worker does and posts the answer - once per
- * request, which the pointer remembers until the request leaves the queue.
- * A case that wants to answer by hand turns this off. */
-static bool        s_gate_auto = true;
-#define GATE_SEEN_MAX  16U
-static const QEvt *s_gate_seen[GATE_SEEN_MAX];   /**< Asks already answered. */
-
-/** @brief Whether @p e was answered already. */
-static bool gate_seen(const QEvt *e)
-{
-    for ( unsigned i = 0U; GATE_SEEN_MAX > i; ++i )
-    {
-        if ( s_gate_seen[i] == e )
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-/** @brief Answer the radio's unmounts waiting in AO_Storage's queue, once each. */
-static void answer_gate(void)
-{
-    const QEvt *ev[32];
-    const QEvt *now[GATE_SEEN_MAX] = { NULL };
-    unsigned    asks = 0U;
-    UBaseType_t n    = uxQueueMessagesWaiting(AO_Storage->eQueue);
-
-    if ( 32U < n )
-    {
-        n = 32U;
-    }
-    for ( UBaseType_t i = 0U; i < n; ++i )
-    {
-        TEST_ASSERT_TRUE(xQueueReceive(AO_Storage->eQueue, &ev[i], 0U) == pdTRUE);
-    }
-    for ( UBaseType_t i = 0U; i < n; ++i )
-    {
-        if ( (QSignal)STORAGE_CMD_SIG == ev[i]->sig )
-        {
-            StorageCmdEvt const *c = (StorageCmdEvt const *)ev[i];
-
-            if ( ((storage_op_t)c->op == STORAGE_OP_UNMOUNT)
-                && (c->who == AO_Radio) && (GATE_SEEN_MAX > asks) )
-            {
-                now[asks++] = ev[i];
-            }
-        }
-        TEST_ASSERT_TRUE(xQueueSend(AO_Storage->eQueue, &ev[i], 0U) == pdTRUE);
-    }
-    /* Answer the ones not answered yet, then remember exactly the ones that
-     * are in the queue: a request that left it may reuse its pool block. */
-    {
-        bool fresh[GATE_SEEN_MAX] = { false };
-
-        for ( unsigned i = 0U; i < asks; ++i )
-        {
-            fresh[i] = !gate_seen(now[i]);
-        }
-        (void)memset(s_gate_seen, 0, sizeof(s_gate_seen));
-        for ( unsigned i = 0U; i < asks; ++i )
-        {
-            s_gate_seen[i] = now[i];
-        }
-        for ( unsigned i = 0U; i < asks; ++i )
-        {
-            if ( fresh[i] )
-            {
-                static const QEvt rsp = QEVT_INITIALIZER(STORAGE_CMD_RSP_SIG);
-
-                kdrv_storage_unmount(KDRV_MEDIUM_SD);
-                QASM_DISPATCH(AO_Radio, &rsp, 0U);
-            }
-        }
-    }
-}
-
 /**
  * @brief Run what the AO handed the workers.
  * @return true when anything ran.
@@ -181,11 +102,6 @@ static void answer_gate(void)
 static bool pull_jobs(void)
 {
     bool any = false;
-
-    if ( s_gate_auto )
-    {
-        answer_gate();
-    }
 
     while ( fake_khal_worker_pending_for(RADIO_WORKER) > 0U )
     {
@@ -239,20 +155,12 @@ static void tick(unsigned steps)
 }
 
 /**
- * @brief Deliver what waits for the AO, and play AO_Storage's answer to the
- *        unmounts it asked for.
+ * @brief Deliver what waits for the AO.
  * @return How many events the AO dispatched.
  */
 static unsigned radio_settle(void)
 {
-    unsigned n = qf_support_settle(AO_Radio);
-
-    if ( s_gate_auto )
-    {
-        answer_gate();
-        n += qf_support_settle(AO_Radio);
-    }
-    return n;
+    return qf_support_settle(AO_Radio);
 }
 
 /** @brief Dispatch @p e by hand, then run what the AO handed the workers. */
@@ -313,8 +221,6 @@ static unsigned job_submits(void)
 static void storage_drain(void)
 {
     const QEvt *e;
-
-    (void)memset(s_gate_seen, 0, sizeof(s_gate_seen));
 
     qf_support_give_queue(AO_Storage);
     while ( xQueueReceive(AO_Storage->eQueue, &e, 0U) == pdTRUE )
@@ -451,8 +357,8 @@ static void deliver_held(kode_status_t rc)
     QF_gc(&d->super);
 }
 
-/** @brief End the running job and deliver its outcome to the AO, alone. */
-static void finish_only(kdrv_radio_job_t job, kode_status_t rc)
+/** @brief End the running job and deliver its outcome to the AO. */
+static void finish(kdrv_radio_job_t job, kode_status_t rc)
 {
     TEST_ASSERT_NOT_NULL_MESSAGE(s_held, "no job is with the worker");
     TEST_ASSERT_TRUE_MESSAGE(same_outcome(job, s_held_req.type),
@@ -460,23 +366,6 @@ static void finish_only(kdrv_radio_job_t job, kode_status_t rc)
     fake_radio_effects(s_held_req.type, rc);
     deliver_held(rc);
     pump();
-}
-
-/**
- * @brief End the running job and deliver its outcome to the AO.
- *
- * A connect that worked is followed by the answer AO_Storage owes the
- * remount: the link is `starting` until the card is back, and nobody
- * dispatches AO_Storage here.
- */
-static void finish(kdrv_radio_job_t job, kode_status_t rc)
-{
-    finish_only(job, rc);
-    if ( (KDRV_RADIO_JOB_CONNECT == job) && (KODE_OK == rc) )
-    {
-        dispatch(STORAGE_CMD_RSP_SIG);
-        pump();
-    }
 }
 
 /**
@@ -682,7 +571,6 @@ static void radio_fresh(void)
      * hand: a knock whose event went that way would fold every later post. */
     radio_knocks_reset();
     radio_lp_expect_net(true);   /* the rounds wait for AO_Net, as on the board */
-    s_gate_auto = true;
     settle_to_off();
     fake_radio_reset();
     fake_hosted_reset();

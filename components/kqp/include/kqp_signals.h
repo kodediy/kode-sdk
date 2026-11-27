@@ -681,10 +681,6 @@ enum KodeSignals {
     STORAGE_LIST_PAGE_SIG,      /**< AO_Storage: post a page of the bootable
                                  *   images on every medium to the asker
                                  *   (StorageListPageEvt).                    */
-    STORAGE_CMD_RSP_SIG,        /**< To StorageCmdEvt.who, when it named one:
-                                 *   that command has run. No payload - it
-                                 *   says when, and the medium's state says
-                                 *   what.                                    */
     STORAGE_OPEN_REQ_SIG,       /**< AO_Storage: open StorageOpenEvt.name.    */
     STORAGE_READ_REQ_SIG,       /**< AO_Storage: fill a free buffer and send it. */
     STORAGE_NEXT_SIG,           /**< AO_Storage: here is StorageBufEvt.idx
@@ -1647,9 +1643,6 @@ enum KodeSignals {
                                  *   enough; the C5 is let go.              */
     RADIO_RECV_IDLE_SIG,        /**< AO_Radio private QTimeEvt: no chunk for
                                  *   KODE_RECV_IDLE_MS - the host is gone.    */
-    RADIO_UNMOUNT_RETRY_SIG,    /**< AO_Radio private one-shot QTimeEvt: the
-                                 *   card still answered an unmount as
-                                 *   mounted; ask for it again.             */
     RADIO_INSTALL_GO_SIG,       /**< AO_Radio private: the staged image is
                                  *   verified and the link is up - start the
                                  *   push. Posted to self, because an entry
@@ -2757,16 +2750,14 @@ typedef struct {
     uint8_t op;          /**< storage_op_t - see kaos.h                        */
     bool    images_only; /**< LIST: only files that could be booted.          */
     bool    last;        /**< LIST: publish STORAGE_LIST_END_SIG afterwards.  */
-    QActive *who;        /**< Who is told the command has run
-                          *   (STORAGE_CMD_RSP_SIG); NULL for nobody.         */
 } StorageCmdEvt;
 
 /**
  * @brief Ask AO_Storage for a page of the bootable images on every medium
  *        (STORAGE_LIST_PAGE_SIG).
  *
- * Its own event rather than a field of StorageCmdEvt: that one fills a small
- * block on the target to the byte, and a page needs nothing else it carries.
+ * Its own event rather than a field of StorageCmdEvt: a page needs its asker
+ * and its skip, and nothing else a command carries.
  */
 typedef struct {
     QEvt     super;
@@ -4792,9 +4783,7 @@ typedef struct {
  *
  * The version fields are the slave's own answer, valid only when @c fw_known:
  * a link can be up with the version RPC unanswered, and reporting zeros as a
- * version would be a lie. @c sd_hosted says which mount path the microSD is
- * on right now - AO_Storage acts on the mount events AO_Radio sends around
- * the link's lifetime; this flag is how everyone else can tell.
+ * version would be a lie.
  */
 typedef struct {
     QEvt     super;
@@ -4803,7 +4792,6 @@ typedef struct {
     uint32_t fw_major;
     uint32_t fw_minor;
     uint32_t fw_patch;
-    bool     sd_hosted;  /**< The card mounts through esp-hosted's controller. */
     bool     gave_up;    /**< The link is down, someone wants it, and no more
                           *   tries are coming until somebody asks.           */
     uint8_t  c5_fit;     /**< kradio_c5_fit_t: whether the C5's kode_c5 is one

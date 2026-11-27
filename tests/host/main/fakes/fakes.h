@@ -638,16 +638,8 @@ void fake_sdmmc_trace_note(const char *what);
 unsigned fake_sdmmc_raw_writes(void);
 
 /**
- * @brief Take the controller away, as a hosted mount finds it while the C5's
- *        link is down: khal_sdmmc_ready() says false and a mount is refused
- *        with KODE_DENIED, trying nothing.
- * @param refuse true to take it away; false to answer as the card does.
- */
-void fake_sdmmc_set_refuse(bool refuse);
-
-/**
- * @brief Refuse every mount with KODE_DENIED while khal_sdmmc_ready() still
- *        says true: the controller went away between the two calls.
+ * @brief Refuse every mount with KODE_DENIED, as khal refuses one it does not
+ *        try.
  * @param deny true to refuse; false to answer as the card does.
  */
 void fake_sdmmc_set_deny(bool deny);

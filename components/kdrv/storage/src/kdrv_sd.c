@@ -196,7 +196,6 @@ static const field_t FIELDS[KDRV_SD_FIELD_MAX] = {
     [KDRV_SD_UHS1]            = CBOOL("uhs1"),
 
     [KDRV_SD_MOUNTED]         = SELF("mounted",  "bool", 0, 1),
-    [KDRV_SD_HOSTED]          = SELF("hosted",   "bool", 0, 1),
 
     [KDRV_SD_TOTAL_MB]        = FAT("total_mb"),
     [KDRV_SD_FREE_MB]         = FAT("free_mb"),
@@ -296,7 +295,6 @@ static void snap_field(kdrv_sd_field_t f, int32_t *value)
         case KDRV_SD_UHS1:            *value = s_snap.is_uhs1 ? 1 : 0; break;
 
         case KDRV_SD_MOUNTED:  *value = khal_sdmmc_mounted() ? 1 : 0; break;
-        case KDRV_SD_HOSTED:   *value = khal_sdmmc_hosted() ? 1 : 0; break;
         case KDRV_SD_WIDTH_REQ:    *value = (int32_t)s_width_req; break;
         case KDRV_SD_FREQ_REQ_KHZ: *value = (int32_t)s_freq_req; break;
         case KDRV_SD_CHECK_REQ:    *value = s_check_req ? 1 : 0; break;
@@ -443,11 +441,6 @@ bool kdrv_sd_mounted(void)
 bool kdrv_sd_mounted_everyday(void)
 {
     return khal_sdmmc_mounted() && s_everyday;
-}
-
-void kdrv_sd_set_hosted(bool hosted)
-{
-    khal_sdmmc_set_hosted(hosted);
 }
 
 /**
@@ -910,21 +903,15 @@ static kode_status_t card_mount(void)
  * @brief Power the card and mount its volume, four data lines first and then
  *        one, a four-line mount proved to take a write.
  *
- * @return KODE_OK with s_snap filled in; KODE_DENIED when no mount was tried
- *         (the link holds the controller and is down) or khal refused it
- *         without a try, which is no answer about the card and is said at
- *         debug level only; any other status with s_snap cleared and the
+ * @return KODE_OK with s_snap filled in; KODE_DENIED when khal refused the
+ *         mount without a try, which is no answer about the card and is said
+ *         at debug level only; any other status with s_snap cleared and the
  *         reason kept in s_why, logged when it differs from the last one.
  */
 static kode_status_t card_up(void)
 {
     s_everyday = false;
     card_power();
-    if ( !khal_sdmmc_ready() )
-    {
-        KLOG_D(TAG, "the mount waits: the link's controller is not up");
-        return KODE_DENIED;
-    }
 
     kode_status_t const st = card_mount();
 

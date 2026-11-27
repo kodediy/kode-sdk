@@ -361,7 +361,6 @@ static void link_says(kradio_link_t link)
     e->fw_major  = 0U;
     e->fw_minor  = 0U;
     e->fw_patch  = 0U;
-    e->sd_hosted = false;
     QACTIVE_POST(AO_Ir, &e->super, NULL);
     (void)qf_support_settle(AO_Ir);
 }

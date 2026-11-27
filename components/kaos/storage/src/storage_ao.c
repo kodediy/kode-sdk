@@ -181,8 +181,8 @@ typedef enum {
 
 /** @brief What a call was for: where the AO goes on when it returns. */
 typedef enum {
-    SD_THEN_MOUNT,         /**< A mount command: say where, answer.           */
-    SD_THEN_UNMOUNT,       /**< An unmount command: answer.                   */
+    SD_THEN_MOUNT,         /**< A mount command: say where.                   */
+    SD_THEN_UNMOUNT,       /**< An unmount command.                           */
     SD_THEN_REMOUNT,       /**< The remount after a write on the card failed. */
     SD_THEN_SCRIPT,        /**< The remount that starts a card script.        */
     SD_THEN_READ4,         /**< One chunk of the four-line read.              */
@@ -221,7 +221,6 @@ typedef struct {
                              *   been told; the guard stays until it returns. */
     uint16_t       seq;     /**< The call's sequence number.                 */
     SdThen         then;    /**< What it was for.                            */
-    QActive       *who;     /**< A command's asker; NULL for none.           */
 } SdJob;
 
 /**
@@ -578,11 +577,10 @@ static QState Storage_active(Storage * const me, QEvt const * const e);
  * @param op          What to do.
  * @param images_only LIST: only files that could be booted.
  * @param last        LIST: publish STORAGE_LIST_END_SIG afterwards.
- * @param who         Who is told the command has run; NULL for nobody.
  * @return true when it was posted; false when the event pool was empty.
  */
 static bool storage_cmd(kdrv_medium_t medium, storage_op_t op,
-                        bool images_only, bool last, QActive *who)
+                        bool images_only, bool last)
 {
     StorageCmdEvt *e = Q_NEW_X(StorageCmdEvt, 0U, STORAGE_CMD_SIG);
     if ( NULL == e )
@@ -593,20 +591,13 @@ static bool storage_cmd(kdrv_medium_t medium, storage_op_t op,
     e->op          = (uint8_t)op;
     e->images_only = images_only;
     e->last        = last;
-    e->who         = who;
     QACTIVE_POST(AO_Storage, &e->super, NULL);
     return true;
 }
 
 void storage_request(kdrv_medium_t medium, storage_op_t op)
 {
-    (void)storage_cmd(medium, op, false, false, NULL);
-}
-
-bool storage_request_answered(kdrv_medium_t medium, storage_op_t op,
-                              QActive *who)
-{
-    return storage_cmd(medium, op, false, false, who);
+    (void)storage_cmd(medium, op, false, false);
 }
 
 void storage_field_request(QActive *who, uint8_t op, uint16_t field,
@@ -793,24 +784,6 @@ static void wake_waiter(StorageWaiter *wait, uint32_t gen, kode_status_t rc,
     /* Not guarded against a NULL semaphore: kaos.h says a waiter names one,
      * and a loud fault is easier to find than a silent stall. */
     khal_sem_signal(wait->done);
-}
-
-/**
- * @brief Tell a command's asker the command has run.
- *
- * Whatever became of it - done, refused, dropped for the card test: the asker
- * is waiting on when, not on what.
- *
- * @param who The asker, or NULL for nobody.
- */
-static void cmd_answer(QActive *who)
-{
-    static const QEvt rsp = QEVT_INITIALIZER(STORAGE_CMD_RSP_SIG);
-
-    if ( NULL != who )
-    {
-        QACTIVE_POST(who, &rsp, &l_storage.super);
-    }
 }
 
 void storage_path_request(QActive *who, uint8_t op, const char *path)
@@ -1222,7 +1195,7 @@ bool storage_recv_request(QActive *who, const char *path, uint32_t size,
 
 void storage_list_one(kdrv_medium_t medium, bool images_only, bool last)
 {
-    (void)storage_cmd(medium, STORAGE_OP_LIST, images_only, last, NULL);
+    (void)storage_cmd(medium, STORAGE_OP_LIST, images_only, last);
 }
 
 void storage_list_request(QActive *who)
@@ -7929,8 +7902,7 @@ static void sd_script_identify(Storage * const me, kode_status_t rc)
 
     if ( KODE_OK != rc )
     {
-        sd_test_abort(me, "there is no card in the slot; on this board that "
-                          "is usually the ESP32-C5 not switching its supply");
+        sd_test_abort(me, "there is no card in the slot");
         return;
     }
     kdrv_sd_dump();
@@ -8185,12 +8157,10 @@ static void sd_job_complete(Storage * const me, kode_status_t rc,
             }
             /* else: the driver already said why, and "no card" and "the
              * partition will not mount" are very different problems. */
-            cmd_answer(me->sdj.who);
             break;
         }
         case SD_THEN_UNMOUNT: {
-            cmd_answer(me->sdj.who);
-            break;
+            break;   /* the card's state says how it went */
         }
         case SD_THEN_SCRIPT: {
             sd_script_identify(me, rc);
@@ -8458,22 +8428,15 @@ static QState Storage_initial(Storage * const me, void const * const par)
  * @brief Hand the worker a mount or an unmount that a command asked for.
  *
  * @param me   The AO.
- * @param c    The command.
  * @param op   SD_OP_MOUNT or SD_OP_UNMOUNT.
  * @param then The matching SdThen.
- * @return true when the call is out and its return answers the asker; false
- *         when it could not be made and the asker is answered at once.
  */
-static bool cmd_job(Storage * const me, const StorageCmdEvt *c, SdOp op,
-                    SdThen then)
+static void cmd_job(Storage * const me, SdOp op, SdThen then)
 {
-    me->sdj.who = c->who;
-    if ( sd_job_submit(me, op, then) )
+    if ( !sd_job_submit(me, op, then) )
     {
-        return true;
+        KLOG_W(TAG, "the card could not be asked for; the request is refused");
     }
-    KLOG_W(TAG, "the card could not be asked for; the request is refused");
-    return false;
 }
 
 /**
@@ -8481,27 +8444,23 @@ static bool cmd_job(Storage * const me, const StorageCmdEvt *c, SdOp op,
  *
  * @param me The AO.
  * @param c  The command.
- * @return true when the command is a call to the card that is now out, whose
- *         return answers the asker; false when it is done and the asker is
- *         answered at once.
  */
-static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
+static void handle_cmd(Storage * const me, const StorageCmdEvt *c)
 {
     kdrv_medium_t const medium = (kdrv_medium_t)c->medium;
     const char *const   what   = (KDRV_MEDIUM_SD == medium) ? "sd" : "fs";
-    bool                job    = false;
 
     /* The card test walks the card between phases, and a rescan from the
-     * launcher or a link coming up on the radio both post a mount or an
-     * unmount without knowing that. Dropping those for the length of the run
-     * is what stops the card being pulled out from under it; the console is
-     * busy for the same duration, so nothing typed can arrive here either. */
+     * launcher posts a mount or an unmount without knowing that. Dropping
+     * those for the length of the run is what stops the card being pulled
+     * out from under it; the console is busy for the same duration, so
+     * nothing typed can arrive here either. */
     if ( (0U != me->t_phase) && (KDRV_MEDIUM_SD == medium)
         && ((storage_op_t)c->op != STORAGE_OP_SELFTEST)
         && ((storage_op_t)c->op != STORAGE_OP_VERIFY) )
     {
         KLOG_W(TAG, "the card test is running; the card is not free");
-        return false;
+        return;
     }
 
     switch ( (storage_op_t)c->op )
@@ -8509,7 +8468,7 @@ static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
         case STORAGE_OP_MOUNT: {
             if ( KDRV_MEDIUM_SD == medium )
             {
-                job = cmd_job(me, c, SD_OP_MOUNT, SD_THEN_MOUNT);
+                cmd_job(me, SD_OP_MOUNT, SD_THEN_MOUNT);
                 break;
             }
             const char *mount = kdrv_storage_mount(medium);
@@ -8524,26 +8483,17 @@ static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
         case STORAGE_OP_UNMOUNT: {
             if ( busy(me) )
             {
-                /* Usually a rescan's unmount+mount, which is fire-and-forget
-                 * and names nobody: refusing it stalls nothing, keeps the card
-                 * mounted under the transfer already touching it, and is what
-                 * the rescan of an install's own aftermath meets. An unmount
-                 * somebody asked for is refused out loud. */
-                if ( NULL == c->who )
-                {
-                    KLOG_D(TAG, "a transfer is in flight; %s unmount is "
-                                "refused", what);
-                }
-                else
-                {
-                    KLOG_W(TAG, "a transfer is in flight; %s unmount is "
-                                "refused", what);
-                }
+                /* Usually a rescan's unmount+mount, which is fire-and-forget:
+                 * refusing it stalls nothing, keeps the card mounted under the
+                 * transfer already touching it, and is what the rescan of an
+                 * install's own aftermath meets. */
+                KLOG_D(TAG, "a transfer is in flight; %s unmount is refused",
+                       what);
                 break;
             }
             if ( KDRV_MEDIUM_SD == medium )
             {
-                job = cmd_job(me, c, SD_OP_UNMOUNT, SD_THEN_UNMOUNT);
+                cmd_job(me, SD_OP_UNMOUNT, SD_THEN_UNMOUNT);
                 break;
             }
             kdrv_storage_unmount(medium);
@@ -8628,7 +8578,6 @@ static bool handle_cmd(Storage * const me, const StorageCmdEvt *c)
             break;
         }
     }
-    return job;
 }
 
 #if CONFIG_KODE_LOWPOWER
@@ -8771,13 +8720,7 @@ static QState Storage_serve(Storage * const me, QEvt const * const e)
         case STORAGE_CMD_SIG: {
             StorageCmdEvt const * const c = Q_EVT_CAST(StorageCmdEvt);
 
-            /* Whatever became of it - done, refused, dropped for the card
-             * test: the asker is waiting on when, not on what. A call to the
-             * card answers when it returns. */
-            if ( !handle_cmd(me, c) )
-            {
-                cmd_answer(c->who);
-            }
+            handle_cmd(me, c);
             status = Q_HANDLED();
             break;
         }
@@ -9494,9 +9437,8 @@ static bool card_refuse(Storage * const me, QEvt const * const e)
             }
             else
             {
-                /* nothing but the answer */
+                /* nothing to say: the medium's state says it */
             }
-            cmd_answer(c->who);
             break;
         }
         case STORAGE_OPEN_REQ_SIG: {

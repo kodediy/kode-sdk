@@ -140,8 +140,7 @@ const kode_sys_row_t kode_sys_rows[KODE_SYS_ROWS] = {
     /* The firmware's interface, if it asks to start here (kode_app_early()):
      * its first frame does not wait for the rows below. */
     { .start = &kode_sys_app_early,  .park = NULL },
-    /* After AO_Storage: the link bring-up walks the card by posting to it.
-     * AO_Audio names it (the amplifier is the C5's IO4) and so does AO_Ir (the
+    /* AO_Audio names it (the amplifier is the C5's IO4) and so does AO_Ir (the
      * infrared block is behind the link), so sound and infrared keep it. */
     { .start = &kaos_radio_start,    .park = &kaos_park_c5 },
     /* After AO_Radio: its initial transition asks AO_Radio for the Wi-Fi state. */
